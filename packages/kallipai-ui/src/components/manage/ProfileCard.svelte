@@ -1,14 +1,15 @@
 <script lang="ts">
+  import { MENU_ITEM, MENU_ITEM_DANGER } from "../../lib/classes.ts";
   // One draggable profile card (set slots and the parking area share this
   // language). The card only reports the raw drag lifecycle and menu
   // intents; payloads and mutations stay with the owning page/section.
-  import { Menu, Portal } from "@skeletonlabs/skeleton-svelte";
-  import { FlaskConical, MoreVertical, Pencil, Trash } from "@lucide/svelte";
+  import { Menu } from "@skeletonlabs/skeleton-svelte";
+  import ActionMenu from "../ActionMenu.svelte";
+  import { FlaskConical, Pencil, Trash } from "@lucide/svelte";
   import type {
     ProfileModel,
     ProfileModelProbeReport,
   } from "@kallipai/kallipai-client";
-  import { TONAL_ICON_SURF } from "../../lib/classes.ts";
   import {
     probeStatusColor,
     probeStatusLabel,
@@ -28,6 +29,7 @@
     profile,
     report,
     isProbing,
+    readOnly = false,
     onDragStart,
     onDragEnd,
     onTest,
@@ -37,6 +39,8 @@
     profile: ProfileModel;
     report?: ProfileModelProbeReport;
     isProbing: boolean;
+    /** Proxy mode: the card is view-only (no drag, no edit, no remove). */
+    readOnly?: boolean;
     onDragStart: (e: DragEvent) => void;
     onDragEnd: () => void;
     onTest: () => void;
@@ -47,9 +51,12 @@
 
 <div
   role="listitem"
-  class="card preset-filled-surface-100-900 p-3 space-y-1 cursor-grab"
-  draggable="true"
+  class="card preset-filled-surface-100-900 p-3 space-y-1 {readOnly
+    ? ''
+    : 'cursor-grab'}"
+  draggable={!readOnly}
   ondragstart={(e) => {
+    if (readOnly) return;
     // Firefox only starts a drag session if dataTransfer gets data.
     if (e.dataTransfer) {
       e.dataTransfer.setData("text/plain", profile.id);
@@ -61,52 +68,31 @@
 >
   <div class="flex items-center justify-between gap-2">
     <span class="font-mono text-sm">{profile.id}</span>
-    <Menu
-      positioning={{ placement: "bottom-end" }}
-      onSelect={(e) => {
-        if (e.value === "test") onTest();
-        else if (e.value === "edit") onEdit();
-        else if (e.value === "remove" && onRemove) onRemove();
+    <ActionMenu
+      label={manage_profiles_profile_actions_aria()}
+      disabled={isProbing || readOnly}
+      onSelect={(value) => {
+        if (value === "test") onTest();
+        else if (value === "edit" && !readOnly) onEdit();
+        else if (value === "remove" && onRemove && !readOnly) onRemove();
       }}
     >
-      <Menu.Trigger
-        class="size-10 {TONAL_ICON_SURF} shrink-0"
-        aria-label={manage_profiles_profile_actions_aria()}
-        disabled={isProbing}
-      >
-        <MoreVertical class="size-4" />
-      </Menu.Trigger>
-      <Portal>
-        <Menu.Positioner>
-          <Menu.Content class="card preset-tonal-surface p-1 min-w-[8rem]">
-            <Menu.Item
-              value="test"
-              class="flex items-center gap-2 px-3 py-2 rounded-base text-sm cursor-pointer hover:preset-filled-surface-500"
-            >
-              <FlaskConical class="size-4" />
-              {manage_profiles_test()}
-            </Menu.Item>
-            <Menu.Item
-              value="edit"
-              class="flex items-center gap-2 px-3 py-2 rounded-base text-sm cursor-pointer hover:preset-filled-surface-500"
-            >
-              <Pencil class="size-4" />
-              {common_edit()}
-            </Menu.Item>
-            {#if onRemove}
-              <Menu.Separator class="my-1 border-t border-surface-300" />
-              <Menu.Item
-                value="remove"
-                class="flex items-center gap-2 px-3 py-2 rounded-base text-sm text-error-500 dark:text-error-400 cursor-pointer hover:preset-filled-error-500"
-              >
-                <Trash class="size-4" />
-                {common_remove()}
-              </Menu.Item>
-            {/if}
-          </Menu.Content>
-        </Menu.Positioner>
-      </Portal>
-    </Menu>
+      <Menu.Item value="test" class={MENU_ITEM}>
+        <FlaskConical class="size-4" />
+        {manage_profiles_test()}
+      </Menu.Item>
+      <Menu.Item value="edit" class={MENU_ITEM}>
+        <Pencil class="size-4" />
+        {common_edit()}
+      </Menu.Item>
+      {#if onRemove}
+        <Menu.Separator class="my-1 border-t border-surface-300" />
+        <Menu.Item value="remove" class={MENU_ITEM_DANGER}>
+          <Trash class="size-4" />
+          {common_remove()}
+        </Menu.Item>
+      {/if}
+    </ActionMenu>
   </div>
   <dl class="text-xs space-y-0.5">
     <div class="flex gap-2">

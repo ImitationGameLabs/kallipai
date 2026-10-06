@@ -489,6 +489,39 @@ enum FailoverStep {
     Done(AcquireResult),
 }
 
+/// A gateway-level auth rejection (401/403) observed at failover-chain
+/// exhaustion. Lean by design: the tagma renders its own operator log and
+/// drives profile-source refresh and poison state from status + code.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GatewaySignal {
+    pub status: u16,
+    pub code: Option<String>,
+}
+
+/// Fire at most one signal for an exhausted chain: the only call site is
+/// the ChainExhausted arm, so one chain walk emits at most one signal
+/// (mid-chain rejections that recover via failover stay silent). A None
+/// channel (local profiles, test contexts) is zero behavior.
+fn emit_gateway_signal(ctx: &AgentContext, trigger: &Error) {
+    let Some(signals) = &ctx.gateway_signals else {
+        return;
+    };
+    let Some(backend) = trigger.downcast_ref::<BackendError>() else {
+        return;
+    };
+    let Some(rejection) = provider_rejection(backend) else {
+        return;
+    };
+    if rejection.status == reqwest::StatusCode::UNAUTHORIZED
+        || rejection.status == reqwest::StatusCode::FORBIDDEN
+    {
+        let _ = signals.send(GatewaySignal {
+            status: rejection.status.as_u16(),
+            code: rejection.code.clone(),
+        });
+    }
+}
+
 /// Drive within-set failover for `trigger`: advance the chain, emit a `Failover` event on
 /// advance, and map the [`FailoverOutcome`] to a [`FailoverStep`]. `reason` is the operator-facing
 /// diagnostic captured from `trigger` before it is moved into [`advance_failover`].
@@ -520,6 +553,7 @@ async fn step_failover(
             // as a distinguishable terminal outcome rather than a generic `Err`. `trigger` is an
             // `anyhow::Error`; `render_error` de-duplicates its source chain and surfaces any HTTP
             // error body (`as_ref` is required — `anyhow::Error` does not impl `std::error::Error`).
+            emit_gateway_signal(ctx, &trigger);
             FailoverStep::Done(AcquireResult::Outcome(
                 AgentOutcome::FailoverChainExhausted {
                     reason,
@@ -1292,5 +1326,82 @@ mod tests {
             "the cancel kept the anchor: the next turn continues it"
         );
         assert_eq!(requests[2].messages, vec![user_msg("q3")], "delta only");
+    }
+
+    // -- gateway auth-signal emission ------------------------------------
+
+    #[tokio::test]
+    async fn gateway_signal_carries_status_and_code_on_exhaustion_trigger() {
+        let mut ctx = ctx_from_source(
+            vec![profile("p1", "p1", 100_000)],
+            Arc::new(MapSource(HashMap::from([(
+                "p1".to_string(),
+                RecordingBackend::new() as Arc<dyn LlmBackend>,
+            )]))),
+            RetryPolicy::default(),
+        )
+        .await;
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        ctx.gateway_signals = Some(tx);
+        let trigger: Error = BackendError::provider(
+            "recording",
+            TransportError::HttpStatus {
+                status: reqwest::StatusCode::UNAUTHORIZED,
+                body: r#"{"error":{"message":"revoked","code":"key_revoked"}}"#.to_owned(),
+            },
+        )
+        .into();
+        emit_gateway_signal(&ctx, &trigger);
+        let signal = rx.recv().await.expect("exactly one signal");
+        assert_eq!(signal.status, 401);
+        assert_eq!(signal.code.as_deref(), Some("key_revoked"));
+        assert!(rx.try_recv().is_err(), "no second signal");
+    }
+
+    #[tokio::test]
+    async fn gateway_signal_is_silent_without_a_channel() {
+        let ctx = ctx_from_source(
+            vec![profile("p1", "p1", 100_000)],
+            Arc::new(MapSource(HashMap::from([(
+                "p1".to_string(),
+                RecordingBackend::new() as Arc<dyn LlmBackend>,
+            )]))),
+            RetryPolicy::default(),
+        )
+        .await;
+        let trigger: Error = BackendError::provider(
+            "recording",
+            TransportError::HttpStatus {
+                status: reqwest::StatusCode::FORBIDDEN,
+                body: "denied".to_owned(),
+            },
+        )
+        .into();
+        emit_gateway_signal(&ctx, &trigger);
+    }
+
+    #[tokio::test]
+    async fn gateway_signal_ignores_non_auth_statuses() {
+        let mut ctx = ctx_from_source(
+            vec![profile("p1", "p1", 100_000)],
+            Arc::new(MapSource(HashMap::from([(
+                "p1".to_string(),
+                RecordingBackend::new() as Arc<dyn LlmBackend>,
+            )]))),
+            RetryPolicy::default(),
+        )
+        .await;
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        ctx.gateway_signals = Some(tx);
+        let trigger: Error = BackendError::provider(
+            "recording",
+            TransportError::HttpStatus {
+                status: reqwest::StatusCode::BAD_REQUEST,
+                body: "bad".to_owned(),
+            },
+        )
+        .into();
+        emit_gateway_signal(&ctx, &trigger);
+        assert!(rx.try_recv().is_err(), "400 never signals");
     }
 }

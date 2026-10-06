@@ -16,10 +16,12 @@ It maintains the endpoint pool (protocol family, key, `base_url`), organizes
 profile cards between named sets and a parking area by drag and drop, declares
 each profile's context window and modalities, transfers the default-set
 marker, and can run a connectivity probe against a set or a single profile.
-
 Saving writes the instance's `profiles.toml` and takes effect immediately.
-Deleting a set that still has bound agents requires a confirmation. The full
-field reference lives in the manual-editing section below.
+When the profile source is the model gateway, the page turns into a read-only
+mirror of the gateway's config; the tabs at the top switch between the two
+sources (one confirmation each way; see below). Deleting a set that still
+has bound agents requires a confirmation. The full field reference lives in
+the manual-editing section below.
 
 ## The `kallip profile-set` Command
 
@@ -59,7 +61,29 @@ Each profile may also declare `modalities`; an omitted declaration
 defaults to text-only, and a set's effective modalities are the
 intersection across its members.
 
-### Example
+### Profile Source
+
+Where the config comes from is a separate setting: `settings.toml`, next to
+`profiles.toml` in the same directory.
+
+```toml
+[profiles.source]
+mode = "local"  # or "model-gateway"
+```
+
+`local` (the default) reads `profiles.toml` as the single source of truth.
+`model-gateway` pulls the config from the model gateway behind the platform
+edge: the base derives from the relay entry's origin as
+`{origin}/v1/model-gateway` (a multi-entry polis.toml resolves the pinned
+entry, or the first enrolled one before the first pin), and the token comes
+from the relay enrollment (stored with the entry's credentials). What
+arrives is this tagma's selected collection, in one read; a tagma
+without a selection pulls an empty config. The pulled config lives in
+memory only, `profiles.toml` stops receiving updates, and a cold start
+with the gateway unreachable fails with a pointer back to this
+setting. The Profiles page's Gateway/Local tabs switch this setting at
+runtime; the gateway side is offered only when a relay entry carries an
+enrollment token.
 
 Example `profiles.toml`:
 

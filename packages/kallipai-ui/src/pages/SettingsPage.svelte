@@ -14,7 +14,6 @@
   import type {
     AddPasskeyResult,
     PasskeySummary,
-    ProviderRequest,
   } from "@kallipai/kallipai-archeion-client";
   import type {
     PasskeyAddHint,
@@ -24,7 +23,6 @@
   import PasskeyManager from "../components/settings/PasskeyManager.svelte";
   import LinkedAccounts from "../components/settings/LinkedAccounts.svelte";
   import EmailManager from "../components/settings/EmailManager.svelte";
-  import ProviderVault from "../components/settings/ProviderVault.svelte";
   import LightSwitch from "../components/LightSwitch.svelte";
   import LanguageSwitch from "../components/LanguageSwitch.svelte";
   import { Switch } from "@skeletonlabs/skeleton-svelte";
@@ -114,18 +112,6 @@
     }
   });
 
-  // The provider vault loads the same way (mirrors the passkeys discipline:
-  //   a list failure lands in `providersError` without blanking `user`).
-  $effect(() => {
-    if (
-      mode === "online" &&
-      archeionSession.user &&
-      !archeionSession.providersLoaded
-    ) {
-      archeionSession.refreshProviders();
-    }
-  });
-
   // Linked OAuth identities + the configured-provider list (for the link
   // affordance) load when the signed-in user resolves. Both guard on a loaded
   // flag (NOT on length): a zero-provider deploy is a valid steady state, and
@@ -212,16 +198,6 @@
         settings_error_unknown()),
     };
     return { tone: "err", text: map[r.reason] ?? settings_error_unknown() };
-  }
-
-  // -- provider vault (online only) ---------------------------------------
-  // Thin forwarders: the store owns every ceremony and mutation (create
-  // seals encrypted keys; rename re-sends the row unchanged except the
-  // name; flip/reveal open with THIS device's vault key). The components
-  // render and surface errors; this page only wires store calls in.
-  async function onCreateProvider(req: ProviderRequest): Promise<boolean> {
-    await archeionSession.createProvider(req);
-    return true;
   }
 
   // -- timezone (offline management face) ---------------------------------
@@ -409,22 +385,6 @@
           {minting}
           {onMint}
           onClear={() => (archeionSession.pairingCode = null)}
-        />
-
-        <ProviderVault
-          entries={archeionSession.providers}
-          phase={archeionSession.providersError
-            ? "error"
-            : archeionSession.providersLoaded
-              ? "loaded"
-              : "loading"}
-          error={archeionSession.providersError}
-          canFlip={archeionSession.canFlipKeys()}
-          onRename={(id, name) => archeionSession.renameProvider(id, name)}
-          onFlip={(entry) => archeionSession.flipProviderEncryption(entry)}
-          onDelete={(id) => archeionSession.deleteProvider(id)}
-          onCreate={onCreateProvider}
-          onCopyKey={(entry) => archeionSession.revealProviderKey(entry)}
         />
       {/if}
     {:else}

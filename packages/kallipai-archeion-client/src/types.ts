@@ -180,6 +180,8 @@ export interface MeResponse {
   readonly display_name: string | null;
   readonly created_at: string;
   readonly passkey_count: number;
+  /** True for the fixed local admin account (the operator login). */
+  readonly local_admin: boolean;
 }
 
 /** `POST /me/emails` body. The address starts unverified; a verification
@@ -192,37 +194,6 @@ export interface AddEmailRequest {
  * verification link. */
 export interface VerifyEmailRequest {
   readonly token: string;
-}
-
-/** Storage mode of a user-provider key. `plaintext` stores the raw key
- * readable by any session of the account; `encrypted` stores an opaque blob
- * sealed by a device-held vault key that the archeion can neither read nor
- * decrypt (the service is blind to encrypted rows by design). */
-export type ProviderKeyMode = "plaintext" | "encrypted";
-
-/** One entry of the caller's provider vault (`GET /me/providers`).
- * `name` is unique per account; collisions on create/replace are 409.
- * `key_material` returns as stored -- the vault never transforms it. */
-export interface ProviderSummary {
-  readonly id: string;
-  readonly name: string;
-  readonly provider: string;
-  readonly base_url: string | null;
-  /** Raw key when `mode` is plaintext, client-encrypted blob otherwise. */
-  readonly key_material: string;
-  readonly mode: ProviderKeyMode;
-  readonly created_at: string;
-  readonly updated_at: string;
-}
-
-/** Create/replace body for `/me/providers`. Replace sends EVERY field
- * (metadata edit, key rotation, and mode flip share one explicit shape). */
-export interface ProviderRequest {
-  readonly name: string;
-  readonly provider: string;
-  readonly base_url?: string | null;
-  readonly key_material: string;
-  readonly mode: ProviderKeyMode;
 }
 
 /** `GET /users/{username}` -- a public user profile card. Minimal disclosure:

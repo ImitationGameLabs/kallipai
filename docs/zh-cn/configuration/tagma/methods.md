@@ -10,7 +10,9 @@ order: 21
 
 管理区的 Profiles 页是日常配置入口。它维护端点池（协议族、密钥、`base_url`），把 profile 卡片在命名 set 与暂存区之间拖拽组织，声明各 profile 的上下文窗口与模态，转移 default set 标记，并可对 set 或单个 profile 发起连通测试。
 
-保存后写入实例的 `profiles.toml` 并立即生效。删除仍有 agent 绑定的 set 需要确认。字段的完整含义见下方 `profiles.toml` 手动编辑一节。
+保存后写入实例的 `profiles.toml` 并立即生效。当配置来源是模型网关时，页面变为
+网关配置的只读镜像；顶部的标签页在两个来源之间切换（每个方向一次确认，见下文）。
+删除仍有 agent 绑定的 set 需要确认。字段的完整含义见下方 `profiles.toml` 手动编辑一节。
 
 ## `kallip profile-set` 命令
 
@@ -31,7 +33,24 @@ profiles 配置文件位于实例配置根的 `profiles.toml`：`<config home>/k
 
 有配置文件时，tagma 加载多个 provider/model 组合，每个 profile 自行声明 `max_context_window`。每个 profile 还可声明 `modalities`；省略默认纯文本，set 的生效模态是其成员的交集。
 
-### 示例
+### 配置来源
+
+配置来自哪里是一项独立设置：`settings.toml`，与 `profiles.toml` 同目录。
+
+```toml
+[profiles.source]
+mode = "local"  # 或 "model-gateway"
+```
+
+`local`（默认）把 `profiles.toml` 当作唯一事实源。
+`model-gateway` 从平台边缘
+后的模型网关拉取配置：基地址由中继条目的来源推导为
+`{来源}/v1/model-gateway`（多条目 polis.toml 解析钉定的条目，未钉定时取
+第一个完成注册的条目），令牌来自中继注册（随条目凭据一起保存）。拉取的内容是
+本 tagma 选定的 collection，一次读取取齐；尚未选定集合的 tagma 拉取到的是空配置。拉取的
+配置只保存在内存中，`profiles.toml` 不再更新，网关不可达时的冷启动会失败
+并指回此设置。Profiles 页面的「网关/本地」标签页可以在运行期切换该设
+置；只有中继条目带有注册令牌时，网关一侧才会出现。
 
 `profiles.toml` 示例：
 

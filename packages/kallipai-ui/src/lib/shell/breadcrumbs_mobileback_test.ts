@@ -73,3 +73,15 @@ Deno.test("room drills keep their list-page back target", () => {
   assertEquals(mobileBack("/rooms/r-1")?.href, "/rooms");
   assertEquals(mobileBack("/rooms/r-1/settings")?.href, "/rooms/r-1");
 });
+
+Deno.test("the collection detail drills back to the console", () => {
+  assertEquals(
+    mobileBack("/admin/gateway/collections/gpt")?.href,
+    "/admin/gateway",
+  );
+});
+
+Deno.test("gateway pages without a drill back to Home", () => {
+  assertEquals(mobileBack("/admin/gateway")?.href, "/");
+  assertEquals(mobileBack("/gateway")?.href, "/");
+});

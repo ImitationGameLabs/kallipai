@@ -28,6 +28,7 @@
 
 <script lang="ts">
   import { Dialog, Portal } from "@skeletonlabs/skeleton-svelte";
+  import ReqMark from "../ReqMark.svelte";
   import {
     common_cancel,
     common_save,
@@ -194,8 +195,13 @@
             <label class="flex flex-col gap-1">
               <span class="text-xs font-medium">
                 {manage_profiles_set_dialog_name_label()}
+                <ReqMark />
               </span>
-              <input class="input text-sm font-mono" bind:value={nameDraft} />
+              <input
+                class="input text-sm font-mono"
+                bind:value={nameDraft}
+                aria-required="true"
+              />
               {#if nameError}
                 <span class="text-xs text-error-500 dark:text-error-400">
                   {nameError}

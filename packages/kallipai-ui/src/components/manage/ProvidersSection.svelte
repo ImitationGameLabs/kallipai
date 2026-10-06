@@ -1,21 +1,16 @@
 <script lang="ts">
+  import { MENU_ITEM, MENU_ITEM_DANGER } from "../../lib/classes.ts";
   // Providers pool for the profiles page: one card per endpoint plus the
   // dashed add-provider card. Probe actions and dialog requests cross as
   // events; the report chips read the shared per-provider probe map.
   import type { SvelteMap } from "svelte/reactivity";
-  import { Menu, Portal } from "@skeletonlabs/skeleton-svelte";
-  import {
-    FlaskConical,
-    MoreVertical,
-    Pencil,
-    Plus,
-    Trash,
-  } from "@lucide/svelte";
+  import { Menu } from "@skeletonlabs/skeleton-svelte";
+  import ActionMenu from "../ActionMenu.svelte";
+  import { FlaskConical, Pencil, Plus, Trash } from "@lucide/svelte";
   import type {
     ProfileProvider,
     ProfileProviderProbeReport,
   } from "@kallipai/kallipai-client";
-  import { TONAL_ICON_SURF } from "../../lib/classes.ts";
   import {
     modelsCountLabel,
     probeStatusColor,
@@ -41,6 +36,7 @@
     onEdit,
     onRemove,
     onAdd,
+    readOnly = false,
   }: {
     providers: ProfileProvider[];
     reports: SvelteMap<string, ProfileProviderProbeReport>;
@@ -49,6 +45,7 @@
     onEdit: (provider: ProfileProvider) => void;
     onRemove: (provider: ProfileProvider) => void;
     onAdd: () => void;
+    readOnly?: boolean;
   } = $props();
 </script>
 
@@ -64,52 +61,29 @@
           <span class="font-mono text-sm font-semibold truncate min-w-0 flex-1"
             >{ep.id}</span
           >
-          <Menu
-            positioning={{ placement: "bottom-end" }}
-            onSelect={(e) => {
-              if (e.value === "test") onTest(ep.id);
-              else if (e.value === "edit") onEdit(ep);
-              else if (e.value === "remove") onRemove(ep);
+          <ActionMenu
+            label={manage_profiles_provider_actions_aria()}
+            disabled={isProbing || readOnly}
+            onSelect={(value) => {
+              if (value === "test") onTest(ep.id);
+              else if (value === "edit" && !readOnly) onEdit(ep);
+              else if (value === "remove" && !readOnly) onRemove(ep);
             }}
           >
-            <Menu.Trigger
-              class="size-10 {TONAL_ICON_SURF} shrink-0"
-              aria-label={manage_profiles_provider_actions_aria()}
-              disabled={isProbing}
-            >
-              <MoreVertical class="size-4" />
-            </Menu.Trigger>
-            <Portal>
-              <Menu.Positioner>
-                <Menu.Content
-                  class="card preset-tonal-surface p-1 min-w-[8rem]"
-                >
-                  <Menu.Item
-                    value="test"
-                    class="flex items-center gap-2 px-3 py-2 rounded-base text-sm cursor-pointer hover:preset-filled-surface-500"
-                  >
-                    <FlaskConical class="size-4" />
-                    {manage_profiles_test()}
-                  </Menu.Item>
-                  <Menu.Item
-                    value="edit"
-                    class="flex items-center gap-2 px-3 py-2 rounded-base text-sm cursor-pointer hover:preset-filled-surface-500"
-                  >
-                    <Pencil class="size-4" />
-                    {common_edit()}
-                  </Menu.Item>
-                  <Menu.Separator class="my-1 border-t border-surface-300" />
-                  <Menu.Item
-                    value="remove"
-                    class="flex items-center gap-2 px-3 py-2 rounded-base text-sm text-error-500 dark:text-error-400 cursor-pointer hover:preset-filled-error-500"
-                  >
-                    <Trash class="size-4" />
-                    {common_remove()}
-                  </Menu.Item>
-                </Menu.Content>
-              </Menu.Positioner>
-            </Portal>
-          </Menu>
+            <Menu.Item value="test" class={MENU_ITEM}>
+              <FlaskConical class="size-4" />
+              {manage_profiles_test()}
+            </Menu.Item>
+            <Menu.Item value="edit" class={MENU_ITEM}>
+              <Pencil class="size-4" />
+              {common_edit()}
+            </Menu.Item>
+            <Menu.Separator class="my-1 border-t border-surface-300" />
+            <Menu.Item value="remove" class={MENU_ITEM_DANGER}>
+              <Trash class="size-4" />
+              {common_remove()}
+            </Menu.Item>
+          </ActionMenu>
         </div>
         <dl class="text-xs space-y-1">
           <div class="flex gap-2">
@@ -157,6 +131,7 @@
       type="button"
       class="card preset-tonal-surface border-2 border-dashed border-surface-400 p-4 flex items-center justify-center gap-2 min-h-24 hover:preset-filled-surface-100-900 transition cursor-pointer"
       onclick={onAdd}
+      disabled={readOnly}
     >
       <Plus class="size-6 opacity-70" />
       <span class="text-sm opacity-70">

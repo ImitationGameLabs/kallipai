@@ -28,3 +28,7 @@ internal: true
 这条规则是为了防止漂移：品牌名渗入标识符，日后就是一次改名的成本；技术词干混入行文，项目读起来就像一个 CLI 旗标。
 
 品牌只有**一种书写形式**：**KallipAI**——用于一切面向人的界面：README 与文档 H1、站点字标、行文中的品牌指称。小写标识符 `kallipai` 覆盖仓库名、`@kallipai` 包作用域、URL 与域名。推荐读音为 **kallipai**（/ˈkælɪpaɪ/），无论品牌以何种形式书写。品牌形式与标识符都不是 CLI 名。
+
+### 网关域词目：collection 与 profile set
+
+模型网关有两层词目。下层是 **profile set**（配置集）：一组有序的模型配置，顺序即故障转移顺序。上层是 **collection**（合集）：可发布的配置集打包单元。该词出现在实体名、路由段（`/user/collections`）与字段名（`collection_name`）中；i18n 键将采用 `collections_*` 词根。合集内的配置集无序；每个配置集保留自己的故障转移顺序。

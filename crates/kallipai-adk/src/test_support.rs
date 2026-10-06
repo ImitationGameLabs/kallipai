@@ -156,6 +156,7 @@ pub(crate) async fn ctx_from_source(
         pending_profile_reset: Arc::new(std::sync::Mutex::new(None)),
         message_puller: None,
         persist_failures: Default::default(),
+        gateway_signals: None,
     }
 }
 

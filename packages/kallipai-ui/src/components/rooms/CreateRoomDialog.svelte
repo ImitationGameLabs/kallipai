@@ -18,6 +18,7 @@
 
 <script lang="ts">
   import { Dialog, Portal } from "@skeletonlabs/skeleton-svelte";
+  import ReqMark from "../ReqMark.svelte";
   import {
     common_cancel,
     rooms_create_title,
@@ -106,7 +107,7 @@
           <label class="flex flex-col gap-1">
             <span class="text-sm font-medium"
               >{rooms_name_label()}
-              <span class="text-error-500 dark:text-error-400">*</span></span
+              <ReqMark /></span
             >
             <input
               class="input text-sm"

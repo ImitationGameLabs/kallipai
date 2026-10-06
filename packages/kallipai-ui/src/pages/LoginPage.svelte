@@ -7,6 +7,7 @@
   import Brand from "../components/Brand.svelte";
   import FormError from "../components/FormError.svelte";
   import Banner from "../components/Banner.svelte";
+  import ReqMark from "../components/ReqMark.svelte";
   import OAuthProviderButtons from "../components/OAuthProviderButtons.svelte";
   import SecretInput from "../components/SecretInput.svelte";
   import {
@@ -226,7 +227,7 @@
       <label class="block space-y-1">
         <span class="text-sm opacity-70">
           {login_offline_key_label()}
-          <span class="text-error-500 dark:text-error-400">*</span>
+          <ReqMark />
         </span>
         <!-- The admin key is a secret, not a password: SecretInput keeps
              it out of the browser credential heuristics. -->
@@ -234,6 +235,7 @@
           bind:value={adminKey}
           placeholder={login_offline_key_placeholder()}
           disabled={offlineDisabled}
+          aria-required="true"
         />
       </label>
       {#if offlineError}
@@ -263,7 +265,7 @@
       <label class="block space-y-1">
         <span class="text-sm opacity-70">
           {login_username()}
-          <span class="text-error-500 dark:text-error-400">*</span>
+          <ReqMark />
         </span>
         <input
           class="input"

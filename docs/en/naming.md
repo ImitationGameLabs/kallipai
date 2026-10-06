@@ -60,3 +60,14 @@ lowercase identifier `kallipai` covers the repository name, the `@kallipai`
 package scope, URLs, and domains. The recommended pronunciation is
 **kallipai** (/ˈkælɪpaɪ/), regardless of how the brand is written. Neither
 the brand form nor the identifier is a CLI name.
+
+### Gateway vocabulary: collection and profile set
+
+The model gateway has a two-layer vocabulary. The lower layer is the
+**profile set** (zh: 配置集): an ordered list of model configurations,
+where the order is the failover order. The upper layer is the
+**collection** (zh: 合集): the publishable bundle of sets. The word
+appears in the entity name, the route segment (`/user/collections`),
+and the field name (`collection_name`); i18n keys will use the
+`collections_*` stem. Sets within a collection are unordered; each set
+keeps its own failover order.

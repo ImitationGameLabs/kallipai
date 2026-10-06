@@ -41,3 +41,29 @@ export function timezoneCandidates(): string[] {
   ).supportedValuesOf;
   return values ? values("timeZone") : [];
 }
+
+/** The local end-of-day instant of a `YYYY-MM-DD` day, or null when the
+ * string is not a plain date (the expiry semantics: a grant for a day
+ * stays valid through that whole day). Parsed by parts -- `new Date`
+ * would read the bare date as UTC midnight and shift the wall day. */
+export function endOfDayIso(day: string): string | null {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(day);
+  if (m === null) return null;
+  return new Date(
+    Number(m[1]),
+    Number(m[2]) - 1,
+    Number(m[3]),
+    23,
+    59,
+    59,
+    999,
+  ).toISOString();
+}
+
+/** The local today as a `YYYY-MM-DD` string (the date input's min). */
+export function todayIso(): string {
+  const now = new Date();
+  const month = `${now.getMonth() + 1}`.padStart(2, "0");
+  const day = `${now.getDate()}`.padStart(2, "0");
+  return `${now.getFullYear()}-${month}-${day}`;
+}

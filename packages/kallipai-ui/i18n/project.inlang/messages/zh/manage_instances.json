@@ -53,16 +53,5 @@
   "manage_instances_advanced_toggle": "高级",
   "manage_instances_mint_action": "铸造登记码",
   "manage_instances_mint_done_hint": "把这串码交给你的 tagma（KALLIPAI_TAGMA_RELAY_ENROLLMENT_CODE）。此处仅显示一次，下方待接入行保留掩码形式。",
-  "manage_instances_new": "新建 tagma",
-  "manage_instances_create_provider_label": "LLM 凭据（可选）",
-  "manage_instances_create_provider_none": "跳过——稍后添加密钥",
-  "manage_instances_create_provider_locked_hint": "加密密钥仅在本设备的 passkey 会话中可用。",
-  "manage_instances_create_provider_model_label": "模型名称",
-  "manage_instances_create_provider_model_placeholder": "如 deepseek-chat",
-  "manage_instances_push_not_applied": "Provider 密钥已存入「{slug}」，但尚无 agent 启用——请在其 profiles 页面点 Apply。",
-  "manage_instances_push_verified": "Provider 密钥已下发至「{slug}」，连接验证通过。",
-  "manage_instances_push_unverified": "Provider 密钥已下发至「{slug}」，但连接验证未通过——请查看其 profiles 页面。",
-  "manage_instances_push_pending": "正在下发 Provider 密钥……",
-  "manage_instances_push_unreachable": "「{slug}」未能及时就绪，未下发任何凭据。请在其 profiles 页面手动添加密钥。",
-  "manage_instances_push_failed": "「{slug}」拒绝了该 provider 密钥：{message}"
+  "manage_instances_new": "新建 tagma"
 }

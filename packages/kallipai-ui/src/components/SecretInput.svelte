@@ -5,7 +5,7 @@
   // and a provider key is not a website login. type="text" plus
   // autocomplete="one-time-code" keeps it out of that heuristic; masked by
   // default via -webkit-text-security (Firefox ignores it and shows plain
-  // text -- accepted, see task record), with an eye toggle to reveal.
+  // text), with an eye toggle to reveal.
   import { Eye, EyeOff } from "@lucide/svelte";
   import {
     common_show_secret,
@@ -16,17 +16,24 @@
     value = $bindable(""),
     placeholder = undefined,
     disabled = false,
+    oninput = undefined,
+    ...rest
   }: {
     value: string;
     placeholder?: string;
     disabled?: boolean;
+    /** Live-input hook for the caller's touched flag (validation timing). */
+    oninput?: () => void;
+    [key: string]: unknown;
+    /** Any other input attribute (aria-required, id, ...) forwards to
+     * the inner input; the component's own attributes keep precedence. */
   } = $props();
-
   let revealed = $state(false);
 </script>
 
 <div class="relative w-full">
   <input
+    {...rest}
     class="input text-sm font-mono w-full"
     style={revealed ? "" : "-webkit-text-security: disc;"}
     type="text"
@@ -34,6 +41,7 @@
     spellcheck="false"
     {placeholder}
     {disabled}
+    {oninput}
     bind:value
   />
   <button

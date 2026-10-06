@@ -34,6 +34,9 @@ pub mod usage_stats;
 // its profile-snapshot cell. The failover-chain accessors stay `pub(crate)` — only the
 // runtime reads them; `profile_snapshot` is `pub` (in-crate tests; mirrors the tagma's read).
 pub use failover::{FailoverState, ProfileReset, ProfileSnapshot};
+// Re-exported so the tagma can receive gateway auth rejections (401/403)
+// observed at failover-chain exhaustion; the emitting loop stays adk-internal.
+pub use acquisition::GatewaySignal;
 
 // Re-exported shell tool-name constants so downstream crates (e.g. the tagma's
 // approval gate) can refer to them without taking a direct `kallipai-shell` dep.

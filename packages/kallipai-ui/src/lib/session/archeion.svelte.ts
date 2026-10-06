@@ -38,8 +38,6 @@ import {
   type PairResult,
   type PasskeySummary,
   type ProviderInfo,
-  type ProviderSummary,
-  type ProviderRequest,
   registerWithPasskey,
   type TagmaView,
 } from "@kallipai/kallipai-archeion-client";
@@ -61,8 +59,6 @@ import type {
   EnrollmentCodeCardProps,
   TagmaCardProps,
 } from "../tagmata.svelte.ts";
-import { open, seal } from "../vault/crypto.ts";
-import { deviceVault } from "../vault/keyStore.ts";
 
 let archeionClient: ArcheionClient | null = null;
 let archeionBaseUrl = "";
@@ -162,41 +158,6 @@ export function lescheBaseUrlOrFail(): string {
  * provider redirect (the callback URL carries only `code`+`state`, not which
  * provider began the ceremony). Set at begin, consumed at finish. */
 const OAUTH_CALLBACK_KEY = "kallipai.oauth.callback";
-
-/** sessionStorage key for the passkey-login marker: set on a successful
- * passkey register/login/pair, cleared on any other login path. Tab-scoped by
- * storage type, which matches the "logged in with a passkey THIS time" bar:
- * the vault mode-flip affordance shows only while the marker is live. NOT a
- * security boundary -- flipping encrypted->plaintext requires opening the
- * blob with this device's vault key, so a forged marker is self-damage only. */
-const VIA_PASSKEY_KEY = "kallipai.session.via-passkey";
-
-/** True when THIS login came through a passkey ceremony (see the key doc). */
-function viaPasskey(): boolean {
-  try {
-    return sessionStorage.getItem(VIA_PASSKEY_KEY) === "1";
-  } catch {
-    return false; // sessionStorage unavailable (SSR / privacy mode)
-  }
-}
-
-/** Mark the current session as arrived via passkey (set on success). */
-function markViaPasskey(): void {
-  try {
-    sessionStorage.setItem(VIA_PASSKEY_KEY, "1");
-  } catch {
-    // Storage write failed; the flip affordance stays hidden (fail closed).
-  }
-}
-
-/** Clear the passkey marker -- any non-passkey login path calls this. */
-function clearViaPasskey(): void {
-  try {
-    sessionStorage.removeItem(VIA_PASSKEY_KEY);
-  } catch {
-    // Nothing to clean up if storage is unavailable.
-  }
-}
 
 interface OAuthCallbackContext {
   provider: string;
@@ -320,13 +281,6 @@ class ArcheionSessionStore {
   oauthProviders: ProviderInfo[] = $state([]);
   oauthProvidersLoaded = $state(false);
 
-  // The signed-in user's provider vault (API keys; encrypted rows are blobs
-  // only this device can open). Mirrors the passkeys discipline: a list
-  // failure lands in `providersError` and never blanks `user`; mutations
-  // THROW so one failure does not blank the section.
-  providers: ProviderSummary[] = $state([]);
-  providersError: string | null = $state(null);
-  providersLoaded = $state(false);
   // A freshly minted device-pairing code, shown once (typeable + QR) with a
   // countdown, for a new device to redeem. Step-up-gated like addPasskey.
   pairingCode: PairingCodeView | null = $state(null);
@@ -408,7 +362,6 @@ class ArcheionSessionStore {
     const result = await registerWithPasskey(client(), args);
     this.lastCeremony = result;
     if (result.ok) {
-      markViaPasskey();
       await this.whoami();
     }
     return result;
@@ -419,7 +372,6 @@ class ArcheionSessionStore {
     const result = await loginWithPasskey(client(), username);
     this.lastCeremony = result;
     if (result.ok) {
-      markViaPasskey();
       await this.whoami();
     }
     return result;
@@ -434,7 +386,6 @@ class ArcheionSessionStore {
     const result = await adminLoginWithKey(client(), key);
     if (result.ok) {
       sessionStorage.setItem(INSTANCES_TOKEN_KEY, key);
-      clearViaPasskey();
       await this.whoami();
     }
     return result;
@@ -449,7 +400,6 @@ class ArcheionSessionStore {
     const result = await loginWithDiscoverablePasskey(client(), signal);
     this.lastCeremony = result;
     if (result.ok) {
-      markViaPasskey();
       await this.whoami();
     }
     return result;
@@ -655,121 +605,6 @@ class ArcheionSessionStore {
     };
   }
 
-  // -- provider vault (self-service API-key storage) -----------------------
-
-  /** Fetch the signed-in user's provider vault. Mirrors the passkeys error
-   *  discipline: a list failure lands in `providersError`, never blanking `user`. */
-  async refreshProviders(): Promise<void> {
-    this.providersError = null;
-    try {
-      this.providers = await client().listProviders();
-      this.providersLoaded = true;
-    } catch (e) {
-      console.error("[archeion] listProviders failed:", e);
-      this.providersError = auth_couldnt_reach();
-    }
-  }
-
-  /** Create a vault entry; mirrors `renamePasskey` (local insert, THROWS). A
-   *  duplicate name is a 409 the caller surfaces inline. An `encrypted`
-   *  request is sealed with the device vault key HERE, so a plaintext key
-   *  never leaves this browser unencrypted and callers stay unaware of the
-   *  ceremony (the same policy `flipProviderEncryption` applies). */
-  async createProvider(body: ProviderRequest): Promise<ProviderSummary> {
-    const sealed =
-      body.mode === "encrypted"
-        ? {
-            ...body,
-            key_material: await seal(
-              await deviceVault.ensure(),
-              body.key_material,
-            ),
-          }
-        : body;
-    const created = await client().createProvider(sealed);
-    this.providers = [...this.providers, created];
-    return created;
-  }
-
-  /** Replace a vault entry in place (rename / key rotation / mode flip).
-   *  key_material is stored exactly as sent: unlike create there is no
-   *  built-in sealing here, so an encrypted row must pass its existing blob
-   *  back or a fresh seal() output, never a raw key. THROWS on error like
-   *  every other mutation. */
-  async replaceProvider(id: string, body: ProviderRequest): Promise<void> {
-    const updated = await client().replaceProvider(id, body);
-    this.providers = this.providers.map((p) => (p.id === id ? updated : p));
-  }
-
-  /** Delete a vault entry; THROWS on error. The archeion returns the remaining
-   *  list, which becomes the new local state (mirrors removeEmail). */
-  async deleteProvider(id: string): Promise<void> {
-    this.providers = await client().deleteProvider(id);
-  }
-
-  /** Whether THIS login arrived via a passkey ceremony; gates the vault's
-   *  encryption affordances (see VIA_PASSKEY_KEY doc -- a UI hint, not a
-   *  security boundary). Not reactive by design: it changes only across
-   *  logins, which re-render the session anyway. */
-  canFlipKeys(): boolean {
-    return viaPasskey();
-  }
-
-  /** Rename a vault entry in place: replace resends every field unchanged
-   *  except the name. THROWS on error like every other mutation (a duplicate
-   *  name is a 409 the caller surfaces inline). */
-  async renameProvider(id: string, name: string): Promise<void> {
-    const current = this.providers.find((p) => p.id === id);
-    if (!current) throw new Error("provider not in local list");
-    await this.replaceProvider(id, {
-      name,
-      provider: current.provider,
-      base_url: current.base_url,
-      key_material: current.key_material,
-      mode: current.mode,
-    });
-  }
-
-  /** Flip one entry between plaintext and encrypted storage IN THIS BROWSER:
-   *  seal with the device vault key or open the blob locally, then send the
-   *  new form. The flip affordance is gated to passkey-arrived sessions
-   *  upstack; the ceremony itself only needs the device key. THROWS when an
-   *  encrypted blob cannot be opened with THIS device's key. */
-  async flipProviderEncryption(entry: ProviderSummary): Promise<void> {
-    const key = await deviceVault.ensure();
-    if (entry.mode === "plaintext") {
-      await this.replaceProvider(entry.id, {
-        name: entry.name,
-        provider: entry.provider,
-        base_url: entry.base_url,
-        key_material: await seal(key, entry.key_material),
-        mode: "encrypted",
-      });
-    } else {
-      await this.replaceProvider(entry.id, {
-        name: entry.name,
-        provider: entry.provider,
-        base_url: entry.base_url,
-        key_material: await open(key, entry.key_material),
-        mode: "plaintext",
-      });
-    }
-  }
-
-  /** Return the usable key material for copying: plaintext entries pass
-   *  through; encrypted blobs are opened with THIS device's key, returning
-   *  null when that fails (expected for rows sealed on another device). */
-  async revealProviderKey(entry: ProviderSummary): Promise<string | null> {
-    if (entry.mode === "plaintext") return entry.key_material;
-    try {
-      const key = await deviceVault.ensure();
-      return await open(key, entry.key_material);
-    } catch (e) {
-      console.error("[vault] open failed:", e);
-      return null;
-    }
-  }
-
   /** Start an OAuth SIGN-IN from the login/register page: navigate to the
    *  provider. No return value -- the SPA unloads; the callback page completes
    *  the ceremony. `returnPath` is the sanitized path to resume to after
@@ -817,7 +652,6 @@ class ArcheionSessionStore {
   ): Promise<OAuthCompleteResult> {
     const result = await completeOAuth(client(), provider, body);
     if (result.ok && result.kind === "signin") {
-      clearViaPasskey();
       await this.whoami();
       // The finish XHR set the session cookie; a transient whoami blip (a
       // network race right after the cookie landed) should not strand the
@@ -939,7 +773,6 @@ class ArcheionSessionStore {
     const result = await pairDevice(client(), { code, label });
     this.lastPair = result;
     if (result.ok) {
-      markViaPasskey();
       await this.whoami();
     }
     return result;
@@ -974,13 +807,9 @@ class ArcheionSessionStore {
     this.externalIdentitiesLoaded = false;
     this.oauthProviders = [];
     this.oauthProvidersLoaded = false;
-    this.providers = [];
-    this.providersError = null;
-    this.providersLoaded = false;
     this.pairingCode = null;
     this.pairingError = null;
     this.lastPair = null;
-    clearViaPasskey();
     sessionStorage.removeItem(INSTANCES_TOKEN_KEY);
   }
 }

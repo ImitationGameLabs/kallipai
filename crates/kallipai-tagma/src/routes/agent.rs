@@ -959,6 +959,17 @@ pub async fn update_profile_set(
                 .join(", ")
         )));
     };
+    // A dead enrollment token refuses new bindings: handing an agent a
+    // chain through a known-dead token just burns a failover chain at
+    // first use. A successful refresh (the signal consumer) clears the
+    // poison.
+    state
+        .profile_source
+        .load_full()
+        .source()
+        .ensure_usable()
+        .await
+        .map_err(|error| ApiError::conflict(error.to_string()))?;
     let mut registry = state.registry.write().await;
     registry.require_superior(auth.identity(), &id)?;
     let entry = registry

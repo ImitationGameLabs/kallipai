@@ -12,6 +12,7 @@ import {
   agent_state_parked,
   agent_state_retrying,
   agent_state_waiting,
+  // deno-lint-ignore no-sloppy-imports
 } from "../paraglide/messages.js";
 import {
   Circle,

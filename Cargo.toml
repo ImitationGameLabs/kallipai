@@ -87,6 +87,7 @@ libsandbox = { git = "https://github.com/ImitationGameLabs/libsandbox-rs.git", r
 libc = "0.2"
 futures-core = "0.3.32"
 futures-util = "0.3.32"
+pingora = { version = "=0.9.0", features = ["proxy", "rustls"] }
 regex = "1.12.3"
 reqwest = { version = "0.13.2", default-features = false, features = [
   "json",
@@ -95,6 +96,7 @@ reqwest = { version = "0.13.2", default-features = false, features = [
   "stream",
 ] }
 bincode = "1"
+bytes = "1"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = { version = "1.0.149", features = ["preserve_order"] }
 # Match sea-orm's sqlx (0.8); the tagma names SqliteConnectOptions for PRAGMAs.

@@ -31,37 +31,10 @@
   }
 }
 
-{$KALLIPAI_EDGE_SCHEME}*.{$KALLIPAI_DOMAIN}:{$KALLIPAI_EDGE_PORT} {
-  import tls.caddy
-
-  @app host app.{$KALLIPAI_DOMAIN}
-  handle @app {
-    # the host vite dev server (packages/kallipai-web `deno task dev`,
-    # appHost in its vite.config) serves the SPA with HMR.
-    reverse_proxy 127.0.0.1:5173
-  }
-
-  @api host api.{$KALLIPAI_DOMAIN}
-  handle @api {
-    # The platform's single API face, path-routed by service segment.
-    # handle_path strips /v1/<service> and forwards the remainder as-is:
-    # all four backends serve bare resource paths, so the strip is the
-    # whole story - no rewrites, and no identity-mapping exception for files
-    # (its named matcher below covers the bare /v1/files prefix too).
-    import kallipai-api-routes
-  }
-
-  # Any other *.<devDomain> host (typo, or the bare apex) matched the wildcard
-  # site block's SNI but no route above -- surface it as a real 404 rather
-  # than Caddy's default empty 200, so misroutes are obvious.
-  handle {
-    respond 404
-  }
-}
-
-# The api.<domain> route table, shared by the https wildcard edge above and
-# the loopback plaintext edge below (one place to review the path map):
-# /v1/<service>/* -> the stripped remainder, forwarded as-is.
+# The api.<domain> route table, shared by every consumer below (the
+# https wildcard edge and the loopback plaintext edge; one place to
+# review the path map): /v1/<service>/* -> the stripped remainder,
+# forwarded as-is.
 (kallipai-api-routes) {
   handle_path /v1/archeion/* {
     reverse_proxy 127.0.0.1:7100
@@ -82,8 +55,45 @@
   handle_path /v1/instances/* {
     reverse_proxy 127.0.0.1:7300
   }
+  # The model gateway's management face as the fifth /v1 service segment
+  # (parity with the prod nixos module's api vhost): every route on that
+  # face carries its own family credential (an admin token or a proxy
+  # key), so the edge adds none. The dev gateway is host-run like the
+  # host vite server, on the code-default management port 7500; the
+  # OpenAI wire (:7501) stays direct in dev.
+  handle_path /v1/model-gateway/* {
+    reverse_proxy 127.0.0.1:7500
+  }
   # Unregistered /v1/* prefixes on the api face are a real 404.
   respond 404
+}
+
+{$KALLIPAI_EDGE_SCHEME}*.{$KALLIPAI_DOMAIN}:{$KALLIPAI_EDGE_PORT} {
+  import tls.caddy
+
+  @app host app.{$KALLIPAI_DOMAIN}
+  handle @app {
+    # the host vite dev server (packages/kallipai-web `deno task dev`,
+    # appHost in its vite.config) serves the SPA with HMR.
+    reverse_proxy 127.0.0.1:5173
+  }
+
+  @api host api.{$KALLIPAI_DOMAIN}
+  handle @api {
+    # The platform's single API face, path-routed by service segment.
+    # handle_path strips /v1/<service> and forwards the remainder as-is:
+    # all five backends serve bare resource paths, so the strip is the
+    # whole story - no rewrites, and no identity-mapping exception for files
+    # (its named matcher above covers the bare /v1/files prefix too).
+    import kallipai-api-routes
+  }
+
+  # Any other *.<devDomain> host (typo, or the bare apex) matched the wildcard
+  # site block's SNI but no route above -- surface it as a real 404 rather
+  # than Caddy's default empty 200, so misroutes are obvious.
+  handle {
+    respond 404
+  }
 }
 
 # Loopback plaintext edge for the dev tagma (host network): the tagma's

@@ -16,8 +16,9 @@ use kallipai_archeion_common::control_plane::ControlPlane;
 use kallipai_archeion_common::internal_api::{
     EnrollmentLookupRequest, EnrollmentLookupResponse, TagmaProfilesRequest, TagmaProfilesResponse,
     TunnelProofTsRequest, TunnelProofTsResponse, UserIdentitiesRequest, UserIdentitiesResponse,
-    UserIdentityByUsernameRequest, UserIdentityResponse, VerifyBearerRequest, VerifyBearerResponse,
-    VerifySessionRequest, VerifySessionResponse, WirePrincipal,
+    UserIdentityByUsernameRequest, UserIdentityResponse, UserSearchRequest, UserSearchResponse,
+    VerifyBearerRequest, VerifyBearerResponse, VerifySessionRequest, VerifySessionResponse,
+    WirePrincipal,
 };
 
 use crate::control_plane::DbControlPlane;
@@ -34,6 +35,7 @@ pub fn router() -> Router<SharedState> {
             post(user_identity_by_username),
         )
         .route("/enrollment-lookup", post(enrollment_lookup))
+        .route("/user-search", post(user_search))
         .route("/tunnel-proof-ts", post(tunnel_proof_ts))
 }
 
@@ -143,6 +145,18 @@ async fn user_identity_by_username(
         Ok(None) => Err(NOT_FOUND),
         Err(e) => Err(backend(e)),
     }
+}
+
+async fn user_search(
+    State(state): State<SharedState>,
+    axum::Json(req): axum::Json<UserSearchRequest>,
+) -> Result<axum::Json<UserSearchResponse>, HandlerError> {
+    let users = control(&state)
+        .search_users(&req.query, req.limit)
+        .await
+        .map_err(backend)?;
+    // The trait type IS the wire entry (UserIdentityResponse aliases it).
+    Ok(axum::Json(UserSearchResponse { users }))
 }
 
 async fn enrollment_lookup(

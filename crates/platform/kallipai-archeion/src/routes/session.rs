@@ -20,6 +20,7 @@ use axum::http::header;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
+use kallipai_archeion_common::control_plane::{LOCAL_ADMIN_PROVIDER, LOCAL_ADMIN_SUBJECT};
 use kallipai_common::authtoken::TokenHash;
 use kallipai_common::protocol::ApiError;
 use sea_orm::{ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter};
@@ -104,6 +105,16 @@ async fn me(
         .map_err(map_db_err)?;
     let external_identities: Vec<ExternalIdentitySummary> =
         external_identities.into_iter().map(Into::into).collect();
+    // The admin marker row is the same source verify_session reads
+    // (routes/auth.rs), so /me reports the session's admin status.
+    let local_admin = external_identities::Entity::find()
+        .filter(external_identities::Column::UserId.eq(user_id.to_string()))
+        .filter(external_identities::Column::Provider.eq(LOCAL_ADMIN_PROVIDER))
+        .filter(external_identities::Column::Subject.eq(LOCAL_ADMIN_SUBJECT))
+        .one(&state.db)
+        .await
+        .map_err(map_db_err)?
+        .is_some();
     Ok(Json(MeResponse {
         user_id: user_id.to_string(),
         display_name: user.display_name,
@@ -113,6 +124,7 @@ async fn me(
         external_identities,
         created_at: user.created_at,
         passkey_count,
+        local_admin,
     }))
 }
 
@@ -134,6 +146,9 @@ struct MeResponse {
     #[serde(with = "time::serde::rfc3339")]
     created_at: OffsetDateTime,
     passkey_count: i64,
+    /// Whether this session belongs to the fixed local admin account
+    /// (the same marker row the session verifier reads).
+    local_admin: bool,
 }
 
 /// A linked email address as returned by `/me` and `/me/emails`.
@@ -215,5 +230,46 @@ mod tests {
         assert_eq!(emails[0].address, "alice@example.test");
         assert!(emails[0].is_primary);
         assert_eq!(primary_email.as_deref(), Some("alice@example.test"));
+    }
+
+    /// `/me` reports the local-admin flag from the marker row: the fixed
+    /// admin-login account reads true, a plain user reads false.
+    #[tokio::test]
+    async fn me_flags_the_local_admin_marker_row() {
+        use crate::db::entity::external_identities;
+        use kallipai_archeion_common::control_plane::{LOCAL_ADMIN_PROVIDER, LOCAL_ADMIN_SUBJECT};
+        use sea_orm::{ActiveModelTrait, Set};
+        use time::OffsetDateTime;
+
+        let state = make_state().await;
+        let plain_id = seed_user(&state, "plain").await;
+        let admin_id = seed_user(&state, "op").await;
+        external_identities::ActiveModel {
+            id: Set(uuid::Uuid::new_v4()),
+            user_id: Set(admin_id.to_string()),
+            provider: Set(LOCAL_ADMIN_PROVIDER.to_string()),
+            subject: Set(LOCAL_ADMIN_SUBJECT.to_string()),
+            display_name: Set(None),
+            created_at: Set(OffsetDateTime::now_utc()),
+            last_used_at: Set(None),
+        }
+        .insert(&state.db)
+        .await
+        .expect("insert marker row");
+        let Json(MeResponse {
+            local_admin: plain, ..
+        }) = me(
+            State(state.clone()),
+            AuthPrincipal(Principal::User(plain_id)),
+        )
+        .await
+        .expect("me ok");
+        assert!(!plain);
+        let Json(MeResponse {
+            local_admin: admin, ..
+        }) = me(State(state), AuthPrincipal(Principal::User(admin_id)))
+            .await
+            .expect("me ok");
+        assert!(admin);
     }
 }

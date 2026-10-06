@@ -24,10 +24,7 @@
 <script lang="ts">
   import { Dialog, Portal } from "@skeletonlabs/skeleton-svelte";
   import FormError from "../FormError.svelte";
-  import {
-    isLocked,
-    type PushCandidate,
-  } from "../../lib/instances/credentialPush.ts";
+  import ReqMark from "../ReqMark.svelte";
   import { copyText } from "../../lib/clipboard.ts";
   import {
     common_cancel,
@@ -36,11 +33,6 @@
     common_create,
     manage_instances_advanced_toggle,
     manage_instances_create_creating,
-    manage_instances_create_provider_label,
-    manage_instances_create_provider_locked_hint,
-    manage_instances_create_provider_model_label,
-    manage_instances_create_provider_model_placeholder,
-    manage_instances_create_provider_none,
     manage_instances_create_workspace_label,
     manage_instances_create_workspace_placeholder,
     manage_instances_dialog_desc,
@@ -71,10 +63,6 @@
     // "designated-user" capability gate: hides path A entirely when the
     // instances service cannot spawn (the dialog then opens on path B).
     canSpawn = false,
-    // Vault rows offered as one-click credential sources (page-supplied;
-    // empty = the select degrades to a skip-only dropdown).
-    providers = [],
-    sessionViaPasskey = false,
     onOneClick,
     onSpawn,
     onMint,
@@ -84,14 +72,7 @@
     busy?: boolean;
     error?: string | null;
     canSpawn?: boolean;
-    providers?: PushCandidate[];
-    sessionViaPasskey?: boolean;
-    onOneClick: (opts: {
-      workspace: string;
-      providerId?: string | null;
-      /** Required when providerId is set (the bound set's model). */
-      model?: string;
-    }) => Promise<void> | void;
+    onOneClick: (opts: { workspace: string }) => Promise<void> | void;
     onSpawn: (fields: AdvancedSpawnFields) => Promise<void> | void;
     onMint: () => Promise<{ id: string; code: string } | null>;
     onCancel: () => void;
@@ -101,8 +82,6 @@
   // CreateRoomDialog) so a prior draft, error, or minted code never lingers.
   let method = $state<"cloud" | "local">("cloud");
   let workspace = $state("");
-  let providerId = $state<string | null>(null);
-  let pushModel = $state("");
   let advanced = $state(false);
   let fields = $state<AdvancedSpawnFields>({
     slug: "",
@@ -121,8 +100,6 @@
     if (open && !lastOpen) {
       method = canSpawn ? "cloud" : "local";
       workspace = "";
-      providerId = null;
-      pushModel = "";
       advanced = false;
       fields = {
         slug: "",
@@ -140,13 +117,8 @@
     lastOpen = open;
   });
 
-  const pickedProvider = $derived(
-    providerId ? (providers.find((p) => p.id === providerId) ?? null) : null,
-  );
-  // Fail closed: a credential pick without a model name cannot launch.
   const canSubmit = $derived(
     !busy &&
-      !(providerId && !pushModel.trim()) &&
       (method === "local" ||
         (advanced
           ? fields.slug.trim().length > 0 && fields.workspace.trim().length > 0
@@ -187,11 +159,7 @@
       });
       return;
     }
-    void onOneClick({
-      workspace: workspace.trim(),
-      providerId,
-      model: pushModel.trim(),
-    });
+    void onOneClick({ workspace: workspace.trim() });
   }
 </script>
 
@@ -260,7 +228,7 @@
               <label class="flex flex-col gap-1">
                 <span class="text-sm font-medium">
                   {manage_instances_create_workspace_label()}
-                  <span class="text-error-500 dark:text-error-400">*</span>
+                  <ReqMark />
                 </span>
                 <input
                   class="input text-sm"
@@ -269,46 +237,6 @@
                   disabled={busy}
                   required
                 />
-              </label>
-              <label class="flex flex-col gap-1">
-                <span class="text-sm font-medium">
-                  {manage_instances_create_provider_label()}
-                </span>
-                <select
-                  class="input text-sm"
-                  bind:value={providerId}
-                  disabled={busy}
-                >
-                  <option value={null}>
-                    {manage_instances_create_provider_none()}
-                  </option>
-                  {#each providers as p (p.id)}
-                    <option
-                      value={p.id}
-                      disabled={isLocked(p, sessionViaPasskey)}
-                    >
-                      {p.name}
-                    </option>
-                  {/each}
-                </select>
-                {#if providers.some((p) => isLocked(p, sessionViaPasskey))}
-                  <span class="text-xs opacity-70">
-                    {manage_instances_create_provider_locked_hint()}
-                  </span>
-                {/if}
-                {#if pickedProvider}
-                  <span class="text-sm font-medium">
-                    {manage_instances_create_provider_model_label()}
-                    <span class="text-error-500 dark:text-error-400">*</span>
-                  </span>
-                  <input
-                    class="input text-sm"
-                    placeholder={manage_instances_create_provider_model_placeholder()}
-                    bind:value={pushModel}
-                    disabled={busy}
-                    required
-                  />
-                {/if}
               </label>
             {/if}
 
@@ -328,7 +256,7 @@
                 <label class="flex flex-col gap-1">
                   <span class="text-sm font-medium">
                     {manage_instances_spawn_slug_label()}
-                    <span class="text-error-500 dark:text-error-400">*</span>
+                    <ReqMark />
                   </span>
                   <input
                     class="input text-sm"
@@ -341,7 +269,7 @@
                 <label class="flex flex-col gap-1">
                   <span class="text-sm font-medium">
                     {manage_instances_spawn_workspace_label()}
-                    <span class="text-error-500 dark:text-error-400">*</span>
+                    <ReqMark />
                   </span>
                   <input
                     class="input text-sm"

@@ -11,12 +11,12 @@ use kallipai_archeion_common::control_plane::{
 use kallipai_archeion_common::ids::{TagmaId, UserId};
 use kallipai_archeion_common::principal::Principal;
 use kallipai_common::authtoken::TokenHash;
-use sea_orm::sea_query::{Expr, Query};
-use sea_orm::{ColumnTrait, EntityTrait, FromQueryResult, QueryFilter, QuerySelect};
+use sea_orm::sea_query::{Expr, LikeExpr, Query};
+use sea_orm::{ColumnTrait, EntityTrait, FromQueryResult, QueryFilter, QueryOrder, QuerySelect};
 use time::OffsetDateTime;
 
 use crate::db::Db;
-use crate::db::entity::{external_identities, sessions, tagma_tokens, tagmata, users};
+use crate::db::entity::{emails, external_identities, sessions, tagma_tokens, tagmata, users};
 
 /// The registry, DB-backed. Cheap to construct (a cloned `Db` handle + the admin
 /// hash), so the archeion control-plane's own `AuthPrincipal` extractor and the
@@ -33,6 +33,77 @@ impl DbControlPlane {
             db,
             admin_token_hash,
         }
+    }
+}
+
+/// The search result cap behind the admin member picker: a bound, not
+/// a configuration surface.
+pub const USER_SEARCH_LIMIT_MAX: u32 = 50;
+
+/// A literal-prefix LIKE pattern: the `%` / `_` / `\` wildcards in the
+/// raw query are escaped so the search matches the text, not the
+/// pattern language (usernames legitimately contain `_`).
+fn like_prefix(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len() + 2);
+    for c in raw.chars() {
+        if matches!(c, '\\' | '%' | '_') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out.push('%');
+    out
+}
+
+impl DbControlPlane {
+    /// The prefix search behind the admin member picker: a `users.id`,
+    /// `username`, or `emails.address` prefix. The address is a match
+    /// key only -- the rows carry the minimal identity fields, never
+    /// the email itself.
+    pub async fn search_users(
+        &self,
+        query: &str,
+        limit: u32,
+    ) -> Result<Vec<UserIdentity>, ControlPlaneError> {
+        let address_matches: Vec<String> = emails::Entity::find()
+            .filter(
+                Expr::col((emails::Entity, emails::Column::Address))
+                    .like(LikeExpr::new(like_prefix(query)).escape('\\')),
+            )
+            .all(&self.db)
+            .await
+            .map_err(map_err)?
+            .into_iter()
+            .map(|e| e.account_id)
+            .collect();
+        let mut any = sea_orm::Condition::any()
+            .add(
+                Expr::col((users::Entity, users::Column::Id))
+                    .like(LikeExpr::new(like_prefix(query)).escape('\\')),
+            )
+            .add(
+                Expr::col((users::Entity, users::Column::Username))
+                    .like(LikeExpr::new(like_prefix(query)).escape('\\')),
+            );
+        if !address_matches.is_empty() {
+            any = any.add(users::Column::Id.is_in(address_matches));
+        }
+        let rows = users::Entity::find()
+            .filter(any)
+            .order_by_asc(users::Column::Username)
+            .limit(limit.min(USER_SEARCH_LIMIT_MAX) as u64)
+            .all(&self.db)
+            .await
+            .map_err(map_err)?;
+        Ok(rows
+            .into_iter()
+            .map(|u| UserIdentity {
+                user_id: UserId::from(u.id),
+                username: u.username,
+                display_name: u.display_name,
+                disabled: u.disabled_at.is_some(),
+            })
+            .collect())
     }
 }
 
@@ -637,5 +708,99 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    async fn seed_email(state: &crate::state::SharedState, account_id: &str, address: &str) {
+        emails::ActiveModel {
+            id: Set(uuid::Uuid::new_v4()),
+            account_id: Set(account_id.to_owned()),
+            address: Set(address.to_owned()),
+            is_primary: Set(true),
+            verified_at: Set(None),
+            verification_token_hash: Set(None),
+            verification_token_expires_at: Set(None),
+            added_at: Set(OffsetDateTime::now_utc()),
+        }
+        .insert(&state.db)
+        .await
+        .expect("seed email");
+    }
+
+    /// The three prefix channels (id, username, email) each resolve, the
+    /// answers stay username-ordered, and a disabled account still
+    /// answers flagged -- the picker decides, the search does not filter.
+    #[tokio::test]
+    async fn search_users_matches_id_username_and_email_prefixes() {
+        let state = make_state().await;
+        let alice = seed_user(&state, "alice").await;
+        let bob = seed_user(&state, "bob").await;
+        seed_user(&state, "carol").await;
+        seed_email(&state, alice.as_ref(), "alice@personal.test").await;
+        seed_email(&state, bob.as_ref(), "bob@work.test").await;
+        let control = cp(&state);
+        // The username channel.
+        let hits = control.search_users("ali", 50).await.unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].username, "alice");
+        assert_eq!(hits[0].user_id, alice);
+        // The id channel (a prefix of the opaque id).
+        let id_prefix: String = alice.to_string().chars().take(8).collect();
+        let hits = control.search_users(&id_prefix, 50).await.unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].username, "alice");
+        // The email channel: a match key for the right account.
+        let hits = control.search_users("bob@work", 50).await.unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].username, "bob");
+        // The answers never carry the address.
+        let json = serde_json::to_string(&hits).unwrap();
+        assert!(!json.contains("bob@work"));
+        // A disabled account answers flagged, not filtered.
+        let carol = users::Entity::find()
+            .filter(users::Column::Username.eq("carol"))
+            .one(&state.db)
+            .await
+            .expect("carol read")
+            .expect("carol row");
+        let mut disabled = users::ActiveModel::from(carol);
+        disabled.disabled_at = Set(Some(OffsetDateTime::now_utc()));
+        disabled.update(&state.db).await.expect("carol disable");
+        let hits = control.search_users("carol", 50).await.unwrap();
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].disabled);
+    }
+
+    /// The LIKE wildcards are escaped: the query matches the text, not
+    /// the pattern language (usernames legitimately contain `_`).
+    #[tokio::test]
+    async fn search_users_escapes_like_wildcards() {
+        let state = make_state().await;
+        seed_user(&state, "a_b").await;
+        seed_user(&state, "axb").await;
+        let control = cp(&state);
+        // The literal underscore matches only the real underscore name.
+        let hits = control.search_users("a_", 50).await.unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].username, "a_b");
+        // The wildcard-free prefix still matches both.
+        let hits = control.search_users("a", 50).await.unwrap();
+        assert_eq!(hits.len(), 2);
+        // A bare wildcard is a literal character, not a pattern.
+        let hits = control.search_users("%", 50).await.unwrap();
+        assert!(hits.is_empty());
+    }
+
+    /// The caller's limit is honored and the platform-side cap holds.
+    #[tokio::test]
+    async fn search_users_clamps_limit() {
+        let state = make_state().await;
+        for name in ["u-one", "u-two", "u-three"] {
+            seed_user(&state, name).await;
+        }
+        let control = cp(&state);
+        let hits = control.search_users("u-", 2).await.unwrap();
+        assert_eq!(hits.len(), 2);
+        let hits = control.search_users("u-", u32::MAX).await.unwrap();
+        assert_eq!(hits.len(), 3);
     }
 }

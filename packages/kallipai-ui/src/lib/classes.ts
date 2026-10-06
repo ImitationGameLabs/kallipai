@@ -11,3 +11,8 @@ export const TONAL_ICON_PRIM =
 
 export const TONAL_ICON_ERR =
   "grid place-items-center rounded-base preset-tonal-surface hover:preset-filled-error-500 hover:text-on-error-500";
+
+export const MENU_ITEM =
+  "flex items-center gap-2 px-3 py-2 rounded-base text-sm cursor-pointer hover:preset-filled-surface-500";
+export const MENU_ITEM_DANGER =
+  "flex items-center gap-2 px-3 py-2 rounded-base text-sm text-error-500 dark:text-error-400 cursor-pointer hover:preset-filled-error-500";

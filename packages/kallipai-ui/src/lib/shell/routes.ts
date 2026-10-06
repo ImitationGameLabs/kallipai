@@ -42,3 +42,18 @@ export function tagmaAgentPath(tagmaId: string, agentId: string): string {
 export function filesPath(): string {
   return "/files";
 }
+
+/** The gateway admin console: `/admin/gateway` (the platform catalog face). */
+export function adminGatewayPath(): string {
+  return "/admin/gateway";
+}
+
+/** A gateway collection's detail page: `/admin/gateway/collections/<name>`. */
+export function adminGatewayCollectionPath(name: string): string {
+  return `/admin/gateway/collections/${encodeURIComponent(name)}`;
+}
+
+/** The caller's gateway space: `/gateway` (the user face). */
+export function gatewayPath(): string {
+  return "/gateway";
+}

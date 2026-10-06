@@ -6,9 +6,12 @@ use sea_orm::entity::prelude::*;
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
 #[sea_orm(table_name = "set_members")]
 pub struct Model {
+    /// The owning set's space (a member row's owner is its set's owner:
+    /// membership never crosses a space boundary).
+    #[sea_orm(primary_key, auto_increment = false)]
+    pub owner: String,
     #[sea_orm(primary_key, auto_increment = false)]
     pub set_name: String,
-    #[sea_orm(primary_key, auto_increment = false)]
     pub profile_id: String,
     pub position: i32,
 }

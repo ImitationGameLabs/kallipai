@@ -7,17 +7,10 @@
   // hosted shape minus the identity rows. Rename stays an inline edit; Revoke
   // keeps its confirmation dialog (one-click irreversible, cuts the device
   // off on its next request).
-  import { Menu, Portal } from "@skeletonlabs/skeleton-svelte";
+  import { Menu } from "@skeletonlabs/skeleton-svelte";
+  import ActionMenu from "../ActionMenu.svelte";
   import { timezoneSetting } from "../../lib/time/stamp.svelte.ts";
-  import {
-    Check,
-    ExternalLink,
-    MoreVertical,
-    Play,
-    Square,
-    Trash,
-    X,
-  } from "@lucide/svelte";
+  import { Check, ExternalLink, Play, Square, Trash, X } from "@lucide/svelte";
   import {
     type TagmaCardProps,
     formatDateTime,
@@ -29,7 +22,12 @@
   import ManageTagmaRoomsDialog from "./ManageTagmaRoomsDialog.svelte";
   import { navigate } from "../../lib/shell/port.ts";
   import { tagmaDetailsSectionPath } from "../../lib/shell/routes.ts";
-  import { TONAL_ICON_PRIM, TONAL_ICON_SURF } from "../../lib/classes.ts";
+  import {
+    MENU_ITEM,
+    MENU_ITEM_DANGER,
+    TONAL_ICON_PRIM,
+    TONAL_ICON_SURF,
+  } from "../../lib/classes.ts";
   import RevokeTagmaDialog from "./RevokeTagmaDialog.svelte";
   import {
     common_rename,
@@ -315,111 +313,80 @@
          not have. Hidden (not removed) during edit so the row keeps its
          space. -->
     <div class="flex items-center justify-end gap-2" class:invisible={editing}>
-      <Menu
-        positioning={{ placement: "top-end" }}
-        onSelect={(e) => {
-          if (e.value === "open" && process?.port) {
+      <ActionMenu
+        placement="top-end"
+        compact
+        label={tagma_actions_aria()}
+        onSelect={(value) => {
+          if (value === "open" && process?.port) {
             navigate(`/connect?tagmaUrl=http://127.0.0.1:${process.port}`);
-          } else if (e.value === "stop" && process && onStop) {
+          } else if (value === "stop" && process && onStop) {
             onStop(process.slug);
           } else if (
-            e.value === "start" &&
+            value === "start" &&
             process &&
             !process.running &&
             onStart
           ) {
             void onStart?.(process.slug);
-          } else if (e.value === "manage" && tagma) {
+          } else if (value === "manage" && tagma) {
             navigate(tagmaDetailsSectionPath(tagma.tagmaId, "overview"));
-          } else if (e.value === "rooms" && tagma) roomsOpen = true;
-          else if (e.value === "rename" && tagma && onRename) startRename();
-          else if (e.value === "revoke" && tagma && onRevoke)
+          } else if (value === "rooms" && tagma) roomsOpen = true;
+          else if (value === "rename" && tagma && onRename) startRename();
+          else if (value === "revoke" && tagma && onRevoke)
             confirmingRevoke = true;
         }}
       >
-        <Menu.Trigger
-          class="size-8 {TONAL_ICON_SURF}"
-          aria-label={tagma_actions_aria()}
-        >
-          <MoreVertical class="size-4" />
-        </Menu.Trigger>
-        <Portal>
-          <Menu.Positioner>
-            <Menu.Content class="card preset-tonal-surface p-1 min-w-[8rem]">
-              {#if tagma}
-                <Menu.Item
-                  value="manage"
-                  class="flex items-center gap-2 px-3 py-2 rounded-base text-sm cursor-pointer hover:preset-filled-surface-500"
-                >
-                  <Settings class="size-4" />
-                  {tagma_menu_manage()}
-                </Menu.Item>
-              {/if}
-              {#if tagma}
-                <Menu.Item
-                  value="rooms"
-                  class="flex items-center gap-2 px-3 py-2 rounded-base text-sm cursor-pointer hover:preset-filled-surface-500"
-                >
-                  <DoorOpen class="size-4" />
-                  {tagma_menu_manage_rooms()}
-                </Menu.Item>
-              {/if}
-              {#if process?.port}
-                <Menu.Item
-                  value="open"
-                  class="flex items-center gap-2 px-3 py-2 rounded-base text-sm cursor-pointer hover:preset-filled-surface-500"
-                >
-                  <ExternalLink class="size-4" />
-                  {nav_chat()}
-                </Menu.Item>
-              {/if}
-              {#if process && !process.running && onStart}
-                <Menu.Item
-                  value="start"
-                  class="flex items-center gap-2 px-3 py-2 rounded-base text-sm cursor-pointer hover:preset-filled-surface-500"
-                >
-                  <Play class="size-4" />
-                  {manage_instances_start()}
-                </Menu.Item>
-              {/if}
+        {#if tagma}
+          <Menu.Item value="manage" class={MENU_ITEM}>
+            <Settings class="size-4" />
+            {tagma_menu_manage()}
+          </Menu.Item>
+        {/if}
+        {#if tagma}
+          <Menu.Item value="rooms" class={MENU_ITEM}>
+            <DoorOpen class="size-4" />
+            {tagma_menu_manage_rooms()}
+          </Menu.Item>
+        {/if}
+        {#if process?.port}
+          <Menu.Item value="open" class={MENU_ITEM}>
+            <ExternalLink class="size-4" />
+            {nav_chat()}
+          </Menu.Item>
+        {/if}
+        {#if process && !process.running && onStart}
+          <Menu.Item value="start" class={MENU_ITEM}>
+            <Play class="size-4" />
+            {manage_instances_start()}
+          </Menu.Item>
+        {/if}
 
-              {#if tagma && onRename}
-                <Menu.Item
-                  value="rename"
-                  class="px-3 py-2 rounded-base text-sm cursor-pointer hover:preset-filled-surface-500"
-                >
-                  {common_rename()}
-                </Menu.Item>
-              {/if}
-              <!-- Danger zone: destructive actions cluster at the tail,
+        {#if tagma && onRename}
+          <Menu.Item value="rename" class={MENU_ITEM}>
+            {common_rename()}
+          </Menu.Item>
+        {/if}
+        <!-- Danger zone: destructive actions cluster at the tail,
                    past a separator (the AccountMenu pattern), so a
                    misaimed click never lands on Stop/Revoke from the
                    safe-zone scroll. -->
-              {#if (process?.running && onStop) || (tagma && onRevoke)}
-                <Menu.Separator class="my-1 border-surface-200-800" />
-              {/if}
-              {#if process?.running && onStop}
-                <Menu.Item
-                  value="stop"
-                  class="flex items-center gap-2 px-3 py-2 rounded-base text-sm text-error-500 dark:text-error-400 cursor-pointer hover:preset-filled-error-500"
-                >
-                  <Square class="size-4" />
-                  {manage_instances_stop()}
-                </Menu.Item>
-              {/if}
-              {#if tagma && onRevoke}
-                <Menu.Item
-                  value="revoke"
-                  class="flex items-center gap-2 px-3 py-2 rounded-base text-sm text-error-500 dark:text-error-400 cursor-pointer hover:preset-filled-error-500"
-                >
-                  <Trash class="size-4" />
-                  {tagma_revoke()}
-                </Menu.Item>
-              {/if}
-            </Menu.Content>
-          </Menu.Positioner>
-        </Portal>
-      </Menu>
+        {#if (process?.running && onStop) || (tagma && onRevoke)}
+          <Menu.Separator class="my-1 border-surface-200-800" />
+        {/if}
+        {#if process?.running && onStop}
+          <Menu.Item value="stop" class={MENU_ITEM_DANGER}>
+            <Square class="size-4" />
+            {manage_instances_stop()}
+          </Menu.Item>
+        {/if}
+        {#if tagma && onRevoke}
+          <Menu.Item value="revoke" class={MENU_ITEM_DANGER}>
+            <Trash class="size-4" />
+            {tagma_revoke()}
+          </Menu.Item>
+        {/if}
+      </ActionMenu>
     </div>
   {/if}
 </div>

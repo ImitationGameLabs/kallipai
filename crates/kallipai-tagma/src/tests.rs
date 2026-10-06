@@ -62,6 +62,52 @@ fn files_token_follows_the_primary_entry_scan() {
 }
 
 #[test]
+fn gateway_params_pair_the_active_origin_with_its_enrollment_token() {
+    let entry = |name: &str, url: &str| RelayEntry {
+        name: name.to_owned(),
+        polis_url: url.to_owned(),
+        enrollment_code: None,
+    };
+    // Enroll one entry on disk (credentials/<name>/tagma.{id,token}).
+    let root = tempfile::TempDir::new().unwrap();
+    let enrolled = |root: &std::path::Path, name: &str| {
+        let dir = root.join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("tagma.id"), "id-1").unwrap();
+        std::fs::write(dir.join("tagma.token"), "token-1").unwrap();
+    };
+    // No relay entries: no platform face, so no gateway at all.
+    assert!(gateway_params_from(&[], None).is_none());
+    // Entries exist but none enrolled: the token half is missing.
+    let entries = [
+        entry("alpha", "https://api.example.com"),
+        entry("beta", "http://api.other.test"),
+    ];
+    let faces = platform_faces(&entries, root.path());
+    assert!(gateway_params_from(&faces, None).is_none());
+    // The second entry enrolls: it is the first (and only) dual-complete
+    // face, so the unpinned default resolves it and derives the base
+    // from ITS origin (the one-segment shape every backend service
+    // uses).
+    enrolled(root.path(), "beta");
+    let faces = platform_faces(&entries, root.path());
+    let params = gateway_params_from(&faces, None).unwrap();
+    assert_eq!(params.base, "http://api.other.test/v1/model-gateway");
+    assert_eq!(params.origin, "http://api.other.test");
+    assert_eq!(params.token, "token-1");
+    // A pin decides even when it points at an UNENROLLED entry: no
+    // silent fallback to the enrolled one — no enrollment, no gateway.
+    assert!(gateway_params_from(&faces, Some("https://api.example.com")).is_none());
+    // A pin matching no configured entry yields no gateway either.
+    assert!(gateway_params_from(&faces, Some("https://nowhere.test")).is_none());
+    // The pin enrolls later: the pin wins over the config order.
+    enrolled(root.path(), "alpha");
+    let faces = platform_faces(&entries, root.path());
+    let params = gateway_params_from(&faces, Some("https://api.example.com")).unwrap();
+    assert_eq!(params.origin, "https://api.example.com");
+    assert_eq!(params.token, "token-1");
+}
+#[test]
 fn boot_refuses_to_start_without_a_slug() {
     temp_env::with_vars_unset(["KALLIPAI_TAGMA_SLUG"], || {
         let err = boot_identity().unwrap_err();

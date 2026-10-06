@@ -1,5 +1,10 @@
 import { assertEquals } from "@std/assert";
-import { formatStampInZone, timezoneCandidates } from "./stamp.ts";
+import {
+  endOfDayIso,
+  formatStampInZone,
+  timezoneCandidates,
+  todayIso,
+} from "./stamp.ts";
 
 // 2026-07-01T00:00:00Z — mid-summer, away from DST transitions.
 const ISO = "2026-07-01T00:00:00Z";
@@ -42,4 +47,26 @@ Deno.test("timezoneCandidates: includes common IANA zones", () => {
   const candidates = timezoneCandidates();
   assertEquals(candidates.includes("Asia/Shanghai"), true);
   assertEquals(candidates.includes("America/New_York"), true);
+});
+
+Deno.test("endOfDayIso: the day's last local millisecond, as UTC ISO", () => {
+  const iso = endOfDayIso("2026-07-01");
+  const local = new Date(2026, 6, 1, 23, 59, 59, 999);
+  assertEquals(iso, local.toISOString());
+});
+
+Deno.test("endOfDayIso: non-date strings answer null", () => {
+  assertEquals(endOfDayIso(""), null);
+  assertEquals(endOfDayIso("2026-07"), null);
+  assertEquals(endOfDayIso("2026-07-01T10:00"), null);
+});
+
+Deno.test("todayIso: the local calendar day as YYYY-MM-DD", () => {
+  const now = new Date();
+  const expected = [
+    now.getFullYear(),
+    `${now.getMonth() + 1}`.padStart(2, "0"),
+    `${now.getDate()}`.padStart(2, "0"),
+  ].join("-");
+  assertEquals(todayIso(), expected);
 });

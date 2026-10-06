@@ -1,4 +1,5 @@
 <script lang="ts" module>
+  import { MENU_ITEM } from "../../lib/classes.ts";
   // A room list entry: the room's name + description + visibility + a kebab menu
   // that opens the room's settings page (where invite/add-tagma/leave live). A
   // clean list row; management lives on the settings page. The body opens the
@@ -15,8 +16,9 @@
 </script>
 
 <script lang="ts">
-  import { Menu, Portal } from "@skeletonlabs/skeleton-svelte";
-  import { MoreVertical, Settings } from "@lucide/svelte";
+  import { Menu } from "@skeletonlabs/skeleton-svelte";
+  import ActionMenu from "../ActionMenu.svelte";
+  import { Settings } from "@lucide/svelte";
   import { formatStamp } from "../../lib/time/stamp.svelte.ts";
   import {
     room_label_fallback,
@@ -24,7 +26,6 @@
     room_actions_aria,
     rooms_menu_settings,
   } from "../../paraglide/messages.js";
-  import { TONAL_ICON_SURF } from "../../lib/classes.ts";
 
   let { room, onOpen, onSettings }: RoomCardProps = $props();
 
@@ -63,32 +64,18 @@
 
   {#if onSettings}
     <div class="shrink-0">
-      <Menu
-        positioning={{ placement: "bottom-end" }}
-        onSelect={(e) => {
-          if (e.value === "settings") onSettings();
+      <ActionMenu
+        compact
+        label={room_actions_aria()}
+        onSelect={(value) => {
+          if (value === "settings") onSettings();
         }}
       >
-        <Menu.Trigger
-          class="size-8 {TONAL_ICON_SURF}"
-          aria-label={room_actions_aria()}
-        >
-          <MoreVertical class="size-4" />
-        </Menu.Trigger>
-        <Portal>
-          <Menu.Positioner>
-            <Menu.Content class="card preset-tonal-surface p-1 min-w-[8rem]">
-              <Menu.Item
-                value="settings"
-                class="flex items-center gap-2 px-3 py-2 rounded-base text-sm cursor-pointer hover:preset-filled-surface-500"
-              >
-                <Settings class="size-4" />
-                {rooms_menu_settings()}
-              </Menu.Item>
-            </Menu.Content>
-          </Menu.Positioner>
-        </Portal>
-      </Menu>
+        <Menu.Item value="settings" class={MENU_ITEM}>
+          <Settings class="size-4" />
+          {rooms_menu_settings()}
+        </Menu.Item>
+      </ActionMenu>
     </div>
   {/if}
 </div>

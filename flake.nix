@@ -168,6 +168,7 @@
             kallipctl = builds.ctl;
             kallipai-daemon-spawn = builds.daemon-spawn;
             kallipai-instances = builds.instances;
+            kallipai-model-gateway = builds.model-gateway;
             # The FHS distribution tarball builds on the pinned 22.11
             kallipai-tarball = import ./nix/packages/tarball.nix {
               # Tool-side pkgs (patchelf/gnutar) from the main line; the

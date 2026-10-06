@@ -10,6 +10,5 @@ pub mod passkeys;
 pub mod sessions;
 pub mod tagma_tokens;
 pub mod tagmata;
-pub mod user_providers;
 pub mod users;
 pub mod webauthn_challenges;

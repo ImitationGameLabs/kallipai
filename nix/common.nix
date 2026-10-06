@@ -61,6 +61,11 @@ let
       with pkgs;
       [
         pkg-config
+
+        # cmake builds libz-ng-sys (flate2's zlib-ng backend, hard-selected
+        # by pingora-core); the deps and crate builds need it at build
+        # time, not just the devShell.
+        cmake
       ]
       ++ lib.optionals (pkgsFhs != null) [
         # The 22.11 linker: drives the whole link layer (-L, dynamic

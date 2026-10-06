@@ -20,6 +20,7 @@ pub mod inbox;
 pub mod lifecycle;
 pub mod messaging;
 pub mod probe;
+pub mod profile_source;
 pub mod projector;
 pub mod pump_driver;
 pub mod relay;
@@ -108,13 +109,57 @@ pub async fn run(args: Args) -> Result<()> {
         );
     }
 
-    // Load profile config once at startup (config file or implicit env profile), then build one
-    // backend per referenced provider and assemble the registry before restoring agents —
-    // restored agents resolve their profile from here too. The tagma owns reqwest + backend
-    // construction; the runtime holds the pre-built backends and does selection (plus reuse of
-    // `reqwest` types for HTTP-shape retry classification). A
-    // misconfigured provider (unknown family, bad config) fails fast here at startup.
-    let cfg = kallipai_adk::profile::load().context("failed to load model profiles")?;
+    // Resolve the profile source (local file or the model gateway's
+    // distribution face) and load the initial profile config from it, then
+    // build one backend per referenced provider and assemble the registry
+    // before restoring agents — restored agents resolve their profile from
+    // here too. The tagma owns reqwest + backend construction; the runtime
+    // holds the pre-built backends and does selection (plus reuse of
+    // `reqwest` types for HTTP-shape retry classification). A misconfigured
+    // source or provider (unknown family, bad config) fails fast here at
+    // startup.
+    // The boot resolver: an explicit settings.toml mode wins, else the
+    // one-shot spawn env seed (KALLIPAI_TAGMA_PROFILE_SOURCE) applies,
+    // else local. The switch face keeps reading the pure-toml loader.
+    let source_mode = settings::resolve_boot_profile_source_mode()
+        .context("failed to resolve the profile source mode for boot")?;
+    // The gateway connection: each relay entry contributes a platform
+    // face (origin plus its stored enrollment token — no enrollment,
+    // no gateway). The active face is the pinned polis entry, or
+    // before the first pin the first entry that carries a token. The
+    // resolved pair is the switchability gate, not the mode signal; a
+    // local-only boot (no relay entries) carries no platform face, so
+    // the model-gateway mode is structurally unavailable there.
+    let relay_entries = resolve_relay_entries(&args)?;
+    let credentials_root = credentials_dir()?;
+    let platforms = platform_faces(&relay_entries, &credentials_root);
+    let pinned_polis = settings::load_profile_source_polis()
+        .context("failed to read the pinned profile source polis from settings")?;
+    let gateway_params = gateway_params_from(&platforms, pinned_polis.as_deref());
+    let profile_source = profile_source::build(source_mode, gateway_params.as_ref())
+    // A proxy-mode boot that resolved nothing names the stale pin
+    // when there is one (which platform origin to re-enroll),
+    // instead of generic guidance.
+    .with_context(|| match (source_mode, pinned_polis.as_deref()) {
+        (profile_source::ProfileSourceKind::Proxy, Some(pin)) => format!(
+            "failed to configure the model profile source: the pinned platform origin {pin:?} does not resolve to an enrolled platform; re-enroll it, or set [profiles.source] mode to local in settings.toml and pin another platform with a runtime switch"
+        ),
+        _ => "failed to configure the model profile source".to_owned(),
+    })?;
+    // The hot-swappable slot: a PUT /profiles source switch replaces the
+    // source here without a restart. The gateway connection parameters
+    // and the platform faces ride along on the AppState.
+    let profile_slot = std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
+        profile_source::SourceSlot::new(profile_source),
+    ));
+    let profile_source = profile_slot.load_full().source();
+    // The boot-shaped load: an unreachable gateway degrades to an empty
+    // config (the health block flags degraded; the repull task retries)
+    // instead of failing the boot; a dead enrollment token still fails.
+    let cfg = profile_source
+        .boot_load()
+        .await
+        .context("failed to load model profiles")?;
     let factory = just_llm_client::client::BackendFactory::new();
     let user_agent = backend::resolve_user_agent(args.llm_api_user_agent.as_deref());
     let source = backend::build_backends(&cfg, factory, user_agent)
@@ -146,6 +191,17 @@ pub async fn run(args: Args) -> Result<()> {
     if sweep_legacy_files_token() {
         info!("removed legacy KALLIPAI_FILES_TOKEN from the process environment");
     }
+    // The gateway-signal intake runs in every mode: the adk acquisition
+    // loop publishes at most one 401/403 per exhausted failover chain,
+    // and the consumer refreshes the snapshot and poisons the source on
+    // a confirmed dead token. The task loads the source slot per signal,
+    // so a runtime source switch (PUT /profiles) redirects later
+    // signals to the new source; in local mode the handler is a no-op.
+    let gateway_signals = {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        profile_source::spawn_gateway_signal_task(profile_slot.clone(), rx);
+        Some(tx)
+    };
     let state = Arc::new(AppState::with_limits(
         operator.hash().clone(),
         args.max_agents,
@@ -156,7 +212,18 @@ pub async fn run(args: Args) -> Result<()> {
         kallipai_adk::usage_stats::UsageStats::default(),
         token_budget,
         files_token,
+        profile_slot,
+        std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(gateway_params)),
+        platforms,
+        gateway_signals,
     ));
+    // The degraded-boot repull task: while the live source is the model
+    // gateway and its boot fetch failed, retry in the background and, on
+    // the first success, rebuild the bundle and broadcast the reset
+    // signal to live agents (recovery is fully automatic — bound agents
+    // re-resolve without a restart or a manual apply). A local or
+    // healthy source makes every round a no-op.
+    crate::routes::profiles::spawn_degraded_repull_task(state.clone());
 
     // The typed topic bus registered inline at construction; surface the
     // topic set once at boot (this is also the counters' live reader).
@@ -862,9 +929,9 @@ fn resolve_primary_identity(
 /// first entry owns the tagma identity). `None` when no entry has stored
 /// credentials — record fetches then degrade to 503, while the path form
 /// (local blobs) is unaffected. Runs at `SharedState` build time, before
-/// `restore_agents` (re-assembly fetches through this token); the relay
-/// plan re-walks the same entries later in boot (two small directory
-/// reads, intentionally unshared).
+/// `restore_agents` (re-assembly fetches through this token); the
+/// gateway-base derivation and the relay plan re-walk the same entries
+/// later in boot (small directory reads, intentionally unshared).
 fn resolve_files_token(args: &args::Args) -> Result<Option<String>> {
     let entries = resolve_relay_entries(args)?;
     let root = credentials_dir()?;
@@ -877,6 +944,47 @@ fn files_token_from_entries(entries: &[RelayEntry], root: &std::path::Path) -> O
     entries
         .iter()
         .find_map(|entry| credentials::load_tagma(&root.join(&entry.name)).map(|s| s.token))
+}
+
+/// Resolve every configured relay entry's platform face: entry order
+/// (the operator's declared order) is the fallback order the active
+/// resolution walks.
+fn platform_faces(entries: &[RelayEntry], root: &std::path::Path) -> Vec<state::PlatformFace> {
+    entries
+        .iter()
+        .map(|entry| state::PlatformFace {
+            name: entry.name.clone(),
+            origin: entry.polis_url.clone(),
+            base: kallipai_common::polis::service_base(&entry.polis_url, "model-gateway"),
+            token: credentials::load_tagma(&root.join(&entry.name)).map(|s| s.token),
+        })
+        .collect()
+}
+
+/// The gateway connection parameters for the boot, or `None` when no
+/// platform face pairs its origin with a stored enrollment token. The
+/// active face is the pinned polis entry (the one the last switch
+/// targeted); a pin matching no entry means no gateway — the boot does
+/// not silently fall back to another platform, because the pin is the
+/// operator's recorded choice. Before the first pin, the first
+/// token-carrying entry in config order is the default, and the first
+/// switch rewrites the pin. A pinned entry whose token is gone also
+/// yields no gateway (re-enroll, or switch back to local): no
+/// enrollment, no gateway.
+pub(crate) fn gateway_params_from(
+    faces: &[state::PlatformFace],
+    pinned_polis: Option<&str>,
+) -> Option<profile_source::GatewayParams> {
+    let active = match pinned_polis {
+        Some(polis) => faces.iter().find(|face| face.origin == polis)?,
+        None => faces.iter().find(|face| face.token.is_some())?,
+    };
+    let token = active.token.clone()?;
+    Some(profile_source::GatewayParams {
+        base: active.base.clone(),
+        origin: active.origin.clone(),
+        token,
+    })
 }
 
 /// Remove a legacy `KALLIPAI_FILES_TOKEN` from the process environment, if
@@ -1274,6 +1382,11 @@ async fn activate_relay(
             .enroll(&code, &device)
             .await?;
             credentials::save_tagma(&entry_dir, tagma_id.as_ref(), &token, &entry.polis_url);
+            // The boot snapshot predates this write (platform_faces
+            // runs before relay activation), so the switch-target
+            // list would show the platform un-enrolled until a
+            // restart: record the token on the face now.
+            state.set_platform_token(&entry.name, token.clone());
             info!(relay = %entry.name, tagma = %tagma_id, "relay: enrolled with archeion");
             // First-run enroll boot: the projector's write-once ids are
             // claimed by the first successful enrollee — the primary-archeion

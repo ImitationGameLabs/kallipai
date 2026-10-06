@@ -20,6 +20,7 @@
 <script lang="ts">
   import { Dialog, Portal } from "@skeletonlabs/skeleton-svelte";
   import SecretInput from "../SecretInput.svelte";
+  import ReqMark from "../ReqMark.svelte";
   import {
     common_cancel,
     common_save,
@@ -125,7 +126,7 @@
             <span class="text-sm font-medium">
               {manage_profiles_provider_id_label()}
               {#if mode === "new"}
-                <span class="text-error-500 dark:text-error-400">*</span>
+                <ReqMark />
               {/if}
             </span>
             <input
@@ -169,10 +170,10 @@
             <span class="text-sm font-medium">
               {manage_profiles_provider_api_key_label()}
               {#if mode === "new"}
-                <span class="text-error-500 dark:text-error-400">*</span>
+                <ReqMark />
               {/if}
             </span>
-            <SecretInput bind:value={apiKey} />
+            <SecretInput bind:value={apiKey} aria-required={mode === "new"} />
             {#if provider}
               <span class="text-xs opacity-60">
                 {manage_profiles_provider_api_key_hint_edit({

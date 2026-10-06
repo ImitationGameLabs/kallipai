@@ -241,6 +241,34 @@ pub struct AppState {
     /// Profile registry loaded once at startup (config file or implicit env profile).
     /// Shared so the pre-built backends survive across agents.
     pub profiles: Arc<ArcSwap<ProfileBundle>>,
+    /// The configured model-profile source (local file or gateway
+    /// distribution face), hot-swappable by a PUT /profiles source switch
+    /// (the refresh trigger — forward-path 401/403 handling — and the
+    /// management face re-fetch or inspect through this slot).
+    pub profile_source: Arc<ArcSwap<crate::profile_source::SourceSlot>>,
+    /// Gateway connection parameters for the active model-gateway
+    /// source, hot-swapped by a source switch (the pin rewrite):
+    /// present exactly when the live source is the model gateway
+    /// and its face carries an enrollment token. `None` in local
+    /// mode (the persisted pin survives on disk) and when no entry
+    /// resolves at boot. A switch never gates on this slot alone:
+    /// a request carrying `polis` resolves against the platforms
+    /// table, and one without re-resolves like boot.
+    pub gateway_params:
+        std::sync::Arc<arc_swap::ArcSwap<Option<crate::profile_source::GatewayParams>>>,
+    /// Every configured relay entry's platform face: the switchable-
+    /// platform list (GET /profiles serves it; a switch resolves its
+    /// target origin here). Boot order, the operator's declared
+    /// order. Interior-mutable for one reason: a first-run enroll
+    /// stores its token after this snapshot was taken, and
+    /// `set_platform_token` records it without a restart.
+    pub platforms: std::sync::Arc<arc_swap::ArcSwap<Vec<PlatformFace>>>,
+    /// Gateway auth-signal intake: the adk acquisition loop
+    /// publishes at most one signal per exhausted failover chain that ended in
+    /// a provider 401/403; the consumer task (see
+    /// `profile_source::spawn_gateway_signal_task`) drives refresh and poison
+    /// state per signal (a no-op while the source is local).
+    pub gateway_signals: Option<tokio::sync::mpsc::UnboundedSender<kallipai_adk::GatewaySignal>>,
     /// Shared HTTP client for tagma-side outbound calls (the files-service
     /// media fetch): one client reuses its connection pool across requests,
     /// and clones are cheap (an internal `Arc`).
@@ -332,6 +360,35 @@ pub struct AppState {
     /// held for the whole plan/preflight/execute pipeline via
     /// `try_lock`, so a crashed run cannot wedge the field.
     pub converge: tokio::sync::Mutex<()>,
+}
+
+/// One switchable platform face, resolved at boot from a relay entry:
+/// the origin (the platform edge, exactly as configured — the wire
+/// form a switch request matches), the derived model-gateway base,
+/// and the entry's stored enrollment token (`None` until relay
+/// enrollment on that platform).
+#[derive(Clone)]
+pub struct PlatformFace {
+    /// The relay entry's slug (`credentials/<name>/`).
+    pub name: String,
+    pub origin: String,
+    pub base: String,
+    pub token: Option<String>,
+}
+
+/// The token is platform credential material: `Debug` prints it as
+/// `[REDACTED]` (the TagmaIdentity precedent on the gateway side); the
+/// `Option` layer itself stays visible (enrolled vs not is not a
+/// secret).
+impl std::fmt::Debug for PlatformFace {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PlatformFace")
+            .field("name", &self.name)
+            .field("origin", &self.origin)
+            .field("base", &self.base)
+            .field("token", &self.token.as_ref().map(|_| "[REDACTED]"))
+            .finish()
+    }
 }
 
 #[cfg(test)]
@@ -733,6 +790,16 @@ impl AppState {
             kallipai_adk::usage_stats::UsageStats::default(),
             kallipai_adk::token_budget::TokenBudget::unlimited(),
             None,
+            std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
+                crate::profile_source::SourceSlot::new(std::sync::Arc::new(
+                    crate::profile_source::LocalProfileSource::new(),
+                )),
+            )),
+            std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
+                None::<crate::profile_source::GatewayParams>,
+            )),
+            Vec::new(),
+            None,
         )
     }
 
@@ -748,6 +815,12 @@ impl AppState {
         usage_stats: kallipai_adk::usage_stats::UsageStats,
         token_budget: kallipai_adk::token_budget::TokenBudget,
         files_token: Option<String>,
+        profile_source: Arc<ArcSwap<crate::profile_source::SourceSlot>>,
+        gateway_params: std::sync::Arc<
+            arc_swap::ArcSwap<Option<crate::profile_source::GatewayParams>>,
+        >,
+        platforms: Vec<PlatformFace>,
+        gateway_signals: Option<tokio::sync::mpsc::UnboundedSender<kallipai_adk::GatewaySignal>>,
     ) -> Self {
         let (invalidations, _) = tokio::sync::watch::channel(0u64);
         Self {
@@ -764,6 +837,10 @@ impl AppState {
             token_budget,
             files_token,
             profiles,
+            profile_source,
+            gateway_params,
+            platforms: std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(platforms)),
+            gateway_signals,
             // Bounded so a wedged files connection cannot hang the boot
             // path (restore re-assembly awaits this client).
             files_http: reqwest::Client::builder()
@@ -843,6 +920,23 @@ impl AppState {
     ) {
         let mut slots = self.relays.lock().unwrap_or_else(|e| e.into_inner());
         slots.insert(name.to_owned(), (handle, join));
+    }
+
+    /// Record a just-stored enrollment token on its platform face.
+    /// A first-run enroll writes the credential after the boot
+    /// snapshot was taken (`platform_faces` runs before relay
+    /// activation), so the switch-target list (GET /profiles, switch
+    /// resolution) would keep showing the platform un-enrolled until
+    /// a restart. Only the token moves; the face's identity (name,
+    /// origin, base) is boot config.
+    pub fn set_platform_token(&self, entry_name: &str, token: String) {
+        self.platforms.rcu(|faces| {
+            let mut next = (**faces).clone();
+            if let Some(face) = next.iter_mut().find(|f| f.name == entry_name) {
+                face.token = Some(token.clone());
+            }
+            std::sync::Arc::new(next)
+        });
     }
 
     /// Clone the named relay connector out for a route (guard dropped before

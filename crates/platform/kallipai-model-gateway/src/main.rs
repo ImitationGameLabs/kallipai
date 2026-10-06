@@ -1,36 +1,34 @@
 //! `kallipai-model-gateway`: the kallipai model gateway.
 //!
-//! Two physically separated faces: the distribution face serves model profile
-//! data to clients and never touches credential material; the secret face
-//! stores provider/proxy credentials and injects Authorization headers on
-//! the forwarding path. The separation is structural, not just convention:
-//! sibling `distribution` / `secret` modules share no code path, and a
-//! credential's key bytes have no accessor -- their only consumer is the
-//! secret module's `inject`, and `Debug` prints them as `[REDACTED]`.
-//! Forwarding (`forward`) authorizes under the same allowed-sets contract
-//! as distribution: both the explicit profile override and the default-set
-//! fallback answer 403 when the target profile is outside the presenting
-//! key's allowed sets.
-//! Forwarding also enforces the authorization matrix (the per-tagma quota
-//! share and the profile total, 429 when either is exhausted) and lands
-//! one audit row per request in Postgres.
-//! The management face (the /admin routes) authenticates with its
-//! own credential family -- the static management token behind
-//! the ManagementAuth trait -- and lands every change in
-//! management_events inside the change's own transaction.
+//! Two physically separated faces: the data plane (pingora on the public
+//! address) serves the distribution reads, the LLM-compatible forwarding
+//! and the health probe, and never touches credential material beyond
+//! stamping it onto the upstream request; the management face (axum on
+//! its own address) stores provider/proxy credentials behind its own
+//! credential family and lands every change in management_events inside
+//! the change's own transaction. The separation is structural, not just
+//! convention: sibling `distribution` / `secret` modules share no code
+//! path, a credential's key bytes have no getter (the two credential-
+//! stamping egress points are the only consumers), and `Debug` prints
+//! them as `[REDACTED]`.
+//! Forwarding authorizes under the consuming account's visibility
+//! domain: both the explicit profile override and the default-set
+//! fallback answer 403 when the target profile is outside the
+//! presenting tagma's owner domain. Consuming identities are
+//! platform tokens (the archeion's verify-bearer); per-request
+//! metering and quota enforcement are suspended (metrics batch).
 
 mod args;
-mod db;
-mod quota;
-mod routes;
-mod state;
-
 mod audit;
+mod data_plane;
+mod db;
 mod distribution;
 mod forward;
 mod management;
 mod registry;
+mod routes;
 mod secret;
+mod state;
 
 #[cfg(test)]
 mod test_support;
@@ -60,34 +58,53 @@ async fn main() -> Result<()> {
     // the full schema migrations are applied at boot.
     let db = db::connect_and_migrate(&args.database_url).await?;
 
-    // The management credential is hashed into the authenticator once,
-    // here at boot; rotation means restarting the process. An empty
-    // config closes the management face (Disabled) instead of failing
-    // the boot: the distribution and forwarding faces do not need it.
-    let management_auth: std::sync::Arc<dyn management::ManagementAuth> = if args
-        .management_token
-        .is_empty()
-    {
-        tracing::warn!("no management token configured: the management face refuses every request");
-        std::sync::Arc::new(management::Disabled)
-    } else {
-        std::sync::Arc::new(management::StaticManagementToken::new(
-            &args.management_token,
-        ))
+    // The admin face authenticates against the platform identity (the
+    // archeion): the internal URL plus the shared internal secret from
+    // its provisioned file (read once at boot; the bounded wait absorbs
+    // the boot-ordering race). Without the wiring the face is closed
+    // (Disabled) instead of failing boot: the distribution and
+    // forwarding faces do not need it.
+    let management_auth = match (&args.archeion_url, &args.internal_token_file) {
+        (Some(url), Some(path)) => {
+            let internal_token = kallipai_common::secret_file::read_trimmed_with_retry(
+                std::path::Path::new(path),
+                kallipai_common::secret_file::BOOT_RETRY,
+            )
+            .context("reading the archeion internal token file")?;
+            management::AdminAuth::Platform(std::sync::Arc::new(management::ArcheionVerifier::new(
+                url.clone(),
+                internal_token,
+            )))
+        }
+        _ => {
+            tracing::warn!(
+                "no archeion wiring configured: the management face refuses every request"
+            );
+            management::AdminAuth::Disabled
+        }
     };
     let state = AppState {
         db,
         public_base_url: args.public_base_url.clone(),
-        quota: std::sync::Arc::new(quota::QuotaLedger::new()),
+        identity_cache: std::sync::Arc::new(crate::secret::IdentityCache::default()),
         management: management_auth,
-        key_cache: std::sync::Arc::new(crate::secret::KeyCache::default()),
     };
-    let data_plane = routes::data_plane_router(state.clone(), &args.cors_origins);
-    let management_plane = routes::management_plane_router(state, &args.cors_origins);
 
-    let data_listener = tokio::net::TcpListener::bind(&args.listen_addr)
-        .await
-        .with_context(|| format!("binding data-plane addr {}", args.listen_addr))?;
+    // The data plane: pingora drives its own runtime on a dedicated
+    // thread; the tokio runtime below keeps serving the management face
+    // in the same process.
+    data_plane::spawn_data_plane(
+        args.listen_addr.clone(),
+        state.clone(),
+        args.cors_origins.clone(),
+    )
+    .context("spawning the pingora data plane")?;
+    info!(addr = %args.listen_addr, "kallipai-model-gateway data plane listening (pingora)");
+
+    // The management plane: axum on the tokio runtime, with graceful
+    // shutdown. (The pingora thread exits with the process; its graceful
+    // teardown is not wired.)
+    let management = routes::management_plane_router(state, &args.cors_origins);
     let management_listener = tokio::net::TcpListener::bind(&args.management_listen_addr)
         .await
         .with_context(|| {
@@ -96,31 +113,18 @@ async fn main() -> Result<()> {
                 args.management_listen_addr
             )
         })?;
-    info!(addr = %args.listen_addr, "kallipai-model-gateway data plane listening");
     info!(
         addr = %args.management_listen_addr,
         "kallipai-model-gateway management plane listening"
     );
 
-    let data_server = axum::serve(
-        data_listener,
-        data_plane.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-    )
-    .with_graceful_shutdown(shutdown_signal());
-    let management_server = axum::serve(
+    axum::serve(
         management_listener,
-        management_plane.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        management.into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
-    .with_graceful_shutdown(shutdown_signal());
-
-    tokio::try_join!(
-        async { data_server.await.context("data plane server error") },
-        async {
-            management_server
-                .await
-                .context("management plane server error")
-        }
-    )?;
+    .with_graceful_shutdown(shutdown_signal())
+    .await
+    .context("management plane server error")?;
 
     Ok(())
 }

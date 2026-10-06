@@ -8,6 +8,7 @@ import {
   connection_connected,
   connection_connecting,
   connection_not_connected,
+  // deno-lint-ignore no-sloppy-imports
 } from "../paraglide/messages.js";
 export type ConnectionState = "connected" | "connecting" | "offline";
 

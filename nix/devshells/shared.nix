@@ -44,6 +44,8 @@ in
     # compose/dev/Caddyfile.dev.
     mkcert
 
+    # cmake builds libz-ng-sys, flate2's zlib-ng backend hard-selected by pingora-core.
+    cmake
     # Temporary workaround for copilot-cli direnv integration bug
     # See: https://github.com/github/copilot-cli/issues/731
     # TODO: Remove once the upstream issue is resolved

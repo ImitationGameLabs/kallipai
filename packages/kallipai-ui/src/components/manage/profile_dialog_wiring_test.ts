@@ -1,4 +1,4 @@
-import { assert } from "@std/assert";
+import { assert, assertEquals } from "@std/assert";
 
 // Source-read pins for the set-member profile edit wiring. The card's
 // Edit entry must reach a profile-level editor (onEditProfile), not the
@@ -10,6 +10,8 @@ const PROFILES_PAGE = new URL(
   import.meta.url,
 );
 const PROFILE_DIALOG = new URL("./ProfileDialog.svelte", import.meta.url);
+const MODALITY_TAGS = new URL("../ModalityTags.svelte", import.meta.url);
+const COMPUTE_LIB = new URL("../../lib/manage/compute.ts", import.meta.url);
 
 function source(url: URL): string {
   return new TextDecoder().decode(Deno.readFileSync(url));
@@ -50,20 +52,28 @@ Deno.test(
 
 Deno.test(
   "text is a permanent, locked modality selection",
-  { permissions: { read: [PROFILE_DIALOG] } },
+  { permissions: { read: [PROFILE_DIALOG, MODALITY_TAGS] } },
   () => {
-    const src = source(PROFILE_DIALOG);
+    const dialog = source(PROFILE_DIALOG);
+    const tags = source(MODALITY_TAGS);
     assert(
-      src.includes('m === "text" ||'),
+      dialog.includes('m === "text" ||'),
       "the latch must union text into the initial selection",
     );
     assert(
-      src.includes('if (m === "text") return;'),
-      "toggleModality must refuse to cancel text",
+      dialog.includes("<ModalityTags"),
+      "the dialog must render the shared modality tag group",
+    );
+    // The shared group renders the text pill as a static badge (no
+    // toggle handler), so cancelling text is unreachable by
+    // construction -- the old guard lives in the component now.
+    assert(
+      tags.includes('{#if m === "text"}'),
+      "the text pill must render as a static, non-interactive badge",
     );
     assert(
-      src.includes('{#if m === "text"}'),
-      "the text pill must render as a static, non-interactive badge",
+      !tags.includes('onclick={() => toggle("text")}'),
+      "text must have no toggle path",
     );
   },
 );
@@ -120,8 +130,8 @@ const EFFORT_UNION = new URL(
 );
 
 Deno.test(
-  "the effort select mirrors the ReasoningEffort union",
-  { permissions: { read: [PROFILE_DIALOG, EFFORT_UNION] } },
+  "the effort options mirror the ReasoningEffort union",
+  { permissions: { read: [PROFILE_DIALOG, EFFORT_UNION, COMPUTE_LIB] } },
   () => {
     const types = source(EFFORT_UNION);
     const line = types.match(/^export type ReasoningEffort = .*;$/m);
@@ -131,6 +141,18 @@ Deno.test(
     );
     const tiers = [...line[0].matchAll(/"([a-z]+)"/g)].map((m) => m[1]);
     assert(tiers.length > 0, "the union must enumerate its members");
+    const compute = source(COMPUTE_LIB);
+    const head = compute.indexOf("export const EFFORT_OPTIONS");
+    assert(head !== -1, "compute.ts must declare EFFORT_OPTIONS");
+    const bodyStart = compute.indexOf("= [", head) + 3;
+    const bodyEnd = compute.indexOf("];", head);
+    const body = compute.slice(bodyStart, bodyEnd);
+    const options = [...body.matchAll(/"([a-z]+)"/g)].map((m) => m[1]);
+    assertEquals(
+      options,
+      tiers,
+      "EFFORT_OPTIONS must mirror the union in order",
+    );
     const src = source(PROFILE_DIALOG);
     const start = src.indexOf(
       '<select class="select text-sm" bind:value={effort}>',
@@ -141,15 +163,9 @@ Deno.test(
       select.includes('<option value="">'),
       "the select must keep an unset option",
     );
-    for (const tier of tiers) {
-      assert(
-        select.includes(`<option value="${tier}">${tier}</option>`),
-        `the select must offer the raw tier ${tier}`,
-      );
-    }
     assert(
-      select.split("<option value=").length - 1 === tiers.length + 1,
-      "the select offers exactly the union tiers plus unset",
+      select.includes("{#each EFFORT_OPTIONS as e (e)}"),
+      "the select must iterate the shared effort options",
     );
   },
 );

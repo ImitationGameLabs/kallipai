@@ -11,6 +11,8 @@ path = "src/main.rs"
 
 [dependencies]
 kallipai-common = { workspace = true, features = ["axum", "logging"] }
+kallipai-archeion-common = { workspace = true }
+cookie = { workspace = true }
 axum = { workspace = true }
 async-stream = { workspace = true }
 futures-util = { workspace = true }
@@ -25,12 +27,17 @@ anyhow = { workspace = true }
 clap = { workspace = true }
 sea-orm = { workspace = true }
 sea-orm-migration = { workspace = true }
+sqlx = { workspace = true }
 async-trait = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+uuid = { workspace = true }
+pingora = { workspace = true }
+bytes = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt", "test-util"] }
+just-llm-client = { workspace = true }
 testcontainers = { workspace = true, features = ["reusable-containers"] }
 testcontainers-modules = { workspace = true }

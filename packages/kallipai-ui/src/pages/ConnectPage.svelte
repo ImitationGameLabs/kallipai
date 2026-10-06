@@ -7,6 +7,7 @@
   import { CONNECT_TOKEN_KEY } from "../lib/instances/client.ts";
   import Brand from "../components/Brand.svelte";
   import FormError from "../components/FormError.svelte";
+  import ReqMark from "../components/ReqMark.svelte";
   import {
     connect_title,
     connect_subtitle,
@@ -114,7 +115,7 @@
     <label class="block space-y-1">
       <span class="text-sm opacity-70">
         {connect_url_label()}
-        <span class="text-error-500 dark:text-error-400">*</span>
+        <ReqMark />
       </span>
       <input
         class="input"
@@ -129,7 +130,7 @@
     <label class="block space-y-1">
       <span class="text-sm opacity-70">
         {connect_token_label()}
-        <span class="text-error-500 dark:text-error-400">*</span>
+        <ReqMark />
       </span>
       <input
         class="input"

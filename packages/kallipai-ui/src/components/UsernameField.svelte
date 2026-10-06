@@ -8,6 +8,7 @@
   // renders a check icon when a handle is free and red copy below the field
   // when it is taken or reserved.
   import { CircleCheck } from "@lucide/svelte";
+  import ReqMark from "./ReqMark.svelte";
   import { isValidUsername } from "../lib/username.ts";
   import {
     USERNAME_AVAILABILITY_DEBOUNCE_MS,
@@ -72,7 +73,8 @@
 
 <label class="block space-y-1">
   <span class="text-sm opacity-70">
-    {auth_username()} <span class="text-error-500 dark:text-error-400">*</span>
+    {auth_username()}
+    <ReqMark />
   </span>
   <div class="flex items-center gap-2">
     <input

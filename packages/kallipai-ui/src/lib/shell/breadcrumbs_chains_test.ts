@@ -17,6 +17,9 @@ declare global {
 const { assertEquals } = await import("@std/assert");
 const { matchTrail, trailTable } = await import("./breadcrumbs.ts");
 const {
+  manage_gateway_menu,
+  nav_admin,
+  user_gateway_menu,
   nav_chats,
   nav_files,
   nav_home,
@@ -97,4 +100,28 @@ Deno.test("conversations chain through their chats-hub domain", () => {
     if (!trail) throw new Error(`${path} must resolve`);
     assertEquals(trail[1], { label: nav_chats(), href: "/chats" });
   }
+});
+
+Deno.test("the admin gateway console chains through the admin hub", () => {
+  assertEquals(matchTrail("/admin/gateway"), [
+    { label: nav_home(), href: "/" },
+    { label: nav_admin() },
+    { label: manage_gateway_menu(), current: true },
+  ]);
+});
+
+Deno.test("the collection detail drill keeps the full chain", () => {
+  assertEquals(matchTrail("/admin/gateway/collections/gpt"), [
+    { label: nav_home(), href: "/" },
+    { label: nav_admin() },
+    { label: manage_gateway_menu(), href: "/admin/gateway" },
+    { label: "gpt", current: true },
+  ]);
+});
+
+Deno.test("the user gateway page keeps its home-first chain", () => {
+  assertEquals(matchTrail("/gateway"), [
+    { label: nav_home(), href: "/" },
+    { label: user_gateway_menu(), current: true },
+  ]);
 });

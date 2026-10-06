@@ -9,6 +9,8 @@
   "nav_files": "文件",
   "nav_home": "主页",
   "nav_manage": "管理",
+  "nav_admin": "管理区",
+  "admin_area_forbidden": "仅平台管理员可访问此区域。",
   "nav_more": "更多",
   "nav_overview": "概览",
   "nav_budget": "预算管理",

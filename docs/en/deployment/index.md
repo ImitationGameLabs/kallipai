@@ -1,7 +1,7 @@
 ---
 title: Deployment
 order: 1
-description: How to deploy KallipAI: the NixOS modules, or a conventional Linux install.
+description: "How to deploy KallipAI: the NixOS modules, or a conventional Linux install."
 ---
 
 Each chapter under this section is one way to run the platform, written

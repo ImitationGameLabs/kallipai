@@ -9,6 +9,8 @@
   "nav_files": "Files",
   "nav_home": "Home",
   "nav_manage": "Manage",
+  "nav_admin": "Admin",
+  "admin_area_forbidden": "Only platform administrators can open this area.",
   "nav_more": "More",
   "nav_overview": "Overview",
   "nav_budget": "Budget",

@@ -1,22 +1,27 @@
 <script lang="ts">
   // The panorama: the product home ('/'), desktop-only. A 12-column bento --
   // the sessions region (8 cols) and the tagmata column (4 cols) project the
-  // same stores the chats hub reads; the second bento row carries the files
-  // entry card; the extension slot stays reserved and renders
-  // nothing (no placeholder card, no copy). Small screens never see
-  // this page: the root route's load redirects to /chats before mount, and
-  // the listener below covers a desktop->mobile crossing afterwards. Pure
-  // store projection: the page owns no fetches of its own.
+  // same stores the chats hub reads; the second row carries the files
+  // entry card (8) and, for the local admin, the gateway admin card (4).
+  // Small screens never see this page: the root route's load redirects to
+  // /chats before mount, and the listener below covers a desktop->mobile
+  // crossing afterwards. Pure store projection: the page owns no fetches
+  // of its own.
   import { Cpu, Users } from "@lucide/svelte";
   import HubRow from "../components/HubRow.svelte";
   import { desktopQuery } from "../lib/shell/breakpoint.ts";
-  import { navigate } from "../lib/shell/port.ts";
+  import { navigate, shellMode } from "../lib/shell/port.ts";
   import { archeionSession } from "../lib/session/archeion.svelte";
   import { channelsStore } from "../lib/session/channels.svelte";
   import { realtimeStore } from "../lib/session/realtime.svelte.ts";
   import { roomsStore } from "../lib/session/rooms.svelte";
   import { directSessionsStore } from "../lib/session/directSessions.svelte";
-  import { filesPath, tagmaChatPath } from "../lib/shell/routes.ts";
+  import {
+    adminGatewayPath,
+    filesPath,
+    gatewayPath,
+    tagmaChatPath,
+  } from "../lib/shell/routes.ts";
   import { tagmaNavIndicator } from "../lib/shell/links.ts";
   import {
     unreadStore,
@@ -30,7 +35,13 @@
     files_heading,
     files_panorama_blurb,
     files_panorama_open,
+    manage_gateway_menu,
+    manage_gateway_panorama_blurb,
+    manage_profiles_open_gateway_admin,
     nav_manage,
+    user_gateway_menu,
+    user_gateway_panorama_blurb,
+    user_gateway_panorama_open,
     nav_tagmata,
     panorama_view_all,
     room_label_fallback,
@@ -92,14 +103,26 @@
       badge: unreadStore.countOf(tagmaKey(c.tagmaId)),
     })),
   );
+
+  const gatewayVisible = $derived(
+    shellMode() === "online" && archeionSession.user?.local_admin === true,
+  );
+
+  // The user face's card: every signed-in online session, the admin
+  // session included (the dual-domain account sees both entries).
+  const userGatewayVisible = $derived(
+    shellMode() === "online" && archeionSession.user !== null,
+  );
 </script>
 
 <svelte:head><title>{nav_home()}</title></svelte:head>
 
 <div class="p-6 max-w-6xl mx-auto grid grid-cols-12 gap-6 items-start">
-  <!-- Bento template: sessions 8 + tagmata 4 fill the first row; the second
-       row's files slot (8) carries the entry card; extension (4) stays
-       reserved, so the column budget stays honest. -->
+  <!-- Bento template: sessions 8 + tagmata 4 fill the first row; the
+       second row carries the files entry card (8) and the gateway
+       admin card (4, admin sessions only). An admin session adds its
+       user-space card (4) on the third row: the dual-domain account
+       keeps both entries. -->
   <section class="col-span-8 space-y-3" aria-label={nav_chats()}>
     <div class="flex items-baseline justify-between gap-4">
       <h2 class="text-sm font-semibold uppercase tracking-wide opacity-60">
@@ -159,4 +182,40 @@
       </a>
     </div>
   </section>
+
+  <!-- The gateway region: static entry cards beside the files card.
+       Every signed-in online session sees its own gateway space; an
+       admin session additionally sees the admin console. -->
+  {#if gatewayVisible}
+    <section class="col-span-4 space-y-3" aria-label={manage_gateway_menu()}>
+      <h2 class="text-sm font-semibold uppercase tracking-wide opacity-60">
+        {manage_gateway_menu()}
+      </h2>
+      <div class="card preset-tonal-surface p-6 flex flex-col gap-3">
+        <p class="text-sm opacity-80">{manage_gateway_panorama_blurb()}</p>
+        <a
+          href={adminGatewayPath()}
+          class="btn preset-filled-primary-500 self-start"
+        >
+          {manage_profiles_open_gateway_admin()}
+        </a>
+      </div>
+    </section>
+  {/if}
+  {#if userGatewayVisible}
+    <section class="col-span-4 space-y-3" aria-label={user_gateway_menu()}>
+      <h2 class="text-sm font-semibold uppercase tracking-wide opacity-60">
+        {user_gateway_menu()}
+      </h2>
+      <div class="card preset-tonal-surface p-6 flex flex-col gap-3">
+        <p class="text-sm opacity-80">{user_gateway_panorama_blurb()}</p>
+        <a
+          href={gatewayPath()}
+          class="btn preset-filled-primary-500 self-start"
+        >
+          {user_gateway_panorama_open()}
+        </a>
+      </div>
+    </section>
+  {/if}
 </div>

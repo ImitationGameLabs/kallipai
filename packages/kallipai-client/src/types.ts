@@ -295,6 +295,16 @@ export interface ProfileConfig {
    * parking (tri-state — see the Rust merge), while the UI always sends it.
    */
   readonly parking?: readonly ProfileModel[];
+
+  /** Additive source block (mode spelling: "local" | "model-gateway"). */
+  readonly source?: ProfileSourceHealth;
+  /** On-disk local preview, present only under the model-gateway source:
+   * the parsed config, an `absent` marker with the read error, or an
+   * `unreadable` marker when parsing the read bytes failed. */
+  readonly local_disk?:
+    | ProfileConfig
+    | { absent: true; error: string }
+    | { unreadable: string };
 }
 
 /** One named set inside a `PUT /profiles` body: sets serialize as an
@@ -319,6 +329,52 @@ export interface ProfileConfigPutRequest {
   /** Operator-confirmed acceptance of dangling profile-set bindings (the
    * server's 409 lists them; absent/false keeps the hard reject). */
   readonly force?: boolean;
+  /** Source intent: a mode different from the live one takes the
+   * switch branch (the profiles payload is ignored); a same-mode
+   * member carrying `collection` is the selection update. The
+   * gateway holds the selection (the write goes through to it).
+   * `polis` names the target platform origin (the online UI carries
+   * the serving platform); absent lets the server resolve the pinned
+   * or first-enrolled platform. */
+  readonly source?: {
+    readonly mode: ProfileSourceMode;
+    readonly polis?: string;
+    readonly collection?: ProfileSourceSelection;
+  };
+}
+
+/** One collection of the account's visibility domain: an absent
+ * owner addresses the account's own space; an explicit owner a
+ * shared or platform collection. */
+export interface ProfileSourceSelection {
+  readonly owner?: string;
+  readonly collection: string;
+}
+
+export type ProfileSourceMode = "local" | "model-gateway";
+
+/** The additive `source` block on GET /profiles responses. */
+export interface ProfileSourceHealth {
+  readonly mode: ProfileSourceMode;
+  /** Any configured platform entry stores an enrollment token
+   * (the switch can be taken), whatever the current mode. */
+  readonly proxy_available: boolean;
+  readonly poisoned: boolean;
+  readonly token_state: string;
+  readonly last_refresh: string | null;
+  readonly refresh_failure_count: number;
+  /** The active gateway platform origin; null in local mode. */
+  readonly polis: string | null;
+  /** Every configured platform entry's enrollment state (the
+   * switch-target list; the UI matches the serving origin). */
+  readonly platforms: readonly ProfileSourcePlatform[];
+}
+
+/** One platform entry in the GET /profiles source block. */
+export interface ProfileSourcePlatform {
+  readonly name: string;
+  readonly origin: string;
+  readonly enrolled: boolean;
 }
 /** `POST /profiles/apply` response. */
 export interface ProfileApplyResponse {

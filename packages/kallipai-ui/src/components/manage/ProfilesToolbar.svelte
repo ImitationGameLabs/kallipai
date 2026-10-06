@@ -19,6 +19,7 @@
     manage_profiles_test_all,
     manage_profiles_sets_hazard,
   } from "../../paraglide/messages.js";
+  import { saveButtonEnabled } from "../../lib/manage/profilesGatewayTab.ts";
 
   let {
     store,
@@ -28,6 +29,8 @@
     onSave,
     onDiscard,
     onRequestApply,
+    readOnly = false,
+    pickDirty = false,
   }: {
     store: ProfilesStore;
     applyResult: string | null;
@@ -36,6 +39,8 @@
     onSave: () => void;
     onDiscard: () => void;
     onRequestApply: () => void;
+    readOnly?: boolean;
+    pickDirty?: boolean;
   } = $props();
 </script>
 
@@ -64,13 +69,14 @@
     >
     <button
       class="btn btn-sm preset-filled-primary-500"
-      disabled={!store.isDirty || store.isSaving}
+      disabled={!saveButtonEnabled(readOnly, store.isDirty, pickDirty) ||
+        store.isSaving}
       onclick={onSave}
       >{store.isSaving ? "…" : manage_profiles_save_changes()}</button
     >
     <button
       class="btn btn-sm preset-filled-secondary-500"
-      disabled={store.isDirty || store.isSaving}
+      disabled={readOnly || store.isDirty || store.isSaving}
       onclick={onRequestApply}>{manage_profiles_apply_all()}</button
     >
   </div>
@@ -91,7 +97,7 @@
     {store.probeError}
   </p>
 {/if}
-{#if store.isDirty}
+{#if store.isDirty || pickDirty}
   <button class="text-xs opacity-60 hover:opacity-100" onclick={onDiscard}>
     {manage_profiles_discard()}
   </button>

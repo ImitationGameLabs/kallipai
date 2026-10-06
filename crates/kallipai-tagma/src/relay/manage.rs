@@ -56,6 +56,7 @@ fn manage_router() -> Router<SharedState> {
         )
         .route("/profiles/probe", post(profile_probe::probe_profiles))
         .route("/profiles/apply", post(profiles::apply_profiles))
+        .route("/profiles/refresh", post(profiles::refresh_profile_source))
         .route("/profiles/default", put(profiles::set_default_profile_set))
         .route(
             "/profiles/sets/{name}",
@@ -350,6 +351,7 @@ mod tests {
             ("PUT", "/profiles"),
             ("POST", "/profiles/probe"),
             ("POST", "/profiles/apply"),
+            ("POST", "/profiles/refresh"),
             ("PUT", "/profiles/default"),
             ("DELETE", "/profiles/sets/default"),
             ("GET", "/work-schedule"),

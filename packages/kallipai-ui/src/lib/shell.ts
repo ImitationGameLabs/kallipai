@@ -7,6 +7,7 @@ import {
   shell_error,
   shell_live,
   shell_offline,
+  // deno-lint-ignore no-sloppy-imports
 } from "../paraglide/messages.js";
 
 // The indicator's visual tokens (dot classes + SR label) live HERE, not in

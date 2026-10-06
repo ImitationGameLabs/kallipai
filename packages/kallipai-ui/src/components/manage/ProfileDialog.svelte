@@ -35,9 +35,12 @@
   import { Dialog, Portal } from "@skeletonlabs/skeleton-svelte";
   import {
     MODALITY_ORDER,
+    EFFORT_OPTIONS,
     normalizeModalities,
     profileModalities,
   } from "../../lib/manage/compute.ts";
+  import ModalityTags from "../ModalityTags.svelte";
+  import ReqMark from "../ReqMark.svelte";
   import {
     common_cancel,
     common_save,
@@ -165,18 +168,6 @@
       ...(modalities ? { modalities } : {}),
     });
   }
-
-  // Toggle one modality; the selection stays in canonical order.
-  // text is a permanent, locked selection — the guard keeps the
-  // empty set unreachable even below the non-interactive pill.
-  function toggleModality(m: Modality): void {
-    if (m === "text") return;
-    if (selected.includes(m)) {
-      selected = selected.filter((x) => x !== m);
-    } else {
-      selected = MODALITY_ORDER.filter((x) => x === m || selected.includes(x));
-    }
-  }
 </script>
 
 <Dialog {open} {onOpenChange}>
@@ -204,7 +195,7 @@
             <span class="text-sm font-medium">
               {manage_profiles_profile_dialog_id_label()}
               {#if mode === "new"}
-                <span class="text-error-500 dark:text-error-400">*</span>
+                <ReqMark />
               {/if}
             </span>
             <input
@@ -224,9 +215,13 @@
           <label class="flex flex-col gap-1">
             <span class="text-sm font-medium">
               {manage_profiles_profile_dialog_endpoint_label()}
-              <span class="text-error-500 dark:text-error-400">*</span>
+              <ReqMark />
             </span>
-            <select class="select text-sm" bind:value={endpoint}>
+            <select
+              class="select text-sm"
+              bind:value={endpoint}
+              aria-required="true"
+            >
               {#each providerIds as eid (eid)}
                 <option value={eid}>{eid}</option>
               {/each}
@@ -236,7 +231,7 @@
           <label class="flex flex-col gap-1">
             <span class="text-sm font-medium">
               {manage_profiles_profile_dialog_model_label()}
-              <span class="text-error-500 dark:text-error-400">*</span>
+              <ReqMark />
             </span>
             <input
               class="input text-sm font-mono"
@@ -249,7 +244,7 @@
           <label class="flex flex-col gap-1">
             <span class="text-sm font-medium">
               {manage_profiles_profile_dialog_max_context_label()}
-              <span class="text-error-500 dark:text-error-400">*</span>
+              <ReqMark />
             </span>
             <input
               class="input text-sm font-mono"
@@ -273,46 +268,16 @@
               <option value="">
                 {manage_profiles_profile_dialog_effort_unset()}
               </option>
-              <option value="low">low</option>
-              <option value="medium">medium</option>
-              <option value="high">high</option>
-              <option value="xhigh">xhigh</option>
-              <option value="max">max</option>
+              {#each EFFORT_OPTIONS as e (e)}
+                <option value={e}>{e}</option>
+              {/each}
             </select>
           </label>
-          <div class="flex flex-col gap-1">
-            <span class="text-sm font-medium">
-              {manage_profiles_profile_modalities_label()}
-            </span>
-            <div
-              class="flex flex-wrap gap-1.5"
-              role="group"
-              aria-label={manage_profiles_profile_modalities_label()}
-            >
-              {#each MODALITY_ORDER as m (m)}
-                {#if m === "text"}
-                  <span
-                    class="badge rounded-full text-xs preset-filled-primary-500"
-                  >
-                    {m}
-                  </span>
-                {:else}
-                  <button
-                    type="button"
-                    aria-pressed={selected.includes(m)}
-                    class="badge rounded-full text-xs cursor-pointer transition {selected.includes(
-                      m,
-                    )
-                      ? 'preset-filled-primary-500'
-                      : 'preset-outlined-surface-500 hover:preset-filled-surface-500'}"
-                    onclick={() => toggleModality(m)}
-                  >
-                    {m}
-                  </button>
-                {/if}
-              {/each}
-            </div>
-          </div>
+          <ModalityTags
+            label={manage_profiles_profile_modalities_label()}
+            {selected}
+            onChange={(next) => (selected = [...next])}
+          />
 
           {#if probeReport}
             <div class="border-t border-surface-300 pt-2 text-xs">

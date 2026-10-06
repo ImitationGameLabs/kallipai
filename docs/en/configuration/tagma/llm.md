@@ -22,4 +22,24 @@ Each layer exists on its own for a concrete reason.
 
 **An agent binds a set, not a single profile, because failover advances within the set.** When the active profile fails terminally, the next profile in the set takes over; the active index resets on restore. Binding a single profile would leave no path to advance.
 
+**The config's source decides who owns it: a local file or the model gateway.**
+In local mode (the default), `profiles.toml` is the single source of truth and
+the Profiles page is the full editor. In model-gateway mode, the tagma pulls
+the config from a model gateway at startup and keeps it in memory only: the
+page turns into a read-only mirror, and a cold start with the gateway
+unreachable fails instead of silently serving a stale file. The choice lives
+from the Profiles page.
+Pulling means one selected collection: each tagma picks the one
+collection to serve, and a tagma without a pick serves an empty
+config.
+
+Connecting a tagma runs through its own Profiles page: the gateway
+tab carries the mode switch, the collection preview, and the
+selection pick in one place. Switching validates the
+platform enrollment and re-points the pull at once; the tagma holds
+no credential the operator has to handle. A daemon without an
+enrolled platform shows a guidance card in place of the tab. The
+gateway address follows the tagma's platform, so nothing else
+needs configuring.
+
 Config files, fields, and runtime details (examples, default resolution, dangling sets, retry-budget specifics) live in [Model configuration methods](methods.md).

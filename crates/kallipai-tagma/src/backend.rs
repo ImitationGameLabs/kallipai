@@ -24,6 +24,7 @@ use just_llm_client::{
     GenerationStream, Identifiable, LlmBackend,
 };
 use kallipai_adk::profile::{BackendSource, NO_PROFILE_HINT, ProfileConfig, Provider};
+use tracing::warn;
 
 /// Default timeout for establishing the outbound LLM HTTP connection (DNS + TCP + TLS). Distinct
 /// from [`DEFAULT_READ_TIMEOUT`], which bounds per-read idle.
@@ -126,7 +127,16 @@ pub fn build_backends(
     validate_providers(cfg, &factory)?;
 
     let mut cache = HashMap::new();
-    for set in cfg.sets.values() {
+    for (name, set) in &cfg.sets {
+        // A memberless set stays unserved: the registry holds it and fails
+        // agents bound to it at resolution, so boot proceeds with the
+        // remaining sets instead of dying here. The map key names it:
+        // the deserialized `name` field is blank on this face (the
+        // registry's name normalization runs after this build).
+        if set.profiles.is_empty() {
+            warn!("profile set '{name}' has no profiles; agents bound to it cannot start");
+            continue;
+        }
         let active = set.active_profile();
         if cache.contains_key(&active.endpoint) {
             continue;
@@ -364,6 +374,37 @@ mod tests {
     fn active_provider_pre_built_and_lookup_succeeds() {
         let source = build_backends(&ds_cfg(), BackendFactory::new(), DEFAULT_USER_AGENT).unwrap();
         // The active provider is pre-built, so lookup succeeds without lazy construction.
+        assert!(source.get("ds").is_ok());
+    }
+
+    /// Boot-shaped: a memberless set rides along without failing the build;
+    /// the other sets' actives still pre-build (agents bound to the
+    /// memberless set fail later, at registry resolution). The config
+    /// comes through the deserialization face, where the set's `name`
+    /// field is skipped — the boot warn names the set by its map key,
+    /// and the blank deserialized name here pins that premise.
+    #[test]
+    fn memberless_set_skips_prebuild_and_build_still_succeeds() {
+        let cfg: ProfileConfig = serde_json::from_value(serde_json::json!({
+            "sets": {
+                "default": { "profiles": [
+                    { "id": "p", "endpoint": "ds", "model": "deepseek-test",
+                      "max_context_window": 500_000 }
+                ] },
+                "hollow": { "profiles": [] }
+            },
+            "endpoints": {
+                "ds": { "id": "ds", "family": "deepseek", "api_key": "fake" }
+            }
+        }))
+        .expect("the wire-shaped config deserializes");
+        assert!(
+            cfg.sets["hollow"].name.is_empty(),
+            "the skipped name field is blank on this face"
+        );
+        let factory = just_llm_client::client::BackendFactory::new();
+        let source = build_backends(&cfg, factory, DEFAULT_USER_AGENT)
+            .expect("memberless set must not fail the build");
         assert!(source.get("ds").is_ok());
     }
 

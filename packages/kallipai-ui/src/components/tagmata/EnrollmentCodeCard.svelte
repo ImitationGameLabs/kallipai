@@ -6,14 +6,20 @@
   // The label is editable in place via the kebab menu's Rename action, mirroring
   // the enrolled TagmaCard.
   import { onMount } from "svelte";
-  import { Menu, Portal } from "@skeletonlabs/skeleton-svelte";
-  import { Check, MoreVertical, Trash, X } from "@lucide/svelte";
+  import { Menu } from "@skeletonlabs/skeleton-svelte";
+  import ActionMenu from "../ActionMenu.svelte";
+  import { Check, Trash, X } from "@lucide/svelte";
   import {
     type EnrollmentCodeCardProps,
     formatRemaining,
     isExpired,
   } from "../../lib/tagmata.svelte.ts";
-  import { TONAL_ICON_PRIM, TONAL_ICON_SURF } from "../../lib/classes.ts";
+  import {
+    MENU_ITEM,
+    MENU_ITEM_DANGER,
+    TONAL_ICON_PRIM,
+    TONAL_ICON_SURF,
+  } from "../../lib/classes.ts";
   import {
     common_copied,
     common_copy,
@@ -241,43 +247,27 @@
            `invisible`, not removed) during edit so its reserved space keeps the
            card a constant size. -->
       <div class="flex justify-end" class:invisible={editing}>
-        <Menu
-          positioning={{ placement: "top-end" }}
-          onSelect={(e) => {
-            if (e.value === "rename" && onRename) startRename();
-            else if (e.value === "revoke" && onRevoke) void requestRevoke();
+        <ActionMenu
+          placement="top-end"
+          compact
+          label={tagma_actions_aria()}
+          onSelect={(value) => {
+            if (value === "rename" && onRename) startRename();
+            else if (value === "revoke" && onRevoke) void requestRevoke();
           }}
         >
-          <Menu.Trigger
-            class="size-8 {TONAL_ICON_SURF}"
-            aria-label={tagma_actions_aria()}
-          >
-            <MoreVertical class="size-4" />
-          </Menu.Trigger>
-          <Portal>
-            <Menu.Positioner>
-              <Menu.Content class="card preset-tonal-surface p-1 min-w-[8rem]">
-                {#if onRename}
-                  <Menu.Item
-                    value="rename"
-                    class="px-3 py-2 rounded-base text-sm cursor-pointer hover:preset-filled-surface-500"
-                  >
-                    {common_rename()}
-                  </Menu.Item>
-                {/if}
-                {#if onRevoke}
-                  <Menu.Item
-                    value="revoke"
-                    class="flex items-center gap-2 px-3 py-2 rounded-base text-sm text-error-500 dark:text-error-400 cursor-pointer hover:preset-filled-error-500"
-                  >
-                    <Trash class="size-4" />
-                    {tagma_revoke()}
-                  </Menu.Item>
-                {/if}
-              </Menu.Content>
-            </Menu.Positioner>
-          </Portal>
-        </Menu>
+          {#if onRename}
+            <Menu.Item value="rename" class={MENU_ITEM}>
+              {common_rename()}
+            </Menu.Item>
+          {/if}
+          {#if onRevoke}
+            <Menu.Item value="revoke" class={MENU_ITEM_DANGER}>
+              <Trash class="size-4" />
+              {tagma_revoke()}
+            </Menu.Item>
+          {/if}
+        </ActionMenu>
       </div>
     {/if}
   </div>

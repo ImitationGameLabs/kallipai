@@ -288,6 +288,14 @@ export class TagmaClient {
     });
   }
 
+  /** POST /profiles/refresh — re-pull the live gateway snapshot and swap
+   * the bundle (operator-only; a local source is a 409). */
+  refreshProfiles(): Promise<ProfileConfig> {
+    return this.json<ProfileConfig>("/profiles/refresh", {
+      method: "POST",
+    });
+  }
+
   /** POST /profiles/probe — dry-run validation of a (draft) config (operator-only). */
   probeProfiles(body: ProfileProbeRequest): Promise<ProfileProbeResponse> {
     return this.json<ProfileProbeResponse>("/profiles/probe", {

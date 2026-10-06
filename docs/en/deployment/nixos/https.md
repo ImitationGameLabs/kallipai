@@ -12,10 +12,10 @@ Caddy's `tls internal` directive issues certificates from Caddy's own
 local CA instead; browsers show a warning until the host trusts that CA.
 
 Add `tls internal` to each site block in the [Minimal
-configuration](minimal.md). A host's block then reads, for example:
+configuration](minimal.md), dropping the `http://` prefix from the address: with the prefix present Caddy silently discards the `tls` directive. A host's block then reads, for example:
 
 ```nix
-services.caddy.virtualHosts."http://api.kallipai.lan".extraConfig = ''
+services.caddy.virtualHosts."api.kallipai.lan".extraConfig = ''
   # ...the api handle blocks from the Minimal configuration...
   tls internal
 '';
@@ -49,3 +49,12 @@ security.pki.certificateFiles = [ ./kallipai-root.crt ];
 The copy exists because the CA generates its root at runtime, while
 `security.pki.certificateFiles` is read while the system trust bundle
 is built; a direct reference to the `/var/lib` path cannot resolve.
+
+The model gateway follows the same rules. When the platform runs
+`services.kallipai.tls = true`, the gateway's virtual host from the
+[Minimal configuration](minimal.md) drops its `http://` prefix, and
+Caddy serves it over https automatically: ACME on a public domain,
+`tls internal` on a private one. Keep the two switches in step. The
+gateway's public base URL derives from the same platform setting, so a
+vhost moved to https while `tls` stays false hands clients a base URL
+whose scheme does not match the port actually answering.

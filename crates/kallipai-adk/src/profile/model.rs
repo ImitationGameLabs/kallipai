@@ -91,13 +91,14 @@ pub struct ProfileSet {
 impl ProfileSet {
     /// The spawn-time active profile (always `profiles[0]`). At runtime the active profile may
     /// advance via within-set failover — see `FailoverState::current_profile`, which tracks the
-    /// live position and differs once failover has advanced. Non-empty profiles is a registry
-    /// construction invariant ([`crate::profile::ProfileRegistry::new`] rejects empty sets), so
-    /// this never panics for a set obtained through the registry.
+    /// live position and differs once failover has advanced. Non-empty profiles is a resolution
+    /// invariant: the registry holds memberless sets, but its resolution paths refuse them
+    /// (see [`crate::profile::ProfileRegistry`]) and the tagma's backend pre-build skips
+    /// them, so every caller reaching this read holds a non-empty set.
     pub fn active_profile(&self) -> &Profile {
         self.profiles
             .first()
-            .expect("set has profiles (registry construction invariant)")
+            .expect("set has profiles (resolution invariant)")
     }
 
     /// The set's effective input modalities: the intersection of member

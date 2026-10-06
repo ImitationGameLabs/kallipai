@@ -22,4 +22,17 @@ provider 选择变量：[Tagma](../../reference/environment-variables/tagma.md)�
 
 **Agent 绑定的是 set 而非单个 profile，因为故障转移要在 set 内前进。** 活跃 profile 终态失败时，set 内下一个 profile 接手；恢复时活跃索引重置。绑定单个 profile 就没有这条前进路径。
 
+**配置的来源决定谁拥有它：本地文件或模型网关。** local 模式（默认）下，
+`profiles.toml` 是唯一事实源，Profiles 页面是完整编辑器。model-gateway 模式下，
+tagma 启动时从模型网关拉取配置并只保存在内存中：页面变为只读镜像，网关不可达时的
+冷启动直接失败，而不是悄悄展示一份过期文件。这个选择记录在 `settings.toml`
+（`[profiles.source].mode`），可以在 Profiles 页面运行期切换。
+拉取的内容是本 tagma 选定的那一个 collection：每个 tagma 指定一个集合供网关提供，
+尚未选定集合的 tagma 拉取到的是空配置。
+
+接入 tagma 走它自己的 Profiles 页：gateway 标签页把模式切换、collection 预览和单选
+收在一处。切换会校验平台注册并立刻切换拉取；tagma 不持有需要用户经手的凭据。
+没有已注册平台的 daemon 会在标签页的位置显示一张指引卡。网关地址跟随 tagma
+所在平台，无需其他配置。
+
 配置文件、字段与运行细节（示例、default 解析、悬空 set、重试预算的细节）见[模型配置方法](methods.md)。

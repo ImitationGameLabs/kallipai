@@ -32,9 +32,11 @@ const FILES = [
   "manage_agents",
   "manage_budget",
   "manage_profiles",
+  "manage_gateway",
   "manage_schedules",
   "manage_tasks",
   "manage_instances",
+  "user_gateway",
   "panorama",
   "files",
 ] as const;
@@ -116,6 +118,10 @@ const loaders: Record<string, Loader> = {
     }).then((m) => m.default as Record<string, string>),
   "en|manage_profiles": () =>
     import("../i18n/project.inlang/messages/en/manage_profiles.json", {
+      with: { type: "json" },
+    }).then((m) => m.default as Record<string, string>),
+  "en|manage_gateway": () =>
+    import("../i18n/project.inlang/messages/en/manage_gateway.json", {
       with: { type: "json" },
     }).then((m) => m.default as Record<string, string>),
   "en|manage_schedules": () =>
@@ -214,6 +220,14 @@ const loaders: Record<string, Loader> = {
     import("../i18n/project.inlang/messages/zh/manage_profiles.json", {
       with: { type: "json" },
     }).then((m) => m.default as Record<string, string>),
+  "en|user_gateway": () =>
+    import("../i18n/project.inlang/messages/en/user_gateway.json", {
+      with: { type: "json" },
+    }).then((m) => m.default as Record<string, string>),
+  "zh|manage_gateway": () =>
+    import("../i18n/project.inlang/messages/zh/manage_gateway.json", {
+      with: { type: "json" },
+    }).then((m) => m.default as Record<string, string>),
   "zh|manage_schedules": () =>
     import("../i18n/project.inlang/messages/zh/manage_schedules.json", {
       with: { type: "json" },
@@ -224,6 +238,10 @@ const loaders: Record<string, Loader> = {
     }).then((m) => m.default as Record<string, string>),
   "zh|manage_instances": () =>
     import("../i18n/project.inlang/messages/zh/manage_instances.json", {
+      with: { type: "json" },
+    }).then((m) => m.default as Record<string, string>),
+  "zh|user_gateway": () =>
+    import("../i18n/project.inlang/messages/zh/user_gateway.json", {
       with: { type: "json" },
     }).then((m) => m.default as Record<string, string>),
   "zh|panorama": () =>
@@ -316,6 +334,7 @@ const PREFIXES = new Set([
   "connection",
   "nav",
   "account",
+  "admin",
   "auth",
   "login",
   "oauth",
@@ -343,6 +362,8 @@ const PREFIXES = new Set([
   "manage_schedules",
   "manage_instances",
   "manage_tasks",
+  "manage_gateway",
+  "user_gateway",
   "panorama",
   "files",
 ]);
@@ -369,8 +390,8 @@ Deno.test("catalog: key prefixes stay inside the closed vocabulary", () => {
 });
 
 // Prefix-to-file attribution: several prefixes deliberately live inside a
-// differently-named file (agent_state_ in common.json, connection_ and nav_
-// in shell.json). This map makes the attribution explicit and fails when a
+// differently-named file (agent_state_ in common.json, connection_, nav_,
+// and admin_ in shell.json). This map makes the attribution explicit and
 // key lands in a file its prefix is not attributed to, so "split by domain"
 // stays enforced rather than aspirational.
 const PREFIX_FILES: Record<string, string> = {
@@ -383,6 +404,7 @@ const PREFIX_FILES: Record<string, string> = {
   connection: "shell",
   nav: "shell",
   account: "shell",
+  admin: "shell",
   auth: "auth",
   login: "auth",
   oauth: "auth",
@@ -410,6 +432,8 @@ const PREFIX_FILES: Record<string, string> = {
   manage_schedules: "manage_schedules",
   manage_instances: "manage_instances",
   manage_tasks: "manage_tasks",
+  manage_gateway: "manage_gateway",
+  user_gateway: "user_gateway",
   panorama: "panorama",
   files: "files",
 };
@@ -474,6 +498,27 @@ Deno.test("catalog: _one/_other appear only as complete plural pairs", () => {
 const SYNONYMS: string[][] = [
   ["files_heading", "nav_files"],
   [
+    "manage_gateway_provider_actions_aria",
+    "manage_profiles_provider_actions_aria",
+  ],
+  ["manage_gateway_parking", "manage_profiles_parking"],
+  ["manage_gateway_set_add", "user_gateway_set_add"],
+  ["manage_profiles_tab_local", "manage_schedules_clock_local"],
+  ["manage_gateway_provider_key", "user_gateway_provider_key"],
+  [
+    "manage_gateway_provider_family",
+    "manage_profiles_provider_family_label",
+    "user_gateway_provider_family",
+  ],
+  [
+    "manage_gateway_provider_pool_empty",
+    "user_gateway_profile_provider_pool_empty",
+  ],
+  [
+    "manage_profiles_profile_dialog_effort_unset",
+    "user_gateway_profile_effort_unset",
+  ],
+  [
     "manage_profiles_profile_modalities_label",
     "manage_profiles_set_modalities_label",
   ],
@@ -486,7 +531,7 @@ const SYNONYMS: string[][] = [
   ["nav_overview", "manage_overview_heading"],
   ["nav_budget", "manage_budget_heading"],
   ["nav_agents", "manage_agents_heading"],
-  ["nav_profiles", "manage_profiles_heading"],
+  ["nav_profiles", "manage_profiles_heading", "user_gateway_profiles"],
   ["nav_schedules", "manage_schedules_heading"],
   ["nav_tasks", "manage_tasks_heading"],
   ["nav_tagmata", "manage_instances_heading"],
@@ -507,12 +552,15 @@ const SYNONYMS: string[][] = [
     "manage_profiles_max_context_label",
   ],
   [
+    "user_gateway_profile_provider",
     "manage_agent_provider",
     "manage_profiles_set_dialog_provider_label",
     "manage_profiles_profile_dialog_endpoint_label",
+    "manage_gateway_provider_label",
   ],
   ["manage_agent_retry_error_unknown", "shell_error"],
   [
+    "user_gateway_profile_model",
     "manage_agent_model",
     "manage_profiles_set_dialog_model_label",
     "manage_profiles_profile_dialog_model_label",
@@ -526,15 +574,60 @@ const SYNONYMS: string[][] = [
     "manage_profiles_set_dialog_max_context_label",
   ],
   ["manage_profiles_set_dialog_description_label", "rooms_description_label"],
-  ["manage_agent_set", "manage_budget_set"],
-  ["manage_instances_dialog_title", "manage_instances_new"],
-  ["rooms_name_label", "settings_provider_name_label"],
   [
-    "manage_profiles_provider_base_url_label",
-    "settings_provider_base_url_label",
+    "manage_agent_set",
+    "manage_budget_set",
+    "manage_gateway_placement_set_label",
   ],
+  ["manage_instances_dialog_title", "manage_instances_new"],
+  ["rooms_name_label", "user_gateway_set_name"],
   ["tagma_drawer_title", "nav_breadcrumb_agents"],
   ["manage_budget_unlimited", "tagma_status_unlimited"],
+  ["agent_state_parked", "user_gateway_profile_parked"],
+  ["manage_gateway_provider_edit_title", "user_gateway_provider_edit_title"],
+  ["manage_gateway_provider_add", "user_gateway_provider_add"],
+  ["manage_gateway_provider_id", "user_gateway_provider_id"],
+  ["manage_gateway_sets", "manage_profiles_sets", "user_gateway_sets"],
+  ["user_gateway_publish", "manage_gateway_collection_publish"],
+  ["user_gateway_unpublish", "manage_gateway_collection_unpublish"],
+  ["manage_gateway_collections", "user_gateway_collections"],
+  [
+    "manage_gateway_placement_collection_label",
+    "user_gateway_set_dialog_collection_label",
+  ],
+  [
+    "manage_gateway_collection_add",
+    "manage_gateway_collection_dialog_create_title",
+    "user_gateway_collection_add",
+  ],
+  [
+    "manage_gateway_collection_dialog_edit_title",
+    "user_gateway_collection_edit_title",
+  ],
+  ["manage_gateway_reach_everyone", "user_gateway_everyone"],
+  [
+    "manage_gateway_group_add",
+    "manage_gateway_group_dialog_create_title",
+    "user_gateway_group_add",
+  ],
+  ["manage_gateway_group_dialog_edit_title", "user_gateway_group_edit_title"],
+  ["manage_gateway_group_members", "room_members"],
+  ["manage_gateway_group_members_count_one", "room_member_one"],
+  ["manage_gateway_group_members_count_other", "room_member_other"],
+  [
+    "manage_gateway_group_search_placeholder",
+    "manage_gateway_group_search_aria",
+  ],
+  [
+    "manage_gateway_group_name_label",
+    "rooms_name_label",
+    "user_gateway_set_name",
+  ],
+  ["manage_gateway_groups", "user_gateway_groups"],
+  ["manage_gateway_provider_base", "user_gateway_credential_base"],
+  ["user_gateway_heading", "user_gateway_menu"],
+  ["manage_agent_description", "user_gateway_set_description"],
+  ["manage_profiles_providers", "user_gateway_providers"],
 ];
 
 Deno.test("catalog: same-value keys are all deliberate synonyms", () => {

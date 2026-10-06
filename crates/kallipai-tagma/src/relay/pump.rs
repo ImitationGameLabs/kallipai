@@ -33,9 +33,8 @@ impl RelayHandle {
 
     /// Subscribe to both chat topics on the typed bus and forward frames
     /// onto the relay until `cancel` fires. The bus lives on `AppState` for
-    /// the tagma's lifetime, so a `Closed` on either topic is shutdown; the
-    /// old boot-ordering retry loop is gone — the bus exists as soon as the
-    /// state does.
+    /// the tagma's lifetime, so a `Closed` on either topic is shutdown:
+    /// the bus exists as soon as the state does.
     async fn run_pump(self, cancel: CancellationToken) {
         let Some(mut authored_rx) = self.subscribe_topics().await else {
             return; // shutting down (the AppState is dropped)

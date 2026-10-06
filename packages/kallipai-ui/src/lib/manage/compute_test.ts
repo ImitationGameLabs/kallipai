@@ -14,24 +14,24 @@ import {
   addProfile,
   addProvider,
   addSet,
+  associationText,
   barColorClass,
   barFillPct,
   type BudgetSample,
   buildProbeRequest,
   burnRate,
   clampPage,
-  associationText,
   confirmationBoundary,
   confirmerConfirmationState,
   consumedPct,
   cronHasFiveFields,
   etaMinutes,
+  filterEpoch,
   formatModalities,
   isBudgetPaused,
   moveFromParking,
   moveProfile,
   moveToParking,
-  filterEpoch,
   normalizeModalities,
   profileConfigEqual,
   profileConfigToWire,
@@ -48,8 +48,8 @@ import {
   setHasShadowedMembers,
   singleParkingProfileProbeRequest,
   singleProfileProbeRequest,
-  timelinePayloadView,
   singleProviderProbeRequest,
+  timelinePayloadView,
   updateSetDescription,
   upsertProvider,
   validateWarnMinutes,
@@ -470,8 +470,9 @@ Deno.test("replaceSetProfile: unknown set name is a no-op", () => {
   assertEquals(replaceSetProfile(base, "ghost", 0, replacement), base);
 });
 
-Deno.test("normalizeModalities: text-only rides as absent", () => {
+Deno.test("normalizeModalities: text-only and empty ride as absent", () => {
   assertEquals(normalizeModalities(["text"]), undefined);
+  assertEquals(normalizeModalities([]), undefined);
 });
 
 Deno.test("normalizeModalities: anything else carries as declared", () => {

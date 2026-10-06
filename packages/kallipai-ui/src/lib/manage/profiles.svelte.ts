@@ -5,29 +5,33 @@ import type {
   ProfileConfig,
   ProfileProbeRequest,
   ProfileProbeResponse,
+  ProfileSourceMode,
+  ProfileSourceSelection,
 } from "@kallipai/kallipai-client";
 import {
-  addProvider as addProviderFn,
   addProfile as addProfileFn,
+  addProvider as addProviderFn,
   addSet as addSetFn,
   buildProbeRequest as buildProbeRequestFn,
   profileConfigEqual,
   profileConfigToWire as profileConfigToWireFn,
+  removeProfile as removeProfileFn,
   removeProvider as removeProviderFn,
   removeSet as removeSetFn,
-  removeProfile as removeProfileFn,
   singleProviderProbeRequest as singleProviderProbeRequestFn,
 } from "./compute.ts";
 import { type ManagementBackend, managementBackend } from "./client.ts";
-import { classifySaveFailure } from "./profiles-view.ts";
+import { classifySaveFailure, type PendingDangling } from "./profiles-view.ts";
 import { KallipaiError } from "@kallipai/kallipai-common";
 import { displayError } from "./errors.ts";
 import {
   manage_profiles_apply_failed,
   manage_profiles_load_failed,
   manage_profiles_probe_failed,
+  manage_profiles_refetch_failed,
   manage_profiles_save_failed,
   manage_profiles_save_stale_backend,
+  manage_profiles_switch_failed,
 } from "../../paraglide/messages.js";
 
 export class ProfilesStore {
@@ -43,14 +47,16 @@ export class ProfilesStore {
   draft = $state<ProfileConfig | null>(null);
   isLoading = $state(false);
   isSaving = $state(false);
-  /** Stranded profile-set bindings from the last 409, awaiting operator
-   * confirmation. Non-null renders the confirm dialog. */
-  pendingDangling = $state<readonly string[] | null>(null);
+  /** The parked dangling-409 state: the stranded set names plus
+   * which send parked it. The confirm dialog re-sends by the
+   * recorded kind, so the retry always matches the live park. */
+  pendingDangling = $state<PendingDangling | null>(null);
   /** True when a force save hit an old backend (bare 409 without the
    * structured list): the confirm re-send is blocked until reload. */
   saveBlocked = $state(false);
   error = $state<string | null>(null);
   isProbing = $state(false);
+  isRefetching = $state(false);
 
   /** Latest probe outcome (POST /profiles/probe), or null. */
   probe = $state<ProfileProbeResponse | null>(null);
@@ -99,10 +105,13 @@ export class ProfilesStore {
       this.draft = structuredClone(resp);
     } catch (e) {
       switch (classifySaveFailure(e, force)) {
-        case "park-dangling":
+        case "park-dangling": {
           // Structured 409: ask the operator before stranding bindings.
-          this.pendingDangling = (e as KallipaiError).api.dangling ?? null;
+          const dangling = (e as KallipaiError).api.dangling;
+          this.pendingDangling =
+            dangling !== undefined ? { names: dangling, retry: "save" } : null;
           break;
+        }
         case "stale-backend":
           // Old backend: force is ignored, so a dangling save keeps
           // failing with a bare 409 and no structured list. Surface the
@@ -126,6 +135,147 @@ export class ProfilesStore {
   /** Drop the pending dangling list, keeping the edit state as-is. */
   dismissDangling(): void {
     this.pendingDangling = null;
+  }
+
+  /** Switch the profile source (PUT /profiles with a source block).
+   * A mode different from the live one takes the server's switch
+   * branch (a validating gateway fetch for model-gateway, the
+   * dangling-bindings gate, then the settings writes and the
+   * hot-swap); the profiles payload of the request is ignored by
+   * design. `polis` names the target platform (the online UI
+   * carries the serving platform's origin); `collection` names
+   * the collection to pull (absent keeps the selected one; the
+   * gateway holds the selection). On success the
+   * response carries the new-source config, which becomes both
+   * config and draft. A dangling-bindings 409 parks the stranded
+   * list in `pendingDangling` (the confirm dialog re-sends with
+   * `force`), like the save path. A failure switches nothing and
+   * leaves the local state untouched. */
+  async switchSource(
+    mode: ProfileSourceMode,
+    options: {
+      polis?: string;
+      collection?: ProfileSourceSelection;
+      force?: boolean;
+    } = {},
+  ): Promise<void> {
+    this.isSaving = true;
+    this.pendingDangling = null;
+    this.error = null;
+    try {
+      const resp = await this.backend.updateProfiles({
+        sets: [],
+        endpoints: {},
+        parking: [],
+        source: {
+          mode,
+          ...(options.polis !== undefined ? { polis: options.polis } : {}),
+          ...(options.collection !== undefined
+            ? { collection: options.collection }
+            : {}),
+        },
+        ...(options.force ? { force: true } : {}),
+      });
+      this.config = resp;
+      this.draft = structuredClone(resp);
+    } catch (e) {
+      switch (classifySaveFailure(e, options.force ?? false)) {
+        case "park-dangling": {
+          const dangling = (e as KallipaiError).api.dangling;
+          this.pendingDangling =
+            dangling !== undefined
+              ? { names: dangling, retry: "switch" }
+              : null;
+          break;
+        }
+        default:
+          console.warn("[profiles] source switch failed:", e);
+          this.error = displayError(
+            "profiles",
+            e,
+            manage_profiles_switch_failed(),
+          );
+      }
+      throw e;
+    } finally {
+      this.isSaving = false;
+    }
+  }
+
+  /** Point the live source at another collection (PUT /profiles
+   * with the same source.mode carrying collection). The server
+   * writes the pick through to the gateway and re-fetches the
+   * snapshot on it (the same dangling-bindings gate applies,
+   * and any later rejection names the moved pointer). The
+   * response is the same face as GET /profiles, so config and
+   * draft both refresh; a dangling-bindings 409 parks the
+   * stranded list in `pendingDangling` (the confirm dialog
+   * re-sends with `force`). */
+  async updateSourceCollection(
+    target: ProfileSourceSelection,
+    force = false,
+  ): Promise<void> {
+    this.isSaving = true;
+    this.pendingDangling = null;
+    this.error = null;
+    try {
+      const resp = await this.backend.updateProfiles({
+        sets: [],
+        endpoints: {},
+        parking: [],
+        source: {
+          mode: this.config?.source?.mode ?? "local",
+          collection: target,
+        },
+        ...(force ? { force: true } : {}),
+      });
+      this.config = resp;
+      this.draft = structuredClone(resp);
+    } catch (e) {
+      switch (classifySaveFailure(e, force)) {
+        case "park-dangling": {
+          const dangling = (e as KallipaiError).api.dangling;
+          this.pendingDangling =
+            dangling !== undefined ? { names: dangling, retry: "apply" } : null;
+          break;
+        }
+        default:
+          console.warn("[profiles] collection selection failed:", e);
+          this.error = displayError(
+            "profiles",
+            e,
+            manage_profiles_switch_failed(),
+          );
+      }
+      throw e;
+    } finally {
+      this.isSaving = false;
+    }
+  }
+
+  /** Re-pull the live gateway snapshot (POST /profiles/refresh) and
+   * adopt it as both config and draft. Gateway-side edits (a
+   * re-anchored default, a published member) reach the running tagma
+   * through this; until then it serves the boot snapshot. A local
+   * source is refused by the server (409). */
+  async refetchSource(): Promise<void> {
+    this.isRefetching = true;
+    this.error = null;
+    try {
+      const resp = await this.backend.refreshProfiles();
+      this.config = resp;
+      this.draft = structuredClone(resp);
+    } catch (e) {
+      console.warn("[profiles] source refetch failed:", e);
+      this.error = displayError(
+        "profiles",
+        e,
+        manage_profiles_refetch_failed(),
+      );
+      throw e;
+    } finally {
+      this.isRefetching = false;
+    }
   }
 
   /** Apply the current registry to all live agents (POST /profiles/apply). */

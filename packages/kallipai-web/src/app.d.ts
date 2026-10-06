@@ -26,6 +26,8 @@ declare global {
       offlineLogin?: boolean;
       /** Platform-edge-origin override; the /v1/<service> tail is still appended; empty string counts as unset. */
       apiBase?: string;
+      /** The model gateway admin base URL (the /admin face); empty string counts as unset. */
+      gatewayAdminUrl?: string;
     };
   }
 }

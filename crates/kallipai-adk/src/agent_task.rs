@@ -190,6 +190,10 @@ pub struct AgentContext {
     /// escalates to an explicit data-loss warning. Any success clears the
     /// streak.
     pub persist_failures: AtomicU32,
+    /// Gateway auth-rejection observer (401/403 surfaced at failover-chain
+    /// exhaustion). Injected by the tagma in gateway-proxy mode; None (local
+    /// mode, test contexts) is zero behavior. See [`crate::GatewaySignal`].
+    pub gateway_signals: Option<tokio::sync::mpsc::UnboundedSender<crate::GatewaySignal>>,
 }
 
 impl AgentContext {

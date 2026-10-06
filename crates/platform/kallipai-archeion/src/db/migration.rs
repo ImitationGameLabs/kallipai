@@ -15,6 +15,7 @@ mod m_20260731_01_passkey_last_used_at;
 mod m_20260807_01_identity_rework;
 mod m_20260808_01_oauth_signup_username;
 mod m_20260826_01_user_providers;
+mod m_20261004_01_drop_user_providers;
 
 /// The archeion migrator. New migrations are appended to [`MigratorTrait::migrations`].
 pub struct Migrator;
@@ -31,6 +32,7 @@ impl MigratorTrait for Migrator {
             Box::new(m_20260807_01_identity_rework::Migration),
             Box::new(m_20260808_01_oauth_signup_username::Migration),
             Box::new(m_20260826_01_user_providers::Migration),
+            Box::new(m_20261004_01_drop_user_providers::Migration),
         ]
     }
 }

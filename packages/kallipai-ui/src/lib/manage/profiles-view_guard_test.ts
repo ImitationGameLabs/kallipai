@@ -53,6 +53,9 @@ Deno.test("the guard intercepts only a dirty, not-yet-open state", () => {
 
 Deno.test("the guard dialog waits while the dangling confirm is up", () => {
   assertEquals(leaveGuardDialogVisible(true, null), true);
-  assertEquals(leaveGuardDialogVisible(true, ["agent-x → 'alt'"]), false);
+  assertEquals(
+    leaveGuardDialogVisible(true, { names: ["agent-x"], retry: "save" }),
+    false,
+  );
   assertEquals(leaveGuardDialogVisible(false, null), false);
 });

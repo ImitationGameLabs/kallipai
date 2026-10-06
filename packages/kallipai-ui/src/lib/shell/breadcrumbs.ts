@@ -25,9 +25,11 @@ import {
 import {
   account_menu,
   chat_title_local,
+  manage_gateway_menu,
   nav_budget,
   nav_breadcrumb_agents,
   nav_breadcrumb_tagma,
+  nav_admin,
   nav_chats,
   nav_files,
   nav_home,
@@ -40,6 +42,7 @@ import {
   room_label_fallback,
   settings_heading,
   tagma_fallback_label,
+  user_gateway_menu,
 } from "../../paraglide/messages.js";
 import {
   entry,
@@ -194,6 +197,23 @@ export const trailTable: TrailEntry[] = [
   entry("/user/:handle", ({ handle }: With<"handle">) => [
     { label: nav_home(), href: "/" },
     { label: handle, current: true },
+  ]),
+  entry("/admin/gateway", () => [
+    { label: nav_home(), href: "/" },
+    // The admin hub 301s to this very page, so the area label stays an
+    // inert crumb (a link would bounce straight back).
+    { label: nav_admin() },
+    { label: manage_gateway_menu(), current: true },
+  ]),
+  entry("/admin/gateway/collections/:name", ({ name }: With<"name">) => [
+    { label: nav_home(), href: "/" },
+    { label: nav_admin() },
+    { label: manage_gateway_menu(), href: "/admin/gateway" },
+    { label: name, current: true },
+  ]),
+  entry("/gateway", () => [
+    { label: nav_home(), href: "/" },
+    { label: user_gateway_menu(), current: true },
   ]),
 ];
 

@@ -1,6 +1,9 @@
 import { assert, assertEquals } from "@std/assert";
 import {
+  adminGatewayCollectionPath,
+  adminGatewayPath,
   filesPath,
+  gatewayPath,
   tagmaAgentPath,
   tagmaChatPath,
   tagmaDetailsPath,
@@ -114,6 +117,25 @@ Deno.test("filesPath builds the global files route", () => {
   assertEquals(filesPath(), "/files");
 });
 
+Deno.test("adminGatewayPath builds the admin gateway route", () => {
+  assertEquals(adminGatewayPath(), "/admin/gateway");
+});
+
+Deno.test("adminGatewayCollectionPath builds the detail subface route", () => {
+  assertEquals(
+    adminGatewayCollectionPath("gpt"),
+    "/admin/gateway/collections/gpt",
+  );
+  assertEquals(
+    adminGatewayCollectionPath("a b"),
+    "/admin/gateway/collections/a%20b",
+  );
+});
+
+Deno.test("gatewayPath builds the user gateway route", () => {
+  assertEquals(gatewayPath(), "/gateway");
+});
+
 const FILES_PAGE = new URL("../../pages/FilesPage.svelte", import.meta.url);
 const ROOT_LAYOUT = new URL("./RootLayout.svelte", import.meta.url);
 
@@ -161,6 +183,35 @@ Deno.test(
       assert(
         src.includes("@kallipai/kallipai-ui"),
         "shell must import the shared package, not a local copy",
+      );
+    }
+  },
+);
+
+const ADMIN_HUBS = [
+  new URL(
+    "../../../../kallipai-web/src/routes/admin/+page.ts",
+    import.meta.url,
+  ),
+  new URL(
+    "../../../../kallipai-app/src/routes/admin/+page.ts",
+    import.meta.url,
+  ),
+];
+
+Deno.test(
+  "the admin hub stays wired to the path builder",
+  // The hub 301s to the gateway console through the builder; pin the
+  // wiring so a downgrade to 302 or a re-derived literal cannot slip
+  // in. Scoped read grant, same rationale as the details hubs.
+  { permissions: { read: ADMIN_HUBS } },
+  () => {
+    for (const hub of ADMIN_HUBS) {
+      const src = new TextDecoder().decode(Deno.readFileSync(hub));
+      assert(src.includes("redirect(301"), "hub must issue a permanent 301");
+      assert(
+        src.includes("adminGatewayPath()"),
+        "hub must forward via the path builder, not a re-derived literal",
       );
     }
   },

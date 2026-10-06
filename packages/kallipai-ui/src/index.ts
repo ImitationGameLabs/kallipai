@@ -114,6 +114,8 @@ export { default as SchedulesPage } from "./pages/manage/SchedulesPage.svelte";
 export { default as TasksPage } from "./pages/manage/TasksPage.svelte";
 export { default as OnlineManagePage } from "./pages/manage/OnlineManagePage.svelte";
 export { default as OnlineAgentDetailPage } from "./pages/manage/OnlineAgentDetailPage.svelte";
+export { default as GatewayCatalogPage } from "./pages/manage/gateway/GatewayCatalogPage.svelte";
+export { default as GatewayMinePage } from "./pages/gateway/GatewayMinePage.svelte";
 export { budgetStore } from "./lib/manage/budget.svelte.ts";
 export { agentsStore } from "./lib/manage/agents.svelte.ts";
 export { profilesStore } from "./lib/manage/profiles.svelte.ts";
@@ -121,6 +123,7 @@ export { schedulesStore } from "./lib/manage/schedules.svelte.ts";
 
 // Route path builders (the tagma-centric URL single source).
 export {
+  adminGatewayPath,
   tagmaChatPath,
   tagmaDetailsPath,
   tagmaDetailsSectionPath,
@@ -134,6 +137,7 @@ export { default as Banner } from "./components/Banner.svelte";
 export { type BannerTone, bannerTones } from "./components/Banner.svelte";
 export { default as Brand } from "./components/Brand.svelte";
 export { default as PageHeader } from "./components/PageHeader.svelte";
+export { default as AdminArea } from "./components/AdminArea.svelte";
 export { default as Breadcrumbs } from "./components/Breadcrumbs.svelte";
 export type { BreadcrumbSegment } from "./components/Breadcrumbs.svelte";
 export type { NavItem } from "./lib/shell.ts";

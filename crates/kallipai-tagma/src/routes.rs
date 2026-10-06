@@ -164,6 +164,10 @@ pub fn router() -> Router<SharedState> {
             axum::routing::post(profiles::apply_profiles),
         )
         .route(
+            "/profiles/refresh",
+            axum::routing::post(profiles::refresh_profile_source),
+        )
+        .route(
             "/profiles/default",
             axum::routing::put(profiles::set_default_profile_set),
         )

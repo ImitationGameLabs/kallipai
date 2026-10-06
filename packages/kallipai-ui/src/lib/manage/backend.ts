@@ -71,6 +71,7 @@ export interface ManagementBackend {
   getProfiles(): Promise<ProfileConfig>;
   updateProfiles(body: ProfileConfigPutRequest): Promise<ProfileConfig>;
   applyProfiles(): Promise<ProfileApplyResponse>;
+  refreshProfiles(): Promise<ProfileConfig>;
   probeProfiles(body: ProfileProbeRequest): Promise<ProfileProbeResponse>;
   deleteProfileSet(name: string, force: boolean): Promise<DeleteSetResponse>;
   getWorkSchedule(): Promise<WorkSchedule>;
@@ -134,6 +135,9 @@ export class OfflineBackend implements ManagementBackend {
   }
   applyProfiles() {
     return this.client.applyProfiles();
+  }
+  refreshProfiles() {
+    return this.client.refreshProfiles();
   }
 
   probeProfiles(body: ProfileProbeRequest) {
@@ -453,6 +457,9 @@ export class OnlineBackend implements ManagementBackend {
   }
   applyProfiles() {
     return this.req<ProfileApplyResponse>("POST", "/profiles/apply");
+  }
+  refreshProfiles(): Promise<ProfileConfig> {
+    return this.req<ProfileConfig>("POST", "/profiles/refresh");
   }
 
   probeProfiles(body: ProfileProbeRequest) {

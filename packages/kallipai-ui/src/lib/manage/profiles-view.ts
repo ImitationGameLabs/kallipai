@@ -175,10 +175,16 @@ export function leaveGuardIntercept(
   return isDirty && !guardOpen;
 }
 
+/** A parked dangling-409: the stranded set names plus which send
+ * parked it (the confirm dialog re-sends by the kind). */
+export type PendingDangling = {
+  names: readonly string[];
+  retry: "save" | "switch" | "apply";
+};
 /** The unsaved-changes dialog waits while the dangling confirm is up. */
 export function leaveGuardDialogVisible(
   guardOpen: boolean,
-  pendingDangling: readonly string[] | null,
+  pendingDangling: PendingDangling | null,
 ): boolean {
   return guardOpen && pendingDangling === null;
 }

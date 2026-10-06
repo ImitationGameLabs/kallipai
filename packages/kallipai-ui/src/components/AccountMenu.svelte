@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { MENU_ITEM } from "../lib/classes.ts";
   import { Menu, Portal } from "@skeletonlabs/skeleton-svelte";
   import { LogOut, Settings, User } from "@lucide/svelte";
   import { archeionSession } from "../lib/session/archeion.svelte";
@@ -65,19 +66,13 @@
   <Portal>
     <Menu.Positioner>
       <Menu.Content class="card preset-tonal-surface p-1 min-w-[12rem]">
-        <Menu.Item
-          value="settings"
-          class="flex items-center gap-2 px-3 py-2 rounded-base text-sm hover:preset-filled-surface-500 cursor-pointer"
-        >
+        <Menu.Item value="settings" class={MENU_ITEM}>
           <Settings class="size-4" />
           {settings_heading()}
         </Menu.Item>
         <Menu.Separator class="my-1 border-surface-200-800" />
         {#if mode === "online"}
-          <Menu.Item
-            value="logout"
-            class="flex items-center gap-2 px-3 py-2 rounded-base text-sm hover:preset-filled-surface-500 cursor-pointer"
-          >
+          <Menu.Item value="logout" class={MENU_ITEM}>
             <LogOut class="size-4" />
             {account_logout()}
           </Menu.Item>

@@ -138,6 +138,29 @@ pub struct UserIdentityByUsernameRequest {
     pub username: String,
 }
 
+// --- user-search (the admin member picker's account lookup) ---
+
+/// `POST /internal/user-search`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserSearchRequest {
+    /// The literal prefix to match: a `users.id`, `username`, or
+    /// `emails.address` prefix. The wildcards in a LIKE pattern are
+    /// escaped server-side, so the query matches text, not the pattern
+    /// language (usernames legitimately contain `_`).
+    /// Matching is case-sensitive (the default Postgres `LIKE`).
+    pub query: String,
+    /// The result cap; the archeion clamps it to its own maximum.
+    pub limit: u32,
+}
+
+/// `200` body: the matching accounts, ordered by username. The email is
+/// a match key only -- the entries carry the minimal identity fields
+/// and never the address itself.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserSearchResponse {
+    pub users: Vec<UserIdentityResponse>,
+}
+
 // --- tunnel-proof-ts ---
 
 /// `POST /internal/tunnel-proof-ts`.
@@ -200,6 +223,43 @@ mod tests {
         assert_eq!(back.display_name.as_deref(), Some("Alice"));
     }
 
+    #[test]
+    fn user_search_round_trips() {
+        let req = UserSearchRequest {
+            query: "al".to_string(),
+            limit: 20,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert_eq!(json, r#"{"query":"al","limit":20}"#);
+        let back: UserSearchRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.query, "al");
+        assert_eq!(back.limit, 20);
+
+        let resp = UserSearchResponse {
+            users: vec![UserIdentityResponse {
+                user_id: UserId::from("u1".to_string()),
+                username: "alice".to_string(),
+                display_name: Some("Alice".to_string()),
+                disabled: false,
+            }],
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let back: UserSearchResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.users.len(), 1);
+        assert_eq!(back.users[0].username, "alice");
+        // The wire shape carries no email field: pin the key set.
+        let entry = serde_json::to_value(&resp).unwrap();
+        let keys: Vec<&str> = entry["users"][0]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(|k| k.as_str())
+            .collect();
+        assert_eq!(
+            keys,
+            vec!["user_id", "username", "display_name", "disabled"]
+        );
+    }
     #[test]
     fn verified_session_serializes_the_wire_key_set() {
         // VerifiedSession (aliased as VerifySessionResponse) owns the wire

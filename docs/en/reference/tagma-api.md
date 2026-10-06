@@ -81,6 +81,7 @@ single operator comparison additionally uses a constant-time compare.
 | `PUT`    | `/profiles`                                           | Validate, persist, hot-swap the registry                                                                        | operator                     |
 | `POST`   | `/profiles/apply`                                     | Push the registry to all live agents                                                                            | operator                     |
 | `POST`   | `/profiles/probe`                                     | Trial-probe candidate endpoints and sets                                                                        | operator                     |
+| `POST`   | `/profiles/refresh`                                   | Re-pull the live gateway snapshot into the registry                                                             | operator                     |
 | `GET`    | `/budget`                                             | Get tagma-wide token budget status                                                                              | any                          |
 | `POST`   | `/budget`                                             | Adjust or set tagma-wide token budget                                                                           | operator                     |
 | `GET`    | `/approvals`                                          | List approvals                                                                                                  | any (filtered by scope)      |
@@ -439,6 +440,20 @@ Operator only (the config carries API keys). Returns the current config
 in the same shape as the profiles config file, with `api_key` values
 masked.
 
+The response carries an additive `source` block: `mode` (`local` or
+`model-gateway`), `proxy_available` (a configured platform entry carries an
+enrollment token, so a switch to the gateway is possible), `polis` (the
+active gateway face's origin, null in local mode), `platforms` (every
+configured entry's name, origin, and enrollment state: the
+switch-target list), `poisoned`, `token_state`,
+`last_refresh`, and `refresh_failure_count` (gateway-source health). The
+served config is the snapshot of the one collection this tagma
+selected on the gateway (one read per refresh; a tagma without a
+selection serves an empty config). Under `model-gateway` the response
+also carries `local_disk`: the local `profiles.toml` as a masked
+read-only preview, or `{"absent": true, "error": "..."}` when nothing
+readable is on disk.
+
 #### `PUT /profiles`: Validate, Persist, Hot-Swap
 
 Operator only. Accepts a full config in the file's schema. Each
@@ -449,8 +464,37 @@ string resets it to the family default). The request is merged against
 the live config and validated by building backends and a trial
 registry; on success the config is written to disk, the in-memory
 registry is swapped as a unit, and running agents are unaffected until
-`POST /profiles/apply` (or their next restore). Responds with the
-merged masked config.
+`POST /profiles/apply` (or their next restore). A config that drops a
+set a live agent still records answers `409` with the stranded
+bindings (`force: true` on the wire confirms the stranding, or remove
+the set through `DELETE /profiles/sets/{name}`, which interrupts the
+bound agents first). Responds with the merged masked config.
+
+A `source` object whose `mode` differs from the live source takes the switch
+branch instead: the profiles payload of the request is ignored by design (the
+switch never touches `profiles.toml`), the new mode is validated and persisted
+to `settings.toml`, and the in-memory source and registry swap as a unit.
+Switching to `model-gateway` resolves the platform table: the request's
+`polis` names the target, and a request without one re-resolves like boot
+(the pinned platform, or the first enrolled entry). `400` answers an
+unknown or unenrolled platform; a
+gateway that cannot be reached, or whose pulled config fails validation,
+answers `502` and switches nothing.
+A `source.collection` member (`{owner?, collection}`; an absent owner
+addresses the account's own space) names the collection to pull: the
+switch writes it through to the gateway first, and a same-mode PUT
+carrying it is the selection update (the gateway holds the pointer;
+the tagma keeps no local selection). `400` answers a collection the
+account cannot see or one that serves no set, and any rejection
+after a successful write names the pointer it moved (a stranding
+one needs `force`, the others another collection). A target that
+drops a set a live agent still records answers `409` with the
+stranded bindings; `force: true` on the PUT wire confirms the
+stranding.
+Switching back to `local` requires a readable `profiles.toml` (`409`
+otherwise). The response is the new source's masked config plus a
+`source_switch` block describing the change; `POST /profiles/apply` pushes
+the new registry to running agents.
 
 #### `POST /profiles/apply`: Push the Registry to Live Agents
 
@@ -466,6 +510,20 @@ only; restore re-derives it). Responds with counts:
 
 `applied` counts live agents that received the signal; `skipped` counts
 faulted entries and live agents whose recorded set no longer resolves.
+
+#### `POST /profiles/refresh`: Re-Pull the Live Gateway Snapshot
+
+Operator only. Re-fetches the selected collection from the model
+gateway and swaps the bundle in place, so gateway-side edits (a
+re-anchored default set, a newly added member) reach a running
+tagma without a restart; a healthy tagma otherwise serves the boot
+snapshot until it restarts or re-selects. Local sources are a 409
+(the local file is read on every use). A dead enrollment token is
+also a 409 (re-enroll the tagma, then restart or round-trip the source
+mode; the token is read once at boot).
+A failed fetch is a 502 and
+leaves the live bundle untouched. Responds with the same body as
+`GET /profiles`.
 
 #### `POST /profiles/probe`: Trial-Probe Candidate Definitions
 

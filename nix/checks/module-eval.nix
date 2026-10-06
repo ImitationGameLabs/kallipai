@@ -37,6 +37,7 @@
               "kallipai-lesche"
               "kallipai-files"
               "kallipai-instances"
+              "kallipai-model-gateway"
               "kallipai-web-dist"
               "workspace"
             ]
@@ -115,6 +116,9 @@
       polisInstancesUnit =
         pkgs.writeText "kallipai-instances-test"
           webDerived.config.systemd.units."kallipai-instances.service".text;
+      gatewayUnit =
+        pkgs.writeText "kallipai-model-gateway-test"
+          webDerived.config.systemd.units."kallipai-model-gateway.service".text;
       inherit (import ../lib.nix) bakeRuntimeConfig;
       stubDist = stubPackages.${pkgs.stdenv.hostPlatform.system}."kallipai-web-dist";
       # No runtime keys: the site root is the bundle itself.
@@ -153,6 +157,17 @@
           polis.enable = true;
           web.enable = true;
           domain = "kallipai.com";
+        };
+      };
+      # apiBase overrides every service base; the gateway admin URL
+      # rides the same platform edge (one expression, two arms).
+      webApiBase = evalHost {
+        services.kallipai = {
+          daemon.enable = true;
+          polis.enable = true;
+          web.enable = true;
+          domain = "kallipai.com";
+          web.runtimeConfig.apiBase = "https://edge.example.com";
         };
       };
       webTlsOff = evalHost {
@@ -261,11 +276,43 @@
       test "${toString (lib.elem "kallipai-polis" webDerived.config.users.users.kallipai-instances.extraGroups)}" = "1"
       derived="${webDerived.config.services.kallipai.web.distWithRuntimeConfig}"
       grep -q '"domain":"kallipai.com"' "$derived/config.js"
+      grep -q '"gatewayAdminUrl":"https://api.kallipai.com/v1/model-gateway"' "$derived/config.js"
       # The baking helper, called directly, writes exactly the payload.
       direct="${directBake}"
       grep -q '"offlineLogin":false' "$direct/config.js"
       test -z "$(grep bundle-shell "$direct/config.js")"
       grep -q bundle-page "$direct/index.html"
+
+      # The gateway host: assertions all green (its port pair cannot
+      # collide with the polis four at the defaults), the unit rides the
+      # default ports on both faces, the peer-auth DB URL, the
+      # domain-derived public base URL, and the log dir. No state
+      # directory: durable surfaces live in PostgreSQL. The gateway's
+      # ensure entries merge into the shared postgresql config beside
+      # the polis ones (3 + 1 users).
+      test "${toString (builtins.length (failedAssertions webDerived))}" = "0"
+      grep -q 'KALLIPAI_MODEL_GATEWAY_ADDR=127.0.0.1:7501' '${gatewayUnit}'
+      grep -q 'KALLIPAI_MODEL_GATEWAY_MANAGEMENT_ADDR=127.0.0.1:7500' '${gatewayUnit}'
+      grep -q 'KALLIPAI_MODEL_GATEWAY_DATABASE_URL=postgresql:///kallipai-model-gateway?host=/run/postgresql' '${gatewayUnit}'
+      grep -q 'KALLIPAI_MODEL_GATEWAY_PUBLIC_BASE_URL=https://model-gw.kallipai.com/v1' '${gatewayUnit}'
+      grep -q 'KALLIPAI_MODEL_GATEWAY_LOG_DIR=/var/log/kallipai/model-gateway' '${gatewayUnit}'
+      grep -q 'ExecStart=.*/bin/kallipai-model-gateway' '${gatewayUnit}'
+      test -z "$(grep StateDirectory '${gatewayUnit}')"
+      test -z "$(grep EnvironmentFile '${gatewayUnit}')"
+      test "${toString (lib.elem "kallipai-model-gateway" webDerived.config.services.postgresql.ensureDatabases)}" = "1"
+      test "${toString (builtins.length webDerived.config.services.postgresql.ensureUsers)}" = "4"
+      # The admin face authenticates against the archeion: the internal
+      # URL and the shared internal token file ride the unit env.
+      grep -q 'KALLIPAI_MODEL_GATEWAY_ARCHEION_URL=http://127.0.0.1:7100' '${gatewayUnit}'
+      grep -q 'KALLIPAI_MODEL_GATEWAY_INTERNAL_TOKEN_FILE=/var/lib/kallipai/archeion/internal-token' '${gatewayUnit}'
+      # The gateway user rides the platform gate group: the 0640
+      # internal-token file is group-readable only through membership.
+      test "${toString (lib.elem "kallipai-polis" webDerived.config.users.users.kallipai-model-gateway.extraGroups)}" = "1"
+      # The domain derivation feeds the admin page CORS allowlist too.
+      test "${webDerived.config.services.kallipai.polis.gateway.corsOrigins}" = "https://app.kallipai.com"
+      # The gateway admin URL follows apiBase when the platform edge
+      # moves (the default arm asserted beside the baked config.js).
+      test "${webApiBase.config.services.kallipai.web.runtimeConfig.gatewayAdminUrl}" = "https://edge.example.com/v1/model-gateway"
       printf %s ok > "$out"
     '';
 }

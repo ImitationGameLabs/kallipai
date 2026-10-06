@@ -131,4 +131,9 @@ in
   # to the daemon's UDS socket -- the only networked door the family
   # exposes, with its own host guard and auth modes.
   instances = buildCrate "cargo build --release -p kallipai-instances";
+  # The model gateway: the profiles distribution face plus the
+  # credential-injecting forwarding face (pure HTTP/Postgres, no
+  # shell-out deps). Its own deployment unit -- see
+  # services.kallipai.polis.gateway in nixos-modules.nix.
+  model-gateway = buildCrate "cargo build --release -p kallipai-model-gateway";
 }

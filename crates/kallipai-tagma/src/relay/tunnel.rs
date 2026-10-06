@@ -169,6 +169,7 @@ fn frame_allowed(method: &str, path: &str) -> bool {
         | ("PUT", "/work-schedule")
         | ("GET", "/profiles")
         | ("POST", "/profiles/apply")
+        | ("POST", "/profiles/refresh")
         | ("PUT", "/profiles/default") => true,
         ("GET", "/tasks") => true,
         // Task detail: GET /tasks/{id} (two segments, read-only; the
@@ -259,6 +260,7 @@ mod manage_rest_tests {
             ("GET", "/profiles"),
             ("PUT", "/profiles/default"),
             ("POST", "/profiles/apply"),
+            ("POST", "/profiles/refresh"),
             ("GET", "/tasks"),
             ("GET", "/tasks/7"),
             ("GET", "/tasks/export"),
@@ -372,5 +374,32 @@ mod manage_frame_tests {
         assert_eq!(replies.len(), 2);
         assert_eq!(replies[0]["status"], 200, "correct order must route");
         assert_eq!(replies[1]["status"], 404, "swapped order must deny");
+    }
+
+    /// The refresh frame regression: the profiles refetch button rides
+    /// the remote manage surface. The default test state runs a local
+    /// source, so the router's own refusal (409) is the pass-through
+    /// proof -- 404 would mean the allowlist denied the frame.
+    #[tokio::test]
+    async fn refresh_frame_reaches_router() {
+        let replies = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let (handle, state) = setup(replies.clone()).await;
+        let _keep_state = &state;
+        let trace = kallipai_archeion_common::ids::TraceId::random();
+        handle
+            .handle_manage_rest(
+                1,
+                "/profiles/refresh",
+                "POST",
+                &trace,
+                serde_json::json!({}),
+            )
+            .await;
+        let replies = replies.lock().await;
+        assert_eq!(replies.len(), 1);
+        assert_eq!(
+            replies[0]["status"], 409,
+            "refresh must clear the frame allowlist"
+        );
     }
 }

@@ -118,6 +118,16 @@ pub(crate) async fn spawn_agent(mut args: SpawnArgs) -> anyhow::Result<(Agent, A
         if profile.endpoint == crate::backend::UNCONFIGURED {
             crate::backend::unconfigured_client(Some(system_prompt.clone()))
         } else {
+            // A dead enrollment token refuses new spawns: serving a
+            // profile through a known-dead token just burns a failover
+            // chain per round. The signal consumer clears the poison on
+            // a successful refresh.
+            args.shared_state
+                .profile_source
+                .load_full()
+                .source()
+                .ensure_usable()
+                .await?;
             args.shared_state
                 .profiles
                 .load()
@@ -247,6 +257,7 @@ pub(crate) async fn spawn_agent(mut args: SpawnArgs) -> anyhow::Result<(Agent, A
         pending_profile_reset: pending_profile_reset.clone(),
         message_puller,
         persist_failures: Default::default(),
+        gateway_signals: args.shared_state.gateway_signals.clone(),
     };
 
     let agent_handle = tokio::spawn(agent_task::agent_task(

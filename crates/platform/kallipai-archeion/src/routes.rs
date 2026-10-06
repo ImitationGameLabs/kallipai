@@ -16,7 +16,6 @@ mod passkeys;
 mod public_profiles;
 mod session;
 mod tagmata;
-mod user_providers;
 
 use axum::Router;
 use axum::extract::State;
@@ -90,7 +89,6 @@ pub fn router(
         .merge(session::router())
         .merge(oauth::session_router())
         .merge(device_pairing::session_router())
-        .merge(user_providers::session_router())
         .merge(email_write)
         .merge(email_verify)
         .nest("/admin", admin::router())
@@ -172,16 +170,7 @@ pub(crate) fn cors_layer(origins: &str) -> CorsLayer {
         // `Access-Control-Allow-Credentials: true` together with a wildcard
         // (`Allow-Methods: *`), and tower-http panics at layer construction if
         // they're combined. Listed are exactly the methods the archeion routes use.
-        // PUT is the provider-vault replace (`PUT /me/providers/{id}`, the
-        // web app's rename/key-rotation write); without it the browser
-        // rejects the preflight and the write never lands.
-        .allow_methods([
-            Method::GET,
-            Method::POST,
-            Method::PUT,
-            Method::PATCH,
-            Method::DELETE,
-        ])
+        .allow_methods([Method::GET, Method::POST, Method::PATCH, Method::DELETE])
         // Allow credentialed (cookie-bearing) cross-origin requests so the web
         // app -- served from a different origin than the archeion (e.g. the app at
         // http://localhost:5173 calling the archeion at http://localhost:7100 in
@@ -228,7 +217,7 @@ mod tests {
         let request = Request::builder()
             .method(Method::OPTIONS)
             .header(ORIGIN, "https://app.example")
-            .header(ACCESS_CONTROL_REQUEST_METHOD, "PUT")
+            .header(ACCESS_CONTROL_REQUEST_METHOD, "DELETE")
             .body(Body::empty())
             .unwrap();
         let response = app.oneshot(request).await.unwrap();
@@ -241,6 +230,6 @@ mod tests {
             .unwrap();
         let mut advertised: Vec<&str> = advertised.split(',').map(str::trim).collect();
         advertised.sort_unstable();
-        assert_eq!(advertised, ["DELETE", "GET", "PATCH", "POST", "PUT"]);
+        assert_eq!(advertised, ["DELETE", "GET", "PATCH", "POST"]);
     }
 }

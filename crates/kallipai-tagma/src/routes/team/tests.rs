@@ -607,6 +607,16 @@ fn preflight_rejects_a_converge_over_capacity() {
             kallipai_adk::usage_stats::UsageStats::default(),
             kallipai_adk::token_budget::TokenBudget::unlimited(),
             None,
+            std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
+                crate::profile_source::SourceSlot::new(std::sync::Arc::new(
+                    crate::profile_source::LocalProfileSource::new(),
+                )),
+            )),
+            std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
+                None::<crate::profile_source::GatewayParams>,
+            )),
+            Vec::new(),
+            None,
         ));
     let root = body("root");
     let declaration = declaration(
@@ -1023,6 +1033,16 @@ async fn rejected_response_leaves_inactive_agents_none() {
             PolicyPreset::Default,
             kallipai_adk::usage_stats::UsageStats::default(),
             kallipai_adk::token_budget::TokenBudget::unlimited(),
+            None,
+            std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
+                crate::profile_source::SourceSlot::new(std::sync::Arc::new(
+                    crate::profile_source::LocalProfileSource::new(),
+                )),
+            )),
+            std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
+                None::<crate::profile_source::GatewayParams>,
+            )),
+            Vec::new(),
             None,
         ));
     let auth = crate::auth::AuthIdentity::test_new(crate::auth::Identity::Operator);

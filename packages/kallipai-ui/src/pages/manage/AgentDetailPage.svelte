@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { MENU_ITEM, MENU_ITEM_DANGER } from "../../lib/classes.ts";
   import type {
     AgentStatusResponse,
     AgentUsageStats,
@@ -6,14 +7,14 @@
     WireAgentManagementSummary,
   } from "@kallipai/kallipai-client";
   import { agentStateLabel } from "../../lib/agentState.ts";
-  import { MoreVertical, Pencil, Trash } from "@lucide/svelte";
-  import { Menu, Portal } from "@skeletonlabs/skeleton-svelte";
+  import { Pencil, Trash } from "@lucide/svelte";
+  import { Menu } from "@skeletonlabs/skeleton-svelte";
+  import ActionMenu from "../../components/ActionMenu.svelte";
   import { managementBackend } from "../../lib/manage/client.ts";
   import { KallipaiError } from "@kallipai/kallipai-common";
   import { SvelteSet } from "svelte/reactivity";
   import type { ManagementBackend } from "../../lib/manage/backend.ts";
   import { navigate } from "../../lib/shell/port.ts";
-  import { TONAL_ICON_SURF } from "../../lib/classes.ts";
   import { startVisibleInterval } from "../../lib/visibleInterval.ts";
   import ConfirmDialog from "../../components/ConfirmDialog.svelte";
   import AgentIdentityDialog from "../../components/manage/AgentIdentityDialog.svelte";
@@ -261,42 +262,22 @@
     {#if agent}
       <section class="card preset-tonal-surface p-5 space-y-3">
         <div class="flex justify-end">
-          <Menu
-            positioning={{ placement: "bottom-end" }}
-            onSelect={(e) => {
-              if (e.value === "edit") showIdentityDialog = true;
-              else if (e.value === "remove") showRemoveDialog = true;
+          <ActionMenu
+            label={manage_agent_identity_actions_aria()}
+            onSelect={(value) => {
+              if (value === "edit") showIdentityDialog = true;
+              else if (value === "remove") showRemoveDialog = true;
             }}
           >
-            <Menu.Trigger
-              class="size-10 {TONAL_ICON_SURF} shrink-0"
-              aria-label={manage_agent_identity_actions_aria()}
-            >
-              <MoreVertical class="size-4" />
-            </Menu.Trigger>
-            <Portal>
-              <Menu.Positioner>
-                <Menu.Content
-                  class="card preset-tonal-surface p-1 min-w-[8rem]"
-                >
-                  <Menu.Item
-                    value="edit"
-                    class="flex items-center gap-2 px-3 py-2 rounded-base text-sm cursor-pointer hover:preset-filled-surface-500"
-                  >
-                    <Pencil class="size-4" />
-                    {common_edit()}
-                  </Menu.Item>
-                  <Menu.Item
-                    value="remove"
-                    class="flex items-center gap-2 px-3 py-2 rounded-base text-sm text-error-500 dark:text-error-400 cursor-pointer hover:preset-filled-error-500"
-                  >
-                    <Trash class="size-4" />
-                    {manage_agent_remove_agent()}
-                  </Menu.Item>
-                </Menu.Content>
-              </Menu.Positioner>
-            </Portal>
-          </Menu>
+            <Menu.Item value="edit" class={MENU_ITEM}>
+              <Pencil class="size-4" />
+              {common_edit()}
+            </Menu.Item>
+            <Menu.Item value="remove" class={MENU_ITEM_DANGER}>
+              <Trash class="size-4" />
+              {manage_agent_remove_agent()}
+            </Menu.Item>
+          </ActionMenu>
         </div>
         <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
           <div>

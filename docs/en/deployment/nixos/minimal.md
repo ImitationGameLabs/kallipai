@@ -78,6 +78,31 @@ in
           uri strip_prefix /v1/files
           reverse_proxy 127.0.0.1:${toString ports.files}
         }
+        # The model gateway's own API as the fifth /v1 service segment.
+        # Everything under the segment is the gateway's management face
+        # (profile reads, the admin family, health), so the stripped path
+        # routes on the management port. Every route on that face carries
+        # its own family credential (an admin token or a proxy key); the
+        # edge adds none.
+        handle_path /v1/model-gateway/* {
+          reverse_proxy 127.0.0.1:${toString config.services.kallipai.polis.gateway.managementPort}
+        }
+      '';
+
+      # The model gateway: its own host for the OpenAI wire (clients
+      # configure a /v1 base; the edge strips it before the gateway).
+      "http://model-gw.${domain}".extraConfig = ''
+        handle_path /v1/* {
+          # Streaming wire (chat completions stream): like the lesche
+          # segment, disable buffering so tokens reach clients live.
+          reverse_proxy 127.0.0.1:${toString config.services.kallipai.polis.gateway.port} {
+            flush_interval -1
+          }
+        }
+        # The fallback carries the same streaming surface.
+        reverse_proxy 127.0.0.1:${toString config.services.kallipai.polis.gateway.port} {
+          flush_interval -1
+        }
       '';
     };
   };
@@ -93,6 +118,7 @@ in
       "127.0.0.1" = [
         "app.kallipai.lan"
         "api.kallipai.lan"
+        "model-gw.kallipai.lan"
       ];
     };
   };
@@ -114,16 +140,47 @@ users.users."<username>".extraGroups = [ "kallipai-daemon" ];
 
 Once the NixOS configuration has built and switched to the new generation, verify the deployment as follows:
 
-Check the five units:
+Check the six units:
 
 ```sh
 systemctl status kallipai-daemon kallipai-archeion kallipai-lesche \
-  kallipai-files kallipai-instances
+  kallipai-files kallipai-instances kallipai-model-gateway
 ```
 
-Then confirm the two hosts answer: `api.kallipai.lan` for the
-platform and `app.kallipai.lan` for the web app. A healthy deployment: the app
-loads, you can sign up and sign in, and you can create a first agent.
+Then confirm the three hosts answer: `api.kallipai.lan` for the
+platform, `app.kallipai.lan` for the web app, and
+`model-gw.kallipai.lan` for the model gateway. A healthy deployment: the
+app loads, you can sign up and sign in, and you can create a first
+agent. The gateway exposes a health endpoint:
+
+```sh
+curl http://model-gw.kallipai.lan/health
+```
+
+## Gateway Admin Face
+
+The model gateway's management face carries two credential families on
+one port: the proxy key authorizes distribution reads and the
+forwarding face, and the platform identity authorizes the admin family.
+The families share no path and no failure path, so one credential says
+nothing about the other.
+
+The admin credential is the platform identity (the archeion). A request
+passes either with an archeion admin bearer (the machine and CLI
+channel) or with the local admin's platform session cookie (the browser
+channel: the admin page signs in with the platform account). A valid
+non-admin identity is authenticated but unauthorized (403); an
+invalid or absent credential is rejected (401); an unreachable
+archeion fails closed (503). With no archeion wiring configured the
+whole face is closed, and the distribution and forwarding faces run
+unaffected.
+
+The browser channel is hardened as a pair: session cookies are HttpOnly
+and SameSite=Strict, and state-changing requests must carry a custom
+header a cross-origin browser cannot synthesize. Sessions are opaque
+hashed credentials server-side. Attribution follows the credential:
+every admin change lands in the audit trail with the operator that made
+it, and profiles and sets record the account that owns them.
 
 ## Admin Token
 

@@ -7,6 +7,7 @@
   import { navigate } from "../lib/shell/port.ts";
   import type { PairResult } from "@kallipai/kallipai-archeion-client";
   import Brand from "../components/Brand.svelte";
+  import ReqMark from "../components/ReqMark.svelte";
   import Banner from "../components/Banner.svelte";
   import FormError from "../components/FormError.svelte";
   import {
@@ -147,7 +148,7 @@
     <label class="block space-y-1">
       <span class="text-sm opacity-70">
         {pair_code_label()}
-        <span class="text-error-500 dark:text-error-400">*</span>
+        <ReqMark />
       </span>
       <input
         class="input font-mono tracking-widest"

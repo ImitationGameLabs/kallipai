@@ -690,6 +690,16 @@ fn with_limits_sets_max_agents() {
         kallipai_adk::usage_stats::UsageStats::default(),
         kallipai_adk::token_budget::TokenBudget::unlimited(),
         None,
+        std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
+            crate::profile_source::SourceSlot::new(std::sync::Arc::new(
+                crate::profile_source::LocalProfileSource::new(),
+            )),
+        )),
+        std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
+            None::<crate::profile_source::GatewayParams>,
+        )),
+        Vec::new(),
+        None,
     );
     assert_eq!(state.max_agents, 50);
     assert_eq!(state.max_subagents, 20);

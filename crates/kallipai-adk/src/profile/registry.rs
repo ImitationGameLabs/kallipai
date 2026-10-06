@@ -33,23 +33,23 @@ pub struct ProfileRegistry {
 }
 
 impl ProfileRegistry {
-    /// Construct and validate: every set non-empty, and each set's `name` synchronized with
-    /// its map key (deserialization cannot fill it — `name` is skipped on
-    /// the wire — so this constructor is the single normalization point,
-    /// unconditionally overwriting `name` with the key; the name can never
-    /// disagree with the key it is addressed by). An empty collection is
-    /// allowed (profile-less boot — resolution dangles until a profile is
-    /// added). Provider existence, family, and base_url are validated by the
-    /// tagma when it builds the active set (see `kallipai_tagma::backend`);
-    /// the registry only checks structure.
+    /// Construct and normalize: each set's `name` is synchronized with its map key
+    /// (deserialization cannot fill it — `name` is skipped on the wire — so this
+    /// constructor is the single normalization point, unconditionally overwriting
+    /// `name` with the key; the name can never disagree with the key it is
+    /// addressed by). An empty collection is allowed (profile-less boot —
+    /// resolution dangles until a profile is added), and a memberless set is
+    /// held rather than rejected: the tagma's boot stays alive with the set
+    /// visible, while resolution of a binding to it fails per agent (see
+    /// [`select_set`](Self::select_set) and [`resolve_recorded_set`](Self::resolve_recorded_set)).
+    /// Provider existence, family, and base_url are validated by the tagma when
+    /// it builds the active set (see `kallipai_tagma::backend`); the registry
+    /// only checks structure.
     pub fn new(
         mut sets: BTreeMap<String, ProfileSet>,
         source: Arc<dyn BackendSource>,
     ) -> Result<Self> {
         for (key, set) in sets.iter_mut() {
-            if set.profiles.is_empty() {
-                bail!("set '{key}' has no profiles");
-            }
             set.name = key.clone();
         }
         Ok(Self { sets, source })
@@ -61,25 +61,38 @@ impl ProfileRegistry {
 
     /// Resolve a set by its exact name. Unknown names error with the available set names
     /// listed, so the caller surfaces an actionable message (spawn rejects with it; runtime
-    /// rebinds treat it as a dangling record).
+    /// rebinds treat it as a dangling record). A memberless set is held for
+    /// visibility but errors here: nothing in it can serve, so spawn refuses
+    /// the binding at the agent level.
     pub fn select_set(&self, name: &str) -> Result<&ProfileSet> {
-        self.sets.get(name).ok_or_else(|| {
+        let set = self.sets.get(name).ok_or_else(|| {
             let known: Vec<&str> = self.sets.keys().map(String::as_str).collect();
             anyhow::anyhow!(
                 "unknown profile set '{name}'; available sets: {}",
                 known.join(", ")
             )
-        })
+        })?;
+        if set.profiles.is_empty() {
+            bail!("profile set '{name}' has no profiles; add a member or rebind");
+        }
+        Ok(set)
     }
     /// Resolve the set a record is bound to. Spawn writes the binding;
     /// restore, reactivation, and delivery re-read it. A missing binding
     /// (record predates set binding) and an unknown name are the same
-    /// dangling state — callers surface it instead of guessing a set.
+    /// dangling state — callers surface it instead of guessing a set. A memberless
+    /// set is the same agent-level failure: the binding names a real set that
+    /// cannot serve, so restore, reactivation, and delivery all dangle on it.
     pub fn resolve_recorded_set(&self, binding: Option<&str>) -> Result<&ProfileSet, DanglingSet> {
         let name = binding.ok_or_else(|| self.dangling("agent record has no profile set"))?;
-        self.sets
+        let set = self
+            .sets
             .get(name)
-            .ok_or_else(|| self.dangling(&format!("unknown profile set '{name}'")))
+            .ok_or_else(|| self.dangling(&format!("unknown profile set '{name}'")))?;
+        if set.profiles.is_empty() {
+            return Err(self.dangling(&format!("profile set '{name}' has no profiles")));
+        }
+        Ok(set)
     }
 
     fn dangling(&self, reason: &str) -> DanglingSet {
@@ -291,20 +304,30 @@ mod tests {
     }
 
     #[test]
-    fn new_rejects_set_with_no_profiles() {
-        let res = ProfileRegistry::new(
-            BTreeMap::from([(
-                "empty".to_string(),
-                ProfileSet {
-                    name: "empty".into(),
-                    description: None,
-                    profiles: vec![],
-                },
-            )]),
-            Arc::new(MapSource(HashMap::new())),
+    fn memberless_set_is_held_and_fails_at_resolution() {
+        let sets = BTreeMap::from([(
+            "empty".to_string(),
+            ProfileSet {
+                name: "empty".into(),
+                description: None,
+                profiles: vec![],
+            },
+        )]);
+        let reg = ProfileRegistry::new(sets, Arc::new(MapSource(HashMap::new())))
+            .expect("memberless set is held, not rejected");
+        assert_eq!(reg.sets()["empty"].name, "empty");
+        let err = reg
+            .select_set("empty")
+            .expect_err("spawn-side select refuses a memberless set");
+        assert!(format!("{err}").contains("has no profiles"), "got: {err}");
+        let dangling = reg
+            .resolve_recorded_set(Some("empty"))
+            .expect_err("record-side resolve dangles on a memberless set");
+        assert!(
+            dangling.reason.contains("has no profiles"),
+            "got: {dangling:?}"
         );
-        let err = res.err().expect("empty set must be rejected");
-        assert!(format!("{err}").contains("'empty'"), "got: {err}");
+        assert_eq!(dangling.available, vec!["empty".to_string()]);
     }
 
     #[test]

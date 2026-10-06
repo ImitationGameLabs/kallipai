@@ -3,9 +3,8 @@
 use std::sync::Arc;
 
 use crate::db::Db;
-use crate::management::ManagementAuth;
-use crate::quota::QuotaLedger;
-use crate::secret::KeyCache;
+use crate::management::AdminAuth;
+use crate::secret::IdentityCache;
 
 /// State shared by every route handler: one cloneable handle to the durable
 /// store. Credential material never travels through this type -- handlers on
@@ -20,17 +19,14 @@ pub struct AppState {
     /// The gateway's own base URL, echoed as `base_url` in every
     /// distributed profile (the proxy self reference).
     pub public_base_url: String,
-    /// The in-memory quota ledger (rpm/tpm window counters), shared by
-    /// the forwarding path. Process-local by ruling: restarts reset the
-    /// windows; the database holds the audit rows and the budget sum.
-    pub quota: Arc<QuotaLedger>,
-    /// The management credential (the admin face's authenticator). The
-    /// proxy-key family never flows through here: distribution handlers
-    /// see this trait object but cannot resolve a proxy key with it, and
-    /// the secret module never sees the management credential.
-    pub management: Arc<dyn ManagementAuth>,
-    /// The process-local resolved-key cache for the distribution
-    /// read path. Management writes clear it after commit (see
-    /// [`KeyCache::clear`]); the store stays the source of truth.
-    pub key_cache: std::sync::Arc<KeyCache>,
+    /// The admin face's authentication source. The distribution read
+    /// path resolves its tagma bearers through the same verifier (see
+    /// [`crate::secret`]), but only the admin principal -- or the
+    /// local-admin session -- carries management rights: a tagma
+    /// bearer never opens the /admin face.
+    pub management: AdminAuth,
+    /// The process-local identity cache for the distribution read
+    /// path. Pure TTL staleness (the authority is the truth; see
+    /// [`IdentityCache`]).
+    pub identity_cache: Arc<IdentityCache>,
 }

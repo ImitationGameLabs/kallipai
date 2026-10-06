@@ -1,6 +1,6 @@
 ---
 title: Installing on Linux (FHS)
-description: Install the KallipAI tarball on a conventional x86_64 Linux distribution: user install, systemd setup, upgrades, and uninstall.
+description: "Install the KallipAI tarball on a conventional x86_64 Linux distribution: user install, systemd setup, upgrades, and uninstall."
 order: 15
 ---
 

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { MENU_ITEM, MENU_ITEM_DANGER } from "../../lib/classes.ts";
   // Sets pool for the profiles page: one draggable-profile container per
   // named set (name / description / default badge header, the set probe
   // footer, and the dashed add-set card). Drag state and drop mutations
@@ -6,21 +7,14 @@
   // (start/over/leave/end/drop) so both drop targets share one source of
   // truth.
   import type { SvelteMap } from "svelte/reactivity";
-  import { Menu, Portal } from "@skeletonlabs/skeleton-svelte";
-  import {
-    FlaskConical,
-    MoreVertical,
-    Pencil,
-    Plus,
-    Star,
-    Trash,
-  } from "@lucide/svelte";
+  import { Menu } from "@skeletonlabs/skeleton-svelte";
+  import ActionMenu from "../ActionMenu.svelte";
+  import { FlaskConical, Pencil, Plus, Star, Trash } from "@lucide/svelte";
   import type {
     ProfileModel,
     ProfileModelProbeReport,
     ProfileSet,
   } from "@kallipai/kallipai-client";
-  import { TONAL_ICON_SURF } from "../../lib/classes.ts";
   import ProfileCard from "./ProfileCard.svelte";
   import {
     profileKey,
@@ -76,6 +70,7 @@
     onSetDefault,
     onAddSet,
     onRemoveProfile,
+    readOnly = false,
   }: {
     /** Draft sets as name/value pairs (Object.entries order). */
     sets: readonly [string, ProfileSet][];
@@ -106,6 +101,7 @@
       profileIdx: number,
       profileId: string,
     ) => void;
+    readOnly?: boolean;
   } = $props();
 </script>
 
@@ -130,11 +126,16 @@
         ? 'outline-2 outline-dashed outline-primary-500'
         : ''}"
       ondragover={(e) => {
+        if (readOnly) return;
         e.preventDefault();
         onSetDragOver(setName);
       }}
-      ondragleave={() => onSetDragLeave(setName)}
+      ondragleave={() => {
+        if (readOnly) return;
+        onSetDragLeave(setName);
+      }}
       ondrop={(e) => {
+        if (readOnly) return;
         e.preventDefault();
         onSetDrop(setName);
       }}
@@ -166,58 +167,37 @@
             </p>
           {/if}
         </div>
-        <Menu
-          positioning={{ placement: "bottom-end" }}
-          onSelect={(e) => {
-            if (e.value === "test") onTestSet(setName);
-            else if (e.value === "default") onSetDefault(setName);
-            else if (e.value === "edit") onEditSet(setName);
-            else if (e.value === "remove") onRemoveSet(setName);
+        <ActionMenu
+          label={manage_profiles_set_actions_aria()}
+          disabled={isProbing || readOnly}
+          onSelect={(value) => {
+            if (value === "test") onTestSet(setName);
+            else if (value === "default" && !readOnly) onSetDefault(setName);
+            else if (value === "edit" && !readOnly) onEditSet(setName);
+            else if (value === "remove" && !readOnly) onRemoveSet(setName);
           }}
         >
-          <Menu.Trigger
-            class="size-10 {TONAL_ICON_SURF} shrink-0"
-            aria-label={manage_profiles_set_actions_aria()}
-            disabled={isProbing}
+          <Menu.Item value="test" class={MENU_ITEM}>
+            <FlaskConical class="size-4" />
+            {manage_profiles_test_all()}
+          </Menu.Item>
+          <Menu.Item
+            value="default"
+            disabled={defaultName === setName || readOnly}
+            class="{MENU_ITEM} data-[disabled]:cursor-not-allowed"
           >
-            <MoreVertical class="size-4" />
-          </Menu.Trigger>
-          <Portal>
-            <Menu.Positioner>
-              <Menu.Content class="card preset-tonal-surface p-1 min-w-[8rem]">
-                <Menu.Item
-                  value="test"
-                  class="flex items-center gap-2 px-3 py-2 rounded-base text-sm cursor-pointer hover:preset-filled-surface-500"
-                >
-                  <FlaskConical class="size-4" />
-                  {manage_profiles_test_all()}
-                </Menu.Item>
-                <Menu.Item
-                  value="default"
-                  disabled={defaultName === setName}
-                  class="flex items-center gap-2 px-3 py-2 rounded-base text-sm cursor-pointer hover:preset-filled-surface-500 data-[disabled]:cursor-not-allowed"
-                >
-                  <Star class="size-4" />
-                  {manage_profiles_set_as_default()}
-                </Menu.Item>
-                <Menu.Item
-                  value="edit"
-                  class="flex items-center gap-2 px-3 py-2 rounded-base text-sm cursor-pointer hover:preset-filled-surface-500"
-                >
-                  <Pencil class="size-4" />
-                  {common_edit()}
-                </Menu.Item>
-                <Menu.Item
-                  value="remove"
-                  class="flex items-center gap-2 px-3 py-2 rounded-base text-sm text-error-500 dark:text-error-400 cursor-pointer hover:preset-filled-error-500"
-                >
-                  <Trash class="size-4" />
-                  {common_remove()}
-                </Menu.Item>
-              </Menu.Content>
-            </Menu.Positioner>
-          </Portal>
-        </Menu>
+            <Star class="size-4" />
+            {manage_profiles_set_as_default()}
+          </Menu.Item>
+          <Menu.Item value="edit" class={MENU_ITEM}>
+            <Pencil class="size-4" />
+            {common_edit()}
+          </Menu.Item>
+          <Menu.Item value="remove" class={MENU_ITEM_DANGER}>
+            <Trash class="size-4" />
+            {common_remove()}
+          </Menu.Item>
+        </ActionMenu>
       </div>
 
       {#each set.profiles as profile, profileIdx (profileIdx)}
@@ -226,6 +206,7 @@
           {profile}
           {report}
           {isProbing}
+          {readOnly}
           onDragStart={(e: DragEvent) =>
             onCardDragStart(setName, profileIdx, profile.id, e)}
           onDragEnd={onCardDragEnd}
@@ -270,6 +251,7 @@
     type="button"
     class="card preset-tonal-surface border-2 border-dashed border-surface-400 p-4 flex items-center justify-center gap-2 min-h-24 w-full hover:preset-filled-surface-100-900 transition cursor-pointer"
     onclick={onAddSet}
+    disabled={readOnly}
   >
     <Plus class="size-6 opacity-70" />
     <span class="text-sm opacity-70">

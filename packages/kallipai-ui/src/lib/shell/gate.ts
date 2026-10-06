@@ -134,15 +134,21 @@ export function appGateDecision(args: {
       return { kind: "redirect", url: "/local" };
     }
     // /rooms is online-only (the archeion control plane is
-    // unreachable offline); `/` is the old offline root. A non-local
+    // unreachable offline); /admin and /gateway are the online
+    // management and user gateway areas. `/` is the old offline root.
+    // A non-local
     // /chat/{id} deep link is meaningless offline (no relay conversations
     // exist). All collapse to the local home.
     if (
+      args.pathname === "/admin" ||
+      args.pathname === "/gateway" ||
       args.pathname === "/rooms" ||
       args.pathname === "/chats" ||
       args.pathname.startsWith("/chats/") ||
       args.pathname === "/" ||
       args.pathname.startsWith("/chat/") ||
+      args.pathname.startsWith("/admin/") ||
+      args.pathname.startsWith("/gateway/") ||
       args.pathname.startsWith("/rooms/")
     ) {
       return { kind: "redirect", url: "/local" };

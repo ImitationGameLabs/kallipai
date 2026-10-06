@@ -31,6 +31,7 @@
     onEdit,
     onAdd,
     onRemove,
+    readOnly = false,
   }: {
     parking: readonly ProfileModel[];
     reports: SvelteMap<string, ProfileModelProbeReport>;
@@ -45,6 +46,7 @@
     onEdit: (idx: number) => void;
     onAdd: () => void;
     onRemove: (idx: number, profileId: string) => void;
+    readOnly?: boolean;
   } = $props();
 </script>
 
@@ -62,11 +64,16 @@
       ? 'outline-2 outline-dashed outline-primary-500'
       : ''}"
     ondragover={(e) => {
+      if (readOnly) return;
       e.preventDefault();
       onParkingDragOver();
     }}
-    ondragleave={onParkingDragLeave}
+    ondragleave={() => {
+      if (readOnly) return;
+      onParkingDragLeave();
+    }}
     ondrop={(e) => {
+      if (readOnly) return;
       e.preventDefault();
       onParkingDrop();
     }}
@@ -77,17 +84,23 @@
         {profile}
         {report}
         {isProbing}
+        {readOnly}
         onDragStart={(e) => onCardDragStart(idx, profile.id, e)}
         onDragEnd={onCardDragEnd}
         onTest={() => onTest(idx)}
-        onEdit={() => onEdit(idx)}
-        onRemove={() => onRemove(idx, profile.id)}
+        onEdit={() => {
+          if (!readOnly) onEdit(idx);
+        }}
+        onRemove={() => {
+          if (!readOnly) onRemove(idx, profile.id);
+        }}
       />
     {/each}
     <button
       type="button"
       class="card preset-tonal-surface border-2 border-dashed border-surface-400 p-4 flex items-center justify-center gap-2 min-h-24 w-full hover:preset-filled-surface-100-900 transition cursor-pointer"
       onclick={onAdd}
+      disabled={readOnly}
     >
       <Plus class="size-6 opacity-70" />
       <span class="text-sm opacity-70">

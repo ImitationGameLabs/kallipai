@@ -53,16 +53,5 @@
   "manage_instances_advanced_toggle": "Advanced",
   "manage_instances_mint_action": "Mint enrollment code",
   "manage_instances_mint_done_hint": "Give this code to your tagma (KALLIPAI_TAGMA_RELAY_ENROLLMENT_CODE). It shows once here; the pending row below keeps its masked form.",
-  "manage_instances_new": "New tagma",
-  "manage_instances_create_provider_label": "LLM credentials (optional)",
-  "manage_instances_create_provider_none": "Skip — add the key later",
-  "manage_instances_create_provider_locked_hint": "Encrypted keys unlock only in a passkey session on this device.",
-  "manage_instances_create_provider_model_label": "Model name",
-  "manage_instances_create_provider_model_placeholder": "e.g. deepseek-chat",
-  "manage_instances_push_not_applied": "Provider key stored on \"{slug}\" but no agent picked it up yet — use Apply on its profiles page.",
-  "manage_instances_push_verified": "Provider key delivered to \"{slug}\" and connect-checked.",
-  "manage_instances_push_unverified": "Provider key delivered to \"{slug}\", but the connect check failed — see its profiles page.",
-  "manage_instances_push_pending": "Delivering the provider key…",
-  "manage_instances_push_unreachable": "\"{slug}\" did not become reachable in time; nothing was pushed. Add the key on its profiles page.",
-  "manage_instances_push_failed": "\"{slug}\" rejected the provider key: {message}"
+  "manage_instances_new": "New tagma"
 }

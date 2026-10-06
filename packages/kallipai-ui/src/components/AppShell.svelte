@@ -40,14 +40,13 @@
 
   // The single structural fork: one matchMedia at the Tailwind md
   // breakpoint (48rem) mounts exactly one shell. The shells carry no
-  // media queries -- being mounted IS the viewport verdict -- so the
-  // old pair of always-alive Navigation instances toggled by
-  // hidden/md:grid classes is gone, and with it the duplicate nav tree
-  // in the DOM below md. Crossing the breakpoint swaps the mounted
-  // shell; shell-local transients (the More sheet and its open state)
-  // die with the unmount, which is the active-zeroing the old md
-  // listener used to enforce. The dynamic imports keep each shell in
-  // its own chunk, so a session on one form does not pay for the
+  // media queries -- being mounted IS the viewport verdict -- so one
+  // Navigation instance is alive at a time and the DOM below md
+  // carries no second nav tree. Crossing the breakpoint swaps the
+  // mounted shell; shell-local transients (the More sheet and its
+  // open state) die with the unmount, which zeroes their state on
+  // every crossing. The dynamic imports keep each shell in its
+  // own chunk, so a session on one form does not pay for the
   // other's markup.
   const mdQuery = matchMedia(desktopQuery);
   let desktop = $state(mdQuery.matches);

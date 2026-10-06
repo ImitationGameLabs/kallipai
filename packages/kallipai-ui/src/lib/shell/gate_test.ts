@@ -133,6 +133,37 @@ Deno.test("offline + /rooms -> redirect /local (rooms are online-only)", () => {
   });
 });
 
+Deno.test("offline + /admin -> redirect /local (admin area is online)", () => {
+  assertEquals(decide({ mode: "offline", pathname: "/admin" }), {
+    kind: "redirect",
+    url: "/local",
+  });
+});
+
+Deno.test("offline + /admin/gateway -> redirect /local", () => {
+  assertEquals(decide({ mode: "offline", pathname: "/admin/gateway" }), {
+    kind: "redirect",
+    url: "/local",
+  });
+});
+
+Deno.test(
+  "offline + /gateway -> redirect /local (user gateway is online)",
+  () => {
+    assertEquals(decide({ mode: "offline", pathname: "/gateway" }), {
+      kind: "redirect",
+      url: "/local",
+    });
+  },
+);
+
+Deno.test("offline + /gateway/{deep} -> redirect /local", () => {
+  assertEquals(decide({ mode: "offline", pathname: "/gateway/x-1" }), {
+    kind: "redirect",
+    url: "/local",
+  });
+});
+
 Deno.test("offline + / -> redirect /local (old offline root)", () => {
   assertEquals(decide({ mode: "offline", pathname: "/" }), {
     kind: "redirect",

@@ -12,6 +12,7 @@ import type {
   ProfileProbeRequest,
   ProfileProvider,
   ProfileSet,
+  ReasoningEffort,
   TaskEventExport,
   TaskExport,
 } from "@kallipai/kallipai-client";
@@ -204,6 +205,15 @@ export const MODALITY_ORDER: readonly Modality[] = [
   "video",
 ];
 
+/** The wire effort tiers (mirrors the client ReasoningEffort union). */
+export const EFFORT_OPTIONS: readonly ReasoningEffort[] = [
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+];
+
 /** Modalities a profile declares; absent = text-only (the server default). */
 export function profileModalities(profile: ProfileModel): readonly Modality[] {
   return profile.modalities ?? ["text"];
@@ -235,14 +245,14 @@ export function formatModalities(modalities: readonly Modality[]): string {
   return MODALITY_ORDER.filter((m) => modalities.includes(m)).join(", ");
 }
 
-/** Modalities for the wire: a text-only selection is the server
- * default and rides as absent (keeps isDirty honest); anything
- * else is carried as declared.
+/** Modalities for the wire: a text-only or empty selection is the
+ * server default and rides as absent (keeps isDirty honest);
+ * anything else is carried as declared.
  */
 export function normalizeModalities(
   modalities: readonly Modality[],
 ): readonly Modality[] | undefined {
-  if (modalities.length === 1 && modalities[0] === "text") {
+  if (modalities.every((m) => m === "text")) {
     return undefined;
   }
   return [...modalities];

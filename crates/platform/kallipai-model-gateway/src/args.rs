@@ -43,14 +43,14 @@ pub struct Args {
     #[arg(long, env = "KALLIPAI_MODEL_GATEWAY_CORS_ORIGINS", default_value = "")]
     pub cors_origins: String,
     /// The gateway's own base URL as clients should reach it -- the
-    /// `base_url` field of every distributed profile (the design doc's
-    /// "base_url = the proxy itself"; tagmas point their provider config
-    /// here). Includes the `/v1` prefix: consumers append
-    /// `chat/completions` to this base.
+    /// `base_url` field of every distributed profile (the proxy itself;
+    /// tagmas point their provider config here). Consumers append
+    /// `chat/completions` to it: the bare origin reaches the data plane
+    /// directly; the `/v1`-prefixed form needs an edge that strips it.
     #[arg(
         long,
         env = "KALLIPAI_MODEL_GATEWAY_PUBLIC_BASE_URL",
-        default_value = "http://127.0.0.1:7501/v1"
+        default_value = "http://127.0.0.1:7501"
     )]
     pub public_base_url: String,
     /// Postgres URL for the gateway's durable store (e.g.
@@ -59,17 +59,18 @@ pub struct Args {
     /// fails fast at boot rather than silently running stateless.
     #[arg(long, env = "KALLIPAI_MODEL_GATEWAY_DATABASE_URL")]
     pub database_url: String,
-    /// Static management token for the admin face (sent as
-    /// `Authorization: Bearer <token>`). Read once at boot; rotating it
-    /// means restarting the process. Unset (empty) closes the management
-    /// face: every admin request is refused with 401 while the
-    /// distribution and forwarding faces run unaffected.
-    #[arg(
-        long,
-        env = "KALLIPAI_MODEL_GATEWAY_MANAGEMENT_TOKEN",
-        default_value = ""
-    )]
-    pub management_token: String,
+    /// Archeion internal root the admin face authenticates against (e.g.
+    /// `http://127.0.0.1:7100`). Unset closes the management face: every
+    /// admin request is refused with 401 while the distribution and
+    /// forwarding faces run unaffected.
+    #[arg(long, env = "KALLIPAI_MODEL_GATEWAY_ARCHEION_URL")]
+    pub archeion_url: Option<String>,
+    /// File holding the archeion-internal shared secret (the value the
+    /// archeion provisions at first boot; read once at boot). Required
+    /// together with `archeion_url`; without the pair the management face
+    /// stays closed.
+    #[arg(long, env = "KALLIPAI_MODEL_GATEWAY_INTERNAL_TOKEN_FILE")]
+    pub internal_token_file: Option<String>,
 }
 
 #[cfg(test)]
@@ -100,7 +101,7 @@ mod tests {
         ]);
         assert_eq!(args.listen_addr, "127.0.0.1:7501");
         assert_eq!(args.management_listen_addr, "127.0.0.1:7500");
-        assert_eq!(args.public_base_url, "http://127.0.0.1:7501/v1");
+        assert_eq!(args.public_base_url, "http://127.0.0.1:7501");
         // The two faces must stay on distinct ports.
         assert_ne!(args.listen_addr, args.management_listen_addr);
     }

@@ -1,10 +1,11 @@
 //! HTTP surface of the gateway, assembled as two physically separate
 //! planes on two listeners of one process:
 //!
-//! - the data plane: distribution GETs (secret-free registry reads), the
-//!   LLM-compatible forwarding POST, and the process health probe -- the
-//!   surface LLM clients and tagmas talk to;
-//! - the management plane: the /admin family behind its own credential.
+//! - the data plane: the pingora face on the public address, whose
+//!   routes live in `data_plane::routes` (the dispatch table, the
+//!   forwarding POSTs and the health probe);
+//! - the management plane: the /admin family and the distribution
+//!   reads, each behind its own credential family.
 //!
 //! The split keeps the LLM-client-compatible surface and the house
 //! namespace from constraining each other's paths or versions, and lets
@@ -14,64 +15,63 @@
 
 use axum::Router;
 use axum::http::{HeaderValue, Method};
-use axum::routing::{get, post};
+use axum::routing::{get, put};
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use crate::state::AppState;
 
 pub use kallipai_common::protocol::ApiError;
 
-/// Build the data-plane router: the distribution face's secret-free
-/// registry reads, the LLM-compatible forwarding endpoint, and the
-/// process health probe. Served on the public address; the management
-/// face shares no route and no listener with it.
-pub fn data_plane_router(state: AppState, cors_origins: &str) -> Router {
+/// Build the management-plane router: the /admin family behind its own
+/// credential (AdminToken), the distribution reads behind theirs (the
+/// tagma bearer): two disjoint route families on one listener. Health is
+/// mounted here too: a process probe, not a member of either route
+/// family. No explicit body limit is installed: the payloads are
+/// small JSON, and axum's default 2 MiB cap is more than enough (the
+/// 8 MiB forwarding cap is data-plane only).
+pub fn management_plane_router(state: AppState, cors_origins: &str) -> Router {
     Router::new()
+        .nest("/admin", crate::management::router())
+        .nest("/user", crate::management::user_routes::router())
+        // The distribution reads: the tagma-bearer-authenticated, secret-free
+        // profile API, mounted at the root of the management face (the
+        // api edge routes the stripped /v1/model-gateway segment here).
+        .route("/sets", get(crate::distribution::get_sets))
+        .route("/sets/{name}", get(crate::distribution::get_set))
+        .route("/parking", get(crate::distribution::get_parking))
         .route(
             "/profiles/{profile_id}",
             get(crate::distribution::get_profile),
         )
-        .route("/sets/{name}", get(crate::distribution::get_set))
-        .route("/sets", get(crate::distribution::get_sets))
-        .route("/parking", get(crate::distribution::get_parking))
-        .route("/default", get(crate::distribution::get_default))
         .route(
-            "/v1/chat/completions",
-            post(crate::forward::chat_completions),
+            "/selection",
+            put(crate::distribution::put_selection).delete(crate::distribution::delete_selection),
+        )
+        .route(
+            "/selected-collection",
+            get(crate::distribution::get_selected_collection),
         )
         .route("/health", get(health))
         .with_state(state)
-        .layer(axum::extract::DefaultBodyLimit::max(
-            crate::forward::MAX_BODY_BYTES,
-        ))
-        .layer(cors_layer(cors_origins))
-}
-
-/// Build the management-plane router: the /admin family behind its own
-/// credential (AdminToken), served on its own listener. Health is
-/// mounted here too: it is a process probe, not a member of either
-/// route family, so an orchestration watching either address sees the
-/// same liveness answer. No explicit body limit is installed here: the
-/// admin payloads are small JSON, and axum's default 2 MiB cap is
-/// more than enough (the 8 MiB forwarding cap is data-plane only).
-pub fn management_plane_router(state: AppState, cors_origins: &str) -> Router {
-    Router::new()
-        .nest("/admin", crate::management::routes::router())
-        .route("/health", get(health))
-        .with_state(state)
+        // The CSRF guard (the cookie channel's second pillar) sits inside
+        // the CORS layer: preflights answer before it, and its own
+        // GET/HEAD/OPTIONS exemption keeps the distribution reads untouched.
+        .layer(axum::middleware::from_fn(crate::management::csrf_guard))
         .layer(cors_layer(cors_origins))
 }
 
 /// GET /health: no authentication, on purpose -- compose healthcheck, the
-/// files service's health route is the precedent.
+/// files service's health route is the precedent. Mounted on the
+/// management router here; the pingora data plane answers its own copy
+/// in `request_filter`.
 async fn health() -> &'static str {
     "ok"
 }
 
 /// `cors_layer` (credentials-aware, explicit method list, never a wildcard
 /// origin) -- the lesche variant, NOT the tagma permissive one. The method
-/// list is hand-maintained: `GET` for the distribution surface, `POST`
-/// for the forwarding surface, `PUT`/`DELETE` for the management face.
+/// list is hand-maintained: `GET` for the distribution reads, `POST`
+/// for the forwarding surface, `PUT`/`PATCH`/`DELETE` for the admin face.
 /// empty allowlist (no cross-origin allowed), never an open hole.
 pub fn cors_layer(origins: &str) -> CorsLayer {
     let allowed: Vec<HeaderValue> = origins
@@ -91,13 +91,21 @@ pub fn cors_layer(origins: &str) -> CorsLayer {
     };
     CorsLayer::new()
         .allow_origin(origin)
-        .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE])
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::PATCH,
+            Method::DELETE,
+        ])
         // The forward client and the browser app both send Authorization;
         // the Fetch spec excludes it from the `*` wildcard, so list the
         // request headers we actually accept explicitly (lesche twin).
         .allow_headers([
             axum::http::header::AUTHORIZATION,
             axum::http::header::CONTENT_TYPE,
+            // The browser channel's CSRF marker (see csrf_guard).
+            axum::http::header::HeaderName::from_static(crate::management::CSRF_HEADER),
         ])
         .allow_credentials(true)
 }
@@ -105,7 +113,7 @@ pub fn cors_layer(origins: &str) -> CorsLayer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::raw_test_db;
+    use crate::test_support::{TEST_ADMIN_BEARER, migrated_test_db, raw_test_db};
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt;
@@ -115,13 +123,12 @@ mod tests {
     #[tokio::test]
     async fn health_answers_ok_without_auth() {
         let db = raw_test_db().await;
-        let app = data_plane_router(
+        let app = management_plane_router(
             AppState {
                 db,
                 public_base_url: "http://127.0.0.1:7501".to_string(),
-                quota: std::sync::Arc::new(crate::quota::QuotaLedger::new()),
                 management: crate::test_support::test_management(),
-                key_cache: std::sync::Arc::new(crate::secret::KeyCache::default()),
+                identity_cache: std::sync::Arc::new(crate::secret::IdentityCache::default()),
             },
             "",
         );
@@ -139,36 +146,41 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
     }
 
-    /// The two planes share no routes: an admin path is a plain 404 on
-    /// the data plane and a data path is a plain 404 on the management
-    /// plane. The physical separation starts at the route table -- no
-    /// path is reachable on the wrong listener, whatever credentials a
-    /// request carries.
+    /// The two route families stay disjoint: an admin path is a plain
+    /// 404 on the data plane and a forwarding path is unknown on the
+    /// management plane. The physical separation starts at the route
+    /// table -- no path is reachable on the wrong listener, whatever
+    /// credentials a request carries.
     #[tokio::test]
     async fn the_planes_share_no_routes() {
-        let db = raw_test_db().await;
+        let db = migrated_test_db().await;
         let state = AppState {
             db,
             public_base_url: "http://127.0.0.1:7501".to_string(),
-            quota: std::sync::Arc::new(crate::quota::QuotaLedger::new()),
             management: crate::test_support::test_management(),
-            key_cache: std::sync::Arc::new(crate::secret::KeyCache::default()),
+            identity_cache: std::sync::Arc::new(crate::secret::IdentityCache::default()),
         };
-        let data = data_plane_router(state.clone(), "");
         let management = management_plane_router(state, "");
 
-        let response = data
-            .oneshot(
-                Request::builder()
-                    .uri("/admin/keys")
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("infallible oneshot");
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        // The data plane's half is a dispatch pin now: the /admin
+        // family (bare prefix included) routes to the Admin
+        // short-circuit -- a 404 on the public port, never a proxy-through;
+        // the distribution reads are gone from its dispatch table.
+        assert!(matches!(
+            crate::data_plane::routes::route_of(&Method::GET, "/sets"),
+            crate::data_plane::Route::NotFound
+        ));
+        assert!(matches!(
+            crate::data_plane::routes::route_of(&Method::GET, "/admin/keys"),
+            crate::data_plane::Route::Admin
+        ));
+        assert!(matches!(
+            crate::data_plane::routes::route_of(&Method::GET, "/admin"),
+            crate::data_plane::Route::Admin
+        ));
 
         let response = management
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri("/sets")
@@ -177,7 +189,23 @@ mod tests {
             )
             .await
             .expect("infallible oneshot");
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        // The distribution reads live here: no platform bearer means
+        // the extractor's 401, not a 404.
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        // Even the management credential is the wrong family for the
+        // reads: they never consult the admin token (family, not port).
+        let response = management
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/sets")
+                    .header("authorization", format!("Bearer {TEST_ADMIN_BEARER}"))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("infallible oneshot");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
     /// A wildcard-origin config yields an empty allowlist: no request gets
@@ -267,7 +295,7 @@ mod cors_tests {
             .unwrap();
         let mut advertised: Vec<&str> = advertised.split(',').map(str::trim).collect();
         advertised.sort_unstable();
-        assert_eq!(advertised, vec!["DELETE", "GET", "POST", "PUT"]);
+        assert_eq!(advertised, vec!["DELETE", "GET", "PATCH", "POST", "PUT"]);
         assert_eq!(
             response
                 .headers()
