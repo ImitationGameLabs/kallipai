@@ -82,8 +82,8 @@ async fn consume_stream(
                         // The partial content already emitted via deltas is void; the caller re-sends
                         // the same request and emits a `StreamReset` so downstream folds/discards it.
                         warn!(
-                            "LLM stream dropped mid-stream: {}",
-                            crate::llm_error::render_error(&e)
+                            error = %crate::llm_error::render_error(&e),
+                            "LLM stream dropped mid-stream"
                         );
                         return StreamOutcome::Transient(e);
                     }
