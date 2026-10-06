@@ -510,10 +510,10 @@ in
           default = defaultGatewayPorts.management;
           description = ''
             Listening port of the gateway's management API face (the
-            /admin family and /metrics). Binds the loopback and is not
-            published by the module: the admin namespace is house-only.
-            Must be 1024-65535; a conflict surfaces at service start
-            as an address-in-use error.
+            /admin family, the distribution reads, and /metrics). Binds
+            the loopback and is not published by the module: the admin
+            namespace is house-only. Must be 1024-65535; a conflict
+            surfaces at service start as an address-in-use error.
           '';
         };
 
@@ -521,8 +521,8 @@ in
           type = lib.types.port;
           default = defaultGatewayPorts.data;
           description = ''
-            Listening port of the forwarding face (distribution reads,
-            forwarding, health). Must be 1024-65535; a conflict surfaces
+            Listening port of the forwarding face (the LLM-compatible
+            wire and health). Must be 1024-65535; a conflict surfaces
             at service start as an address-in-use error.
           '';
         };

@@ -15,7 +15,7 @@ use clap::Parser;
 )]
 pub struct Args {
     /// Data-plane address to listen on (behind a TLS-terminating
-    /// reverse proxy): distribution reads, forwarding, and health.
+    /// reverse proxy): forwarding and health.
     /// Default is 7501: the platform's managed services hold the 7x00
     /// range (7100 archeion, 7200 lesche, 7300 instances, 7400 files),
     /// and those are management faces, so the LLM-compatible
