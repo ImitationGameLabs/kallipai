@@ -163,8 +163,14 @@ agents; the lesche message route returns 503).
 #### Archeion Side
 
 ```sh
-arion up -d                # caddy + archeion + lesche + files + instances + archeion-postgres + lesche-postgres + files-postgres (arion builds the workspace via the flake)
+arion up -d                # caddy + archeion + lesche + files + instances + archeion-postgres + lesche-postgres + files-postgres + gateway + gateway-postgres + prometheus (arion builds the workspace via the flake)
 ```
+
+The model gateway rides the same stack: `gateway` + `gateway-postgres` +
+`prometheus`. The gateway's data plane publishes loopback-only at
+`127.0.0.1:7501` (`KALLIPAI_ARION_GATEWAY_PORT` overrides it);
+prometheus serves `127.0.0.1:9090` and scrapes the gateway's metrics
+face every 30 seconds.
 
 Dev is fronted by Caddy (see the one-time setup above): the browser loads the
 web app at `https://app.kallipai.lan` and calls the platform at

@@ -39,6 +39,7 @@ fn test_state(db: crate::db::Db) -> AppState {
         public_base_url: "http://gw.test:7501".to_string(),
         management: crate::test_support::test_management(),
         identity_cache: std::sync::Arc::new(crate::secret::IdentityCache::default()),
+        metrics: crate::metrics::Metrics::private(),
     }
 }
 
@@ -50,6 +51,43 @@ async fn spawn_plane(db: crate::db::Db) -> String {
     spawn_data_plane(addr.clone(), test_state(db), String::new()).expect("spawn data plane");
     wait_for_listener(&addr);
     format!("http://{addr}")
+}
+
+/// The same plane with a metrics handle the test can read: the handle
+/// shares the collectors the phases write, so assertions read what the
+/// phases recorded.
+async fn spawn_plane_with_metrics(db: crate::db::Db) -> (String, crate::metrics::Metrics) {
+    let addr = next_addr();
+    let metrics = crate::metrics::Metrics::private();
+    let state = AppState {
+        db,
+        public_base_url: "http://gw.test:7501".to_string(),
+        management: crate::test_support::test_management(),
+        identity_cache: std::sync::Arc::new(crate::secret::IdentityCache::default()),
+        metrics: metrics.clone(),
+    };
+    spawn_data_plane(addr.clone(), state, String::new()).expect("spawn data plane");
+    wait_for_listener(&addr);
+    (format!("http://{addr}"), metrics)
+}
+
+/// Await a forward-outcome count: the terminal `logging` phase races
+/// with the client seeing its response, so the assertion polls briefly
+/// instead of assuming ordering.
+async fn await_forward_count(
+    metrics: &crate::metrics::Metrics,
+    outcome: crate::metrics::ForwardOutcome,
+    expected: u64,
+) {
+    for _ in 0..500 {
+        if metrics.forward_count(crate::forward::dialect::Endpoint::ChatCompletions, outcome)
+            >= expected
+        {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("forward outcome {outcome:?} never reached {expected}");
 }
 
 /// A taken port is the caller's error, not a background panic: the
@@ -188,7 +226,7 @@ async fn forward_injects_upstream_authorization_and_passes_through() {
     let db = migrated_test_db().await;
     let (upstream_base, seen) = spawn_mock_upstream().await;
     crate::test_support::seed_registry(&db, &upstream_base).await;
-    let base = spawn_plane(db).await;
+    let (base, metrics) = spawn_plane_with_metrics(db).await;
 
     let response = post_generation(
         &base,
@@ -208,6 +246,101 @@ async fn forward_injects_upstream_authorization_and_passes_through() {
         .and_then(|h| h.get("authorization"))
         .and_then(|v| v.to_str().ok());
     assert_eq!(auth, Some(format!("Bearer {UPSTREAM_KEY}").as_str()));
+    // The forward landed its terminal class and the in-flight gauge
+    // paired its decrement with the selection-time increment.
+    await_forward_count(&metrics, crate::metrics::ForwardOutcome::Upstream2xx, 1).await;
+    assert_eq!(metrics.in_flight_value(), 0);
+}
+
+/// The upstream label on the upstream families is the credential's URL
+/// authority (host and port), never a directory identity: this
+/// fixture's profile id and provider id disagree on purpose, so a
+/// directory-keyed label would surface as the wrong series (or
+/// none) carrying the observation.
+#[tokio::test]
+async fn upstream_histograms_label_the_url_authority() {
+    use crate::registry::{profile, provider, set_member};
+    use sea_orm::ActiveModelTrait;
+    use sea_orm::Set;
+
+    let db = migrated_test_db().await;
+    let (upstream_base, _seen) = spawn_mock_upstream().await;
+    crate::test_support::seed_registry(&db, &upstream_base).await;
+
+    provider::ActiveModel {
+        owner: Set(crate::registry::CATALOG_OWNER.to_string()),
+        provider_id: Set("pv-9".to_string()),
+        family: Set("deepseek".to_string()),
+        base_url: Set(Some(upstream_base.clone())),
+        ..Default::default()
+    }
+    .insert(&db)
+    .await
+    .expect("insert the distinct provider");
+    crate::secret::provider_credential::ActiveModel {
+        owner: Set(crate::registry::CATALOG_OWNER.to_string()),
+        provider_id: Set("pv-9".to_string()),
+        api_key: Set(crate::test_support::UPSTREAM_KEY.to_string()),
+    }
+    .insert(&db)
+    .await
+    .expect("insert the distinct credential");
+    profile::ActiveModel {
+        profile_id: Set("pf-9".to_string()),
+        provider_id: Set("pv-9".to_string()),
+        model: Set("deepseek-chat".to_string()),
+        max_context_window: Set(Some(128_000)),
+        effort: Set(Some("high".to_string())),
+        modalities: Set(Some("[\"text\"]".to_string())),
+        parked: Set(false),
+        store: Set(None),
+        owner: Set(crate::registry::CATALOG_OWNER.to_string()),
+    }
+    .insert(&db)
+    .await
+    .expect("insert the distinct profile");
+    set_member::ActiveModel {
+        set_name: Set("alpha".to_string()),
+        profile_id: Set("pf-9".to_string()),
+        position: Set(9),
+        owner: Set(crate::registry::CATALOG_OWNER.to_string()),
+    }
+    .insert(&db)
+    .await
+    .expect("insert the distinct member");
+
+    let (base, metrics) = spawn_plane_with_metrics(db).await;
+    let response = post_generation(
+        &base,
+        "/chat/completions",
+        TEST_TAGMA_BEARER,
+        Some("pf-9"),
+        r#"{"model":"deepseek-chat","messages":[{"role":"user","content":"hi"}]}"#,
+        &[],
+    )
+    .await;
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    await_forward_count(&metrics, crate::metrics::ForwardOutcome::Upstream2xx, 1).await;
+    let text = metrics.render();
+    let authority = upstream_base
+        .strip_prefix("http://")
+        .unwrap_or(&upstream_base);
+    assert!(
+        text.contains(&format!(
+            "kallipai_model_gateway_upstream_time_to_first_header_seconds_count{{upstream=\"{authority}\"}}"
+        )),
+        "the label must be the upstream authority:\n{text}"
+    );
+    assert!(
+        text.contains(&format!(
+            "kallipai_model_gateway_upstream_responses_total{{api_family=\"deepseek\",status_class=\"2xx\",upstream=\"{authority}\"}} 1"
+        )),
+        "the attribution table must carry the response class:\n{text}"
+    );
+    assert!(
+        !text.contains("system/pf-9") && !text.contains("system/pv-9"),
+        "no directory identity may leak into an upstream label:\n{text}"
+    );
 }
 
 /// Authorization scoping on the forward path: unknown bearer 401, a
@@ -218,7 +351,7 @@ async fn forward_rejects_unknown_bearers_and_out_of_domain_profiles() {
     let db = migrated_test_db().await;
     let (upstream_base, _seen) = spawn_mock_upstream().await;
     crate::test_support::seed_registry(&db, &upstream_base).await;
-    let base = spawn_plane(db).await;
+    let (base, metrics) = spawn_plane_with_metrics(db).await;
 
     let response =
         post_generation(&base, "/chat/completions", "not-a-bearer", None, "{}", &[]).await;
@@ -245,6 +378,20 @@ async fn forward_rejects_unknown_bearers_and_out_of_domain_profiles() {
     )
     .await;
     assert_eq!(response.status(), axum::http::StatusCode::NOT_FOUND);
+
+    // The observability face: one identity resolution per attempt, one
+    // forward outcome per request, each under its own class.
+    assert_eq!(
+        metrics.identity_count(crate::metrics::IdentityOutcome::Unauthorized),
+        1
+    );
+    assert_eq!(
+        metrics.identity_count(crate::metrics::IdentityOutcome::Ok),
+        2
+    );
+    await_forward_count(&metrics, crate::metrics::ForwardOutcome::GatedAuth, 1).await;
+    await_forward_count(&metrics, crate::metrics::ForwardOutcome::GatedVisibility, 1).await;
+    await_forward_count(&metrics, crate::metrics::ForwardOutcome::GatedRoute, 1).await;
 }
 
 /// The un-overridden face: the selected collection's default set
@@ -599,7 +746,7 @@ async fn forward_rejects_parked_profiles_inside_the_domain() {
     ))
     .await
     .expect("park the parked profile into the allowed set");
-    let base = spawn_plane(db).await;
+    let (base, metrics) = spawn_plane_with_metrics(db).await;
 
     let response = post_generation(
         &base,
@@ -611,6 +758,9 @@ async fn forward_rejects_parked_profiles_inside_the_domain() {
     )
     .await;
     assert_eq!(response.status(), axum::http::StatusCode::FORBIDDEN);
+    // Parking is its own observable class: a platform state, not an
+    // error.
+    await_forward_count(&metrics, crate::metrics::ForwardOutcome::GatedParking, 1).await;
 }
 
 /// The family gate: an endpoint refuses profiles whose family it

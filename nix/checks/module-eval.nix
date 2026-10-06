@@ -63,8 +63,8 @@
                 fsType = "ext4";
               };
             }
-            extraModules
-          ];
+          ]
+          ++ lib.toList extraModules;
         };
       aligned = evalHost {
         services.kallipai = {
@@ -190,6 +190,48 @@
           };
         };
       };
+      # The polis scrape export: empty with polis or gateway off; one
+      # job per enabled metrics-capable service (the gateway today)
+      # with the port following the service's own option, a drifted
+      # management port reaching the target; the module leaves
+      # services.prometheus untouched, and the documented wiring
+      # (copied verbatim as a function module) evaluates green.
+      scrapeOff = evalHost { services.kallipai.daemon.enable = true; };
+      scrapeGwOff = evalHost {
+        services.kallipai.polis = {
+          enable = true;
+          gateway.enable = false;
+        };
+      };
+      scrapeJob = lib.elemAt aligned.config.services.kallipai.polis.scrapeConfigs 0;
+      scrapeTarget = lib.elemAt (lib.elemAt scrapeJob.static_configs 0).targets 0;
+      scrapeDrifted = evalHost {
+        services.kallipai.polis = {
+          enable = true;
+          gateway.managementPort = 7510;
+        };
+      };
+      scrapeDriftedTarget = lib.elemAt (lib.elemAt (lib.elemAt scrapeDrifted.config.services.kallipai.polis.scrapeConfigs 0).static_configs 0).targets 0;
+      # Pins that the documented example evaluates; wiring in stays the host's call.
+      scrapeWired = evalHost [
+        {
+          services.kallipai.polis.enable = true;
+        }
+        (
+          {
+            config,
+            ...
+          }:
+          {
+            services.prometheus = {
+              enable = true;
+              scrapeConfigs = config.services.kallipai.polis.scrapeConfigs;
+            };
+          }
+        )
+      ];
+      wiredTarget = lib.elemAt (lib.elemAt (lib.elemAt scrapeWired.config.services.prometheus.scrapeConfigs 0).static_configs 0).targets 0;
+
       # The baking helper, called directly (no module), writes exactly
       # the payload it is given.
       directBake = bakeRuntimeConfig {
@@ -313,6 +355,25 @@
       # The gateway admin URL follows apiBase when the platform edge
       # moves (the default arm asserted beside the baked config.js).
       test "${webApiBase.config.services.kallipai.web.runtimeConfig.gatewayAdminUrl}" = "https://edge.example.com/v1/model-gateway"
+
+      # The polis scrape export: no polis or gateway leaves the
+      # list empty; a polis host gets one loopback job per
+      # metrics-capable service with the port following the service's
+      # own option; a drifted management port reaches the target; the
+      # module keeps services.prometheus off, and the documented
+      # wiring carries the job through verbatim. Stays assertion- and
+      # warning-free beside the polis family.
+      test "${toString (builtins.length scrapeOff.config.services.kallipai.polis.scrapeConfigs)}" = "0"
+      test "${toString (builtins.length scrapeGwOff.config.services.kallipai.polis.scrapeConfigs)}" = "0"
+      test "${lib.boolToString webDerived.config.services.prometheus.enable}" = "false"
+      test "${toString (builtins.length aligned.config.services.kallipai.polis.scrapeConfigs)}" = "1"
+      test "${scrapeJob.job_name}" = "kallipai-model-gateway"
+      test "${scrapeJob.scrape_interval}" = "30s"
+      test "${scrapeTarget}" = "127.0.0.1:7500"
+      test "${scrapeDriftedTarget}" = "127.0.0.1:7510"
+      test "${wiredTarget}" = "127.0.0.1:7500"
+      test "${toString (builtins.length (failedAssertions scrapeWired))}" = "0"
+      test "${toString (builtins.length scrapeWired.config.warnings)}" = "0"
       printf %s ok > "$out"
     '';
 }

@@ -29,4 +29,8 @@ pub struct AppState {
     /// path. Pure TTL staleness (the authority is the truth; see
     /// [`IdentityCache`]).
     pub identity_cache: Arc<IdentityCache>,
+    /// The macro-observability collectors the data plane writes from
+    /// its phase boundaries and the management plane renders at
+    /// `/metrics` (see [`crate::metrics`]).
+    pub metrics: crate::metrics::Metrics,
 }

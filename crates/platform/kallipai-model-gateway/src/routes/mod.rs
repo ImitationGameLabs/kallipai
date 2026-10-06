@@ -24,11 +24,11 @@ pub use kallipai_common::protocol::ApiError;
 
 /// Build the management-plane router: the /admin family behind its own
 /// credential (AdminToken), the distribution reads behind theirs (the
-/// tagma bearer): two disjoint route families on one listener. Health is
-/// mounted here too: a process probe, not a member of either route
-/// family. No explicit body limit is installed: the payloads are
-/// small JSON, and axum's default 2 MiB cap is more than enough (the
-/// 8 MiB forwarding cap is data-plane only).
+/// tagma bearer): two disjoint route families on one listener. Health
+/// and metrics are mounted here too: process probes, not members of
+/// either route family. No explicit body limit is installed: the
+/// payloads are small JSON, and axum's default 2 MiB cap is more than
+/// enough (the 8 MiB forwarding cap is data-plane only).
 pub fn management_plane_router(state: AppState, cors_origins: &str) -> Router {
     Router::new()
         .nest("/admin", crate::management::router())
@@ -52,6 +52,7 @@ pub fn management_plane_router(state: AppState, cors_origins: &str) -> Router {
             get(crate::distribution::get_selected_collection),
         )
         .route("/health", get(health))
+        .route("/metrics", get(render_metrics))
         .with_state(state)
         // The CSRF guard (the cookie channel's second pillar) sits inside
         // the CORS layer: preflights answer before it, and its own
@@ -66,6 +67,22 @@ pub fn management_plane_router(state: AppState, cors_origins: &str) -> Router {
 /// in `request_filter`.
 async fn health() -> &'static str {
     "ok"
+}
+
+/// GET /metrics: the Prometheus text exposition of the observability
+/// face. No authentication, on purpose -- the same probe family as
+/// /health (a scrape must survive credential outages), safe because
+/// the production faces bind loopback.
+async fn render_metrics(
+    axum::extract::State(state): axum::extract::State<crate::state::AppState>,
+) -> impl axum::response::IntoResponse {
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
+        state.metrics.render(),
+    )
 }
 
 /// `cors_layer` (credentials-aware, explicit method list, never a wildcard
@@ -129,6 +146,7 @@ mod tests {
                 public_base_url: "http://127.0.0.1:7501".to_string(),
                 management: crate::test_support::test_management(),
                 identity_cache: std::sync::Arc::new(crate::secret::IdentityCache::default()),
+                metrics: crate::metrics::Metrics::private(),
             },
             "",
         );
@@ -146,6 +164,47 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
     }
 
+    /// The metrics exposition answers 200 unauthenticated with the
+    /// Prometheus text content type (a scrape presents no credentials),
+    /// through the real router builder.
+    #[tokio::test]
+    async fn metrics_answers_the_prometheus_text_unauthenticated() {
+        let db = raw_test_db().await;
+        let app = management_plane_router(
+            AppState {
+                db,
+                public_base_url: "http://127.0.0.1:7501".to_string(),
+                management: crate::test_support::test_management(),
+                identity_cache: std::sync::Arc::new(crate::secret::IdentityCache::default()),
+                metrics: crate::metrics::Metrics::private(),
+            },
+            "",
+        );
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/metrics")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("infallible oneshot");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let content_type = response
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .expect("a content type");
+        assert!(content_type.starts_with("text/plain"));
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("the body");
+        let text = String::from_utf8(body.to_vec()).expect("utf-8 exposition");
+        assert!(text.contains("kallipai_model_gateway_build_info"));
+    }
+
     /// The two route families stay disjoint: an admin path is a plain
     /// 404 on the data plane and a forwarding path is unknown on the
     /// management plane. The physical separation starts at the route
@@ -159,6 +218,7 @@ mod tests {
             public_base_url: "http://127.0.0.1:7501".to_string(),
             management: crate::test_support::test_management(),
             identity_cache: std::sync::Arc::new(crate::secret::IdentityCache::default()),
+            metrics: crate::metrics::Metrics::private(),
         };
         let management = management_plane_router(state, "");
 

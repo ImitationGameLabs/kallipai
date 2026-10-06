@@ -17,6 +17,7 @@ use crate::db;
 pub(crate) use crate::distribution::TagmaIdentity;
 use crate::distribution::visibility;
 use crate::forward::{self, dialect};
+use crate::metrics::ForwardOutcome;
 use crate::registry;
 use crate::routes::ApiError;
 use crate::secret;
@@ -113,25 +114,68 @@ pub(crate) fn route_of(method: &Method, path: &str) -> Route {
 pub(crate) async fn authenticate(
     state: &AppState,
     headers: &HeaderMap,
-) -> Result<TagmaIdentity, Box<axum::response::Response>> {
-    TagmaIdentity::from_headers(state, headers)
-        .await
-        .map_err(|error| Box::new(error.into_response()))
+) -> Result<TagmaIdentity, ApiError> {
+    TagmaIdentity::from_headers(state, headers).await
+}
+
+/// A selection-gate rejection: the client's rendered answer plus the
+/// outcome class the observability face counts the request under.
+/// `request_filter` renders the response and stages the outcome; the
+/// `logging` phase is the single terminal record point.
+pub(crate) struct GateError {
+    pub(crate) outcome: ForwardOutcome,
+    response: Box<axum::response::Response>,
+}
+
+impl GateError {
+    /// The routing family: the request never reached an upstream (the
+    /// 404/405/400 vocabulary).
+    pub(crate) fn route(error: ApiError) -> Self {
+        Self::gate(ForwardOutcome::GatedRoute, error)
+    }
+
+    /// The visibility domain rejected the target (403).
+    pub(crate) fn visibility(error: ApiError) -> Self {
+        Self::gate(ForwardOutcome::GatedVisibility, error)
+    }
+
+    /// The target is parked: a platform state, not an error (403).
+    pub(crate) fn parking(error: ApiError) -> Self {
+        Self::gate(ForwardOutcome::GatedParking, error)
+    }
+
+    /// A gateway-side failure on the forward path (5xx): store errors,
+    /// missing credentials, unparseable endpoint prefixes.
+    pub(crate) fn internal(error: ApiError) -> Self {
+        Self::gate(ForwardOutcome::ProxyError, error)
+    }
+
+    fn gate(outcome: ForwardOutcome, error: ApiError) -> Self {
+        Self {
+            outcome,
+            response: Box::new(error.into_response()),
+        }
+    }
+
+    pub(crate) fn into_response(self) -> axum::response::Response {
+        *self.response
+    }
 }
 
 /// The forwarding selection: the explicit override, the visibility
 /// contract on it, the parking gate, the family gate, and the
 /// credential fetch. The outcome is
 /// everything the later phases need, so no phase after
-/// `request_filter` touches the registry again. The error side is the
-/// rendered response: the handler gates speak `ApiError` and travel to
-/// the client through the bridge.
+/// `request_filter` touches the registry again. The error side is a
+/// [`GateError`]: the gate's `ApiError` travels to the client through
+/// the bridge, and the outcome class travels to the observability
+/// face.
 pub(crate) async fn select_route(
     state: &AppState,
     identity: &TagmaIdentity,
     headers: &HeaderMap,
     endpoint: dialect::Endpoint,
-) -> Result<Selection, Box<axum::response::Response>> {
+) -> Result<Selection, GateError> {
     // Profile resolution: the explicit override, authorized under the
     // visibility domain -- then the parking gate. Availability is a
     // second gate orthogonal to authorization: a parked profile inside
@@ -148,16 +192,14 @@ pub(crate) async fn select_route(
             // accounts).
             let mut rows = registry::profiles_by_id(&state.db, explicit)
                 .await
-                .map_err(|e| Box::new(db::map_db_err(e).into_response()))?;
+                .map_err(|e| GateError::internal(db::map_db_err(e)))?;
             let Some(profile) = rows.pop() else {
-                return Err(Box::new(
-                    ApiError::not_found("no such profile").into_response(),
-                ));
+                return Err(GateError::route(ApiError::not_found("no such profile")));
             };
             let served = registry::served_profile(&state.db, profile)
                 .await
-                .map_err(|e| Box::new(db::map_db_err(e).into_response()))?
-                .ok_or_else(|| Box::new(ApiError::not_found("no such profile").into_response()))?;
+                .map_err(|e| GateError::internal(db::map_db_err(e)))?
+                .ok_or_else(|| GateError::route(ApiError::not_found("no such profile")))?;
             let grant = visibility::profile_grant(
                 &state.db,
                 &identity.viewer,
@@ -165,25 +207,20 @@ pub(crate) async fn select_route(
                 explicit,
             )
             .await
-            .map_err(|e| Box::new(db::map_db_err(e).into_response()))?;
+            .map_err(|e| GateError::internal(db::map_db_err(e)))?;
             match grant {
                 None if served.provider_owner == registry::CATALOG_OWNER => {
-                    return Err(Box::new(
-                        ApiError::forbidden("profile is outside the visibility domain")
-                            .into_response(),
-                    ));
+                    return Err(GateError::visibility(ApiError::forbidden(
+                        "profile is outside the visibility domain",
+                    )));
                 }
                 None => {
-                    return Err(Box::new(
-                        ApiError::not_found("no such profile").into_response(),
-                    ));
+                    return Err(GateError::route(ApiError::not_found("no such profile")));
                 }
                 Some(_) => {}
             }
             if served.profile.parked {
-                return Err(Box::new(
-                    ApiError::forbidden("profile is parked").into_response(),
-                ));
+                return Err(GateError::parking(ApiError::forbidden("profile is parked")));
             }
             served
         }
@@ -194,11 +231,11 @@ pub(crate) async fn select_route(
                 registry::gateway_selection::Entity::find_by_id(identity.tagma_id.clone())
                     .one(&state.db)
                     .await
-                    .map_err(|e| Box::new(db::map_db_err(e).into_response()))?
+                    .map_err(|e| GateError::internal(db::map_db_err(e)))?
             else {
-                return Err(Box::new(
-                    ApiError::not_found("no collection selected").into_response(),
-                ));
+                return Err(GateError::route(ApiError::not_found(
+                    "no collection selected",
+                )));
             };
             let Some(collection) = registry::collection::Entity::find_by_id((
                 pointer.owner.clone(),
@@ -206,17 +243,16 @@ pub(crate) async fn select_route(
             ))
             .one(&state.db)
             .await
-            .map_err(|e| Box::new(db::map_db_err(e).into_response()))?
+            .map_err(|e| GateError::internal(db::map_db_err(e)))?
             else {
-                return Err(Box::new(
-                    ApiError::not_found("the selected collection no longer exists").into_response(),
-                ));
+                return Err(GateError::route(ApiError::not_found(
+                    "the selected collection no longer exists",
+                )));
             };
             let Some(default_set) = collection.default_set_name.clone() else {
-                return Err(Box::new(
-                    ApiError::not_found("the selected collection has no default set")
-                        .into_response(),
-                ));
+                return Err(GateError::route(ApiError::not_found(
+                    "the selected collection has no default set",
+                )));
             };
             let served = registry::set_head_for_families(
                 &state.db,
@@ -225,14 +261,11 @@ pub(crate) async fn select_route(
                 endpoint.families(),
             )
             .await
-            .map_err(|e| Box::new(db::map_db_err(e).into_response()))?
+            .map_err(|e| GateError::internal(db::map_db_err(e)))?
             .ok_or_else(|| {
-                Box::new(
-                    ApiError::not_found(
-                        "the selected collection's default set has no member serving this endpoint",
-                    )
-                    .into_response(),
-                )
+                GateError::route(ApiError::not_found(
+                    "the selected collection's default set has no member serving this endpoint",
+                ))
             })?;
             // The domain gate is set-level, unlike the override
             // path's profile-level grant check: the default set
@@ -242,17 +275,14 @@ pub(crate) async fn select_route(
             // domain.
             if !visibility::set_visible(&state.db, &identity.viewer, &default_set)
                 .await
-                .map_err(|e| Box::new(db::map_db_err(e).into_response()))?
+                .map_err(|e| GateError::internal(db::map_db_err(e)))?
             {
-                return Err(Box::new(
-                    ApiError::forbidden("default profile is outside the visibility domain")
-                        .into_response(),
-                ));
+                return Err(GateError::visibility(ApiError::forbidden(
+                    "default profile is outside the visibility domain",
+                )));
             }
             if served.profile.parked {
-                return Err(Box::new(
-                    ApiError::forbidden("profile is parked").into_response(),
-                ));
+                return Err(GateError::parking(ApiError::forbidden("profile is parked")));
             }
             served
         }
@@ -262,34 +292,25 @@ pub(crate) async fn select_route(
     // a best-effort forward (the wire path and the credential shape
     // would both be guesses). The 400 names both sides of the mismatch.
     if !endpoint.families().contains(&served.family.as_str()) {
-        return Err(Box::new(
-            ApiError::bad_request(format!(
-                "profile family {:?} cannot serve this endpoint (serves {:?})",
-                served.family,
-                endpoint.families()
-            ))
-            .into_response(),
-        ));
+        return Err(GateError::route(ApiError::bad_request(format!(
+            "profile family {:?} cannot serve this endpoint (serves {:?})",
+            served.family,
+            endpoint.families()
+        ))));
     }
     let profile_id = served.profile.profile_id.clone();
     let credential = secret::credential_for_profile(&state.db, &served.profile)
         .await
-        .map_err(|e| Box::new(db::map_db_err(e).into_response()))?
+        .map_err(|e| GateError::internal(db::map_db_err(e)))?
         .ok_or_else(|| {
-            Box::new(
-                ApiError::internal(format_args!(
-                    "no provider credential for profile {profile_id}"
-                ))
-                .into_response(),
-            )
+            GateError::internal(ApiError::internal(format_args!(
+                "no provider credential for profile {profile_id}"
+            )))
         })?;
     let parsed = parse_endpoint_prefix(credential.endpoint_prefix()).ok_or_else(|| {
-        Box::new(
-            ApiError::internal(format_args!(
-                "the upstream endpoint prefix for profile {profile_id} does not parse"
-            ))
-            .into_response(),
-        )
+        GateError::internal(ApiError::internal(format_args!(
+            "the upstream endpoint prefix for profile {profile_id} does not parse"
+        )))
     })?;
     // SNI is the host: the certificate the upstream presents names the
     // host we dialed, and no per-credential SNI field exists.
@@ -303,6 +324,7 @@ pub(crate) async fn select_route(
         peer,
         credential,
         auth,
+        api_family: served.family.clone(),
         base_path: parsed.base_path,
         authority: parsed.authority,
     })

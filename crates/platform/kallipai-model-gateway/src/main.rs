@@ -15,8 +15,9 @@
 //! domain: both the explicit profile override and the default-set
 //! fallback answer 403 when the target profile is outside the
 //! presenting tagma's owner domain. Consuming identities are
-//! platform tokens (the archeion's verify-bearer); per-request
-//! metering and quota enforcement are suspended (metrics batch).
+//! platform tokens (the archeion's verify-bearer); macro
+//! observability is served at /metrics, and per-request usage
+//! metering awaits its body-scanning batch.
 
 mod args;
 mod audit;
@@ -25,6 +26,7 @@ mod db;
 mod distribution;
 mod forward;
 mod management;
+mod metrics;
 mod registry;
 mod routes;
 mod secret;
@@ -88,6 +90,7 @@ async fn main() -> Result<()> {
         public_base_url: args.public_base_url.clone(),
         identity_cache: std::sync::Arc::new(crate::secret::IdentityCache::default()),
         management: management_auth,
+        metrics: crate::metrics::Metrics::default_registry(),
     };
 
     // The data plane: pingora drives its own runtime on a dedicated

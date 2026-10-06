@@ -55,6 +55,7 @@ pub(crate) async fn seeded_state() -> AppState {
         public_base_url: "http://gw.test:7501".to_owned(),
         management: crate::test_support::test_management(),
         identity_cache: std::sync::Arc::new(crate::secret::IdentityCache::default()),
+        metrics: crate::metrics::Metrics::private(),
     }
 }
 

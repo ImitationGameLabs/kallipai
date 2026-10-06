@@ -80,10 +80,11 @@ in
         }
         # The model gateway's own API as the fifth /v1 service segment.
         # Everything under the segment is the gateway's management face
-        # (profile reads, the admin family, health), so the stripped path
-        # routes on the management port. Every route on that face carries
-        # its own family credential (an admin token or a proxy key); the
-        # edge adds none.
+        # (profile reads, the admin family, health, metrics), so the
+        # stripped path routes on the management port. Every route on
+        # that face carries its own family credential (an admin token or
+        # a proxy key) except the unauthenticated health and metrics
+        # probes; the edge adds none.
         handle_path /v1/model-gateway/* {
           reverse_proxy 127.0.0.1:${toString config.services.kallipai.polis.gateway.managementPort}
         }
@@ -155,6 +156,26 @@ agent. The gateway exposes a health endpoint:
 
 ```sh
 curl http://model-gw.kallipai.lan/health
+```
+
+The `/metrics` exposition rides the management port, not the
+model-gw host: reach it on the host itself at
+`http://127.0.0.1:7500/metrics`, or through the api edge at
+`http://api.kallipai.lan/v1/model-gateway/metrics`. It is the
+Prometheus text of the forwarding observability counters, with no
+credential: a probe that must survive credential outages.
+
+The NixOS module exports the scrape job for that face as a read-only
+list: `config.services.kallipai.polis.scrapeConfigs`. The exported job
+scrapes every 30 seconds. The module never starts a recorder; wire the
+list into the host's Prometheus on its own options (append more jobs
+with `++`, retention follows `services.prometheus.retentionTime`):
+
+```nix
+services.prometheus = {
+  enable = true;
+  scrapeConfigs = config.services.kallipai.polis.scrapeConfigs;
+};
 ```
 
 ## Gateway Admin Face

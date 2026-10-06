@@ -34,6 +34,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }
 pingora = { workspace = true }
+prometheus = { workspace = true, features = ["process"] }
 bytes = { workspace = true }
 
 [dev-dependencies]
@@ -41,3 +42,4 @@ tokio = { workspace = true, features = ["macros", "rt", "test-util"] }
 just-llm-client = { workspace = true }
 testcontainers = { workspace = true, features = ["reusable-containers"] }
 testcontainers-modules = { workspace = true }
+tempfile = { workspace = true }

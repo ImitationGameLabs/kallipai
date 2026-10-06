@@ -1,6 +1,8 @@
 # Dev archeion-side composition: caddy + archeion + lesche + files +
-# archeion-postgres + lesche-postgres + files-postgres + instances. The default
-# dev stack -- a plain `arion up` brings it up via the `arion-compose.nix` shim
+# archeion-postgres + lesche-postgres + files-postgres + instances + the
+# model-gateway stack (gateway + gateway-postgres + prometheus). The
+# default dev stack -- a plain `arion up` brings it up via the
+# `arion-compose.nix` shim
 # at the repo root (which just re-exports this module); invoke directly with
 # `arion -f compose/dev/polis.nix ...` for the same result.
 #
@@ -174,6 +176,7 @@ let
   archeionHostPort = envOrDefault "KALLIPAI_ARION_ARCHEION_PORT" "7100";
   lescheHostPort = envOrDefault "KALLIPAI_ARION_LESCHE_PORT" "7200";
   instancesHostPort = envOrDefault "KALLIPAI_ARION_INSTANCES_PORT" "7300";
+  gatewayHostPort = envOrDefault "KALLIPAI_ARION_GATEWAY_PORT" "7501";
   # Bound container stdout logs: the json-file driver caps each service's
   # on-disk log at 50m x 5 rotated files (docker logs reads them). Shared
   # verbatim by every service in this composition.
@@ -184,6 +187,17 @@ let
       "max-file" = "5";
     };
   };
+  # The scraper config for the compose prometheus: the same 30s single
+  # job the NixOS metrics switch pins, pointed at the gateway's
+  # management face by service name.
+  prometheusConfig = pkgs.writeText "prometheus.yml" ''
+    global:
+      scrape_interval: 30s
+    scrape_configs:
+      - job_name: kallipai-model-gateway
+        static_configs:
+          - targets: ["gateway:7500"]
+  '';
 in
 {
   imports = [ ./files.nix ];
@@ -207,6 +221,8 @@ in
       # The archeion-provisioned internal secret: written by the archeion
       # (rw), read by the lesche, files, and instances (ro).
       polis_internal = { };
+      gateway_pgdata = { };
+      prometheus_data = { };
     };
 
     # Container log rotation caps (50m x 5 json-file per service). The
@@ -218,6 +234,9 @@ in
     services.archeion.out.service.logging = logLimits;
     services.lesche.out.service.logging = logLimits;
     services.instances.out.service.logging = logLimits;
+    services.gateway-postgres.out.service.logging = logLimits;
+    services.gateway.out.service.logging = logLimits;
+    services.prometheus.out.service.logging = logLimits;
     # Dev-only hardcoded creds (prod reads them from .env).
     services.archeion-postgres = {
       service.image = "postgres:17.5";
@@ -232,6 +251,18 @@ in
     services.lesche-postgres = {
       service.image = "postgres:17.5";
       service.volumes = [ "lesche_pgdata:/var/lib/postgresql/data" ];
+      service.environment = {
+        POSTGRES_USER = "kallipai";
+        POSTGRES_PASSWORD = "kallipai";
+        POSTGRES_DB = "kallipai";
+      };
+    };
+
+    # The model gateway's own postgres: the same dev-only hardcoded
+    # creds shape as the two above (prod reads them from .env).
+    services.gateway-postgres = {
+      service.image = "postgres:17.5";
+      service.volumes = [ "gateway_pgdata:/var/lib/postgresql/data" ];
       service.environment = {
         POSTGRES_USER = "kallipai";
         POSTGRES_PASSWORD = "kallipai";
@@ -449,6 +480,65 @@ in
         KALLIPAI_INSTANCES_CORS_ORIGINS = appOrigin;
         RUST_LOG = "info";
       };
+    };
+
+    # The model gateway: the compose twin of the NixOS unit (nix/
+    # nixos-modules.nix). Runs the flake-built workspace binary (the same
+    # useHostStore shape as instances), pairs with its own postgres, and
+    # verifies its callers with the archeion-provisioned internal token
+    # (shared volume, read-only here). The data plane publishes
+    # loopback-only for host tooling; the management plane (the metrics
+    # face included) stays compose-internal: prometheus scrapes
+    # gateway:7500 by service name, never via the host.
+    services.gateway = {
+      service.useHostStore = true;
+      service.command = [ "${workspace}/bin/kallipai-model-gateway" ];
+      # Loopback-tight publish, same posture as instances: host-side
+      # tooling (curl, kallipctl) only; compose peers reach the data
+      # plane by service name.
+      service.ports = [ "127.0.0.1:${gatewayHostPort}:7501" ];
+      service.env_file = [ ".env" ];
+      # Soft dependency, same shape as the NixOS unit: a first boot
+      # before the archeion provisions the token degrades, not crashes.
+      service.depends_on = [
+        "archeion"
+        "gateway-postgres"
+      ];
+      service.volumes = [ "polis_internal:/var/lib/kallipai/internal:ro" ];
+      image.contents = [
+        workspace
+      ]
+      ++ cacert;
+      service.environment = {
+        PATH = "${workspace}/bin";
+        KALLIPAI_MODEL_GATEWAY_ADDR = "0.0.0.0:7501";
+        KALLIPAI_MODEL_GATEWAY_MANAGEMENT_ADDR = "0.0.0.0:7500";
+        KALLIPAI_MODEL_GATEWAY_DATABASE_URL = "postgresql://kallipai:kallipai@gateway-postgres:5432/kallipai";
+        KALLIPAI_MODEL_GATEWAY_ARCHEION_URL = "http://archeion:7100";
+        KALLIPAI_MODEL_GATEWAY_INTERNAL_TOKEN_FILE = "/var/lib/kallipai/internal/internal-token";
+        RUST_LOG = "info";
+      };
+    };
+
+    # Prometheus scraping the gateway's metrics face: the compose twin of
+    # the NixOS metrics switch (30s interval, 30d retention). The image
+    # tag is pinned to match the flake nixpkgs prometheus, so the
+    # two deployments run the same scraper release. Loopback-only
+    # publish for a host-side browser; the config file rides the
+    # read-only writeText store path.
+    services.prometheus = {
+      service.image = "prom/prometheus:v3.13.0";
+      service.ports = [ "127.0.0.1:9090:9090" ];
+      service.depends_on = [ "gateway" ];
+      service.command = [
+        "--config.file=/etc/prometheus/prometheus.yml"
+        "--storage.tsdb.path=/prometheus"
+        "--storage.tsdb.retention.time=30d"
+      ];
+      service.volumes = [
+        "prometheus_data:/prometheus"
+        "${prometheusConfig}:/etc/prometheus/prometheus.yml:ro"
+      ];
     };
   };
 }

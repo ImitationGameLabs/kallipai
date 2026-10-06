@@ -77,10 +77,11 @@ in
         }
         # The model gateway's own API as the fifth /v1 service segment.
         # Everything under the segment is the gateway's management face
-        # (profile reads, the admin family, health), so the stripped path
-        # routes on the management port. Every route on that face carries
-        # its own family credential (an admin token or a proxy key); the
-        # edge adds none.
+        # (profile reads, the admin family, health, metrics), so the
+        # stripped path routes on the management port. Every route on
+        # that face carries its own family credential (an admin token or
+        # a proxy key) except the unauthenticated health and metrics
+        # probes; the edge adds none.
         handle_path /v1/model-gateway/* {
           reverse_proxy 127.0.0.1:${toString config.services.kallipai.polis.gateway.managementPort}
         }
@@ -145,6 +146,24 @@ systemctl status kallipai-daemon kallipai-archeion kallipai-lesche \
 
 ```sh
 curl http://model-gw.kallipai.lan/health
+```
+
+`/metrics` 指标面在管理端口上，不在 model-gw 域名上：在主机本机访问
+`http://127.0.0.1:7500/metrics`，或经 api 边缘访问
+`http://api.kallipai.lan/v1/model-gateway/metrics`。它是转发可观测性
+计数器的 Prometheus 文本，无需凭据：探针必须在凭据故障时仍可抓取。
+
+NixOS 模块把这个指标面的抓取任务导出为只读列表：
+`config.services.kallipai.polis.scrapeConfigs`。导出的任务每 30 秒抓
+取一次。模块自身不启动记录器；在主机的 Prometheus 自身选项上接入
+该列表（用 `++` 追加更多任务，保留期跟随
+`services.prometheus.retentionTime`）：
+
+```nix
+services.prometheus = {
+  enable = true;
+  scrapeConfigs = config.services.kallipai.polis.scrapeConfigs;
+};
 ```
 
 ## 网关管理面

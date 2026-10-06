@@ -483,6 +483,7 @@ mod tests {
             public_base_url: "http://gw.test:7501".to_string(),
             management: crate::test_support::test_management(),
             identity_cache: std::sync::Arc::new(crate::secret::IdentityCache::default()),
+            metrics: crate::metrics::Metrics::private(),
         }
     }
 
@@ -657,6 +658,7 @@ mod tests {
             public_base_url: "http://gw.test:7501".to_string(),
             management,
             identity_cache: std::sync::Arc::new(crate::secret::IdentityCache::default()),
+            metrics: crate::metrics::Metrics::private(),
         };
         let app = router_for_test(state);
 
@@ -755,6 +757,7 @@ mod tests {
             public_base_url: "http://gw.test:7501".to_string(),
             management,
             identity_cache: std::sync::Arc::new(crate::secret::IdentityCache::default()),
+            metrics: crate::metrics::Metrics::private(),
         };
         let app = router_for_test(state);
 
@@ -792,6 +795,7 @@ mod tests {
             public_base_url: "http://gw.test:7501".to_string(),
             management,
             identity_cache: std::sync::Arc::new(crate::secret::IdentityCache::default()),
+            metrics: crate::metrics::Metrics::private(),
         };
         let app = router_for_test(state);
 
@@ -818,6 +822,7 @@ mod tests {
             public_base_url: "http://gw.test:7501".to_string(),
             management,
             identity_cache: std::sync::Arc::new(crate::secret::IdentityCache::default()),
+            metrics: crate::metrics::Metrics::private(),
         };
         let app = router_for_test(state);
 
@@ -869,6 +874,7 @@ mod tests {
             public_base_url: "http://gw.test:7501".to_string(),
             management,
             identity_cache: std::sync::Arc::new(crate::secret::IdentityCache::default()),
+            metrics: crate::metrics::Metrics::private(),
         };
         let app = router_for_test(state);
         let bound = crate::test_support::TEST_TAGMA_BEARER_BOUND;
@@ -1089,6 +1095,7 @@ mod tests {
             public_base_url: "http://gw.test:7501".to_string(),
             management,
             identity_cache: std::sync::Arc::new(crate::secret::IdentityCache::default()),
+            metrics: crate::metrics::Metrics::private(),
         };
         let app = router_for_test(state);
         let a = "bearer-a-tagma-pick-0123456789ab";

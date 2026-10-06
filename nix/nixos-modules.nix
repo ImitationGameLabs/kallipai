@@ -35,6 +35,25 @@ let
   polisCfg = config.services.kallipai.polis;
   gatewayCfg = config.services.kallipai.polis.gateway;
   webCfg = config.services.kallipai.web;
+  # The polis services that serve a /metrics text face today; each
+  # entry maps to one upstream Prometheus scrape job, the port
+  # following the service's own option. A metrics-capable service
+  # that lands later joins this list with ++.
+  metricsFaces = lib.optional (polisCfg.enable && gatewayCfg.enable) {
+    job_name = "kallipai-model-gateway";
+    port = gatewayCfg.managementPort;
+  };
+  # The jobs services.kallipai.polis.scrapeConfigs hands to the
+  # host's recorder wiring.
+  scrapeJobs = map (face: {
+    inherit (face) job_name;
+    scrape_interval = "30s";
+    static_configs = [
+      {
+        targets = [ "127.0.0.1:${toString face.port}" ];
+      }
+    ];
+  }) metricsFaces;
 
   # The flake's own build for this host: the package options default to
   # it, so enabling a service needs no package reference; setting an
@@ -531,6 +550,31 @@ in
           '';
         };
 
+      };
+
+      # The read-only scrape jobs for every enabled polis service
+      # that serves a /metrics text face (the model gateway
+      # today): wire them into the host's recorder on its own
+      # options; the module itself never enables a recorder.
+      scrapeConfigs = lib.mkOption {
+        type = lib.types.listOf lib.types.attrs;
+        readOnly = true;
+        description = ''
+          Upstream Prometheus scrape jobs for the enabled polis
+          services that serve a /metrics text face (the model gateway
+          today), one job per service with the port following the
+          service's own option. The module generates the list and never
+          touches the recorder itself; wire it in on the recorder's own
+          options:
+
+            services.prometheus = {
+              enable = true;
+              scrapeConfigs = config.services.kallipai.polis.scrapeConfigs;
+            };
+
+          Append with ++ to scrape more; retention follows
+          services.prometheus.retentionTime.
+        '';
       };
     };
     web = {
@@ -1181,6 +1225,13 @@ in
         };
       };
     })
+    # The polis scrape jobs: one per enabled metrics-capable
+    # service, the port following each service's own option (the
+    # model gateway today). A read-only export for the host's
+    # recorder wiring; the module never touches
+    # services.prometheus.
+    { services.kallipai.polis.scrapeConfigs = scrapeJobs; }
+
     (lib.mkIf webCfg.enable {
       # The site root: straight-through when no runtime key is set (the
       # shipped config.js already carries the factory default), the

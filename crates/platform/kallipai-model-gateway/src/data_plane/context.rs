@@ -27,6 +27,9 @@ pub struct Selection {
     pub peer: HttpPeer,
     pub credential: ProviderCredential,
     pub auth: crate::secret::AuthStyle,
+    /// The registry family of the selected provider: the `api_family`
+    /// attribution label.
+    pub api_family: String,
     /// The credential's base path, trimmed of its trailing slash; the
     /// endpoint's wire path appends to it in the rewrite phase.
     pub base_path: String,
@@ -37,4 +40,20 @@ pub struct Selection {
 pub struct GatewayCtx {
     pub route: Route,
     pub selection: Option<Selection>,
+    /// The forwarding clock: `t0` at the Forward branch entry,
+    /// `t1` at the first upstream response header. The duration
+    /// metrics observe them at the terminal phase.
+    pub t0: Option<std::time::Instant>,
+    pub t1: Option<std::time::Instant>,
+    /// The outcome a gate staged in `request_filter`; the `logging`
+    /// phase is the single terminal record point and prefers it
+    /// over anything derived.
+    pub pending_outcome: Option<crate::metrics::ForwardOutcome>,
+    /// The upstream status line staged at the first response
+    /// header, for the terminal classification.
+    pub upstream_status: Option<u16>,
+    /// Whether the upstream connection was established or reused
+    /// for this request: the discriminator between a connect
+    /// error and a proxy error at the terminal phase.
+    pub connected: bool,
 }

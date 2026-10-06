@@ -41,8 +41,10 @@
 //! renames or deletes leaves the row naming a missing target, and the
 //! readers answer an honest 404 instead of a silent cascade loss.
 //!
-//! Quota and metering tables do not exist here: usage accounting is
-//! suspended until a metrics service batch (declared in main.rs).
+//! Quota and metering tables do not exist here: per-request usage
+//! accounting needs a body-scanning batch of its own; the macro
+//! observability face lives outside the store (see the metrics
+//! module).
 //!
 //! Type notes carried by the columns: the `owner` defaults (`system`)
 //! date from the space split and exist so bare maintenance SQL lands
