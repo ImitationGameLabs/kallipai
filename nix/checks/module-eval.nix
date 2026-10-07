@@ -208,7 +208,7 @@
       scrapeDrifted = evalHost {
         services.kallipai.polis = {
           enable = true;
-          model-gateway.port = 7510;
+          ports.model-gateway = 7510;
         };
       };
       scrapeDriftedTarget = lib.elemAt (lib.elemAt (lib.elemAt scrapeDrifted.config.services.kallipai.polis.scrapeConfigs 0).static_configs 0).targets 0;

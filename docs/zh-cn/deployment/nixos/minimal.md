@@ -83,7 +83,7 @@ in
         # a proxy key) except the unauthenticated health and metrics
         # probes; the edge adds none.
         handle_path /v1/model-gateway/* {
-          reverse_proxy 127.0.0.1:${toString config.services.kallipai.polis.model-gateway.port}
+          reverse_proxy 127.0.0.1:${toString config.services.kallipai.polis.ports.model-gateway}
         }
       '';
 
