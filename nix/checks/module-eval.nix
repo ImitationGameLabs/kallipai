@@ -212,6 +212,37 @@
         };
       };
       scrapeDriftedTarget = lib.elemAt (lib.elemAt (lib.elemAt scrapeDrifted.config.services.kallipai.polis.scrapeConfigs 0).static_configs 0).targets 0;
+      # Collision probes for the unified port check: one assertion per
+      # colliding value group, the message naming every listener on the
+      # value. collideFwd pins the forwarding face's explicit list entry;
+      # gwOffCollide pins that a disabled gateway leaves the checked set.
+      collide = evalHost {
+        services.kallipai = {
+          daemon.enable = true;
+          polis = {
+            enable = true;
+            ports.model-gateway = 7200;
+          };
+        };
+      };
+      collideFwd = evalHost {
+        services.kallipai = {
+          daemon.enable = true;
+          polis = {
+            enable = true;
+            model-gateway.forwardPort = 7100;
+          };
+        };
+      };
+      gwOffCollide = evalHost {
+        services.kallipai.polis = {
+          enable = true;
+          model-gateway.enable = false;
+          ports.model-gateway = 7200;
+        };
+      };
+      collideMsg = (builtins.head (failedAssertions collide)).message;
+      collideFwdMsg = (builtins.head (failedAssertions collideFwd)).message;
       # Pins that the documented example evaluates; wiring in stays the host's call.
       scrapeWired = evalHost [
         {
@@ -267,6 +298,20 @@
       # exists since the subdomain shape hides ports behind the edge.
       test "${toString (builtins.length (failedAssertions drifted))}" = "0"
       test "${toString (builtins.length drifted.config.warnings)}" = "0"
+      # The unified port check: a colliding host fails exactly one
+      # assertion and the message names every listener on the value.
+      test "${toString (builtins.length (failedAssertions collide))}" = "1"
+      test "${
+        toString (lib.hasInfix "ports.lesche" collideMsg && lib.hasInfix "ports.model-gateway" collideMsg)
+      }" = "1"
+      test "${toString (builtins.length (failedAssertions collideFwd))}" = "1"
+      test "${
+        toString (
+          lib.hasInfix "ports.archeion" collideFwdMsg
+          && lib.hasInfix "model-gateway.forwardPort" collideFwdMsg
+        )
+      }" = "1"
+      test "${toString (builtins.length (failedAssertions gwOffCollide))}" = "0"
 
       # No runtime keys: the stub bundle passes straight through, shell
       # config.js and page sentinel both untouched.

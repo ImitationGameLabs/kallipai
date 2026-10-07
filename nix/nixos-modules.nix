@@ -655,116 +655,42 @@ in
   config = lib.mkMerge [
     {
       assertions =
+        let
+          # Every port the polis services bind, as one structural list:
+          # a key added to polis.ports joins on its own, and the
+          # forwarding face's separate option contributes one explicit
+          # entry (it lives outside polis.ports by design). A listener
+          # missing from this list would escape both checks below, so
+          # the list is derived from the options, never hand-enumerated.
+          listeners =
+            map (n: {
+              name = "ports.${n}";
+              value = polisCfg.ports.${n};
+            }) (lib.filter (n: gatewayCfg.enable || n != "model-gateway") (lib.attrNames polisCfg.ports))
+            ++ lib.optionals gatewayCfg.enable [
+              {
+                name = "model-gateway.forwardPort";
+                value = gatewayCfg.forwardPort;
+              }
+            ];
+          byValue = lib.groupBy (l: toString l.value) listeners;
+        in
         lib.optionals polisCfg.enable (
-          # The four listeners must not collide: a shared port is always a
-          # misconfiguration, so fail at eval time with the pair and value.
-          (map
-            (pair: {
-              assertion = polisCfg.ports.${builtins.elemAt pair 0} != polisCfg.ports.${builtins.elemAt pair 1};
-              message = "services.kallipai.polis.ports.${builtins.elemAt pair 0} and services.kallipai.polis.ports.${builtins.elemAt pair 1} are both ${
-                toString polisCfg.ports.${builtins.elemAt pair 0}
-              }; the polis listeners must use distinct ports — set one of them to a free port.";
-            })
-            [
-              [
-                "archeion"
-                "lesche"
-              ]
-              [
-                "lesche"
-                "files"
-              ]
-              [
-                "archeion"
-                "files"
-              ]
-              [
-                "archeion"
-                "instances"
-              ]
-              [
-                "lesche"
-                "instances"
-              ]
-              [
-                "files"
-                "instances"
-              ]
-            ]
-          )
-          ++ (map
-            (svc: {
-              assertion = polisCfg.ports.${svc} >= 1024 && polisCfg.ports.${svc} <= 65535;
-              message = "services.kallipai.polis.ports.${svc} is ${toString polisCfg.ports.${svc}}; it must be 1024-65535 — the polis services do not hold CAP_NET_BIND_SERVICE, so a lower port cannot be bound. Set it to a port in that range.";
-            })
-            [
-              "archeion"
-              "lesche"
-              "files"
-              "instances"
-            ]
-          )
-        )
-        ++ (lib.optionals (polisCfg.enable && gatewayCfg.enable) [
-          {
-            assertion = polisCfg.ports.model-gateway != gatewayCfg.forwardPort;
-            message = "services.kallipai.polis.ports.model-gateway and services.kallipai.polis.model-gateway.forwardPort are both ${toString polisCfg.ports.model-gateway}; the gateway's management and forwarding faces must use distinct ports — set one of them to a free port.";
-          }
-          {
-            assertion = polisCfg.ports.model-gateway >= 1024 && polisCfg.ports.model-gateway <= 65535;
-            message = "services.kallipai.polis.ports.model-gateway is ${toString polisCfg.ports.model-gateway}; it must be 1024-65535 — the gateway does not hold CAP_NET_BIND_SERVICE, so a lower port cannot be bound. Set it to a port in that range.";
-          }
-        ])
-        ++ (lib.optionals (polisCfg.enable && gatewayCfg.enable) (
-          map
-            (face: {
-              assertion = gatewayCfg.${face} >= 1024 && gatewayCfg.${face} <= 65535;
-              message = "services.kallipai.polis.model-gateway.${face} is ${toString gatewayCfg.${face}}; it must be 1024-65535 — the gateway does not hold CAP_NET_BIND_SERVICE, so a lower port cannot be bound. Set it to a port in that range.";
-            })
-            [
-              "forwardPort"
-            ]
-        ))
-        ++ (lib.optionals (polisCfg.enable && gatewayCfg.enable) (
-          map
-            (svc: {
-              assertion = polisCfg.ports.${svc} != polisCfg.ports.model-gateway;
-              message = "services.kallipai.polis.ports.${svc} and services.kallipai.polis.ports.model-gateway are both ${toString polisCfg.ports.${svc}}; the polis listeners must use distinct ports — set one of them to a free port.";
-            })
-            [
-              "archeion"
-              "lesche"
-              "files"
-              "instances"
-            ]
-        ))
-        ++ (lib.optionals (polisCfg.enable && gatewayCfg.enable) (
-          map
-            (pair: {
-              assertion = polisCfg.ports.${builtins.elemAt pair 0} != gatewayCfg.${builtins.elemAt pair 1};
-              message = "services.kallipai.polis.ports.${builtins.elemAt pair 0} and services.kallipai.polis.model-gateway.${builtins.elemAt pair 1} are both ${
-                toString polisCfg.ports.${builtins.elemAt pair 0}
-              }; the polis listeners and the gateway's forwarding face must use distinct ports — set one of them to a free port.";
-            })
-            [
-              [
-                "archeion"
-                "forwardPort"
-              ]
-              [
-                "lesche"
-                "forwardPort"
-              ]
-              [
-                "files"
-                "forwardPort"
-              ]
-              [
-                "instances"
-                "forwardPort"
-              ]
-            ]
-        ));
+          # One assertion per port value that two or more listeners
+          # bind: grouping subsumes every pairwise combination, and the
+          # message names all listeners on the value so the operator
+          # fixes the whole group in one pass.
+          lib.mapAttrsToList (value: group: {
+            assertion = false;
+            message = "services.kallipai.polis listeners ${
+              lib.concatStringsSep ", " (map (l: l.name) (lib.sortOn (l: l.name) group))
+            } all bind ${value}; each listener must have its own port — set all but one to a free port.";
+          }) (lib.filterAttrs (_: group: builtins.length group > 1) byValue)
+          ++ (map (l: {
+            assertion = l.value >= 1024 && l.value <= 65535;
+            message = "services.kallipai.polis.${l.name} is ${toString l.value}; it must be 1024-65535 — the polis services do not hold CAP_NET_BIND_SERVICE, so a lower port cannot be bound. Set it to a port in that range.";
+          }) listeners)
+        );
     }
     (lib.mkIf cfg.enable {
       # One group per declared user plus the shared access gate group
