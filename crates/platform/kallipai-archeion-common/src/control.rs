@@ -4,7 +4,7 @@
 //! possession on every tunnel reconnect.
 //!
 //! The key-exchange handshake (`KeyExchangeInit` / `KeyExchangeResponse`) lives
-//! in `kallipai-lesche-common` -- it is a data-plane operation the lesche brokers.
+//! in `kallipai-keryx-common` -- it is a data-plane operation the keryx brokers.
 
 use crate::bytes::{Ed25519PublicKey, Ed25519Signature};
 use crate::ids::TagmaId;

@@ -67,6 +67,13 @@ in
             flush_interval -1
           }
         }
+        handle_path /v1/keryx/* {
+          reverse_proxy 127.0.0.1:${toString ports.keryx} {
+            # keryx streams like the lesche; flush_interval -1 disables
+            # response buffering so events reach clients immediately.
+            flush_interval -1
+          }
+        }
         handle_path /v1/instances/* {
           reverse_proxy 127.0.0.1:${toString ports.instances}
         }
@@ -75,7 +82,7 @@ in
           uri strip_prefix /v1/files
           reverse_proxy 127.0.0.1:${toString ports.files}
         }
-        # The model gateway's own API as the fifth /v1 service segment.
+        # The model gateway's own API as the sixth /v1 service segment.
         # Everything under the segment is the gateway's management face
         # (profile reads, the admin family, health, metrics), so the
         # stripped path routes on the management port. Every route on

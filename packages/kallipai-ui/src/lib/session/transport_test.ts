@@ -12,10 +12,10 @@ import { RelayTransport } from "./relayTransport.ts";
 import type { TagmaClient } from "@kallipai/kallipai-client";
 import type {
   Participant,
-  RelayChannel,
   SignalEvent,
   TagmaReply,
 } from "@kallipai/kallipai-lesche-client";
+import type { RelayChannel } from "@kallipai/kallipai-keryx-client";
 import { LOCAL_OPERATOR_SENDER } from "../transcript.ts";
 
 // Shared fixtures: the agent that authors replies on the wire, and the local

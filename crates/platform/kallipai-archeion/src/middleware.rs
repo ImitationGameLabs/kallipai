@@ -52,7 +52,7 @@ pub async fn csrf_guard(
     next.run(request).await
 }
 
-/// Guard for the `/internal/*` ControlPlane surface (consumed by the lesche).
+/// Guard for the `/internal/*` ControlPlane surface (consumed by the data planes).
 /// Runs as `from_fn_with_state(expected_hash, internal_guard)` so the expected
 /// hash is baked into the layer, independent of the handlers'
 /// `State<SharedState>`. Rejects any request whose `Authorization: Bearer`

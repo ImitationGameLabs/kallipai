@@ -1,12 +1,13 @@
-//! The manage-plane projection snapshot the tagma pushes to the lesche
+//! The manage-plane projection snapshot the tagma pushes to the keryx
 //! (a full roster plus the aggregate status counters).
 //!
 //! Plaintext by design -- manage metadata is the relay-visible surface (same
-//! trust base as the [`crate::tunnel::TunnelInbound::ManageRest`] frame). The
-//! snapshot is a *pure cache* of tagma state: the lesche stores the latest
-//! one under a monotonically increasing seq and serves it to clients even
-//! when the tagma is offline (stale read), so the tagma simply re-pushes a
-//! fresh full snapshot on tunnel-up -- there is no delta protocol.
+//! trust base as the ManageRest tunnel frame, whose wire type lives
+//! in `kallipai-keryx-common`). The snapshot is a *pure cache* of
+//! tagma state: the keryx stores the latest one under a monotonically
+//! increasing seq and serves it to clients even when the tagma is
+//! offline (stale read), so the tagma simply re-pushes a fresh full
+//! snapshot on tunnel-up -- there is no delta protocol.
 //!
 //! Deliberately excluded: prompt-bearing
 //! text never rides the projection. Roster summaries carry only registry
@@ -20,10 +21,10 @@ use kallipai_common::protocol::AgentSummary;
 use serde::{Deserialize, Serialize};
 
 /// One full-projection push from a tagma. `push_seq` is the tagma's
-/// per-connection push counter (reset on tunnel-up): the lesche uses it to
+/// per-connection push counter (reset on tunnel-up): the keryx link uses it
 /// reject out-of-order replays within the same connection generation.
-/// The lesche stamps its own store-side `seq` and `updated_at` on receipt;
-/// those are per-lesche-store, not per-tagma.
+/// The keryx stamps its own store-side `seq` and `updated_at` on receipt;
+/// those are per-keryx-store, not per-tagma.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectionSnapshot {
     /// The full agent roster, registry metadata only (no prompt text).
@@ -43,7 +44,7 @@ pub struct ProjectionSnapshot {
 }
 
 /// The prompt-free work-schedule projection. `spec` and `status` ride as
-/// opaque JSON: the concrete enums are tagma-local and the lesche only
+/// opaque JSON: the concrete enums are tagma-local and the keryx only
 /// stores and relays them, never interprets them.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkScheduleProjection {
@@ -57,7 +58,7 @@ pub struct WorkScheduleProjection {
 }
 
 /// One change-notification frame on the `/tagmata/{id}/state` SSE stream:
-/// stream: the lesche tells subscribed clients *that* a tagma's projection
+/// stream: the keryx tells subscribed clients *that* a tagma's projection
 /// moved (and to which store seq), never *what* moved -- clients re-pull
 /// via GET. `tagma_id` is carried even on the per-tagma stream so a future
 /// global multiplexed stream keeps the same frame shape.
@@ -73,7 +74,7 @@ mod tests {
 
     /// The snapshot rides the plaintext internal surface, but it is still a
     /// persisted-then-served wire shape: pin the field names so a rename
-    /// cannot silently break the lesche's stored rows across a deploy.
+    /// cannot silently break the keryx's stored rows across a deploy.
     #[test]
     fn snapshot_field_names_are_wire_stable() {
         let json = serde_json::json!({

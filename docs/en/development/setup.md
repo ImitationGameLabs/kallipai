@@ -67,7 +67,7 @@ the production domain (`kallipai.com`); `.env.example` sets it to
 `kallipai.lan` for local dev (so dev DNS/certs never clash with
 production), and you get that when you copy `.env.example` to `.env`.
 direnv's `dotenv` loads `.env` into the shell, so arion eval, `mkcert`,
-and vite all see it. The whole stack (the archeion/lesche env, the
+and vite all see it. The whole stack (the archeion/lesche/keryx env, the
 Caddyfile, and vite's dev-server shaping (allowedHosts, HMR websocket)
 ) derives from `KALLIPAI_DOMAIN` plus the two edge knobs
 (`KALLIPAI_EDGE_TLS`, `KALLIPAI_EDGE_PORT`). The web app's own API URLs

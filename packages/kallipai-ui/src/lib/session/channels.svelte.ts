@@ -13,16 +13,18 @@ import { type TagmaView } from "@kallipai/kallipai-archeion-client";
 import {
   type Envelope,
   type FileAttachment,
-  LescheApiError,
-  openRelayChannel,
-  type RelayChannel,
+  DataPlaneApiError,
   type SignalEvent,
 } from "@kallipai/kallipai-lesche-client";
+import {
+  openRelayChannel,
+  type RelayChannel,
+} from "@kallipai/kallipai-keryx-client";
 import { SvelteMap, SvelteSet } from "svelte/reactivity";
 import {
   archeionClientOrFail,
   archeionSession,
-  lescheClientOrFail,
+  keryxClientOrFail,
 } from "./archeion.svelte.ts";
 import { unreadStore } from "./unread.svelte.ts";
 import type { DirectTransport } from "./directTransport.ts";
@@ -40,7 +42,7 @@ import {
   clearPendings,
   getReadWatermark,
   readTail,
-} from "@kallipai/kallipai-lesche-client";
+} from "@kallipai/kallipai-keryx-client";
 import { configStore } from "../config/config.svelte.ts";
 import { type ConversationLine, LOCAL_OPERATOR_SENDER } from "../transcript.ts";
 
@@ -313,7 +315,7 @@ export class ChannelsStore {
 
     const info = await archeionClientOrFail().getTagma(tagma.tagma_id);
     const channel = await openRelayChannel(
-      lescheClientOrFail(),
+      keryxClientOrFail(),
       tagma.tagma_id,
       userId,
       userHandle,
@@ -565,7 +567,7 @@ export class ChannelsStore {
       cooldownUntil: this.now() + delay,
       terminal: failures >= OPEN_FAILURE_LIMIT,
     });
-    if (e instanceof LescheApiError && e.status === 503) {
+    if (e instanceof DataPlaneApiError && e.status === 503) {
       this.offlineCorrection?.(tagmaId);
     }
   }

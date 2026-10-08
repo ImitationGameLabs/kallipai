@@ -27,7 +27,7 @@
   // <RootLayout> consumes these ports (it cannot import $app/* from inside
   // the library package). Idempotent setters; the root layout has a single
   // instance so this runs once at boot.
-  // No initArcheion/initLesche/initInstances: this shell is offline-only. The
+  // No initArcheion/initRelays/initInstances: this shell is offline-only. The
   // RootLayout offline boot (configStore-driven connectDirect) never reads
   // the relay ports, and the instances capability probe tolerates an unset
   // service (its UI hides when unreachable).

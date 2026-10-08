@@ -9,7 +9,7 @@
     initConfigStorage,
     initFiles,
     initInstances,
-    initLesche,
+    initRelays,
     localStorageConfigStorage,
     type NavIcons,
   } from "@kallipai/kallipai-ui";
@@ -27,7 +27,7 @@
     Wallet,
   } from "@lucide/svelte";
 
-  // Inject the app's navigation, archeion/lesche URLs, and storage backend into
+  // Inject the app's navigation, archeion/lesche/keryx URLs, and storage backend into
   // kallipai-ui. The shared <RootLayout> consumes these ports (it cannot import
   // $app/* or import.meta.env from inside the library package). Idempotent
   // setters; the root layout has a single instance so this runs once at boot.
@@ -42,7 +42,10 @@
   // :8080) reaches its siblings on that port too.
   const config = window.KALLIPAI_CONFIG ?? {};
   initArcheion(serviceUrl("archeion", config, location));
-  initLesche(serviceUrl("lesche", config, location));
+  initRelays(
+    serviceUrl("lesche", config, location),
+    serviceUrl("keryx", config, location),
+  );
   initFiles(serviceUrl("files", config, location));
   initInstances(serviceUrl("instances", config, location));
   initConfigStorage(localStorageConfigStorage);

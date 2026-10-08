@@ -78,7 +78,7 @@ Uninstall removes the payload tree and the links that point into it
 `~/.local/share/kallipai` is kept.
 Uninstalling a system-level install follows the same pattern with
 `sudo bash install.sh --with-systemd --uninstall`: root removes the
-payload, the links, and the five unit files, and keeps `/var/lib/kallipai`
+payload, the links, and the six unit files, and keeps `/var/lib/kallipai`
 (the services' state) plus the system users and groups, printing manual
 cleanup hints.
 
@@ -94,12 +94,13 @@ sudo bash install.sh --tarball ./kallipai-1.0.0-linux-x86_64.tar.gz --with-syste
 
 This installs the payload under `/usr/local/lib/kallipai/<version>/`,
 links into `/usr/local/bin`, creates dedicated system users, and renders
-five units into `/etc/systemd/system/`:
+six units into `/etc/systemd/system/`:
 
 - `kallipai-daemon` (runs as root; `KillMode=process` so running tagmata
   survive a daemon restart)
-- `kallipai-archeion`, `kallipai-lesche`, `kallipai-files`,
-  `kallipai-instances` (one dedicated user each)
+- `kallipai-archeion`, `kallipai-lesche`, `kallipai-keryx`,
+  `kallipai-files`, `kallipai-instances` (one dedicated user each; the
+  keryx keeps all state in memory, so no database is needed for it)
 
 Units are enabled and already-active units are restarted through an
 upgrade. Re-running the same command with a newer tarball upgrades in

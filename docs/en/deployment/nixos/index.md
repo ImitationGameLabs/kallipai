@@ -5,9 +5,10 @@ description: Deploying KallipAI hosts with the provided NixOS modules.
 ---
 
 This guide walks through deploying the KallipAI platform form on a NixOS
-host: the daemon as a system service, the four polis services (archeion:
-identity control plane; lesche: relay data plane; files: content transfer;
-instances: web instances proxy)
+host: the daemon as a system service, the six polis services (archeion:
+identity control plane; lesche: relay data plane; keryx: tagma-link
+relay; files: content transfer; instances: web instances proxy;
+model-gateway: model API gateway)
 behind the host's reverse proxy, and the web app. The container form (arion
 compose, Nix-native docker-compose) is a separate, complementary way to
 run the platform; this

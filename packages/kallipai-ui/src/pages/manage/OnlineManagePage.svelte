@@ -14,8 +14,8 @@
   import {
     ManageRestClient,
     ProjectionClient,
-  } from "@kallipai/kallipai-lesche-client";
-  import { lescheBaseUrlOrFail } from "../../lib/session/archeion.svelte.ts";
+  } from "@kallipai/kallipai-keryx-client";
+  import { keryxBaseUrlOrFail } from "../../lib/session/archeion.svelte.ts";
   import { manageChannelStalled } from "../../lib/manage/channelStalled.ts";
   import { budgetStore } from "../../lib/manage/budget.svelte.ts";
   import { agentsStore } from "../../lib/manage/agents.svelte.ts";
@@ -97,9 +97,9 @@
         conv as import("../../lib/session/conversation.svelte.ts").RelayConversation;
       const channel = relayConv.relayTransport.relayChannel;
       const backend = new OnlineBackend(
-        new ManageRestClient(lescheBaseUrlOrFail()),
+        new ManageRestClient(keryxBaseUrlOrFail()),
         channel.tagmaId,
-        new ProjectionClient(lescheBaseUrlOrFail()),
+        new ProjectionClient(keryxBaseUrlOrFail()),
         channel,
       );
       budgetStore.switchBackend(backend);

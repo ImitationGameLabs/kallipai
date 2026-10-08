@@ -1,33 +1,42 @@
-// RealtimeStore: the online-mode realtime feed. Owns the single multiplexed
-// SSE subscription to the lesche's `GET /v1/lesche/me/events` and demuxes its two
-// concerns: tagma presence (`tagma_online` / `tagma_offline`, the SOLE liveness
-// signal -- the archeion's `/v1/lesche/tagmata` no longer carries an `online` field) and
-// inbound conversation `envelope` delivery (handed to channelsStore via a
-// shell-wired sink).
+// RealtimeStore: the online-mode realtime feed. Owns TWO SSE subscriptions,
+// one per service family: the lesche feed (`GET /v1/lesche/me/events`, the
+// room family -- membership edges, member presence, read-cursor echoes) and
+// the keryx feed (`GET /v1/keryx/me/events`, the bilateral family: tagma
+// presence -- `tagma_online` / `tagma_offline`, the SOLE liveness signal, the
+// archeion's `/v1/lesche/tagmata` carries no `online` field -- plus inbound
+// conversation `envelope` delivery, status snapshots, and runtime signals).
+// Both loops share one reconnect machine (backoff, 401 recovery via an
+// auth-plane re-verify, abort, foreground kick); each frame dispatches to
+// its family's sinks, and a bilateral frame arriving on the lesche stream
+// (a mixed-version leftover) is ignored.
 //
-// The SSE loop (backoff, 401 recovery via an auth-plane re-verify, abort) was
-// moved here from channels.svelte.ts, which is now pure per-channel chat
-// state. Realtime is
-// started/stopped by RootLayout (reactive to online mode + a signed-in user);
-// it must run before any channel opens, because the /tagmata dashboard reads
-// presence to light the online dot and the presence sink drives auto-connect
-// (the shell opens a channel on an offline -> online transition).
+// The SSE loops were moved here from channels.svelte.ts, which is now pure
+// per-channel chat state. Realtime is started/stopped by RootLayout
+// (reactive to online mode + a signed-in user); it must run before any
+// channel opens, because the /tagmata dashboard reads presence to light the
+// online dot and the presence sink drives auto-connect (the shell opens a
+// channel on an offline -> online transition).
 //
-// Dependency direction is one-way: realtime -> archeion (the lesche client port).
-// It does NOT import channels -- the envelope sink is bound by the shell
-// (RootLayout), keeping the two stores decoupled.
+// Dependency direction is one-way: realtime -> archeion (the service client
+// port). It does NOT import channels -- the envelope sink is bound by the
+// shell (RootLayout), keeping the two stores decoupled.
 
 import {
-  LescheApiError,
-  type LescheEvent,
+  DataPlaneApiError,
   type Envelope,
+  type LescheEvent,
+  type MeEventFrame,
   type SignalEvent,
   type TagmaStatusPayload,
 } from "@kallipai/kallipai-lesche-client";
+import type {
+  KeryxEvent,
+  KeryxEventFrame,
+} from "@kallipai/kallipai-keryx-client";
 import { SvelteMap, SvelteSet } from "svelte/reactivity";
 import { reverifySession, type SessionVerifier } from "./realtimeReverify.ts";
 import type { TagmaStatusSummary } from "../tagmata.svelte.ts";
-import { lescheClientOrFail } from "./archeion.svelte.ts";
+import { keryxClientOrFail, lescheClientOrFail } from "./archeion.svelte.ts";
 import { MeCursor, ResyncBatcher, type ResyncPlan } from "./cursor.ts";
 
 /** Sink for inbound conversation envelopes. Bound by the shell to
@@ -122,7 +131,8 @@ class RealtimeStore {
   // would reintroduce the flap the no-clear-on-reconnect policy avoids.
   private resolvedState = $state(false);
   private running = false;
-  private abort: AbortController | null = null;
+  private abortLesche: AbortController | null = null;
+  private abortKeryx: AbortController | null = null;
   private envelopeSink: EnvelopeSink | null = null;
   private presenceSink: PresenceSink | null = null;
   private signalSink: SignalSink | null = null;
@@ -276,8 +286,10 @@ class RealtimeStore {
       () => this.markResolved(),
       RESOLVE_DEADLINE_MS,
     );
-    this.abort = new AbortController();
-    void this.run();
+    this.abortLesche = new AbortController();
+    this.abortKeryx = new AbortController();
+    void this.runLesche();
+    void this.runKeryx();
   }
 
   /** Stop the subscriber, abort the in-flight fetch, and drop presence. Called
@@ -288,8 +300,10 @@ class RealtimeStore {
     this.unbindForeground();
     this.foregroundKick = false;
     this.wake?.();
-    this.abort?.abort();
-    this.abort = null;
+    this.abortLesche?.abort();
+    this.abortLesche = null;
+    this.abortKeryx?.abort();
+    this.abortKeryx = null;
     this.clearResolveDeadline();
     // Fire any pending resync before tearing down: a plan judged but not
     // yet debounced still describes real loss the stores should heal.
@@ -312,46 +326,43 @@ class RealtimeStore {
     this.resolvedState = true;
   }
 
-  /** The reconnect loop. Presence is intentionally NOT cleared on reconnect:
-   * doing so would flash every connected tagma offline until the snapshot
-   * repaints it, which (with an idle-prone SSE connection) shows up as the
-   * online/offline dot flapping. Instead the lesche re-sends the presence
-   * snapshot on every connect, so a reconnect idempotently re-adds the
-   * still-online set with no flicker. The trade-off is that a tagma whose
-   * `tagma_offline` was missed during a disconnect can read stale-online until
-   * the next session reset; this is rare (the tagma tunnel is the only offline
-   * source and it is stable) and self-corrects on a refresh. */
-  private async run(): Promise<void> {
+  /** The shared stream loop (reconnect, backoff, 401 recovery, foreground
+   * fast path). Presence is intentionally NOT cleared on reconnect: doing so
+   * would flash every connected tagma offline until the snapshot repaints it,
+   * which (with an idle-prone SSE connection) shows up as the online/offline
+   * dot flapping. Each feed re-sends its connect-time snapshot on every
+   * connect, so a reconnect idempotently re-adds the still-online set with no
+   * flicker. `kind` selects the per-stream abort slot so a stop or foreground
+   * kick aborts both in-flight fetches. */
+  private async runStream<F extends MeEventFrame | KeryxEventFrame>(
+    kind: "lesche" | "keryx",
+    feed: (signal: AbortSignal) => AsyncGenerator<F>,
+    onFrame: (frame: F) => void,
+  ): Promise<void> {
     let backoff = 1000;
     this.bindForeground();
     while (this.running) {
-      this.abort = new AbortController(); // fresh per attempt: restartable
+      const attempt = new AbortController(); // fresh per attempt: restartable
+      if (kind === "lesche") this.abortLesche = attempt;
+      else this.abortKeryx = attempt;
       try {
-        for await (const ev of lescheClientOrFail().meEvents(
-          this.abort.signal,
-        )) {
-          backoff = 1000; // a live event proves the stream is healthy.
-          // The first event (incl. the connect-time presence snapshot) resolves
-          // presence immediately. The no-event case (empty snapshot, or the SSE
-          // never connects) is handled by the one-shot deadline armed in start.
+        for await (const frame of feed(attempt.signal)) {
+          backoff = 1000; // a live frame proves the stream is healthy.
+          // The first frame (incl. a connect-time snapshot) resolves presence
+          // immediately; the no-frame case is handled by the one-shot deadline
+          // armed in start.
           this.markResolved();
-          // Cursor first: the marker seeds or judges the stream and never
-          // reaches dispatch; a payload frame is judged, any resync plan
-          // is batched (one refetch per burst), and only its event reaches
-          // the exhaustive switch below.
-          const plan = this.cursor.observe(ev);
-          if (plan) this.resyncBatcher.push(plan);
-          if (ev.kind === "event") this.dispatch(ev.event);
+          onFrame(frame);
         }
         // Stream ended cleanly (rare); loop to reconnect unless stopped.
       } catch (e) {
-        // A 401 from the lesche no longer means the session is gone: the
-        // relay can reject a cookie the auth plane still honors (e.g. a
-        // lesche restart). Re-validate against the auth plane -- a real
-        // sign-out clears the user and stops the loop (the uid-keyed shell
-        // effect restarts us on the next sign-in); anything else keeps the
-        // loop alive with the backoff capping the retry period at 30s.
-        if (e instanceof LescheApiError && e.status === 401) {
+        // A 401 from a relay no longer means the session is gone: the relay
+        // can reject a cookie the auth plane still honors (e.g. a service
+        // restart). Re-validate against the auth plane -- a real sign-out
+        // clears the user and stops the loop (the uid-keyed shell effect
+        // restarts us on the next sign-in); anything else keeps the loop
+        // alive with the backoff capping the retry period at 30s.
+        if (e instanceof DataPlaneApiError && e.status === 401) {
           const { verdict, verifiedAt } = await reverifySession(
             this.sessionVerifier,
             this.lastVerifiedAt,
@@ -384,6 +395,36 @@ class RealtimeStore {
     this.unbindForeground();
   }
 
+  /** The lesche feed: the room family. The cursor machine (gap detection +
+   * batched resync) rides this stream, and the shell's resync sink re-pulls
+   * the room surfaces -- exactly what a room-family gap needs. */
+  private async runLesche(): Promise<void> {
+    await this.runStream(
+      "lesche",
+      (signal) => lescheClientOrFail().meEvents(signal),
+      (frame) => {
+        const plan = this.cursor.observe(frame);
+        if (plan) this.resyncBatcher.push(plan);
+        if (frame.kind === "event") this.dispatchRoom(frame.event);
+      },
+    );
+  }
+
+  /** The keryx feed: the bilateral family (envelopes, the presence pair,
+   * status, signal, file deliveries). No cursor machine here: a reconnect
+   * replays the connect-time snapshot (presence + cached status), which IS
+   * the resync for this family, and envelope loss is healed per-channel by
+   * the history re-pull the channels store already owns. */
+  private async runKeryx(): Promise<void> {
+    await this.runStream(
+      "keryx",
+      (signal) => keryxClientOrFail().keryxEvents(signal),
+      (frame) => {
+        if (frame.kind === "event") this.dispatchBilateral(frame.event);
+      },
+    );
+  }
+
   /** Foreground return: abort the current SSE attempt (the loop reconnects
    * immediately) and cut any in-flight backoff sleep. The connect-time
    * presence snapshot re-fires on reconnect, so the swap is lossless. */
@@ -396,7 +437,8 @@ class RealtimeStore {
       return;
     }
     this.foregroundKick = true;
-    this.abort?.abort();
+    this.abortLesche?.abort();
+    this.abortKeryx?.abort();
     this.wake?.();
   };
 
@@ -426,36 +468,17 @@ class RealtimeStore {
     );
   }
 
-  private dispatch(ev: LescheEvent): void {
+  private dispatchRoom(ev: LescheEvent): void {
     switch (ev.type) {
       case "tagma_online":
-        // Transition only: the lesche re-sends the presence snapshot on every
-        // SSE reconnect, and the no-clear-on-reconnect policy (see `run`)
-        // leaves the set populated, so a re-send for an already-online tagma
-        // is a no-op here. Firing the sink only on a real transition keeps a
-        // healthy reconnect from flooding channelsStore with redundant opens.
-        if (this.presence.has(ev.tagma_id)) break;
-        this.presence.add(ev.tagma_id);
-        this.presenceSink?.(ev.tagma_id, true);
-        break;
       case "tagma_offline":
-        if (!this.presence.has(ev.tagma_id)) break;
-        this.applyOffline(ev.tagma_id);
-        break;
       case "envelope":
-        this.envelopeSink?.(ev.envelope);
-        break;
       case "tagma_status":
-        // Map the snake_case wire fields to the camelCase internal shape at
-        // this single dispatch boundary, so consumers read idiomatic TS.
-        this.ingestStatusSnapshot(ev.tagma_id, ev);
-        break;
       case "tagma_signal":
-        // A per-event runtime signal (busy/idle presence, turn terminals,
-        // errors). Plaintext operator metadata, not conversation content;
-        // routed to the owning channel's transcript as a status transition
-        // and/or a transient system line.
-        this.signalSink?.(ev.tagma_id, ev.event);
+        // The keryx stream owns the bilateral family (envelopes, the
+        // presence pair, status, signal); the lesche stream carries the room
+        // family only. A bilateral frame on this stream is a mixed-version
+        // leftover and is ignored.
         break;
       case "room_membership_changed":
         // A room's membership epoch bumped (a member was added/removed). The
@@ -465,7 +488,7 @@ class RealtimeStore {
         this.roomMembershipChangedSink?.(ev.room_id);
         break;
       case "room_member_online":
-        // A peer came online in this room (agent tunnel / human app stream).
+        // A peer came online in this room (agent stream / human app stream).
         // Idempotent set-add on the owning room's online set (see
         // roomConversationsStore.applyMemberPresence); the roster re-fetch
         // remains the resync ground truth.
@@ -493,6 +516,52 @@ class RealtimeStore {
     }
   }
 
+  /** The keryx stream's dispatch: the bilateral family. The online/offline
+   * and status handling mirrors what the lesche stream does. */
+  private dispatchBilateral(ev: KeryxEvent): void {
+    switch (ev.type) {
+      case "tagma_online":
+        // Transition only: the keryx re-sends the presence snapshot on every
+        // SSE reconnect, so a re-send for an already-online tagma is a no-op
+        // here. Firing the sink only on a real transition keeps a healthy
+        // reconnect from flooding channelsStore with redundant opens.
+        if (this.presence.has(ev.tagma_id)) break;
+        this.presence.add(ev.tagma_id);
+        this.presenceSink?.(ev.tagma_id, true);
+        break;
+      case "tagma_offline":
+        if (!this.presence.has(ev.tagma_id)) break;
+        this.applyOffline(ev.tagma_id);
+        break;
+      case "envelope":
+        this.envelopeSink?.(ev.envelope);
+        break;
+      case "tagma_status":
+        // Map the snake_case wire fields to the camelCase internal shape at
+        // this single dispatch boundary, so consumers read idiomatic TS.
+        this.ingestStatusSnapshot(ev.tagma_id, ev);
+        break;
+      case "tagma_signal":
+        // A per-event runtime signal (busy/idle presence, turn terminals,
+        // errors). Plaintext operator metadata, not conversation content;
+        // routed to the owning channel's transcript as a status transition
+        // and/or a transient system line.
+        this.signalSink?.(ev.tagma_id, ev.event);
+        break;
+      case "file_delivered":
+        // A file landed in the user's files space. The files listing is the
+        // resync ground truth (the recipient fetches content by record id);
+        // no UI sink consumes the push yet, so this is deliberately a no-op.
+        break;
+      default: {
+        // Exhaustiveness guard: a new KeryxEvent variant without a dispatch
+        // case fails the build here rather than silently dropping.
+        const _exhaustive: never = ev;
+        break;
+      }
+    }
+  }
+
   /** Shared offline application: retract presence, evict the stale status
    *  snapshot (an offline tagma must not keep rendering agent counts or
    *  budget), and notify both sinks. Used by the `tagma_offline` event and
@@ -505,7 +574,7 @@ class RealtimeStore {
   }
 
   /** Correct a stale-online entry from outside the event stream: the
-   *  channels store reports an offline-class open failure (the lesche just
+   *  channels store reports an offline-class open failure (the keryx just
    *  refused the KEX because the tagma is unreachable), which is better
    *  evidence than a `tagma_offline` event that was missed during an SSE
    *  gap. No-op when the tagma already reads offline; a genuine

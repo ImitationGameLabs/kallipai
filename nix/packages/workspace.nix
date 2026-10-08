@@ -94,11 +94,15 @@ in
     nativeBuildInputs = (old.nativeBuildInputs or [ ]) ++ [ pkgs.installShellFiles ];
     postInstall = (old.postInstall or "") + genCompletions [ "kallipai-admin" ];
   });
-  # The lesche data-plane relay (tagma relay tunnels, app SSE, envelope
-  # routing; pure HTTP, no shell-out deps). Its own image so the archeion and
-  # lesche services deploy independently -- see
+  # The lesche relay (rooms, direct sessions, the agent SSE and presence;
+  # no shell-out deps). Its own image so the archeion and lesche services
+  # deploy independently -- see
   # nix/packages/docker-images/lesche.nix.
   lesche = buildCrate "cargo build --release -p kallipai-lesche";
+  # The keryx relay (tagma-link and user-DM surface; pure HTTP, no
+  # database, no shell-out deps). Its own image -- see
+  # nix/packages/docker-images/keryx.nix.
+  keryx = buildCrate "cargo build --release -p kallipai-keryx";
   # The files transfer service (content-addressed blobs, ACL'd spaces;
   # pure HTTP/Postgres, no shell-out deps). Its own image so it deploys
   # independently of the archeion/lesche pair -- see

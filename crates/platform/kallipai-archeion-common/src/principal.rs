@@ -1,12 +1,12 @@
 //! The resolved identity of an archeion request, and the authorization helpers
 //! that gate handlers on it.
 //!
-//! `Principal` and the `require_*` helpers live in this shared crate so both
-//! the registry (`kallipai-archeion`) and the data-plane relay (`kallipai-lesche`)
-//! enforce the same deputy guard. The credential-to-Principal resolution
+//! `Principal` and the `require_*` helpers live in this shared crate so the
+//! registry (`kallipai-archeion`) and the data-plane services enforce the
+//! same deputy guard. The credential-to-Principal resolution
 //! (cookie / bearer verification against the durable store) is a registry
 //! concern and lives behind the [`crate::control_plane::ControlPlane`] trait;
-//! the lesche consumes the resulting `Principal` (over the `/internal/*` HTTP
+//! the data-plane services consume the resulting `Principal` (over the `/internal/*` HTTP
 //! API, where it is carried as [`crate::internal_api::WirePrincipal`]).
 //!
 //! # Origin / deputy guard

@@ -44,6 +44,7 @@ import {
 import type { PairingCodeView } from "../passkeys.svelte.ts";
 import { INSTANCES_TOKEN_KEY } from "../instances/client.ts";
 import { LescheClient } from "@kallipai/kallipai-lesche-client";
+import { KeryxClient } from "@kallipai/kallipai-keryx-client";
 import { FilesClient } from "@kallipai/kallipai-files-client";
 import {
   auth_couldnt_reach,
@@ -103,27 +104,59 @@ export function archeionPolisOriginOrFail(): string {
   return base.slice(0, base.length - tail.length);
 }
 
-// The lesche (data-plane) client lives on a separate origin from the archeion; its
-// URL is injected the same way (no import.meta.env in this library). The session
-// cookie is shared cross-subdomain, so the same credentialed fetch works.
+// The data-plane clients live on separate origins from the archeion; their
+// URLs are injected the same way (no import.meta.env in this library). The
+// session cookie is shared cross-subdomain, so the same credentialed fetch
+// works. The lesche client owns the rooms family (room envelopes, room
+// history, room management, the lesche /me/events stream); the keryx
+// client owns the bilateral family (key exchange, envelope posts, the
+// keryx /me/events stream, the projection/manage routes).
 let lescheClient: LescheClient | null = null;
-let lescheBaseUrl = "";
+let keryxClient: KeryxClient | null = null;
+let keryxBaseUrl = "";
 
-/** Inject the lesche base URL and construct the data-plane client. Called once
- * at bootstrap alongside initArcheion. */
-export function initLesche(url: string): void {
+/** Inject the lesche + keryx base URLs and construct the data-plane
+ * clients. Called once at bootstrap alongside initArcheion. */
+export function initRelays(url: string, keryxUrl: string): void {
   lescheClient = new LescheClient(url);
-  lescheBaseUrl = url;
+  keryxClient = new KeryxClient(keryxUrl);
+  keryxBaseUrl = keryxUrl;
 }
 
-/** The data-plane (lesche) client; throws if initLesche has not been called.
- * Consumed by channelsStore (the key exchange + envelope relay) and
- * realtimeStore (the me/events SSE) -- both peer singletons. */
+/** The data-plane (lesche) client; throws if initRelays has not been called.
+ * Consumed by roomsStore (room management) and realtimeStore (the lesche
+ * me/events SSE) -- both peer singletons. */
 export function lescheClientOrFail(): LescheClient {
   if (!lescheClient) {
-    throw new Error("initLesche(url) must be called at app bootstrap");
+    throw new Error(
+      "initRelays(url, keryxUrl) must be called at app bootstrap",
+    );
   }
   return lescheClient;
+}
+
+/** The data-plane (keryx) client; throws if initRelays has not been
+ * called. Consumed by channelsStore (the key exchange + envelope relay)
+ * and realtimeStore (the keryx me/events SSE). */
+export function keryxClientOrFail(): KeryxClient {
+  if (!keryxClient) {
+    throw new Error(
+      "initRelays(url, keryxUrl) must be called at app bootstrap",
+    );
+  }
+  return keryxClient;
+}
+
+/** The keryx service base; throws if initRelays has not been called.
+ * Consumed by the projection/manage-REST clients (their routes moved to
+ * the keryx service). */
+export function keryxBaseUrlOrFail(): string {
+  if (!keryxBaseUrl) {
+    throw new Error(
+      "initRelays(url, keryxUrl) must be called at app bootstrap",
+    );
+  }
+  return keryxBaseUrl;
 }
 
 // The files (transfer-plane) client lives on its own origin too; its URL is
@@ -132,7 +165,7 @@ export function lescheClientOrFail(): LescheClient {
 let filesClient: FilesClient | null = null;
 
 /** Inject the files base URL and construct the transfer client. Called once
- * at bootstrap alongside initArcheion/initLesche. */
+ * at bootstrap alongside initArcheion/initRelays. */
 export function initFiles(url: string): void {
   filesClient = new FilesClient(url);
 }
@@ -145,13 +178,6 @@ export function filesClientOrFail(): FilesClient {
     throw new Error("initFiles(url) must be called at app bootstrap");
   }
   return filesClient;
-}
-/** The injected lesche base URL; same relay purpose as the archeion one. */
-export function lescheBaseUrlOrFail(): string {
-  if (!lescheBaseUrl) {
-    throw new Error("initLesche(url) must be called at app bootstrap");
-  }
-  return lescheBaseUrl;
 }
 
 /** sessionStorage key stashing the in-flight OAuth provider + action across the

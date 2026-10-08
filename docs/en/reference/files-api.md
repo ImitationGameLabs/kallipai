@@ -17,7 +17,7 @@ The service reads its archeion connection from two required variables:
 | Variable                               | Required      | Default   | Description                                                                                                                                                                                                      |
 | ---                                    | ---           | ---       | ---                                                                                                                                                                                                              |
 | `KALLIPAI_FILES_ARCHEION_INTERNAL_URL` | yes (service) | _(unset)_ | Archeion internal base URL for `/internal/*` ControlPlane calls. Must NOT be publicly reachable.                                                                                                                 |
-| `KALLIPAI_POLIS_INTERNAL_TOKEN_FILE`   | yes (service) | _(unset)_ | File holding the platform-internal secret bearer for the archeion `/internal/*` API, provisioned by the archeion (0640 under its state directory) and read at boot by the lesche, files, and instances services. |
+| `KALLIPAI_POLIS_INTERNAL_TOKEN_FILE`   | yes (service) | _(unset)_ | File holding the platform-internal secret bearer for the archeion `/internal/*` API, provisioned by the archeion (0640 under its state directory) and read at boot by the lesche, keryx, files, instances, and model-gateway services. |
 
 ## Auth: Archeion-Verified Principals
 

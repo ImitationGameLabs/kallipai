@@ -1,6 +1,6 @@
 [package]
 name = "kallipai-lesche"
-description = "kallipai data-plane relay: tagma tunnels, app event streams, envelope relay"
+description = "kallipai data-plane relay: rooms, direct sessions, app event streams, agent SSE"
 edition = "2024"
 version.workspace = true
 license.workspace = true

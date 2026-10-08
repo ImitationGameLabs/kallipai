@@ -1,6 +1,6 @@
 [package]
 name = "kallipai-lesche-client"
-description = "HTTP client for the kallipai-lesche data-plane relay (tagma tunnel, envelopes, key exchange)"
+description = "Tagma-side HTTP client spanning both relay families: the lesche data plane (rooms, direct sessions, the agent stream) and the keryx link planes (tagma tunnel, key exchange, envelope posts, upstream events)"
 edition = "2024"
 version.workspace = true
 license.workspace = true
@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 kallipai-archeion-common = { workspace = true }
 kallipai-lesche-common = { workspace = true }
+kallipai-keryx-common = { workspace = true }
 kallipai-e2ee = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }

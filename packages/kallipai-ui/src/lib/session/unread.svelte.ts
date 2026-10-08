@@ -21,7 +21,7 @@
 // Line sources feed it from two directions:
 //   - 1:1: RelayConversation's line-entry hook (the applyReplyCore reducer
 //     path -- live frames and catch-up rows pass the same point) calls
-//     {@link observeTagmaLine}. The watermark persists to the kallipai-relay
+//     {@link observeTagmaLine}. The watermark persists to the kallipai-keryx
 //     IndexedDB (getReadWatermark/putReadWatermark) and rehydrates at channel
 //     open ({@link hydrateTagma}), so a reload restores the badge and the
 //     catch-up pull counts only genuinely new rows.
@@ -54,7 +54,7 @@ import { SvelteMap } from "svelte/reactivity";
 import {
   clearReadWatermarks,
   putReadWatermark,
-} from "@kallipai/kallipai-lesche-client";
+} from "@kallipai/kallipai-keryx-client";
 import { archeionSession, lescheClientOrFail } from "./archeion.svelte.ts";
 
 /** Badge display cap: anything above renders as "99+" ({@link badgeLabel}). */

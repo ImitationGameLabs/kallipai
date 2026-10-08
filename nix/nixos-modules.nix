@@ -10,7 +10,7 @@
 # directory (/run/user/<uid>), the same semantics a human user gets.
 #
 # The polis section (services.kallipai.polis) brings up the platform
-# services -- archeion, lesche, files, instances, and the model gateway --
+# services -- archeion, lesche, keryx, files, instances, and the model gateway --
 # on one switch:
 # localhost-only listeners behind the host's reverse proxy, one shared
 # PostgreSQL for the stateful services over unix-socket peer auth,
@@ -75,6 +75,7 @@ let
   defaultPolisPorts = {
     archeion = 7100;
     lesche = 7200;
+    keryx = 7210;
     files = 7400;
     instances = 7300;
     model-gateway = 7500;
@@ -217,7 +218,7 @@ in
       };
     };
     polis = {
-      enable = lib.mkEnableOption "the polis platform services (archeion, lesche, files, instances, and the model gateway) as system services";
+      enable = lib.mkEnableOption "the polis platform services (archeion, lesche, keryx, files, instances, and the model gateway) as system services";
 
       archeionPackage = lib.mkOption {
         type = lib.types.package;
@@ -228,6 +229,11 @@ in
         type = lib.types.package;
         default = hostPackages.workspace;
         description = "The kallipai-lesche package; defaults to the full workspace build.";
+      };
+      keryxPackage = lib.mkOption {
+        type = lib.types.package;
+        default = hostPackages.workspace;
+        description = "The kallipai-keryx package; defaults to the full workspace build.";
       };
       filesPackage = lib.mkOption {
         type = lib.types.package;
@@ -265,11 +271,13 @@ in
         type = lib.types.nullOr lib.types.path;
         default = null;
         description = ''
-          Path to a root-only EnvironmentFile carrying the files-to-lesche
-          event-push secret; the file must define two keys with the same value:
-          KALLIPAI_LESCHE_INTERNAL_TOKEN and KALLIPAI_FILES_NOTIFY_TOKEN. Default
-          null: the lesche leaves its internal surface unmounted and the push
-          stays disabled (the safe standalone posture).
+          Path to a root-only EnvironmentFile carrying the files-to-keryx
+          event-push secret; the file must define these keys with the
+          same value: KALLIPAI_KERYX_INTERNAL_TOKEN (the push target),
+          and KALLIPAI_FILES_NOTIFY_TOKEN (the
+          sender). Default null: the keryx leaves its internal surface
+          unmounted and the push stays disabled (the safe standalone
+          posture).
         '';
       };
 
@@ -289,6 +297,16 @@ in
           default = defaultPolisPorts.lesche;
           description = ''
             Listening port of the lesche service. Must be 1024-65535;
+            pick a port outside the system's ephemeral range and unused by
+            other services on this host — a conflict surfaces at service
+            start as an address-in-use error.
+          '';
+        };
+        keryx = lib.mkOption {
+          type = lib.types.port;
+          default = defaultPolisPorts.keryx;
+          description = ''
+            Listening port of the keryx service. Must be 1024-65535;
             pick a port outside the system's ephemeral range and unused by
             other services on this host — a conflict surfaces at service
             start as an address-in-use error.
@@ -433,6 +451,18 @@ in
       };
 
       lesche = {
+        maxBodySizeKb = lib.mkOption {
+          type = lib.types.nullOr lib.types.ints.unsigned;
+          default = null;
+          description = "Max HTTP request body size in kilobytes (0 = axum default).";
+        };
+        corsOrigins = lib.mkOption {
+          type = lib.types.nullOr lib.types.str;
+          default = null;
+          description = "Comma-separated CORS allow-list origins.";
+        };
+      };
+      keryx = {
         proofSkewSecs = lib.mkOption {
           type = lib.types.nullOr lib.types.int;
           default = null;
@@ -825,6 +855,7 @@ in
         map (name: lib.nameValuePair name { }) [
           "kallipai-archeion"
           "kallipai-lesche"
+          "kallipai-keryx"
           "kallipai-files"
           "kallipai-instances"
           "kallipai-model-gateway"
@@ -850,6 +881,7 @@ in
             [
               "kallipai-archeion"
               "kallipai-lesche"
+              "kallipai-keryx"
               "kallipai-files"
               "kallipai-model-gateway"
             ]
@@ -984,8 +1016,6 @@ in
             KALLIPAI_LESCHE_LOG_DIR = "/var/log/kallipai/lesche";
             KALLIPAI_POLIS_INTERNAL_TOKEN_FILE = "/var/lib/kallipai/archeion/internal-token";
           }
-          // envOpt "KALLIPAI_LESCHE_PROOF_SKEW_SECS" polisCfg.lesche.proofSkewSecs
-          // envOpt "KALLIPAI_LESCHE_KEY_EXCHANGE_TIMEOUT_SECS" polisCfg.lesche.keyExchangeTimeoutSecs
           // envOpt "KALLIPAI_LESCHE_MAX_BODY_SIZE_KB" polisCfg.lesche.maxBodySizeKb
           // envOpt "KALLIPAI_LESCHE_CORS_ORIGINS" polisCfg.lesche.corsOrigins;
           serviceConfig = {
@@ -1000,6 +1030,46 @@ in
             # A crash-looping unit must not slam the start-rate limit
             # and lock itself out of restarting (archeion precedent).
             RestartSec = "5s";
+            EnvironmentFile = lib.optional (polisCfg.notifyTokenFile != null) (
+              toString polisCfg.notifyTokenFile
+            );
+          };
+        };
+
+        kallipai-keryx = {
+          description = "kallipai keryx relay service";
+          wantedBy = [ "multi-user.target" ];
+          # Soft dependency: the keryx reads the archeion's provisioned
+          # internal-token file at boot, so the archeion starts first.
+          # If the archeion goes down later, the keryx keeps running
+          # degraded and recovers on its own.
+          after = [
+            "network.target"
+            "kallipai-archeion.service"
+          ];
+          wants = [ "kallipai-archeion.service" ];
+          environment = {
+            KALLIPAI_KERYX_ADDR = "127.0.0.1:${toString polisPorts.keryx}";
+            KALLIPAI_KERYX_ARCHEION_INTERNAL_URL = "http://127.0.0.1:${toString polisPorts.archeion}";
+            KALLIPAI_KERYX_LOG_DIR = "/var/log/kallipai/keryx";
+            KALLIPAI_POLIS_INTERNAL_TOKEN_FILE = "/var/lib/kallipai/archeion/internal-token";
+          }
+          // envOpt "KALLIPAI_KERYX_MAX_BODY_SIZE_KB" polisCfg.keryx.maxBodySizeKb
+          // envOpt "KALLIPAI_KERYX_PROOF_SKEW_SECS" polisCfg.keryx.proofSkewSecs
+          // envOpt "KALLIPAI_KERYX_KEY_EXCHANGE_TIMEOUT_SECS" polisCfg.keryx.keyExchangeTimeoutSecs
+          // envOpt "KALLIPAI_KERYX_CORS_ORIGINS" polisCfg.keryx.corsOrigins;
+          serviceConfig = {
+            ExecStart = "${polisCfg.keryxPackage}/bin/kallipai-keryx";
+            User = "kallipai-keryx";
+            Group = "kallipai-keryx";
+            LogsDirectory = "kallipai/keryx";
+            LogsDirectoryMode = "0750";
+            Restart = "on-failure";
+            # A crash-looping unit must not slam the start-rate limit
+            # and lock itself out of restarting (archeion precedent).
+            RestartSec = "5s";
+            # The files-to-keryx event-push secret rides the shared
+            # notifyTokenFile EnvironmentFile (see the option doc).
             EnvironmentFile = lib.optional (polisCfg.notifyTokenFile != null) (
               toString polisCfg.notifyTokenFile
             );
@@ -1024,7 +1094,7 @@ in
             KALLIPAI_FILES_DATABASE_URL = "postgresql:///kallipai-files?host=/run/postgresql";
             KALLIPAI_FILES_LOG_DIR = "/var/log/kallipai/files";
             KALLIPAI_FILES_BLOB_ROOT = "/var/lib/kallipai/files/blobs";
-            KALLIPAI_FILES_NOTIFY_URL = "http://127.0.0.1:${toString polisPorts.lesche}";
+            KALLIPAI_FILES_NOTIFY_URL = "http://127.0.0.1:${toString polisPorts.keryx}";
             KALLIPAI_POLIS_INTERNAL_TOKEN_FILE = "/var/lib/kallipai/archeion/internal-token";
           }
           // envOpt "KALLIPAI_FILES_MAX_BODY_SIZE_MB" polisCfg.files.maxBodySizeMb
@@ -1191,6 +1261,7 @@ in
             oauthRedirectBase = lib.mkDefault appOrigin;
           };
           lesche.corsOrigins = lib.mkDefault appOrigin;
+          keryx.corsOrigins = lib.mkDefault appOrigin;
           files.corsOrigins = lib.mkDefault appOrigin;
           instances = {
             corsOrigins = lib.mkDefault appOrigin;

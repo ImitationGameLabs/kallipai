@@ -3,8 +3,10 @@ members = [
   "crates/kallipai-common",
   "crates/platform/kallipai-archeion-common",
   "crates/platform/kallipai-lesche-common",
+  "crates/platform/kallipai-keryx-common",
   "crates/platform/kallipai-archeion",
   "crates/platform/kallipai-lesche",
+  "crates/platform/kallipai-keryx",
   "crates/platform/kallipai-e2ee",
   "crates/platform/kallipai-archeion-client",
   "crates/platform/kallipai-lesche-client",
@@ -49,8 +51,10 @@ just-llm-client = { git = "https://github.com/ImitationGameLabs/just-agent-libs.
 kallipai-common = { path = "crates/kallipai-common", default-features = false }
 kallipai-archeion-common = { path = "crates/platform/kallipai-archeion-common" }
 kallipai-lesche-common = { path = "crates/platform/kallipai-lesche-common" }
+kallipai-keryx-common = { path = "crates/platform/kallipai-keryx-common" }
 kallipai-archeion = { path = "crates/platform/kallipai-archeion" }
 kallipai-lesche = { path = "crates/platform/kallipai-lesche" }
+kallipai-keryx = { path = "crates/platform/kallipai-keryx" }
 kallipai-e2ee = { path = "crates/platform/kallipai-e2ee" }
 kallipai-archeion-client = { path = "crates/platform/kallipai-archeion-client" }
 kallipai-lesche-client = { path = "crates/platform/kallipai-lesche-client" }

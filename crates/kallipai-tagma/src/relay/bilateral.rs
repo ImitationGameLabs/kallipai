@@ -18,7 +18,7 @@ impl RelayHandle {
     pub(super) async fn handle_kex(
         &self,
         conversation_id: ConversationId,
-        init: kallipai_lesche_common::control::KeyExchangeInit,
+        init: kallipai_keryx_common::control::KeyExchangeInit,
     ) {
         let (response, key) = match kex::respond_key_exchange(
             &self.inner.device,
@@ -54,7 +54,7 @@ impl RelayHandle {
         {
             warn!(conv = %conversation_id, "post key-exchange response: {e:#}");
         }
-        // `conv` is the relay-plane key (what archeion/lesche index this KEX by),
+        // `conv` is the relay-plane key (what the keryx indexes this KEX by),
         // so it carries the cross-service correlation value; the tagma id is a
         // constant 1:1 derivation of it and adds nothing per-line.
         info!(conv = %conversation_id, first, "relay KEX completed");

@@ -2240,6 +2240,16 @@
           ]
         }
       },
+      "packages/kallipai-keryx-client": {
+        "packageJson": {
+          "dependencies": [
+            "npm:@jsr/std__assert@^1.0.19",
+            "npm:@noble/ciphers@^2.2.0",
+            "npm:@noble/curves@^2.2.0",
+            "npm:@noble/hashes@^2.2.0"
+          ]
+        }
+      },
       "packages/kallipai-lesche-client": {
         "packageJson": {
           "dependencies": [

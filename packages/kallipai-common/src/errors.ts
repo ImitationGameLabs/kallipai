@@ -35,12 +35,6 @@ export class TransportError extends Error {
   }
 }
 
-/** Read an `ApiError` from a non-2xx `Response`. Shared by every HTTP client so
- * the `{"error":{"message":"..."}}` envelope is parsed in one place. The status
- * rides the response line; the message falls back from the envelope to a
- * plain-text body (e.g. a CSRF-guard 403 string), then to `statusText`. The
- * body is read ONCE as text (then parsed), because `.json()` would consume the
- * stream and leave a following `.text()` empty. */
 /** Parse the `{"error":{"message","dangling"}}` envelope shared by every
  * client path: HTTP responses (`readApiError`) and relay manage_result
  * bodies (`OnlineBackend`) must agree on what the server sent, so the
@@ -58,6 +52,12 @@ export function parseErrorEnvelope(body: unknown): {
   return { message: envelope?.error?.message, dangling };
 }
 
+/** Read an `ApiError` from a non-2xx `Response`. Shared by every HTTP client so
+ * the `{"error":{"message":"..."}}` envelope is parsed in one place. The status
+ * rides the response line; the message falls back from the envelope to a
+ * plain-text body (e.g. a CSRF-guard 403 string), then to `statusText`. The
+ * body is read ONCE as text (then parsed), because `.json()` would consume the
+ * stream and leave a following `.text()` empty. */
 export async function readApiError(resp: Response): Promise<ApiError> {
   let message = resp.statusText;
   let dangling: readonly string[] | undefined;
@@ -80,4 +80,25 @@ export async function readApiError(resp: Response): Promise<ApiError> {
     // Empty or unreadable body: keep statusText.
   }
   return { status: resp.status, message, dangling };
+}
+
+/**
+ * Data-plane API error, thrown by the lesche and keryx browser clients on
+ * a non-2xx response: the parsed body as an `Error` with the HTTP status
+ * carried alongside. Both services emit the same
+ * `{"error":{"message":...}}` envelope, so one class covers both planes
+ * and callers `instanceof`-check once regardless of which relay rejected
+ * the call. Mirrors
+ * `kallipai_common::protocol::ApiError`, and stays distinct from the
+ * tagma-transport error family above -- data-plane errors route through
+ * the realtime/channels stores, not a transport classifier.
+ */
+export class DataPlaneApiError extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+  ) {
+    super(message);
+    this.name = "DataPlaneApiError";
+  }
 }

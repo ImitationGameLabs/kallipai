@@ -44,12 +44,12 @@ import type {
   ConversationTranscript,
 } from "../transcript.ts";
 import type {
-  CachedLine,
   FileAttachment,
   HistoryEntry,
   Participant,
   TagmaReply,
 } from "@kallipai/kallipai-lesche-client";
+import type { CachedLine } from "@kallipai/kallipai-keryx-client";
 import {
   deletePending,
   isFailedPending,
@@ -59,10 +59,10 @@ import {
   putPending,
   readPendingByTagma,
   readTailBefore,
-} from "@kallipai/kallipai-lesche-client";
+} from "@kallipai/kallipai-keryx-client";
 import type { Transport } from "./transport.ts";
 import { DirectTransport, type TransportState } from "./directTransport.ts";
-import { LescheApiError } from "@kallipai/kallipai-lesche-client";
+import { DataPlaneApiError } from "@kallipai/kallipai-lesche-client";
 import { KallipaiError } from "@kallipai/kallipai-common";
 import {
   chat_send_failed,
@@ -481,10 +481,10 @@ export abstract class ConversationBase {
         };
       }
     } catch (e) {
-      // Typed failures (direct KallipaiError / relay LescheApiError) keep
+      // Typed failures (direct KallipaiError / relay DataPlaneApiError) keep
       // their server copy; transport failures are qualitative.
       let failureCopy: string;
-      if (e instanceof KallipaiError || e instanceof LescheApiError) {
+      if (e instanceof KallipaiError || e instanceof DataPlaneApiError) {
         failureCopy = e.message;
       } else {
         console.error("[chat] send failed:", e);

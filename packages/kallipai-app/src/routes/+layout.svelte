@@ -10,7 +10,7 @@
     initFiles,
     initNotificationBackend,
     initInstances,
-    initLesche,
+    initRelays,
     localStorageConfigStorage,
     type NavIcons,
   } from "@kallipai/kallipai-ui";
@@ -47,7 +47,7 @@
   // Service URLs on this surface: {KALLIPAI_POLIS_URL}/v1/<service>.
   const polis = import.meta.env.KALLIPAI_POLIS_URL ?? "http://localhost:8080";
   initArcheion(`${polis}/v1/archeion`);
-  initLesche(`${polis}/v1/lesche`);
+  initRelays(`${polis}/v1/lesche`, `${polis}/v1/keryx`);
   initFiles(`${polis}/v1/files`);
   initConfigStorage(localStorageConfigStorage);
   initNotificationBackend(tauriNotificationBackend);

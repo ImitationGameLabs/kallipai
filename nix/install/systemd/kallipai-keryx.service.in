@@ -1,0 +1,36 @@
+# kallipai-keryx -- tagma-link relay (system-level FHS install).
+# Rendered by install.sh; @BINDIR@ becomes the installed payload bin dir.
+# The service is stateless (all state in memory, no database to provide),
+# mirroring the NixOS module defaults. Optional settings (proof skew,
+# key-exchange timeout, body size, CORS) go in a drop-in; a root-only env
+# file can carry the internal-surface bearer (it must equal the files
+# service's notify token):
+#   systemctl edit kallipai-keryx
+#     [Service]
+#     Environment=KALLIPAI_KERYX_CORS_ORIGINS=https://app.example.com
+# or uncomment in a rendered copy:
+#   EnvironmentFile=/etc/kallipai/keryx.env
+[Unit]
+Description=kallipai keryx tagma-link relay
+# Soft dependency: the keryx reads the archeion's provisioned
+# internal-token file at boot, so the archeion starts first. If the
+# archeion goes down later, the keryx keeps running degraded and
+# recovers on its own -- an archeion crash does not cascade here.
+After=network.target kallipai-archeion.service
+Wants=kallipai-archeion.service
+
+[Service]
+Environment=KALLIPAI_KERYX_ADDR=127.0.0.1:7210
+Environment=KALLIPAI_KERYX_ARCHEION_INTERNAL_URL=http://127.0.0.1:7100
+Environment=KALLIPAI_KERYX_LOG_DIR=/var/log/kallipai/keryx
+Environment=KALLIPAI_POLIS_INTERNAL_TOKEN_FILE=/var/lib/kallipai/archeion/internal-token
+ExecStart=@BINDIR@/kallipai-keryx
+User=kallipai-keryx
+Group=kallipai-keryx
+LogsDirectory=kallipai/keryx
+LogsDirectoryMode=0750
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target

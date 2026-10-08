@@ -1,7 +1,7 @@
 import { assertEquals } from "@std/assert";
 import { assertRejects } from "@std/assert";
 import type { Envelope, RoomMessageView, RoomRosterView } from "./types.ts";
-import { LescheApiError } from "./types.ts";
+import { DataPlaneApiError } from "./types.ts";
 import { LescheClient } from "./http.ts";
 
 // HTTP-client contract tests for the rooms surface. The data-plane routes
@@ -484,7 +484,7 @@ Deno.test("listMyTagmaRooms GETs the owner tagma-rooms path", async () => {
 });
 
 Deno.test(
-  "a non-2xx response throws LescheApiError with the server message",
+  "a non-2xx response throws DataPlaneApiError with the server message",
   async () => {
     const stub: typeof fetch = () =>
       Promise.resolve(
@@ -499,7 +499,7 @@ Deno.test(
       const c = new LescheClient(BASE);
       const err = await assertRejects(
         () => c.createRoomInvite("room-1", "user-2"),
-        LescheApiError,
+        DataPlaneApiError,
       );
       assertEquals(err.status, 409);
       assertEquals(err.message, "invite already pending");

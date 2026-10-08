@@ -13,7 +13,7 @@ use kallipai_lesche_common::message::TagmaReply;
 /// producer, not correlated to any single op `req_id`).
 pub(super) const PUMP_TRACE: &str = "tagma:pump";
 
-/// Backoff between lesche tunnel reconnect attempts.
+/// Backoff between keryx tunnel reconnect attempts.
 pub(super) const TUNNEL_RECONNECT_BACKOFF: Duration = Duration::from_secs(2);
 
 /// Map a tagma error to an op `Error` reply, preserving the tagma's HTTP status

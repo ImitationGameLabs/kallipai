@@ -6,7 +6,7 @@
 use anyhow::{Context, Result};
 use kallipai_archeion_common::bytes::{Ed25519Signature, X25519PublicKey};
 use kallipai_e2ee::{DeviceKey, SessionKey, derive_responder_session_key};
-use kallipai_lesche_common::control::{KeyExchangeInit, KeyExchangeResponse};
+use kallipai_keryx_common::control::{KeyExchangeInit, KeyExchangeResponse};
 use kallipai_lesche_common::proof::kex_transcript;
 
 /// Build a key-exchange response for an initiator's `init`: derive the session
@@ -44,7 +44,7 @@ mod tests {
     use super::respond_key_exchange;
     use kallipai_archeion_common::bytes::X25519PublicKey;
     use kallipai_e2ee::{DeviceKey, HKDF_INFO};
-    use kallipai_lesche_common::control::KeyExchangeInit;
+    use kallipai_keryx_common::control::KeyExchangeInit;
     use kallipai_lesche_common::proof::{kex_transcript, verify_kex_proof};
     use x25519_dalek::{PublicKey as X25519Public, ReusableSecret};
 

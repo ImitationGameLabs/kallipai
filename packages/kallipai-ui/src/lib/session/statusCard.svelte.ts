@@ -16,7 +16,7 @@ import type { AgentState, WireParkedReason } from "@kallipai/kallipai-client";
 import { type ManagementBackend } from "../manage/backend.ts";
 import { startVisibleInterval } from "../visibleInterval.ts";
 import type { TagmaStatusSummary } from "../tagmata.svelte.ts";
-import { LescheApiError } from "@kallipai/kallipai-lesche-client";
+import { DataPlaneApiError } from "@kallipai/kallipai-lesche-client";
 
 /** One rendered row. `contextTokens` is null until the slow poll lands (or
  * forever, for faulted/parked agents). */
@@ -160,7 +160,7 @@ class StatusCardStore {
     this.backend = backend;
     this.refreshRoster();
     if (backend.projectionFeed) {
-      // The lesche's dirty SSE drives both refreshes the moment a
+      // The keryx's dirty SSE drives both refreshes the moment a
       // frame lands. A silently dead stream looks alive, so the visible
       // backstop intervals run alongside it (30s both, matching the
       // Offline cadence's slow leg): the poll is the only thing that
@@ -320,7 +320,7 @@ class StatusCardStore {
             const pid = status.profile?.profile_id;
             if (pid) this.profileIds.set(row.id, pid);
           } catch (e) {
-            if (e instanceof LescheApiError && e.status === 404) {
+            if (e instanceof DataPlaneApiError && e.status === 404) {
               this.liveAgentIds.delete(row.id);
             }
             // agent gone or not yet responsive: it cools down like any

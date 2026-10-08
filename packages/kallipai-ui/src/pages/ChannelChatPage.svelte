@@ -22,8 +22,8 @@
   import {
     ManageRestClient,
     ProjectionClient,
-  } from "@kallipai/kallipai-lesche-client";
-  import { lescheBaseUrlOrFail } from "../lib/session/archeion.svelte.ts";
+  } from "@kallipai/kallipai-keryx-client";
+  import { keryxBaseUrlOrFail } from "../lib/session/archeion.svelte.ts";
   import { managementBackend } from "../lib/manage/client.ts";
   import { convDraftKey, tagmaDraftKey } from "../lib/session/drafts.ts";
   import { channelsStore } from "../lib/session/channels.svelte";
@@ -291,9 +291,9 @@
         if (!conv.connected) return;
         statusCardStore.attach(
           new OnlineBackend(
-            new ManageRestClient(lescheBaseUrlOrFail()),
+            new ManageRestClient(keryxBaseUrlOrFail()),
             conv.relayTransport.relayChannel.tagmaId,
-            new ProjectionClient(lescheBaseUrlOrFail()),
+            new ProjectionClient(keryxBaseUrlOrFail()),
             conv.relayTransport.relayChannel,
           ),
         );
@@ -328,9 +328,9 @@
     const tagmaId = conv.relayTransport.relayChannel.tagmaId;
     let client: ProjectionClient;
     try {
-      client = new ProjectionClient(lescheBaseUrlOrFail());
+      client = new ProjectionClient(keryxBaseUrlOrFail());
     } catch {
-      return; // no lesche base URL: nothing to refresh
+      return; // no keryx base URL: nothing to refresh
     }
     const onVisible = () => {
       if (document.visibilityState !== "visible") return;

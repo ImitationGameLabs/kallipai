@@ -6,14 +6,13 @@ use crate::error::{daemon_err, proxy_err};
 use crate::guard::AppState;
 use axum::extract::rejection::{JsonRejection, QueryRejection};
 use axum::extract::{Query, State};
-use axum::http::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
-use axum::http::{HeaderName, HeaderValue, Method, StatusCode};
+use axum::http::{Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use kallipai_daemon_common::wire::InstanceInfo;
 use serde::Deserialize;
-use tower_http::cors::{AllowOrigin, CorsLayer};
+use tower_http::cors::CorsLayer;
 
 #[derive(Debug, Deserialize)]
 pub struct SpawnRequest {
@@ -46,48 +45,10 @@ pub struct HealthQuery {
     pub slug: Option<String>,
 }
 
-/// Build a CORS layer from a comma-separated allowlist. Mirrors the
-/// archeion/lesche `cors_layer` (credentials-aware, explicit method list,
-/// never a wildcard origin). The tagma has a separate permissive variant
-/// -- do NOT copy that one; this is the credentials-aware variant the
-/// browser app needs.
+/// Build the credentials-aware CORS layer: the shared builder with the
+/// verbs the management API speaks.
 pub fn cors_layer(origins: &str) -> CorsLayer {
-    let allowed: Vec<HeaderValue> = origins
-        .split(',')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .filter_map(|s| s.parse().ok())
-        .collect();
-    let origin = if allowed.is_empty() {
-        AllowOrigin::list(Vec::new())
-    } else {
-        AllowOrigin::list(allowed)
-    };
-    CorsLayer::new()
-        .allow_origin(origin)
-        // Methods must be an explicit list, NOT `Any`: the Fetch spec
-        // forbids `Access-Control-Allow-Credentials: true` together with
-        // a wildcard (`Allow-Methods: *`), and tower-http panics at
-        // layer construction if they're combined. The management API
-        // speaks exactly these two verbs.
-        .allow_methods([Method::GET, Method::POST])
-        // Allow credentialed cross-origin requests so the web app --
-        // served from a different origin than this service -- can send
-        // its bearer header after a passing preflight. Safe because
-        // every wildcard-forbidden field is concrete: the origin
-        // allowlist is `AllowOrigin::list` (never `Any`) and the methods
-        // are enumerated above. A misconfigured
-        // `KALLIPAI_INSTANCES_CORS_ORIGINS=*` therefore yields an empty
-        // allowlist (no cross-origin allowed) rather than an open hole.
-        .allow_credentials(true)
-        // `Authorization` is excluded from the `*` wildcard by the Fetch
-        // spec, so list the request headers we actually send explicitly.
-        .allow_headers([
-            AUTHORIZATION,
-            CONTENT_TYPE,
-            ACCEPT,
-            HeaderName::from_static("x-requested-with"),
-        ])
+    kallipai_common::cors::cors_layer(origins, &[Method::GET, Method::POST])
 }
 
 /// The instances resource router. The token guard and CORS layer are
@@ -227,4 +188,41 @@ pub struct Capabilities {
 #[derive(Debug, serde::Serialize)]
 pub struct InstanceList {
     pub instances: Vec<InstanceInfo>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cors_layer;
+    use axum::body::Body;
+    use axum::http::Request;
+    use axum::http::header::{ACCESS_CONTROL_ALLOW_METHODS, ACCESS_CONTROL_REQUEST_METHOD, ORIGIN};
+    use tower::ServiceExt;
+
+    /// The verb list is this service's local call into the shared
+    /// builder, invisible to the shared suite: pin the advertised
+    /// set so adding or removing a verb must update this test
+    /// consciously.
+    #[tokio::test]
+    async fn preflight_advertises_exactly_the_route_methods() {
+        let app = axum::Router::new()
+            .route("/healthz", axum::routing::get(|| async { "ok" }))
+            .layer(cors_layer("https://app.example"));
+        let request = Request::builder()
+            .method(axum::http::Method::OPTIONS)
+            .header(ORIGIN, "https://app.example")
+            .header(ACCESS_CONTROL_REQUEST_METHOD, "POST")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let advertised = response
+            .headers()
+            .get(ACCESS_CONTROL_ALLOW_METHODS)
+            .expect("allowed preflight advertises the method list")
+            .to_str()
+            .unwrap();
+        let mut advertised: Vec<&str> = advertised.split(',').map(str::trim).collect();
+        advertised.sort_unstable();
+        assert_eq!(advertised, ["GET", "POST"]);
+    }
 }

@@ -1,27 +1,23 @@
-//! `kallipai-lesche`: the kallipai data-plane relay (λέσχη -- the Greek conversation
+//! `kallipai-lesche`: the kallipai data-plane relay (lesche -- the Greek conversation
 //! hall, beside the archeion).
 //!
-//! The lesche owns every agent/human communication surface -- tagma tunnels,
-//! app event streams, envelope routing, key exchange, presence -- plus the
-//! durable chat store (rooms, membership, message payloads). The in-memory
-//! surfaces are soft-state rebuilt on restart;
-//! the chat schema persists in the lesche's own Postgres. It authenticates
-//! requests, resolves tagma metadata, attests identity facts, and advances the
-//! tunnel-proof replay guard through a narrow `ControlPlane` trait implemented
-//! by an HTTP client (`HttpControlPlane`) that calls the archeion's `/internal/*`
-//! API. All app<->tagma business evolution happens in this crate and the shared
-//! `kallipai-archeion-common` wire types, never in the registry.
+//! The lesche owns the room and direct-session surfaces plus the agent SSE
+//! delivery stream, with the durable chat store (rooms, membership,
+//! message payloads) in its own Postgres; the in-memory stream state is
+//! soft state rebuilt on restart. It authenticates requests and resolves
+//! tagma metadata through a narrow `ControlPlane` trait implemented
+//! by an HTTP client (`HttpControlPlane`) that calls the archeion's
+//! `/internal/*` API. All app<->tagma room-family evolution happens in
+//! this crate and the shared wire types, never in the registry.
 
 mod args;
 mod auth;
+mod chat;
 mod control_plane_http;
 mod control_policy;
-mod db;
-mod fan;
-mod identity;
-mod member_identity;
+mod events;
+mod link;
 mod middleware;
-mod room_presence;
 mod routes;
 mod sse;
 mod state;
@@ -30,7 +26,6 @@ mod state;
 mod test_support;
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::{Context, Result};
 use axum::Router;
@@ -56,8 +51,8 @@ async fn main() -> Result<()> {
     kallipai_common::logging::init_service_logging(&filter, "lesche", log_dir.as_deref());
 
     // The registry is reached only through the HTTP ControlPlane client. There
-    // is intentionally no auth cache: long-lived connections (tagma tunnel, app
-    // SSE) authenticate once at open, and the remaining verify calls are
+    // is intentionally no auth cache: long-lived connections (agent SSE,
+    // app SSE) authenticate once at open, and the remaining verify calls are
     // human-paced, so uncached per-request RPC is negligible load. See
     // `control_plane_http`.
     let control = Arc::new(HttpControlPlane::new(
@@ -72,27 +67,22 @@ async fn main() -> Result<()> {
     // carries it as `Option<Db>` so the mock routing tests can pass `None`
     // (they do not exercise persistence); the relay fan-out branches on
     // `state.db.as_ref()`.
-    let db = db::connect_and_migrate(&args.database_url).await?;
+    let db = chat::db::connect_and_migrate(&args.database_url).await?;
 
     let conv_state: SharedConvState = Arc::new(state::ConversationsState {
         control,
         registry: std::sync::RwLock::new(state::Registry::new()),
-        pending_key_exchange: std::sync::Mutex::new(std::collections::HashMap::new()),
-        proof_skew_secs: args.proof_skew_secs,
-        key_exchange_timeout: Duration::from_secs(args.key_exchange_timeout_secs),
         db: Some(db),
         agent_profiles: state::AgentProfileCache::default(),
     });
 
     // The relay routes carry `SharedConvState` (already applied inside
-    // `routes::router`); the result is a stateless `Router<()>`. Merge it in:
-    // mounted at the root, so the data-plane paths are bare resource paths;
-    // CSRF guard to the whole relay surface (it gates the cookie-bearing
-    // `POST /conversations` and is a no-op for bearer/machine requests).
-    let internal_token_hash = (!args.internal_token.is_empty())
-        .then(|| kallipai_common::authtoken::TokenHash::of(&args.internal_token));
-    let v1 = routes::router(conv_state.clone(), internal_token_hash)
-        .layer(axum::middleware::from_fn(middleware::csrf_guard));
+    // `routes::router`); the result is a stateless `Router<()>`, mounted at
+    // the root, so the data-plane paths are bare resource paths; CSRF
+    // guard to the whole relay surface (it gates the cookie-bearing room
+    // writes and is a no-op for bearer/machine requests).
+    let v1 =
+        routes::router(conv_state.clone()).layer(axum::middleware::from_fn(middleware::csrf_guard));
 
     // Outermost layers: body limit, then CORS (explicit allowlist, never Any),
     // then request tracing. Mirrors the archeion's layer order.

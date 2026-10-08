@@ -2,9 +2,11 @@
 //
 // Browser client for the archeion control-plane relay (default :7100): passkey
 // register/login, `/me`, and the tagma lifecycle (mint/rename/revoke + the
-// pinned device-key fetch). The data-plane client (conversations, key exchange,
-// E2EE envelopes, app SSE) lives in `@kallipai/kallipai-lesche-client`. The
-// session cookie is shared cross-subdomain between archeion and lesche.
+// pinned device-key fetch). The bilateral data-plane client (conversations,
+// key exchange, E2EE envelopes, the bilateral SSE) lives in
+// `@kallipai/kallipai-keryx-client`; the rooms client lives in
+// `@kallipai/kallipai-lesche-client`. The session cookie is shared
+// cross-subdomain across archeion, keryx, and lesche.
 
 export const PACKAGE_NAME = "@kallipai/kallipai-archeion-client";
 

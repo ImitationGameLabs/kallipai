@@ -1367,20 +1367,25 @@ async fn activate_relay(
         id.clone()
     };
 
-    // The data-plane client: tagma tunnel, envelope/KEX POSTs, room discovery
-    // (the chat domain lives in lesche now). Built once and shared by the room
-    // routes and the relay orchestrator (a cheap clone of the shared reqwest
-    // pool + bearer).
+    // The data-plane client: the keryx-split family -- the tunnel, KEX,
+    // upstream and conversation-envelope POSTs dial the keryx base; the
+    // rooms/direct routes and the agent SSE stream dial the lesche base.
+    // Built once and shared by the room routes and the relay orchestrator (a
+    // cheap clone of the shared reqwest pool + bearer).
     let lesche = kallipai_lesche_client::LescheClient::builder(
         &kallipai_common::polis::service_base(&entry.polis_url, "lesche"),
         &tagma_token,
     )
+    .with_keryx_url(&kallipai_common::polis::service_base(
+        &entry.polis_url,
+        "keryx",
+    ))
     .build()?;
 
     let handle = relay::RelayHandle::new(
-        lesche,
+        lesche.clone(),
         entry.name.clone(),
-        tagma_id,
+        tagma_id.clone(),
         // TODO(label-plumb): paired with the projector-construction site —
         // "Tagma" until the enrolled label is plumbed through.
         "Tagma".to_string(),
@@ -1396,7 +1401,12 @@ async fn activate_relay(
     );
 
     let join = tokio::spawn(handle.clone().run(state.shutdown.clone()));
-    state.set_relay(&entry.name, handle, join);
+    state.set_relay(&entry.name, handle.clone(), join);
+    // The agent SSE carrier: the delivery feed for room and direct-session
+    // envelopes, held beside the device-proof tunnel (which keeps the
+    // control frames). Unconditional -- the two carriers are complementary
+    // feeds, not alternatives.
+    tokio::spawn(relay::agent_sse::run(handle, state.shutdown.clone()));
     Ok(())
 }
 

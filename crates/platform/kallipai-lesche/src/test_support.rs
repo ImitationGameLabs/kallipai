@@ -1,6 +1,11 @@
 //! Test-only support: an in-memory `ControlPlane` mock + relay-state fixtures,
 //! so the relay's routing/KEX/presence logic is tested without Docker.
 
+/// Route-module test helpers: request builders and DB-backed fixtures
+/// shared by the chat and link domain route tests.
+#[cfg(test)]
+pub(crate) mod routes;
+
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -96,7 +101,7 @@ impl MockControlPlane {
     }
 
     /// Override a seeded tagma's pinned key (`None` = pending / not yet
-    /// enrolled-a-key), so a test can drive the tunnel / rooms-send gate's
+    /// enrolled-a-key), so a test can drive the deliverability gate's
     /// no-pinned-key branch.
     pub fn set_pinned_key(&self, tagma: &TagmaId, key: Option<Ed25519PublicKey>) {
         let mut tagmas = self.tagmas.lock().unwrap();
@@ -314,40 +319,15 @@ impl ControlPlane for MockControlPlane {
 
 /// Build a `SharedConvState` wired to a fresh mock registry. The mock is
 /// returned so the test can seed tagmas/tokens.
-pub fn make_state(
-    proof_skew_secs: i64,
-    key_exchange_timeout: std::time::Duration,
-) -> (SharedConvState, Arc<MockControlPlane>) {
+pub fn make_state() -> (SharedConvState, Arc<MockControlPlane>) {
     let control = Arc::new(MockControlPlane::new());
     let state: SharedConvState = Arc::new(ConversationsState {
         control: control.clone(),
         registry: std::sync::RwLock::new(crate::state::Registry::new()),
-        pending_key_exchange: std::sync::Mutex::new(HashMap::new()),
-        proof_skew_secs,
-        key_exchange_timeout,
         db: None,
         agent_profiles: crate::state::AgentProfileCache::default(),
     });
     (state, control)
-}
-
-/// Insert a presence entry directly (bypassing the tunnel handler's proof
-/// machinery) and return the per-connection identity token + the tunnel's
-/// inbound broadcast sender. Mirrors what a live tagma tunnel establishes.
-pub fn seed_presence(
-    state: &SharedConvState,
-    tagma: &TagmaId,
-    owner: UserId,
-) -> (
-    tokio::sync::broadcast::Sender<kallipai_lesche_common::tunnel::TunnelInbound>,
-    Arc<()>,
-) {
-    let (tx, _rx) =
-        tokio::sync::broadcast::channel::<kallipai_lesche_common::tunnel::TunnelInbound>(128);
-    let id = Arc::new(());
-    let mut reg = state.registry.write().unwrap();
-    reg.register_presence(tagma, owner, tx.clone(), id.clone());
-    (tx, id)
 }
 
 /// The shared test Postgres: one reusable container per machine, named
@@ -498,7 +478,7 @@ async fn sweep_dead_test_dbs(port: u16) {
 /// stale same-named database first (pid reuse). Dead databases disappear
 /// with the container (`docker rm -f kallipai-testcontainers-pg-16alpine`); no other
 /// cleanup exists by design.
-pub(crate) async fn provision_test_db() -> crate::db::Db {
+pub(crate) async fn provision_test_db() -> crate::chat::db::Db {
     use sea_orm::{ConnectionTrait, Database, DatabaseBackend, Statement};
     let port = *shared_pg_port().await;
     let n = DB_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -521,7 +501,7 @@ pub(crate) async fn provision_test_db() -> crate::db::Db {
     .expect("create test database");
     drop(root);
     let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/{db_name}");
-    crate::db::connect_and_migrate(&url)
+    crate::chat::db::connect_and_migrate(&url)
         .await
         .expect("connect + migrate")
 }

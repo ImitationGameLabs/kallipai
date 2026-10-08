@@ -159,3 +159,42 @@ export type TagmaReply =
       readonly status: number;
       readonly body: unknown;
     };
+
+/** The unit the data-plane relays forward. `sequence_n` is
+ * per-conversation, per-sender, monotonic from 0; it doubles as the AEAD
+ * nonce counter. `ciphertext` is standard-base64 AEAD output
+ * (ChaCha20-Poly1305, tag appended). `timestamp` is ISO 8601 with
+ * fractional seconds (time::serde::iso8601); do not round-trip a
+ * received value through `Date`. Rides the bilateral E2EE
+ * conversations (the keryx plane, ciphertext opaque to the relay) and
+ * the room envelopes (the lesche plane, opaque stored payload with
+ * `sequence_n` 0), so the shape lives here rather than in either
+ * plane client. */
+export interface Envelope {
+  readonly channel_id: string;
+  readonly sender: Participant;
+  readonly sequence_n: number;
+  readonly trace_id: string;
+  readonly timestamp: string;
+  readonly ciphertext: string;
+}
+
+/** The aggregate status payload carried by the `tagma_status` SSE event
+ * (both planes' `/me/events` streams) and `GET /tagmata/{id}/status`
+ * (one wire shape, three consumers). */
+export interface TagmaStatusPayload {
+  readonly root_state:
+    | "idle"
+    | "busy"
+    | "waiting"
+    | "retrying"
+    | "parked"
+    | "faulted";
+  readonly subagents_total: number;
+  readonly subagents_active: number;
+  readonly token_budget: number;
+  readonly token_consumed: number;
+  // Unlimited budget (enforcement off, consumption still tracked);
+  // absent from older tagmas (serde default false).
+  readonly token_budget_unlimited?: boolean;
+}

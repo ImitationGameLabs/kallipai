@@ -1,55 +1,18 @@
 //! Data-plane route mounting.
 
-mod conversations;
-mod direct;
-mod events;
-mod internal;
-mod manage_proxy;
-mod room_management;
-mod rooms;
-mod signal;
-mod state;
-mod status;
-mod tunnel;
-mod upstream;
-
-#[cfg(test)]
-pub(crate) mod test_support;
-
 use axum::Router;
-use axum::http::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
-use axum::http::{HeaderName, HeaderValue, Method};
-use tower_http::cors::{AllowOrigin, CorsLayer};
+use axum::http::Method;
+use tower_http::cors::CorsLayer;
 
 use crate::state::SharedConvState;
 
-/// Data-plane routes, state-injected (`Router<()>`): `/conversations*`,
-/// `/me/events`, and `/tunnel`.
-pub fn router(
-    state: SharedConvState,
-    internal_token_hash: Option<kallipai_common::authtoken::TokenHash>,
-) -> Router<()> {
-    let mut app = Router::new()
-        .merge(conversations::router().with_state(state.clone()))
-        .merge(rooms::router().with_state(state.clone()))
-        .merge(direct::router().with_state(state.clone()))
-        .merge(room_management::router().with_state(state.clone()))
-        .merge(events::router().with_state(state.clone()))
-        .merge(tunnel::router().with_state(state.clone()))
-        .merge(manage_proxy::router().with_state(state.clone()))
-        .merge(state::router().with_state(state.clone()))
-        .merge(upstream::router().with_state(state.clone()));
-    // The service-to-service `/internal/*` surface: mounted only when the
-    // shared secret is configured (same discipline as the archeion's internal
-    // nest; the files service pushes FileDelivered events here).
-    if let Some(hash) = internal_token_hash {
-        let internal = internal::router(state.clone()).layer(axum::middleware::from_fn_with_state(
-            hash,
-            crate::middleware::internal_guard,
-        ));
-        app = app.nest("/internal", internal);
-    }
-    app
+/// Data-plane routes, state-injected (`Router<()>`): the chat and link
+/// domains plus the shared events face.
+pub fn router(state: SharedConvState) -> Router<()> {
+    Router::new()
+        .merge(crate::chat::router().with_state(state.clone()))
+        .merge(crate::events::router().with_state(state.clone()))
+        .merge(crate::link::router().with_state(state))
 }
 
 /// The complete external route table: (verb, path) pairs the merged
@@ -58,13 +21,8 @@ pub fn router(
 /// a row here: the shape tests drive every row through the app and
 /// the CORS layer derives its preflight set from this table, so a stale
 /// /v1 prefix in a registration, or an unadvertised verb fails
-/// here instead of in production. `ANY` stands for the manage-proxy
-/// pass-through, which forwards every verb. Keep rows path-sorted.
+/// here instead of in production. Keep rows path-sorted.
 pub(crate) const ROUTE_TABLE: &[(&str, &str)] = &[
-    ("POST", "/conversations"),
-    ("POST", "/conversations/{id}/envelopes"),
-    ("POST", "/conversations/{id}/key-exchange/init"),
-    ("POST", "/conversations/{id}/key-exchange/response"),
     ("GET", "/direct-sessions"),
     ("POST", "/direct-sessions"),
     ("GET", "/direct-sessions/{session_id}/messages"),
@@ -85,71 +43,21 @@ pub(crate) const ROUTE_TABLE: &[(&str, &str)] = &[
     ("GET", "/rooms/{room_id}/messages"),
     ("POST", "/rooms/{room_id}/tagmata"),
     ("PUT", "/rooms/{room_id}/read-cursor"),
-    ("GET", "/tagmata/{id}/agents"),
-    ("GET", "/tagmata/{id}/budget"),
-    ("GET", "/tagmata/{id}/status"),
-    ("ANY", "/tagmata/{id}/manage/{*path}"),
-    ("GET", "/tagmata/{id}/state"),
-    ("GET", "/tagmata/{id}/work-schedule"),
+    ("GET", "/tagmata/{id}/events"),
     ("GET", "/tagmata/{tagma_id}/rooms"),
-    ("POST", "/tagmata/{tagma_id}/upstream"),
-    ("GET", "/tunnel"),
-    ("POST", "/tunnel/manage-reply"),
 ];
-/// Build a CORS layer from a comma-separated allowlist. Mirrors the archeion's
-/// `cors_layer` (credentials-aware, explicit method list, never a wildcard
-/// origin). The tagma has a separate permissive `cors_layer` -- do NOT copy
-/// that one; this is the credentials-aware variant the browser app needs.
+/// Build the credentials-aware CORS layer: the shared builder with the
+/// verb list derived from ROUTE_TABLE, so a route row
+/// and its preflight advertisement cannot drift apart.
 pub fn cors_layer(origins: &str) -> CorsLayer {
-    let allowed: Vec<HeaderValue> = origins
-        .split(',')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .filter_map(|s| s.parse().ok())
-        .collect();
-    let origin = if allowed.is_empty() {
-        AllowOrigin::list(Vec::new())
-    } else {
-        AllowOrigin::list(allowed)
-    };
-    // Methods must be an explicit list, NOT `Any`: the Fetch spec forbids
-    // `Access-Control-Allow-Credentials: true` together with a wildcard
-    // (`Allow-Methods: *`), and tower-http panics at layer construction if
-    // they're combined. The list is exactly the ROUTE_TABLE-derived set
-    // (ANY rows skipped): a route row and its preflight advertisement
-    // cannot drift apart.
     let mut methods: Vec<Method> = Vec::new();
     for (verb, _) in ROUTE_TABLE {
-        if *verb == "ANY" {
-            continue;
-        }
         let m = Method::from_bytes(verb.as_bytes()).expect("table verb is concrete");
         if !methods.contains(&m) {
             methods.push(m);
         }
     }
-    CorsLayer::new()
-        .allow_origin(origin)
-        .allow_methods(methods)
-        // Allow credentialed (cookie-bearing) cross-origin requests so the web
-        // app -- served from a different origin than the lesche -- can send the
-        // `kallipai_session` cookie with `credentials: "include"`. Safe because
-        // every wildcard-forbidden field is concrete: the origin allowlist is
-        // `AllowOrigin::list` (never `Any`) and the methods are enumerated
-        // above. A misconfigured `KALLIPAI_LESCHE_CORS_ORIGINS=*` therefore yields
-        // an empty allowlist (no cross-origin allowed) rather than an open hole.
-        .allow_credentials(true)
-        // `Authorization` is excluded from the `*` wildcard by the Fetch spec,
-        // so list the request headers we actually send explicitly. The CSRF
-        // marker (`X-Requested-With`) is a custom header the browser only sends
-        // same-origin / after a passing preflight, so it must be allowed here
-        // for the preflight to succeed.
-        .allow_headers([
-            AUTHORIZATION,
-            CONTENT_TYPE,
-            ACCEPT,
-            HeaderName::from_static("x-requested-with"),
-        ])
+    kallipai_common::cors::cors_layer(origins, &methods)
 }
 
 #[cfg(test)]
@@ -167,9 +75,7 @@ mod tests {
     /// must serve at its registered bare shape, and a
     /// wrong verb must answer 405. Status vocabulary: 401 = route reached
     /// (the auth extractor answers unauthenticated requests), 404 = no
-    /// route mounted here, 405 = route exists, verb not served. The table
-    /// rows with `ANY` are covered by the proxy tests; concrete
-    /// verbs go through the positive pass.
+    /// route mounted here, 405 = route exists, verb not served.
     async fn shape_response(app: &axum::Router, verb: &str, path: &str) -> axum::http::StatusCode {
         let request = Request::builder()
             .method(verb)
@@ -182,13 +88,9 @@ mod tests {
 
     #[tokio::test]
     async fn every_table_row_serves_at_its_bare_shape() {
-        let (state, _control) =
-            crate::test_support::make_state(60, std::time::Duration::from_secs(10));
-        let app = super::router(state, None);
+        let (state, _control) = crate::test_support::make_state();
+        let app = super::router(state);
         for (verb, path) in super::ROUTE_TABLE {
-            if *verb == "ANY" {
-                continue; // covered by the manage-proxy tests
-            }
             let status = shape_response(&app, verb, path).await;
             assert_eq!(
                 status,
@@ -203,15 +105,14 @@ mod tests {
     /// tellable apart in the assertion message.
     #[tokio::test]
     async fn wrong_verbs_answer_405() {
-        let (state, _control) =
-            crate::test_support::make_state(60, std::time::Duration::from_secs(10));
-        let app = super::router(state, None);
+        let (state, _control) = crate::test_support::make_state();
+        let app = super::router(state);
         let wrong = [
-            ("POST", "/tagmata/t-a/agents"),
-            ("DELETE", "/tagmata/t-a/state"),
-            ("PUT", "/tagmata/t-a/state"),
-            ("GET", "/tunnel/manage-reply"),
-            ("DELETE", "/conversations"),
+            ("DELETE", "/rooms"),
+            ("PUT", "/direct-sessions"),
+            ("GET", "/rooms/r-1/envelopes"),
+            ("POST", "/me/events"),
+            ("DELETE", "/tagmata/t-a/events"),
         ];
         for (verb, path) in wrong {
             let status = shape_response(&app, verb, path).await;
@@ -254,9 +155,8 @@ mod tests {
     /// Same pin as the archeion's: the advertised preflight set must equal
     /// the derived set exactly, so dropping a method (the omission that
     /// broke the archeion's provider vault) fails here instead of in a live
-    /// session. The manage surface's verbs are GET/POST/PUT per the tagma
-    /// frame allowlist; the three sources move together: frame allowlist,
-    /// ROUTE_TABLE, and the CORS methods (one change re-advertises all).
+    /// session. The two sources move together: ROUTE_TABLE and the CORS
+    /// methods (one change re-advertises all).
     #[tokio::test]
     async fn preflight_advertises_exactly_the_route_methods() {
         let app = Router::new()
@@ -280,7 +180,7 @@ mod tests {
         advertised.sort_unstable();
         let mut expected: Vec<&str> = Vec::new();
         for (verb, _) in super::ROUTE_TABLE {
-            if *verb == "ANY" || expected.contains(verb) {
+            if expected.contains(verb) {
                 continue;
             }
             expected.push(*verb);
@@ -297,13 +197,8 @@ mod tests {
     /// crashed startup while the test suite stayed green.
     #[test]
     fn full_router_assembly_does_not_panic() {
-        let (state, _control) =
-            crate::test_support::make_state(60, std::time::Duration::from_secs(10));
-        // Both mount states: no internal surface, and with it.
-        let _ = super::router(state.clone(), None);
-        let _ = super::router(
-            state,
-            Some(kallipai_common::authtoken::TokenHash::of("secret")),
-        );
+        let (state, _control) = crate::test_support::make_state();
+        // Single mount state: the internal surface lives on the keryx.
+        let _ = super::router(state);
     }
 }

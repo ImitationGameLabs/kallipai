@@ -2,8 +2,9 @@
 // kallipai-common parseSseStream) into MeEventFrames. This validates the fetch +
 // SSE wiring; it does not re-test SSE framing itself.
 
-import { assertEquals } from "@std/assert";
+import { assert, assertEquals } from "@std/assert";
 import { LescheClient } from "./http.ts";
+import { DataPlaneApiError } from "./types.ts";
 
 Deno.test(
   "meEvents yields id-less payload frames without a cursor",
@@ -170,6 +171,7 @@ Deno.test("meEvents surfaces a non-2xx response as an error", async () => {
       await iter.next();
     } catch (e) {
       threw = true;
+      assert(e instanceof DataPlaneApiError);
       assertEquals((e as { status: number }).status, 401);
     }
     if (!threw) throw new Error("expected meEvents to throw on 401");

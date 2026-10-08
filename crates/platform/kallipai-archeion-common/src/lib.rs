@@ -1,15 +1,16 @@
-//! Wire types for the `kallipai-archeion` relay (control plane) plus the foundation
-//! it exposes to the rest of the platform: identity newtypes, crypto-byte
+//! Wire types for the `kallipai-archeion` registry (control plane) plus the
+//! foundation it exposes to the rest of the platform: identity newtypes, crypto-byte
 //! wrappers, the deputy-guard auth principal, the signed-proof verification
-//! primitives, and the archeion-lesche RPC contract (`ControlPlane` trait +
+//! primitives, and the control-plane RPC contract (`ControlPlane` trait +
 //! `/internal/*` request/response types).
 //!
-//! The archeion is upstream of the data plane: `kallipai-lesche-common` (the lesche
-//! wire types) depends on this crate for the foundation, and the lesche service
-//! reaches the archeion over HTTP through a client implementing
-//! [`control_plane::ControlPlane`]. Lesche-specific data-plane types (envelopes,
-//! tunnel frames, the me/events SSE union, the KEX handshake) live in
-//! `kallipai-lesche-common`, not here.
+//! The archeion is upstream of the data plane: `kallipai-lesche-common` (the
+//! lesche wire types) depends on this crate for the foundation, and the
+//! data-plane services reach the archeion over HTTP through clients
+//! implementing [`control_plane::ControlPlane`]. Data-plane wire types live
+//! in the data-plane commons, not here: envelopes in
+//! `kallipai-lesche-common`; tunnel frames, the keryx me/events union, and
+//! the KEX handshake in `kallipai-keryx-common`.
 //! The room-domain wire types (`RoomId`, `MemberId`, the `/rooms` DTOs, the
 //! membership snapshot) live there too; this crate keeps only the
 //! platform-wide foundation identities (`ParticipantId`, `ParticipantKind`,

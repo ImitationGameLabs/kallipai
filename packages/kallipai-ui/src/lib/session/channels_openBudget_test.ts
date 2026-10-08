@@ -21,7 +21,7 @@ declare global {
 (globalThis as Record<string, unknown>)["$state"] = (v: unknown) => v;
 
 type TagmaView = import("@kallipai/kallipai-archeion-client").TagmaView;
-const { LescheApiError } = await import("@kallipai/kallipai-lesche-client");
+const { DataPlaneApiError } = await import("@kallipai/kallipai-lesche-client");
 const { assertEquals } = await import("@std/assert");
 const { ChannelsStore } = await import("./channels.svelte.ts");
 
@@ -110,12 +110,12 @@ Deno.test(
   "an offline-class failure asks the shell to correct stale presence",
   async () => {
     const h = new Harness();
-    h.script = [new LescheApiError(503, "tagma offline")];
+    h.script = [new DataPlaneApiError(503, "tagma offline")];
     await h.ensureOpen(tagma);
     assertEquals(h.corrections, ["t-1"]);
 
     // A non-offline failure must NOT retract presence (the tagma may be fine;
-    // the lesche just failed to serve the KEX).
+    // the keryx just failed to serve the KEX).
     h.script = [new Error("net down")];
     await h.ensureOpen(tagma);
     assertEquals(h.corrections.length, 1);
@@ -160,7 +160,7 @@ Deno.test(
     const h = new Harness();
     h.script = Array.from(
       { length: 6 },
-      () => new LescheApiError(503, "tagma offline"),
+      () => new DataPlaneApiError(503, "tagma offline"),
     );
     // Six 503 failures terminal the budget...
     for (let i = 0; i < 6; i++) {

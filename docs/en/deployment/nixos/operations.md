@@ -13,8 +13,8 @@ recognizing at boot.
 The polis services authenticate to each other with one shared secret,
 provisioned by the control plane into its state directory
 (`/var/lib/kallipai/archeion/internal-token`, mode 0640, readable by
-the `kallipai-polis` group the module creates). The other three
-services read the same file, so all four agree on one value for the
+the `kallipai-polis` group the module creates). The five other
+services read the same file, so all six agree on one value for the
 lifetime of the deployment.
 
 Secret state is filed by lifetime: `/etc` holds administrator-owned
@@ -22,10 +22,11 @@ static configuration (a pinned admin token), `/run` holds volatile
 runtime state, and `/var/lib` holds service-owned persistent state
 (the internal token).
 
-To rotate the internal token: stop the four polis services, delete the
+To rotate the internal token: stop the six polis services, delete the
 file, start the archeion (a fresh value is generated), then start the
-other three. The group restart keeps every service on the same
-generation.
+other five. Every reader loads the token file once at boot, so a
+service left running keeps calling `/internal` with the old value.
+The group restart keeps every service on the same generation.
 
 ### Users, Launch Identities, and the Real-Root Guard
 
@@ -51,9 +52,10 @@ internal-token section describes.
 ## Troubleshooting the First Boot
 
 A missing internal-token file is not an error on the archeion's first
-boot; it generates one. The lesche, files, and instances units require
-the archeion and read that file at boot; if it has not appeared within a
-short grace window the unit refuses to start, and
+boot; it generates one. The lesche, keryx, files, instances, and
+model-gateway units require the archeion and read that file at boot;
+if it has not appeared within a short grace window the unit refuses
+to start, and
 `journalctl -u kallipai-instances` shows the path it waited for. An empty
 token file fails every reader explicitly; delete the file to
 re-provision rather than editing it by hand.

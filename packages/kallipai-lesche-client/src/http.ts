@@ -1,23 +1,27 @@
-// Browser client for the lesche data-plane relay. The lesche (default :7200) is
-// the data plane: conversation setup, the synchronous key exchange, envelope
-// posting, and the multiplexed app SSE. The session cookie is shared
-// cross-subdomain with the archeion (`KALLIPAI_ARCHEION_SESSION_COOKIE_DOMAIN`), so the
-// same credentialed fetch works. Every fetch carries `credentials: "include"`
-// (the session cookie is the auth) and every non-GET carries the CSRF marker
-// (`X-Requested-With: kallipai`), which the lesche's `csrf_guard` requires on
-// cookie-bearing mutating requests. Non-2xx responses become `LescheApiError`
-// (`{ status, message }`).
+// Browser client for the lesche data-plane relay. The lesche (default :7200)
+// is the rooms data plane: room envelopes, room history, room management,
+// and the lesche `me/events` SSE (the room family). The bilateral
+// conversations, the key exchange, and the keryx `me/events` stream live in
+// @kallipai/kallipai-keryx-client. The session cookie is shared
+// cross-subdomain with the archeion (`KALLIPAI_ARCHEION_SESSION_COOKIE_DOMAIN`),
+// so the same credentialed fetch works. Every fetch carries
+// `credentials: "include"` (the session cookie is the auth) and every
+// non-GET carries the CSRF marker (`X-Requested-With: kallipai`), which the
+// lesche's `csrf_guard` requires on cookie-bearing mutating requests.
+// Non-2xx responses become `DataPlaneApiError` (`{ status, message }`). The
+// JSON/CSRF fetch discipline and the SSE frame machine live in
+// @kallipai/kallipai-common, shared with the keryx client.
 
-import { parseSseStream, readApiError } from "@kallipai/kallipai-common";
-import { LescheApiError } from "./types.ts";
+import {
+  BaseClient,
+  type EventFrame,
+  readEventFrames,
+} from "@kallipai/kallipai-common";
 import type {
   AddTagmaRequest,
-  CreateConversationResponse,
   CreateInviteRequest,
   CreateInviteResponse,
   Envelope,
-  KeyExchangeInit,
-  KeyExchangeResponse,
   LescheEvent,
   RoomInviteView,
   RoomMessageView,
@@ -27,152 +31,15 @@ import type {
   Visibility,
 } from "./types.ts";
 
-/** CSRF marker the lesche's `csrf_guard` checks. */
-const CSRF_HEADER = "X-Requested-With";
-const CSRF_HEADER_VALUE = "kallipai";
-
-/** Connect/first-byte window for SSE fetches: long enough for a cold TLS
- * handshake through a slow proxy, short enough that a hung connection is
- * abandoned before the user gives up. Body lifetime is explicitly not
- * covered -- see {@linkcode sseFetch}. */
-export const SSE_CONNECT_TIMEOUT_MS = 30_000;
-
-/** One frame of the `GET /me/events` stream, shaped for cursor tracking.
- *
- * - `stream`: the open marker — `event: stream` with
- *   `{ epoch, next_seq }` data. `nextSeq` is the seq of the first frame
- *   allocated after the marker capture; frames allocated earlier may still
- *   arrive first (pre-adoption).
- * - `event`: a payload frame. `epoch`/`seq` come from the SSE `id:` field
- *   (`"<epoch>:<seq>"`); both are `null` when the server sent no id
- *   (an older server, or a non-kallipai intermediary) — consumers treat that
- *   as unversioned and disable gap detection, degrading to exactly the
- *   pre-cursor behavior.
- */
-export type MeEventFrame =
-  | { kind: "stream"; epoch: number; nextSeq: number }
-  | {
-      kind: "event";
-      epoch: number | null;
-      seq: number | null;
-      event: LescheEvent;
-    };
+/** The lesche `/me/events` frame: the room-family stream. */
+export type MeEventFrame = EventFrame<LescheEvent>;
 
 /**
- * Fetch a lesche SSE endpoint with a connect/first-byte timeout. The window
- * covers connection establishment and response headers only: once the response
- * arrives the timer is cleared, because a body-scoped timer would kill every
- * healthy long-lived stream at the window edge and drive a periodic reconnect
- * storm (amplified by idle-sensitive intermediaries that drop quiet streams).
- * The external `signal` -- the caller's stream lifetime, also passed to
- * `parseSseStream` -- is bridged into the internal controller for the fetch
- * itself and unhooked once headers arrive; an already-aborted external signal
- * short-circuits before any request is made.
- */
-export async function sseFetch(
-  url: string,
-  signal: AbortSignal | undefined,
-  connectTimeoutMs = SSE_CONNECT_TIMEOUT_MS,
-): Promise<Response> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), connectTimeoutMs);
-  const onExternalAbort = () => controller.abort();
-  signal?.addEventListener("abort", onExternalAbort);
-  if (signal?.aborted) controller.abort();
-  try {
-    return await fetch(url, {
-      method: "GET",
-      headers: { accept: "text/event-stream" },
-      credentials: "include",
-      signal: controller.signal,
-    });
-  } finally {
-    clearTimeout(timer);
-    signal?.removeEventListener("abort", onExternalAbort);
-  }
-}
-/**
- * Shared base for the lesche browser client: a base URL + the JSON/CSRF fetch
- * helper. The session cookie (`credentials: "include"`) is the auth; the
- * `X-Requested-With` CSRF marker is required on cookie-bearing mutating
- * requests. Non-2xx responses become `LescheApiError` (`{ status, message }`).
- *
- * Internal to this package: the lesche surface has a single client, so the base
- * is not re-exported.
- */
-abstract class BaseClient {
-  constructor(protected readonly baseUrl: string) {}
-
-  /** JSON fetch with the CSRF marker on non-GETs; `LescheApiError` on non-2xx. */
-  protected async json<T>(
-    path: string,
-    method: string,
-    body?: unknown,
-  ): Promise<T> {
-    const headers: Record<string, string> = { accept: "application/json" };
-    // Send the CSRF marker on every non-GET unconditionally: it is required on
-    // cookie-bearing mutating requests and harmless otherwise.
-    const isStateChanging = method !== "GET";
-    if (isStateChanging) {
-      headers[CSRF_HEADER] = CSRF_HEADER_VALUE;
-      if (body !== undefined) headers["content-type"] = "application/json";
-    }
-    // Hard timeout: a stalled relay must reject the pending open (the chat
-    // page then degrades) rather than hang forever. 30s matches the SSE
-    // connect timeout already used by the streaming path.
-    const resp = await fetch(this.baseUrl + path, {
-      method,
-      headers,
-      credentials: "include",
-      signal: AbortSignal.timeout(30_000),
-      ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
-    });
-    if (!resp.ok) throw await lescheError(resp);
-    // 204 No Content -- nothing to parse.
-    if (resp.status === 204 || resp.headers.get("content-length") === "0") {
-      return undefined as T;
-    }
-    return (await resp.json()) as T;
-  }
-}
-
-/**
- * Data-plane client (the lesche service, default :7200): conversation setup,
- * the synchronous key exchange, envelope posting, and the multiplexed app SSE.
+ * Data-plane client (the lesche service, default :7200): the rooms family --
+ * room envelopes, room history, room management, and the lesche `me/events`
+ * SSE.
  */
 export class LescheClient extends BaseClient {
-  /** `POST /conversations { tagma_id }` — resolve the single conversation a
-   * tagma owns with its operator (idempotent). */
-  createConversation(tagmaId: string): Promise<CreateConversationResponse> {
-    return this.json("/conversations", "POST", { tagma_id: tagmaId });
-  }
-
-  /** `POST /conversations/{id}/key-exchange/init` — synchronous request/reply
-   * returning the responder's signed key-exchange response inline (200). 503 = the
-   * tagma is offline, 409 = a key exchange is already in flight, 504 = timed
-   * out. */
-  keyExchangeInit(
-    conversationId: string,
-    init: KeyExchangeInit,
-  ): Promise<KeyExchangeResponse> {
-    return this.json(
-      `/conversations/${encodeURIComponent(conversationId)}/key-exchange/init`,
-      "POST",
-      init,
-    );
-  }
-
-  /** `POST /conversations/{id}/envelopes` — route an encrypted envelope to
-   * the other endpoint. Returns on 202 Accepted. 503 = the peer is offline,
-   * 409 = stale/duplicate sequence_n. */
-  postEnvelope(conversationId: string, envelope: Envelope): Promise<void> {
-    return this.json(
-      `/conversations/${encodeURIComponent(conversationId)}/envelopes`,
-      "POST",
-      envelope,
-    );
-  }
-
   // -- rooms (multi-member data plane) ---------------------------------------
 
   /** `POST /rooms/{id}/envelopes` — store + fan a room envelope to the
@@ -216,25 +83,7 @@ export class LescheClient extends BaseClient {
    * owns reconnect/backoff; the generator ends when the stream closes or
    * `signal` aborts. */
   async *meEvents(signal?: AbortSignal): AsyncGenerator<MeEventFrame> {
-    const resp = await sseFetch(this.baseUrl + "/me/events", signal);
-    if (!resp.ok) {
-      throw await lescheError(resp);
-    }
-    for await (const ev of parseSseStream(resp, signal)) {
-      if (ev.event === "stream") {
-        const { epoch, next_seq } = JSON.parse(ev.data) as {
-          epoch: number;
-          next_seq: number;
-        };
-        yield { kind: "stream", epoch, nextSeq: next_seq };
-        continue;
-      }
-      const event = JSON.parse(ev.data) as LescheEvent;
-      const m = ev.id !== undefined ? /^(\d+):(\d+)$/.exec(ev.id) : null;
-      yield m
-        ? { kind: "event", epoch: Number(m[1]), seq: Number(m[2]), event }
-        : { kind: "event", epoch: null, seq: null, event };
-    }
+    yield* readEventFrames<LescheEvent>(this.baseUrl + "/me/events", signal);
   }
 
   // --- room management (relocated from archeion) -------------------------------
@@ -349,12 +198,4 @@ export class LescheClient extends BaseClient {
   listMyTagmaRooms(tagmaId: string): Promise<TagmaRoomView[]> {
     return this.json(`/me/tagmata/${encodeURIComponent(tagmaId)}/rooms`, "GET");
   }
-}
-
-/** Build a `LescheApiError` from a non-2xx response. Envelope parsing is
- * shared (`readApiError`) so the lesche client cannot drift from the
- * `{"error":{"message":...}}` shape the server emits. */
-async function lescheError(resp: Response): Promise<LescheApiError> {
-  const { status, message } = await readApiError(resp);
-  return new LescheApiError(status, message);
 }

@@ -1,11 +1,12 @@
 // Browser client for the archeion control-plane relay. The archeion (default :7100)
 // is the control plane: passkey ceremonies, `/me`, and the tagma lifecycle. It
-// shares a session cookie cross-subdomain with the lesche (data plane), so every
+// shares a session cookie cross-subdomain (archeion/lesche/keryx), so every
 // fetch carries `credentials: "include"` (the session cookie is the auth) and
 // every non-GET carries the CSRF marker (`X-Requested-With: kallipai`), which the
 // archeion's `csrf_guard` requires on cookie-bearing mutating requests. Non-2xx
 // responses become `ArcheionApiError` (`{ status, message }`). The data-plane
-// client lives in `@kallipai/kallipai-lesche-client`.
+// client lives in @kallipai/kallipai-keryx-client (bilateral) / -lesche-client
+// (rooms).
 
 import { readApiError } from "@kallipai/kallipai-common";
 import { ArcheionApiError } from "./types.ts";
@@ -32,11 +33,11 @@ import type {
   PublicUserProfile,
   RegisterBeginResponse,
   RegisterFinishRequest,
-  UsernameAvailabilityResponse,
   RenamePasskeyRequest,
   RenameTagmaRequest,
   TagmaInfo,
   TagmaView,
+  UsernameAvailabilityResponse,
   VerifyEmailRequest,
 } from "./types.ts";
 
@@ -106,7 +107,7 @@ abstract class BaseClient {
  * Control-plane client (the archeion service, default :7100): passkey ceremonies,
  * `/me`, and the tagma lifecycle. Also exposes `getTagma` — the pinned device
  * key is TOFU from the control plane, even though the key exchange itself runs
- * on the lesche (see `@kallipai/kallipai-lesche-client`).
+ * on the keryx (see `@kallipai/kallipai-keryx-client`).
  */
 export class ArcheionClient extends BaseClient {
   // -- auth ceremonies ------------------------------------------------------
@@ -358,7 +359,7 @@ export class ArcheionClient extends BaseClient {
 
   /** `GET /tagmata` — the caller's tagmata (pending + enrolled, not revoked),
    * newest first. Registry view only; liveness is NOT included (it arrives via
-   * the lesche's `meEvents`). */
+   * the keryx's `meEvents`). */
   listTagmata(): Promise<TagmaView[]> {
     return this.json("/tagmata", "GET");
   }
@@ -377,7 +378,7 @@ export class ArcheionClient extends BaseClient {
   }
 
   /** `GET /tagmata/{id}` — the tagma's pinned Ed25519 device key (TOFU). The
-   * app verifies the lesche's key-exchange signature against it. */
+   * app verifies the tagma's key-exchange signature against it. */
   getTagma(id: string): Promise<TagmaInfo> {
     return this.json(`/tagmata/${encodeURIComponent(id)}`, "GET");
   }

@@ -1,4 +1,5 @@
-//! Async HTTP client for the kallipai-lesche data-plane relay.
+//! Async HTTP client for the tagma-side relay surfaces: the lesche data
+//! plane plus the keryx link planes.
 //!
 //! Authenticated with the tagma's `sk-tagma-` bearer:
 //! - [`LescheClient::post_envelope`] — post an agent envelope, retrying on 503.
@@ -7,6 +8,8 @@
 //!   events (status, signal, projection) over the single upstream channel.
 //! - [`LescheClient::open_tunnel`] — open the long-lived tunnel SSE and
 //!   yield parsed [`TunnelInbound`] events.
+//! - [`LescheClient::open_agent_events`] — open the agent SSE stream (the
+//!   bearer-only delivery carrier) and yield parsed [`LescheAgentEvent`]s.
 //!
 //! # Two HTTP clients (load-bearing)
 //!
@@ -29,14 +32,14 @@ use base64::Engine as _;
 use futures_util::StreamExt;
 use kallipai_archeion_common::ids::{ChannelId, ConversationId, TagmaId};
 use kallipai_e2ee::DeviceKey;
-use kallipai_lesche_common::control::KeyExchangeResponse;
+use kallipai_keryx_common::control::KeyExchangeResponse;
+use kallipai_keryx_common::tunnel::ManageRestReply;
+use kallipai_keryx_common::tunnel::TunnelInbound;
 use kallipai_lesche_common::direct::{DirectMessageView, DirectSessionId, DirectSessionView};
-use kallipai_lesche_common::event::UpstreamEvent;
+use kallipai_lesche_common::event::{LescheAgentEvent, UpstreamEvent};
 use kallipai_lesche_common::message::Envelope;
 use kallipai_lesche_common::proof::tunnel_transcript;
 use kallipai_lesche_common::rooms::{RoomId, TagmaRoomView};
-use kallipai_lesche_common::tunnel::ManageRestReply;
-use kallipai_lesche_common::tunnel::TunnelInbound;
 
 struct Inner {
     base_url: String,
@@ -45,9 +48,14 @@ struct Inner {
     /// Long-lived tunnel stream: NO total timeout (see crate docs).
     http_stream: reqwest::Client,
     tagma_token: String,
+    /// The keryx service root for the split-family routes (the tunnel,
+    /// KEX, upstream, conversation-envelope and manage-reply paths). None
+    /// keeps every route on `base_url` (the single-service shape).
+    keryx_url: Option<String>,
 }
 
-/// Async HTTP client for the kallipai-lesche data-plane relay.
+/// Async HTTP client for the tagma-side relay surfaces: the lesche
+/// data plane plus the keryx link planes.
 #[derive(Clone)]
 pub struct LescheClient {
     inner: Arc<Inner>,
@@ -110,6 +118,7 @@ impl LescheClient {
             tagma_token: tagma_token.into(),
             http_post: None,
             http_stream: None,
+            keryx_url: None,
         }
     }
 
@@ -127,6 +136,14 @@ impl LescheClient {
     fn url(&self, path: &str) -> String {
         format!("{}{path}", self.inner.base_url)
     }
+    /// Resolve a split-family (keryx) route: the keryx base when set,
+    /// the lesche base otherwise (the single-service fallback tests use).
+    fn keryx_route(&self, path: &str) -> String {
+        match &self.inner.keryx_url {
+            Some(base) => format!("{base}{path}"),
+            None => self.url(path),
+        }
+    }
 
     /// Post an agent envelope, retrying on 503 (app offline) with a bounded
     /// backoff (500ms, 1s, 2s, 4s, 8s, 16s ~= 31s total). A dropped reply is
@@ -141,7 +158,7 @@ impl LescheClient {
             Duration::from_secs(8),
             Duration::from_secs(16),
         ];
-        let url = self.url(&format!("/conversations/{conv_id}/envelopes"));
+        let url = self.keryx_route(&format!("/conversations/{conv_id}/envelopes"));
         for wait in BACKOFF {
             let resp = self
                 .inner
@@ -286,7 +303,7 @@ impl LescheClient {
         conv_id: &ConversationId,
         response: &KeyExchangeResponse,
     ) -> Result<()> {
-        let url = self.url(&format!("/conversations/{conv_id}/key-exchange/response"));
+        let url = self.keryx_route(&format!("/conversations/{conv_id}/key-exchange/response"));
         let resp = self
             .inner
             .http_post
@@ -304,10 +321,10 @@ impl LescheClient {
 
     /// Reply to a manage-rest frame: the plaintext counterpart of the
     /// ManageRest tunnel frame. Not retried: the pending waiter on the
-    /// lesche side times out and surfaces a 504 to the proxy caller, so a
+    /// keryx side times out and surfaces a 504 to the proxy caller, so a
     /// dropped reply degrades to an error, never to stale data.
     pub async fn post_manage_reply(&self, payload: &ManageRestReply) -> Result<()> {
-        let url = self.url("/tunnel/manage-reply");
+        let url = self.keryx_route("/tunnel/manage-reply");
         let resp = self
             .inner
             .http_post
@@ -330,13 +347,13 @@ impl LescheClient {
     /// endpoints have always used. Best-effort like the per-kind calls it
     /// supersedes; a failure here is logged by the caller. Returns the
     /// [`UpstreamAck`] so the caller can reconcile its per-face gates
-    /// against the lesche's piggybacked subscriber counts.
+    /// against the keryx's piggybacked subscriber counts.
     pub async fn post_upstream(
         &self,
         tagma_id: &TagmaId,
         events: &[UpstreamEvent],
     ) -> Result<UpstreamAck> {
-        let url = self.url(&format!("/tagmata/{tagma_id}/upstream"));
+        let url = self.keryx_route(&format!("/tagmata/{tagma_id}/upstream"));
         let resp = self
             .inner
             .http_post
@@ -355,17 +372,17 @@ impl LescheClient {
     /// Open the tunnel SSE and return a stream of parsed inbound events.
     ///
     /// The reconnect proof (timestamp + signature over the tunnel transcript) is
-    /// generated once per call and validated by the lesche against the tagma's
+    /// generated once per call and validated by the keryx against the tagma's
     /// monotonic high-water-mark. Callers MUST call `open_tunnel` fresh on each
     /// reconnect (do not cache/reuse the stream): the proof timestamp is
-    /// single-use, and the lesche rejects timestamps that do not strictly
+    /// single-use, and the keryx rejects timestamps that do not strictly
     /// advance the per-tagma marker.
     pub async fn open_tunnel(
         &self,
         device: &DeviceKey,
         tagma_id: &TagmaId,
     ) -> Result<impl futures_core::Stream<Item = Result<TunnelInbound>> + use<>> {
-        let url = self.url("/tunnel");
+        let url = self.keryx_route("/tunnel");
         let unix_secs = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
@@ -386,6 +403,30 @@ impl LescheClient {
             anyhow::bail!("tunnel GET returned {}", resp.status());
         }
         Ok(tunnel_stream(resp))
+    }
+
+    /// Open the agent SSE stream (`GET /tagmata/{id}/events`) and return a
+    /// stream of parsed events. Bearer-only: no device proof is sent or
+    /// needed (the long-lived token is the whole credential), unlike
+    /// [`Self::open_tunnel`]. Reconnect is a plain fresh GET — there is no
+    /// replay guard to advance and no single-use proof to regenerate.
+    pub async fn open_agent_events(
+        &self,
+        tagma_id: &TagmaId,
+    ) -> Result<impl futures_core::Stream<Item = Result<LescheAgentEvent>> + use<>> {
+        let url = self.url(&format!("/tagmata/{tagma_id}/events"));
+        let resp = self
+            .inner
+            .http_stream
+            .get(&url)
+            .bearer_auth(&self.inner.tagma_token)
+            .send()
+            .await
+            .context("agent-events GET failed")?;
+        if !resp.status().is_success() {
+            anyhow::bail!("agent-events GET returned {}", resp.status());
+        }
+        Ok(agent_event_stream(resp))
     }
     // ------------------------------------------------------------------
     // Direct sessions (T↔T plaintext 1v1). Same wire discipline as the
@@ -609,6 +650,44 @@ fn tunnel_stream(
     }
 }
 
+/// The agent-stream counterpart of [`tunnel_stream`]: same SSE framing and
+/// bad-frame tolerance (report, keep draining), different event vocabulary.
+fn agent_event_stream(
+    resp: reqwest::Response,
+) -> impl futures_core::Stream<Item = Result<LescheAgentEvent>> {
+    async_stream::stream! {
+        let mut stream = resp.bytes_stream();
+        let mut buf = String::new();
+        while let Some(chunk) = stream.next().await {
+            let chunk = match chunk {
+                Ok(c) => c,
+                Err(e) => {
+                    yield Err(anyhow::Error::new(e).context("agent stream chunk"));
+                    return;
+                }
+            };
+            match std::str::from_utf8(&chunk) {
+                Ok(s) => buf.push_str(s),
+                Err(e) => {
+                    yield Err(anyhow::Error::new(e).context("non-utf8 SSE chunk"));
+                    return;
+                }
+            }
+            while let Some(idx) = buf.find("\n\n") {
+                let event = buf[..idx].to_string();
+                buf.drain(..=idx + 1);
+                if let Some(data) = parse_data_payload(&event) {
+                    match serde_json::from_str::<LescheAgentEvent>(&data) {
+                        Ok(ev) => yield Ok(ev),
+                        // One bad event: report it but keep draining the stream.
+                        Err(e) => yield Err(anyhow::Error::new(e).context("invalid agent event JSON")),
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Extract the concatenated `data:` payload from one SSE event block.
 fn parse_data_payload(event: &str) -> Option<String> {
     let mut data = String::new();
@@ -626,6 +705,7 @@ pub struct LescheClientBuilder {
     tagma_token: String,
     http_post: Option<reqwest::Client>,
     http_stream: Option<reqwest::Client>,
+    keryx_url: Option<String>,
 }
 
 impl LescheClientBuilder {
@@ -640,6 +720,14 @@ impl LescheClientBuilder {
     /// will be killed mid-flight.
     pub fn http_stream_client(mut self, client: reqwest::Client) -> Self {
         self.http_stream = Some(client);
+        self
+    }
+    /// Set the keryx service root (including its /v1/keryx segment).
+    /// The tunnel, key-exchange, upstream, conversation-envelope and
+    /// manage-reply routes dial this base; every rooms/direct route
+    /// stays on the lesche base.
+    pub fn with_keryx_url(mut self, url: &str) -> Self {
+        self.keryx_url = Some(url.trim_end_matches('/').to_owned());
         self
     }
 
@@ -670,6 +758,7 @@ impl LescheClientBuilder {
                 http_post,
                 http_stream,
                 tagma_token: self.tagma_token,
+                keryx_url: self.keryx_url,
             }),
         })
     }
@@ -678,7 +767,7 @@ impl LescheClientBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kallipai_archeion_common::bytes::Ciphertext;
+    use kallipai_archeion_common::bytes::{Ciphertext, Ed25519Signature, X25519PublicKey};
     use kallipai_archeion_common::ids::{
         ConversationId, ParticipantId, ParticipantKind, TagmaId, TraceId,
     };
@@ -707,6 +796,13 @@ mod tests {
             trace_id: TraceId::from("trace-1".to_string()),
             timestamp: time::OffsetDateTime::now_utc(),
             ciphertext: Ciphertext(vec![0u8; 12]),
+        }
+    }
+
+    fn kex_response() -> KeyExchangeResponse {
+        KeyExchangeResponse {
+            ephemeral_public: X25519PublicKey(vec![0u8; 32]),
+            signature: Ed25519Signature(vec![0u8; 64]),
         }
     }
 
@@ -1067,10 +1163,53 @@ mod tests {
                 assert_eq!(conversation_id.as_ref(), "c1");
             }
             TunnelInbound::Envelope { .. } => panic!("expected KeyExchange"),
-            TunnelInbound::Wake => panic!("expected KeyExchange"),
             TunnelInbound::ManageRest { .. } => panic!("expected KeyExchange"),
             TunnelInbound::OwnerSub { .. } => panic!("expected KeyExchange"),
         }
+    }
+
+    /// The agent stream carries the bearer only (no device-proof headers ride
+    /// this carrier), dials the per-tagma events path, and parses frames with
+    /// the tunnel's `kind` vocabulary.
+    #[tokio::test]
+    async fn open_agent_events_is_bearer_only_and_parses_events() {
+        let server = MockServer::start().await;
+        let frame1 = serde_json::to_string(&LescheAgentEvent::Envelope {
+            envelope: sample_envelope(1),
+        })
+        .unwrap();
+        let frame2 = serde_json::to_string(&LescheAgentEvent::Wake).unwrap();
+        let body = format!("data: {frame1}\n\ndata: {frame2}\n\n");
+        Mock::given(method("GET"))
+            .and(path("/tagmata/tagma-1/events"))
+            .and(header("authorization", "Bearer sk-tagma-test"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(body))
+            .mount(&server)
+            .await;
+        let tagma_id = TagmaId::from("tagma-1".to_string());
+        let stream = client(&server)
+            .open_agent_events(&tagma_id)
+            .await
+            .expect("open");
+        let collected: Vec<_> = stream.collect::<Vec<_>>().await;
+        assert_eq!(collected.len(), 2);
+        assert!(matches!(
+            collected[0].as_ref().unwrap(),
+            LescheAgentEvent::Envelope { .. }
+        ));
+        assert!(matches!(
+            collected[1].as_ref().unwrap(),
+            LescheAgentEvent::Wake
+        ));
+        // Bearer-only, on the wire: no proof headers on the one request sent.
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].headers.get("x-device-proof").is_none());
+        assert!(requests[0].headers.get("x-device-timestamp").is_none());
+        assert_eq!(
+            requests[0].headers.get("authorization").unwrap(),
+            "Bearer sk-tagma-test"
+        );
     }
 
     /// A malformed JSON event must NOT tear down the tunnel: it surfaces as an
@@ -1111,7 +1250,7 @@ mod tests {
     #[tokio::test]
     async fn open_tunnel_skips_keepalive_comments() {
         let server = MockServer::start().await;
-        let good = "data: {\"kind\":\"wake\"}\n\n";
+        let good = "data: {\"kind\":\"owner_sub\",\"active\":true}\n\n";
         // Comment block first, then a real event.
         let body = format!(": keepalive\n\n{good}");
         Mock::given(method("GET"))
@@ -1129,6 +1268,80 @@ mod tests {
             .collect::<Vec<_>>()
             .await;
         assert_eq!(collected.len(), 1, "comment frame yields no item");
-        assert!(matches!(collected[0], Ok(TunnelInbound::Wake)));
+        assert!(matches!(collected[0], Ok(TunnelInbound::OwnerSub { .. })));
+    }
+
+    /// The split family: with a keryx base set, the tunnel dials the keryx
+    /// base while `list_my_rooms` stays on the lesche base. Each mock only
+    /// answers its own route, so a crossed dial fails the request.
+    #[tokio::test]
+    async fn split_family_dials_the_keryx_base_for_keryx_routes() {
+        let keryx = MockServer::start().await;
+        let lesche = MockServer::start().await;
+        let tagma = TagmaId::from("t-1".to_string());
+        let conv = ConversationId::for_tagma(&tagma);
+        Mock::given(method("GET"))
+            .and(path("/tunnel"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(": keepalive\n\n"))
+            .mount(&keryx)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(format!("/conversations/{conv}/envelopes")))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&keryx)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(format!("/conversations/{conv}/key-exchange/response")))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&keryx)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/tunnel/manage-reply"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&keryx)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(format!("/tagmata/{tagma}/upstream")))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"applied": 1})),
+            )
+            .mount(&keryx)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/tagmata/t-1/rooms"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("[]"))
+            .mount(&lesche)
+            .await;
+        let client = LescheClient::builder(&lesche.uri(), "sk-tagma-test")
+            .with_keryx_url(&keryx.uri())
+            .build()
+            .unwrap();
+        let device = DeviceKey::generate();
+        let stream = client.open_tunnel(&device, &tagma).await.expect("open");
+        let collected: Vec<_> = stream.collect::<Vec<_>>().await;
+        assert!(collected.is_empty(), "keepalive-only stream yields no item");
+        let rooms = client.list_my_rooms(&tagma).await.expect("rooms");
+        assert!(rooms.is_empty());
+        client
+            .post_envelope(&ConversationId::for_tagma(&tagma), &sample_envelope(0))
+            .await
+            .expect("envelope dials the keryx base");
+        client
+            .post_key_exchange_response(&ConversationId::for_tagma(&tagma), &kex_response())
+            .await
+            .expect("kex response dials the keryx base");
+        client
+            .post_manage_reply(&ManageRestReply {
+                req_id: 7,
+                status: 200,
+                body: serde_json::json!({}),
+            })
+            .await
+            .expect("manage reply dials the keryx base");
+        let ack = client
+            .post_upstream(&tagma, &[UpstreamEvent::Signal(SignalEvent::Idle)])
+            .await
+            .expect("upstream dials the keryx base");
+        assert_eq!(ack.faces, None, "ack parses from the keryx mock body");
     }
 }

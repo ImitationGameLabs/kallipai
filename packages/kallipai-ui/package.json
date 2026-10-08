@@ -20,6 +20,7 @@
   "peerDependencies": {
     "@kallipai/kallipai-archeion-client": "workspace:*",
     "@kallipai/kallipai-lesche-client": "workspace:*",
+    "@kallipai/kallipai-keryx-client": "workspace:*",
     "@kallipai/kallipai-files-client": "workspace:*",
     "@kallipai/kallipai-client": "workspace:*",
     "@lucide/svelte": "^1.24.0",

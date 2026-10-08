@@ -1,8 +1,8 @@
 # Arion composition for the prod-archeion deploy (the server side): archeion +
-# lesche + files + archeion-postgres + lesche-postgres + files-postgres. The
-# archeion (control plane) runs from packages.kallipai-archeion-image; the lesche
-# (data-plane relay) runs from packages.kallipai-lesche-image; files (content
-# transfer) runs from packages.kallipai-files-image; each postgres uses the
+# lesche + keryx + files + archeion-postgres + lesche-postgres +
+# files-postgres. The archeion (control plane) runs from packages.kallipai-archeion-image; the
+# lesche (data-plane relay) runs from packages.kallipai-lesche-image; the keryx
+# (tagma-link relay) runs from packages.kallipai-keryx-image; files (content
 # official postgres:17.5 image for production parity and isolation.
 #
 # Invoke from the repo root (so .env resolves):
@@ -14,11 +14,12 @@
 # shared secret, POSTGRES_PASSWORD) comes from the repo-root .env; each
 # service's operational env (listen addr, blob root, internal hop URL)
 # is pinned inline and overrides env_file.
-# None of the three services is published -- all sit behind the
-# operator's TLS-terminating edge proxy, which HOST-routes archeion.<d> -> archeion
-# and lesche.<d> -> lesche / files.<d> -> files (the per-service subdomain
-# topology). The lesche and the files service reach the archeion's /internal
-# ControlPlane surface over the private compose network (each with its own
+# None of the four services is published -- all sit behind the
+# operator's TLS-terminating edge proxy, which HOST-routes archeion.<d> ->
+# archeion, lesche.<d> -> lesche, keryx.<d> -> keryx, files.<d> -> files (the
+# per-service subdomain topology). The lesche, the keryx, and the files
+# service reach the archeion's /internal ControlPlane surface over the
+# private compose network (each with its own
 # KALLIPAI_*_ARCHEION_INTERNAL_URL=http://archeion:7100); the proxy must NOT route
 # /internal publicly. See docs/en/deployment/container.md.
 { lib, ... }:
@@ -33,6 +34,8 @@ let
   lescheImage = flake.packages.x86_64-linux.kallipai-lesche-image;
   files = flake.packages.x86_64-linux.kallipai-files;
   filesImage = flake.packages.x86_64-linux.kallipai-files-image;
+  keryx = flake.packages.x86_64-linux.kallipai-keryx;
+  keryxImage = flake.packages.x86_64-linux.kallipai-keryx-image;
   # Bound container stdout logs: the json-file driver caps each service's
   # on-disk log at 50m x 5 rotated files (docker logs reads them). Shared
   # verbatim by every service in this composition.
@@ -54,7 +57,7 @@ in
       files_pgdata = { };
       kallipai_files_blobs = { };
       # The archeion-provisioned internal secret: written by the archeion
-      # (rw), read by the lesche and files (ro). Survives restarts, so the
+      # (rw), read by the lesche, keryx, and files (ro). Survives restarts, so the
       # value stays stable for the whole composition.
       polis_internal = { };
     };
@@ -68,6 +71,7 @@ in
     services.archeion.out.service.logging = logLimits;
     services.lesche.out.service.logging = logLimits;
     services.files.out.service.logging = logLimits;
+    services.keryx.out.service.logging = logLimits;
     # POSTGRES_USER/PASSWORD/DB come from .env ONLY and are read by all
     # three postgres services -- do NOT set them in service.environment
     # (compose precedence would pin a weak default password on a public DB).
@@ -98,17 +102,16 @@ in
       service.command = [ "${archeion}/bin/kallipai-archeion" ];
       service.env_file = [ ".env" ];
       # The internal secret is self-managed: first boot generates it into
-      # the shared volume, later boots read the existing value; the lesche
-      # and files read the same file (mounted read-only below).
+      # the shared volume, later boots read the existing value; the lesche,
+      # keryx, and files read the same file (mounted read-only below).
       service.volumes = [ "polis_internal:/var/lib/kallipai/internal" ];
       service.environment = {
         KALLIPAI_ARCHEION_ADDR = "0.0.0.0:7100";
         KALLIPAI_ARCHEION_INTERNAL_TOKEN_FILE = "/var/lib/kallipai/internal/internal-token";
         RUST_LOG = "info";
         # KALLIPAI_ARCHEION_SESSION_COOKIE_DOMAIN comes from .env: set to the parent
-        # KALLIPAI_ARCHEION_SESSION_COOKIE_DOMAIN comes from .env: set to the parent
         # domain (e.g. kallipai.com) so the session cookie is shared across the
-        # archeion.<d> and lesche.<d> subdomains the edge routes here.
+        # archeion.<d>, lesche.<d> and keryx.<d> subdomains the edge routes here.
       };
       # No service.ports -- the archeion sits behind the operator's TLS-terminating
       # edge proxy, which HOST-routes archeion.<d> -> archeion:7100 and lesche.<d> ->
@@ -118,8 +121,8 @@ in
       # network, never via the public edge.
     };
 
-    # Lesche: the data-plane relay (tagma relay tunnels, app SSE, envelope routing,
-    # KEX, presence). Owns the chat domain in its own Postgres (rooms, membership,
+    # Lesche: the data-plane relay (rooms, direct sessions, the agent SSE
+    # and presence). Owns the chat domain in its own Postgres (rooms, membership,
     # message payloads); it authenticates requests and
     # attests identity through the archeion's /internal ControlPlane API over the
     # private compose network. Not published -- the operator's edge host-routes
@@ -181,6 +184,31 @@ in
       };
       # No service.ports -- like the archeion and the lesche, the files service
       # sits behind the TLS-terminating reverse proxy.
+    };
+
+    # Keryx: the tagma-link and user-DM relay. All state is in-memory
+    # (no database, no postgres beside it); credentials and tagma
+    # metadata resolve through the archeion's /internal surface over
+    # the private compose network. Not published -- the operator's
+    # edge host-routes keryx.<d> here.
+    services.keryx = {
+      # Soft ordering: the keryx reads the archeion-provisioned
+      # internal token at boot (with retry), so the archeion starts
+      # first.
+      service.depends_on = [ "archeion" ];
+      build.image = lib.mkForce keryxImage;
+      service.command = [ "${keryx}/bin/kallipai-keryx" ];
+      service.env_file = [ ".env" ];
+      service.volumes = [ "polis_internal:/var/lib/kallipai/internal:ro" ];
+      service.environment = {
+        KALLIPAI_KERYX_ADDR = "0.0.0.0:7210";
+        KALLIPAI_KERYX_ARCHEION_INTERNAL_URL = "http://archeion:7100";
+        KALLIPAI_POLIS_INTERNAL_TOKEN_FILE = "/var/lib/kallipai/internal/internal-token";
+        RUST_LOG = "info";
+        # KALLIPAI_KERYX_CORS_ORIGINS and KALLIPAI_KERYX_INTERNAL_TOKEN
+        # (the /internal bearer; must equal the files service's
+        # KALLIPAI_FILES_NOTIFY_TOKEN) come from .env.
+      };
     };
   };
 }

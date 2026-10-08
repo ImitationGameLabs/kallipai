@@ -2,7 +2,7 @@
 //
 // Two implementations:
 // - OfflineBackend: wraps TagmaClient (HTTP to localhost tagma API)
-// - OnlineBackend: wraps ManageRestClient (plaintext over TLS via lesche proxy)
+// - OnlineBackend: wraps ManageRestClient (plaintext over TLS via keryx proxy)
 //
 // Both throw KallipaiError on non-2xx (OnlineBackend reconstructs it from the
 // relayed status+body). Network failures differ: OfflineBackend throws
@@ -13,7 +13,7 @@ import {
   LinearBackoff,
   ManageRestClient,
   ProjectionClient,
-} from "@kallipai/kallipai-lesche-client";
+} from "@kallipai/kallipai-keryx-client";
 import { KallipaiError, parseErrorEnvelope } from "@kallipai/kallipai-common";
 import type {
   AgentStatusResponse,
@@ -42,7 +42,7 @@ import type {
 } from "@kallipai/kallipai-client";
 
 /** A live projection-dirty subscription, when the transport has
- * one (OnlineBackend over the lesche SSE). `subscribe` starts the
+ * one (OnlineBackend over the keryx state SSE). `subscribe` starts the
  * feed and returns the stop handle; the implementation owns the
  * reconnect/backoff loop and fans every dirty nudge to the callback. */
 export interface ProjectionFeed {
@@ -207,7 +207,7 @@ export class OfflineBackend implements ManagementBackend {
   }
 }
 
-// --- OnlineBackend (wraps ManageRestClient over the lesche proxy) ---
+// --- OnlineBackend (wraps ManageRestClient over the keryx proxy) ---
 /**
  * The encrypted envelope face of a relay channel, narrowed to what
  * profiles writes need. Provider API keys never ride the plaintext
@@ -314,7 +314,7 @@ export class OnlineBackend implements ManagementBackend {
     const runLoop = async (): Promise<void> => {
       while (controller && !controller.signal.aborted) {
         try {
-          // A fresh connection renumbers the stream: a lesche restart
+          // A fresh connection renumbers the stream: a keryx restart
           // starts seq back at 1, so a gate persisted across connections
           // would drop every frame as a replay. Reset per connection --
           // the cost is one idempotent replayed GET after a reconnect.
@@ -394,7 +394,7 @@ export class OnlineBackend implements ManagementBackend {
   updateBudget(body: BudgetUpdateRequest) {
     return this.req<BudgetResponse>("POST", "/budget", body);
   }
-  /** The roster read rides the lesche's cached projection
+  /** The roster read rides the keryx's cached projection
    * instead of the per-call manage relay, so roster refreshes stop
    * round-tripping to the tagma. Falls back to the relay when no
    * projection client was wired (older construction sites). The
@@ -496,7 +496,7 @@ export class OnlineBackend implements ManagementBackend {
   getTask(id: number) {
     return this.req<TaskExport>("GET", `/tasks/${id}`);
   }
-  // The lesche manage-frame allowlist only passes GET /tasks and
+  // The keryx manage-frame allowlist only passes GET /tasks and
   // GET /tasks/{id}: every task write verb and the archive download
   // are offline-transport-only, so the online implementations fail
   // loudly instead of gambling on a proxy 404 (or worse, a JSON-

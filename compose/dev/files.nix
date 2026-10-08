@@ -7,7 +7,7 @@
 # Shape follows the stack's existing services: the workspace `files` binary
 # via useHostStore, its own postgres:17.5 with a files_pgdata named volume,
 # and the archeion-provisioned internal secret read by file path (the same
-# discipline as the lesche/instances pair).
+# discipline as every other polis reader).
 { pkgs, lib, ... }:
 let
   # Load via git+file URL (not a bare path) so getFlake applies fetchGit's VCS
@@ -105,9 +105,9 @@ in
         KALLIPAI_FILES_ARCHEION_INTERNAL_URL = "http://archeion:7100";
         # Read the archeion-provisioned internal secret (shared volume).
         KALLIPAI_POLIS_INTERNAL_TOKEN_FILE = "/var/lib/kallipai/internal/internal-token";
-        KALLIPAI_FILES_NOTIFY_URL = "http://lesche:7200";
-        # Same dev shared secret discipline: must equal the lesche's
-        # KALLIPAI_LESCHE_INTERNAL_TOKEN.
+        KALLIPAI_FILES_NOTIFY_URL = "http://keryx:7210";
+        # Same dev shared secret discipline: must equal the keryx's
+        # KALLIPAI_KERYX_INTERNAL_TOKEN.
         KALLIPAI_FILES_NOTIFY_TOKEN = "dev-notify-secret";
         RUST_LOG = "info";
       };

@@ -1,4 +1,4 @@
-# Dev archeion-side composition: caddy + archeion + lesche + files +
+# Dev archeion-side composition: caddy + archeion + lesche + keryx + files +
 # archeion-postgres + lesche-postgres + files-postgres + instances + the
 # model-gateway stack (gateway + gateway-postgres + prometheus). The
 # default dev stack -- a plain `arion up` brings it up via the
@@ -40,7 +40,7 @@ let
   # Dev topology note: a Caddy edge proxy (services.caddy) is the one
   # entry point -- always on, routing the same `*.<devDomain>` vhosts
   # (default domain kallipai.com; .env sets kallipai.lan) to vite (on
-  # the host) / archeion / lesche / files / instances. The edge speaks
+  # the host) / archeion / lesche / keryx / files / instances. The edge speaks
   # https with an mkcert certificate by default, or plain http when
   # KALLIPAI_EDGE_TLS=off; KALLIPAI_EDGE_PORT moves its listen port (a
   # deployed system caddy keeps the host's real 443). The session
@@ -175,6 +175,7 @@ let
   projectName = envOrDefault "KALLIPAI_ARION_PROJECT_NAME" "kallipai-dev";
   archeionHostPort = envOrDefault "KALLIPAI_ARION_ARCHEION_PORT" "7100";
   lescheHostPort = envOrDefault "KALLIPAI_ARION_LESCHE_PORT" "7200";
+  keryxHostPort = envOrDefault "KALLIPAI_ARION_KERYX_PORT" "7210";
   instancesHostPort = envOrDefault "KALLIPAI_ARION_INSTANCES_PORT" "7300";
   gatewayHostPort = envOrDefault "KALLIPAI_ARION_GATEWAY_PORT" "7501";
   # Bound container stdout logs: the json-file driver caps each service's
@@ -219,7 +220,8 @@ in
       archeion_pgdata = { };
       lesche_pgdata = { };
       # The archeion-provisioned internal secret: written by the archeion
-      # (rw), read by the lesche, files, and instances (ro).
+      # (rw), read by the lesche, keryx, files, instances, and
+      # model gateway (ro).
       polis_internal = { };
       gateway_pgdata = { };
       prometheus_data = { };
@@ -233,6 +235,7 @@ in
     services.caddy.out.service.logging = logLimits;
     services.archeion.out.service.logging = logLimits;
     services.lesche.out.service.logging = logLimits;
+    services.keryx.out.service.logging = logLimits;
     services.instances.out.service.logging = logLimits;
     services.gateway-postgres.out.service.logging = logLimits;
     services.gateway.out.service.logging = logLimits;
@@ -293,6 +296,7 @@ in
       service.depends_on = [
         "archeion"
         "lesche"
+        "keryx"
         "files"
       ];
       service.network_mode = "host";
@@ -373,8 +377,8 @@ in
         KALLIPAI_ARCHEION_TRUSTED_PROXIES = "127.0.0.0/8, ::1/128";
         # The platform-internal secret is dev-self-managed, matching prod:
         # first boot generates it into the shared volume, later boots read
-        # the existing value; the lesche, files, and instances read the same
-        # file (mounted read-only below).
+        # the existing value; the lesche, keryx, files, instances, and
+        # model gateway read the same file (mounted read-only below).
         KALLIPAI_ARCHEION_INTERNAL_TOKEN_FILE = "/var/lib/kallipai/internal/internal-token";
         # The local-platform login refuses to boot with an operator-set
         # admin token shorter than 32 chars, so the dev fixture pins a
@@ -426,7 +430,6 @@ in
         KALLIPAI_LESCHE_ARCHEION_INTERNAL_URL = "http://archeion:7100";
         # Read the archeion-provisioned internal secret (shared volume).
         KALLIPAI_POLIS_INTERNAL_TOKEN_FILE = "/var/lib/kallipai/internal/internal-token";
-        KALLIPAI_LESCHE_INTERNAL_TOKEN = "dev-notify-secret";
         # Allow the web app origin (https://app.<devDomain> via Caddy) to
         # make credentialed cross-origin calls to api.<devDomain>.
         KALLIPAI_LESCHE_CORS_ORIGINS = appOrigin;
@@ -434,6 +437,40 @@ in
       };
     };
 
+    # Keryx: the tagma-link and user-DM relay. All state is in-memory
+    # (no database); credentials and tagma metadata resolve through the
+    # archeion's /internal surface over the compose network. The mounted
+    # route surface is the liveness pair; the browser rides the edge's
+    # /v1/keryx path, host tooling the published port.
+    services.keryx = {
+      # Soft ordering: the keryx reads the archeion-provisioned internal
+      # token at boot (with retry), so the archeion starts first.
+      service.depends_on = [ "archeion" ];
+      service.useHostStore = true;
+      service.command = [ "${workspace}/bin/kallipai-keryx" ];
+      service.ports = [ "${keryxHostPort}:7210" ];
+      service.env_file = [ ".env" ];
+      service.volumes = [ "polis_internal:/var/lib/kallipai/internal:ro" ];
+      # Same eager rustls trust-store load as the lesche: the control
+      # plane client builds its reqwest Client at startup.
+      image.contents = [
+        workspace
+      ]
+      ++ cacert;
+      service.environment = {
+        KALLIPAI_KERYX_ADDR = "0.0.0.0:7210";
+        KALLIPAI_KERYX_ARCHEION_INTERNAL_URL = "http://archeion:7100";
+        # Read the archeion-provisioned internal secret (shared volume).
+        KALLIPAI_POLIS_INTERNAL_TOKEN_FILE = "/var/lib/kallipai/internal/internal-token";
+        # The /internal/* bearer: must equal the files service's
+        # KALLIPAI_FILES_NOTIFY_TOKEN (file-delivery push).
+        KALLIPAI_KERYX_INTERNAL_TOKEN = "dev-notify-secret";
+        # Allow the web app origin (https://app.<devDomain> via Caddy) to
+        # make credentialed cross-origin calls.
+        KALLIPAI_KERYX_CORS_ORIGINS = appOrigin;
+        RUST_LOG = "info";
+      };
+    };
     # Instances: the local instance management service (kallipai-instances),
     # proxying the HOST daemon's UDS socket. Both the socket dir and the
     # instance tree are host bind mounts: the KALLIPAI_ARION_INSTANCES_*

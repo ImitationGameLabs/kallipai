@@ -153,13 +153,14 @@
           packages = {
             inherit workspace;
             default = workspace;
-            # Per-crate binaries (archeion; lesche; files; tagma). Cross-platform:
+            # Per-crate binaries (archeion; lesche; keryx; files; tagma). Cross-platform:
             # plain Rust builds. Their docker images are Linux-only (see
-            # kallipai-archeion-image / kallipai-lesche-image / kallipai-files-image /
+            # kallipai-archeion-image / kallipai-lesche-image / kallipai-keryx-image /
             # kallipai-tagma-image below).
             kallipai-archeion = builds.archeion;
             kallipai-admin = builds.admin;
             kallipai-lesche = builds.lesche;
+            kallipai-keryx = builds.keryx;
             kallipai-files = builds.files;
             kallipai-tagma = builds.tagma;
             kallipai-cron-daemon = builds.cron-daemon;
@@ -188,8 +189,8 @@
           # nix/packages/docker-images/.
           // (lib.optionalAttrs pkgs.stdenv.isLinux {
             # Purpose-built prod images for the split deploy
-            # (compose/prod/polis.nix / tagma.nix): archeion, lesche, and
-            # files are the server-side services (co-located, independent images);
+            # (compose/prod/polis.nix / tagma.nix): archeion, lesche, keryx,
+            # and files are the server-side services (co-located, independent images);
             # carries no tagma-specific baked env.
             kallipai-archeion-image = import ./nix/packages/docker-images/archeion.nix {
               inherit
@@ -204,6 +205,13 @@
                 common
                 ;
               inherit (builds) lesche;
+            };
+            kallipai-keryx-image = import ./nix/packages/docker-images/keryx.nix {
+              inherit
+                pkgs
+                common
+                ;
+              inherit (builds) keryx;
             };
             kallipai-files-image = import ./nix/packages/docker-images/files.nix {
               inherit

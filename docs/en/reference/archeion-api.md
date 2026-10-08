@@ -129,7 +129,7 @@ session cookie verifies via `/internal/verify-session`, passing only for
 the fixed local-admin account's session (`local_admin`; any other user
 session is 403, an absent one 401 with code `admin_session_required`).
 Cookie-bearing state-changing requests carry the same two-pillar CSRF
-defense as the archeion/lesche (`SameSite=Strict` + the mandatory
+defense as the archeion/lesche/keryx (`SameSite=Strict` + the mandatory
 `X-Requested-With: kallipai` marker on non-GETs; bearer requests are
 exempt).
 

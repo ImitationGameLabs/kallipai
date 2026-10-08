@@ -8,11 +8,11 @@ description: 各服务如何以 systemd unit 运行，以及令牌轮换等日�
 
 ## 内部令牌（自管理）
 
-polis 服务之间用一枚共享密钥相互认证，由控制面供给到其状态目录（`/var/lib/kallipai/archeion/internal-token`，权限 0640，模块创建的 `kallipai-polis` 组可读）。其余三个服务读同一文件，四者在部署生命周期内共享同一个值。
+polis 服务之间用一枚共享密钥相互认证，由控制面供给到其状态目录（`/var/lib/kallipai/archeion/internal-token`，权限 0640，模块创建的 `kallipai-polis` 组可读）。其余五个服务读同一文件，六者在部署生命周期内共享同一个值。
 
 密钥状态按生命周期归档：`/etc` 存管理员所有的静态配置（钉死的管理令牌），`/run` 存易失的运行时状态，`/var/lib` 存服务所有的持久状态（内部令牌）。
 
-轮换内部令牌：停掉四个 polis 服务，删除该文件，启动 archeion（会生成新值），再启动其余三个。整组重启保证所有服务处于同一 generation。
+轮换内部令牌：停掉六个 polis 服务，删除该文件，启动 archeion（会生成新值），再启动其余五个。每个读者服务都在启动时只读一次令牌文件，留在运行中的服务会带着旧值继续调 `/internal`，因此必须随整组重启。整组重启保证所有服务处于同一 generation。
 
 ### 用户、启动身份与 real-root 防护
 
@@ -22,4 +22,4 @@ polis 服务之间用一枚共享密钥相互认证，由控制面供给到其�
 
 ## 首次启动排障
 
-内部令牌文件缺失在 archeion 首次启动时不算错误；它会生成一枚。lesche、files 与 instances unit 依赖 archeion 并在启动时读取该文件；短宽限窗内文件未出现，unit 就拒绝启动，`journalctl -u kallipai-instances` 会显示它等待的路径。空令牌文件会让所有读取方显式失败；删掉文件重新供给，不要手工编辑。
+内部令牌文件缺失在 archeion 首次启动时不算错误；它会生成一枚。lesche、keryx、files、instances 与 model-gateway unit 依赖 archeion 并在启动时读取该文件；短宽限窗内文件未出现，unit 就拒绝启动，`journalctl -u kallipai-instances` 会显示它等待的路径。空令牌文件会让所有读取方显式失败；删掉文件重新供给，不要手工编辑。

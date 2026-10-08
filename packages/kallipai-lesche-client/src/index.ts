@@ -1,43 +1,19 @@
 // @kallipai/kallipai-lesche-client
 //
-// Browser client for the lesche data-plane relay (default :7200): the E2EE
-// conversation transport. `LescheClient` covers conversation setup, the
-// synchronous key exchange, envelope posting, and the multiplexed `me/events`
-// SSE stream; `openRelayChannel`/`RelayChannel` wire those into a pure E2EE pipe
-// to a tagma. The pinned device key is TOFU from the archeion (control plane) and
-// is passed in as a base64 string by the caller, so this package has no source
-// dependency on the archeion client. Browser-first (session cookie shared
-// cross-subdomain with the archeion; `me/events` is parsed with the shared
-// `parseSseStream`).
+// Browser client for the lesche data-plane relay (default :7200): the rooms
+// family -- room envelopes, room history, room management, and the lesche
+// `me/events` SSE. The bilateral E2EE conversation transport (conversation
+// setup, the key exchange, envelope posting, the keryx `me/events` stream)
+// lives in @kallipai/kallipai-keryx-client. Browser-first (session cookie
+// shared cross-subdomain with the archeion; the stream is parsed with the
+// shared frame machine in kallipai-common).
 
 export const PACKAGE_NAME = "@kallipai/kallipai-lesche-client";
 
 export { LescheClient } from "./http.ts";
-export { openRelayChannel, RelayChannel } from "./channel.ts";
-export { ManageRestClient } from "./manageRest.ts";
-export { LinearBackoff, ProjectionClient } from "./projection.ts";
-export {
-  type CachedLine,
-  clear as clearConvCache,
-  clearPendings,
-  clearReadWatermarks,
-  deletePending,
-  getReadWatermark,
-  isFailedPending,
-  markPendingFailed,
-  type PendingLine,
-  put,
-  putPending,
-  putReadWatermark,
-  readPendingByTagma,
-  readTail,
-  readTailBefore,
-  setPendingRowsForTests,
-} from "./cache.ts";
 
-// Data-plane wire types the UI consumes. The remaining wire types
-// (Participant, TagmaRequest, TagmaControl, KeyExchange*, etc.) are
-// package-private (used inside the channel/crypto implementation).
+// Data-plane wire types the UI consumes. The remaining wire types are
+// package-private.
 export type {
   AuthoredEvent,
   Envelope,
@@ -47,17 +23,10 @@ export type {
   RoomMessageView,
   SignalEvent,
   TagmaReply,
+  TagmaStatusPayload,
 } from "./types.ts";
 export type { LescheEvent } from "./types.ts";
 export type { MeEventFrame } from "./http.ts";
-export type {
-  ProjectionAgentsResponse,
-  ProjectionBudgetResponse,
-  ProjectionDirty,
-  ProjectionStatusResponse,
-  ProjectionWorkScheduleResponse,
-  TagmaStatusPayload,
-} from "./types.ts";
 // Room management (relocated from the archeion client).
 export type {
   AddTagmaRequest,
@@ -72,4 +41,4 @@ export type {
   TagmaRoomView,
   Visibility,
 } from "./types.ts";
-export { LescheApiError } from "./types.ts";
+export { DataPlaneApiError } from "./types.ts";

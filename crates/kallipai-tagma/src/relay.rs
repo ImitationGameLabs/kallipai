@@ -1,9 +1,9 @@
 //! The relay connector: the optional online-mode subsystem that links the
-//! tagma to archeion/lesche. Folded in from the former standalone connector — the
-//! tagma now hosts it in-process.
+//! tagma to the keryx and lesche data planes (the tunnel, KEX and envelope
+//! posts dial keryx; rooms, direct sessions and the agent SSE dial lesche).
 //!
-//! Responsibilities (ported from the former standalone connector):
-//! - hold the lesche tunnel SSE + reconnect loop (`run` / `connect_and_drain`);
+//! Responsibilities:
+//! - hold the keryx tunnel SSE + reconnect loop (`run` / `connect_and_drain`);
 //! - broker the per-conversation E2E key (KEX) and the AEAD epoch (`handle_kex`,
 //!   `crypto::CryptoState`);
 //! - decrypt inbound app ops and run them against the root agent in-process
@@ -16,6 +16,7 @@
 //! `Inner` holds a `Weak<AppState>` (not a strong ref) to avoid a reference
 //! cycle with `AppState.relay`.
 
+pub(crate) mod agent_sse;
 mod bilateral;
 pub(crate) mod chat_history;
 mod crypto;
@@ -38,13 +39,13 @@ use futures_util::{FutureExt, StreamExt};
 use kallipai_archeion_common::bytes::Ciphertext;
 use kallipai_archeion_common::ids::{ConversationId, ParticipantId, ParticipantKind, TagmaId};
 use kallipai_e2ee::{self as e2e, DeviceKey};
+use kallipai_keryx_common::tunnel::{Face, ManageRestReply, TunnelInbound};
 use kallipai_lesche_client::LescheClient;
 use kallipai_lesche_common::direct::{DirectMessage, DirectSessionId};
 use kallipai_lesche_common::message::{
     Envelope, Participant, RoomMessage, TagmaControl, TagmaReply, TagmaRequest,
 };
 use kallipai_lesche_common::rooms::RoomId;
-use kallipai_lesche_common::tunnel::{Face, ManageRestReply, TunnelInbound};
 use std::panic::AssertUnwindSafe;
 use time::OffsetDateTime;
 use tokio::sync::Mutex;
@@ -208,15 +209,15 @@ struct Inner {
     /// The running projection push pump, if any. Bounded to the tunnel
     /// session like the other pumps (started on tunnel-up with an
     /// unconditional full first shot, stopped on tunnel-down), and
-    /// additionally gated by the lesche's subscription hint so an unread
+    /// additionally gated by the keryx's subscription hint so an unread
     /// projection costs nothing.
     projection_pump: PumpSlot,
     /// The upstream flusher: the single wire writer for the plaintext
-    /// metadata uplink (status/projection/signal batches to the lesche's
+    /// metadata uplink (status/projection/signal batches to the keryx's
     /// `/upstream` channel). Bounded to the tunnel session like the other
     /// pumps (the POST needs the KEX'd client); see relay/flusher.rs.
     upstream_flusher: PumpSlot,
-    /// Whether the lesche currently has at least one projection subscriber
+    /// Whether the keryx currently has at least one projection subscriber
     /// (the projection face of `OwnerSub`; `false` until one arrives and
     /// after a `false`, the fail-toward-saving-resources default). Read by
     /// the pump before each push; written only from the tunnel dispatch.
@@ -240,9 +241,9 @@ struct Inner {
     /// flip; closed flips need no wake (nothing is due).
     status_gate_notify: std::sync::Arc<tokio::sync::Notify>,
     /// Connection-lifetime monotonic push counter for the projection pump
-    /// (never reset by a pump restart -- the lesche keys same-generation
+    /// (never reset by a pump restart -- the keryx keys same-generation
     /// replay rejection on it; a fresh tunnel session is a new generation,
-    /// which the lesche accepts unconditionally). Incremented per push.
+    /// which the keryx accepts unconditionally). Incremented per push.
     projection_push_seq: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// Fallback tick cadence for the projection pump, in milliseconds
     /// (30000 in production; tests shorten it).

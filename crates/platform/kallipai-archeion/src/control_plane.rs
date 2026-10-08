@@ -1,7 +1,7 @@
 //! The DB-backed [`ControlPlane`] impl: the single source of truth for
-//! credential verification and tagma metadata, consumed by the data-plane relay
-//! (`kallipai-lesche`) through the `/internal/*` HTTP API (each handler wraps this
-//! impl). The lesche never touches these tables directly.
+//! credential verification and tagma metadata, consumed by the data-plane
+//! services through the `/internal/*` HTTP API (each handler wraps this
+//! impl). The data-plane services never touch these tables directly.
 
 use kallipai_archeion_common::bytes::Ed25519PublicKey;
 use kallipai_archeion_common::control_plane::{

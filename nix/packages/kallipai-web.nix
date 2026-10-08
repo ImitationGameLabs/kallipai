@@ -22,9 +22,9 @@ let
   # The web build's read closure as a single-level allowlist: the root
   # manifests the deno workspace resolves, tsconfig.base.json (which the
   # library packages' tsconfigs extend and vite/esbuild follows while
-  # transforming them), the seven package subtrees the bundle imports
+  # transforming them), the eight package subtrees the bundle imports
   # (kallipai-web -> kallipai-ui -> {common, kallipai-client, archeion/lesche/
-  # files clients}), and the manifests of the three app packages whose
+  # keryx/files clients}), and the manifests of the three app packages whose
   # sources the web build never reads -- deno install resolves the whole
   # workspace, so their package.json rides along. Excluding the rest
   # (Rust crates, docs, nix expressions, the kallipai-app, kallipai-direct,
@@ -40,6 +40,7 @@ let
         "packages/kallipai-client"
         "packages/kallipai-archeion-client"
         "packages/kallipai-lesche-client"
+        "packages/kallipai-keryx-client"
         "packages/kallipai-files-client"
       ];
       exactEntries = subtreeRoots ++ [
@@ -99,6 +100,8 @@ let
         "packages/kallipai-archeion-client/package.json"
         "packages/kallipai-lesche-client"
         "packages/kallipai-lesche-client/package.json"
+        "packages/kallipai-keryx-client"
+        "packages/kallipai-keryx-client/package.json"
         "packages/kallipai-files-client"
         "packages/kallipai-files-client/package.json"
         "packages/kallipai-app"
@@ -128,7 +131,7 @@ let
     impureEnvVars = pkgs.lib.fetchers.proxyImpureEnvVars;
 
     outputHashMode = "recursive";
-    outputHash = "sha256-fuwLppoN195M5Cx9mF7Lkpwe7uB+KlpnZBYECAiT8A0=";
+    outputHash = "sha256-1gbBTQVUfwnPp3EZQej2BcIW/EaoMvaB4W7JvkCpYVc=";
     outputHashAlgo = "sha256";
 
     nativeBuildInputs = [ deno ];

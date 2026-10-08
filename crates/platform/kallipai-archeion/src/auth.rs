@@ -26,8 +26,8 @@ use kallipai_common::protocol::ApiError;
 use crate::state::SharedState;
 
 // `Principal` and the `require_*` authorization helpers live in the shared
-// `kallipai-archeion-common` crate so both the registry and the relay enforce the
-// same deputy guard. Re-export them here so existing `crate::auth::Principal` /
+// `kallipai-archeion-common` crate so the registry and the data-plane services
+// enforce the same deputy guard. Re-export them here so existing `crate::auth::Principal` /
 // `super::require_*` references keep resolving.
 pub use kallipai_archeion_common::principal::{Principal, require_admin, require_user};
 
@@ -55,8 +55,8 @@ impl FromRequestParts<SharedState> for AuthPrincipal {
         state: &SharedState,
     ) -> Result<Self, Self::Rejection> {
         // Credential verification is delegated to the shared DB-backed
-        // `ControlPlane` impl (the same one the data-plane relay consumes), so
-        // the registry and the relay enforce identical auth semantics.
+        // `ControlPlane` impl (the same one the data-plane services consume),
+        // so the registry and the services enforce identical auth semantics.
         let control = DbControlPlane::new(
             state.db.clone(),
             // Snapshot under the read lock: a token rotation swaps the value
@@ -84,8 +84,8 @@ impl FromRequestParts<SharedState> for AuthPrincipal {
                 .map_err(|e| ApiError::internal(format_args!("registry error: {e}")))?
                 .ok_or_else(|| ApiError::unauthorized("invalid session"))?;
             // The archeion's own routes need only the user id; the verified
-            // session's username/display_name are consumed by the lesche over
-            // the /internal/verify-session HTTP surface, not here.
+            // session's username/display_name are consumed by the data planes
+            // over the /internal/verify-session HTTP surface, not here.
             return Ok(AuthPrincipal(Principal::User(user.user_id)));
         }
         Err(ApiError::unauthorized("authentication required"))

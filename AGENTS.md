@@ -25,7 +25,7 @@ Code and test comments are self-contained: do not reference out-of-repo document
 ```
 
 `crates/` holds the core crates plus three subsystem homes: `platform/`
-(public-internet relay), `daemon/` (local instance management), and
+(public-internet services), `daemon/` (local instance management), and
 `time/` (timer/scheduling). Each subsystem directory contains its own
 crates; elsewhere one directory is one crate, and directory names match
 crate names. The README table describes the core crates.

@@ -16,6 +16,8 @@ pub mod toolresult;
 
 #[cfg(feature = "axum")]
 pub mod auth_header;
+#[cfg(feature = "axum")]
+pub mod cors;
 #[cfg(feature = "logging")]
 pub mod logging;
 #[cfg(feature = "axum")]

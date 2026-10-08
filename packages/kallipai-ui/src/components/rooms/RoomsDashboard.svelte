@@ -10,7 +10,7 @@
     RoomInviteView,
     RoomView,
   } from "@kallipai/kallipai-lesche-client";
-  import { LescheApiError } from "@kallipai/kallipai-lesche-client";
+  import { DataPlaneApiError } from "@kallipai/kallipai-lesche-client";
   import type { SectionPhase } from "../../lib/phase.ts";
   import RoomCard from "./RoomCard.svelte";
   import CreateRoomDialog, {
@@ -93,7 +93,7 @@
   /** Typed lesche failures keep their server copy (a 409 double-accept
    * is actionable); transport failures are qualitative, details logged. */
   function msgOf(e: unknown): string {
-    if (e instanceof LescheApiError) return e.message;
+    if (e instanceof DataPlaneApiError) return e.message;
     console.error("[rooms] create/accept failed:", e);
     return rooms_couldnt_reach();
   }

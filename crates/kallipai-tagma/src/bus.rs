@@ -76,7 +76,7 @@ impl Event for StatusSnapshot {
 }
 
 /// A full manage-plane projection (roster + status + work schedule): the
-/// lesche's PUT-fed read model, with the same self-healing economics as
+/// keryx's PUT-fed read model, with the same self-healing economics as
 /// [`StatusSnapshot`]. Producer: the projection pump driver; consumers: the
 /// upstream flusher (the wire writer) and nothing else — a no-subscriber
 /// publish is benign by bus contract.

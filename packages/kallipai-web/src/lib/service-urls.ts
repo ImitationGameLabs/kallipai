@@ -18,7 +18,12 @@
  * carries its service (all client path templates are pure tails).
  */
 
-export type ServiceName = "archeion" | "lesche" | "files" | "instances";
+export type ServiceName =
+  | "archeion"
+  | "lesche"
+  | "keryx"
+  | "files"
+  | "instances";
 
 /** The subset of `window.KALLIPAI_CONFIG` this derivation consumes. */
 export interface DerivationConfig {

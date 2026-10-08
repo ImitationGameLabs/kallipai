@@ -1,12 +1,13 @@
 //! `kallipai-archeion`: the registry / control plane (identity, WebAuthn, tagma
-//! lifecycle) for the kallipai relay.
+//! lifecycle) for the kallipai platform.
 //!
-//! The archeion owns the durable Postgres store and exposes a narrow `ControlPlane`
-//! trait (in `kallipai-archeion-common`). The data-plane relay (`kallipai-lesche`) is a
-//! separate process that consumes that trait over the `/internal/*` HTTP API
-//! served here (each handler wraps the DB-backed `DbControlPlane`, guarded by a
-//! shared-secret bearer). If no internal-token file is configured, the
-//! `/internal` nest is not mounted and the archeion runs standalone.
+//! The archeion owns the durable Postgres store and exposes a narrow
+//! `ControlPlane` trait (in `kallipai-archeion-common`). The data-plane
+//! services (each a separate process) consume that trait over the
+//! `/internal/*` HTTP API served here (each handler wraps the DB-backed
+//! `DbControlPlane`, guarded by a shared-secret bearer). If no internal-token
+//! file is configured, the `/internal` nest is not mounted and the archeion
+//! runs standalone.
 
 mod args;
 mod auth;
@@ -197,9 +198,10 @@ async fn main() -> Result<()> {
         args.signup_enabled,
     ));
 
-    // The data-plane services (lesche, files, instances) call the archeion's
+    // The platform services (lesche, keryx, files, instances, model-
+    // gateway) call the
     // `/internal/*` ControlPlane API with a shared secret. That secret is
-    // machine-internal alignment material — the four services only need to
+    // machine-internal alignment material — the six services only need to
     // agree, the value is regenerable, and it never leaves this host — so the
     // archeion owns its lifecycle instead of asking the operator to ship it:
     // first boot generates it into the state directory, later boots read the

@@ -2,7 +2,7 @@
 //!
 //! Each call is one HTTP POST to the archeion's `/internal/*` surface, guarded by
 //! a shared-secret bearer. There is deliberately NO auth cache: the relay's hot
-//! paths are long-lived connections (tagma tunnel, app SSE) that authenticate
+//! paths are long-lived connections (agent SSE, app SSE) that authenticate
 //! once at open and never re-verify mid-stream, so per-request RPC volume is
 //! low. A short-TTL in-process cache would add unbounded state and a
 //! "freshly-issued token cached as None" hazard for ~zero benefit.

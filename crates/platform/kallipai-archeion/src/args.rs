@@ -180,13 +180,14 @@ pub struct Args {
     #[arg(long, env = "KALLIPAI_ARCHEION_OAUTH_GOOGLE_CLIENT_SECRET")]
     pub oauth_google_client_secret: Option<String>,
     /// File holding the platform-internal secret shared with the lesche,
-    /// files, and instances services. Unset = the `/internal` nest is not
-    /// mounted (archeion runs standalone). Set = first boot generates the
-    /// secret into the file (0640, group-readable); later boots read the
-    /// existing value and never overwrite it, so the four services keep
-    /// agreeing while they restart around it. Machine-internal alignment
-    /// material — regenerable, host-local — which is why the archeion owns
-    /// it as state instead of asking the operator to ship it as config.
+    /// keryx, files, instances, and model-gateway services. Unset = the
+    /// `/internal` nest is not mounted (archeion runs standalone). Set =
+    /// first boot generates the secret into the file (0640, group-
+    /// readable); later boots read the existing value and never overwrite
+    /// it, so the six services keep agreeing while they restart around
+    /// it. Machine-internal alignment material — regenerable, host-local
+    /// — which is why the archeion owns it as state instead of asking
+    /// the operator to ship it as config.
     #[arg(long, env = "KALLIPAI_ARCHEION_INTERNAL_TOKEN_FILE")]
     pub internal_token_file: Option<PathBuf>,
     /// Mount POST /auth/admin-login: exchange the admin token for a normal

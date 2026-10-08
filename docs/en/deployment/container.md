@@ -118,6 +118,7 @@ api.<your-domain> {
 	handle_path /v1/archeion/*  { reverse_proxy archeion:7100 }
 	# SSE flushes by content type; the non-SSE fallback lives in the full configs
 	handle_path /v1/lesche/*    { reverse_proxy lesche:7200 }
+	handle_path /v1/keryx/*    { reverse_proxy keryx:7210 }
 	@files path /v1/files /v1/files/*
 	handle @files               { uri strip_prefix /v1/files    reverse_proxy files:7400 }
 	handle_path /v1/instances/* { reverse_proxy instances:7300 }
@@ -144,6 +145,7 @@ services.kallipai.polis = {
   enable = true;
   archeionPackage = inputs.self.packages.x86_64-linux.kallipai-archeion;
   leschePackage = inputs.self.packages.x86_64-linux.kallipai-lesche;
+  keryxPackage = inputs.self.packages.x86_64-linux.kallipai-keryx;
   filesPackage = inputs.self.packages.x86_64-linux.kallipai-files;
   instancesPackage = inputs.self.packages.x86_64-linux.kallipai-instances;
 };

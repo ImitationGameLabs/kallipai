@@ -9,7 +9,7 @@
 # switch or mkIf/mkMerge. The .env at the repo root supplies KALLIPAI_AUTH_TOKEN (the tagma
 # operator token), KALLIPAI_TAGMA_RELAY_ENROLLMENT_CODE (first boot only),
 # KALLIPAI_POLIS_URL (the platform's public API origin, e.g.
-# https://api.kallipai.com -- enrollment, the lesche tunnel, envelopes and
+# https://api.kallipai.com -- enrollment, the keryx tunnel, envelopes and
 # key-exchange responses all derive from it), and
 # the LLM provider credentials. See docs/en/deployment/container.md.
 { lib, ... }:
@@ -79,7 +79,7 @@ in
         RUST_LOG = "info";
         # KALLIPAI_AUTH_TOKEN (operator token), KALLIPAI_TAGMA_RELAY_ENROLLMENT_CODE
         # (first run only), and KALLIPAI_POLIS_URL (the platform API origin:
-        # enrollment at the archeion, the lesche tunnel, envelopes and KEX
+        # enrollment at the archeion, the keryx tunnel, envelopes and KEX
         # responses all derive from it) come from .env. The api face serves
         # every service under https://api.<domain>/v1/<service>/... on one
         # origin sharing the parent domain with app.<domain>.

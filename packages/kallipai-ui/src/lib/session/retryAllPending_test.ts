@@ -117,7 +117,7 @@ Deno.test(
       },
     ];
     const { setPendingRowsForTests } =
-      await import("@kallipai/kallipai-lesche-client");
+      await import("@kallipai/kallipai-keryx-client");
     setPendingRowsForTests(() => stored);
     try {
       await conv.retryAllPending();

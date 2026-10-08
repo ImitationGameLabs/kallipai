@@ -3,9 +3,9 @@
 //! The registry owns identity / credentials / provisioning (users, passkeys,
 //! enrollment tokens, tagmata, tagma tokens, sessions) in the
 //! durable Postgres store, plus the `ControlPlane` impl exposed to the
-//! data-plane relay (`kallipai-lesche`) over the `/internal/*` HTTP API. The
-//! data-plane soft state (presence, conversations, app streams, KEX
-//! correlation) lives in the lesche, not here.
+//! data-plane services over the `/internal/*` HTTP API. The data-plane soft
+//! state (presence, conversations, app streams, KEX correlation) lives in
+//! the keryx, not here.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -59,8 +59,8 @@ pub fn build_webauthn_pair(
     Ok((Arc::new(webauthn), Arc::new(core)))
 }
 
-/// The registry's boot configuration. Relay-only knobs (`proof_skew_secs`,
-/// `key_exchange_timeout`) live on the relay's `ConversationsState`, not here.
+/// The registry's boot configuration. Keryx-relay knobs (`proof_skew_secs`,
+/// `key_exchange_timeout`) live on keryx's `ConversationsState`, not here.
 pub struct AppState {
     pub shutdown: CancellationToken,
     pub limits: Limits,

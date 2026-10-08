@@ -1,10 +1,10 @@
 //! Thin HTTP client for the archeion's service-to-service auth calls.
 //!
-//! The lesche reaches the archeion through `HttpControlPlane` (private to that
-//! crate, and implementing the full six-method `ControlPlane` trait); this
-//! proxy needs exactly two calls (bearer + session verify), so it carries
-//! a verifier of its own rather than pulling the relay crate in or
-//! refactoring a shared client out (a tracked follow-up if a third
+//! The lesche, the keryx and the files service reach the archeion through
+//! their own control-plane clients (the full seven-method `ControlPlane`
+//! trait); this proxy needs exactly two calls (bearer + session verify), so
+//! it carries a verifier of its own rather than pulling a data-plane crate
+//! in or refactoring a shared client out (a tracked follow-up if another
 //! consumer appears).
 
 use kallipai_archeion_common::control_plane::{ControlPlaneError, VerifiedSession};

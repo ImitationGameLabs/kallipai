@@ -1,8 +1,9 @@
 //! Internal `ControlPlane` HTTP API wire types.
 //!
-//! The on-wire contract shared by `kallipai-archeion`'s `/internal/*` handlers (which
-//! wrap its DB-backed `ControlPlane`) and `kallipai-lesche`'s `HttpControlPlane`
-//! client. Lives in this shared crate so the two sides cannot drift apart.
+//! The on-wire contract shared by `kallipai-archeion`'s `/internal/*` handlers
+//! (which wrap its DB-backed `ControlPlane`) and the data-plane services'
+//! `ControlPlane` HTTP clients. Lives in this shared crate so the two sides
+//! cannot drift apart.
 //!
 //! These types are deliberately NOT the same as the public `/v1/*` surface: the
 //! `/internal` API is a service-to-service boundary authenticated by a shared
@@ -90,13 +91,13 @@ pub struct TagmaProfilesRequest {
 }
 
 /// One tagma's facts in [`TagmaProfilesResponse`]. UNFILTERED: carries the raw
-/// identity + usability state (`enrolled`/`revoked`/`owner_disabled`/key) so the
-/// relay, not the registry, derives authorization. An alias of the trait-side
-/// [`crate::control_plane::TagmaProfile`].
+/// identity + usability state (`enrolled`/`revoked`/`owner_disabled`/key)
+/// so the caller, not the registry, derives authorization. An alias of
+/// the trait-side [`crate::control_plane::TagmaProfile`].
 pub type TagmaProfileResponse = crate::control_plane::TagmaProfile;
 
 /// `200` body: one entry per existing input id (unknown ids omitted). Always
-/// `200` (never `404`) -- absence is expressed by omission, so the relay maps
+/// `200` (never `404`) -- absence is expressed by omission, so the caller maps
 /// status straight to the result list.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TagmaProfilesResponse {

@@ -112,7 +112,7 @@ mod tests {
     }
 
     /// With a `Domain` configured, both the set and clear headers carry it, so
-    /// the cookie is shared across `archeion.<d>` / `lesche.<d>` and logout deletes
+    /// the cookie is shared across `archeion.<d>` / `lesche.<d>` / `keryx.<d>` and logout deletes
     /// the same (parent-domain) cookie. Asserted structurally via `Cookie::parse`
     /// (not a substring match) so an attribute emitted in the wrong position or
     /// duplicated still fails.

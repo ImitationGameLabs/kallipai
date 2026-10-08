@@ -2952,6 +2952,8 @@ dependencies = [
  "time",
  "tokio",
  "toml",
+ "tower",
+ "tower-http",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
@@ -3147,6 +3149,48 @@ dependencies = [
 ]
 
 [[package]]
+name = "kallipai-keryx"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "base64 0.22.1",
+ "clap",
+ "cookie",
+ "ed25519-dalek",
+ "futures-util",
+ "kallipai-archeion-common",
+ "kallipai-common",
+ "kallipai-keryx-common",
+ "kallipai-lesche-common",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "time",
+ "tokio",
+ "tokio-stream",
+ "tower",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+ "wiremock",
+]
+
+[[package]]
+name = "kallipai-keryx-common"
+version = "0.1.0"
+dependencies = [
+ "kallipai-archeion-common",
+ "kallipai-lesche-common",
+ "serde",
+ "serde_json",
+ "time",
+ "uuid",
+]
+
+[[package]]
 name = "kallipai-lesche"
 version = "0.1.0"
 dependencies = [
@@ -3192,6 +3236,7 @@ dependencies = [
  "futures-util",
  "kallipai-archeion-common",
  "kallipai-e2ee",
+ "kallipai-keryx-common",
  "kallipai-lesche-common",
  "reqwest",
  "serde",
@@ -3316,6 +3361,7 @@ dependencies = [
  "kallipai-common",
  "kallipai-daemon-common",
  "kallipai-e2ee",
+ "kallipai-keryx-common",
  "kallipai-lesche-client",
  "kallipai-lesche-common",
  "kallipai-shell",

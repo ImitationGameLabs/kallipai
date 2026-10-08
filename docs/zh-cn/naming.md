@@ -13,9 +13,9 @@ internal: true
 
 名字由城邦名的简干 **kallip**（更短、更好打字，去掉不承担技术含义的 `-olis`）加上后缀 **AI** 构成，使项目的性质一目了然。连起来读，`kallipai` 就是字面上的 `kallip` + `ai`。
 
-### 服务名：Archeion 与 Polis
+### 服务名：Archeion、Lesche、Keryx 与 Polis
 
-平台的服务名沿用同一希腊城邦意象。**archeion**（ἀρχεῖον）是古代的档案馆——保存公民名册与公共档案的建筑；身份服务（注册、会话、tagma 记录）承担的正是这份职责。**polis**（城）命名部署组合——它把整个平台组装在一起，而非对应某个单一服务。
+平台的服务名沿用同一希腊城邦意象。**archeion**（ἀρχεῖον）是古代的档案馆——保存公民名册与公共档案的建筑；身份服务（注册、会话、tagma 记录）承担的正是这份职责。**lesche**（λέσχη）是档案馆旁的会客厅——公民聚谈的场所；聊天中继承担的正是这份职责：房间与直连会话面，外加持久的消息存储。**keryx**（κῆρυξ）是传令官——在城邦与外人之间传话的信使；tagma 链路中继承担的正是这份职责：在部署与其 tagmata 之间搬运链路流量、承载 E2E 用户会话，全部状态驻留内存。**polis**（城）命名部署组合——它把整个平台组装在一起，而非对应某个单一服务。tagma 侧一枚 Rust crate 覆盖两台中继：`kallipai-lesche-client` 既讲 lesche 数据面，也讲 keryx 链路面。
 
 四个 wire 协议 tag 特意保留 `agora` 拼写（`kallipai-agora-aead-v1`、`kallipai-agora-enroll-v1`、`kallipai-agora-tunnel-proof-v1`、`kallipai-agora-kex-v1`）：它们是域分隔字符串，客户端 SDK 按字节精确匹配，绝不重版本化。
 

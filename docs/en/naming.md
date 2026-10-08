@@ -23,13 +23,23 @@ to type, free of the `-olis` that does no technical work - with **AI** as a
 suffix that makes the project's nature unambiguous. Read together, `kallipai`
 is literally `kallip` + `ai`.
 
-### Service Names: Archeion and Polis
+### Service Names: Archeion, Lesche, Keryx, and Polis
 
 The platform's service names follow the same Greek-city framing. **archeion**
 (ἀρχεῖον) was the ancient record office - the building that kept the citizen
 registers and public archives. The identity service (enrollment, sessions,
-tagma records) holds that job. **polis** (city) names the deployment
-composition, which assembles the whole platform rather than any one service.
+tagma records) holds that job. **lesche** (λέσχη) was the conversation
+hall beside the record office, where citizens met to talk: the chat
+relay holds the room and direct-session surfaces plus the durable
+message store. **keryx** (κῆρυξ) was the herald, the messenger who
+carried word between the city and those outside it: the relay carries
+the tagma-link traffic between the deployment and its tagmata plus
+the E2E user conversations, all state in memory. **polis** (city)
+names the deployment composition,
+which assembles the whole platform rather than any one service.
+On the tagma side, one Rust crate covers both relays:
+`kallipai-lesche-client` speaks the lesche data plane and the keryx
+link planes.
 
 Four wire-protocol tags keep the `agora` spelling on purpose
 (`kallipai-agora-aead-v1`, `kallipai-agora-enroll-v1`,

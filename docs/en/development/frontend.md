@@ -7,15 +7,15 @@ internal: true
 
 This guide covers the JS/TS workspace packages under `packages/`
 (`kallipai-common`, `kallipai-client`, `kallipai-archeion-client`,
-`kallipai-lesche-client`, `kallipai-ui`, `kallipai-web`, `kallipai-app`,
-`kallipai-direct`). They share a
+`kallipai-lesche-client`, `kallipai-keryx-client`, `kallipai-files-client`,
+`kallipai-ui`, `kallipai-web`, `kallipai-app`, `kallipai-direct`,
+`kallipai-site`). They share a
 single toolchain, **Deno**, laid out as an npm-style workspace but never driven
 by npm. The Rust crates under `crates/` are unrelated (cargo).
-
 The frontend reaches the tagma over two transports behind one `Transport` seam
 (in `kallipai-ui/src/lib/session/`): `DirectTransport` for the offline path
 (consuming `/agents/{id}/external/events` via `kallipai-client`) and a
-`RelayChannel` from `kallipai-lesche-client` for the online E2EE path. Both reduce
+`RelayChannel` from `kallipai-keryx-client` for the online E2EE path. Both reduce
 through the shared `kallipai-ui/src/lib/transcript.ts` reducer (`applyTagmaReply`
 / `applySignal`).
 

@@ -1,0 +1,39 @@
+[package]
+name = "kallipai-keryx"
+description = "kallipai keryx relay service: tagma-link and user DM data plane"
+edition = "2024"
+version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "kallipai-keryx"
+path = "src/main.rs"
+
+[dependencies]
+kallipai-archeion-common = { workspace = true }
+kallipai-keryx-common = { workspace = true }
+kallipai-lesche-common = { workspace = true }
+kallipai-common = { workspace = true, features = ["axum", "logging"] }
+axum = { workspace = true }
+uuid = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = { workspace = true, features = ["sync"] }
+futures-util = { workspace = true }
+tower-http = { workspace = true }
+cookie = { workspace = true }
+base64 = { workspace = true }
+serde_json = { workspace = true }
+serde = { workspace = true }
+reqwest = { workspace = true }
+async-trait = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "test-util"] }
+tower = { workspace = true }
+wiremock = { workspace = true }
+ed25519-dalek = { workspace = true }
+time = { workspace = true }

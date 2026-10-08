@@ -1,100 +1,38 @@
-// Wire types for the `kallipai-lesche` data-plane relay's `/` HTTP surface.
-// These mirror the serde DTOs in
-// `crates/platform/kallipai-lesche-common/src/{control,message,event}.rs` and the
-// lesche's `crates/platform/kallipai-lesche/src/routes/conversations.rs`. The
-// lesche forwards `Envelope.ciphertext` and the byte fields below without
-// interpreting them; every base64 string is STANDARD base64 (padded, +//),
-// matching archeion-common's bytes.rs.
+// Wire types for the `kallipai-lesche` data-plane relay's `/` HTTP surface:
+// the rooms family. These mirror the serde DTOs in
+// `crates/platform/kallipai-lesche-common/src/{message,event,rooms}.rs` and
+// the lesche's routes. The bilateral conversation wire types and the
+// projection family live in @kallipai/kallipai-keryx-client; the shared chat
+// vocabulary and the envelope/status carriers live in
+// `@kallipai/kallipai-common`, re-exported below.
 //
 // The chat wire types (`AuthoredEvent`, `SignalEvent`, `TagmaReply`,
 // `FailoverChainExhausted`) live in `@kallipai/kallipai-common` and are
-// re-exported here, because the direct (offline) client shares them — the
+// re-exported here, because the direct (offline) client shares them -- the
 // external chat-room vocabulary is transport-agnostic.
 
 // Re-export the shared chat vocabulary (one source of truth in kallipai-common).
 export type {
   AuthoredEvent,
+  Envelope,
   FailoverChainExhausted,
   HistoryEntry,
   FileAttachment,
   Participant,
   SignalEvent,
   TagmaReply,
+  TagmaStatusPayload,
 } from "@kallipai/kallipai-common";
+// The data-plane error class is shared with the keryx client (both services
+// emit the same error envelope); it lives in kallipai-common.
+export { DataPlaneApiError } from "@kallipai/kallipai-common";
 import type {
-  FileAttachment,
+  Envelope,
   Participant,
   ParticipantKind,
   SignalEvent,
+  TagmaStatusPayload,
 } from "@kallipai/kallipai-common";
-
-/** `POST /conversations { tagma_id }` -- resolves the single conversation a
- * tagma owns with its operator (idempotent; id derived from the tagma). */
-export interface CreateConversationResponse {
-  readonly conversation_id: string;
-}
-
-/** The unit the lesche forwards. `sequence_n` is per-conversation, per-sender,
- * monotonic from 0; it doubles as the AEAD nonce counter. `ciphertext` is
- * standard-base64 AEAD output (ChaCha20-Poly1305, tag appended). `timestamp` is
- * ISO 8601 with fractional seconds (time::serde::iso8601); do not round-trip a
- * received value through `Date`. */
-export interface Envelope {
-  readonly channel_id: string;
-  readonly sender: Participant;
-  readonly sequence_n: number;
-  readonly trace_id: string;
-  readonly timestamp: string;
-  readonly ciphertext: string;
-}
-
-/** App -> tagma: one semantic op against the tagma, encrypted in an envelope.
- * serde tag = `op`, snake_case. `req_id` correlates the op with its TagmaReply. */
-export type TagmaRequest =
-  | {
-      readonly op: "send_message";
-      readonly req_id: number;
-      readonly text: string;
-      readonly attachment?: FileAttachment;
-    }
-  | { readonly op: "interrupt"; readonly req_id: number };
-
-/** App -> tagma: a control op that does NOT drive the agent (today: the
- * cursor-based history pull). Carried in the same encrypted envelope channel as
- * TagmaRequest; the relay dispatches by the `op` discriminant (disjoint from
- * TagmaRequest's). serde tag = `op`, snake_case. */
-export type TagmaControl =
-  | {
-      readonly op: "history";
-      readonly req_id: number;
-      /** rows with id > after (incremental catch-up). */
-      readonly after: number | null;
-      /** rows with id < before (scroll-up lazy load). */
-      readonly before: number | null;
-      readonly limit: number;
-    }
-  | {
-      /** A management operation (budget, agents, profiles, schedules). The
-       * relay dispatches it in-process against the tagma route handlers. */
-      readonly op: "manage";
-      readonly req_id: number;
-      readonly method: string;
-      readonly path: string;
-      readonly body: unknown;
-    };
-
-/** App -> tagma (relayed by the lesche): start a 1-RTT key exchange, carrying
- * the app's ephemeral X25519 public key (standard base64). */
-export interface KeyExchangeInit {
-  readonly ephemeral_public: string;
-}
-
-/** Responder -> app: the tagma's ephemeral X25519 public key plus an Ed25519
- * signature over the kex transcript (standard base64). */
-export interface KeyExchangeResponse {
-  readonly ephemeral_public: string;
-  readonly signature: string;
-}
 
 /**
  * One message row from a room's history (`GET /rooms/{id}/messages`). The
@@ -219,32 +157,6 @@ export interface AddTagmaRequest {
   readonly tagma_id: string;
 }
 
-/** The aggregate status payload carried by the `tagma_status` SSE event and
- * `GET /tagmata/{id}/status` (one wire shape, two transports). */
-export interface TagmaStatusPayload {
-  readonly root_state:
-    | "idle"
-    | "busy"
-    | "waiting"
-    | "retrying"
-    | "parked"
-    | "faulted";
-  readonly subagents_total: number;
-  readonly subagents_active: number;
-  readonly token_budget: number;
-  readonly token_consumed: number;
-  // Unlimited budget (enforcement off, consumption still tracked);
-  // absent from older tagmas (serde default false).
-  readonly token_budget_unlimited?: boolean;
-}
-
-/** `GET /tagmata/{id}/status` -- the presence cache's latest relayed snapshot
- * (`stale: false`), or an offline tagma's stored projection (`stale: true`).
- * `status` is `null` when the tagma has never broadcast a snapshot. */
-export interface ProjectionStatusResponse {
-  readonly stale: boolean;
-  readonly status: TagmaStatusPayload | null;
-}
 /** An event on the app's multiplexed SSE stream (`GET /me/events`). serde
  * tag = `type`, snake_case. `envelope` carries E2EE conversation content. The
  * presence pair (`tagma_online`/`tagma_offline`), `tagma_status`, and
@@ -300,95 +212,3 @@ export type LescheEvent =
       readonly room_id: string;
       readonly last_read_seq: number;
     };
-
-/**
- * One `ProjectionDirty` frame on the projection SSE stream
- * (`GET /tagmata/{id}/state`). A liveness nudge only -- the
- * payload carries the tagma id and the store seq, never content; the
- * consumer re-pulls the projection GET when the seq is newer than its
- * local copy.
- */
-export interface ProjectionDirty {
-  readonly tagma_id: string;
-  readonly seq: number;
-}
-
-/** `GET /tagmata/{id}/agents` -- the stored projection's
- * roster and aggregate status, plus the seq/staleness bookkeeping.
- * `stale` is true when the tagma has no live presence (offline
- * tags keep serving the last known projection). */
-export interface ProjectionAgentsResponse {
-  readonly stale: boolean;
-  readonly seq: number;
-  readonly updated_at: number;
-  readonly agents: readonly ProjectionAgentSummary[];
-  readonly status: unknown;
-}
-
-/** The projected per-agent summary: the same serde wire as kallipai-ui's
- * management summary common fields (structural, so the UI consumes it
- * directly; extra wire fields the management type omits, like `lock`,
- * are harmless). */
-export interface ProjectionAgentSummary {
-  readonly id: string;
-  readonly workspace_root: string;
-  readonly state:
-    | "idle"
-    | "busy"
-    | "waiting"
-    | "parked"
-    | "retrying"
-    | "faulted";
-  readonly created_by: string | null;
-  readonly role: string;
-  readonly description: string;
-  readonly activity: string;
-  readonly duty: "onduty" | "offduty";
-  readonly faulted_reason: string | null;
-  readonly parked_reason?: unknown;
-  readonly retrying?: unknown;
-  readonly conversation_id: string | null;
-  readonly profile_set?: string | null;
-}
-
-/** `GET /tagmata/{id}/budget` -- the cached token budget
- * snapshot with the same seq/staleness bookkeeping. */
-export interface ProjectionBudgetResponse {
-  readonly stale: boolean;
-  readonly seq: number;
-  readonly updated_at: number;
-  readonly budget: number;
-  readonly consumed: number;
-}
-
-/** `GET /tagmata/{id}/work-schedule` -- the cached
- * prompt-free schedule projection (same seq/staleness bookkeeping). */
-export interface ProjectionWorkScheduleResponse {
-  readonly stale: boolean;
-  readonly seq: number;
-  readonly updated_at: number;
-  readonly work_schedule: {
-    readonly id: string;
-    readonly spec: unknown;
-    readonly pre_warn_minutes: number;
-    readonly final_warn_minutes: number;
-    readonly status: string;
-    readonly created_at: string;
-  } | null;
-}
-
-/**
- * Lesche API error. Mirrors `kallipai_common::protocol::ApiError`. This is a
- * distinct surface from `kallipai-ui`'s tagma-transport `classifyError` -- the
- * lesche errors are routed through the realtime/channels stores, not the shared
- * AppShell banner.
- */
-export class LescheApiError extends Error {
-  constructor(
-    readonly status: number,
-    message: string,
-  ) {
-    super(message);
-    this.name = "LescheApiError";
-  }
-}

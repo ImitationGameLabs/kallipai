@@ -1,43 +1,48 @@
 //! The relay's shared state: a handle to the registry ([`ControlPlane`]) plus
-//! the in-memory soft-state `Registry` (presence, conversations, app streams)
-//! and the relay-only `pending_key_exchange` window.
+//! the in-memory soft-state `Registry` (app streams, agent streams).
 //!
-//! Everything here is soft-state, rebuilt on restart (presence from tagmata
-//! reconnecting, conversations create-on-demand). The durable identity /
-//! credential / provisioning layer lives in the registry behind
-//! [`ControlPlane`]; this crate never reads or writes it directly. The relay
-//! keeps NO replay/dedup window: `sequence_n` is an end-to-end (app<->
-//! tagma) counter scoped to a crypto epoch the relay cannot see, so replay
-//! protection lives entirely at the tagma (per-epoch `seen_inbound` + AEAD
-//! key rotation).
+//! Everything here is soft-state, rebuilt on restart from clients
+//! reconnecting. The durable identity / credential / provisioning layer
+//! lives in the registry behind [`ControlPlane`]; this crate never reads or
+//! writes it directly. The relay keeps NO replay/dedup window: `sequence_n`
+//! is an end-to-end (app<->tagma) counter scoped to a crypto epoch the relay
+//! cannot see, so replay protection lives entirely at the tagma (per-epoch
+//! `seen_inbound` + AEAD key rotation).
 //!
 //! # Lock-discipline invariants (authoritative)
 //!
-//! 1. **No `.await` under a lock.** Drop every `read()`/`write()`/
-//!    `pending_key_exchange` guard before awaiting. `ControlPlane` calls (which
-//!    await) happen outside any relay lock.
-//! 2. **Never co-hold the registry lock with `pending_key_exchange`.** Register
-//!    a KEX waiter only after the registry guard is dropped.
-//! 3. **`app_streams` has a single creator: `me_events`** (`routes/events.rs`).
+//! 1. **No `.await` under a lock.** Drop every `read()`/`write()` guard
+//!    before awaiting. `ControlPlane` calls (which await) happen outside any
+//!    relay lock.
+//! 2. **`app_streams` has a single creator: `me_events`** (`events.rs`).
 //!    Inserting elsewhere would violate the `OnDrop` cleanup assumption (every
 //!    entry has a live subscriber).
-//! 4. **`pending_key_exchange` cleanup is unconditional** via `KexGuard`
-//!    (`routes/conversations.rs`).
+//!
+//! # Domain layout
+//!
+//! The crate is organized into two domains along the line the
+//! physical-split blueprint draws: `chat` (rooms, direct sessions,
+//! the durable store) and `link` (the agent SSE carrier -- every surface
+//! whose peer is a tagma). This registry deliberately spans both and stays
+//! ONE lock: `agent_streams` is link-domain state and `app_streams` is the
+//! shared events face, and the fan paths walk both maps under one read
+//! lock, so a room fan never takes a second lock. Cross-domain calls go
+//! only through the seams the two domain roots export (frame delivery
+//! to an agent stream, presence fans); the one shared cache is
+//! `agent_profiles` (filled lazily by the room/direct send paths on a
+//! cache miss).
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
 use kallipai_archeion_common::control_plane::ControlPlane;
-use kallipai_archeion_common::ids::{ConversationId, ParticipantId, TagmaId, UserId};
+use kallipai_archeion_common::ids::{ParticipantId, TagmaId, UserId};
 use kallipai_common::protocol::ApiError;
-use kallipai_lesche_common::control::KeyExchangeResponse;
-use kallipai_lesche_common::event::{LescheEvent, TagmaStatusPayload};
-use kallipai_lesche_common::projection::{ProjectionDirty, ProjectionSnapshot};
+use kallipai_lesche_common::event::{LescheAgentEvent, LescheEvent};
 use kallipai_lesche_common::rooms::MemberId;
-use kallipai_lesche_common::tunnel::{Face, TunnelInbound};
-use tokio::sync::{broadcast, oneshot};
+use tokio::sync::broadcast;
 
 pub type SharedConvState = Arc<ConversationsState>;
 
@@ -159,20 +164,11 @@ pub struct ConversationsState {
     /// production by `kallipai-archeion`, mockable in tests.
     pub control: Arc<dyn ControlPlane>,
     pub registry: RwLock<Registry>,
-    /// Outstanding synchronous key exchanges, keyed by conversation. Bounded by
-    /// in-flight KEX. Never held together with the registry lock.
-    pub pending_key_exchange:
-        std::sync::Mutex<HashMap<ConversationId, oneshot::Sender<KeyExchangeResponse>>>,
-    /// Acceptable clock skew (both directions) on a tunnel reconnect proof's
-    /// timestamp, in seconds.
-    pub proof_skew_secs: i64,
-    /// How long `key_exchange_init` waits for the tagma's response before 504.
-    pub key_exchange_timeout: Duration,
     /// The durable chat store (`Some` in production): room messages + the
     /// membership graph. Required for room delivery and management.
-    pub db: Option<crate::db::Db>,
+    pub db: Option<crate::chat::db::Db>,
     /// Authoritative agent identity (label + owner display), keyed by the
-    /// agent's `ParticipantId`, populated at tunnel-establish and stamped onto
+    /// agent's `ParticipantId`, populated on first lookup and stamped onto
     /// room envelopes so a tagma cannot self-declare its handle. See
     /// [`AgentProfileCache`].
     pub agent_profiles: AgentProfileCache,
@@ -181,7 +177,8 @@ pub struct ConversationsState {
 /// An agent's authoritative display identity, resolved from the registry and
 /// stamped onto room envelopes/rows by the relay. Mirrors the display fields of
 /// [`kallipai_archeion_common::control_plane::TagmaProfile`] minus the raw usability
-/// facts + pinned key (which only the tunnel-proof / policy paths need).
+/// facts + pinned key (which only the keryx proof check and the
+/// local predicates need).
 #[derive(Debug, Clone)]
 pub struct AgentProfile {
     /// Read by the roster path (a follow-up); the message-stamp path builds the
@@ -196,12 +193,11 @@ pub struct AgentProfile {
 }
 
 /// Per-incarnation cache of resolved agent profiles, keyed by the agent's
-/// `ParticipantId`. Populated at tunnel-establish (one registry RPC per
-/// connect); the rooms send path reads it to stamp the sender handle without a
-/// per-message RPC. A cache miss at send falls back to a live `tagma_profile`
-/// call and caches the result. Stale on owner rename until tunnel reconnect
-/// (acceptable: ownership is non-transferable and the unforgeable id-prefix
-/// still disambiguates).
+/// `ParticipantId`. The send path's first lookup resolves a live
+/// `tagma_profile` (one registry RPC) and caches it; later sends stamp
+/// the sender handle without a per-message RPC. Stale on owner rename
+/// for the cache's lifetime (acceptable: ownership is non-transferable
+/// and the unforgeable id-prefix still disambiguates).
 #[derive(Debug, Default)]
 pub struct AgentProfileCache(std::sync::Mutex<HashMap<ParticipantId, AgentProfile>>);
 
@@ -227,7 +223,7 @@ impl ConversationsState {
     /// The durable store, or a 500. Room management mutates
     /// the durable chat graph, so it cannot degrade to in-memory mock mode
     /// the way delivery does (which skips persistence when no store is wired).
-    pub fn require_db(&self) -> Result<&crate::db::Db, ApiError> {
+    pub fn require_db(&self) -> Result<&crate::chat::db::Db, ApiError> {
         self.db
             .as_ref()
             .ok_or_else(|| ApiError::internal(format_args!("chat store required")))
@@ -241,24 +237,16 @@ impl ConversationsState {
     }
 }
 
-/// In-memory index of presence, conversations, and per-user app streams.
+/// In-memory index of per-user app streams and per-tagma agent streams.
 ///
-/// The presence / app-stream maps are keyed by
-/// [`ParticipantId`] (the opaque room-layer identity): a tagma's tunnel and a
-/// user's app stream are both looked up by their derived participant id, so the
-/// room fan-out routes every member uniformly regardless of kind. The
-/// `TagmaId`/`UserId`-taking helpers derive the participant id internally, so
-/// the tagma-lifecycle paths (tunnel/status/signal) and the app-stream paths
-/// (`me_events`) keep their existing call shapes; the room fan-out uses the
-/// `_by_member` lookups.
+/// Both maps are keyed by [`ParticipantId`] (the opaque room-layer
+/// identity): a user's app stream and a tagma's agent stream are both looked
+/// up by their derived participant id, so the room fan-out routes every
+/// member uniformly regardless of kind. The `TagmaId`/`UserId`-taking
+/// helpers derive the participant id internally, so the app-stream paths
+/// (`me_events`) and the agent-stream paths keep their existing call
+/// shapes; the room fan-out uses the `_by_member` lookups.
 pub struct Registry {
-    pub conversations: HashMap<ConversationId, ConversationRecord>,
-    /// participant_id -> the member's live tunnel (Agent members only today -- a
-    /// platform-native tagma). A participant is "online" iff it has an entry.
-    /// `owner` routes presence events to the owning user; `id` is a
-    /// per-connection identity token so a stale tunnel's cleanup cannot remove a
-    /// freshly reconnected tunnel's presence.
-    pub presence: HashMap<ParticipantId, PresenceEntry>,
     /// participant_id -> the user's multiplexed app SSE stream (Human
     /// members). The sole creator is `me_events`; it carries agent envelopes,
     /// presence, status and room events. Private: mutate only via
@@ -272,71 +260,27 @@ pub struct Registry {
     /// same value = same stream, changed value = recreated stream or
     /// restarted server.
     next_app_stream_epoch: u32,
-    /// Per-tagma projection cache (registry bypass) and
-    /// per-(user, tagma) projection SSE channels. Private: mutated only via
-    /// the projection methods below. The projection table outlives the
-    /// tagma's presence: offline tags keep serving stale reads.
-    projections: HashMap<ParticipantId, ProjectionEntry>,
-    projection_streams: HashMap<(ParticipantId, ParticipantId), broadcast::Sender<ProjectionDirty>>,
-    /// Teardown lag for projection SSE unsubscribes, in milliseconds (30s
-    /// in production; tests shorten it). Read by the SSE OnDrop cleanup.
-    projection_unsub_lag_ms: std::sync::atomic::AtomicU64,
+    /// Per-tagma live agent SSE streams (`GET /tagmata/{id}/events`): the
+    /// sole delivery carrier for tagma-bound lesche events, and the
+    /// online source the room roster reads (a member renders online
+    /// while its agent stream is registered; global liveness reads the
+    /// keryx tunnel edge, not this table). Private: mutated only via
+    /// the agent-stream methods below.
+    agent_streams: HashMap<ParticipantId, AgentStreamEntry>,
 }
 
-/// One live tunnel: the outbound broadcast, the owning user (for presence
-/// routing), the tagma id (carried for the tagma-lifecycle event layer, which
-/// still speaks `TagmaId` -- the participant-id key is one-way derived and
-/// cannot be reversed for `TagmaOnline`/`TagmaStatus` payloads), and a
-/// per-connection identity token used to make presence removal race-free across
-/// reconnects.
-pub struct PresenceEntry {
-    pub tx: broadcast::Sender<TunnelInbound>,
-    pub owner: UserId,
-    pub tagma_id: TagmaId,
+/// One live agent SSE stream: the outbound broadcast plus the
+/// per-connection identity token that makes slot removal race-free
+/// across reconnects.
+pub struct AgentStreamEntry {
+    pub tx: broadcast::Sender<LescheAgentEvent>,
     pub id: Arc<()>,
-    /// Latest aggregate status snapshot relayed over this tunnel; written unconditionally on every status POST (with or without live subscribers). Tunnel-scoped: a reconnect starts the cache empty until the next pump tick (bounded self-heal, <= one fallback tick).
-    pub latest_status: Option<TagmaStatusPayload>,
-    /// The last payload this tunnel's status fan actually broadcast to
-    /// the owner's app stream (the meaningful-transition base). Also
-    /// tunnel-scoped: a reconnect resets the throttle, and the next
-    /// snapshot broadcasts unconditionally.
-    pub last_broadcast_status: Option<TagmaStatusPayload>,
 }
-/// One tagma's stored projection: the latest accepted push plus the
-/// bookkeeping the accept/replay logic needs. `generation` records which
-/// tunnel connection the snapshot came in on (an `Arc::ptr_eq` against the
-/// live [`PresenceEntry::id`]): a push from a different generation is a
-/// reconnect whose push counter restarted, so it is accepted
-/// unconditionally; a same-generation push must carry a strictly
-/// newer `push_seq` or it is an out-of-order replay.
-#[derive(Clone)]
-pub struct ProjectionEntry {
-    /// Store-side seq: increments once per accepted push.
-    pub seq: u64,
-    /// The owning user, captured at accept time from the tagma's presence:
-    /// offline tags keep serving stale reads, and this is what makes
-    /// the owner check possible without a live presence entry.
-    pub owner: UserId,
-    /// The tagma-side push counter at accept time.
-    pub last_push_seq: u64,
-    /// Wall-clock unix seconds when the push was accepted.
-    pub updated_at: i64,
-    pub generation: Arc<()>,
-    pub snapshot: ProjectionSnapshot,
-}
-
-#[derive(Debug, Clone)]
-pub struct ConversationRecord {
-    pub owner: UserId,
-    pub tagma_id: TagmaId,
-}
-
 impl Registry {
     pub fn new() -> Self {
         Self {
-            conversations: HashMap::new(),
-            presence: HashMap::new(),
             app_streams: HashMap::new(),
+            agent_streams: HashMap::new(),
             // Seeded from wall-clock nanos so a restart cannot reuse an epoch a
             // surviving client cursor still holds. The u32 truncation wraps every
             // ~4.295 s (2^32 ns) — not a whole number of milliseconds, so two
@@ -353,9 +297,6 @@ impl Registry {
                 // keeps construction infallible; the bump-per-creation counter
                 // still separates streams within this process.
                 .unwrap_or(0x9E37_79B9),
-            projections: HashMap::new(),
-            projection_streams: HashMap::new(),
-            projection_unsub_lag_ms: std::sync::atomic::AtomicU64::new(30_000),
         }
     }
 
@@ -390,12 +331,6 @@ impl Registry {
         let stream = Arc::new(AppStream::new(self.next_app_stream_epoch));
         self.app_streams
             .insert(ParticipantId::for_user(user), stream.clone());
-        // The 0 -> 1 subscription edge for the status face: the
-        // create IS the edge (this is the sole creator), so
-        // the open hint fans to every live tagma of the owner here, inside
-        // the caller's write lock, exactly like the projection hint fires
-        // inside `open_projection_stream`.
-        self.fan_owner_sub(user, Face::Status, true);
         stream
     }
 
@@ -408,27 +343,9 @@ impl Registry {
     pub fn remove_app_stream_if_last(&mut self, user: &UserId, stream: &AppStream) -> bool {
         if stream.tx.receiver_count() == 1 {
             self.app_streams.remove(&ParticipantId::for_user(user));
-            // last departure, so the close hint fans here — a
-            // subscriber arriving inside the lag window keeps the stream
-            // and the gate alive, mirroring the projection hint's window.
-            self.fan_owner_sub(user, Face::Status, false);
             true
         } else {
             false
-        }
-    }
-
-    /// Fan an `OwnerSub` frame to every live tagma of `owner`: the status
-    /// face is owner-scoped, unlike the (user, tagma)-keyed projection
-    /// stream, so one edge touches all of the owner's tagmata. Sync
-    /// broadcast sends under the caller's registry write lock (never
-    /// awaits); presence-gated like [`Self::send_owner_sub`], so a
-    /// test-seeded stream with no live tunnel is a no-op.
-    fn fan_owner_sub(&self, owner: &UserId, face: Face, active: bool) {
-        for entry in self.presence.values() {
-            if entry.owner == *owner {
-                let _ = entry.tx.send(TunnelInbound::OwnerSub { face, active });
-            }
         }
     }
 
@@ -441,228 +358,54 @@ impl Registry {
             .contains_key(&ParticipantId::for_user(user))
     }
 
-    // --- Projection store & streams ---
-
-    /// Accept a projection push from `tagma` (whose live presence
-    /// connection token is `generation`). Returns the new store seq, or
-    /// `None` when the push is a same-generation replay (its `push_seq` is
-    /// not newer than the accepted one) -- such a push is dropped without
-    /// touching the store or bumping the seq.
-    pub fn accept_projection(
+    /// Register `tagma`'s live agent SSE stream. Returns `false` (slot left
+    /// untouched) when a live stream already holds the slot; a slot whose
+    /// channel has no receivers left is dead (its `OnDrop` cleanup never
+    /// ran), so it is reaped and replaced here -- the fallback cleanup that
+    /// keeps a leaked slot from 409-ing the tagma forever.
+    pub fn register_agent_stream(
         &mut self,
         tagma: &TagmaId,
-        generation: &Arc<()>,
-        push_seq: u64,
-        owner: UserId,
-        snapshot: ProjectionSnapshot,
-    ) -> Option<u64> {
-        let pid = ParticipantId::for_tagma(tagma);
-        let next_seq = match self.projections.get(&pid) {
-            Some(stored) => {
-                let same = Arc::ptr_eq(&stored.generation, generation);
-                if same && push_seq <= stored.last_push_seq {
-                    return None; // out-of-order replay within a generation
-                }
-                // Store seq keeps climbing across generations: clients use
-                // it to detect a reset, so only the tagma push_seq
-                // expectation is voided by a new generation.
-                stored.seq + 1
-            }
-            None => 1,
-        };
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
-        self.projections.insert(
-            pid,
-            ProjectionEntry {
-                owner,
-                seq: next_seq,
-                last_push_seq: push_seq,
-                updated_at: now,
-                generation: generation.clone(),
-                snapshot,
-            },
-        );
-        Some(next_seq)
-    }
-
-    /// The stored projection for `tagma`, if any push was ever accepted.
-    /// Outlives the tagma's presence: offline tags keep serving
-    /// stale reads from this.
-    pub fn projection(&self, tagma: &TagmaId) -> Option<&ProjectionEntry> {
-        self.projections.get(&ParticipantId::for_tagma(tagma))
-    }
-
-    /// Open (or join) the (user, tagma) projection SSE channel. Returns the
-    /// receiver plus whether this subscribe is the stream's 0 -> 1 edge (the
-    /// caller fans `OwnerSub { face: Projection, active: true }` on that edge only).
-    pub fn open_projection_stream(
-        &mut self,
-        user: &UserId,
-        tagma: &TagmaId,
-    ) -> (
-        broadcast::Sender<ProjectionDirty>,
-        broadcast::Receiver<ProjectionDirty>,
-        bool,
-    ) {
-        let key = (
-            ParticipantId::for_user(user),
-            ParticipantId::for_tagma(tagma),
-        );
-        let sender = self
-            .projection_streams
-            .entry(key)
-            .or_insert_with(|| broadcast::channel::<ProjectionDirty>(BROADCAST_CAPACITY).0)
-            .clone();
-        let was_first = sender.receiver_count() == 0;
-        let rx = sender.subscribe();
-        if was_first {
-            self.send_owner_sub(tagma, Face::Projection, true);
-        }
-        (sender, rx, was_first)
-    }
-
-    /// Fan `OwnerSub { face, active }` down one tagma's tunnel. Best-effort:
-    /// an offline tagma misses it; the tunnel handler re-sends the current
-    /// per-face truth on every reconnect so a gate can never go stale for
-    /// long.
-    pub fn send_owner_sub(&self, tagma: &TagmaId, face: Face, active: bool) {
-        if let Some(entry) = self.presence.get(&ParticipantId::for_tagma(tagma)) {
-            let _ = entry.tx.send(TunnelInbound::OwnerSub { face, active });
-        }
-    }
-
-    /// Remove the (user, tagma) projection channel when `sender` is its last
-    /// subscriber, mirroring [`Self::remove_app_stream_if_last`]. Returns
-    /// whether the entry was removed (the 1 -> 0 edge; the caller fans
-    /// `OwnerSub { face: Projection, active: false }` after the lag window).
-    pub fn remove_projection_stream_if_last(
-        &mut self,
-        user: &UserId,
-        tagma: &TagmaId,
-        sender: &broadcast::Sender<ProjectionDirty>,
-    ) -> bool {
-        let key = (
-            ParticipantId::for_user(user),
-            ParticipantId::for_tagma(tagma),
-        );
-        // By the time the OnDrop cleanup runs, the dying stream's own rx is
-        // already gone, so `receiver_count() == 0` means "nobody left"; a
-        // new subscriber that arrived inside the lag window keeps the
-        // channel (and the hint) alive.
-        if sender.receiver_count() == 0 {
-            self.projection_streams.remove(&key);
-            self.send_owner_sub(tagma, Face::Projection, false);
-            true
-        } else {
-            false
-        }
-    }
-    /// The projection SSE teardown lag (ms). Production is 30s; tests
-    /// shorten it so the hint-flap window is observable.
-    pub fn projection_unsub_lag_ms(&self) -> u64 {
-        self.projection_unsub_lag_ms
-            .load(std::sync::atomic::Ordering::Relaxed)
-    }
-    #[cfg(test)] // consumed by the SSE OnDrop teardown test only
-    /// Shorten the teardown lag (test injection only).
-    pub fn set_projection_unsub_lag_ms(&self, ms: u64) {
-        self.projection_unsub_lag_ms
-            .store(ms, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    /// Whether any client currently holds a live projection stream for
-    /// `tagma`. Consulted on tunnel reconnect so the lesche re-sends the
-    /// current hint (the tagma may have missed a flip while offline).
-    pub fn projection_stream_live_for_tagma(&self, tagma: &TagmaId) -> bool {
-        let tp = ParticipantId::for_tagma(tagma);
-        self.projection_streams
-            .iter()
-            .any(|((_, t), s)| *t == tp && s.receiver_count() > 0)
-    }
-
-    /// Fan a `ProjectionDirty` frame to `(user, tagma)`'s projection stream,
-    /// if any client is subscribed. Best-effort: no subscribers is fine (the
-    /// hint suppression means this is the normal unread case).
-    pub fn fan_projection_dirty(&self, user: &UserId, tagma: &TagmaId, dirty: ProjectionDirty) {
-        if let Some(sender) = self.projection_streams.get(&(
-            ParticipantId::for_user(user),
-            ParticipantId::for_tagma(tagma),
-        )) {
-            let _ = sender.send(dirty);
-        }
-    }
-
-    /// Ensure the soft-state conversation record exists for `tagma_id` owned by
-    /// `owner`, and return its stable id. Idempotent (the id is the
-    /// deterministic `ConversationId::for_tagma` derivation). Sole mutator of
-    /// `conversations`.
-    pub fn ensure_conversation(&mut self, owner: &UserId, tagma_id: &TagmaId) -> ConversationId {
-        let conv_id = ConversationId::for_tagma(tagma_id);
-        self.conversations
-            .entry(conv_id.clone())
-            .or_insert(ConversationRecord {
-                owner: owner.clone(),
-                tagma_id: tagma_id.clone(),
-            });
-        conv_id
-    }
-
-    /// Register a live tagma tunnel for `tagma`, owned by `owner`, capturing the
-    /// per-connection identity token `id` so a stale tunnel's cleanup cannot
-    /// remove a fresh reconnect's presence. Keyed by the tagma's derived
-    /// participant id.
-    pub fn register_presence(
-        &mut self,
-        tagma: &TagmaId,
-        owner: UserId,
-        tx: broadcast::Sender<TunnelInbound>,
+        tx: broadcast::Sender<LescheAgentEvent>,
         id: Arc<()>,
-    ) {
-        self.presence.insert(
-            ParticipantId::for_tagma(tagma),
-            PresenceEntry {
-                tx,
-                owner,
-                tagma_id: tagma.clone(),
-                id,
-                latest_status: None,
-                last_broadcast_status: None,
-            },
-        );
+    ) -> bool {
+        let pid = ParticipantId::for_tagma(tagma);
+        if self
+            .agent_streams
+            .get(&pid)
+            .is_some_and(|entry| entry.tx.receiver_count() > 0)
+        {
+            return false;
+        }
+        self.agent_streams.insert(pid, AgentStreamEntry { tx, id });
+        true
     }
 
-    /// The live tunnel entry for a room member id (the room fan-out's Agent-member
-    /// lookup). See [`app_stream_by_member`](Self::app_stream_by_member) for the
-    /// keying rationale and the `MemberId`-typed guard.
-    pub fn presence_by_member(&self, mid: &MemberId) -> Option<&PresenceEntry> {
-        self.presence.get(mid.as_ref())
+    /// The live agent-stream entry for a tagma. Test-facing probe: the
+    /// runtime delivery lookups go through the `_by_member` form.
+    #[cfg(test)]
+    pub fn agent_stream_by_tagma(&self, tagma: &TagmaId) -> Option<&AgentStreamEntry> {
+        self.agent_streams.get(&ParticipantId::for_tagma(tagma))
     }
 
-    /// The live tunnel entry for a tagma (the tagma-lifecycle paths: tunnel /
-    /// status / signal). Derives the participant id internally so those paths
-    /// keep their `TagmaId` call shape.
-    pub fn presence_by_tagma(&self, tagma: &TagmaId) -> Option<&PresenceEntry> {
-        self.presence.get(&ParticipantId::for_tagma(tagma))
+    /// The live agent-stream entry for a room member id (the room fan-out
+    /// and roster delivery lookup). Keyed by the member id string.
+    pub fn agent_stream_by_member(&self, mid: &MemberId) -> Option<&AgentStreamEntry> {
+        self.agent_streams.get(mid.as_ref())
     }
 
-    /// Mutable lookup for the status relay's cache write (the only writer of latest_status). See presence_by_tagma.
-    pub fn presence_by_tagma_mut(&mut self, tagma: &TagmaId) -> Option<&mut PresenceEntry> {
-        self.presence.get_mut(&ParticipantId::for_tagma(tagma))
-    }
-    /// Remove `tagma`'s presence iff the live entry is still `id` (Arc pointer
-    /// identity), returning whether it was removed. Race-free across reconnects.
-    pub fn take_presence_if_owned(&mut self, tagma: &TagmaId, id: &Arc<()>) -> bool {
+    /// Remove `tagma`'s agent stream iff the live entry is still `id` (Arc
+    /// pointer identity), returning whether it was removed. Race-free
+    /// across reconnects.
+    pub fn take_agent_stream_if_owned(&mut self, tagma: &TagmaId, id: &Arc<()>) -> bool {
         let pid = ParticipantId::for_tagma(tagma);
         let still_ours = self
-            .presence
+            .agent_streams
             .get(&pid)
-            .map(|p| Arc::ptr_eq(&p.id, id))
+            .map(|e| Arc::ptr_eq(&e.id, id))
             .unwrap_or(false);
         if still_ours {
-            self.presence.remove(&pid);
+            self.agent_streams.remove(&pid);
         }
         still_ours
     }
@@ -679,54 +422,6 @@ mod tests {
     use super::*;
     use kallipai_archeion_common::ids::TagmaId;
     use kallipai_lesche_common::event::LescheEvent;
-
-    /// `register_presence` stores the owner so presence events can be routed to
-    /// the owning user's app stream, and the snapshot iteration (what
-    /// `me_events` emits on stream open) filters by owner.
-    #[test]
-    fn presence_records_owner_and_snapshot_filters_by_owner() {
-        let mut reg = Registry::new();
-        let alice = UserId::from("alice".to_string());
-        let bob = UserId::from("bob".to_string());
-        let a1 = TagmaId::from("a1".to_string());
-        let a2 = TagmaId::from("a2".to_string());
-        let b1 = TagmaId::from("b1".to_string());
-        let (tx_a1, _) = broadcast::channel::<TunnelInbound>(8);
-        let (tx_a2, _) = broadcast::channel::<TunnelInbound>(8);
-        let (tx_b1, _) = broadcast::channel::<TunnelInbound>(8);
-        reg.register_presence(&a1, alice.clone(), tx_a1, Arc::new(()));
-        reg.register_presence(&a2, alice.clone(), tx_a2, Arc::new(()));
-        reg.register_presence(&b1, bob.clone(), tx_b1, Arc::new(()));
-
-        // Snapshot for alice = her two tagmas.
-        let alice_online: Vec<TagmaId> = reg
-            .presence
-            .values()
-            .filter(|e| e.owner == alice)
-            .map(|e| e.tagma_id.clone())
-            .collect();
-        assert_eq!(alice_online.len(), 2);
-        assert!(alice_online.contains(&a1) && alice_online.contains(&a2));
-    }
-
-    /// The presence-push wiring: an open app stream for the owner receives a
-    /// `TagmaOnline` sent to the owner's sender (the path `tunnel`/`me_events`
-    /// take on connect / stream open).
-    #[tokio::test]
-    async fn app_stream_receives_presence_event() {
-        let mut reg = Registry::new();
-        let alice = UserId::from("alice".to_string());
-        let stream = reg.open_app_stream(&alice);
-        let mut rx = stream.subscribe();
-        // Simulate the tunnel handler's online announcement.
-        stream
-            .deliver(LescheEvent::TagmaOnline {
-                tagma_id: TagmaId::from("a1".to_string()),
-            })
-            .expect("delivered");
-        let frame = rx.recv().await.expect("receive");
-        assert!(matches!(frame.event, LescheEvent::TagmaOnline { .. }));
-    }
 
     /// Marker invariant: `capture_marker` returns the seq of the first frame
     /// allocated after the capture, and allocation continues densely there.

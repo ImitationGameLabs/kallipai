@@ -110,6 +110,9 @@
       polisLescheUnit =
         pkgs.writeText "kallipai-lesche-test"
           webDerived.config.systemd.units."kallipai-lesche.service".text;
+      polisKeryxUnit =
+        pkgs.writeText "kallipai-keryx-test"
+          webDerived.config.systemd.units."kallipai-keryx.service".text;
       polisFilesUnit =
         pkgs.writeText "kallipai-files-test"
           webDerived.config.systemd.units."kallipai-files.service".text;
@@ -278,6 +281,7 @@
       # checked explicitly (they only throw in the toplevel activation).
       test "${toString aligned.config.services.kallipai.polis.ports.archeion}" = "7100"
       test "${toString aligned.config.services.kallipai.polis.ports.lesche}" = "7200"
+      test "${toString aligned.config.services.kallipai.polis.ports.keryx}" = "7210"
       test "${toString (builtins.length (failedAssertions aligned))}" = "0"
       test "${toString (builtins.length aligned.config.warnings)}" = "0"
       test "${toString workspaceOnPath}" = "1"
@@ -356,11 +360,20 @@
       grep -q 'Group=kallipai-polis' '${webDerivedUnit}'
       test -z "$(grep SupplementaryGroups '${webDerivedUnit}')"
       test -z "$(grep SupplementaryGroups '${polisLescheUnit}')"
+      test -z "$(grep SupplementaryGroups '${polisKeryxUnit}')"
       test -z "$(grep SupplementaryGroups '${polisFilesUnit}')"
       test -z "$(grep SupplementaryGroups '${polisInstancesUnit}')"
       test "${toString (lib.elem "kallipai-polis" webDerived.config.users.users.kallipai-lesche.extraGroups)}" = "1"
+      test "${toString (lib.elem "kallipai-polis" webDerived.config.users.users.kallipai-keryx.extraGroups)}" = "1"
       test "${toString (lib.elem "kallipai-polis" webDerived.config.users.users.kallipai-files.extraGroups)}" = "1"
       test "${toString (lib.elem "kallipai-polis" webDerived.config.users.users.kallipai-instances.extraGroups)}" = "1"
+      # The keryx unit: the relay binary on ExecStart, the derived
+      # CORS allowlist reaching the process env, and the no-database
+      # contract (all state is in-memory, so the unit env carries no
+      # DATABASE_URL at all).
+      grep -q 'ExecStart=.*/bin/kallipai-keryx' '${polisKeryxUnit}'
+      grep -q 'KALLIPAI_KERYX_CORS_ORIGINS=https://app.kallipai.com' '${polisKeryxUnit}'
+      test -z "$(grep DATABASE_URL '${polisKeryxUnit}')"
       derived="${webDerived.config.services.kallipai.web.distWithRuntimeConfig}"
       grep -q '"domain":"kallipai.com"' "$derived/config.js"
       grep -q '"gatewayAdminUrl":"https://api.kallipai.com/v1/model-gateway"' "$derived/config.js"

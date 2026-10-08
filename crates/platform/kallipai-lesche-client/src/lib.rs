@@ -1,5 +1,5 @@
-//! HTTP client for the kallipai-lesche data-plane relay. See [`LescheClient`] for
-//! the surface.
+//! Tagma-side HTTP client spanning both relay families. See [`LescheClient`]
+//! for the surface.
 
 mod client;
 

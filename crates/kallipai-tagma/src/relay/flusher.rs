@@ -16,7 +16,7 @@
 //! count, or a tunnel re-learn) wakes the flusher via
 //! `status_gate_notify` and the retained full snapshot POSTs immediately
 //! -- resume is the keep-last structure itself, nothing partial exists.
-//! The gate defaults OPEN: a lesche that never signals the gate
+//! The gate defaults OPEN: a keryx that never signals the gate
 //! degrades to the shipped always-push semantics, while an erroneously
 //! open gate self-corrects within one push's piggyback.
 //!
@@ -154,7 +154,7 @@ impl RelayHandle {
                     Ok(ack) => {
                         retry = None;
                         // Piggyback reconcile: the response's
-                        // per-face counts are the lesche's freshest truth;
+                        // per-face counts are the keryx's freshest truth;
                         // a diverging face flips through the same handlers
                         // the tunnel dispatch uses (flip + notify-if-open).
                         // An absent field (no piggyback counts) reconciles as a
@@ -284,7 +284,7 @@ impl RelayHandle {
     }
 
     /// Reconcile both faces against the `/upstream` response's piggybacked
-    /// subscriber counts: the counts are the lesche's freshest
+    /// subscriber counts: the counts are the keryx's freshest
     /// per-face truth, so a diverging face flips through the same handlers
     /// the tunnel dispatch uses. The projection face rides the same lane
     /// without disturbing its pump semantics (a flip is exactly a hint).

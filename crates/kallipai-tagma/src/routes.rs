@@ -19,7 +19,7 @@ pub(crate) mod team;
 use axum::Router;
 use kallipai_common::protocol::{ListAgentsResponse, ListApprovalsQuery, MessageRequest};
 use state::SharedState;
-use tower_http::cors::{AllowHeaders, Any, CorsLayer};
+use tower_http::cors::CorsLayer;
 
 use crate::state;
 
@@ -36,10 +36,7 @@ use crate::state;
 /// value), it actually covers `Authorization`, which the Fetch spec excludes
 /// from `*`.
 pub fn cors_layer() -> CorsLayer {
-    CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods(Any)
-        .allow_headers(AllowHeaders::mirror_request())
+    kallipai_common::cors::permissive_cors_layer()
 }
 
 /// Build the full axum router with all agent routes.

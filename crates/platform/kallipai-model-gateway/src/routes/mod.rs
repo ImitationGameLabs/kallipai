@@ -14,9 +14,9 @@
 //! up; this module assembles the route tables and the shared layers.
 
 use axum::Router;
-use axum::http::{HeaderValue, Method};
+use axum::http::Method;
 use axum::routing::{get, put};
-use tower_http::cors::{AllowOrigin, CorsLayer};
+use tower_http::cors::CorsLayer;
 
 use crate::state::AppState;
 
@@ -85,46 +85,21 @@ async fn render_metrics(
     )
 }
 
-/// `cors_layer` (credentials-aware, explicit method list, never a wildcard
-/// origin) -- the lesche variant, NOT the tagma permissive one. The method
-/// list is hand-maintained: `GET` for the distribution reads, `POST`
-/// for the forwarding surface, `PUT`/`PATCH`/`DELETE` for the admin face.
-/// empty allowlist (no cross-origin allowed), never an open hole.
+/// Build the credentials-aware CORS layer: the shared builder with the
+/// verbs this service's routes use. The method list is hand-maintained:
+/// `GET` for the distribution reads, `POST` for the forwarding surface,
+/// `PUT`/`PATCH`/`DELETE` for the admin face.
 pub fn cors_layer(origins: &str) -> CorsLayer {
-    let allowed: Vec<HeaderValue> = origins
-        .split(',')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        // A literal "*" is not an origin: filter it so a misconfigured
-        // wildcard yields exactly the empty allowlist the docs promise,
-        // never a header entry that only exact-matches the string "*".
-        .filter(|s| *s != "*")
-        .filter_map(|s| s.parse().ok())
-        .collect();
-    let origin = if allowed.is_empty() {
-        AllowOrigin::list(Vec::new())
-    } else {
-        AllowOrigin::list(allowed)
-    };
-    CorsLayer::new()
-        .allow_origin(origin)
-        .allow_methods([
+    kallipai_common::cors::cors_layer(
+        origins,
+        &[
             Method::GET,
             Method::POST,
             Method::PUT,
             Method::PATCH,
             Method::DELETE,
-        ])
-        // The forward client and the browser app both send Authorization;
-        // the Fetch spec excludes it from the `*` wildcard, so list the
-        // request headers we actually accept explicitly (lesche twin).
-        .allow_headers([
-            axum::http::header::AUTHORIZATION,
-            axum::http::header::CONTENT_TYPE,
-            // The browser channel's CSRF marker (see csrf_guard).
-            axum::http::header::HeaderName::from_static(crate::management::CSRF_HEADER),
-        ])
-        .allow_credentials(true)
+        ],
+    )
 }
 
 #[cfg(test)]
@@ -267,55 +242,6 @@ mod tests {
             .expect("infallible oneshot");
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
-
-    /// A wildcard-origin config yields an empty allowlist: no request gets
-    /// an allow-origin echo (the "*" is filtered, never passed through as
-    /// a literal origin), while a listed origin still echoes -- the same
-    /// layer machinery, so the pin cannot pass by stripping everything.
-    #[tokio::test]
-    async fn cors_wildcard_config_yields_empty_allowlist() {
-        let wildcard = axum::Router::new()
-            .route("/health", get(health))
-            .layer(cors_layer("*"));
-        let listed = axum::Router::new()
-            .route("/health", get(health))
-            .layer(cors_layer("https://good.example"));
-
-        let denied = wildcard
-            .oneshot(
-                Request::builder()
-                    .uri("/health")
-                    .header("origin", "https://evil.example")
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("infallible oneshot");
-        assert!(
-            denied
-                .headers()
-                .get("access-control-allow-origin")
-                .is_none()
-        );
-
-        let echoed = listed
-            .oneshot(
-                Request::builder()
-                    .uri("/health")
-                    .header("origin", "https://good.example")
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("infallible oneshot");
-        assert_eq!(
-            echoed
-                .headers()
-                .get("access-control-allow-origin")
-                .expect("listed origin must echo"),
-            "https://good.example"
-        );
-    }
 }
 
 /// A stateless stand-in route for the CORS-layer pins: the preflight is
@@ -364,27 +290,6 @@ mod cors_tests {
                 .to_str()
                 .unwrap(),
             "https://app.example"
-        );
-    }
-
-    /// A wildcard-origin config yields no ACAO at all (the "*" is filtered,
-    /// so nothing echoes) -- the browser rejects the response rather than
-    /// the proxy holding an open cross-origin hole.
-    #[tokio::test]
-    async fn preflight_under_wildcard_config_denies_every_origin() {
-        let app = Router::new()
-            .route("/health", get(health))
-            .layer(cors_layer("*"));
-        let response = app
-            .oneshot(preflight("https://evil.example"))
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        assert!(
-            response
-                .headers()
-                .get("access-control-allow-origin")
-                .is_none()
         );
     }
 }

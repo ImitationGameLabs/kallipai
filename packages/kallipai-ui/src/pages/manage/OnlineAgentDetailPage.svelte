@@ -9,8 +9,8 @@
   import { channelsStore } from "../../lib/session/channels.svelte.ts";
   import { realtimeStore } from "../../lib/session/realtime.svelte.ts";
   import { OnlineBackend } from "../../lib/manage/backend.ts";
-  import { ManageRestClient } from "@kallipai/kallipai-lesche-client";
-  import { lescheBaseUrlOrFail } from "../../lib/session/archeion.svelte.ts";
+  import { ManageRestClient } from "@kallipai/kallipai-keryx-client";
+  import { keryxBaseUrlOrFail } from "../../lib/session/archeion.svelte.ts";
   import { manageChannelStalled } from "../../lib/manage/channelStalled.ts";
   import AgentDetailPage from "./AgentDetailPage.svelte";
   import { tagmaDetailsPath } from "../../lib/shell/routes.ts";
@@ -68,7 +68,7 @@
         conv as import("../../lib/session/conversation.svelte.ts").RelayConversation;
       const channel = relayConv.relayTransport.relayChannel;
       backend = new OnlineBackend(
-        new ManageRestClient(lescheBaseUrlOrFail()),
+        new ManageRestClient(keryxBaseUrlOrFail()),
         channel.tagmaId,
         undefined,
         channel,

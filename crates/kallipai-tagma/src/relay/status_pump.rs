@@ -1,6 +1,6 @@
 //! The status pump: snapshots the tagma's aggregate runtime state (agent
 //! counts + token budget) and publishes it onto the bus's status topic for
-//! the upstream flusher, which serializes it to the lesche. The pump is
+//! the upstream flusher, which serializes it to the keryx. The pump is
 //! event-driven: it wakes on registry invalidations (roster and budget-limit
 //! mutations, plus the bridge's agent state-transition bumps) and on turn
 //! signals, coalesces bursts through a short debounce, and re-checks on a
@@ -12,7 +12,7 @@
 //! Status is a periodic full snapshot, not a delta log: a dropped frame just
 //! means slightly-stale data until the next wake, so there is no sequence
 //! tracking and no replay path. An unchanged snapshot is never re-published:
-//! the lesche caches every delivered snapshot and flushes it to a connecting
+//! the keryx caches every delivered snapshot and flushes it to a connecting
 //! subscriber, and `GET /tagmata/{id}/status` serves the cache on demand.
 
 use std::sync::Weak;
@@ -201,7 +201,7 @@ mod tests {
     use std::sync::atomic::Ordering;
     use std::time::Duration;
 
-    /// Build a relay wired to a real AppState and no lesche traffic: the
+    /// Build a relay wired to a real AppState and no keryx traffic: the
     /// pump is publish-only (the wire belongs to the flusher,
     /// tested in relay/flusher.rs), so these legs observe the bus topic.
     /// Returns the handle and the state strong ref (the pump holds a Weak

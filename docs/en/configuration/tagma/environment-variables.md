@@ -12,7 +12,7 @@ The environment variable reference now lives in its own section:
 - [Agent shell sessions](../../reference/environment-variables/agent-shell.md):
   variables injected into every agent shell.
 - [Platform services](../../reference/environment-variables/platform-services.md):
-  logging for the archeion, lesche, and files services.
+  logging for all six polis services.
 
 Pages that keep their own variable documentation: [Data and
 skills](service.md#data-and-skills), [Logging](service.md#logging), [System

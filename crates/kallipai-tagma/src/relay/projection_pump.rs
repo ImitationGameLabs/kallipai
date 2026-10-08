@@ -1,10 +1,10 @@
 //! The projection pump: pushes the tagma's manage-plane projection (full
-//! roster + aggregate status) to the lesche whenever the state may have
+//! roster + aggregate status) to the keryx whenever the state may have
 //! changed and someone is actually reading it.
 //!
 //! Three sources wake the pump:
 //! - tunnel-up: an unconditional full first snapshot (the self-heal — the
-//!   lesche's in-memory projection dies with its process, and a reconnecting
+//!   keryx's in-memory projection dies with its process, and a reconnecting
 //!   tagma must repopulate it regardless of any buffered hint, which by
 //!   definition cannot have survived either side's restart);
 //! - a `SignalFrame` on the typed topic bus (the third subscriber:
@@ -16,7 +16,7 @@
 //!   catches anything the invalidation source missed.
 //!
 //! Everything is suppressed while `projection_active` is false (no subscriber
-//! on the lesche side), except the tunnel-up first shot. Pushes are
+//! on the keryx side), except the tunnel-up first shot. Pushes are
 //! best-effort publishes: the upstream flusher owns wire retention and
 //! retry (see relay/flusher.rs).
 
@@ -80,7 +80,7 @@ fn work_schedule_projection(
 
 /// Captures the full projection snapshot (roster + status + work schedule)
 /// under the registry read-lock, stamping the connection-lifetime push seq
-/// (the lesche keys same-generation replay rejection on it; never reset by a
+/// (the keryx keys same-generation replay rejection on it; never reset by a
 /// pump restart). The guard is dropped before any await (lock discipline
 /// discipline); a store read failure degrades that push to no-schedule
 /// rather than blocking the whole snapshot. `None` when the `AppState` is
@@ -228,7 +228,7 @@ mod tests {
     use std::time::Duration;
 
     /// Build a RelayHandle wired to a real AppState (root registered,
-    /// external projector installed) and no lesche traffic: the pump is
+    /// external projector installed) and no keryx traffic: the pump is
     /// publish-only (the wire belongs to the flusher), so these
     /// legs observe the bus topic. Returns the handle and the state strong
     /// ref (the pump holds a Weak).
@@ -297,7 +297,7 @@ mod tests {
             .bus
             .subscribe::<crate::bus::ProjectionSnapshot>()
             .expect("topic");
-        // Simulate "the lesche told us nobody is listening": the pump stays
+        // Simulate "the keryx told us nobody is listening": the pump stays
         // stopped and nothing is pushed.
         handle.handle_projection_hint(false).await;
         tokio::time::sleep(Duration::from_millis(150)).await;
@@ -350,14 +350,14 @@ mod tests {
         );
         // Simulate a reconnect: tunnel-down stops the pump, tunnel-up
         // starts a fresh one whose first shot repopulates the (possibly
-        // restarted) lesche's projection.
+        // restarted) keryx's projection.
         handle.stop_projection_pump().await;
         handle.start_projection_pump().await;
         let got = wait_pushes(&mut rx, 1).await;
         assert_eq!(got.len(), 1, "restart pushes a fresh full snapshot");
         // The counter is monotonic across a pump restart -- the second
         // shot continues the sequence (2) rather than replaying 1, which
-        // the lesche's same-generation check would reject.
+        // the keryx's same-generation check would reject.
         assert_eq!(got[0].push_seq, 2, "seq continues across restart");
         handle.stop_projection_pump().await;
     }

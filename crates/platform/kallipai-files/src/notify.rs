@@ -1,5 +1,5 @@
-//! The lesche event-push surface: a successful delivery notifies the
-//! recipient's side through the lesche's internal surface, so their UI/agent
+//! The keryx event-push surface: a successful delivery notifies the
+//! recipient's side through the keryx's internal surface, so their UI/agent
 //! learns a file arrived without polling. Mirrors the FilesControlPlane
 //! shape (base URL + shared secret bearer, a bounded timeout) and is
 //! best-effort by design: a failed push only logs, because the file itself
@@ -27,7 +27,7 @@ pub trait NotifyPusher: Send + Sync {
     );
 }
 
-/// A reqwest-backed client for one configured lesche internal surface.
+/// A reqwest-backed client for one configured keryx internal surface.
 #[derive(Clone)]
 pub struct LescheNotifyClient {
     base: String,
@@ -42,7 +42,7 @@ const NOTIFY_TIMEOUT: Duration = Duration::from_secs(10);
 
 impl LescheNotifyClient {
     /// Wire the client from config. `None` (an unset URL/token) disables the
-    /// push entirely -- the safe posture for a files service whose lesche
+    /// push entirely -- the safe posture for a files service whose keryx
     /// does not mount the internal surface.
     pub fn new(base: String, token: String) -> Option<Self> {
         if base.is_empty() || token.is_empty() {

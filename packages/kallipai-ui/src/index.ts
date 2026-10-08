@@ -9,8 +9,8 @@
 //   - App layer (session stores, config facade, auth gate, route page bodies):
 //     added when kallipai-app converged on archeion login. This tier depends on the
 //     transport clients (@kallipai/kallipai-client, @kallipai/kallipai-archeion-client,
-//     @kallipai/kallipai-lesche-client) as peerDeps, and stays free of `$app/*` --
-//     navigation is injected via
+//     @kallipai/kallipai-lesche-client, @kallipai/kallipai-keryx-client) as
+//     peerDeps, and stays free of `$app/*` --
 //     initShell(), the archeion URL via initArcheion(), storage via initConfigStorage().
 //
 // SPLIT PENDING: the app tier should eventually live in its own package
@@ -37,7 +37,7 @@ export {
 export {
   initArcheion,
   initFiles,
-  initLesche,
+  initRelays,
 } from "./lib/session/archeion.svelte.ts";
 export { initInstances } from "./lib/instances/client.ts";
 export {

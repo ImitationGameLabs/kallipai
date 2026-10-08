@@ -16,7 +16,7 @@ use axum::{
     routing::{get, post},
 };
 use serde::Deserialize;
-use tower_http::cors::{AllowHeaders, Any, CorsLayer};
+use tower_http::cors::CorsLayer;
 use uuid::Uuid;
 
 use kallipai_common::agentid::AgentId;
@@ -35,10 +35,7 @@ use crate::store::calculate_initial_next_fire;
 /// boundary; `mirror_request()` covers `Authorization`, which `Any` (`*`)
 /// excludes per the Fetch spec.
 pub fn cors_layer() -> CorsLayer {
-    CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods(Any)
-        .allow_headers(AllowHeaders::mirror_request())
+    kallipai_common::cors::permissive_cors_layer()
 }
 
 /// Build the management router.

@@ -4,7 +4,7 @@
 //!
 //! These are deliberately separate from the public `control` / `message` surface:
 //! admin types are operator-facing and evolve with the admin tooling, not with
-//! the relay/tagma contract.
+//! the data-plane/tagma contract.
 
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;

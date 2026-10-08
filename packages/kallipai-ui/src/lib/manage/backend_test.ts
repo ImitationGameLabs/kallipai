@@ -9,7 +9,7 @@ import { KallipaiError } from "@kallipai/kallipai-common";
 import {
   type ManageRestClient,
   ProjectionClient,
-} from "@kallipai/kallipai-lesche-client";
+} from "@kallipai/kallipai-keryx-client";
 import { OnlineBackend, type ProfilesEnvelopeChannel } from "./backend.ts";
 
 // The projection feed consults document.hidden and binds a
@@ -178,7 +178,7 @@ Deno.test(
 
 // End-to-end across the seam: listAgents rides the projection GET, and a
 // dirty frame pumped through the stubbed SSE stream reaches the feed
-// subscriber -- the exact chain a real lesche drives (store -> SSE -> GET).
+// subscriber -- the exact chain a real keryx drives (store -> SSE -> GET).
 Deno.test(
   "projection-backed listAgents and a dirty frame reach the feed",
   async () => {
@@ -444,7 +444,7 @@ Deno.test(
   },
 );
 
-// Regression (review round): a lesche restart renumbers the stream --
+// Regression (review round): a keryx restart renumbers the stream --
 // seq starts back at 1. The seq gate resets per connection, so the
 // renumbered stream still notifies instead of reading as replays.
 Deno.test("a renumbered stream still notifies after a reconnect", async () => {

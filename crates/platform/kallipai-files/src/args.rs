@@ -47,12 +47,12 @@ pub struct Args {
     /// `KALLIPAI_ARCHEION_CORS_ORIGINS`.
     #[arg(long, env = "KALLIPAI_FILES_CORS_ORIGINS", default_value = "")]
     pub cors_origins: String,
-    /// Lesche internal base URL for the file-delivered event push (e.g.
-    /// `http://lesche:7200`). Empty disables the push entirely.
+    /// Keryx internal base URL for the file-delivered event push (e.g.
+    /// `http://keryx:7210`). Empty disables the push entirely.
     #[arg(long, env = "KALLIPAI_FILES_NOTIFY_URL", default_value = "")]
     pub notify_url: String,
-    /// Shared secret bearer for the lesche internal API. Must equal the
-    /// lesche's `KALLIPAI_LESCHE_INTERNAL_TOKEN`.
+    /// Shared secret bearer for the keryx internal API. Must equal the
+    /// keryx's `KALLIPAI_KERYX_INTERNAL_TOKEN`.
     #[arg(long, env = "KALLIPAI_FILES_NOTIFY_TOKEN", default_value = "")]
     pub notify_token: String,
     /// Archeion degrade posture (seventh approved default). `closed` (the

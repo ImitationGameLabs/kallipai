@@ -18,6 +18,7 @@ kallipai-blob-store = { workspace = true }
 kallipai-daemon-common = { workspace = true }
 kallipai-archeion-common = { workspace = true }
 kallipai-lesche-common = { workspace = true }
+kallipai-keryx-common = { workspace = true }
 kallipai-archeion-client = { workspace = true }
 kallipai-lesche-client = { workspace = true }
 kallipai-e2ee = { workspace = true }

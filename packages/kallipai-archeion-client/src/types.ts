@@ -213,7 +213,7 @@ export type TagmaState = "pending" | "enrolled";
 /**
  * `GET /tagmata`. One tagma across its lifecycle. This is the registry
  * view only -- it carries NO liveness signal. Whether a tagma tunnel is
- * currently open arrives via the data plane: the lesche's `GET /me/events`
+ * currently open arrives via the data plane: the keryx's `GET /me/events`
  * SSE stream emits `tagma_online` / `tagma_offline` events (plus an initial
  * presence snapshot on connect). The pending-phase fields `code_masked` and
  * `expires_at` are present only while `state === "pending"` (the archeion omits
@@ -246,9 +246,9 @@ export interface RenameTagmaRequest {
 }
 
 /** `GET /tagmata/{id}` -- the tagma's pinned Ed25519 device key (TOFU). The
- * app verifies the lesche's key-exchange signature against it. `pinned_public_key`
+ * app verifies the keryx's key-exchange signature against it. `pinned_public_key`
  * is a 32-byte Ed25519 public key as standard base64; the caller passes this
- * string verbatim to `openRelayChannel` in `@kallipai/kallipai-lesche-client`. */
+ * string verbatim to `openRelayChannel` in `@kallipai/kallipai-keryx-client`. */
 export interface TagmaInfo {
   readonly tagma_id: string;
   readonly pinned_public_key: string;
@@ -267,9 +267,10 @@ export interface PublicTagmaProfile {
 }
 
 // -- rooms ---------------------------------------------------------------
-// Moved to @kallipai/kallipai-lesche-client (the chat domain lives in lesche
-// now). Import RoomView / RoomRosterView / RoomInviteView / CreateInvite* /
-// AddTagmaRequest / RoomMemberProfile / ParticipantKind from there.
+// Moved out of this package with the data-plane split: the bilateral chat
+// domain lives in @kallipai/kallipai-keryx-client, the rooms family in
+// @kallipai/kallipai-lesche-client (RoomView / RoomRosterView / RoomInviteView
+// / CreateInvite* / AddTagmaRequest / RoomMemberProfile / ParticipantKind).
 
 /**
  * Archeion API error. Mirrors `kallipai_common::protocol::ApiError`. This is a

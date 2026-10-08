@@ -1,7 +1,7 @@
 //! The service-to-service `/internal/*` ControlPlane HTTP surface.
 //!
 //! Each handler wraps the DB-backed `DbControlPlane`. `None` outcomes (unknown
-//! session / token / tagma) map to HTTP `404` so the lesche's
+//! session / token / tagma) map to HTTP `404` so each consumer's
 //! `HttpControlPlane` can turn status straight into `Option::None` without
 //! parsing a sentinel body. The whole nest is guarded by
 //! [`crate::middleware::internal_guard`] (shared-secret bearer); handlers never
@@ -39,14 +39,14 @@ pub fn router() -> Router<SharedState> {
         .route("/tunnel-proof-ts", post(tunnel_proof_ts))
 }
 
-/// A handler error: a status code plus a body the lesche never reads (it maps
+/// A handler error: a status code plus a body the consumers never read (they map
 /// `404` -> `None`, any other non-2xx -> `Backend` from the status alone). All
 /// bodies here are empty; diagnostics go to `tracing` (see `backend`).
 type HandlerError = (StatusCode, String);
 
 /// Map a `ControlPlane` backend failure to a 500 with an EMPTY body. The body
 /// could otherwise echo a raw `DbErr` (query text, constraint names) to a
-/// trusted-but-remote caller; the lesche inspects only the status, so log the
+/// trusted-but-remote caller; the consumers inspect only the status, so log the
 /// detail server-side and return the same empty body `NOT_FOUND` uses.
 fn backend<E: std::fmt::Display>(e: E) -> HandlerError {
     tracing::error!(error = %e, "internal route failure");

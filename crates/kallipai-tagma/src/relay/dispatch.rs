@@ -56,7 +56,7 @@ impl RelayHandle {
             }
         };
         // The sender identity is non-forgeable: it is the relay-authenticated
-        // `envelope.sender.id` (the lesche validates id + kind against the
+        // `envelope.sender.id` (the keryx validates id + kind against the
         // authed principal before stamping the row), decoded here as the
         // authoritative derived participant id string -- `ParticipantId::
         // for_tagma(...)` on the tagma side, `ParticipantId::for_user(...)` on
@@ -64,7 +64,7 @@ impl RelayHandle {
         let sender_id = payload.sender_id;
         // The advisory `Participant` carries the kind + handle. The kind is
         // relay-authenticated transitively (a user credential cannot post an
-        // `Agent` sender, and vice versa, or the lesche's require_* check
+        // `Agent` sender, and vice versa, or the keryx's require_* check
         // rejects it); the handle is spoofable + sanitized in
         // `format_relay_incoming`.
         let sender_kind = sender.kind.as_str();

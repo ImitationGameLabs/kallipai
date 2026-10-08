@@ -1,17 +1,18 @@
-//! The narrow interface the data-plane relay (`kallipai-lesche`) uses to talk to
-//! the registry (`kallipai-archeion`). The registry owns identity and credentials
-//! only; the relay owns all conversation/room state and policy. This trait is
-//! therefore a **fact service**: the relay asks the registry for raw identity
-//! facts (who owns a tagma, their label/handle/key/enrollment state) and
-//! derives every authorization decision itself -- the registry never renders a
-//! "usable for purpose X" verdict. Authentication (cookie/token verification)
-//! and the tunnel-proof replay guard are the only non-read surface.
+//! The narrow interface the data-plane services use to talk to the registry
+//! (`kallipai-archeion`). The registry owns identity and credentials only; the
+//! data-plane services own all conversation/room state and policy. This trait
+//! is therefore a **fact service**: each service asks the registry for raw
+//! identity facts (who owns a tagma, their label/handle/key/enrollment state)
+//! and derives every authorization decision itself -- the registry never
+//! renders a "usable for purpose X" verdict. Authentication (cookie/token
+//! verification) and the tunnel-proof replay guard are the only non-read
+//! surface.
 //!
 //! Keeping the surface small and stable is the point of the control-plane /
-//! data-plane split: app↔tagma business evolution happens inside the lesche
-//! and the shared wire types, never here. The lesche runs as a separate service
-//! and reaches this trait over the `/internal/*` HTTP API via an RPC client impl
-//! (`HttpControlPlane`); the on-wire contract for that API lives in
+//! data-plane split: app↔tagma business evolution happens inside the
+//! data-plane services and the shared wire types, never here. The lesche,
+//! the keryx and the files service reach it over `/internal/*` via their own
+//! RPC impls; the on-wire contract for that API lives in
 //! [`crate::internal_api`].
 
 use crate::bytes::Ed25519PublicKey;
@@ -19,14 +20,14 @@ use crate::ids::{TagmaId, UserId};
 use crate::principal::Principal;
 use serde::{Deserialize, Serialize};
 
-/// A tagma's registry facts: the raw identity + usability state the relay reads
+/// A tagma's registry facts: the raw identity + usability state the caller reads
 /// to (a) verify a tunnel-reconnect proof against `pinned_public_key`, (b) stamp
 /// the authoritative display identity (`label` + `@owner_username`) onto room
 /// envelopes/rows, and (c) derive locally whether the tagma may join a room /
 /// open a bilateral chat (`enrolled && !revoked && !owner_disabled`, etc.). The
 /// registry returns these facts UNFILTERED -- one row per existing input id --
-/// so the relay, not the registry, owns the policy that combines them. A tagma
-/// missing from the result is simply unknown (omitted); the relay degrades its
+/// so the caller, not the registry, owns the policy that combines them. A tagma
+/// missing from the result is simply unknown (omitted); the caller degrades its
 /// roster row to a prefix-only handle.
 /// The serde form IS the `tagma-profiles` wire contract -- `TagmaProfileResponse`
 /// in [`crate::internal_api`] is a type alias of this struct.
@@ -53,7 +54,7 @@ pub struct TagmaProfile {
     pub owner_disabled: bool,
 }
 
-/// A user's registry facts: the raw identity + state the relay reads to label a
+/// A user's registry facts: the raw identity + state the caller reads to label a
 /// HUMAN roster member and to derive locally whether they may be invited
 /// (`!disabled`). The registry returns rows UNFILTERED; a user missing from the
 /// result is unknown (omitted).
@@ -137,8 +138,8 @@ pub struct EnrollmentLookup {
     pub enrolled_tagmas: Vec<TagmaId>,
 }
 
-/// Why a [`ControlPlane`] call failed. Surfaces as HTTP 500 at the relay; the
-/// relay maps "not found / unauthorized" outcomes to `Option::None` rather than
+/// Why a [`ControlPlane`] call failed. Surfaces as HTTP 500 at the caller; the
+/// caller maps "not found / unauthorized" outcomes to `Option::None` rather than
 /// to errors so they can become precise 404/401s.
 #[derive(Debug, thiserror::Error)]
 pub enum ControlPlaneError {
@@ -146,15 +147,15 @@ pub enum ControlPlaneError {
     Backend(String),
 }
 
-/// The registry, as seen by the relay. All methods are `async` (the DB-backed
-/// impl awaits; a future RPC impl awaits the network) and are always called
-/// *outside* any relay soft-state lock.
+/// The registry, as seen by the data-plane services. All methods are `async`
+/// (the DB-backed impl awaits; the RPC impls await the network) and are always
+/// called *outside* any data-plane soft-state lock.
 #[async_trait::async_trait]
 pub trait ControlPlane: Send + Sync + 'static {
     /// Verify a `kallipai_session` cookie value -> the owning user plus their
     /// authoritative display identity, or `None` if the session is absent /
     /// expired / disabled. By construction this can only ever produce a `User`
-    /// (the deputy guard: a `User` is reachable ONLY via the cookie). The relay
+    /// (the deputy guard: a `User` is reachable ONLY via the cookie). The caller
     /// resolves this once per connection-open and caches the display for the
     /// connection lifetime (it is NOT a per-message call).
     async fn verify_session(
@@ -164,7 +165,7 @@ pub trait ControlPlane: Send + Sync + 'static {
 
     /// Verify an `Authorization: Bearer` token -> an `Admin` or `Tagma`
     /// principal, or `None` if invalid / revoked / owner-disabled. (`Admin` is
-    /// returned but rejected by the relay's `require_tagma` on data-plane
+    /// returned but rejected by the caller's `require_tagma` on data-plane
     /// routes, matching the registry's own behavior.)
     async fn verify_bearer(&self, token: &str) -> Result<Option<Principal>, ControlPlaneError>;
 
@@ -172,7 +173,7 @@ pub trait ControlPlane: Send + Sync + 'static {
     /// UNFILTERED (raw enrolled/revoked/owner-disabled state + key + display
     /// fields). Unknown ids are omitted, never error'd. The single read behind
     /// the tunnel-reconnect proof, the rooms-send handle stamp, and the room
-    /// roster's agent labels; the relay derives all authorization from the
+    /// roster's agent labels; the caller derives all authorization from the
     /// returned facts.
     async fn tagma_profiles(
         &self,
@@ -192,7 +193,7 @@ pub trait ControlPlane: Send + Sync + 'static {
     /// Resolve a single human principal by login handle. The registry
     /// normalizes a bare handle via the same rules as signup; the caller strips
     /// any `@` sigil first. An unknown or malformed handle collapses to `None`
-    /// (no shape leak -- the relay renders one fixed 404). A disabled user is
+    /// (no shape leak -- the caller renders one fixed 404). A disabled user is
     /// returned as `Some(disabled = true)`, UNFILTERED, matching
     /// [`user_identities`](Self::user_identities); the invite gate derives
     /// `!disabled` locally so the disabled and unknown cases stay
@@ -222,7 +223,7 @@ pub trait ControlPlane: Send + Sync + 'static {
     /// `ts`. Returns `true` if it advanced (the proof is fresh), `false` if it
     /// was stale or replayed. This is the durable, cross-restart replay guard —
     /// the only DB write the data plane conceptually triggers, exposed
-    /// opaquely so the relay never touches the `tagmata` table.
+    /// opaquely so the data plane never touches the `tagmata` table.
     async fn bump_tunnel_proof_ts(
         &self,
         tagma_id: &TagmaId,

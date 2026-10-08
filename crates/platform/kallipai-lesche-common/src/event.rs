@@ -15,7 +15,7 @@
 //! opens). `TagmaStatus` carries a tagma's live aggregate runtime state
 //! (agent counts + token budget); like presence it is plaintext and
 //! user-scoped, pushed by the tagma on a periodic snapshot and rebroadcast
-//! by the lesche. `TagmaSystem` carries a tagma's per-event runtime signal
+//! by the keryx. `TagmaSystem` carries a tagma's per-event runtime signal
 //! (busy/idle presence, turn terminals, errors) — plaintext like the others,
 //! because these are operator metadata, not conversation content (authored
 //! content rides the encrypted envelope as a `TagmaReply::Event`).
@@ -47,7 +47,7 @@ pub enum LescheEvent {
     TagmaOffline { tagma_id: TagmaId },
     /// A file was delivered into this user's files space (the delivery side
     /// of the files service's `POST /files/{id}/send`), pushed by the
-    /// files service via the lesche's internal surface. Plaintext operator
+    /// files service via the keryx's internal surface. Plaintext operator
     /// metadata like the presence pair: where the file landed and who sent
     /// it are not conversation content. The recipient fetches the content
     /// itself via `GET /files/{record_id}`.
@@ -63,9 +63,11 @@ pub enum LescheEvent {
         /// Blob size in bytes.
         size: u64,
     },
-    /// by the lesche. Plaintext and user-scoped like the presence pair (the
-    /// lesche can read it): agent state and token budget are operator
-    /// metadata, not conversation content. Emitted on a periodic snapshot, so
+    /// A tagma's live aggregate runtime state (agent counts + token
+    /// budget), pushed by the keryx. Plaintext and user-scoped like the
+    /// presence pair (the keryx can read it): agent state and token budget
+    /// are operator metadata, not conversation content. Emitted on a
+    /// periodic snapshot, so
     /// a dropped frame just means slightly-stale data. The root agent (the
     /// conversation peer) is reported separately from subagents (spawned
     /// helpers) so the UI can distinguish "root processing the user's turn"
@@ -82,7 +84,7 @@ pub enum LescheEvent {
         token_consumed: u64,
     },
     /// A tagma's per-event runtime signal (busy/idle presence, turn terminals,
-    /// errors), pushed by the tagma and rebroadcast by the lesche on the
+    /// errors), pushed by the tagma and rebroadcast by the keryx on the
     /// owner's app event stream. Plaintext like the status/presence variants:
     /// operator metadata, not conversation content (authored content rides the
     /// encrypted envelope). Not persisted in `chat_history` and not replayed —
@@ -140,6 +142,25 @@ pub enum LescheEvent {
         last_read_seq: i64,
     },
 }
+/// Events on a tagma's agent SSE stream (`GET /tagmata/{id}/events`), the
+/// bearer-only delivery carrier sibling of the device-proof tunnel. The
+/// vocabulary is the tunnel's delivery-class subset: forwarded envelopes
+/// and the transient membership wake. `kind` tags mirror the tunnel frame
+/// family (`"envelope"` / `"wake"`), so a reader built for one parses the
+/// other's delivery frames. Control traffic never rides this stream: key
+/// exchange, the manage proxy, and owner-subscription hints are
+/// tunnel-only vocabulary, whatever carrier delivers the frames.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum LescheAgentEvent {
+    /// A forwarded E2E envelope for a conversation this tagma owns.
+    Envelope { envelope: Envelope },
+    /// A best-effort hint that a room's membership changed, so the tagma
+    /// should refresh its joined-rooms cache immediately. Transient and
+    /// NOT buffered: an offline tagma misses it and relies on the
+    /// room-membership pump's immediate first tick on reconnect.
+    Wake,
+}
 
 /// The tagma's periodic runtime snapshot — the `UpstreamEvent::Status`
 /// element of the batched `POST /tagmata/{tagma_id}/upstream` body,
@@ -185,7 +206,7 @@ impl TagmaStatusPayload {
 
 /// `POST /tagmata/{tagma_id}/upstream` request body element — one
 /// plaintext metadata event on the single upstream channel. The batch body
-/// is `Vec<UpstreamEvent>`; the lesche demultiplexes each element into the
+/// is `Vec<UpstreamEvent>`; the keryx demultiplexes each element into the
 /// same fan logic the three per-kind endpoints (status POST / signal POST /
 /// state PUT) have always used, so the two paths cannot drift.
 /// Adjacently tagged because the payload variants mix structs and an enum
@@ -204,7 +225,7 @@ pub enum UpstreamEvent {
     Signal(SignalEvent),
     /// Full projection snapshot; fans like the state PUT (projection
     /// store accept plus dirty fan). Boxed: the batch enum is born at the
-    /// flusher serialization boundary and dies at the lesche demux, so
+    /// flusher serialization boundary and dies at the keryx demux, so
     /// the variant-size spread is not worth carrying inline (clippy
     /// large_enum_variant).
     Projection(Box<crate::projection::ProjectionSnapshot>),
@@ -215,7 +236,7 @@ mod upstream_shape_tests {
     use super::*;
 
     /// The upstream channel is a cross-crate wire contract (tagma flusher
-    /// serializes, lesche demultiplexes): pin the adjacent-tag shape per
+    /// serializes, keryx demultiplexes): pin the adjacent-tag shape per
     /// variant so neither side can rename or retag unilaterally.
     #[test]
     fn status_variant_adjacent_tag_shape() {

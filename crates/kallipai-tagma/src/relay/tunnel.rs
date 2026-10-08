@@ -1,4 +1,4 @@
-//! The lesche tunnel: the SSE stream reader + reconnect loop, and the inbound
+//! The keryx tunnel: the SSE stream reader + reconnect loop, and the inbound
 //! dispatch fan-out.
 //!
 //! A child module of `relay`, so `use super::*` reuses
@@ -10,7 +10,7 @@
 use super::*;
 
 impl RelayHandle {
-    /// Hold the lesche tunnel open, reconnecting with a small backoff on any
+    /// Hold the keryx tunnel open, reconnecting with a small backoff on any
     /// disconnect or error. Selects on `shutdown` (the tagma-wide parent token)
     /// so SIGINT/SIGTERM cancels the relay alongside axum and the agents. On
     /// shutdown the pump is drained (`stop_pump`) so in-flight emits complete.
@@ -119,15 +119,6 @@ impl RelayHandle {
                     error!("relay op dispatch panicked past the inner boundary");
                 }
             }
-            TunnelInbound::Wake => {
-                // A best-effort hint that membership changed: re-poll
-                // `list_my_rooms` immediately so the joined-rooms cache warms
-                // before the next room envelope arrives (a just-added tagma is
-                // blind until this poll lands). The Wake carries no payload, so
-                // the sweep re-fetches `list_my_rooms` -- one batched GET,
-                // acceptable at the expected volume.
-                self.poll_rooms().await;
-            }
             TunnelInbound::ManageRest {
                 req_id,
                 method,
@@ -189,10 +180,10 @@ fn frame_allowed(method: &str, path: &str) -> bool {
 }
 
 impl RelayHandle {
-    /// A ManageRest frame from the lesche reverse-proxy: run the frame-surface
+    /// A ManageRest frame from the keryx reverse-proxy: run the frame-surface
     /// allowlist, then execute against the same manage router the envelope
     /// path uses, replying over the plaintext manage-reply POST (the E2E
-    /// emit loop is unreadable to the lesche proxy, which needs the reply
+    /// emit loop is unreadable to the keryx proxy, which needs the reply
     /// to answer the HTTP caller). Replies are keyed by req_id; trace ids
     /// are only for logging.
     async fn handle_manage_rest(

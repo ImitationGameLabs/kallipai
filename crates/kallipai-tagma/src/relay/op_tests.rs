@@ -20,7 +20,7 @@ use kallipai_common::protocol::{AuthoredEvent, SignalEvent, SseEvent};
 use kallipai_e2ee::{
     DIR_INITIATOR_TO_RESPONDER, DIR_RESPONDER_TO_INITIATOR, DeviceKey, SessionKey, nonce,
 };
-use kallipai_lesche_common::control::KeyExchangeInit;
+use kallipai_keryx_common::control::KeyExchangeInit;
 use kallipai_lesche_common::event::UpstreamEvent;
 use kallipai_lesche_common::message::{
     Envelope, Participant, RoomMessage, TagmaReply, TagmaRequest,

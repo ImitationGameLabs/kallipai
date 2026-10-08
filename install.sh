@@ -4,7 +4,7 @@
 # Two modes:
 #   user (default)   payload ~/.local/lib/kallipai, links ~/.local/bin
 #   --with-systemd   payload /usr/local/lib/kallipai, links /usr/local/bin,
-#                    five systemd units in /etc/systemd/system; needs root
+#                    six systemd units in /etc/systemd/system; needs root
 #
 # Sources:
 #   --tarball PATH   install from a local tarball plus its .sha256 sidecar
@@ -30,6 +30,7 @@ UNITS=(
   kallipai-daemon
   kallipai-archeion
   kallipai-lesche
+  kallipai-keryx
   kallipai-files
   kallipai-instances
 )
@@ -76,7 +77,7 @@ Options:
                    sidecar next to it). This is the smoke-test path.
   --version V      Release version to download (default mode only).
   --with-systemd   System-level install: /usr/local payload and links,
-                   five systemd units, dedicated system users. Requires
+                   six systemd units, dedicated system users. Requires
                    root and the repository checkout (for the unit
                    templates under nix/install/systemd/).
   --uninstall      Remove the installed payload, links, and (with
@@ -155,9 +156,10 @@ if [ "$ACTION" = "uninstall" ]; then
     echo
     echo "Kept for data safety (remove manually if desired):"
     echo "  state tree:   sudo rm -rf $SYS_STATE_ROOT"
-    echo "  users/groups: kallipai-archeion kallipai-lesche kallipai-files"
-    echo "                kallipai-instances (users), their primary groups,"
-    echo "                kallipai-polis and kallipai-daemon (gate groups)"
+    echo "  users/groups: kallipai-archeion kallipai-lesche kallipai-keryx"
+    echo "                kallipai-files kallipai-instances (users),"
+    echo "                their primary groups, kallipai-polis and"
+    echo "                kallipai-daemon (gate groups)"
   else
     echo
     echo "Kept for data safety: $HOME/.local/share/kallipai is untouched."
@@ -237,15 +239,16 @@ if [ "$SYSTEM_MODE" = 1 ]; then
   ensure_group kallipai-polis
   ensure_group kallipai-daemon
   # Per-service primary groups, then the users (NixOS module mirror:
-  # lesche/files ride kallipai-polis; instances is the one polis user
+  # lesche/keryx/files ride kallipai-polis; instances is the one polis user
   # that also joins the daemon socket gate. The archeion account
   # deliberately carries no supplementary group: its unit already runs
   # with the platform gate group as its primary.
-  for svc in archeion lesche files instances; do
+  for svc in archeion lesche keryx files instances; do
     ensure_group "kallipai-$svc"
   done
   ensure_user kallipai-archeion kallipai-archeion ""
   ensure_user kallipai-lesche   kallipai-lesche   kallipai-polis
+  ensure_user kallipai-keryx    kallipai-keryx    kallipai-polis
   ensure_user kallipai-files    kallipai-files    kallipai-polis
   ensure_user kallipai-instances kallipai-instances "kallipai-polis,kallipai-daemon"
 

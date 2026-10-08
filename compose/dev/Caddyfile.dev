@@ -47,6 +47,12 @@
       flush_interval -1
     }
   }
+  handle_path /v1/keryx/* {
+    reverse_proxy 127.0.0.1:7210 {
+      # Same SSE flush safety net as the lesche segment above.
+      flush_interval -1
+    }
+  }
   @files path /v1/files /v1/files/*
   handle @files {
     uri strip_prefix /v1/files
@@ -55,7 +61,7 @@
   handle_path /v1/instances/* {
     reverse_proxy 127.0.0.1:7300
   }
-  # The model gateway's management face as the fifth /v1 service segment
+  # The model gateway's management face as the sixth /v1 service segment
   # (parity with the prod nixos module's api vhost): every route on that
   # face carries its own family credential (an admin token or a proxy
   # key), so the edge adds none. The dev gateway is host-run like the
@@ -82,7 +88,7 @@
   handle @api {
     # The platform's single API face, path-routed by service segment.
     # handle_path strips /v1/<service> and forwards the remainder as-is:
-    # all five backends serve bare resource paths, so the strip is the
+    # all six backends serve bare resource paths, so the strip is the
     # whole story - no rewrites, and no identity-mapping exception for files
     # (its named matcher above covers the bare /v1/files prefix too).
     import kallipai-api-routes

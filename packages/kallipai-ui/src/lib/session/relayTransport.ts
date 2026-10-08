@@ -11,9 +11,9 @@
 
 import type {
   FileAttachment,
-  RelayChannel,
   SignalEvent,
 } from "@kallipai/kallipai-lesche-client";
+import type { RelayChannel } from "@kallipai/kallipai-keryx-client";
 import type { TagmaStatusSummary } from "../tagmata.svelte.ts";
 import type { ConversationSender } from "../transcript.ts";
 import { toSender } from "../transcript.ts";

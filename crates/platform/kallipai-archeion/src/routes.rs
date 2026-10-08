@@ -2,9 +2,10 @@
 //!
 //! Only the control plane lives here (auth ceremonies, session/me, admin,
 //! tagmata) plus the service-to-service `/internal/*` surface that the
-//! data-plane relay (`kallipai-lesche`, a separate process) consumes. The data
-//! plane (conversations, envelopes, KEX, tagma tunnel, app events) lives in
-//! `kallipai-lesche`.
+//! data-plane services (separate processes) consume. The data plane lives
+//! outside this crate: room envelopes, invites, and direct sessions in the
+//! lesche; conversations, KEX, the tagma tunnel, and the agent app stream in
+//! the keryx.
 
 mod admin;
 mod auth;
@@ -19,17 +20,16 @@ mod tagmata;
 
 use axum::Router;
 use axum::extract::State;
-use axum::http::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
-use axum::http::{HeaderName, HeaderValue, Method, StatusCode};
+use axum::http::{Method, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::get;
 use kallipai_common::authtoken::TokenHash;
-use tower_http::cors::{AllowOrigin, CorsLayer};
+use tower_http::cors::CorsLayer;
 
 use crate::state::SharedState;
 
 /// Build the public router. `internal_token_hash`, when `Some`, mounts the
-/// `/internal/*` ControlPlane surface for the lesche (guarded by that hash);
+/// `/internal/*` ControlPlane surface for the data-plane services (guarded by that hash);
 /// `None` runs the archeion standalone with no internal surface.
 pub fn router(
     state: SharedState,
@@ -79,7 +79,7 @@ pub fn router(
     // The control-plane v1 carries `SharedState`; resolve it to a stateless
     // `Router<()>`. The CSRF custom-header guard scopes to v1 (a no-op for
     // non-cookie / bearer requests); it gates cookie-bearing mutating control-
-    // plane requests. The data plane (lesche) runs its own CSRF guard.
+    // plane requests. The data planes (lesche/keryx) run their own CSRF guard.
     let mut v1 = Router::new()
         .merge(ceremony_begin)
         .merge(pair_begin)
@@ -143,57 +143,15 @@ async fn readyz(State(state): State<SharedState>) -> impl IntoResponse {
     }
 }
 
-/// Build a CORS layer from a comma-separated allowlist. An empty configured
-/// list denies all cross-origin requests; the operator sets the real allowlist
-/// (the app's origin) via `KALLIPAI_ARCHEION_CORS_ORIGINS`. Never wildcard the
-/// origin on a public deploy.
-///
-/// Methods and headers are explicit lists, not `Any` (the Fetch spec and
-/// `tower-http` rationale lives at the `allow_methods` call below); the
-/// origin allowlist is the real gate, and leaving either unset would
-/// default them to denied and reject every preflight.
+/// Build the credentials-aware CORS layer: the shared builder carrying
+/// the verbs the archeion routes use. The origin allowlist comes from
+/// `KALLIPAI_ARCHEION_CORS_ORIGINS`, parsed and validated in the shared
+/// builder.
 pub(crate) fn cors_layer(origins: &str) -> CorsLayer {
-    let allowed: Vec<HeaderValue> = origins
-        .split(',')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .filter_map(|s| s.parse().ok())
-        .collect();
-    let origin = if allowed.is_empty() {
-        AllowOrigin::list(Vec::new())
-    } else {
-        AllowOrigin::list(allowed)
-    };
-    CorsLayer::new()
-        .allow_origin(origin)
-        // Methods must be an explicit list, NOT `Any`: the Fetch spec forbids
-        // `Access-Control-Allow-Credentials: true` together with a wildcard
-        // (`Allow-Methods: *`), and tower-http panics at layer construction if
-        // they're combined. Listed are exactly the methods the archeion routes use.
-        .allow_methods([Method::GET, Method::POST, Method::PATCH, Method::DELETE])
-        // Allow credentialed (cookie-bearing) cross-origin requests so the web
-        // app -- served from a different origin than the archeion (e.g. the app at
-        // http://localhost:5173 calling the archeion at http://localhost:7100 in
-        // dev, or app vs. archeion hosts in prod) -- can send/receive the
-        // `kallipai_session` cookie with `credentials: "include"`. Safe because
-        // every wildcard-forbidden field is concrete: the origin allowlist is
-        // `AllowOrigin::list` (never `Any`) and the methods are enumerated above.
-        // A misconfigured `KALLIPAI_ARCHEION_CORS_ORIGINS=*` therefore yields an empty
-        // allowlist (no cross-origin allowed) rather than an open hole.
-        .allow_credentials(true)
-        // `Authorization` is excluded from the `*` wildcard by the Fetch spec,
-        // so list the request headers we actually send explicitly. The CSRF
-        // marker (`X-Requested-With`) is a custom header the browser only sends
-        // same-origin / after a passing preflight, so it must be allowed here
-        // for the preflight to succeed.
-        .allow_headers([
-            AUTHORIZATION,
-            CONTENT_TYPE,
-            ACCEPT,
-            // The CSRF marker is a custom header; the browser only sends it
-            // same-origin / after a passing preflight, so allow it explicitly.
-            HeaderName::from_static("x-requested-with"),
-        ])
+    kallipai_common::cors::cors_layer(
+        origins,
+        &[Method::GET, Method::POST, Method::PATCH, Method::DELETE],
+    )
 }
 
 #[cfg(test)]
