@@ -504,84 +504,84 @@ export class OnlineBackend implements ManagementBackend {
   createTask(): Promise<TaskExport> {
     return Promise.reject(
       new Error(
-        "task writes are offline-only: the lesche manage frame allowlist passes the task read face only",
+        "task writes are offline-only: the keryx manage frame allowlist passes the task read face only",
       ),
     );
   }
   startTask(): Promise<TaskExport> {
     return Promise.reject(
       new Error(
-        "task writes are offline-only: the lesche manage frame allowlist passes the task read face only",
+        "task writes are offline-only: the keryx manage frame allowlist passes the task read face only",
       ),
     );
   }
   confirmTask(): Promise<TaskExport> {
     return Promise.reject(
       new Error(
-        "task writes are offline-only: the lesche manage frame allowlist passes the task read face only",
+        "task writes are offline-only: the keryx manage frame allowlist passes the task read face only",
       ),
     );
   }
   reviewTask(): Promise<TaskExport> {
     return Promise.reject(
       new Error(
-        "task writes are offline-only: the lesche manage frame allowlist passes the task read face only",
+        "task writes are offline-only: the keryx manage frame allowlist passes the task read face only",
       ),
     );
   }
   pauseTask(): Promise<TaskExport> {
     return Promise.reject(
       new Error(
-        "task writes are offline-only: the lesche manage frame allowlist passes the task read face only",
+        "task writes are offline-only: the keryx manage frame allowlist passes the task read face only",
       ),
     );
   }
   resumeTask(): Promise<TaskExport> {
     return Promise.reject(
       new Error(
-        "task writes are offline-only: the lesche manage frame allowlist passes the task read face only",
+        "task writes are offline-only: the keryx manage frame allowlist passes the task read face only",
       ),
     );
   }
   noteTask(): Promise<TaskExport> {
     return Promise.reject(
       new Error(
-        "task writes are offline-only: the lesche manage frame allowlist passes the task read face only",
+        "task writes are offline-only: the keryx manage frame allowlist passes the task read face only",
       ),
     );
   }
   closeTask(): Promise<TaskExport> {
     return Promise.reject(
       new Error(
-        "task writes are offline-only: the lesche manage frame allowlist passes the task read face only",
+        "task writes are offline-only: the keryx manage frame allowlist passes the task read face only",
       ),
     );
   }
   reopenTask(): Promise<TaskExport> {
     return Promise.reject(
       new Error(
-        "task writes are offline-only: the lesche manage frame allowlist passes the task read face only",
+        "task writes are offline-only: the keryx manage frame allowlist passes the task read face only",
       ),
     );
   }
   archiveTask(): Promise<TaskExport> {
     return Promise.reject(
       new Error(
-        "task writes are offline-only: the lesche manage frame allowlist passes the task read face only",
+        "task writes are offline-only: the keryx manage frame allowlist passes the task read face only",
       ),
     );
   }
   fetchTaskArchive(): Promise<Uint8Array> {
     return Promise.reject(
       new Error(
-        "archive download is offline-only: the lesche manage frame allowlist passes the task read face only",
+        "archive download is offline-only: the keryx manage frame allowlist passes the task read face only",
       ),
     );
   }
   exportTask(): Promise<TaskExport> {
     return Promise.reject(
       new Error(
-        "task export is offline-only: the lesche manage frame allowlist passes the task read face only",
+        "task export is offline-only: the keryx manage frame allowlist passes the task read face only",
       ),
     );
   }
@@ -589,21 +589,21 @@ export class OnlineBackend implements ManagementBackend {
   getTimezone(): Promise<{ timezone: string | null }> {
     return Promise.reject(
       new Error(
-        "timezone settings are offline-only: the lesche manage frame allowlist does not pass the settings face",
+        "timezone settings are offline-only: the keryx manage frame allowlist does not pass the settings face",
       ),
     );
   }
   putTimezone(_timezone: string | null): Promise<{ timezone: string | null }> {
     return Promise.reject(
       new Error(
-        "timezone settings are offline-only: the lesche manage frame allowlist does not pass the settings face",
+        "timezone settings are offline-only: the keryx manage frame allowlist does not pass the settings face",
       ),
     );
   }
   exportAllTasks(): Promise<TaskExport[]> {
     return Promise.reject(
       new Error(
-        "bulk export is offline-only: the lesche manage-reply frame caps responses below the ledger's export size",
+        "bulk export is offline-only: the keryx manage-reply frame caps responses below the ledger's export size",
       ),
     );
   }

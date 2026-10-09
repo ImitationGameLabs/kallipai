@@ -188,7 +188,7 @@ Deno.test(
     globalThis.fetch = ((url: string | URL | Request) => {
       const u = String(url);
       seen.push(u);
-      if (u.endsWith("/v1/lesche/tagmata/t-a/agents")) {
+      if (u.endsWith("/v1/keryx/tagmata/t-a/agents")) {
         return Promise.resolve(
           Response.json({
             stale: false,
@@ -223,12 +223,12 @@ Deno.test(
       const backend = new OnlineBackend(
         {} as unknown as ManageRestClient, // the manage relay stays untouched
         "t-a",
-        new ProjectionClient("http://lesche.test/v1/lesche"),
+        new ProjectionClient("http://keryx.test/v1/keryx"),
       );
       const agents = await backend.listAgents();
       assertEquals(agents.agents[0]!.id, "root");
       assertEquals(
-        seen.some((u) => u.endsWith("/v1/lesche/tagmata/t-a/agents")),
+        seen.some((u) => u.endsWith("/v1/keryx/tagmata/t-a/agents")),
         true,
       );
 
@@ -288,7 +288,7 @@ Deno.test(
       const backend = new OnlineBackend(
         {} as unknown as ManageRestClient,
         "t-a",
-        new ProjectionClient("http://lesche.test"),
+        new ProjectionClient("http://keryx.test"),
       );
       let aCount = 0;
       let bCount = 0;
@@ -361,7 +361,7 @@ Deno.test(
       const backend = new OnlineBackend(
         {} as unknown as ManageRestClient,
         "t-a",
-        new ProjectionClient("http://lesche.test"),
+        new ProjectionClient("http://keryx.test"),
       );
       let nudges = 0;
       const stop = backend.projectionFeed!.subscribe(() => {
@@ -421,7 +421,7 @@ Deno.test(
       const backend = new OnlineBackend(
         {} as unknown as ManageRestClient,
         "t-a",
-        new ProjectionClient("http://lesche.test"),
+        new ProjectionClient("http://keryx.test"),
       );
       let nudges = 0;
       const stop = backend.projectionFeed!.subscribe(() => {
@@ -474,7 +474,7 @@ Deno.test("a renumbered stream still notifies after a reconnect", async () => {
     const backend = new OnlineBackend(
       {} as unknown as ManageRestClient,
       "t-a",
-      new ProjectionClient("http://lesche.test"),
+      new ProjectionClient("http://keryx.test"),
     );
     let nudges = 0;
     const stop = backend.projectionFeed!.subscribe(() => {
@@ -571,7 +571,7 @@ Deno.test(
       const backend = new OnlineBackend(
         {} as unknown as ManageRestClient,
         "t-a",
-        new ProjectionClient("http://lesche.test"),
+        new ProjectionClient("http://keryx.test"),
       );
       let nudges = 0;
       const first = backend.projectionFeed!.subscribe(() => {
@@ -626,7 +626,7 @@ Deno.test(
     await assertRejects(
       () => backend.exportAllTasks(),
       Error,
-      "offline-only: the lesche manage-reply frame caps",
+      "offline-only: the keryx manage-reply frame caps",
     );
     // The archive download keeps its existing allowlist refusal.
     await assertRejects(
