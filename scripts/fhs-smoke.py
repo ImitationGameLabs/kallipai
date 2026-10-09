@@ -15,7 +15,7 @@ Checks per tier (1-3 in the container as a normal user):
 
 Host-side checks:
   4. NEEDED inventory over the tarball binaries (glibc family only)
-  5. self-containment: install.sh and the six unit templates ship
+  5. self-containment: install.sh and the seven unit templates ship
      inside the tarball; the tiers below install from an extraction
   6. --with-systemd tier: units rendered in the container, then
      systemd-analyze verify --root on the host against the rendered
@@ -100,6 +100,7 @@ def check_contents(tarball: Path) -> None:
         "kallipai-lesche",
         "kallipai-keryx",
         "kallipai-files",
+        "kallipai-model-gateway",
         "kallipai-instances",
     )
     expected = ["install.sh", "bin"] + [f"systemd/{u}.service.in" for u in units]
@@ -174,17 +175,17 @@ SYSTEM_SCRIPT = r"""set -eu
 NAME=__TARBALL_NAME__
 bash /mnt/extract/install.sh --with-systemd --tarball "/mnt/$NAME"
 test -d /usr/local/lib/kallipai/*/bin
-for u in kallipai-daemon kallipai-archeion kallipai-lesche kallipai-keryx kallipai-files kallipai-instances; do
+for u in kallipai-daemon kallipai-archeion kallipai-lesche kallipai-keryx kallipai-files kallipai-model-gateway kallipai-instances; do
   test -f /usr/local/lib/kallipai/*/systemd/$u.service.in
 done
-for u in kallipai-archeion kallipai-lesche kallipai-files kallipai-instances; do
+for u in kallipai-archeion kallipai-lesche kallipai-files kallipai-model-gateway kallipai-instances; do
   getent passwd "$u" > /dev/null
   getent group "$u" > /dev/null
 done
 getent group kallipai-polis > /dev/null
 getent group kallipai-daemon > /dev/null
 id -nG kallipai-instances | tr ' ' '\n' | grep -qx kallipai-daemon
-for u in kallipai-daemon kallipai-archeion kallipai-lesche kallipai-files kallipai-instances; do
+for u in kallipai-daemon kallipai-archeion kallipai-lesche kallipai-files kallipai-model-gateway kallipai-instances; do
   test -f "/etc/systemd/system/$u.service"
 done
 grep -q 'KALLIPAI_BIN_DIR=/usr/local/lib/kallipai/' /etc/systemd/system/kallipai-daemon.service

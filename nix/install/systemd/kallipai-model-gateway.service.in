@@ -1,0 +1,37 @@
+# kallipai-model-gateway -- model gateway (system-level FHS install).
+# Rendered by install.sh; @BINDIR@ becomes the installed payload bin dir.
+# The gateway keeps every durable surface (profiles, keys, request
+# audits) in PostgreSQL, so the unit owns only its rolling log dir --
+# mirroring the NixOS module defaults. Optional settings (CORS,
+# public base URL) go in a drop-in:
+#   systemctl edit kallipai-model-gateway
+#     [Service]
+#     Environment=KALLIPAI_MODEL_GATEWAY_CORS_ORIGINS=https://app.example.com
+#     Environment=KALLIPAI_MODEL_GATEWAY_PUBLIC_BASE_URL=https://model-gw.example.com/v1
+[Unit]
+Description=kallipai model gateway
+# Soft dependency: the gateway reads the archeion's provisioned
+# internal-token file at boot and its profiles live in PostgreSQL,
+# so both start first. If either goes down later, the gateway keeps
+# running degraded and recovers on its own.
+After=network.target postgresql.service kallipai-archeion.service
+Wants=postgresql.service kallipai-archeion.service
+
+[Service]
+Environment=KALLIPAI_MODEL_GATEWAY_ADDR=127.0.0.1:7501
+Environment=KALLIPAI_MODEL_GATEWAY_MANAGEMENT_ADDR=127.0.0.1:7500
+Environment=KALLIPAI_MODEL_GATEWAY_DATABASE_URL=postgresql:///kallipai-model-gateway?host=/run/postgresql
+Environment=KALLIPAI_MODEL_GATEWAY_LOG_DIR=/var/log/kallipai/model-gateway
+Environment=KALLIPAI_MODEL_GATEWAY_ARCHEION_URL=http://127.0.0.1:7100
+Environment=KALLIPAI_MODEL_GATEWAY_INTERNAL_TOKEN_FILE=/var/lib/kallipai/archeion/internal-token
+ExecStart=@BINDIR@/kallipai-model-gateway
+User=kallipai-model-gateway
+Group=kallipai-model-gateway
+# No local state: the durable surfaces all live in PostgreSQL.
+LogsDirectory=kallipai/model-gateway
+LogsDirectoryMode=0750
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target

@@ -56,7 +56,7 @@ bash install.sh --uninstall
 ```
 
 卸载会删除载荷树与指向它的链接（指向其他目标的链接保持不动）。你在 `~/.local/share/kallipai` 的数据会保留。
-系统级安装的卸载遵循同一模式：`sudo bash install.sh --with-systemd --uninstall`。root 会删除载荷、链接与六个单元文件，保留 `/var/lib/kallipai`（服务状态树）与系统用户、组，并打印手动清理提示。
+系统级安装的卸载遵循同一模式：`sudo bash install.sh --with-systemd --uninstall`。root 会删除载荷、链接与七个单元文件，保留 `/var/lib/kallipai`（服务状态树）与系统用户、组，并打印手动清理提示。
 
 ## systemd 系统级安装
 
@@ -66,11 +66,12 @@ bash install.sh --uninstall
 sudo bash install.sh --tarball ./kallipai-1.0.0-linux-x86_64.tar.gz --with-systemd
 ```
 
-这会把载荷装到 `/usr/local/lib/kallipai/<版本>/`、链接到 `/usr/local/bin`、创建专用系统用户，并向 `/etc/systemd/system/` 渲染六个单元：
+这会把载荷装到 `/usr/local/lib/kallipai/<版本>/`、链接到 `/usr/local/bin`、创建专用系统用户，并向 `/etc/systemd/system/` 渲染七个单元：
 
 - `kallipai-daemon`（以 root 运行；`KillMode=process`，守护进程重启时运行中的 tagma 不受牵连）
 - `kallipai-archeion`、`kallipai-lesche`、`kallipai-keryx`、`kallipai-files`、
-  `kallipai-instances`（各用专用用户；keryx 全内存态，无需数据库）
+  `kallipai-model-gateway`、`kallipai-instances`（各用专用用户；keryx 全内存态无需
+  数据库；model gateway 的档案、密钥与审计全在 PostgreSQL）
 
 单元会被 enable，升级时已处于 active 的单元会被重启。用更新的 tarball 重跑同一命令即完成原位升级。
 
