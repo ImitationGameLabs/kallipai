@@ -1,6 +1,6 @@
 //! The per-epoch crypto state for the relay's AEAD channel to the app.
 //!
-//! Ported verbatim from the former standalone connector. The single
+//! The single
 //! `Mutex<CryptoState>` (held by [`crate::relay::Inner`]) covers the session
 //! key and both sequence counters so an emit always reads a key/counter pair
 //! from the same epoch — a re-KEX rotates the key and resets the counters

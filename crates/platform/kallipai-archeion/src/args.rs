@@ -74,8 +74,9 @@ pub struct Args {
     #[arg(long, env = "KALLIPAI_ARCHEION_COOKIE_SECURE", default_value_t = true)]
     pub cookie_secure: bool,
     /// Cookie `Domain` attribute. Set to the parent domain in a per-subdomain
-    /// deploy so the session cookie is shared across `archeion.<d>` and
-    /// `lesche.<d>` (e.g. `kallipai.com` prod, `localhost` dev). Unset =
+    /// deploy so the session cookie is shared across `archeion.<d>` /
+    /// `lesche.<d>` / `keryx.<d>` (e.g. `kallipai.com` prod, `localhost` dev).
+    /// Unset =
     /// host-only (single-origin deploy).
     #[arg(long, env = "KALLIPAI_ARCHEION_SESSION_COOKIE_DOMAIN")]
     pub cookie_domain: Option<String>,
@@ -156,8 +157,8 @@ pub struct Args {
     )]
     pub enrollment_code_ttl_secs: u64,
     /// Whether open signup is allowed (both passkey-only signup and OAuth
-    /// signup that creates a new account). The invite gate is gone; this is its
-    /// replacement for closing signups during an incident. Existing-account
+    /// signup that creates a new account). Setting it false closes signups
+    /// during an incident; existing-account
     /// login (passkey or OAuth) and account linking are unaffected.
     #[arg(long, env = "KALLIPAI_ARCHEION_SIGNUP_ENABLED", default_value_t = true)]
     pub signup_enabled: bool,

@@ -326,8 +326,8 @@ async fn register_begin(
     State(state): State<SharedState>,
     Json(req): Json<RegisterBeginRequest>,
 ) -> Result<Json<CeremonyBeginResponse<CreationChallengeResponse>>, ApiError> {
-    // Open signup is gated by the runtime kill switch (the invite gate is gone;
-    // this is its replacement). Login is unaffected. Register can surface an
+    // Open signup is gated by the runtime kill switch.
+    // Login is unaffected. Register can surface an
     // explicit 403 because the request IS signup intent; OAuth `finish_signin`
     // cannot -- it must mask signup-disabled as a generic 401 so a disabled-
     // signup probe does not reveal whether `(provider, subject)` is a known

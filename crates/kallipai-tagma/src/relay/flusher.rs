@@ -320,20 +320,20 @@ mod tests {
         Arc<Vec<serde_json::Value>>,
     );
 
-    /// Spawn a mock lesche capturing `POST /upstream` batches. When `fail_nth`
+    /// Spawn a mock keryx capturing `POST /upstream` batches. When `fail_nth`
     /// is `Some(n)`, the n-th attempt (0-based) answers 500 instead. Each OK
     /// attempt answers the shipped `"ok"` shape only because the client's
     /// legacy contract response carries no piggyback; see
-    /// [`spawn_upstream_lesche_scripted`] for the faces-carrying bodies.
-    async fn spawn_upstream_lesche(capture: Capture, fail_nth: Option<usize>) -> String {
-        spawn_upstream_lesche_scripted(capture, fail_nth, Vec::new()).await
+    /// [`spawn_upstream_keryx_scripted`] for the faces-carrying bodies.
+    async fn spawn_upstream_keryx(capture: Capture, fail_nth: Option<usize>) -> String {
+        spawn_upstream_keryx_scripted(capture, fail_nth, Vec::new()).await
     }
 
-    /// [`spawn_upstream_lesche`] with per-attempt JSON response bodies: the
+    /// [`spawn_upstream_keryx`] with per-attempt JSON response bodies: the
     /// n-th OK attempt answers `bodies[n]` (the last entry repeats); an
     /// empty script answers `{"applied": N}` -- no `faces` field, the
     /// legacy shape the reconcile must treat as a no-op.
-    async fn spawn_upstream_lesche_scripted(
+    async fn spawn_upstream_keryx_scripted(
         capture: Capture,
         fail_nth: Option<usize>,
         bodies: Vec<serde_json::Value>,
@@ -392,13 +392,13 @@ mod tests {
         .expect("snapshot parses")
     }
 
-    /// Build a relay on a real AppState against the mock lesche, with a
+    /// Build a relay on a real AppState against the mock keryx, with a
     /// shortened flusher retry tick. Returns the handle and the state
     /// strong ref (the flusher holds a Weak).
     async fn setup(capture: Capture, fail_nth: Option<usize>) -> (RelayHandle, SharedState) {
         let state = make_state();
         let root = kallipai_common::agentid::AgentId::from("root".to_string());
-        let url = spawn_upstream_lesche(capture, fail_nth).await;
+        let url = spawn_upstream_keryx(capture, fail_nth).await;
         let client = LescheClient::builder(&url, "tok").build().unwrap();
         let handle = RelayHandle::new(
             client,
@@ -737,7 +737,7 @@ mod tests {
     async fn piggyback_counts_flip_the_gate_both_ways() {
         let capture: Capture = Arc::new(Mutex::new(Vec::new()));
         let faces = |s: u64, p: u64| serde_json::json!({"applied": 1, "faces": {"status": s, "projection": p}});
-        let url = spawn_upstream_lesche_scripted(
+        let url = spawn_upstream_keryx_scripted(
             capture.clone(),
             None,
             vec![faces(0, 0), faces(1, 0), faces(1, 1)],

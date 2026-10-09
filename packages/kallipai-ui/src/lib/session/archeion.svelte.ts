@@ -343,7 +343,7 @@ class ArcheionSessionStore {
 
   /** Enrolled tagmata as card props WITHOUT presence. The registry owns
    * identity/label/createdAt only; live presence is overlaid by the view from
-   * realtime (the archeion `/v1/lesche/tagmata` no longer carries liveness). */
+   * realtime (the archeion `/v1/lesche/tagmata` carries no liveness). */
   get enrolledCards(): Omit<TagmaCardProps, "presence">[] {
     return this.tagmata
       .filter((t) => t.state === "enrolled")

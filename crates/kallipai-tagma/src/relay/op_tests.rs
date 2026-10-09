@@ -1,10 +1,9 @@
-//! Operation-level tests for the in-process relay: a mock lesche that
+//! Operation-level tests for the in-process relay: a mock keryx that
 //! captures posted envelopes, driven by a real `AppState` with a minimal
 //! root agent. The initiator side is simulated inline (dir-0 encrypt of the
 //! request, dir-1 decrypt of the replies). This proves the semantic channel
 //! — encrypt -> relay op -> in-process tagma call -> encrypt reply -> decrypt
-//! — without the real archeion or any TS. Adapted from the former standalone
-//! connector's HTTP-mock-tagma tests, now exercising `deliver_message` and
+//! — without the real archeion or any TS, exercising `deliver_message` and
 //! the broadcast pump directly.
 
 use super::*;
@@ -57,7 +56,7 @@ fn initiator_decrypt(key: &[u8; 32], seq: u64, ct: &[u8]) -> Option<Vec<u8>> {
         .ok()
 }
 
-async fn spawn_lesche(capture: Capture, signals: SignalCapture) -> String {
+async fn spawn_keryx(capture: Capture, signals: SignalCapture) -> String {
     let app = Router::new()
         .route("/conversations/{conv}/envelopes", post(capture_handler))
         .route("/tagmata/{_tagma}/upstream", post(signal_handler))
@@ -84,7 +83,7 @@ async fn signal_handler(
     "ok"
 }
 
-/// Build a relay wired to a fresh mock lesche and a real `AppState` whose
+/// Build a relay wired to a fresh mock keryx and a real `AppState` whose
 /// single root agent has a capturable prompt channel and a `events_cap`-deep
 /// event buffer. A pre-shared session key is installed (KEX itself is
 /// covered by e2e tests). Returns the handle, the key, the envelope capture,
@@ -186,8 +185,8 @@ async fn setup_inner(
 
     let capture: Capture = Arc::new(Mutex::new(Vec::new()));
     let signals: SignalCapture = Arc::new(Mutex::new(Vec::new()));
-    let lesche_url = spawn_lesche(capture.clone(), signals.clone()).await;
-    let client = LescheClient::builder(&lesche_url, "tok").build().unwrap();
+    let keryx_url = spawn_keryx(capture.clone(), signals.clone()).await;
+    let client = LescheClient::builder(&keryx_url, "tok").build().unwrap();
     let device = DeviceKey::generate();
     let tagma_id = TagmaId::from("tagma".to_string());
     let conversation_id = ConversationId::for_tagma(&tagma_id);
@@ -636,11 +635,7 @@ async fn send_message_persists_inbound_and_forwards_usermessage() {
         } => Some(*history_id),
         _ => None,
     });
-    assert_eq!(
-        ack,
-        Some(0),
-        "MessageAccepted ack no longer stamps history_id"
-    );
+    assert_eq!(ack, Some(0), "MessageAccepted ack carries no history_id");
 
     // The inbound row is persisted under the peer's partition.
     let user = peer();

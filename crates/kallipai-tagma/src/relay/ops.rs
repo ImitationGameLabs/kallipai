@@ -1,5 +1,5 @@
 //! Pure helpers for the relay op path: the reply burst limiter and the
-//! req_id/op-error helpers. Ported from the former standalone connector. The
+//! req_id/op-error helpers. The
 //! SSE→external-event projection lives in [`crate::projector`] (shared with
 //! the direct serving path).
 

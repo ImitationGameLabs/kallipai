@@ -306,7 +306,7 @@ fn frame_allowed_is_order_sensitive() {
 }
 
 /// Frame dispatch end-to-end -- handle_manage_rest
-/// against a mock lesche that records the manage-reply POST. Pins the
+/// against a mock keryx that records the manage-reply POST. Pins the
 /// (path, method) call order at the real dispatch site: the correct order
 /// must reach the router (200), and a swapped call must deny (404) --
 /// the exact regression this pins.
@@ -333,8 +333,8 @@ mod manage_frame_tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async { axum::serve(listener, app).await.unwrap() });
-        let lesche_url = format!("http://{addr}");
-        let client = LescheClient::builder(&lesche_url, "tok").build().unwrap();
+        let keryx_url = format!("http://{addr}");
+        let client = LescheClient::builder(&keryx_url, "tok").build().unwrap();
         let handle = RelayHandle::new(
             client,
             "test".to_string(),

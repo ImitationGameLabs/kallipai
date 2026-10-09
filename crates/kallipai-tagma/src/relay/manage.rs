@@ -331,8 +331,8 @@ mod tests {
     /// Route-shape nail: every (method, path) row of the management-plane
     /// table must survive the router's extractors. A Path-shape mismatch
     /// (route capture count vs extractor arity) is a 500 by axum
-    /// contract -- exactly the bug class the lesche manage proxy surfaced
-    /// in production. 400/404/405 are legitimate handler outcomes here;
+    /// contract.
+    /// 400/404/405 are legitimate handler outcomes here;
     /// only the 500 shape-rejection fires the assert.
     #[tokio::test]
     async fn manage_router_shape_pin_rejects_no_path_shape_500s() {

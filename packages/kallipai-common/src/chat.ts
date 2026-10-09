@@ -98,9 +98,9 @@ export type TagmaReply =
       readonly queue_depth: number;
       readonly warning?: string;
       /** `chat_history.id` of the **inbound** row the tagma appended for this
-       * user message. The direct path no longer stamps this (the projector's
-       * published `user_message` frame is the promotion path); the relay path
-       * historically carried it. `0`/absent means no row was recorded and must
+       * user message. The direct path does not stamp this (the projector's
+       * published `user_message` frame is the promotion path); the relay ack
+       * stamps 0. `0`/absent means no row was recorded and must
        * not be used for dedup. The ack itself is never stored or replayed. */
       readonly history_id?: number;
       /** RFC 3339 send time of the inbound row. Absent on acks with no durable

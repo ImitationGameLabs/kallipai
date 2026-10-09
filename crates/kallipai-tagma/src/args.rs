@@ -45,8 +45,7 @@ pub struct Args {
     #[arg(long, env = "KALLIPAI_POLIS_URL")]
     pub polis_url: Option<String>,
     /// Single-use archeion enrollment code (first run only; thereafter the stored
-    /// tagma token is reused). Replaces the former standalone connector's
-    /// enrollment-code env var.
+    /// tagma token is reused).
     #[arg(long, env = "KALLIPAI_TAGMA_RELAY_ENROLLMENT_CODE")]
     pub relay_enrollment_code: Option<String>,
     /// Max `kallip lesche send` deliveries per burst window. Bounds a runaway

@@ -34,8 +34,9 @@ pub struct SessionCfg {
     /// Whether to emit `Secure` on the cookie. False only for local HTTP dev.
     pub cookie_secure: bool,
     /// Cookie `Domain` attribute. Set to the parent domain in a per-subdomain
-    /// deploy so the session cookie is shared across `archeion.<d>` and
-    /// `lesche.<d>` (e.g. `kallipai.com` prod, `localhost` dev). `None` = no
+    /// deploy so the session cookie is shared across `archeion.<d>` /
+    /// `lesche.<d>` / `keryx.<d>` (e.g. `kallipai.com` prod, `localhost` dev).
+    /// `None` = no
     /// `Domain` attribute, i.e. a host-only cookie (single-origin deploy). The
     /// clear path MUST apply the same value or logout leaves the cookie behind.
     pub cookie_domain: Option<String>,

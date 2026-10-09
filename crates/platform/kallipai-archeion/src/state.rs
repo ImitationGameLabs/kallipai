@@ -112,7 +112,7 @@ pub struct AppState {
     /// config; a provider is present iff its client credentials are set.
     pub oauth_providers: crate::oauth::ProviderRegistry,
     /// Whether open signup (passkey-only or OAuth account creation) is allowed.
-    /// The runtime kill switch now that the invite gate is gone. Login and
+    /// Runtime kill switch for open signup. Login and
     /// linking are unaffected.
     pub signup_enabled: bool,
 }

@@ -251,8 +251,7 @@ impl RelayHandle {
     }
 
     /// Translate one op into an in-process tagma call against the root agent and
-    /// produce the matching reply. (The former standalone connector did this
-    /// over HTTP via `TagmaClient`; the fold calls the registry directly.)
+    /// produce the matching reply, calling the registry directly.
     ///
     /// This runs under the `catch_unwind` boundary in `handle_agent_op`, so it
     /// must stay unwind-safe: no non-`UnwindSafe` guard (e.g. a `MutexGuard`)
@@ -285,7 +284,7 @@ impl RelayHandle {
                     req_id,
                     queue_depth: resp.queue_depth,
                     warning: resp.warning,
-                    // Intentionally 0: the ack no longer stamps the inbound
+                    // Intentionally 0: the ack carries no inbound
                     // row id. The pump persists the authored half and
                     // stamps ids onto the Event/UserMessage replies
                     // (relay/pump.rs); the app dedups its optimistic line

@@ -6,8 +6,7 @@
 //! The agent invokes `kallip lesche send` (a subcommand of the `kallip` CLI)
 //! via `bash_exec`; it authenticates with its own per-agent token and POSTs
 //! here. The tagma, holding the E2E key in-process, delivers the text as an
-//! `AssistantContent` envelope over the relay. This replaces the former
-//! standalone connector's unix-socket reply path.
+//! `AssistantContent` envelope over the relay.
 //!
 //! Root-only: the conversation with the user is owned by the single root
 //! agent, so delivering a user-facing message is the root's job. A subagent

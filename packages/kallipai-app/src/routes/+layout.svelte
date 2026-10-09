@@ -28,7 +28,7 @@
     Wallet,
   } from "@lucide/svelte";
 
-  // Inject the app's navigation, archeion/lesche URLs, and storage backend into
+  // Inject the app's navigation, archeion/keryx/lesche URLs, and storage backend into
   // kallipai-ui. The shared <RootLayout> consumes these ports (it cannot import
   // $app/* or import.meta.env from inside the library package). Idempotent
   // setters; the root layout has a single instance so this runs once at boot.

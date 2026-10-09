@@ -36,7 +36,7 @@ pub struct Args {
     #[arg(long, env = "KALLIPAI_FILES_DATABASE_URL")]
     pub database_url: String,
     /// Maximum accepted upload body, in megabytes. A larger stream is cut
-    /// off with 413. The default is a placeholder value (100 MB); the
+    /// off with 413. The default (100 MB) is a starting point; the
     /// operator may tune it (structure is unaffected).
     #[arg(long, env = "KALLIPAI_FILES_MAX_BODY_SIZE_MB", default_value_t = 100)]
     pub max_body_size_mb: u64,

@@ -6,12 +6,12 @@
 // presence sinks); this module owns the throttle and the verdict mapping.
 
 /** Re-validate the login session against the auth plane. Returns true when
- * the session survives (the 401 was lesche-side), false when the auth plane
+ * the session survives (the 401 was relay-side), false when the auth plane
  * says the session is really gone. May reject on network trouble. */
 export type SessionVerifier = () => Promise<boolean>;
 
-/** How often a lesche 401 may trigger an auth-plane round-trip. Bounds the
- * pathological mismatch (lesche rejects, auth plane is fine) to a 30s retry
+/** How often a relay 401 may trigger an auth-plane round-trip. Bounds the
+ * pathological mismatch (a relay rejects, auth plane is fine) to a 30s retry
  * period instead of a verify-per-reconnect storm. */
 export const SESSION_REVERIFY_THROTTLE_MS = 30_000;
 
@@ -22,7 +22,7 @@ export const SESSION_REVERIFY_THROTTLE_MS = 30_000;
  * valid and let the backoff, not the verifier, pace the retries. */
 export type VerifyVerdict = "valid" | "invalid" | "skipped";
 
-/** Decide what a lesche 401 means. `verifier === null` (shell never bound
+/** Decide what a relay 401 means. `verifier === null` (shell never bound
  * one) maps to `invalid`: without a way to check, the historical stop-on-401
  * behavior is the safe default. A verifier that rejects (network trouble
  * reaching the auth plane) maps to `valid`: the auth plane being unreachable

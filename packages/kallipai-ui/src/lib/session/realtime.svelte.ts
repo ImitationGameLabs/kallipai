@@ -147,7 +147,7 @@ class RealtimeStore {
   private foregroundKick = false;
   /** Resolves the in-flight backoff sleep early (foreground fast path). */
   private wake: (() => void) | null = null;
-  // Auth-plane session re-verification (the lesche-401 recovery path). The
+  // Auth-plane session re-verification (the relay-401 recovery path). The
   // verifier is bound by the shell; `lastVerifiedAt` paces it to one
   // round-trip per throttle window. Null until bound (tests, pre-shell).
   private sessionVerifier: SessionVerifier | null = null;
@@ -222,9 +222,9 @@ class RealtimeStore {
   }
 
   /** Bind the auth-plane session verifier, called once by the shell at boot.
-   * Invoked when the lesche returns a 401 so the loop can distinguish a real
+   * Invoked when a relay returns a 401 so the loop can distinguish a real
    * sign-out (stop; the uid-keyed effect restarts us on the next sign-in)
-   * from a lesche-side rejection with a healthy session (keep retrying
+   * from a relay-side rejection with a healthy session (keep retrying
    * under backoff). Unbound, a 401 stops the loop (the safe default). */
   setSessionVerifier(verifier: SessionVerifier | null): void {
     this.sessionVerifier = verifier;
@@ -356,7 +356,7 @@ class RealtimeStore {
         }
         // Stream ended cleanly (rare); loop to reconnect unless stopped.
       } catch (e) {
-        // A 401 from a relay no longer means the session is gone: the relay
+        // A 401 from a relay does not mean the session is gone: the relay
         // can reject a cookie the auth plane still honors (e.g. a service
         // restart). Re-validate against the auth plane -- a real sign-out
         // clears the user and stops the loop (the uid-keyed shell effect
