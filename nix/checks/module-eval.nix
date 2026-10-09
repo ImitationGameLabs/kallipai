@@ -122,6 +122,34 @@
       gatewayUnit =
         pkgs.writeText "kallipai-model-gateway-test"
           webDerived.config.systemd.units."kallipai-model-gateway.service".text;
+      # Every edge service's unit env must carry the derived CORS
+      # allowlist; the roster below drives the assertions in the script.
+      corsEnvUnits = [
+        {
+          env = "KALLIPAI_ARCHEION_CORS_ORIGINS";
+          unit = webDerivedUnit;
+        }
+        {
+          env = "KALLIPAI_LESCHE_CORS_ORIGINS";
+          unit = polisLescheUnit;
+        }
+        {
+          env = "KALLIPAI_KERYX_CORS_ORIGINS";
+          unit = polisKeryxUnit;
+        }
+        {
+          env = "KALLIPAI_FILES_CORS_ORIGINS";
+          unit = polisFilesUnit;
+        }
+        {
+          env = "KALLIPAI_INSTANCES_CORS_ORIGINS";
+          unit = polisInstancesUnit;
+        }
+        {
+          env = "KALLIPAI_MODEL_GATEWAY_CORS_ORIGINS";
+          unit = gatewayUnit;
+        }
+      ];
       inherit (import ../lib.nix) bakeRuntimeConfig;
       stubDist = stubPackages.${pkgs.stdenv.hostPlatform.system}."kallipai-web-dist";
       # No runtime keys: the site root is the bundle itself.
@@ -347,7 +375,6 @@
       # archeion admits exactly that origin), tls-on leaves the cookie
       # flag to the code default, and tls-off forces it non-Secure.
       grep -q 'KALLIPAI_ARCHEION_WEBAUTHN_RP_ORIGIN=https://app.kallipai.com' '${webDerivedUnit}'
-      grep -q 'KALLIPAI_ARCHEION_CORS_ORIGINS=https://app.kallipai.com' '${webDerivedUnit}'
       grep -q 'KALLIPAI_ARCHEION_OAUTH_REDIRECT_BASE=https://app.kallipai.com' '${webDerivedUnit}'
       test -z "$(grep KALLIPAI_ARCHEION_COOKIE_SECURE '${webDerivedUnit}')"
       grep -q 'KALLIPAI_ARCHEION_COOKIE_SECURE=false' '${webTlsOffUnit}'
@@ -367,12 +394,15 @@
       test "${toString (lib.elem "kallipai-polis" webDerived.config.users.users.kallipai-keryx.extraGroups)}" = "1"
       test "${toString (lib.elem "kallipai-polis" webDerived.config.users.users.kallipai-files.extraGroups)}" = "1"
       test "${toString (lib.elem "kallipai-polis" webDerived.config.users.users.kallipai-instances.extraGroups)}" = "1"
-      # The keryx unit: the relay binary on ExecStart, the derived
-      # CORS allowlist reaching the process env, and the no-database
-      # contract (all state is in-memory, so the unit env carries no
-      # DATABASE_URL at all).
+      # Every edge service's unit env carries the derived CORS allowlist;
+      # one roster drives the six greps, so a new service needs one line.
+      ${lib.concatMapStringsSep "\n      " (
+        p: "grep -q '${p.env}=https://app.kallipai.com' '${toString p.unit}'"
+      ) corsEnvUnits}
+      # The keryx unit: the relay binary on ExecStart and the
+      # no-database contract (all state is in-memory, so the unit env
+      # carries no DATABASE_URL at all).
       grep -q 'ExecStart=.*/bin/kallipai-keryx' '${polisKeryxUnit}'
-      grep -q 'KALLIPAI_KERYX_CORS_ORIGINS=https://app.kallipai.com' '${polisKeryxUnit}'
       test -z "$(grep DATABASE_URL '${polisKeryxUnit}')"
       derived="${webDerived.config.services.kallipai.web.distWithRuntimeConfig}"
       grep -q '"domain":"kallipai.com"' "$derived/config.js"
