@@ -12,6 +12,7 @@ use clap::{Args, Subcommand};
 pub(crate) enum LescheCommand {
     /// Send a text message: to the user (default), a room (`--room`), or a
     /// peer tagma's direct session (`--tagma`).
+    /// The user's client renders messages as Markdown.
     Send(SendArgs),
     /// List the rooms this tagma has joined (so you can address them with
     /// `send --room <room>`). See also `sessions` for every addressable

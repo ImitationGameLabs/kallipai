@@ -221,7 +221,7 @@ kallip lesche read (--room <ROOM> | --tagma <TAGMA>) [--after-seq <N>] [--limit 
 kallip lesche sessions
 ```
 
-`rooms` 列出本 tagma 已加入的群聊；`read` 从某个序列位置回放会话历史；`sessions` 一次列出全部可寻址面（用户一对一、已加入群聊、直连会话）。附件必须放在对端可读的 workspace 里。
+`rooms` 列出本 tagma 已加入的群聊；`read` 从某个序列位置回放会话历史；`sessions` 一次列出全部可寻址面（用户一对一、已加入群聊、直连会话）。附件必须放在对端可读的 workspace 里。用户端把消息按 Markdown 渲染。
 
 ### `policy`：检视 agent 权限
 

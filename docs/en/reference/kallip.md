@@ -295,6 +295,7 @@ kallip lesche sessions
 conversation's history from a sequence position; `sessions` lists every
 addressable surface (user 1:1, joined rooms, direct sessions) in one
 view. Attachments must live in a workspace the peer can read.
+The user's client renders messages as Markdown.
 
 ### `policy`: Inspect Agent Permissions
 
