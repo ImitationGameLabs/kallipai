@@ -15,11 +15,13 @@ Checks per tier (1-3 in the container as a normal user):
 
 Host-side checks:
   4. NEEDED inventory over the tarball binaries (glibc family only)
-  5. --with-systemd tier: units rendered in the container, then
+  5. self-containment: install.sh and the six unit templates ship
+     inside the tarball; the tiers below install from an extraction
+  6. --with-systemd tier: units rendered in the container, then
      systemd-analyze verify --root on the host against the rendered
      copies (with stub executables for the container-side paths)
-  6. negative paths: check_arch / check_glibc sourced from install.sh
-     and called with forged inputs
+  7. negative paths: check_arch / check_glibc sourced from the
+     extracted install.sh and called with forged inputs
 
 Usage: python3 scripts/fhs-smoke.py --tarball <kallipai-VER-linux-x86_64.tar.gz> [--all]
 """
@@ -90,9 +92,29 @@ def check_needed(tarball: Path) -> None:
         else f"{len(found)} entries, all allowed",
     )
 
+def check_contents(tarball: Path) -> None:
+    """Self-containment: installer and unit templates ship inside."""
+    units = (
+        "kallipai-daemon",
+        "kallipai-archeion",
+        "kallipai-lesche",
+        "kallipai-keryx",
+        "kallipai-files",
+        "kallipai-instances",
+    )
+    expected = ["install.sh", "bin"] + [f"systemd/{u}.service.in" for u in units]
+    with tarfile.open(tarball) as tf:
+        have = set(tf.getnames())
+    missing = [e for e in expected if e not in have]
+    record(
+        "tarball-contents",
+        not missing,
+        f"missing: {missing}" if missing else f"{len(expected)} expected entries present",
+    )
 
-def check_negative_paths(repo: Path) -> None:
-    """Forged-input runs of the factored gates inside install.sh."""
+
+def check_negative_paths(extract: Path) -> None:
+    """Forged-input runs of the factored gates in the extracted installer."""
     cases = [
         (["check_arch"], 0),
         (["check_arch", "aarch64"], 1),
@@ -104,7 +126,7 @@ def check_negative_paths(repo: Path) -> None:
     for calls, expected in cases:
         proc = run(
             ["bash", "-c", "set -u; source ./install.sh; " + " ".join(calls)],
-            cwd=repo,
+            cwd=extract,
             env={**os.environ, "KALLIPAI_INSTALL_SKIP_MAIN": "1"},
         )
         all_ok &= record(
@@ -122,7 +144,7 @@ def check_negative_paths(repo: Path) -> None:
 USER_SCRIPT = r"""set -eu
 NAME=__TARBALL_NAME__
 useradd -m smoke
-su smoke -c 'bash /mnt/install.sh --tarball /mnt/'"$NAME"
+su smoke -c 'bash /mnt/extract/install.sh --tarball /mnt/'"$NAME"
 # 1. every payload binary is linked by name into ~/.local/bin
 for f in /home/smoke/.local/lib/kallipai/*/bin/*; do
   n="$(basename "$f")"
@@ -131,18 +153,18 @@ for f in /home/smoke/.local/lib/kallipai/*/bin/*; do
 done
 test -x /home/smoke/.local/bin/kallipctl
 # 2a. same-version rerun stays idempotent
-su smoke -c 'bash /mnt/install.sh --tarball /mnt/'"$NAME"
+su smoke -c 'bash /mnt/extract/install.sh --tarball /mnt/'"$NAME"
 test "$(ls /home/smoke/.local/lib/kallipai | wc -l)" -eq 1
 # 2b. a second version takes over and the old directory is cleaned up
 mkdir -p /tmp/v2 && cp "/mnt/$NAME" /tmp/v2/kallipai-2.0.0-linux-x86_64.tar.gz
 (cd /tmp/v2 && sha256sum kallipai-2.0.0-linux-x86_64.tar.gz > kallipai-2.0.0-linux-x86_64.tar.gz.sha256)
-su smoke -c 'bash /mnt/install.sh --tarball /tmp/v2/kallipai-2.0.0-linux-x86_64.tar.gz'
+su smoke -c 'bash /mnt/extract/install.sh --tarball /tmp/v2/kallipai-2.0.0-linux-x86_64.tar.gz'
 test "$(ls /home/smoke/.local/lib/kallipai | wc -l)" -eq 1
 readlink /home/smoke/.local/bin/kallipctl | grep -q 2.0.0
 # 3. uninstall is clean; the data root survives with its sentinel
 mkdir -p /home/smoke/.local/share/kallipai
 echo smoke-sentinel > /home/smoke/.local/share/kallipai/sentinel
-su smoke -c 'bash /mnt/install.sh --uninstall'
+su smoke -c 'bash /mnt/extract/install.sh --uninstall'
 test ! -e /home/smoke/.local/lib/kallipai
 test -z "$(ls /home/smoke/.local/bin 2>/dev/null)"
 grep -q smoke-sentinel /home/smoke/.local/share/kallipai/sentinel
@@ -150,8 +172,11 @@ grep -q smoke-sentinel /home/smoke/.local/share/kallipai/sentinel
 
 SYSTEM_SCRIPT = r"""set -eu
 NAME=__TARBALL_NAME__
-bash /mnt/install.sh --with-systemd --tarball "/mnt/$NAME"
+bash /mnt/extract/install.sh --with-systemd --tarball "/mnt/$NAME"
 test -d /usr/local/lib/kallipai/*/bin
+for u in kallipai-daemon kallipai-archeion kallipai-lesche kallipai-keryx kallipai-files kallipai-instances; do
+  test -f /usr/local/lib/kallipai/*/systemd/$u.service.in
+done
 for u in kallipai-archeion kallipai-lesche kallipai-files kallipai-instances; do
   getent passwd "$u" > /dev/null
   getent group "$u" > /dev/null
@@ -164,9 +189,9 @@ for u in kallipai-daemon kallipai-archeion kallipai-lesche kallipai-files kallip
 done
 grep -q 'KALLIPAI_BIN_DIR=/usr/local/lib/kallipai/' /etc/systemd/system/kallipai-daemon.service
 # rerun stays idempotent
-bash /mnt/install.sh --with-systemd --tarball "/mnt/$NAME"
+bash /mnt/extract/install.sh --with-systemd --tarball "/mnt/$NAME"
 # uninstall removes payload, links, and units
-bash /mnt/install.sh --with-systemd --uninstall
+bash /mnt/extract/install.sh --with-systemd --uninstall
 test ! -e /usr/local/lib/kallipai
 test ! -e /etc/systemd/system/kallipai-daemon.service
 """
@@ -204,8 +229,8 @@ def tier(image: str, tarball: Path, work: Path, system: bool) -> None:
 
 def check_units_host(tarball: Path, work: Path) -> None:
     """systemd-analyze verify --root over units rendered on the host with
-    the same sed the installer runs (equal form: same templates, same
-    payload bin path), against
+    the same sed the installer runs (equal form: the tarball's
+    templates, the payload bin path), against
     stub executables and the host systemd's base target set."""
     import glob
 
@@ -219,7 +244,7 @@ def check_units_host(tarball: Path, work: Path) -> None:
         )
         return
     bindir = f"/usr/local/lib/kallipai/{version}/bin"
-    repo = Path(__file__).resolve().parent.parent
+    templates = work / "extract" / "systemd"
     root = work / "rootfs"
     unitdir = root / "etc/systemd/system"
     unitdir.mkdir(parents=True)
@@ -234,7 +259,7 @@ def check_units_host(tarball: Path, work: Path) -> None:
         "[Service]\nType=oneshot\nExecStart=/bin/true\n"
     )
     units = []
-    for tpl in sorted((repo / "nix/install/systemd").glob("*.service.in")):
+    for tpl in sorted(templates.glob("*.service.in")):
         name = tpl.name.removesuffix(".service.in") + ".service"
         (unitdir / name).write_text(tpl.read_text().replace("@BINDIR@", bindir))
         stub = root / bindir.strip("/") / name.removesuffix(".service")
@@ -289,18 +314,23 @@ def main() -> int:
 
         digest = hashlib.sha256(tarball.read_bytes()).hexdigest()
         (work / (src.name + ".sha256")).write_text(f"{digest}  {src.name}\n")
-        shutil.copy(
-            Path(__file__).resolve().parent.parent / "install.sh", work / "install.sh"
-        )
-        shutil.copytree(Path(__file__).resolve().parent.parent / "nix", work / "nix")
+        # Stage the tarball's own install form: extract it and run the
+        # extracted installer. No repository surface is staged, so a
+        # tarball that leans on the checkout fails here.
+        extract = work / "extract"
+        extract.mkdir()
+        with tarfile.open(tarball) as tf:
+            tf.extractall(extract)
         # The container's smoke user must read these through the mount
         # regardless of the repo's umask.
-        os.chmod(work / "install.sh", 0o755)
+        os.chmod(extract / "install.sh", 0o755)
+        os.chmod(extract, 0o755)
         os.chmod(tarball, 0o644)
         os.chmod(work / (src.name + ".sha256"), 0o644)
 
         check_needed(tarball)
-        check_negative_paths(work)
+        check_contents(tarball)
+        check_negative_paths(extract)
         images = IMAGES if args.all else IMAGES[:1]
         for image in images:
             tier(image, tarball, work, system=False)

@@ -4,6 +4,10 @@
   # The crane-built workspace derivation (packages.default). Shared so the
   # tarball never rebuilds or duplicates it.
   workspace,
+  # The installer script and the unit templates ship beside the binaries,
+  # so the tarball alone is a complete install form (no repo, no nix).
+  installScript,
+  systemdTemplates,
 }:
 let
   inherit (common) gitVersion;
@@ -11,8 +15,10 @@ let
   # Standard FHS interpreter path used by most Linux distributions.
   fhs-interp = "/lib64/ld-linux-x86-64.so.2";
 in
-# Tarball containing all workspace binaries, suitable for installation
-# inside containers (e.g. Harbor benchmarking containers).
+# Self-contained FHS install form: the binaries, install.sh, and the
+# systemd unit templates travel together, so an extraction plus sudo
+# ./install.sh --with-systemd installs fully without a repository or
+# nix (also consumed directly inside Harbor benchmarking containers).
 #
 # Nix-built binaries hardcode /nix/store/…/ld-linux as their ELF
 # interpreter, which does not exist in standard container images.
@@ -46,6 +52,11 @@ pkgs.runCommand "kallipai-tarball"
       patchelf --set-interpreter ${fhs-interp} "$bin"
       patchelf --remove-rpath "$bin"
     done
+    # Self-sufficiency inputs: install.sh resolves the templates from
+    # the unpacked payload's systemd/ directory at install time.
+    install -m 0755 ${installScript} install.sh
+    mkdir systemd
+    cp ${systemdTemplates}/*.service.in systemd/
 
-    tar -czf $out/kallipai-${gitVersion}-linux-x86_64.tar.gz bin/
+    tar -czf $out/kallipai-${gitVersion}-linux-x86_64.tar.gz bin/ install.sh systemd/
   ''

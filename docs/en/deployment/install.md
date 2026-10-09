@@ -85,8 +85,7 @@ cleanup hints.
 ## System install with systemd
 
 For a host-wide install with services, add `--with-systemd`. It needs
-root and the repository checkout (the unit templates live under
-`nix/install/systemd/`):
+root. The unit templates ship inside the tarball:
 
 ```bash
 sudo bash install.sh --tarball ./kallipai-1.0.0-linux-x86_64.tar.gz --with-systemd

@@ -78,8 +78,7 @@ Options:
   --version V      Release version to download (default mode only).
   --with-systemd   System-level install: /usr/local payload and links,
                    six systemd units, dedicated system users. Requires
-                   root and the repository checkout (for the unit
-                   templates under nix/install/systemd/).
+                   root. The unit templates ship inside the tarball.
   --uninstall      Remove the installed payload, links, and (with
                    --with-systemd) the unit files. Data roots and
                    system users/groups are kept, with printed hints.
@@ -253,9 +252,16 @@ if [ "$SYSTEM_MODE" = 1 ]; then
   ensure_user kallipai-instances kallipai-instances "kallipai-polis,kallipai-daemon"
 
   step "rendering systemd units"
-  TEMPLATE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/nix/install/systemd"
-  [ -d "$TEMPLATE_DIR" ] || die "unit templates not found at $TEMPLATE_DIR: \
---with-systemd needs the repository checkout (user-mode installs carry no such dependency)"
+  # Two real forms carry the templates: the unpacked payload (the
+  # release tarball ships them beside the binaries, making an install
+  # self-sufficient) and the repository checkout (this same script
+  # runs from the source tree during development).
+  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  TEMPLATE_DIR=""
+  for candidate in "$LOAD_ROOT/$VERSION_DIR/systemd" "$SCRIPT_DIR/nix/install/systemd"; do
+    if [ -d "$candidate" ]; then TEMPLATE_DIR="$candidate"; break; fi
+  done
+  [ -n "$TEMPLATE_DIR" ] || die "unit templates not found (looked in $LOAD_ROOT/$VERSION_DIR/systemd and beside this script): --with-systemd needs a self-contained tarball or a repository checkout"
   BINDIR="$LOAD_ROOT/$VERSION_DIR/bin"
   for unit in "${UNITS[@]}"; do
     sed "s|@BINDIR@|$BINDIR|g" "$TEMPLATE_DIR/$unit.service.in" > "$UNIT_DIR/$unit.service"

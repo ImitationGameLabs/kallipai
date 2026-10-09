@@ -60,7 +60,7 @@ bash install.sh --uninstall
 
 ## systemd 系统级安装
 
-要获得带服务的主机级安装，加 `--with-systemd`。它需要 root 与仓库检出（单元模板位于 `nix/install/systemd/` 下）：
+要获得带服务的主机级安装，加 `--with-systemd`。它需要 root。单元模板就打包在 tarball 里：
 
 ```bash
 sudo bash install.sh --tarball ./kallipai-1.0.0-linux-x86_64.tar.gz --with-systemd

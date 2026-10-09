@@ -178,6 +178,10 @@
               inherit pkgs;
               common = commonFhs;
               inherit (buildsFhs) workspace;
+              # Self-containment inputs: the installer script and the
+              # unit templates ship beside the binaries in the tarball.
+              installScript = ./install.sh;
+              systemdTemplates = ./nix/install/systemd;
             };
             # Re-export the per-system-level sharedSkills derivation as a
             # package so deployments can reference the bit-identical store
