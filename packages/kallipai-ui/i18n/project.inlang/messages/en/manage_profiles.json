@@ -45,7 +45,7 @@
   "manage_profiles_provider_id_duplicate": "This ID is already in use.",
   "manage_profiles_provider_family_label": "Family",
   "manage_profiles_provider_base_url_label": "Base URL (optional)",
-  "manage_profiles_provider_base_url_hint": "Required for openai-compatible (e.g. https://host/v1); other families default to their official URL when empty.",
+  "manage_profiles_provider_base_url_hint": "Required for openai-compatible (e.g. https://host/v1); anthropic takes the bare host (no /v1); other families default to their official URL when empty.",
   "manage_profiles_provider_api_key_label": "API Key",
   "manage_profiles_provider_api_key_hint_edit": "Current: {mask}. Leave empty to keep, or type to replace.",
   "manage_profiles_provider_actions_aria": "Provider actions",

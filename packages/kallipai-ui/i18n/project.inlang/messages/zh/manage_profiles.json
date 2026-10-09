@@ -45,7 +45,7 @@
   "manage_profiles_provider_id_duplicate": "该 ID 已被使用。",
   "manage_profiles_provider_family_label": "接口类型",
   "manage_profiles_provider_base_url_label": "Base URL（可选）",
-  "manage_profiles_provider_base_url_hint": "openai-compatible 接口类型必填（如 https://host/v1）；其余接口类型留空使用官方地址。",
+  "manage_profiles_provider_base_url_hint": "openai-compatible 接口类型必填（如 https://host/v1）；anthropic 填主机地址（不带 /v1）；其余接口类型留空使用官方地址。",
   "manage_profiles_provider_api_key_label": "API Key",
   "manage_profiles_provider_api_key_hint_edit": "当前：{mask}。留空保持不变，填写则替换。",
   "manage_profiles_provider_actions_aria": "模型提供商操作",
