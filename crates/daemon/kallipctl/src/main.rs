@@ -16,7 +16,6 @@ use kallipai_daemon_common::wire::{
     ErrorCode, InstanceState, LogCursor, OkPayload, RequestBody, Response, ResponseBody,
 };
 use std::ffi::OsStr;
-use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
 #[command(
@@ -134,16 +133,18 @@ enum Command {
     /// Tail an instance's or a polis service's logs. The argument
     /// picks the source: `logs <slug>` tails a managed instance
     /// through the daemon; `logs --service <name>` tails a polis
-    /// service's rolling file on this host; with neither argument,
+    /// service's logs through the same daemon; with neither argument,
     /// list the services that have logs.
     Logs {
         /// Instance slug: same grammar as spawn's. Instance
         /// logs flow through the daemon.
         #[arg(add = ArgValueCompleter::new(complete_slug))]
         slug: Option<String>,
-        /// The polis service to read on this host: its rolling
-        /// file under `/var/log/kallipai/<service>`.
-        #[arg(long, conflicts_with = "slug")]
+        /// The polis service whose rolling logs to read through
+        /// the daemon (the `/var/log/kallipai/<service>` tree on
+        /// the host, owned by the service user: the daemon reads
+        /// it for the caller, so no sudo is needed).
+        #[arg(long, conflicts_with = "slug", add = ArgValueCompleter::new(complete_service))]
         service: Option<String>,
         /// Lines from the tail (instance default 20, service
         /// default 50, capped at 1000).
@@ -442,17 +443,18 @@ async fn run() -> Result<()> {
             follow,
             level,
         } => {
-            // The argument picks the source: an instance slug
-            // rides the daemon wire; a polis service reads this
-            // host's own /var/log/kallipai; neither just lists
-            // the services. The client is lazy, so the local
-            // arms never touch the socket.
+            // Both sources ride the daemon wire: an instance slug
+            // reads that instance's log directory, a polis service
+            // reads the host's /var/log/kallipai tree through the
+            // same socket, and neither argument lists the services.
             return match (slug, service) {
                 (Some(slug), None) => {
                     run_logs(&client, &slug, lines, file.as_deref(), follow).await
                 }
-                (None, Some(service)) => run_service_logs(&service, lines, follow, level).await,
-                (None, None) => run_service_log_list(),
+                (None, Some(service)) => {
+                    run_service_logs(&client, &service, lines, follow, level).await
+                }
+                (None, None) => run_service_log_list(&client).await,
                 (Some(_), Some(_)) => {
                     unreachable!("clap enforces slug/--service exclusion")
                 }
@@ -699,12 +701,7 @@ async fn run_logs(
             ResponseBody::Ok {
                 payload: OkPayload::Log { text, next_cursor },
             } => {
-                let baseline_lost = match (&cursor, &next_cursor) {
-                    (Some(sent), Some(next)) => next.file != sent.file || next.byte < sent.byte,
-                    (Some(_), None) => true,
-                    _ => false,
-                };
-                if baseline_lost {
+                if cursor_lost(cursor.as_ref(), next_cursor.as_ref()) {
                     eprintln!("log cursor regressed or the log set changed; re-baselining");
                 }
                 match (text.is_empty(), follow) {
@@ -795,88 +792,6 @@ impl LogLevel {
     }
 }
 
-/// The polis services' log root on a systemd host: each service owns
-/// `<root>/<service>/` (systemd `LogsDirectory=kallipai/<service>`).
-const SERVICE_LOG_ROOT: &str = "/var/log/kallipai";
-
-/// Service mode's tail depth (the instance mode keeps its own 20).
-const SERVICE_DEFAULT_LINES: u32 = 50;
-
-/// The services that have a log directory under `root`, sorted. A
-/// missing root is the container-deployment shape, said out loud.
-fn list_service_dirs(root: &Path) -> Result<Vec<String>> {
-    let mut services: Vec<String> = match std::fs::read_dir(root) {
-        Ok(entries) => entries
-            .filter_map(|entry| entry.ok())
-            .filter(|entry| entry.path().is_dir())
-            .filter_map(|entry| entry.file_name().into_string().ok())
-            .collect(),
-        Err(e) => anyhow::bail!(
-            "no polis service log directory at {root:?} ({e}); container deployments \
-             log inside the containers -- use `docker logs <container>` there"
-        ),
-    };
-    services.sort();
-    Ok(services)
-}
-
-/// The bare `logs` shape: name what is on this host and how to tail it.
-fn run_service_log_list() -> Result<()> {
-    let root = Path::new(SERVICE_LOG_ROOT);
-    let services = list_service_dirs(root)?;
-    if services.is_empty() {
-        anyhow::bail!(
-            "no service directories under {SERVICE_LOG_ROOT}; container deployments \
-             log inside the containers -- use `docker logs <container>` there"
-        );
-    }
-    println!("services with logs under {SERVICE_LOG_ROOT}:");
-    for service in &services {
-        println!("  {service}  ({SERVICE_LOG_ROOT}/{service})");
-    }
-    println!("tail one with `kallipctl logs --service <name>`");
-    Ok(())
-}
-
-/// The retained rolling files for `service`, oldest first (the date in
-/// `<service>.<date>.log` sorts the days). Nothing readable there is a
-/// service that never logged on this host -- the container hint applies.
-fn service_log_files(root: &Path, service: &str) -> Result<Vec<PathBuf>> {
-    let dir = root.join(service);
-    let files: Vec<PathBuf> = match std::fs::read_dir(&dir) {
-        Ok(entries) => entries
-            .filter_map(|entry| entry.ok())
-            .map(|entry| entry.path())
-            .filter(|path| path.is_file())
-            .collect(),
-        Err(e) => anyhow::bail!(
-            "no log directory for service {service:?} at {dir:?} ({e}); is it running \
-             on this host? container deployments use `docker logs <container>`"
-        ),
-    };
-    let mut files = files;
-    files.sort();
-    if files.is_empty() {
-        anyhow::bail!(
-            "service {service:?} has no log files under {dir:?} yet; is it running \
-             on this host? container deployments use `docker logs <container>`"
-        );
-    }
-    Ok(files)
-}
-
-/// The last `n` lines across `files`, read oldest first so later files
-/// continue the same line stream.
-fn merged_tail(files: &[PathBuf], n: usize) -> std::io::Result<Vec<String>> {
-    let mut lines = Vec::new();
-    for file in files {
-        let text = std::fs::read_to_string(file)?;
-        lines.extend(text.lines().map(str::to_string));
-    }
-    let start = lines.len().saturating_sub(n);
-    Ok(lines.split_off(start))
-}
-
 /// Keep only the lines carrying `level`'s word.
 fn keep_level(lines: &[String], level: Option<LogLevel>) -> Vec<String> {
     match level {
@@ -889,105 +804,101 @@ fn keep_level(lines: &[String], level: Option<LogLevel>) -> Vec<String> {
     }
 }
 
-/// Complete lines of `path` starting at `offset`, and the offset just
-/// past the last newline seen (a trailing partial line waits for the
-/// next beat). A file that shrank under the cursor re-baselines from
-/// zero rather than failing.
-fn lines_since(path: &Path, offset: u64) -> std::io::Result<(Vec<String>, u64)> {
-    use std::io::{Read, Seek, SeekFrom};
-    let mut file = std::fs::File::open(path)?;
-    let len = file.metadata()?.len();
-    let offset = if len < offset { 0 } else { offset };
-    file.seek(SeekFrom::Start(offset))?;
-    let mut text = String::new();
-    file.read_to_string(&mut text)?;
-    let consumed = text.rfind('\n').map_or(0, |pos| pos as u64 + 1);
-    text.truncate(consumed as usize);
-    let lines: Vec<String> = text.lines().map(str::to_string).collect();
-    Ok((lines, offset + consumed))
-}
-
-/// Where a service-follow loop left off: the newest file it has seen
-/// and how many bytes of it are already printed.
-struct FollowState {
-    file: PathBuf,
-    offset: u64,
-}
-
-/// One follow beat: the lines that appeared since the last beat. A
-/// rotated day (a file sorting after the recorded one) is finished off
-/// and every newer day is taken whole; a recorded file that left the
-/// retention window re-baselines on the newest file instead of
-/// silently stalling at a dead position.
-fn poll_service_increment(
-    root: &Path,
-    service: &str,
-    state: &mut FollowState,
-) -> Result<Vec<String>> {
-    let files = service_log_files(root, service)?;
-    let mut lines = Vec::new();
-    match files.iter().position(|f| f == &state.file) {
-        Some(i) => {
-            let (rest, offset) = lines_since(&state.file, state.offset)?;
-            lines.extend(rest);
-            state.offset = offset;
-            for file in &files[i + 1..] {
-                let (fresh, offset) = lines_since(file, 0)?;
-                lines.extend(fresh);
-                state.file = file.clone();
-                state.offset = offset;
-            }
-        }
-        None => {
-            let newest = files
-                .last()
-                .expect("service_log_files returns a non-empty set");
-            let (fresh, offset) = lines_since(newest, 0)?;
-            lines.extend(fresh);
-            state.file = newest.clone();
-            state.offset = offset;
-            eprintln!("the log file changed under the follow cursor; re-baselined");
-        }
+/// True when the tail's baseline is gone: the next cursor names
+/// another file or sits before the sent byte offset, or the server
+/// returned no cursor at all. Both log loops re-baseline after the
+/// warning this signals.
+fn cursor_lost(sent: Option<&LogCursor>, next: Option<&LogCursor>) -> bool {
+    match (sent, next) {
+        (Some(sent), Some(next)) => next.file != sent.file || next.byte < sent.byte,
+        (Some(_), None) => true,
+        _ => false,
     }
-    Ok(lines)
 }
 
-/// The service-logs loop: one merged tail (the `--lines` first
-/// screen), then a beat per ~500 ms when following. Level filtering
+/// The bare `logs` shape: the services that have a log directory,
+/// through the same endpoint the completion and the tail read.
+async fn run_service_log_list(client: &DaemonClient) -> Result<()> {
+    let response = client
+        .call(RequestBody::ServiceLogList)
+        .await
+        .context("talking to the kallipai daemon")?;
+    match response.body {
+        ResponseBody::Ok {
+            payload: OkPayload::ServiceLogList { services },
+        } => {
+            if services.is_empty() {
+                anyhow::bail!(
+                    "no service log directories on this host; container deployments \
+                     log inside the containers -- use `docker logs <container>` there"
+                );
+            }
+            println!("services with logs on this host:");
+            for service in &services {
+                println!("  {service}");
+            }
+            println!("tail one with `kallipctl logs --service <name>`");
+            Ok(())
+        }
+        ResponseBody::Err { code, message } => {
+            anyhow::bail!("{}: {message}", error_prefix(code))
+        }
+        other => anyhow::bail!("unexpected response: {other:?}"),
+    }
+}
+
+/// The service-logs loop, the instance loop's mirror: one request
+/// per beat, the first carrying the `--lines` first screen and
+/// later ones only what the cursor has not seen. Level filtering
 /// applies to the tail and to every beat alike.
 async fn run_service_logs(
+    client: &DaemonClient,
     service: &str,
     lines: Option<u32>,
     follow: bool,
     level: Option<LogLevel>,
 ) -> Result<()> {
-    let root = Path::new(SERVICE_LOG_ROOT);
-    let files = service_log_files(root, service)?;
-    let n = lines.unwrap_or(SERVICE_DEFAULT_LINES).min(MAX_LINES) as usize;
-    let tail = keep_level(&merged_tail(&files, n)?, level);
-    if tail.is_empty() && !follow {
-        println!("(no matching lines)");
-    }
-    for line in &tail {
-        println!("{line}");
-    }
-    if !follow {
-        return Ok(());
-    }
-    let latest = files
-        .last()
-        .expect("service_log_files returns a non-empty set");
-    let offset = std::fs::metadata(latest).map(|m| m.len()).unwrap_or(0);
-    let mut state = FollowState {
-        file: latest.clone(),
-        offset,
-    };
+    let lines = lines.map(|n| n.min(MAX_LINES));
+    let mut cursor: Option<LogCursor> = None;
     loop {
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        let fresh = keep_level(&poll_service_increment(root, service, &mut state)?, level);
-        for line in &fresh {
-            println!("{line}");
+        let body = RequestBody::ServiceLog {
+            service: service.to_string(),
+            lines,
+            cursor: cursor.clone(),
+        };
+        let response = client
+            .call(body)
+            .await
+            .context("talking to the kallipai daemon")?;
+        match response.body {
+            ResponseBody::Ok {
+                payload: OkPayload::Log { text, next_cursor },
+            } => {
+                if cursor_lost(cursor.as_ref(), next_cursor.as_ref()) {
+                    eprintln!("log cursor regressed or the log set changed; re-baselining");
+                }
+                let screen = text.lines().map(str::to_string).collect::<Vec<_>>();
+                let kept = keep_level(&screen, level);
+                match (kept.is_empty(), follow) {
+                    (true, false) => println!("(no matching lines)"),
+                    (true, true) => {}
+                    (false, _) => {
+                        for line in &kept {
+                            println!("{line}");
+                        }
+                    }
+                }
+                cursor = next_cursor;
+            }
+            ResponseBody::Err { code, message } => {
+                anyhow::bail!("{}: {message}", error_prefix(code))
+            }
+            other => anyhow::bail!("unexpected response: {other:?}"),
         }
+        if !follow {
+            return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }
 }
 
@@ -1086,6 +997,11 @@ fn print(response: Response, started: bool) -> Result<()> {
                         print_log_text(&text);
                     }
                 }
+                // The service-log verbs print their own output (the
+                // tail loop and the listing shape), so this payload
+                // never routes here; the arm keeps the match
+                // exhaustive.
+                OkPayload::ServiceLogList { .. } => {}
             }
             Ok(())
         }
@@ -1443,101 +1359,52 @@ fn complete_slug(current: &OsStr) -> Vec<CompletionCandidate> {
     })
 }
 
+/// Dynamic completion for --service arguments: ask the daemon which
+/// polis services have logs on this host and offer their names.
+/// Same degradation rule as complete_slug: no socket path or IPC
+/// error ever reaches the shell's input line.
+fn complete_service(current: &OsStr) -> Vec<CompletionCandidate> {
+    use kallipai_daemon_common::wire::RequestBody;
+    use kallipai_daemon_common::wire::ResponseBody;
+
+    // The hook runs before any tokio runtime is up, so a throwaway
+    // current-thread runtime drives the async UDS client here.
+    let rt = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(_) => return Vec::new(),
+    };
+    let prefix = current.to_string_lossy();
+    rt.block_on(async move {
+        let candidates = kallipai_daemon_common::socket::candidates_from_env(None);
+        let socket = match kallipai_daemon_common::socket::probe(&candidates) {
+            Ok(socket) => socket,
+            Err(_) => return Vec::new(),
+        };
+        let client = DaemonClient::new(socket);
+        let response = match client.call(RequestBody::ServiceLogList).await {
+            Ok(response) => response,
+            Err(_) => return Vec::new(),
+        };
+        let ResponseBody::Ok {
+            payload: kallipai_daemon_common::wire::OkPayload::ServiceLogList { services },
+        } = response.body
+        else {
+            return Vec::new();
+        };
+        services
+            .into_iter()
+            .filter(|service| service.starts_with(prefix.as_ref()))
+            .map(CompletionCandidate::new)
+            .collect()
+    })
+}
+
 #[cfg(test)]
 mod service_logs_tests {
     use super::*;
-
-    fn fixture_root() -> (tempfile::TempDir, PathBuf) {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path().join("kallipai");
-        std::fs::create_dir_all(&root).unwrap();
-        (dir, root)
-    }
-
-    fn write_log(root: &Path, service: &str, name: &str, text: &str) {
-        let dir = root.join(service);
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join(name), text).unwrap();
-    }
-
-    #[test]
-    fn list_service_dirs_lists_directories_sorted() {
-        let (_guard, root) = fixture_root();
-        write_log(&root, "lesche", "lesche.2026-09-26.log", "b\n");
-        write_log(&root, "archeion", "archeion.2026-09-26.log", "a\n");
-        std::fs::write(root.join("stray-file"), b"").unwrap();
-        let services = list_service_dirs(&root).unwrap();
-        assert_eq!(services, vec!["archeion".to_string(), "lesche".to_string()]);
-    }
-
-    #[test]
-    fn list_service_dirs_missing_root_names_the_container_path() {
-        let missing = Path::new("/nonexistent-kallipai-logs");
-        let err = list_service_dirs(missing).unwrap_err().to_string();
-        assert!(err.contains("docker logs"), "hint missing: {err}");
-        assert!(
-            err.contains("/nonexistent-kallipai-logs"),
-            "path missing: {err}"
-        );
-    }
-
-    #[test]
-    fn service_log_files_orders_days_oldest_first() {
-        let (_guard, root) = fixture_root();
-        write_log(&root, "archeion", "archeion.2026-09-27.log", "new\n");
-        write_log(&root, "archeion", "archeion.2026-09-26.log", "old\n");
-        let files = service_log_files(&root, "archeion").unwrap();
-        let names: Vec<String> = files
-            .iter()
-            .map(|f| f.file_name().unwrap().to_string_lossy().into_owned())
-            .collect();
-        assert_eq!(
-            names,
-            vec!["archeion.2026-09-26.log", "archeion.2026-09-27.log"]
-        );
-    }
-
-    #[test]
-    fn service_log_files_missing_dir_says_the_container_hint() {
-        let (_guard, root) = fixture_root();
-        let err = service_log_files(&root, "archeion")
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("docker logs"), "hint missing: {err}");
-    }
-
-    #[test]
-    fn service_log_files_empty_dir_says_no_files_yet() {
-        let (_guard, root) = fixture_root();
-        std::fs::create_dir_all(root.join("archeion")).unwrap();
-        let err = service_log_files(&root, "archeion")
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("no log files"), "shape missing: {err}");
-    }
-
-    #[test]
-    fn merged_tail_spans_files_oldest_to_newest() {
-        let dir = tempfile::tempdir().unwrap();
-        let old = dir.path().join("a.2026-09-26.log");
-        let new = dir.path().join("a.2026-09-27.log");
-        std::fs::write(&old, "1\n2\n3\n").unwrap();
-        std::fs::write(&new, "4\n5\n").unwrap();
-        let tail = merged_tail(&[old, new], 3).unwrap();
-        assert_eq!(
-            tail,
-            vec!["3".to_string(), "4".to_string(), "5".to_string()]
-        );
-    }
-
-    #[test]
-    fn merged_tail_larger_than_total_returns_everything() {
-        let dir = tempfile::tempdir().unwrap();
-        let only = dir.path().join("a.2026-09-26.log");
-        std::fs::write(&only, "1\n2\n").unwrap();
-        let tail = merged_tail(&[only], 50).unwrap();
-        assert_eq!(tail, vec!["1".to_string(), "2".to_string()]);
-    }
 
     #[test]
     fn keep_level_filters_on_the_level_word() {
@@ -1550,101 +1417,6 @@ mod service_logs_tests {
         let errors = keep_level(&lines, Some(LogLevel::Error));
         assert_eq!(errors, vec!["2026-09-27T10:00:01Z ERROR boom".to_string()]);
         assert_eq!(keep_level(&lines, Some(LogLevel::Debug)).len(), 0);
-    }
-
-    #[test]
-    fn lines_since_holds_back_a_partial_trailing_line() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("a.2026-09-26.log");
-        std::fs::write(&path, "one\ntwo").unwrap();
-        let (lines, offset) = lines_since(&path, 0).unwrap();
-        assert_eq!(lines, vec!["one".to_string()]);
-        assert_eq!(offset, 4);
-        std::fs::write(&path, "one\ntwo\nthree\n").unwrap();
-        let (lines, offset) = lines_since(&path, offset).unwrap();
-        assert_eq!(lines, vec!["two".to_string(), "three".to_string()]);
-        assert_eq!(offset, 14);
-    }
-
-    #[test]
-    fn lines_since_rebaselines_a_shrunk_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("a.2026-09-26.log");
-        std::fs::write(&path, "one\ntwo\nthree\n").unwrap();
-        let (_, offset) = lines_since(&path, 0).unwrap();
-        std::fs::write(&path, "fresh\n").unwrap();
-        let (lines, offset) = lines_since(&path, offset).unwrap();
-        assert_eq!(lines, vec!["fresh".to_string()]);
-        assert_eq!(offset, 6);
-    }
-
-    #[test]
-    fn poll_follows_the_same_day_and_then_the_rotation() {
-        let dir_guard = tempfile::tempdir().unwrap();
-        let root = dir_guard.path().join("kallipai");
-        write_log(&root, "archeion", "archeion.2026-09-26.log", "d1a\nd1b\n");
-        let files = service_log_files(&root, "archeion").unwrap();
-        let latest = files.last().unwrap().clone();
-        let offset = std::fs::metadata(&latest).unwrap().len();
-        let mut state = FollowState {
-            file: latest,
-            offset,
-        };
-
-        std::fs::write(
-            root.join("archeion/archeion.2026-09-26.log"),
-            "d1a\nd1b\nd1c\n",
-        )
-        .unwrap();
-        let fresh = poll_service_increment(&root, "archeion", &mut state).unwrap();
-        assert_eq!(fresh, vec!["d1c".to_string()]);
-
-        write_log(&root, "archeion", "archeion.2026-09-27.log", "d2a\n");
-        let fresh = poll_service_increment(&root, "archeion", &mut state).unwrap();
-        assert_eq!(fresh, vec!["d2a".to_string()]);
-        assert!(state.file.ends_with("archeion.2026-09-27.log"));
-    }
-
-    #[test]
-    fn poll_rebaselines_when_the_recorded_file_leaves_the_set() {
-        let dir_guard = tempfile::tempdir().unwrap();
-        let root = dir_guard.path().join("kallipai");
-        write_log(&root, "archeion", "archeion.2026-09-26.log", "old\n");
-        let files = service_log_files(&root, "archeion").unwrap();
-        let mut state = FollowState {
-            file: files[0].clone(),
-            offset: 0,
-        };
-        std::fs::remove_file(&state.file).unwrap();
-        write_log(&root, "archeion", "archeion.2026-09-27.log", "new\n");
-        let fresh = poll_service_increment(&root, "archeion", &mut state).unwrap();
-        assert_eq!(fresh, vec!["new".to_string()]);
-        assert!(state.file.ends_with("archeion.2026-09-27.log"));
-    }
-
-    #[test]
-    fn poll_crosses_multiple_new_files_in_one_beat() {
-        let dir_guard = tempfile::tempdir().unwrap();
-        let root = dir_guard.path().join("kallipai");
-        write_log(&root, "archeion", "archeion.2026-09-25.log", "d0\n");
-        let files = service_log_files(&root, "archeion").unwrap();
-        let latest = files.last().unwrap().clone();
-        let offset = std::fs::metadata(&latest).unwrap().len();
-        let mut state = FollowState {
-            file: latest,
-            offset,
-        };
-
-        // Two rotations land between two beats: the beat finishes the
-        // recorded day and carries both newer days in order.
-        write_log(&root, "archeion", "archeion.2026-09-26.log", "d1a\nd1b\n");
-        write_log(&root, "archeion", "archeion.2026-09-27.log", "d2a\n");
-        let fresh = poll_service_increment(&root, "archeion", &mut state).unwrap();
-        assert_eq!(
-            fresh,
-            vec!["d1a".to_string(), "d1b".to_string(), "d2a".to_string()]
-        );
-        assert!(state.file.ends_with("archeion.2026-09-27.log"));
     }
 
     #[test]

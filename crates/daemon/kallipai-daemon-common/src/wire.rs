@@ -117,6 +117,24 @@ pub enum RequestBody {
         #[serde(default)]
         cursor: Option<LogCursor>,
     },
+    /// Tail a polis service's own rolling logs (the tree systemd's
+    /// `LogsDirectory=kallipai/<service>` lays out) with the same
+    /// read-only shape and cursor contract as the instance Log verb:
+    /// `lines` is the request intent (clamped like Log's), `cursor`
+    /// continues a previous pull (the `--follow` contract). New
+    /// fields must stay `#[serde(default)]` (the additive-evolution
+    /// rule).
+    ServiceLog {
+        service: String,
+        #[serde(default)]
+        lines: Option<u32>,
+        #[serde(default)]
+        cursor: Option<LogCursor>,
+    },
+    /// The polis services that have a log directory on this host:
+    /// `logs --service` completion and the bare `logs` listing ride
+    /// the same endpoint the tail itself reads.
+    ServiceLogList,
     /// List all managed instances (directory scan).
     List,
     /// Read an instance's persisted env pairs (the record copy, not the
@@ -187,6 +205,11 @@ pub enum OkPayload {
         text: String,
         #[serde(default)]
         next_cursor: Option<LogCursor>,
+    },
+    /// The services with a log directory, sorted: the completion and
+    /// listing source for `logs --service`.
+    ServiceLogList {
+        services: Vec<String>,
     },
     Stop {
         slug: String,
@@ -511,6 +534,54 @@ mod tests {
         let line = encode_response(&ok(without.clone())).expect("encode");
         let back = decode_response(&line).expect("decode");
         assert_eq!(back.body, ResponseBody::Ok { payload: without });
+    }
+
+    #[test]
+    fn service_log_request_round_trips_with_all_fields() {
+        let body = RequestBody::ServiceLog {
+            service: "kallipai-archeion".into(),
+            lines: Some(50),
+            cursor: Some(LogCursor {
+                file: "kallipai-archeion.2026-10-09.log".into(),
+                byte: 2048,
+            }),
+        };
+        let line = encode_request(&request(body.clone())).expect("encode");
+        let back = decode_request(&line).expect("decode");
+        assert_eq!(back.body, body);
+    }
+
+    #[test]
+    fn service_log_request_defaults_every_optional_field() {
+        // Same additive rule as Log's: a service-only payload decodes
+        // with the daemon-chosen line count and no follow cursor.
+        let line = r#"{"v":1,"type":"service_log","service":"kallipai-lesche"}"#;
+        let back = decode_request(line).expect("decode");
+        match back.body {
+            RequestBody::ServiceLog {
+                service,
+                lines,
+                cursor,
+            } => {
+                assert_eq!(service, "kallipai-lesche");
+                assert_eq!(lines, None);
+                assert_eq!(cursor, None);
+            }
+            other => panic!("expected service_log, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn service_log_list_round_trips_both_ways() {
+        let line = r#"{"v":1,"type":"service_log_list"}"#;
+        let back = decode_request(line).expect("decode");
+        assert_eq!(back.body, RequestBody::ServiceLogList);
+        let payload = OkPayload::ServiceLogList {
+            services: vec!["kallipai-daemon".into(), "kallipai-files".into()],
+        };
+        let line = encode_response(&ok(payload.clone())).expect("encode");
+        let back = decode_response(&line).expect("decode");
+        assert_eq!(back.body, ResponseBody::Ok { payload });
     }
 
     #[test]

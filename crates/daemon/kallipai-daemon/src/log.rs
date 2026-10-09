@@ -3,6 +3,8 @@
 //! directory, and writes nothing — not the record area, not the data
 //! directory, not the log tree. A stopped instance reads exactly like
 //! a running one: the logs are output residue on disk.
+//! The service variants (`service_tail`, `list_services`) apply the
+//! same machinery to the polis services' own log tree.
 //!
 //! Log placement is owner-aware: the tree lives in the instance's
 //! TARGET USER's state home (`<home>/.local/state/kallipai/tagmata/<slug>/logs`),
@@ -523,6 +525,116 @@ fn continue_from(
     });
     (builder.text(), Some(next))
 }
+/// The polis services' log root on a systemd host: each service owns
+/// `<root>/<service>/` (systemd `LogsDirectory=kallipai/<service>`).
+/// Container deployments log inside their containers instead, so an
+/// absent root reads as "no services on this host".
+pub const SERVICE_LOG_ROOT: &str = "/var/log/kallipai";
+
+/// Service mode's tail depth; the instance mode keeps its own twenty.
+pub const SERVICE_DEFAULT_LINES: u32 = 50;
+
+#[derive(Debug, thiserror::Error)]
+pub enum ServiceLogError {
+    /// An unknown service name, or one that is not a single safe
+    /// path segment: the same answer either way, so the verb cannot
+    /// probe which directory names exist.
+    #[error("no service logs for {0:?} on this host")]
+    NotFound(String),
+    /// The service log root is absent: the container-deployment
+    /// shape, where services log inside their containers.
+    #[error(
+        "no service log root at {0}; container deployments log inside the containers -- use docker logs there"
+    )]
+    NoRoot(String),
+}
+
+impl From<&ServiceLogError> for ErrorCode {
+    fn from(error: &ServiceLogError) -> Self {
+        match error {
+            ServiceLogError::NotFound(_) | ServiceLogError::NoRoot(_) => ErrorCode::NotFound,
+        }
+    }
+}
+
+/// A service name is one safe path segment: non-empty, no separators,
+/// and the lower grammar systemd unit names carry. Anything else
+/// answers NotFound without touching the filesystem (the name must
+/// not become a traversal probe).
+fn valid_service_name(service: &str) -> bool {
+    !service.is_empty()
+        && service != "."
+        && service != ".."
+        && service
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
+/// The services that have a log directory under `root`, sorted. The
+/// completion and the bare `logs` listing read this same list.
+pub fn list_services(root: &Path) -> Result<Vec<String>, ServiceLogError> {
+    let entries = match std::fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(_) => return Err(ServiceLogError::NoRoot(root.display().to_string())),
+    };
+    let mut services: Vec<String> = entries
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.path().is_dir())
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .collect();
+    services.sort();
+    Ok(services)
+}
+
+/// The retained files of one service directory: regular files sorted by
+/// name (daily `<service>.<date>.log` rolls sort in date order). The
+/// instance listing keeps only `instance*` names; service trees are
+/// dedicated log directories, so every file counts.
+fn list_service_log_files(dir: &Path) -> Vec<LogFile> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut files: Vec<LogFile> = entries
+        .flatten()
+        .filter(|entry| entry.file_type().map(|t| t.is_file()).unwrap_or(false))
+        .filter_map(|entry| {
+            let name = entry.file_name().into_string().ok()?;
+            let len = entry.metadata().ok()?.len();
+            Some(LogFile {
+                name,
+                path: entry.path(),
+                len,
+            })
+        })
+        .collect();
+    files.sort_by(|a, b| a.name.cmp(&b.name));
+    files
+}
+/// Tail a polis service's rolling logs with the instance tail's exact
+/// budget and cursor machinery; the differences are where the files
+/// come from (the service's own directory) and the default line count.
+/// Read-only, like the instance verb.
+pub fn service_tail(
+    root: &Path,
+    service: &str,
+    lines: Option<u32>,
+    cursor: Option<&LogCursor>,
+) -> Result<LogOutcome, ServiceLogError> {
+    if !valid_service_name(service) {
+        return Err(ServiceLogError::NotFound(service.to_string()));
+    }
+    let dir = root.join(service);
+    if !dir.is_dir() {
+        return Err(ServiceLogError::NotFound(service.to_string()));
+    }
+    let files = list_service_log_files(&dir);
+    let max_lines = lines.unwrap_or(SERVICE_DEFAULT_LINES).min(MAX_LINES);
+    let (text, next_cursor) = match cursor {
+        Some(cur) => continue_from(&files, cur, max_lines),
+        None => fresh_tail(&files, max_lines),
+    };
+    Ok(LogOutcome { text, next_cursor })
+}
 
 #[cfg(test)]
 mod tests {
@@ -1024,5 +1136,96 @@ mod tests {
             peek(&first),
             ("whole\npartia", Some(("instance.2026-09-09.log", 12)))
         );
+    }
+
+    #[test]
+    fn service_tail_merges_rolls_oldest_to_newest() {
+        let root = tempdir();
+        write(
+            &root
+                .path()
+                .join("kallipai-lesche/kallipai-lesche.2026-10-08.log"),
+            "d8-a\nd8-b\n",
+        );
+        write(
+            &root
+                .path()
+                .join("kallipai-lesche/kallipai-lesche.2026-10-09.log"),
+            "d9-a\n",
+        );
+        let out = service_tail(root.path(), "kallipai-lesche", Some(3), None).expect("tail");
+        assert_eq!(
+            peek(&out),
+            (
+                "d8-a\nd8-b\nd9-a",
+                Some(("kallipai-lesche.2026-10-09.log", 5))
+            )
+        );
+    }
+
+    #[test]
+    fn service_tail_defaults_to_fifty_lines() {
+        let root = tempdir();
+        let mut text = String::new();
+        for i in 0..60 {
+            text.push_str(&format!("line-{i:02}\n"));
+        }
+        write(
+            &root
+                .path()
+                .join("kallipai-files/kallipai-files.2026-10-09.log"),
+            &text,
+        );
+        let out = service_tail(root.path(), "kallipai-files", None, None).expect("tail");
+        let lines: Vec<&str> = out.text.lines().collect();
+        assert_eq!(lines.len(), 50);
+        assert_eq!(lines[0], "line-10");
+        assert_eq!(lines[49], "line-59");
+    }
+
+    #[test]
+    fn service_tail_cursor_pulls_only_new_lines() {
+        let root = tempdir();
+        let path = root
+            .path()
+            .join("kallipai-keryx/kallipai-keryx.2026-10-09.log");
+        write(&path, "one\ntwo\n");
+        let first = service_tail(root.path(), "kallipai-keryx", Some(5), None).expect("first");
+        let cursor = first.next_cursor.expect("cursor");
+        std::fs::write(&path, "one\ntwo\nthree\n").expect("append");
+        let second =
+            service_tail(root.path(), "kallipai-keryx", Some(5), Some(&cursor)).expect("second");
+        assert_eq!(second.text, "three");
+    }
+
+    #[test]
+    fn service_tail_rejects_unsafe_and_unknown_names() {
+        let root = tempdir();
+        write(
+            &root.path().join("kallipai-files/kallipai-files.log"),
+            "x\n",
+        );
+        for bad in ["../escape", "with/slash", "", ".", "..", "Upper"] {
+            let err = service_tail(root.path(), bad, None, None).expect_err("rejected");
+            assert!(
+                matches!(err, ServiceLogError::NotFound(_)),
+                "{bad}: {err:?}"
+            );
+        }
+        let err = service_tail(root.path(), "absent-service", None, None).expect_err("unknown");
+        assert!(matches!(err, ServiceLogError::NotFound(_)));
+    }
+
+    #[test]
+    fn list_services_sorts_directories_and_flags_missing_root() {
+        let root = tempdir();
+        write(&root.path().join("kallipai-b/keep.log"), "x\n");
+        write(&root.path().join("kallipai-a/keep.log"), "x\n");
+        std::fs::write(root.path().join("plain-file"), "x").expect("plain file");
+        let services = list_services(root.path()).expect("list");
+        assert_eq!(services, vec!["kallipai-a", "kallipai-b"]);
+        let err = list_services(Path::new("/nonexistent-service-root")).expect_err("no root");
+        assert!(matches!(err, ServiceLogError::NoRoot(_)));
+        assert!(err.to_string().contains("docker logs"));
     }
 }
