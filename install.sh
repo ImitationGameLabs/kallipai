@@ -158,8 +158,8 @@ if [ "$ACTION" = "uninstall" ]; then
     echo "  state tree:   sudo rm -rf $SYS_STATE_ROOT"
     echo "  users/groups: kallipai-archeion kallipai-lesche kallipai-keryx"
     echo "                kallipai-files kallipai-instances kallipai-model-gateway (users),"
-    echo "                their primary groups, kallipai-polis and"
-    echo "                kallipai-daemon (gate groups)"
+    echo "                their shared primary group kallipai-polis,"
+    echo "                and kallipai (the socket gate group)"
   else
     echo
     echo "Kept for data safety: $HOME/.local/share/kallipai is untouched."
@@ -237,21 +237,17 @@ if [ "$SYSTEM_MODE" = 1 ]; then
   }
   # The platform gate group and the daemon socket gate group.
   ensure_group kallipai-polis
-  ensure_group kallipai-daemon
-  # Per-service primary groups, then the users (NixOS module mirror:
-  # lesche/keryx/files/model-gateway ride kallipai-polis; instances is
-  # that also joins the daemon socket gate. The archeion account
-  # deliberately carries no supplementary group: its unit already runs
-  # with the platform gate group as its primary.
-  for svc in archeion lesche keryx files model-gateway instances; do
-    ensure_group "kallipai-$svc"
-  done
-  ensure_user kallipai-archeion kallipai-archeion ""
-  ensure_user kallipai-lesche   kallipai-lesche   kallipai-polis
-  ensure_user kallipai-keryx    kallipai-keryx    kallipai-polis
-  ensure_user kallipai-files    kallipai-files    kallipai-polis
-  ensure_user kallipai-model-gateway kallipai-model-gateway kallipai-polis
-  ensure_user kallipai-instances kallipai-instances "kallipai-polis,kallipai-daemon"
+  ensure_group kallipai
+  # Dedicated users with the platform gate group as their primary
+  # (NixOS module mirror: polis is a trust domain; private state
+  # stays private through mode). Instances is the one polis user
+  # that also joins the daemon socket gate.
+  ensure_user kallipai-archeion kallipai-polis ""
+  ensure_user kallipai-lesche   kallipai-polis ""
+  ensure_user kallipai-keryx    kallipai-polis ""
+  ensure_user kallipai-files    kallipai-polis ""
+  ensure_user kallipai-model-gateway kallipai-polis ""
+  ensure_user kallipai-instances kallipai-polis kallipai
 
   step "rendering systemd units"
   # Two real forms carry the templates: the unpacked payload (the

@@ -132,21 +132,21 @@ in
 
 ## rootless 使用
 
-要用 `kallipctl` 驱动 daemon，把用户加入 daemon 的 socket 组：控制 socket 位于 `/run/kallipai/daemon.sock`，仅对 `kallipai-daemon` 组开放（把 `<username>` 换成你的用户名）：
+要用 `kallipctl` 驱动 daemon，把用户加入 daemon 的 socket 组：控制 socket 位于 `/run/kallipai/daemon.sock`，仅对 `kallipai` 组开放（把 `<username>` 换成你的用户名）：
 
 ```nix
-users.users."<username>".extraGroups = [ "kallipai-daemon" ];
+users.users."<username>".extraGroups = [ "kallipai" ];
 ```
 
 ## 部署与验证
 
 在 NixOS Configuration 成功构建并切换到新的 Generation 之后，我们通过下面方式进行验证：
 
-检查六个 unit：
+检查七个 unit：
 
 ```sh
 systemctl status kallipai-daemon kallipai-archeion kallipai-lesche \
-  kallipai-files kallipai-instances kallipai-model-gateway
+  kallipai-keryx kallipai-files kallipai-instances kallipai-model-gateway
 ```
 
 然后确认三个域名都有响应：`api.kallipai.lan` 承载平台，`app.kallipai.lan` 承载 web 应用，`model-gw.kallipai.lan` 承载模型网关。部署健康的标志：应用能加载，能注册登录，能创建第一个 agent。网关提供健康端点：

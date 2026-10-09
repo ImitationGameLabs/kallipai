@@ -27,7 +27,7 @@ Environment=KALLIPAI_FILES_NOTIFY_URL=http://127.0.0.1:7210
 Environment=KALLIPAI_POLIS_INTERNAL_TOKEN_FILE=/var/lib/kallipai/archeion/internal-token
 ExecStart=@BINDIR@/kallipai-files
 User=kallipai-files
-Group=kallipai-files
+Group=kallipai-polis
 StateDirectory=kallipai/files
 LogsDirectory=kallipai/files
 StateDirectoryMode=0700

@@ -178,7 +178,7 @@ in
           access to the archeion's provisioned internal-token file: one
           declaration primitive shared by every platform-internal access
           path. The daemon's control socket is gated separately, by the
-          dedicated kallipai-daemon group, so socket admission does
+          dedicated kallipai group, so socket admission does
           not ride the platform gate. Deliberately not the generic
           `users` group -- that would hand access to every account on
           the host.
@@ -730,14 +730,14 @@ in
       # uid isolation the dedicated-user form exists for. The gate
       # group rides as an extra group — kernel group checks accept
       # supplementary membership, so the nix gate works unchanged. The
-      # daemon's control socket is gated separately (kallipai-daemon
+      # daemon's control socket is gated separately (kallipai
       # below): that group admits only actual socket consumers.
       users.groups = lib.listToAttrs (
         map (name: lib.nameValuePair name { }) (
           cfg.tagmaUsers
           ++ [
             cfg.group
-            "kallipai-daemon"
+            "kallipai"
           ]
         )
       );
@@ -801,7 +801,7 @@ in
           # Dedicated socket gate, not the shared platform gate: the group
           # admits only actual socket consumers. The tagma users keep the
           # nix gate (which the platform gate group carries) untouched.
-          KALLIPAI_DAEMON_SOCKET_GROUP = "kallipai-daemon";
+          KALLIPAI_DAEMON_SOCKET_GROUP = "kallipai";
           # Delegated administration: the polis gate contributes the
           # instances proxy's own account; the daemon refuses an
           # unresolvable name, so option and service drift is loud.
@@ -847,20 +847,20 @@ in
       };
     })
     (lib.mkIf polisCfg.enable {
-      # Dedicated users, per-user primary groups. The stateful services
-      # stay out of the daemon-socket gate group (kallipai-daemon):
-      # none of them consumes the socket. They ride the platform gate
-      # group only where the archeion token requires it.
-      users.groups = builtins.listToAttrs (
-        map (name: lib.nameValuePair name { }) [
-          "kallipai-archeion"
-          "kallipai-lesche"
-          "kallipai-keryx"
-          "kallipai-files"
-          "kallipai-instances"
-          "kallipai-model-gateway"
-        ]
-      );
+      # Dedicated users with the platform gate group as their primary.
+      # Polis is a trust domain: the 0640 internal-token file and the
+      # 0750 log directories are readable across the family by design
+      # (the archeion's state tree pioneered the shape, and management
+      # reads logs through the daemon socket, not group membership).
+      # Private state stays private through mode, not group: the 0700
+      # state trees deny group access, so no per-service primary group
+      # is needed. The daemon-socket gate group (kallipai, declared in
+      # the daemon block) admits only actual socket consumers: no user
+      # here joins it except instances.
+      # The platform gate group, declared here so a polis-only host
+      # (daemon off) still resolves every primary group; the daemon
+      # block re-declares it and the merge is idempotent.
+      users.groups.${cfg.group} = { };
       users.users =
         builtins.listToAttrs (
           map
@@ -868,14 +868,7 @@ in
               name:
               lib.nameValuePair name {
                 isSystemUser = true;
-                group = name;
-                # Consumers ride the platform gate group for the archeion's
-                # 0640 internal-token file. The daemon socket is gated
-                # separately (kallipai-daemon) and none of these users
-                # joins it. The archeion user keeps its primary group private;
-                # its unit runs with the gate group as primary instead, so
-                # membership rides the unit, not this user declaration.
-                extraGroups = lib.optionals (name != "kallipai-archeion") [ cfg.group ];
+                inherit (cfg) group;
               }
             )
             [
@@ -887,17 +880,13 @@ in
             ]
         )
         // {
-          # Explicit for symmetry with the map above; see its comment for
-          # the gate-group rationale.
+          # The one polis user that dials the daemon's control socket:
+          # the platform gate is its primary group, so the socket gate
+          # rides as the single extra group.
           kallipai-instances = {
             isSystemUser = true;
-            group = "kallipai-instances";
-            # The one polis user that dials the daemon's control socket:
-            # platform gate for the token, socket gate for the proxy.
-            extraGroups = [
-              cfg.group
-              "kallipai-daemon"
-            ];
+            inherit (cfg) group;
+            extraGroups = lib.optionals cfg.enable [ "kallipai" ];
           };
         };
 
@@ -1021,7 +1010,7 @@ in
           serviceConfig = {
             ExecStart = "${polisCfg.leschePackage}/bin/kallipai-lesche";
             User = "kallipai-lesche";
-            Group = "kallipai-lesche";
+            Group = cfg.group;
             StateDirectory = "kallipai/lesche";
             LogsDirectory = "kallipai/lesche";
             StateDirectoryMode = "0700";
@@ -1061,7 +1050,7 @@ in
           serviceConfig = {
             ExecStart = "${polisCfg.keryxPackage}/bin/kallipai-keryx";
             User = "kallipai-keryx";
-            Group = "kallipai-keryx";
+            Group = cfg.group;
             LogsDirectory = "kallipai/keryx";
             LogsDirectoryMode = "0750";
             Restart = "on-failure";
@@ -1106,7 +1095,7 @@ in
           serviceConfig = {
             ExecStart = "${polisCfg.filesPackage}/bin/kallipai-files";
             User = "kallipai-files";
-            Group = "kallipai-files";
+            Group = cfg.group;
             StateDirectory = "kallipai/files";
             LogsDirectory = "kallipai/files";
             StateDirectoryMode = "0700";
@@ -1150,7 +1139,7 @@ in
           serviceConfig = {
             ExecStart = "${polisCfg.instancesPackage}/bin/kallipai-instances";
             User = "kallipai-instances";
-            Group = "kallipai-instances";
+            Group = cfg.group;
             # State stays with the daemon (a pure UDS proxy mounts none);
             # the unit owns only its rolling log directory.
             LogsDirectory = "kallipai/instances";
@@ -1210,7 +1199,7 @@ in
         serviceConfig = {
           ExecStart = "${gatewayCfg.package}/bin/kallipai-model-gateway";
           User = "kallipai-model-gateway";
-          Group = "kallipai-model-gateway";
+          Group = cfg.group;
           # No local state: the durable surfaces all live in PostgreSQL.
           LogsDirectory = "kallipai/model-gateway";
           LogsDirectoryMode = "0750";

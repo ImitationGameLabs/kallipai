@@ -23,7 +23,7 @@ Environment=KALLIPAI_POLIS_INTERNAL_TOKEN_FILE=/var/lib/kallipai/archeion/intern
 Environment=KALLIPAI_INSTANCES_LOG_DIR=/var/log/kallipai/instances
 ExecStart=@BINDIR@/kallipai-instances
 User=kallipai-instances
-Group=kallipai-instances
+Group=kallipai-polis
 # State stays with the daemon (a pure UDS proxy mounts none); the
 # unit owns only its rolling log directory.
 LogsDirectory=kallipai/instances

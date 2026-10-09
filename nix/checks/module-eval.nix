@@ -380,20 +380,30 @@
       grep -q 'KALLIPAI_ARCHEION_COOKIE_SECURE=false' '${webTlsOffUnit}'
       test "${lib.boolToString webOverride.config.services.kallipai.polis.archeion.cookieSecure}" = "false"
 
-      # The gate-group handoff is single-tracked: the archeion unit runs
-      # with the gate group as primary (systemd keeps the state tree
-      # group-owned), consumers hold membership at the user layer, and
-      # no unit carries a SupplementaryGroups re-declaration.
+      # The polis gate is the primary group everywhere it matters:
+      # every service unit runs Group=kallipai-polis (systemd keeps
+      # the state and log trees group-owned inside the trust domain),
+      # the accounts carry the same primary, and no unit carries a
+      # SupplementaryGroups re-declaration.
       grep -q 'Group=kallipai-polis' '${webDerivedUnit}'
+      grep -q 'Group=kallipai-polis' '${polisLescheUnit}'
+      grep -q 'Group=kallipai-polis' '${polisKeryxUnit}'
+      grep -q 'Group=kallipai-polis' '${polisFilesUnit}'
+      grep -q 'Group=kallipai-polis' '${polisInstancesUnit}'
       test -z "$(grep SupplementaryGroups '${webDerivedUnit}')"
       test -z "$(grep SupplementaryGroups '${polisLescheUnit}')"
       test -z "$(grep SupplementaryGroups '${polisKeryxUnit}')"
       test -z "$(grep SupplementaryGroups '${polisFilesUnit}')"
       test -z "$(grep SupplementaryGroups '${polisInstancesUnit}')"
-      test "${toString (lib.elem "kallipai-polis" webDerived.config.users.users.kallipai-lesche.extraGroups)}" = "1"
-      test "${toString (lib.elem "kallipai-polis" webDerived.config.users.users.kallipai-keryx.extraGroups)}" = "1"
-      test "${toString (lib.elem "kallipai-polis" webDerived.config.users.users.kallipai-files.extraGroups)}" = "1"
-      test "${toString (lib.elem "kallipai-polis" webDerived.config.users.users.kallipai-instances.extraGroups)}" = "1"
+      test "${webDerived.config.users.users.kallipai-lesche.group}" = "kallipai-polis"
+      test "${webDerived.config.users.users.kallipai-keryx.group}" = "kallipai-polis"
+      test "${webDerived.config.users.users.kallipai-files.group}" = "kallipai-polis"
+      test "${webDerived.config.users.users.kallipai-instances.group}" = "kallipai-polis"
+      # The daemon socket gate is its own group (kallipai): the daemon
+      # unit hands the socket to it and only the instances account
+      # joins it at the user layer.
+      grep -q 'KALLIPAI_DAEMON_SOCKET_GROUP=kallipai' '${daemonUnitFile}'
+      test "${toString (lib.elem "kallipai" webDerived.config.users.users.kallipai-instances.extraGroups)}" = "1"
       # Every edge service's unit env carries the derived CORS allowlist;
       # one roster drives the six greps, so a new service needs one line.
       ${lib.concatMapStringsSep "\n      " (
@@ -435,9 +445,9 @@
       # URL and the shared internal token file ride the unit env.
       grep -q 'KALLIPAI_MODEL_GATEWAY_ARCHEION_URL=http://127.0.0.1:7100' '${gatewayUnit}'
       grep -q 'KALLIPAI_MODEL_GATEWAY_INTERNAL_TOKEN_FILE=/var/lib/kallipai/archeion/internal-token' '${gatewayUnit}'
-      # The gateway user rides the platform gate group: the 0640
-      # internal-token file is group-readable only through membership.
-      test "${toString (lib.elem "kallipai-polis" webDerived.config.users.users.kallipai-model-gateway.extraGroups)}" = "1"
+      # The gateway user's primary group is the platform gate: the
+      # 0640 internal-token file is group-readable through it.
+      test "${webDerived.config.users.users.kallipai-model-gateway.group}" = "kallipai-polis"
       # The domain derivation feeds the admin page CORS allowlist too.
       test "${webDerived.config.services.kallipai.polis.model-gateway.corsOrigins}" = "https://app.kallipai.com"
       # The gateway admin URL follows apiBase when the platform edge

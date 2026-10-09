@@ -26,7 +26,7 @@ Environment=KALLIPAI_MODEL_GATEWAY_ARCHEION_URL=http://127.0.0.1:7100
 Environment=KALLIPAI_MODEL_GATEWAY_INTERNAL_TOKEN_FILE=/var/lib/kallipai/archeion/internal-token
 ExecStart=@BINDIR@/kallipai-model-gateway
 User=kallipai-model-gateway
-Group=kallipai-model-gateway
+Group=kallipai-polis
 # No local state: the durable surfaces all live in PostgreSQL.
 LogsDirectory=kallipai/model-gateway
 LogsDirectoryMode=0750

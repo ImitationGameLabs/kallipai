@@ -137,22 +137,22 @@ in
 
 To drive the daemon with `kallipctl`, admit the user to the
 daemon's socket group: the control socket lives at
-`/run/kallipai/daemon.sock` and is gated to the `kallipai-daemon`
+`/run/kallipai/daemon.sock` and is gated to the `kallipai`
 group (replace `<username>` with your username):
 
 ```nix
-users.users."<username>".extraGroups = [ "kallipai-daemon" ];
+users.users."<username>".extraGroups = [ "kallipai" ];
 ```
 
 ## Deploy and Verify
 
 Once the NixOS configuration has built and switched to the new generation, verify the deployment as follows:
 
-Check the six units:
+Check the seven units:
 
 ```sh
 systemctl status kallipai-daemon kallipai-archeion kallipai-lesche \
-  kallipai-files kallipai-instances kallipai-model-gateway
+  kallipai-keryx kallipai-files kallipai-instances kallipai-model-gateway
 ```
 
 Then confirm the three hosts answer: `api.kallipai.lan` for the

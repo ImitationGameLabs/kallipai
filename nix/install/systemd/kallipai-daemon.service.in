@@ -19,7 +19,7 @@ Environment=KALLIPAI_DAEMON_SOCKET=/run/kallipai/daemon.sock
 Environment=KALLIPAI_DAEMON_RECORD_DIR=/var/lib/kallipai/daemon/instances
 # Dedicated socket gate, not the shared platform gate: the group admits
 # only actual socket consumers.
-Environment=KALLIPAI_DAEMON_SOCKET_GROUP=kallipai-daemon
+Environment=KALLIPAI_DAEMON_SOCKET_GROUP=kallipai
 # The system-level install always carries the polis face, and its
 # instances proxy delegates into the daemon; the daemon refuses an
 # unresolvable name, so this stays in step with what install.sh creates.

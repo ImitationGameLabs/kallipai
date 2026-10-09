@@ -26,7 +26,7 @@ Environment=KALLIPAI_KERYX_LOG_DIR=/var/log/kallipai/keryx
 Environment=KALLIPAI_POLIS_INTERNAL_TOKEN_FILE=/var/lib/kallipai/archeion/internal-token
 ExecStart=@BINDIR@/kallipai-keryx
 User=kallipai-keryx
-Group=kallipai-keryx
+Group=kallipai-polis
 LogsDirectory=kallipai/keryx
 LogsDirectoryMode=0750
 Restart=on-failure

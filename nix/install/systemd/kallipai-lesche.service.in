@@ -27,7 +27,7 @@ Environment=KALLIPAI_LESCHE_LOG_DIR=/var/log/kallipai/lesche
 Environment=KALLIPAI_POLIS_INTERNAL_TOKEN_FILE=/var/lib/kallipai/archeion/internal-token
 ExecStart=@BINDIR@/kallipai-lesche
 User=kallipai-lesche
-Group=kallipai-lesche
+Group=kallipai-polis
 StateDirectory=kallipai/lesche
 LogsDirectory=kallipai/lesche
 StateDirectoryMode=0700

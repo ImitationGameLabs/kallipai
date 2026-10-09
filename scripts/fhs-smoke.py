@@ -178,14 +178,14 @@ test -d /usr/local/lib/kallipai/*/bin
 for u in kallipai-daemon kallipai-archeion kallipai-lesche kallipai-keryx kallipai-files kallipai-model-gateway kallipai-instances; do
   test -f /usr/local/lib/kallipai/*/systemd/$u.service.in
 done
-for u in kallipai-archeion kallipai-lesche kallipai-files kallipai-model-gateway kallipai-instances; do
+for u in kallipai-archeion kallipai-lesche kallipai-keryx kallipai-files kallipai-model-gateway kallipai-instances; do
   getent passwd "$u" > /dev/null
-  getent group "$u" > /dev/null
+  id -nG "$u" | tr ' ' '\n' | grep -qx kallipai-polis
 done
 getent group kallipai-polis > /dev/null
-getent group kallipai-daemon > /dev/null
-id -nG kallipai-instances | tr ' ' '\n' | grep -qx kallipai-daemon
-for u in kallipai-daemon kallipai-archeion kallipai-lesche kallipai-files kallipai-model-gateway kallipai-instances; do
+getent group kallipai > /dev/null
+id -nG kallipai-instances | tr ' ' '\n' | grep -qx kallipai
+for u in kallipai-daemon kallipai-archeion kallipai-lesche kallipai-keryx kallipai-files kallipai-model-gateway kallipai-instances; do
   test -f "/etc/systemd/system/$u.service"
 done
 grep -q 'KALLIPAI_BIN_DIR=/usr/local/lib/kallipai/' /etc/systemd/system/kallipai-daemon.service
