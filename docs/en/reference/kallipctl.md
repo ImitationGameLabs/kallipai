@@ -15,34 +15,28 @@ is needed. Bare `kallipctl logs` lists the services that have logs.
 
 ## Shell completions
 
-`kallipctl` ships a hidden `generate` verb that prints a completion script
-for a given shell:
-
-```bash
-kallipctl generate bash    # or zsh, fish, elvish, powershell
-```
-
-On nix installs (the `kallipctl`, `kallipai-admin`, or `workspace` package)
-the scripts are generated at build time and installed automatically: bash,
-zsh, and fish completions land in the standard profile locations, and all
-five shells are kept under `share/kallipai/completions/kallipctl/` for
-manual installation elsewhere.
-
-For a non-nix install, wire the script into your shell's startup (bash
-example):
-
-```bash
-kallipctl generate bash > ~/.local/share/bash-completion/completions/kallipctl
-```
-
-## Dynamic completions (optional)
-
-The installed scripts complete subcommands and flags. For live value
-completion too (instance slugs, queried from the daemon as you type), source
-the dynamic hook instead. It degrades to no candidates when the daemon is
-unreachable, so typing is never blocked:
+Completion is dynamic: the hooks query the daemon live as you type
+(instance slugs, service names) and degrade to no candidates when the
+daemon is unreachable, so typing is never blocked:
 
 ```bash
 echo "source <(COMPLETE=bash kallipctl)" >> ~/.bashrc
 echo "source <(COMPLETE=zsh kallipctl)" >> ~/.zshrc
+```
+
+On nix installs (the `kallipctl` or `workspace` package) these hook
+scripts are generated at build time and installed
+automatically: bash, zsh, and fish land in the standard profile
+locations, and all five shells are kept under
+`share/kallipai/completions/kallipctl/`. Each hook script embeds the
+nix store path of its binary, so copying one to another host leaves it
+silent. Regenerate it on that host instead.
+
+The hidden `generate` verb prints the static (AOT) scripts: word lists
+baked at build time, no daemon queries. The nix install never uses
+them for kallipctl; they suit sealed environments that cannot run the
+CLI during completion:
+
+```bash
+kallipctl generate bash    # or zsh, fish, elvish, powershell
 ```

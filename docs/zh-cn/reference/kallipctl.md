@@ -13,30 +13,24 @@ polis 服务自身的日志可用 `logs --service <name>` 经守护进程追踪�
 
 ## Shell 补全
 
-`kallipctl` 内置隐藏的 `generate` 动词，按 shell 输出补全脚本：
-
-```bash
-kallipctl generate bash    # 可选 zsh、fish、elvish、powershell
-```
-
-nix 安装（`kallipctl`、`kallipai-admin` 或 `workspace` 包）在构建期生成并
-自动安装：bash、zsh、fish 补全落入各 shell 的标准 profile 路径；五种
-shell 的脚本同时保留在 `share/kallipai/completions/kallipctl/` 下，便于
-手工安装到其它环境。
-
-非 nix 安装可在 shell 启动脚本中接入（bash 示例）：
-
-```bash
-kallipctl generate bash > ~/.local/share/bash-completion/completions/kallipctl
-```
-
-## 动态补全（可选）
-
-安装的脚本覆盖子命令与旗标补全。若需值级实时补全（实例 slug，随输入向
-守护进程查询），改用动态钩子。守护进程不可达时自动退化为空候选，不会
-阻塞输入：
+补全是动态的：钩子随输入实时向守护进程查询（实例 slug、服务名）；
+守护进程不可达时自动退化为空候选，不会阻塞输入：
 
 ```bash
 echo "source <(COMPLETE=bash kallipctl)" >> ~/.bashrc
 echo "source <(COMPLETE=zsh kallipctl)" >> ~/.zshrc
+```
+
+nix 安装（`kallipctl` 或 `workspace` 包）在构建期生成这些钩子脚本
+并自动安装：bash、zsh、fish 落入各 shell 的标准 profile
+路径，五种 shell 的脚本同时保留在 `share/kallipai/completions/kallipctl/`
+下。每份钩子脚本内嵌其二进制的 nix store 路径，拷贝到其它主机会静默
+失效，应在目标主机重新生成。
+
+隐藏的 `generate` 动词输出静态（AOT）脚本：词表在构建期烧定、不查询
+守护进程。nix 安装不为 kallipctl 使用它们；适合补全时无法运行 CLI
+的封闭环境：
+
+```bash
+kallipctl generate bash    # 可选 zsh、fish、elvish、powershell
 ```

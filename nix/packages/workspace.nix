@@ -31,19 +31,21 @@ let
       }
     );
 
-  # Shell completions for the two operator CLIs: each binary carries a
-  # hidden `generate <shell>` verb (clap_complete) so the nix build can
-  # produce the scripts without a build.rs (the CLIs are single-file
-  # mains -- no library surface for a build script to reach). The three
-  # shells with standard profile locations install via
-  # installShellFiles; all five land under share/kallipai/completions
-  # so elvish/powershell users (no standard profile location) and
-  # non-nix installs can copy them by hand.
-  genCompletions = bins: ''
+  # Shell completions for the two operator CLIs. kallipctl takes the
+  # dynamic hooks (COMPLETE=$shell, clap_complete CompleteEnv): its slug
+  # and --service candidates are runtime daemon queries, and the AOT
+  # scripts the hidden generate verb emits bake the word lists at build
+  # time, so the dynamic completer never runs there. kallipai-admin has
+  # no dynamic candidates and keeps the AOT form. The three shells with
+  # standard profile locations install via installShellFiles; all five
+  # land under share/kallipai/completions. Only the admin's AOT scripts
+  # are portable by copy; the dynamic hooks bake this store path, so
+  # other hosts source them straight from the binary.
+  genCompletions = emit: bins: ''
     for binname in ${pkgs.lib.concatStringsSep " " bins}; do
       for shell in bash zsh fish elvish powershell; do
         mkdir -p $out/share/kallipai/completions/$binname
-        $out/bin/$binname generate $shell > $out/share/kallipai/completions/$binname/$shell
+        ${emit} > $out/share/kallipai/completions/$binname/$shell
       done
       installShellCompletion --cmd $binname \
         --bash $out/share/kallipai/completions/$binname/bash \
@@ -51,6 +53,11 @@ let
         --fish $out/share/kallipai/completions/$binname/fish
     done
   '';
+  # The two emit forms: the AOT verb every CLI carries, and the dynamic
+  # CompleteEnv hooks (the COMPLETE env var makes the binary print the
+  # hook script instead of running the CLI).
+  genAot = genCompletions "$out/bin/$binname generate $shell";
+  genDynamic = genCompletions "COMPLETE=$shell $out/bin/$binname";
 in
 {
   # The full workspace: every kallipai binary. This is `packages.default` and the
@@ -78,10 +85,8 @@ in
         wrapProgram $out/bin/kallipai-tagma \
           --set-default KALLIPAI_SKILLS_SEED ${sharedSkills}/share/kallipai/skills
       ''
-      + genCompletions [
-        "kallipctl"
-        "kallipai-admin"
-      ];
+      + genDynamic [ "kallipctl" ]
+      + genAot [ "kallipai-admin" ];
   });
   # The archeion control-plane server (pure HTTP/Postgres; no shell-out deps).
   archeion = buildCrate "cargo build --release -p kallipai-archeion";
@@ -92,7 +97,7 @@ in
   # operators run it against any reachable archeion.
   admin = (buildCrate "cargo build --release -p kallipai-admin").overrideAttrs (old: {
     nativeBuildInputs = (old.nativeBuildInputs or [ ]) ++ [ pkgs.installShellFiles ];
-    postInstall = (old.postInstall or "") + genCompletions [ "kallipai-admin" ];
+    postInstall = (old.postInstall or "") + genAot [ "kallipai-admin" ];
   });
   # The lesche relay (rooms, direct sessions, the agent SSE and presence;
   # no shell-out deps). Its own image so the archeion and lesche services
@@ -128,7 +133,7 @@ in
   daemon = buildCrate "cargo build --release -p kallipai-daemon";
   ctl = (buildCrate "cargo build --release -p kallipctl").overrideAttrs (old: {
     nativeBuildInputs = (old.nativeBuildInputs or [ ]) ++ [ pkgs.installShellFiles ];
-    postInstall = (old.postInstall or "") + genCompletions [ "kallipctl" ];
+    postInstall = (old.postInstall or "") + genDynamic [ "kallipctl" ];
   });
   daemon-spawn = buildCrate "cargo build --release -p kallipai-daemon-spawn";
   # The HTTP front door of the daemon family: proxies the bare resource
