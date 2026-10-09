@@ -7,6 +7,13 @@
 import type { WireParkedReason } from "@kallipai/kallipai-client";
 
 export function parkedReasonText(r: WireParkedReason): string {
+  // Unit variants arrive as bare strings (serde's externally tagged
+  // default); `in` demands an object, so narrow the string arm first.
+  if (typeof r === "string") {
+    return r === "maxRoundsExceeded"
+      ? "max rounds exceeded"
+      : "transient retries exhausted";
+  }
   if ("failoverChainExhausted" in r) {
     const v = r.failoverChainExhausted;
     return `failover chain exhausted (${v.reason}): ${v.detail}`;
@@ -15,6 +22,5 @@ export function parkedReasonText(r: WireParkedReason): string {
   if ("tokenBudgetExceeded" in r) {
     return `token budget exceeded (${r.tokenBudgetExceeded.consumed}/${r.tokenBudgetExceeded.budget})`;
   }
-  if ("maxRoundsExceeded" in r) return "max rounds exceeded";
   return "transient retries exhausted";
 }

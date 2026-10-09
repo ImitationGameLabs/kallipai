@@ -20,8 +20,9 @@ export type AgentState =
   | "parked"
   | "faulted";
 
-/** Why a parked agent parked: the tagma's `ParkedReason`, externally
- * tagged with camelCase variant keys; unit variants arrive as `null`. */
+/** Why a parked agent parked: the tagma's `ParkedReason`, serde's
+ * externally tagged default with camelCase variant keys: struct variants
+ * arrive as single-key objects, unit variants as bare strings. */
 export type WireParkedReason =
   | {
       readonly failoverChainExhausted: {
@@ -36,8 +37,8 @@ export type WireParkedReason =
         readonly budget: number;
       };
     }
-  | { readonly maxRoundsExceeded: null }
-  | { readonly transientRetryExhausted: null };
+  | "maxRoundsExceeded"
+  | "transientRetryExhausted";
 
 /** Armed chain-transient retry counters (`retrying` on summaries and
  * status responses). `retry_in_secs` is the relative backoff delay. */
