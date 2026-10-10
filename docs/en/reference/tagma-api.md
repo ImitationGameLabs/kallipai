@@ -459,10 +459,11 @@ readable is on disk.
 Operator only. Accepts a full config in the file's schema. Each
 endpoint's `api_key` is tri-state on the wire: `null` keeps the live
 key, the masked form echoed back also counts as keep, and a new string
-replaces it; `base_url` follows the same null-keeps rule (an empty
-string resets it to the family default). The request is merged against
-the live config and validated by building backends and a trial
-registry; on success the config is written to disk, the in-memory
+replaces it; `base_url` and `model_list_base_url` follow the same
+null-keeps rule (an empty string resets it: the family default for
+`base_url`, "same base as `base_url`" for the model list). The request is
+merged against the live config and validated by building backends and a
+trial registry; on success the config is written to disk, the in-memory
 registry is swapped as a unit, and running agents are unaffected until
 `POST /profiles/apply` (or their next restore). A config that drops a
 set a live agent still records answers `409` with the stranded
@@ -529,11 +530,27 @@ leaves the live bundle untouched. Responds with the same body as
 
 Operator only. Builds throwaway backends from the request: inline
 `endpoints` (`api_key: null` reuses the live key for that provider id,
-the same draft semantics as the masked PUT) and named `sets` whose
-profiles are checked against the fetched model catalogs, and probes
-them without registering anything, so a candidate config can be
-validated before a PUT. Capped at 64 endpoints and 64 set profiles per
-request. Responds with per-endpoint results and per-set reports.
+the same draft semantics as the masked PUT; `base_url` null keeps the
+live value and `model_list_base_url` does the same for the model list)
+and named `sets`, and probes them without registering anything, so a
+candidate config can be validated before a PUT. Capped at 64 endpoints
+and 64 set profiles per request. Responds with per-endpoint results
+and per-set reports.
+
+The two checks are independent. A **provider** result reports the
+reachability of the model list (`models_count`, or `balance` when the
+family has no list), fetched from `model_list_base_url` when set and
+from `base_url` otherwise; a provider whose list lives elsewhere fails
+this check alone. A **profile** result is the verdict of one minimal,
+billed chat completion through `base_url`: the model list never settles
+it, and a list that does not name the model rides alongside the verdict
+as `models_hint: not_listed`, advisory to `status` and `all_ok`. Only a
+profile whose provider resolves nowhere, or whose backend cannot be
+built, settles without a call, as `invalid_config`.
+
+The list does not gate the call: every set profile that resolves and
+builds is probed with a real call, even when its provider's list check
+failed — the per-request profile cap bounds that spend.
 
 ### External Chat-Room API
 

@@ -22,6 +22,7 @@
     common_remove,
     manage_profiles_provider_base_url_default,
     manage_profiles_provider_card_base_url_label,
+    manage_profiles_provider_card_model_list_base_url_label,
     manage_profiles_profile_provider_label,
     manage_profiles_provider_actions_aria,
     manage_profiles_providers,
@@ -97,9 +98,20 @@
               {manage_profiles_provider_card_base_url_label()}:
             </dt>
             <dd class="font-mono truncate min-w-0">
-              {ep.base_url ?? manage_profiles_provider_base_url_default()}
+              {ep.base_url || manage_profiles_provider_base_url_default()}
             </dd>
           </div>
+
+          {#if ep.model_list_base_url}
+            <div class="flex gap-2">
+              <dt class="opacity-60 shrink-0">
+                {manage_profiles_provider_card_model_list_base_url_label()}:
+              </dt>
+              <dd class="font-mono truncate min-w-0">
+                {ep.model_list_base_url}
+              </dd>
+            </div>
+          {/if}
           <div class="flex gap-2">
             <dt class="opacity-60 shrink-0">API key:</dt>
             <dd class="font-mono min-w-0 break-all">{ep.api_key}</dd>
@@ -113,9 +125,9 @@
             {#if report.latency_ms != null}
               <span class="opacity-60 ml-2">{report.latency_ms}ms</span>
             {/if}
-            {#if report.catalog_count != null}
+            {#if report.models_count != null}
               <span class="opacity-60 ml-2">
-                {modelsCountLabel(report.catalog_count)}
+                {modelsCountLabel(report.models_count)}
               </span>
             {/if}
             {#if report.detail}

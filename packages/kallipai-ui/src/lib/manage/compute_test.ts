@@ -7,6 +7,7 @@ import type {
   Modality,
   ProfileConfig,
   ProfileModel,
+  ProfileProvider,
   ProfileSet,
   TaskEventExport,
 } from "@kallipai/kallipai-client";
@@ -35,6 +36,7 @@ import {
   normalizeModalities,
   profileConfigEqual,
   profileConfigToWire,
+  providerFromDialog,
   profileModalities,
   removeProfile,
   removeProvider,
@@ -228,7 +230,13 @@ Deno.test("addSet: preserves existing sets, endpoints, and default", () => {
     sets: { a: { description: null, profiles: [] } },
     default: "a",
     endpoints: {
-      ep1: { id: "ep1", family: "deepseek", api_key: "", base_url: null },
+      ep1: {
+        id: "ep1",
+        family: "deepseek",
+        api_key: "",
+        base_url: null,
+        model_list_base_url: null,
+      },
     },
   };
   const r = addSet(base);
@@ -353,6 +361,7 @@ Deno.test("upsertProvider: inserts a new provider under its id", () => {
     family: "openai-compatible",
     api_key: "sk-x",
     base_url: "https://x.example/v1",
+    model_list_base_url: null,
   };
   const base = addProvider(emptyConfig, "ep1");
   const r = upsertProvider(base, ep);
@@ -369,6 +378,7 @@ Deno.test(
       family: "openai-compatible",
       api_key: "sk-new",
       base_url: null,
+      model_list_base_url: null,
     };
     const r = upsertProvider(base, updated);
     assertEquals(r.endpoints["ep1"], updated);
@@ -583,7 +593,13 @@ function draftConfig(apiKey: string | null): ProfileConfig {
     },
     default: "s1",
     endpoints: {
-      main: { id: "main", family: "deepseek", api_key: apiKey, base_url: null },
+      main: {
+        id: "main",
+        family: "deepseek",
+        api_key: apiKey,
+        base_url: null,
+        model_list_base_url: null,
+      },
     },
   };
 }
@@ -718,6 +734,120 @@ Deno.test("singleProviderProbeRequest: fresh key inline", () => {
     "main",
   );
   assertEquals(req!.endpoints[0].api_key, "sk-new");
+});
+
+Deno.test("probe bodies carry a provider's two bases", () => {
+  const base = draftConfig(maskedKey);
+  const draft: ProfileConfig = {
+    ...base,
+    endpoints: {
+      main: {
+        ...base.endpoints.main,
+        base_url: "https://api.example/v1",
+        model_list_base_url: "https://list.example/v1",
+      },
+    },
+  };
+
+  const all = buildProbeRequest(draftConfig(maskedKey), draft);
+  assertEquals(all.endpoints[0].base_url, "https://api.example/v1");
+  assertEquals(all.endpoints[0].model_list_base_url, "https://list.example/v1");
+
+  const single = singleProviderProbeRequest(
+    draftConfig(maskedKey),
+    draft,
+    "main",
+  );
+  assertEquals(
+    single!.endpoints[0].model_list_base_url,
+    "https://list.example/v1",
+  );
+});
+
+Deno.test("providerFromDialog: a blank clears a base the draft holds", () => {
+  const held: ProfileProvider = {
+    id: "main",
+    family: "deepseek",
+    api_key: "sk-live",
+    base_url: "https://live.example/v1",
+    model_list_base_url: "https://live-list.example/v1",
+  };
+  const next = providerFromDialog(
+    {
+      id: "main",
+      family: "deepseek",
+      baseUrl: "",
+      modelListBaseUrl: "",
+      apiKey: null,
+    },
+    held,
+  );
+  // A blank over a value the config carries is a real clear (the wire's "").
+  assertEquals(next.base_url, "");
+  assertEquals(next.model_list_base_url, "");
+  assertEquals(next.api_key, "sk-live");
+});
+
+Deno.test("providerFromDialog: a pending clear stays a clear", () => {
+  // After a failed save the draft itself holds "" — a clear waiting to go
+  // out. Reopening the dialog and saving again must keep that intent rather
+  // than reading the empty string as "no value" and reverting to a keep.
+  const held: ProfileProvider = {
+    id: "main",
+    family: "deepseek",
+    api_key: "sk-live",
+    base_url: "",
+    model_list_base_url: "",
+  };
+  const next = providerFromDialog(
+    {
+      id: "main",
+      family: "deepseek",
+      baseUrl: "",
+      modelListBaseUrl: "",
+      apiKey: null,
+    },
+    held,
+  );
+  assertEquals(next.base_url, "");
+  assertEquals(next.model_list_base_url, "");
+});
+
+Deno.test("providerFromDialog: an untouched blank stays null", () => {
+  const next = providerFromDialog(
+    {
+      id: "fresh",
+      family: "deepseek",
+      baseUrl: "",
+      modelListBaseUrl: "",
+      apiKey: "sk-new",
+    },
+    undefined,
+  );
+  // Nothing to clear: null keeps the new provider clean instead of dirtying
+  // the draft with empty strings.
+  assertEquals(next.base_url, null);
+  assertEquals(next.model_list_base_url, null);
+  assertEquals(next.api_key, "sk-new");
+});
+
+Deno.test("an emptied base travels as a clear, not a keep", () => {
+  const base = draftConfig(maskedKey);
+  const cleared: ProfileConfig = {
+    ...base,
+    endpoints: {
+      main: {
+        ...base.endpoints.main,
+        base_url: "",
+        model_list_base_url: "",
+      },
+    },
+  };
+  const wire = profileConfigToWire(cleared);
+  // The wire's null means keep on PUT: a blank field must reach the server
+  // as an empty string, which is the clearing form.
+  assertEquals(wire.endpoints.main.base_url, "");
+  assertEquals(wire.endpoints.main.model_list_base_url, "");
 });
 
 Deno.test("moveProfile: moves to the end of the target set", () => {

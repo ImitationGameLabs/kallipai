@@ -57,6 +57,7 @@
     manage_profiles_profile_dialog_model_label,
     manage_profiles_profile_modalities_label,
     manage_profiles_remove_profile,
+    manage_profiles_probe_models_hint,
     manage_profiles_test,
   } from "../../paraglide/messages.js";
 
@@ -84,7 +85,11 @@
      * new-mode duplicate check — advisory; PUT stays authoritative). */
     occupiedIds?: string[];
     /** Latest probe report for the in-form Test (rendered inline). */
-    probeReport?: { status: string; detail: string | null } | null;
+    probeReport?: {
+      status: string;
+      detail: string | null;
+      modelsHint?: "not_listed" | null;
+    } | null;
     onSave: (result: ProfileDialogResult) => void;
     onCancel: () => void;
     /** Probe the current form values without touching the draft. */
@@ -286,6 +291,11 @@
                 <span class="opacity-60 ml-2 font-mono break-all">
                   {probeReport.detail}
                 </span>
+              {/if}
+              {#if probeReport.modelsHint}
+                <div class="text-warning-500 dark:text-warning-400 mt-1">
+                  {manage_profiles_probe_models_hint()}
+                </div>
               {/if}
             </div>
           {/if}

@@ -12,7 +12,8 @@ and profile set are, and why each is its own layer), see
 ## Web Interface
 
 The Profiles page in the manage area is the day-to-day configuration surface.
-It maintains the endpoint pool (protocol family, key, `base_url`), organizes
+It maintains the endpoint pool (protocol family, key, `base_url`, and the
+optional `model_list_base_url`), organizes
 profile cards between named sets and a parking area by drag and drop, declares
 each profile's context window and modalities, transfers the default-set
 marker, and can run a connectivity probe against a set or a single profile.
@@ -124,9 +125,10 @@ description = "cheap delegation"
 
 - `family` must be one of `deepseek`, `openai-compatible`, `openai-responses`, `anthropic`.
 - `base_url` is required for `openai-compatible` and optional elsewhere: every other family falls back to its official endpoint when omitted.
+- `model_list_base_url` (optional) is the base the provider Test fetches the model list from; it defaults to `base_url` and exists for providers whose list lives at a different base. It takes a base, not the full model-list URL: the client appends `/models`.
 - `store` (optional, default `true`) keeps server-side conversation storage on, so `openai-responses` continues each turn from the stored chain; `store = false` (or any non-Responses family) replays the full conversation every turn.
 - `effort` (optional) requests a reasoning effort: `low`, `medium`, `high`, `xhigh`, or `max`. Providers honor it within their own limits (DeepSeek officially downgrades `medium` and `xhigh` to `high` per its [API reference](https://api-docs.deepseek.com/api/create-chat-completion)).
-- `${VAR}` in `api_key` / `base_url` is expanded from the process environment.
+- `${VAR}` in `api_key` / `base_url` / `model_list_base_url` is expanded from the process environment.
 - The config file should be `chmod 600` (the tagma warns if
   group/other-readable, since it may hold API keys).
 

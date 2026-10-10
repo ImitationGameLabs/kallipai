@@ -12,6 +12,12 @@ The provider-selection variables: [Tagma](../../reference/environment-variables/
 
 Model configuration has three layers. A **provider** is a backend endpoint: protocol family (`family`), key (`api_key`), and an optional `base_url`; it answers who receives the request. A **profile** binds one model to a provider endpoint and declares that combination's capabilities: the context window (`max_context_window`) and supported modalities (`modalities`); it answers which model is used and what it declares. A **profile set** is a named group of profiles forming a failover chain; it answers which group an agent is bound to.
 
+`base_url` carries the model calls; `model_list_base_url` (optional, default
+`base_url`) carries the model list the management UI fetches. A provider
+whose list lives at a different base — a gateway that serves `/models` on
+another path — sets it explicitly; the UI's provider Test checks that base,
+while a profile Test is always one real call through `base_url`.
+
 The layers relate like this: an agent never binds a single profile; it binds a profile set. The root agent uses the config's `default` set, and every subagent declares its own set at spawn time via `profile_set`. The set's first profile is the active model; the rest form the failover chain.
 
 Each layer exists on its own for a concrete reason.

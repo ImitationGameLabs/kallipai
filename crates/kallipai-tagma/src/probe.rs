@@ -6,14 +6,13 @@
 //! backends and exercises the zero-cost capability probes upstream offers
 //! (`ModelCatalog::list_models`, `Balance::get_balance`). Nothing is
 //! persisted and the live registry (`ArcSwap`) is untouched. Provider tests
-//! stay zero-cost, but a set profile that survives its catalog pre-check
-//! is verified with one minimal, billed chat completion (test prompt,
-//! 256-token cap) — that call is the profile Test's real verdict.
+//! stay zero-cost, but every set profile is verified with one minimal,
+//! billed chat completion (test prompt, 256-token cap) — that call alone is
+//! the profile Test's verdict; the model list is provider-level information.
 //!
 //! Statuses are layered so the UI can tell apart the failure classes an
 //! operator can act on differently: `invalid_config` (fix the definition),
-//! `unreachable` (network/endpoint down), `unauthorized` (credential), and
-//! `model_missing`-style catalog mismatch (checked per set profile).
+//! `unreachable` (network/endpoint down), `unauthorized` (credential).
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -36,8 +35,8 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 /// concurrent outbound connection, so an unbounded list is a self-DoS lever
 /// on an operator-only route.
 pub(crate) const MAX_PROBE_PROVIDERS: usize = 64;
-/// Upper bound on set profiles per request: every profile that survives the
-/// catalog pre-check fans out one real (billed) inference call, so an
+/// Upper bound on set profiles per request: every profile fans out one real
+/// (billed) inference call (the model list does not gate it), so an
 /// unbounded list is a spend lever on an operator-only route.
 pub(crate) const MAX_PROBE_PROFILES: usize = 64;
 
@@ -59,7 +58,7 @@ pub struct ProbeRequest {
     #[serde(default)]
     pub endpoints: Vec<ProbeProvider>,
     /// Named sets of profiles to check model names against the fetched
-    /// catalogs.
+    /// model lists.
     #[serde(default)]
     pub sets: Vec<ProbeSet>,
 }
@@ -70,6 +69,9 @@ pub struct ProbeProvider {
     pub family: String,
     pub api_key: Option<String>,
     pub base_url: Option<String>,
+    /// Tri-state, as the PUT body defines it: absent keeps the live value,
+    /// an empty string clears it (the rule both bases share).
+    pub model_list_base_url: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -89,15 +91,14 @@ pub struct ProbeProfile {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProbeStatus {
-    /// Catalog (or balance) came back — provider is reachable and authorized.
+    /// The model list (or balance) came back — reachable and authorized.
     Ok,
     /// Transport-level failure or timeout — nothing HTTP-shaped responded.
     Unreachable,
     /// HTTP 401/403 — the credential was rejected.
     Unauthorized,
-    /// The definition failed backend construction, the provider answered
-    /// with an unexpected HTTP status (404/429/5xx on the probe path), or a
-    /// set profile's model is absent from the provider's catalog.
+    /// The definition failed backend construction, or the provider answered
+    /// with an unexpected HTTP status (404/429/5xx on the probe path).
     InvalidConfig,
     /// Provider responded, but the family offers no zero-cost probe
     /// capability — liveness could not be established without a chat call.
@@ -111,17 +112,28 @@ pub struct ProviderReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub latency_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub catalog_count: Option<usize>,
+    pub models_count: Option<usize>,
     /// Serialized `BalanceSnapshot` when the family supports balance and it
     /// was fetched successfully.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub balance: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
-    /// Model ids from the catalog when fetched AND set checks were
+    /// Model ids from the list when fetched AND set checks were
     /// requested (the model-name verification needs the full list).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub models: Option<Vec<String>>,
+}
+
+/// The single advisory a profile report can carry: the provider's model list
+/// was fetched and does not name the model. The verdict itself always comes
+/// from the real call — a list that is absent, or unreachable, says nothing
+/// either way and stays silent here.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelsHint {
+    /// The list was fetched and does not name the model.
+    NotListed,
 }
 
 #[derive(Serialize)]
@@ -129,6 +141,10 @@ pub struct ProfileReport {
     pub profile_id: String,
     pub endpoint_id: String,
     pub status: ProbeStatus,
+    /// Advisory, never a verdict: the provider's model list was fetched and
+    /// does not name this model. Absent when the list says nothing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub models_hint: Option<ModelsHint>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
 }
@@ -148,7 +164,7 @@ pub struct ProbeResponse {
 
 /// Run the full probe: resolve the provider set against the live config,
 /// probe every endpoint concurrently, then settle set profiles in two
-/// stages (catalog pre-check, shared real inference). Bounds were already
+/// stages (model-list advice, shared real inference). Bounds were already
 /// enforced by the HTTP layer (`MAX_PROBE_PROVIDERS`/`MAX_PROBE_PROFILES`).
 pub(crate) async fn run_probe(state: &SharedState, request: ProbeRequest) -> ProbeResponse {
     let live = state.profiles.load().config.clone();
@@ -201,9 +217,9 @@ pub(crate) async fn run_probe(state: &SharedState, request: ProbeRequest) -> Pro
     .await;
     reports.append(&mut probed);
 
-    // Set checks run in two stages. Stage 1 settles every profile the
-    // per-provider reports already condemn (failed endpoint, catalog miss);
-    // catalog hits and catalog-less ok providers defer to stage 2 — one
+    // Set checks: the model list is advice, the real call is the verdict.
+    // Stage 1 settles only what config alone condemns (an unresolvable
+    // provider) and records the list's opinion as a hint; stage 2 runs one
     // minimal real inference per unique (provider, model), shared by every
     // profile that referenced the pair.
     let by_id: HashMap<&str, &ProviderReport> = reports
@@ -220,14 +236,16 @@ pub(crate) async fn run_probe(state: &SharedState, request: ProbeRequest) -> Pro
     struct PendingInference {
         endpoint_id: String,
         model: String,
+        hint: Option<ModelsHint>,
         coords: Vec<(usize, usize)>,
     }
     let mut pending: Vec<PendingInference> = Vec::new();
     for (t_idx, set) in request.sets.iter().enumerate() {
         for (p_idx, p) in set.profiles.iter().enumerate() {
-            match catalog_stage(p, by_id.get(p.endpoint.as_str()).copied()) {
-                CatalogStage::Settled(report) => settled[t_idx][p_idx] = Some(report),
-                CatalogStage::DeferInference => {
+            let resolvable = inference_pool.contains_key(p.endpoint.as_str());
+            match models_stage(p, by_id.get(p.endpoint.as_str()).copied(), resolvable) {
+                ModelsStage::Settled(report) => settled[t_idx][p_idx] = Some(report),
+                ModelsStage::Assess(hint) => {
                     match pending
                         .iter_mut()
                         .find(|job| job.endpoint_id == p.endpoint && job.model == p.model)
@@ -236,6 +254,7 @@ pub(crate) async fn run_probe(state: &SharedState, request: ProbeRequest) -> Pro
                         None => pending.push(PendingInference {
                             endpoint_id: p.endpoint.clone(),
                             model: p.model.clone(),
+                            hint,
                             coords: vec![(t_idx, p_idx)],
                         }),
                     }
@@ -250,23 +269,24 @@ pub(crate) async fn run_probe(state: &SharedState, request: ProbeRequest) -> Pro
         async move {
             let verdict = match def {
                 Some(def) => inference_verdict(factory, &def, &job.model, INFERENCE_TIMEOUT).await,
-                // Unreachable in practice: deferring requires an ok endpoint
-                // report, which only resolved providers produce.
+                // A profile reaches the real call when its provider is a pool
+                // member; a missing definition means that check condemned it.
                 None => (
                     ProbeStatus::InvalidConfig,
                     Some("provider was not probed".to_string()),
                 ),
             };
-            (verdict, job.coords)
+            (verdict, job.coords, job.hint)
         }
     });
-    for ((status, detail), coords) in join_all(jobs).await {
+    for ((status, detail), coords, hint) in join_all(jobs).await {
         for (t_idx, p_idx) in coords {
             let p = &request.sets[t_idx].profiles[p_idx];
             settled[t_idx][p_idx] = Some(ProfileReport {
                 profile_id: p.id.clone(),
                 endpoint_id: p.endpoint.clone(),
                 status,
+                models_hint: hint,
                 detail: detail.clone(),
             });
         }
@@ -302,17 +322,19 @@ fn invalid_config_report(endpoint_id: String, detail: String) -> ProviderReport 
         endpoint_id,
         status: ProbeStatus::InvalidConfig,
         latency_ms: None,
-        catalog_count: None,
+        models_count: None,
         balance: None,
         detail: Some(detail),
         models: None,
     }
 }
-/// Outcome of the catalog pre-check for one set profile: the report is
-/// either settled without spending tokens, or it defers to a real inference.
-enum CatalogStage {
+/// What the model list says about one set profile, and what happens next:
+/// the list never settles a verdict — only an unresolvable provider does —
+/// so a profile either carries a hint into the real call, or is settled as a
+/// config error without spending tokens.
+enum ModelsStage {
     Settled(ProfileReport),
-    DeferInference,
+    Assess(Option<ModelsHint>),
 }
 
 /// A profile whose provider has no report to consult at all.
@@ -322,40 +344,22 @@ fn not_probed_report(p: &ProbeProfile) -> ProfileReport {
         endpoint_id: p.endpoint.clone(),
         status: ProbeStatus::InvalidConfig,
         detail: Some("provider was not probed".to_string()),
+        models_hint: None,
     }
 }
 
-/// Stage 1 of set checking — settle what the per-endpoint reports already
-/// decide, for free: a failed provider propagates its status, a catalog miss
-/// settles as invalid_config, and a catalog hit (or a catalog-less-but-ok
-/// endpoint) defers to a real inference, which is the profile Test's verdict.
-fn catalog_stage(p: &ProbeProfile, ep: Option<&ProviderReport>) -> CatalogStage {
-    let Some(ep) = ep else {
-        return CatalogStage::Settled(not_probed_report(p));
-    };
-    match ep.status {
-        ProbeStatus::Ok => match &ep.models {
-            Some(models) if models.iter().any(|m| m == &p.model) => CatalogStage::DeferInference,
-            Some(models) => CatalogStage::Settled(ProfileReport {
-                profile_id: p.id.clone(),
-                endpoint_id: p.endpoint.clone(),
-                status: ProbeStatus::InvalidConfig,
-                detail: Some(format!(
-                    "model '{}' not in provider catalog ({} models)",
-                    p.model,
-                    models.len()
-                )),
-            }),
-            // Catalog-less ok (balance-only probe): inference is the only judge.
-            None => CatalogStage::DeferInference,
-        },
-        other => CatalogStage::Settled(ProfileReport {
-            profile_id: p.id.clone(),
-            endpoint_id: p.endpoint.clone(),
-            status: other,
-            detail: None,
-        }),
+/// Stage 1 of set checking — the model list's say, which is advice only: a
+/// provider that never resolved settles as a config error, everything else
+/// goes to the real call with a hint when the fetched list does not name the
+/// model. The call is the profile Test's verdict.
+fn models_stage(p: &ProbeProfile, ep: Option<&ProviderReport>, resolvable: bool) -> ModelsStage {
+    if !resolvable {
+        return ModelsStage::Settled(not_probed_report(p));
     }
+    let not_listed = ep
+        .and_then(|ep| ep.models.as_ref())
+        .is_some_and(|models| !models.iter().any(|m| m == &p.model));
+    ModelsStage::Assess(not_listed.then_some(ModelsHint::NotListed))
 }
 
 /// Stage 2 of set checking — the minimal real inference behind a profile's
@@ -407,8 +411,19 @@ pub(crate) fn mask_key(key: &str) -> String {
     }
 }
 
-/// Merge an inline probe definition with the live config: a null `api_key` or
-/// null `base_url` means "keep the live value for this provider id".
+/// One base field of an inline draft against the live value: absent keeps,
+/// an empty string clears (never a live fallback — the operator meant it),
+/// and anything else replaces.
+fn resolve_base(provided: Option<&String>, live: Option<&String>) -> Option<String> {
+    match provided {
+        None => live.cloned(),
+        Some(url) if url.is_empty() => None,
+        Some(url) => Some(url.clone()),
+    }
+}
+/// Merge an inline probe definition with the live config. Both bases follow
+/// the tri-state rule the PUT path owns (`merge_wire`): absent keeps the
+/// live value, an empty string clears it, a value replaces.
 fn resolve_provider(probe: &ProbeProvider, live: &ProfileConfig) -> Result<Provider, String> {
     let api_key = match &probe.api_key {
         Some(key) => match live.endpoints.get(&probe.id) {
@@ -432,23 +447,30 @@ fn resolve_provider(probe: &ProbeProvider, live: &ProfileConfig) -> Result<Provi
         id: probe.id.clone(),
         family: probe.family.clone(),
         api_key,
-        base_url: probe.base_url.clone().or_else(|| {
+        base_url: resolve_base(
+            probe.base_url.as_ref(),
             live.endpoints
                 .get(&probe.id)
-                .and_then(|ep| ep.base_url.clone())
-        }),
+                .and_then(|ep| ep.base_url.as_ref()),
+        ),
+        model_list_base_url: resolve_base(
+            probe.model_list_base_url.as_ref(),
+            live.endpoints
+                .get(&probe.id)
+                .and_then(|ep| ep.model_list_base_url.as_ref()),
+        ),
     })
 }
 
 /// Build a throwaway backend and run the zero-cost probes, classifying the
-/// outcome. `wants_models` keeps the catalog ids for set model checks.
+/// outcome. `wants_models` keeps the model ids for set model checks.
 async fn probe_one(factory: &BackendFactory, def: Provider, wants_models: bool) -> ProviderReport {
     let endpoint_id = def.id.clone();
     let mut report = ProviderReport {
         endpoint_id,
         status: ProbeStatus::InvalidConfig,
         latency_ms: None,
-        catalog_count: None,
+        models_count: None,
         balance: None,
         detail: None,
         models: None,
@@ -461,13 +483,36 @@ async fn probe_one(factory: &BackendFactory, def: Provider, wants_models: bool) 
             return report;
         }
     };
+    // The library derives both `/models` and `/chat/completions` from one base,
+    // so a provider whose model list lives elsewhere (a gateway that lists
+    // models on another path) cannot say so through `base_url` alone: a second
+    // throwaway backend — same family and key, the models base — carries the
+    // list call. No change to the external client dependency is involved.
+    let models_backend = match def.model_list_base_url.as_deref().filter(|b| !b.is_empty()) {
+        Some(base) => {
+            let models_def = Provider {
+                base_url: Some(base.to_string()),
+                model_list_base_url: None,
+                ..def.clone()
+            };
+            match backend::build_one(factory, &models_def, DEFAULT_USER_AGENT) {
+                Ok(backend) => backend,
+                Err(e) => {
+                    report.detail = Some(format!("{e:#}"));
+                    return report;
+                }
+            }
+        }
+        // Same base: the primary backend already is the list backend.
+        None => backend.clone(),
+    };
 
     let started = Instant::now();
-    let catalog = match tokio::time::timeout(PROBE_TIMEOUT, catalog_ids(&backend)).await {
+    let models = match tokio::time::timeout(PROBE_TIMEOUT, models_ids(&models_backend)).await {
         Err(_) => {
             report.status = ProbeStatus::Unreachable;
             report.detail = Some(format!(
-                "catalog probe timed out after {}s",
+                "model list probe timed out after {}s",
                 PROBE_TIMEOUT.as_secs()
             ));
             report.latency_ms = Some(started.elapsed().as_millis() as u64);
@@ -483,16 +528,16 @@ async fn probe_one(factory: &BackendFactory, def: Provider, wants_models: bool) 
     };
     report.latency_ms = Some(started.elapsed().as_millis() as u64);
 
-    match catalog {
+    match models {
         Some(ids) => {
             report.status = ProbeStatus::Ok;
-            report.catalog_count = Some(ids.len());
+            report.models_count = Some(ids.len());
             if wants_models {
                 report.models = Some(ids);
             }
         }
         None => {
-            // No catalog capability: fall back to balance as the liveness probe.
+            // No model list capability: fall back to balance as the liveness probe.
             match tokio::time::timeout(PROBE_TIMEOUT, balance_value(&backend)).await {
                 Ok(Ok(Some(value))) => {
                     report.status = ProbeStatus::Ok;
@@ -501,7 +546,7 @@ async fn probe_one(factory: &BackendFactory, def: Provider, wants_models: bool) 
                 Ok(Ok(None)) => {
                     report.status = ProbeStatus::Partial;
                     report.detail =
-                        Some("family offers no model catalog or balance probe".to_string());
+                        Some("family offers no model list or balance probe".to_string());
                 }
                 Ok(Err((status, detail))) => {
                     report.status = status;
@@ -520,9 +565,9 @@ async fn probe_one(factory: &BackendFactory, def: Provider, wants_models: bool) 
     report
 }
 
-/// Fetch the model catalog ids; `Ok(None)` = capability unsupported (not an
-/// error — the family simply has nothing to probe with).
-async fn catalog_ids(
+/// Fetch the provider's model ids; `Ok(None)` = capability unsupported (not
+/// an error — the family simply has nothing to probe with).
+async fn models_ids(
     backend: &Arc<dyn just_llm_client::LlmBackend>,
 ) -> Result<Option<Vec<String>>, (ProbeStatus, String)> {
     let handle = match backend.model_catalog() {
@@ -530,7 +575,7 @@ async fn catalog_ids(
         Err(_) => return Ok(None),
     };
     match handle.list_models().await {
-        Ok(catalog) => Ok(Some(catalog.data.into_iter().map(|m| m.id).collect())),
+        Ok(list) => Ok(Some(list.data.into_iter().map(|m| m.id).collect())),
         Err(e) => Err(classify_backend_error(&e)),
     }
 }
@@ -618,9 +663,51 @@ mod tests {
             family: "deepseek".into(),
             api_key: Some(masked),
             base_url: None,
+            model_list_base_url: None,
         };
         let resolved = resolve_provider(&probe_ep, &live).expect("masked echo resolves");
         assert_eq!(resolved.api_key, live.endpoints["test"].api_key);
+    }
+
+    #[test]
+    fn an_empty_probe_base_is_unset_and_never_inherits_live() {
+        // The UI sends a cleared field as an empty string (the PUT body's
+        // clearing form), so the probe must read it as unset — the family's
+        // own endpoint decides — and never as "take the live value", which is
+        // what an absent field means.
+        let mut live = make_state().profiles.load().config.clone();
+        {
+            let entry = live.endpoints.get_mut("test").unwrap();
+            entry.base_url = Some("https://live.example".into());
+            entry.model_list_base_url = Some("https://live-list.example".into());
+        }
+        let cleared = ProbeProvider {
+            id: "test".into(),
+            family: "deepseek".into(),
+            api_key: None,
+            base_url: Some(String::new()),
+            model_list_base_url: Some(String::new()),
+        };
+        let factory = BackendFactory::new();
+        let resolved = resolve_provider(&cleared, &live).expect("empty bases resolve");
+        assert_eq!(
+            resolved.base_url, None,
+            "a blank must not inherit the live base"
+        );
+        assert_eq!(resolved.model_list_base_url, None);
+        // The build is the step a blank base used to fail.
+        assert!(
+            backend::build_one(&factory, &resolved, DEFAULT_USER_AGENT).is_ok(),
+            "an empty base must build against the family endpoint"
+        );
+
+        // The same layout with nothing live to inherit stays a clean build.
+        let mut bare = make_state().profiles.load().config.clone();
+        bare.endpoints.get_mut("test").unwrap().base_url = None;
+        bare.endpoints.get_mut("test").unwrap().model_list_base_url = None;
+        let resolved = resolve_provider(&cleared, &bare).expect("empty bases resolve");
+        assert_eq!(resolved.base_url, None);
+        assert!(backend::build_one(&factory, &resolved, DEFAULT_USER_AGENT).is_ok());
     }
 
     fn provider_report(status: ProbeStatus, models: Option<Vec<String>>) -> ProviderReport {
@@ -630,7 +717,7 @@ mod tests {
             latency_ms: None,
             models,
             balance: None,
-            catalog_count: None,
+            models_count: None,
             detail: None,
         }
     }
@@ -644,68 +731,60 @@ mod tests {
     }
 
     #[test]
-    fn catalog_stage_settles_miss_and_defers_hit() {
-        // Catalog hit: nothing settled yet — the real inference decides.
-        match catalog_stage(
+    fn models_stage_hints_without_settling() {
+        // A list that names the model adds nothing: the real call decides.
+        match models_stage(
             &probe_profile("m1"),
-            Some(&provider_report(
-                ProbeStatus::Ok,
-                Some(vec!["m1".into(), "m2".into()]),
-            )),
+            Some(&provider_report(ProbeStatus::Ok, Some(vec!["m1".into()]))),
+            true,
         ) {
-            CatalogStage::DeferInference => {}
-            CatalogStage::Settled(_) => panic!("catalog hit must defer to inference"),
+            ModelsStage::Assess(None) => {}
+            _ => panic!("a listed model must carry no hint"),
         }
 
-        // Catalog miss: settled invalid_config without spending tokens.
-        let miss = match catalog_stage(
+        // A fetched list that does not name the model is advice, not a verdict.
+        match models_stage(
             &probe_profile("nope"),
             Some(&provider_report(ProbeStatus::Ok, Some(vec!["m1".into()]))),
+            true,
         ) {
-            CatalogStage::Settled(report) => report,
-            CatalogStage::DeferInference => panic!("catalog miss must settle"),
-        };
-        assert_eq!(miss.status, ProbeStatus::InvalidConfig);
-        assert!(
-            miss.detail
-                .as_deref()
-                .unwrap()
-                .contains("not in provider catalog")
-        );
-    }
+            ModelsStage::Assess(Some(ModelsHint::NotListed)) => {}
+            _ => panic!("an unlisted model carries the hint"),
+        }
 
-    #[test]
-    fn catalog_less_ok_provider_defers_inference() {
-        // A balance-only ok endpoint has no catalog to check against; the
-        // inference is the profile's only judge.
-        match catalog_stage(
+        // No list to consult (balance-only family): nothing to hint.
+        match models_stage(
             &probe_profile("any"),
             Some(&provider_report(ProbeStatus::Ok, None)),
+            true,
         ) {
-            CatalogStage::DeferInference => {}
-            CatalogStage::Settled(_) => panic!("catalog-less ok provider must defer to inference"),
+            ModelsStage::Assess(None) => {}
+            _ => panic!("no list means no hint"),
         }
     }
 
     #[test]
-    fn catalog_stage_inherits_provider_failure() {
-        let r = match catalog_stage(
+    fn models_stage_never_inherits_a_provider_verdict() {
+        // A failed provider probe says nothing about whether a model answers:
+        // the profile still goes to the real call, which judges it.
+        match models_stage(
             &probe_profile("m1"),
             Some(&provider_report(ProbeStatus::Unauthorized, None)),
+            true,
         ) {
-            CatalogStage::Settled(report) => report,
-            CatalogStage::DeferInference => panic!("failed endpoint must settle"),
-        };
-        assert_eq!(r.status, ProbeStatus::Unauthorized);
+            ModelsStage::Assess(None) => {}
+            _ => panic!("a provider verdict must not settle the profile"),
+        }
     }
 
     #[test]
-    fn catalog_stage_without_provider_report_is_invalid() {
-        let r = match catalog_stage(&probe_profile("m1"), None) {
-            CatalogStage::Settled(report) => report,
-            CatalogStage::DeferInference => panic!("missing endpoint report must settle"),
+    fn models_stage_settles_an_unresolvable_provider() {
+        let r = match models_stage(&probe_profile("m1"), None, false) {
+            ModelsStage::Settled(report) => report,
+            _ => panic!("an unresolvable provider must settle"),
         };
         assert_eq!(r.status, ProbeStatus::InvalidConfig);
+        assert_eq!(r.models_hint, None);
     }
 
     fn backend_error_with_transport(
@@ -755,6 +834,7 @@ mod tests {
             family: "deepseek".into(),
             api_key: None,
             base_url: None,
+            model_list_base_url: None,
         };
         let resolved = resolve_provider(&probe_ep, &live).unwrap();
         assert_eq!(resolved.base_url.as_deref(), Some("https://live.example"));
@@ -793,6 +873,7 @@ mod tests {
             family: "openai-compatible".into(),
             api_key: "sk-test".into(),
             base_url: Some(server.uri()),
+            model_list_base_url: None,
         };
         let (status, detail) = inference_verdict(
             &BackendFactory::new(),

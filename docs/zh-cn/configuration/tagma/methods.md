@@ -8,7 +8,7 @@ order: 21
 
 ## 网页界面配置
 
-管理区的 Profiles 页是日常配置入口。它维护端点池（协议族、密钥、`base_url`），把 profile 卡片在命名 set 与暂存区之间拖拽组织，声明各 profile 的上下文窗口与模态，转移 default set 标记，并可对 set 或单个 profile 发起连通测试。
+管理区的 Profiles 页是日常配置入口。它维护端点池（协议族、密钥、`base_url`，以及可选的 `model_list_base_url`），把 profile 卡片在命名 set 与暂存区之间拖拽组织，声明各 profile 的上下文窗口与模态，转移 default set 标记，并可对 set 或单个 profile 发起连通测试。
 
 保存后写入实例的 `profiles.toml` 并立即生效。当配置来源是模型网关时，页面变为
 网关配置的只读镜像；顶部的标签页在两个来源之间切换（每个方向一次确认，见下文）。
@@ -91,9 +91,10 @@ description = "cheap delegation"
 
 - `family` 取 `deepseek`、`openai-compatible`、`openai-responses`、`anthropic` 之一。
 - `base_url` 对 `openai-compatible` 必填，其余可选：其他族省略时回落各自官方端点。
+- `model_list_base_url`（可选）：provider Test 拉取模型列表所用的 base，默认等于 `base_url`；列表与调用不在同一 base 的 provider 才需要填。填的是 base，不是完整的模型列表 URL——客户端会自行追加 `/models`。
 - `store`（可选，默认 `true`）保持服务端会话存储开启，`openai-responses` 因此每轮从存储链继续；`store = false`（或任何非 Responses 族）每轮重放完整会话。
 - `effort`（可选）请求推理力度：`low`、`medium`、`high`、`xhigh` 或 `max`。provider 在自身限度内尊重它（DeepSeek 官方把 `medium` 与 `xhigh` 降为 `high`，见其 [API 参考](https://api-docs.deepseek.com/api/create-chat-completion)）。
-- `api_key` / `base_url` 里的 `${VAR}` 从进程环境展开。
+- `api_key` / `base_url` / `model_list_base_url` 里的 `${VAR}` 从进程环境展开。
 - 配置文件应为 `chmod 600`（组/其他可读时 tagma 会警告，因其可能含 API 密钥）。
 
 ### Set 选择

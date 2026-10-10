@@ -92,6 +92,7 @@ pub fn from_env() -> Result<ProfileConfig> {
         family: family_id.into(),
         api_key,
         base_url,
+        model_list_base_url: None,
     };
     // The implicit profile's window comes from the same env var `AgentConfig::load` uses as its
     // budget-shape validation anchor — single source, no drift under static tagma env.
@@ -172,6 +173,10 @@ fn load_file(path: &Path) -> Result<ProfileConfig> {
                 family: body.family,
                 api_key,
                 base_url: body.base_url.map(|s| expand_vars(&s)).transpose()?,
+                model_list_base_url: body
+                    .model_list_base_url
+                    .map(|s| expand_vars(&s))
+                    .transpose()?,
             };
             Ok::<_, anyhow::Error>((id, endpoint))
         })
@@ -528,6 +533,9 @@ struct ProviderEntry {
     api_key: String,
     #[serde(default)]
     base_url: Option<String>,
+    /// Where the model list lives when it is not under `base_url`.
+    #[serde(default)]
+    model_list_base_url: Option<String>,
 }
 
 #[cfg(test)]
@@ -909,6 +917,7 @@ max_context_window = 1000
                 family: "deepseek".into(),
                 api_key: "secret-key".into(),
                 base_url: None,
+                model_list_base_url: None,
             },
         );
         endpoints.insert(
@@ -918,6 +927,7 @@ max_context_window = 1000
                 family: "openai-compatible".into(),
                 api_key: "other-key".into(),
                 base_url: Some("https://api.example.com".into()),
+                model_list_base_url: Some("https://list.example.com/v1".into()),
             },
         );
         let original = ProfileConfig {
@@ -1016,6 +1026,18 @@ max_context_window = 1000
             file.endpoints["oa"].base_url.as_deref(),
             Some("https://api.example.com")
         );
+        assert_eq!(
+            file.endpoints["oa"].model_list_base_url.as_deref(),
+            Some("https://list.example.com/v1")
+        );
+        assert_eq!(file.endpoints["ds"].model_list_base_url, None);
+        // Only the provider that sets one writes the key: an unset list
+        // base leaves existing files byte-identical.
+        assert_eq!(
+            toml_str.matches("model_list_base_url").count(),
+            1,
+            "got: {toml_str}"
+        );
         assert_eq!(file.parking.len(), 1);
         assert_eq!(file.parking[0].id, "spare");
     }
@@ -1032,6 +1054,7 @@ max_context_window = 1000
                 family: "deepseek".into(),
                 api_key: "k".into(),
                 base_url: None,
+                model_list_base_url: None,
             },
         );
         let cfg = ProfileConfig {

@@ -52,6 +52,7 @@
     singleProfileProbeRequest,
     singleParkingProfileProbeRequest,
     upsertProvider,
+    providerFromDialog,
   } from "../../lib/manage/compute.ts";
   import {
     clearProfileResult,
@@ -344,21 +345,16 @@
   function onProviderSave(result: {
     id: string;
     family: string;
-    baseUrl: string | null;
+    baseUrl: string;
+    modelListBaseUrl: string;
     apiKey: string | null;
   }) {
     const draft = profilesStore.draft;
     if (!draft) return;
-    const existing =
-      result.apiKey === null
-        ? (draft.endpoints[result.id]?.api_key ?? "")
-        : result.apiKey;
-    profilesStore.draft = upsertProvider(draft, {
-      id: result.id,
-      family: result.family,
-      api_key: existing,
-      base_url: result.baseUrl,
-    });
+    profilesStore.draft = upsertProvider(
+      draft,
+      providerFromDialog(result, draft.endpoints[result.id]),
+    );
     providerDialog.open = false;
   }
 
@@ -471,6 +467,7 @@
   let profileProbeReport = $state<{
     status: string;
     detail: string | null;
+    modelsHint?: "not_listed" | null;
   } | null>(null);
 
   function openProfileEdit(setName: string, idx: number) {
@@ -530,7 +527,11 @@
     mergeProviderScope(providerReports, resp);
     const p = resp.sets[0]?.profiles[0];
     if (p) {
-      profileProbeReport = { status: p.status, detail: p.detail ?? null };
+      profileProbeReport = {
+        status: p.status,
+        detail: p.detail ?? null,
+        modelsHint: p.models_hint ?? null,
+      };
     }
   }
 
@@ -545,6 +546,7 @@
   let parkingProbeReport = $state<{
     status: string;
     detail: string | null;
+    modelsHint?: "not_listed" | null;
   } | null>(null);
 
   function openParkingNew() {
@@ -637,7 +639,12 @@
     if (!resp) return;
     mergeProviderScope(providerReports, resp);
     const p = resp.sets[0]?.profiles[0];
-    if (p) parkingProbeReport = { status: p.status, detail: p.detail ?? null };
+    if (p)
+      parkingProbeReport = {
+        status: p.status,
+        detail: p.detail ?? null,
+        modelsHint: p.models_hint ?? null,
+      };
   }
 
   /** Kebab Test on a parked card: same request shape, from the draft. */

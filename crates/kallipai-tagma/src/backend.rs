@@ -345,6 +345,7 @@ mod tests {
                 family: family::DEEPSEEK.into(),
                 api_key: "fake".into(),
                 base_url: None,
+                model_list_base_url: None,
             },
         );
         ProfileConfig {
@@ -419,6 +420,7 @@ mod tests {
                 family: family::DEEPSEEK.into(),
                 api_key: "fake".into(),
                 base_url: None,
+                model_list_base_url: None,
             },
         );
         cfg.sets.get_mut("default").unwrap().profiles.push(Profile {
@@ -450,6 +452,7 @@ mod tests {
                 family: "anthropic".into(), // a valid family; the point is it is unreferenced
                 api_key: "fake".into(),
                 base_url: None,
+                model_list_base_url: None,
             },
         );
         assert!(build_backends(&cfg, BackendFactory::new(), DEFAULT_USER_AGENT).is_ok());
@@ -499,6 +502,7 @@ mod tests {
                 family: family::OPENAI_COMPATIBLE.into(),
                 api_key: "fake".into(),
                 base_url: None, // missing — must fail fast at startup
+                model_list_base_url: None,
             },
         );
         let cfg = ProfileConfig {
@@ -552,6 +556,7 @@ mod tests {
             family: family::OPENAI_COMPATIBLE.into(),
             api_key: "test".into(),
             base_url: Some(server.uri()),
+            model_list_base_url: None,
         };
         let factory = BackendFactory::new();
         let backend = build_one(&factory, &endpoint, user_agent).expect("backend builds");

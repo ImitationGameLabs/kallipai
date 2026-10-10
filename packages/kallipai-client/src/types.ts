@@ -256,6 +256,8 @@ export interface ProfileProvider {
   readonly family: string;
   readonly api_key: string | null;
   readonly base_url: string | null;
+  /** Where the model list lives when it is not under `base_url`. */
+  readonly model_list_base_url: string | null;
 }
 
 /** Reasoning effort levels a profile may request; forwarded to providers as-is. */
@@ -404,6 +406,8 @@ export interface ProfileProviderProbeRequest {
   readonly family: string;
   readonly api_key: string | null;
   readonly base_url: string | null;
+  /** Model-list base for this draft; null keeps the live value. */
+  readonly model_list_base_url: string | null;
 }
 
 /** Per-profile model reference inside a probed set. */
@@ -429,12 +433,12 @@ export type ProfileProbeStatus =
   | "invalid_config"
   | "partial";
 
-/** Probe outcome for one endpoint: catalog/balance info on success, reason otherwise. */
+/** Probe outcome for one endpoint: model-list/balance info on success, reason otherwise. */
 export interface ProfileProviderProbeReport {
   readonly endpoint_id: string;
   readonly status: ProfileProbeStatus;
   readonly latency_ms: number | null | undefined;
-  readonly catalog_count: number | null | undefined;
+  readonly models_count: number | null | undefined;
   readonly models: readonly string[] | null | undefined;
   readonly balance: unknown;
   readonly detail: string | null | undefined;
@@ -446,6 +450,9 @@ export interface ProfileModelProbeReport {
   readonly endpoint_id: string;
   readonly status: ProfileProbeStatus;
   readonly detail: string | null | undefined;
+  /** Advisory, never a verdict: the fetched model list does not name this
+   * model. Absent when the list says nothing about it. */
+  readonly models_hint: "not_listed" | null | undefined;
 }
 
 /** Probe rollup for one set. */

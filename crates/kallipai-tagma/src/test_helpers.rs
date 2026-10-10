@@ -248,6 +248,7 @@ pub fn make_profile_bundle() -> Arc<arc_swap::ArcSwap<crate::state::ProfileBundl
             family: family::DEEPSEEK.into(),
             api_key: "test".into(),
             base_url: None,
+            model_list_base_url: None,
         },
     );
     let cfg = ProfileConfig {
@@ -302,6 +303,7 @@ pub fn make_profile_bundle_two_sets() -> Arc<arc_swap::ArcSwap<crate::state::Pro
             family: family::DEEPSEEK.into(),
             api_key: "test".into(),
             base_url: None,
+            model_list_base_url: None,
         },
     );
     endpoints.insert(
@@ -311,6 +313,7 @@ pub fn make_profile_bundle_two_sets() -> Arc<arc_swap::ArcSwap<crate::state::Pro
             family: family::DEEPSEEK.into(),
             api_key: "alt".into(),
             base_url: None,
+            model_list_base_url: None,
         },
     );
     let set = |name: &str, ep: &str| {
@@ -411,6 +414,7 @@ pub fn make_profile_bundle_image_set() -> Arc<arc_swap::ArcSwap<crate::state::Pr
             family: family::DEEPSEEK.into(),
             api_key: "test".into(),
             base_url: None,
+            model_list_base_url: None,
         },
     );
     let cfg = ProfileConfig {

@@ -16,7 +16,18 @@ pub struct Provider {
     /// "openai-compatible").
     pub family: String,
     pub api_key: String,
+    /// Inference base: the endpoint that serves chat completions, and (by
+    /// default) the model list too.
     pub base_url: Option<String>,
+    /// Where the model list lives when it is not under `base_url` — a
+    /// gateway that serves `/models` on another path. `None` (and the empty
+    /// string) means the list is fetched from `base_url`. Inert for families
+    /// with no list capability; inference never uses it.
+    /// Serialized like `base_url` (JSON always carries the key, `null` when
+    /// unset); the TOML file omits `None` values, so existing files keep
+    /// their bytes.
+    #[serde(default)]
+    pub model_list_base_url: Option<String>,
 }
 
 /// A model bound to a [`Provider`], carrying its declared capabilities.

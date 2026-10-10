@@ -12,6 +12,11 @@ provider 选择变量：[Tagma](../../reference/environment-variables/tagma.md)�
 
 模型配置分三层。**Provider** 是一个后端端点：协议族（`family`）、密钥（`api_key`）与可选的 `base_url`，回答“请求发给谁”。**Profile** 把一个模型绑定到一个 provider 端点，并声明该组合的能力：上下文窗口（`max_context_window`）与支持的模态（`modalities`），回答“用哪个模型、它声明了什么”。**Profile set** 是命名的 profile 组，组内构成故障转移链，回答“agent 绑定到哪一组”。
 
+`base_url` 承载模型调用；`model_list_base_url`（可选，默认等于 `base_url`）
+承载管理界面拉取的模型列表。列表与调用不在同一 base 的 provider（例如网关把
+`/models` 放在另一路径）显式设置它；界面上 provider Test 检查的是这个地址，
+而 profile Test 是一次经 `base_url` 的真实调用（provider 解析不到或后端建不起来时除外，那种情况直接判 `invalid_config`）。
+
 三层的关系：agent 不直接绑定单个 profile，而是绑定一个 profile set。root agent 用配置的 `default` set，每个 subagent 在 spawn 时经 `profile_set` 显式声明自己的 set。set 内第一个 profile 是活跃模型，其余构成故障转移链。
 
 每层单独存在都有明确的设计原因。

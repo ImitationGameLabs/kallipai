@@ -557,6 +557,8 @@ fn adapt_profile(
             family: source.family.clone(),
             api_key: source.api_key.clone(),
             base_url: Some(source.base_url.clone()),
+            // Gateway bundles carry one base; the list base stays unset.
+            model_list_base_url: None,
         });
     let effort = source
         .effort

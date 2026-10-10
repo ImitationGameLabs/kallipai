@@ -301,7 +301,13 @@ export function addProvider(config: ProfileConfig, id: string): ProfileConfig {
     ...config,
     endpoints: {
       ...config.endpoints,
-      [id]: { id, family: "deepseek", api_key: "", base_url: null },
+      [id]: {
+        id,
+        family: "deepseek",
+        api_key: "",
+        base_url: null,
+        model_list_base_url: null,
+      },
     },
   };
 }
@@ -327,6 +333,43 @@ export function upsertProvider(
   return {
     ...config,
     endpoints: { ...config.endpoints, [provider.id]: provider },
+  };
+}
+
+/**
+ * The provider a dialog Save writes into the draft, with both base fields
+ * normalized against the entry the draft already holds: a blank clears a
+ * value the config carries (the wire's empty string) and stays null only
+ * when the held entry carries no value at all — an empty string there is
+ * itself a clear waiting to be sent, not an absence. The dialog submits
+ * blanks as empty strings, never as null.
+ */
+export function providerFromDialog(
+  result: {
+    id: string;
+    family: string;
+    baseUrl: string;
+    modelListBaseUrl: string;
+    apiKey: string | null;
+  },
+  held: ProfileProvider | null | undefined,
+): ProfileProvider {
+  // Existence, not truth: a draft field that is an empty string is a
+  // clear waiting to go out, so only a null or absent held value means
+  // there is nothing to clear.
+  const base = (value: string, live: string | null | undefined) => {
+    if (value !== "") return value;
+    return live === null || live === undefined ? null : "";
+  };
+  return {
+    id: result.id,
+    family: result.family,
+    api_key: result.apiKey === null ? (held?.api_key ?? "") : result.apiKey,
+    base_url: base(result.baseUrl, held?.base_url),
+    model_list_base_url: base(
+      result.modelListBaseUrl,
+      held?.model_list_base_url,
+    ),
   };
 }
 
@@ -520,6 +563,7 @@ export function buildProbeRequest(
     id: ep.id,
     family: ep.family,
     base_url: ep.base_url,
+    model_list_base_url: ep.model_list_base_url,
     api_key: probeWireKey(ep.api_key, committed?.endpoints[ep.id]?.api_key),
   }));
   const only = setName === undefined ? undefined : draft.sets[setName];
@@ -557,6 +601,7 @@ export function singleProviderProbeRequest(
         id: ep.id,
         family: ep.family,
         base_url: ep.base_url,
+        model_list_base_url: ep.model_list_base_url,
         api_key: probeWireKey(ep.api_key, committed?.endpoints[id]?.api_key),
       },
     ],
@@ -587,6 +632,7 @@ export function singleProfileProbeRequest(
           id: ep.id,
           family: ep.family,
           base_url: ep.base_url,
+          model_list_base_url: ep.model_list_base_url,
           api_key: probeWireKey(
             ep.api_key,
             committed?.endpoints[ep.id]?.api_key,
@@ -637,6 +683,7 @@ export function singleParkingProfileProbeRequest(
           id: ep.id,
           family: ep.family,
           base_url: ep.base_url,
+          model_list_base_url: ep.model_list_base_url,
           api_key: probeWireKey(
             ep.api_key,
             committed?.endpoints[ep.id]?.api_key,

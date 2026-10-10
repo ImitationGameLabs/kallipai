@@ -11,7 +11,12 @@
   export interface ProviderDialogResult {
     readonly id: string;
     readonly family: string;
-    readonly baseUrl: string | null;
+    /** Trimmed field value; a blank is the operator clearing the base, and
+     * the draft mapping decides what that means (null when there was
+     * nothing to clear, the wire's empty string otherwise). */
+    readonly baseUrl: string;
+    /** Model-list base when it differs from `baseUrl`; "" clears it. */
+    readonly modelListBaseUrl: string;
     /** null = keep the existing draft key (edit mode only). */
     readonly apiKey: string | null;
   }
@@ -19,6 +24,7 @@
 
 <script lang="ts">
   import { Dialog, Portal } from "@skeletonlabs/skeleton-svelte";
+  import { Info } from "@lucide/svelte";
   import SecretInput from "../SecretInput.svelte";
   import ReqMark from "../ReqMark.svelte";
   import {
@@ -28,6 +34,8 @@
     manage_profiles_provider_api_key_label,
     manage_profiles_provider_base_url_hint,
     manage_profiles_provider_base_url_label,
+    manage_profiles_provider_model_list_base_url_hint,
+    manage_profiles_provider_model_list_base_url_label,
     manage_profiles_provider_dialog_desc,
     manage_profiles_provider_dialog_edit_title,
     manage_profiles_provider_dialog_new_title,
@@ -61,6 +69,7 @@
   let id = $state("");
   let family = $state<string>(MODEL_PROVIDER_FAMILIES[0]);
   let baseUrl = $state("");
+  let modelListBaseUrl = $state("");
   let apiKey = $state("");
   let lastOpen = false;
   $effect(() => {
@@ -68,6 +77,7 @@
       id = mode === "edit" && provider ? provider.id : "";
       family = provider?.family ?? FAMILIES[0]!;
       baseUrl = provider?.base_url ?? "";
+      modelListBaseUrl = provider?.model_list_base_url ?? "";
       apiKey = "";
     }
     lastOpen = open;
@@ -93,7 +103,8 @@
     onSave({
       id: trimmedId,
       family,
-      baseUrl: baseUrl.trim() === "" ? null : baseUrl.trim(),
+      baseUrl: baseUrl.trim(),
+      modelListBaseUrl: modelListBaseUrl.trim(),
       apiKey: mode === "new" || trimmedKey !== "" ? trimmedKey : null,
     });
   }
@@ -164,6 +175,24 @@
             <span class="text-xs opacity-60">
               {manage_profiles_provider_base_url_hint()}
             </span>
+          </label>
+
+          <label class="flex flex-col gap-1">
+            <span class="text-sm font-medium flex items-center gap-1">
+              {manage_profiles_provider_model_list_base_url_label()}
+              <span
+                class="inline-grid place-items-center leading-none shrink-0 size-4 opacity-60 cursor-help"
+                title={manage_profiles_provider_model_list_base_url_hint()}
+                role="img"
+                aria-label={manage_profiles_provider_model_list_base_url_hint()}
+              >
+                <Info class="size-full" aria-hidden="true" />
+              </span>
+            </span>
+            <input
+              class="input text-sm font-mono"
+              bind:value={modelListBaseUrl}
+            />
           </label>
 
           <label class="flex flex-col gap-1">

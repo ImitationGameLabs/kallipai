@@ -628,6 +628,10 @@ struct ProviderPatch {
     family: String,
     api_key: Option<String>,
     base_url: Option<String>,
+    /// Model-list base, same tri-state as `base_url`: null keeps the live
+    /// value, "" clears it (the list then comes from `base_url`), a value
+    /// replaces.
+    model_list_base_url: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -748,6 +752,16 @@ fn merge_wire(live: &ProfileConfig, wire: ProfileConfigWire) -> Result<ProfileCo
             Some(url) if url.is_empty() => None,
             Some(url) => Some(url),
         };
+        // `model_list_base_url` follows the same tri-state: null keeps, ""
+        // clears (the list then comes from `base_url`), a value replaces.
+        let model_list_base_url = match ep.model_list_base_url {
+            None => live
+                .endpoints
+                .get(&key)
+                .and_then(|e| e.model_list_base_url.clone()),
+            Some(url) if url.is_empty() => None,
+            Some(url) => Some(url),
+        };
         endpoints.insert(
             key.clone(),
             Provider {
@@ -755,6 +769,7 @@ fn merge_wire(live: &ProfileConfig, wire: ProfileConfigWire) -> Result<ProfileCo
                 family: ep.family,
                 api_key,
                 base_url,
+                model_list_base_url,
             },
         );
     }
@@ -1785,6 +1800,7 @@ mod tests {
                     family: "deepseek".into(),
                     api_key: "sk-live-secret-key".into(),
                     base_url: Some("https://live.example/v1".into()),
+                    model_list_base_url: Some("https://list.live.example/v1".into()),
                 },
             )]),
             // Live draft space: one parked profile (dangling-free but out of rotation).
@@ -1801,12 +1817,23 @@ mod tests {
     }
 
     fn wire(api_key: serde_json::Value, base_url: serde_json::Value) -> ProfileConfigWire {
+        wire_list(api_key, base_url, serde_json::Value::Null)
+    }
+
+    /// The same wire with the model-list base spelled out, so the two base
+    /// fields can be exercised side by side.
+    fn wire_list(
+        api_key: serde_json::Value,
+        base_url: serde_json::Value,
+        model_list_base_url: serde_json::Value,
+    ) -> ProfileConfigWire {
         serde_json::from_value(serde_json::json!({
             "endpoints": { "main": {
                 "id": "main",
                 "family": "deepseek",
                 "api_key": api_key,
-                "base_url": base_url
+                "base_url": base_url,
+                "model_list_base_url": model_list_base_url
             }},
             "sets": [{ "name": "a", "profiles": [{
                 "id": "p", "endpoint": "main", "model": "m", "max_context_window": 128000
@@ -1872,41 +1899,59 @@ mod tests {
     }
 
     #[test]
-    fn merge_wire_null_base_url_keeps_live_url() {
+    fn merge_wire_null_bases_keep_live_urls() {
         let merged = merge_wire(
             &live_config(),
-            wire(serde_json::Value::Null, serde_json::Value::Null),
+            wire_list(
+                serde_json::Value::Null,
+                serde_json::Value::Null,
+                serde_json::Value::Null,
+            ),
         )
         .unwrap();
         assert_eq!(
             merged.endpoints["main"].base_url.as_deref(),
             Some("https://live.example/v1")
         );
+        assert_eq!(
+            merged.endpoints["main"].model_list_base_url.as_deref(),
+            Some("https://list.live.example/v1")
+        );
     }
 
     #[test]
-    fn merge_wire_empty_base_url_clears_to_family_default() {
+    fn merge_wire_empty_bases_clear() {
         let merged = merge_wire(
             &live_config(),
-            wire(serde_json::Value::Null, serde_json::json!("")),
+            wire_list(
+                serde_json::Value::Null,
+                serde_json::json!(""),
+                serde_json::json!(""),
+            ),
         )
         .unwrap();
         assert_eq!(merged.endpoints["main"].base_url, None);
+        assert_eq!(merged.endpoints["main"].model_list_base_url, None);
     }
 
     #[test]
-    fn merge_wire_base_url_string_replaces() {
+    fn merge_wire_base_strings_replace() {
         let merged = merge_wire(
             &live_config(),
-            wire(
+            wire_list(
                 serde_json::Value::Null,
                 serde_json::json!("https://new.example/v1"),
+                serde_json::json!("https://list.new.example/v1"),
             ),
         )
         .unwrap();
         assert_eq!(
             merged.endpoints["main"].base_url.as_deref(),
             Some("https://new.example/v1")
+        );
+        assert_eq!(
+            merged.endpoints["main"].model_list_base_url.as_deref(),
+            Some("https://list.new.example/v1")
         );
     }
 
@@ -2359,6 +2404,7 @@ mod tests {
                 family: family::DEEPSEEK.into(),
                 api_key: "test".into(),
                 base_url: None,
+                model_list_base_url: None,
             },
         );
         ProfileConfig {
@@ -2559,6 +2605,7 @@ mod tests {
                 family: "no-such-family".into(),
                 api_key: "k".into(),
                 base_url: None,
+                model_list_base_url: None,
             },
         );
         ProfileConfig {

@@ -44,6 +44,7 @@ pub async fn probe_profiles(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::probe::ModelsHint;
     use crate::probe::ProbeStatus;
     use crate::test_helpers::make_state;
 
@@ -199,7 +200,7 @@ mod tests {
     }
 
     /// Inline openai-compatible provider pointing at a wiremock server, so
-    /// catalog and chat requests both land on mocks.
+    /// model-list and chat requests both land on mocks.
     fn mock_provider(server_uri: &str) -> serde_json::Value {
         serde_json::json!({
             "id": "mock",
@@ -223,7 +224,7 @@ mod tests {
         })
     }
 
-    async fn mock_catalog(server: &wiremock::MockServer, models: &[&str]) {
+    async fn mock_models(server: &wiremock::MockServer, models: &[&str]) {
         use wiremock::matchers::{method, path};
         let data: Vec<serde_json::Value> = models
             .iter()
@@ -247,7 +248,7 @@ mod tests {
         use wiremock::matchers::{method, path};
 
         let server = wiremock::MockServer::start().await;
-        mock_catalog(&server, &["m1"]).await;
+        mock_models(&server, &["m1"]).await;
         wiremock::Mock::given(method("POST"))
             .and(path("/chat/completions"))
             .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(chat_ok_body()))
@@ -276,7 +277,7 @@ mod tests {
         use wiremock::matchers::{method, path};
 
         let server = wiremock::MockServer::start().await;
-        mock_catalog(&server, &["m1"]).await;
+        mock_models(&server, &["m1"]).await;
         wiremock::Mock::given(method("POST"))
             .and(path("/chat/completions"))
             .respond_with(wiremock::ResponseTemplate::new(401).set_body_string("bad key"))
@@ -293,7 +294,7 @@ mod tests {
             .await
             .unwrap()
             .0;
-        // The catalog probe succeeded, so the profile's verdict is the
+        // The model-list probe succeeded, so the profile's verdict is the
         // inference call's own classification.
         assert_eq!(resp.results[0].status, ProbeStatus::Ok);
         assert_eq!(resp.sets[0].profiles[0].status, ProbeStatus::Unauthorized);
@@ -301,17 +302,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn catalog_miss_settles_without_inference() {
+    async fn models_miss_hints_but_the_call_decides() {
         use wiremock::matchers::{method, path};
 
         let server = wiremock::MockServer::start().await;
-        mock_catalog(&server, &["m2"]).await;
-        // Zero expected hits: the catalog miss must settle before any chat
-        // request is spent.
+        // The list names a different model; the call still decides the verdict.
+        mock_models(&server, &["m2"]).await;
         wiremock::Mock::given(method("POST"))
             .and(path("/chat/completions"))
             .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(chat_ok_body()))
-            .expect(0)
+            .expect(1)
             .mount(&server)
             .await;
 
@@ -325,14 +325,123 @@ mod tests {
             .unwrap()
             .0;
         let report = &resp.sets[0].profiles[0];
-        assert_eq!(report.status, ProbeStatus::InvalidConfig);
-        assert!(
-            report
-                .detail
-                .as_deref()
-                .unwrap()
-                .contains("not in provider catalog")
-        );
+        assert_eq!(report.status, ProbeStatus::Ok);
+        assert_eq!(report.models_hint, Some(ModelsHint::NotListed));
+        assert!(resp.sets[0].all_ok, "the call decides, not the list");
+    }
+
+    #[tokio::test]
+    async fn model_list_base_url_carries_the_list_only() {
+        use wiremock::matchers::{method, path};
+
+        // The list lives on one server, inference on another: no single base
+        // serves both, which is what `model_list_base_url` exists for.
+        let list = wiremock::MockServer::start().await;
+        mock_models(&list, &["m1"]).await;
+        let chat = wiremock::MockServer::start().await;
+        wiremock::Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(chat_ok_body()))
+            .expect(1)
+            .mount(&chat)
+            .await;
+
+        let mut provider = mock_provider(&chat.uri());
+        provider["model_list_base_url"] = serde_json::json!(list.uri());
+
+        let state = make_state();
+        let req = probe_req(serde_json::json!({
+            "endpoints": [provider],
+            "sets": [{ "name": "s0", "profiles": [{ "id": "p1", "endpoint": "mock", "model": "m1" }] }]
+        }));
+        let resp = probe_profiles(State(state), op_auth(), Json(req))
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(resp.results[0].status, ProbeStatus::Ok);
+        assert_eq!(resp.results[0].models_count, Some(1));
+        assert_eq!(resp.sets[0].profiles[0].status, ProbeStatus::Ok);
+        assert!(resp.sets[0].profiles[0].models_hint.is_none());
+    }
+
+    #[tokio::test]
+    async fn an_empty_list_base_reads_the_list_from_the_inference_base() {
+        // The live provider carries a model-list base; the draft clears it, so
+        // the list must come from the inference base the draft also sends.
+        // The live list base is a bogus host on purpose: were it dialed, the
+        // mock's single expected hit would never arrive and the test fails.
+        let server = wiremock::MockServer::start().await;
+        mock_models(&server, &["m1"]).await;
+
+        let state = make_state();
+        let config = {
+            let live = state.profiles.load();
+            let mut config = live.config.clone();
+            let entry = config.endpoints.get_mut("test").expect("live provider");
+            entry.base_url = None;
+            entry.model_list_base_url = Some("https://live-list.invalid/v1".into());
+            config
+        };
+        {
+            let live = state.profiles.load();
+            state
+                .profiles
+                .store(std::sync::Arc::new(crate::state::ProfileBundle {
+                    config,
+                    registry: live.registry.clone(),
+                }));
+        }
+
+        let mut provider = mock_provider(&server.uri());
+        provider["id"] = serde_json::json!("test");
+        provider["family"] = serde_json::json!("deepseek");
+        provider["model_list_base_url"] = serde_json::json!("");
+
+        let req = probe_req(serde_json::json!({
+            "endpoints": [provider],
+            "sets": [{ "name": "s0", "profiles": [{ "id": "p1", "endpoint": "test", "model": "m1" }] }]
+        }));
+        let resp = probe_profiles(State(state), op_auth(), Json(req))
+            .await
+            .unwrap()
+            .0;
+        // The list came from the inference base: the mock saw it (expect(1)),
+        // and the live list base was never inherited.
+        assert_eq!(resp.results[0].models_count, Some(1));
+        assert_eq!(resp.results[0].status, ProbeStatus::Ok);
+    }
+
+    #[tokio::test]
+    async fn a_missing_list_does_not_settle_the_profile() {
+        use wiremock::matchers::{method, path};
+
+        // No list mock: `/models` answers 404 and the provider test fails, yet
+        // the profile is judged anyway by its own call.
+        let list = wiremock::MockServer::start().await;
+        let chat = wiremock::MockServer::start().await;
+        wiremock::Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(chat_ok_body()))
+            .expect(1)
+            .mount(&chat)
+            .await;
+
+        let mut provider = mock_provider(&chat.uri());
+        provider["model_list_base_url"] = serde_json::json!(list.uri());
+
+        let state = make_state();
+        let req = probe_req(serde_json::json!({
+            "endpoints": [provider],
+            "sets": [{ "name": "s0", "profiles": [{ "id": "p1", "endpoint": "mock", "model": "m1" }] }]
+        }));
+        let resp = probe_profiles(State(state), op_auth(), Json(req))
+            .await
+            .unwrap()
+            .0;
+        assert_ne!(resp.results[0].status, ProbeStatus::Ok);
+        assert_eq!(resp.sets[0].profiles[0].status, ProbeStatus::Ok);
+        assert!(resp.sets[0].profiles[0].models_hint.is_none());
+        assert!(resp.sets[0].all_ok);
     }
 
     #[tokio::test]
@@ -340,7 +449,7 @@ mod tests {
         use wiremock::matchers::{method, path};
 
         let server = wiremock::MockServer::start().await;
-        mock_catalog(&server, &["m1"]).await;
+        mock_models(&server, &["m1"]).await;
         wiremock::Mock::given(method("POST"))
             .and(path("/chat/completions"))
             .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(chat_ok_body()))
@@ -366,12 +475,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn responses_family_catalog_probe_ok() {
+    async fn responses_family_models_probe_ok() {
         let server = wiremock::MockServer::start().await;
-        mock_catalog(&server, &["gpt-test"]).await;
+        mock_models(&server, &["gpt-test"]).await;
 
         let state = make_state();
-        // Endpoints only (no sets): the catalog is the whole probe.
+        // Endpoints only (no sets): the model list is the whole probe.
         let req = probe_req(serde_json::json!({
             "endpoints": [{
                 "id": "resp",
@@ -385,11 +494,11 @@ mod tests {
             .unwrap()
             .0;
         assert_eq!(resp.results[0].status, ProbeStatus::Ok);
-        assert_eq!(resp.results[0].catalog_count, Some(1));
+        assert_eq!(resp.results[0].models_count, Some(1));
     }
 
     #[tokio::test]
-    async fn anthropic_family_catalog_probe_ok() {
+    async fn anthropic_family_models_probe_ok() {
         use wiremock::matchers::{method, path};
 
         let server = wiremock::MockServer::start().await;
@@ -418,6 +527,6 @@ mod tests {
             .unwrap()
             .0;
         assert_eq!(resp.results[0].status, ProbeStatus::Ok);
-        assert_eq!(resp.results[0].catalog_count, Some(1));
+        assert_eq!(resp.results[0].models_count, Some(1));
     }
 }

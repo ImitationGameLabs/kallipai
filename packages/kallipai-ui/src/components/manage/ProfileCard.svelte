@@ -23,6 +23,7 @@
     manage_profiles_profile_model_label,
     manage_profiles_profile_provider_label,
     manage_profiles_test,
+    manage_profiles_probe_models_hint,
   } from "../../paraglide/messages.js";
 
   let {
@@ -131,6 +132,11 @@
         <span class="opacity-60 ml-2 font-mono break-all">
           {report.detail}
         </span>
+      {/if}
+      {#if report.models_hint}
+        <div class="text-warning-500 dark:text-warning-400 mt-1">
+          {manage_profiles_probe_models_hint()}
+        </div>
       {/if}
     </div>
   {/if}
