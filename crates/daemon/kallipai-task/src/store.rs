@@ -32,6 +32,7 @@ use crate::entities::task_event::{
 use crate::entities::{task, task_event};
 use crate::gates;
 use crate::model::{TaskStatus, Transition};
+use crate::usage::{self, UsageSnapshot};
 
 /// The name→identity resolver the create verb uses: a sync lookup over a
 /// registry snapshot, injected per create call.
@@ -297,7 +298,7 @@ impl TaskStore {
                         let row = load(tx, id).await?;
                         let status = parse_status(&row)?;
                         check_transition(Transition::Review, status, row.id)?;
-                        apply_transition_tx(tx, row, actor, Transition::Review).await
+                        apply_transition_tx(tx, row, actor, Transition::Review, None).await
                     })
                 })
                 .await
@@ -320,10 +321,16 @@ impl TaskStore {
 
     /// Moves the machine `in_progress -> paused`. No gate: pausing is
     /// always allowed.
-    pub async fn pause(&self, id: i64, actor: &str) -> Result<Task, Error> {
+    pub async fn pause(
+        &self,
+        id: i64,
+        actor: &str,
+        usage: Option<UsageSnapshot>,
+    ) -> Result<Task, Error> {
         let actor = actor.to_owned();
         for attempt in 0..=BUSY_RETRIES {
             let actor = actor.clone();
+            let usage = usage.clone();
             match self
                 .db
                 .transaction(|tx| {
@@ -332,7 +339,7 @@ impl TaskStore {
                         let row = load(tx, id).await?;
                         let status = parse_status(&row)?;
                         check_transition(Transition::Pause, status, row.id)?;
-                        apply_transition_tx(tx, row, actor, Transition::Pause).await
+                        apply_transition_tx(tx, row, actor, Transition::Pause, usage).await
                     })
                 })
                 .await
@@ -357,10 +364,17 @@ impl TaskStore {
     /// like `start` and `reopen`; `--force` escapes with an auditable
     /// event. The confirmation window is NOT re-based: a pause/resume
     /// pair does not open a new cycle.
-    pub async fn resume(&self, id: i64, actor: &str, force: bool) -> Result<Task, Error> {
+    pub async fn resume(
+        &self,
+        id: i64,
+        actor: &str,
+        force: bool,
+        usage: Option<UsageSnapshot>,
+    ) -> Result<Task, Error> {
         let actor = actor.to_owned();
         for attempt in 0..=BUSY_RETRIES {
             let actor = actor.clone();
+            let usage = usage.clone();
             match self
                 .db
                 .transaction(|tx| {
@@ -399,7 +413,7 @@ impl TaskStore {
                             )
                             .await?;
                         }
-                        apply_transition_tx(tx, row, actor, Transition::Resume).await
+                        apply_transition_tx(tx, row, actor, Transition::Resume, usage).await
                     })
                 })
                 .await
@@ -423,10 +437,17 @@ impl TaskStore {
     /// Picks a queued task up (`queued -> in_progress`). The serial gate
     /// holds an assignee to one `in_progress` task; `--force` escapes with
     /// an auditable `force_start` event.
-    pub async fn start(&self, id: i64, actor: &str, force: bool) -> Result<Task, Error> {
+    pub async fn start(
+        &self,
+        id: i64,
+        actor: &str,
+        force: bool,
+        usage: Option<UsageSnapshot>,
+    ) -> Result<Task, Error> {
         let actor = actor.to_owned();
         for attempt in 0..=BUSY_RETRIES {
             let actor = actor.clone();
+            let usage = usage.clone();
             match self
                 .db
                 .transaction(|tx| {
@@ -487,7 +508,7 @@ impl TaskStore {
                             Some(assignee),
                             Some(status.as_str().to_string()),
                             Some(Transition::Start.to_str().to_string()),
-                            None,
+                            usage::transition_payload(usage.as_ref())?,
                             now(),
                         )
                         .await?;
@@ -531,6 +552,7 @@ impl TaskStore {
         actor: &str,
         req: TaskCloseRequest,
         blobs: std::sync::Arc<dyn BlobStore>,
+        usage: Option<UsageSnapshot>,
     ) -> Result<Task, Error> {
         let actor = actor.to_owned();
         // Ingest outside the write transaction: a large archive would
@@ -571,6 +593,7 @@ impl TaskStore {
             let actor = actor.clone();
             let summary = summary.clone();
             let archive_hash = archive_hash.clone();
+            let usage = usage.clone();
             match self
                 .db
                 .transaction(|tx| {
@@ -632,6 +655,7 @@ impl TaskStore {
                         if let Some(hash) = &archive_hash {
                             payload["archive_hash"] = serde_json::Value::String(hash.clone());
                         }
+                        usage::insert_snapshot(&mut payload, usage.as_ref())?;
                         append_event_tx(
                             tx,
                             row.id,
@@ -673,10 +697,17 @@ impl TaskStore {
     /// works one task at a time (`--force` escapes with an auditable
     /// event) — and the `reopen` event doubles as the confirmation-cycle
     /// marker: prior-cycle confirmations no longer satisfy the close gate.
-    pub async fn reopen(&self, id: i64, actor: &str, force: bool) -> Result<Task, Error> {
+    pub async fn reopen(
+        &self,
+        id: i64,
+        actor: &str,
+        force: bool,
+        usage: Option<UsageSnapshot>,
+    ) -> Result<Task, Error> {
         let actor = actor.to_owned();
         for attempt in 0..=BUSY_RETRIES {
             let actor = actor.clone();
+            let usage = usage.clone();
             match self
                 .db
                 .transaction(|tx| {
@@ -735,7 +766,7 @@ impl TaskStore {
                             row.assignee.clone(),
                             Some(status.as_str().to_string()),
                             Some(Transition::Reopen.to_str().to_string()),
-                            None,
+                            usage::transition_payload(usage.as_ref())?,
                             now(),
                         )
                         .await?;
@@ -1182,6 +1213,7 @@ fn to_export(task: Task, events: Vec<TaskEvent>) -> Result<TaskExport, Error> {
     };
     let confirmers: Vec<String> = serde_json::from_str(&task.confirmers)?;
     let association = association_of(&task)?;
+    let usage = crate::usage::aggregate(&events)?;
     let mut event_exports = Vec::with_capacity(events.len());
     for e in events {
         event_exports.push(EventExport {
@@ -1215,6 +1247,7 @@ fn to_export(task: Task, events: Vec<TaskEvent>) -> Result<TaskExport, Error> {
         association,
         archive_hash: task.archive_hash.clone(),
         archive_entries: task.archive_entries,
+        usage,
         events: event_exports,
     })
 }
@@ -1318,13 +1351,15 @@ fn count_tar_entries(packed: &[u8]) -> Result<i64, Error> {
     Ok(count)
 }
 
-/// Shared tail of the payload-free transitions (`review`, `pause`,
-/// `resume`): flip the status row and append the transition event.
+/// Shared tail of the transitions that only flip the status row and append
+/// the event: `review`, `pause`, and `resume`. `pause` and `resume` carry a
+/// usage snapshot; `review` passes none.
 async fn apply_transition_tx(
     tx: &DatabaseTransaction,
     row: task::Model,
     actor: String,
     t: Transition,
+    usage: Option<UsageSnapshot>,
 ) -> Result<Task, Error> {
     let update = ActiveModel {
         id: Set(row.id),
@@ -1346,7 +1381,7 @@ async fn apply_transition_tx(
                 .unwrap_or_else(|| row.status.clone()),
         ),
         Some(t.to_str().to_string()),
-        None,
+        usage::transition_payload(usage.as_ref())?,
         now(),
     )
     .await?;

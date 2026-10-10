@@ -86,6 +86,10 @@ name = "roots_isolation"
 required-features = ["test-support"]
 
 [dev-dependencies]
+# The task-usage capture budget needs a clock a test can advance:
+# `#[tokio::test(start_paused = true)]` parks a capture on an occupied
+# store lock and lets the budget elapse without real waiting.
+tokio = { workspace = true, features = ["macros", "rt", "test-util"] }
 # Wire-level assertion that the resolved User-Agent reaches the provider. reqwest applies client
 # default headers (including User-Agent) at `execute` time, not at `Request::build`, so the UA cannot
 # be read off a prepared `reqwest::Request` — only a real request to a mock server proves it (and

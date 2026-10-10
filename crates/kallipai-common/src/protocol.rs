@@ -36,7 +36,8 @@ pub use task::{
     AssociationExport, ClosedReason, DOSSIER_MAX_BYTES, EventExport, REPORT_MAX_BYTES,
     TASK_BODY_LIMIT_BYTES, TaskCloseRequest, TaskConfirmFile, TaskConfirmRequest,
     TaskCreateRequest, TaskExport, TaskForceRequest, TaskListPage, TaskListQuery, TaskNoteRequest,
-    TaskRow, TaskStatus, TaskTimeAxis,
+    TaskRow, TaskStatus, TaskTimeAxis, TaskUsageExport, UsageAgentExport, UsageGapExport,
+    UsageGapReason, UsageSegmentExport,
 };
 pub use team::{
     RoleDisposition, TeamAction, TeamActionResult, TeamConvergeOutcome, TeamConvergeRequest,

@@ -270,7 +270,7 @@ kallip skill meta <PATH>
 | `task reopen`  | 重新打开已关闭任务；串行门生效，`--force` 可越过                                                                                              |
 | `task archive` | 归档已关闭任务，使其离开默认列表视图；closed-only 门生效，`--force` 可越过                                                                           |
 | `task list`    | 列出任务（`--status`、`--assignee`、`--archived`、时间窗过滤、分页、`--relative-time`）                                                      |
-| `task show`    | 显示单个任务的状态、关联键与事件轨迹                                                                                                         |
+| `task show`    | 显示单个任务的状态、关联键、事件轨迹，以及活跃窗口内的 token 用量                                                                             |
 | `task export`  | 导出单个或全部任务；`--json` 输出供机器消费的 JSON                                                                                           |
 | `task extract` | 解包已关闭任务的内容寻址 dossier 归档                                                                                                    |
 | `task report`  | 回读事件轨迹中的确认：`report list` 列出已交回的确认（可选 `--confirmer` 过滤、`--out` 写文件），`report show` 显示单个确认（`--confirmer`、`--version`、`--out`） |

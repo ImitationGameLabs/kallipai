@@ -256,7 +256,109 @@ pub struct TaskExport {
     /// frozen at close. Absent until the task closes with a dossier.
     pub archive_hash: Option<String>,
     pub archive_entries: Option<i64>,
+    /// Token accounting over the task's active windows, derived at read time
+    /// from the per-transition snapshots in the trail. Absent when no
+    /// transition carries one (tasks that predate the feature).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage: Option<TaskUsageExport>,
     pub events: Vec<EventExport>,
+}
+
+/// Token accounting for one task, summed over its **active windows**.
+///
+/// A window is a `[baseline, terminal)` pair: the baseline is a `start`,
+/// `resume`, or `reopen` transition, the terminal a `pause` or `close`.
+/// Each counter delta is the terminal's value minus its baseline's, clamped
+/// at zero; a window that cannot be paired is left out of the sum. An agent
+/// that at least one of its ends did not read is listed in `gaps` with
+/// `partial` set, while a window whose edges both recorded nothing sets
+/// `partial` alone. The window still open — the one `open` and `open_since`
+/// report — is not one of those: its agents never enter `gaps`.
+///
+/// The total covers the task's active windows only. Work the same agent did
+/// elsewhere while a window was open (another task, unrelated turns) still
+/// lands in these numbers, so `total_tokens` is not a per-task invoice.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskUsageExport {
+    /// Sum of the paired windows' consumed (prompt + completion) tokens.
+    pub total_tokens: u64,
+    /// The task holds an open window: its terminal has not happened yet,
+    /// so its spend is not part of `total_tokens`. Normal for a running
+    /// task, not a data gap.
+    pub open: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub open_since: Option<String>,
+    /// The windows that could be summed, in trail order. A window that is
+    /// still open, or whose edges are incomplete, contributes none.
+    pub segments: Vec<UsageSegmentExport>,
+    /// Per-agent sums across every paired window.
+    pub agents: Vec<UsageAgentExport>,
+    /// Agents left out of the sum because an end did not read them.
+    pub gaps: Vec<UsageGapExport>,
+    /// A window could not be fully accounted: a gap, a failed capture, a
+    /// snapshot that no longer parses, an edge that recorded nothing, or
+    /// an agent a capture had to skip.
+    pub partial: bool,
+    /// Agents whose counters went backwards between two snapshots; their
+    /// negative deltas were clamped to zero.
+    pub non_monotonic: Vec<String>,
+}
+
+/// One summed window: `[from_event, to_event)`.
+///
+/// Only windows with both edges readable become segments; a window that
+/// never closed, or whose other edge is missing or unreadable, is
+/// accounted for by `open`, `gaps`, or `partial` instead.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UsageSegmentExport {
+    /// `start` | `resume` | `reopen`.
+    pub from_event: String,
+    /// `pause` | `close`.
+    pub to_event: String,
+    pub from_at: String,
+    pub to_at: String,
+    pub total_tokens: u64,
+    pub agents: Vec<UsageAgentExport>,
+}
+
+/// One agent's counters over a window, or summed over every window.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UsageAgentExport {
+    pub agent_id: String,
+    /// The agent's role name at read time, filled by the route the same way
+    /// event actors are; null for an id that no longer resolves.
+    pub agent_role: Option<String>,
+    /// prompt + completion: the headline number.
+    pub consumed_tokens: u64,
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_write_tokens: u64,
+}
+
+/// An agent left out of a sum, and why.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UsageGapExport {
+    pub agent_id: String,
+    /// 1-based ordinal of the window in trail order. Not an index into
+    /// `segments`: a window whose edges are incomplete consumes an ordinal
+    /// without contributing one, so the two can differ in length.
+    pub segment: usize,
+    pub reason: UsageGapReason,
+}
+
+/// Why a window could not account for an agent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UsageGapReason {
+    /// The baseline snapshot does not carry the agent: it was spawned
+    /// mid-window, the baseline predates the feature, or its capture could
+    /// not read the agent.
+    MissingBaseline,
+    /// The terminal snapshot does not carry the agent: it was removed,
+    /// parked where its manifest could not be read, or its capture could
+    /// not read the agent (a capture that ran out of budget lands here too).
+    MissingTerminal,
 }
 
 /// The list-face row: a task without its event trail. `GET /tasks` returns

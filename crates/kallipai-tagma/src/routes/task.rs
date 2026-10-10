@@ -65,11 +65,13 @@ async fn role_snapshot(state: &SharedState) -> std::collections::HashMap<String,
         .collect()
 }
 
-/// Fill `actor_role` on every event: the role for a registered agent id,
-/// `None` for anything else (historical confirmer-name actors, the literal
-/// `operator`, deregistered ids, null actors). Read and write responses
-/// share this one mapping, so the wire type has a single fill policy.
-fn inject_actor_roles(
+/// Fill `actor_role` on every event, and `agent_role` on every usage row:
+/// the role for a registered agent id, `None` for anything else (historical
+/// confirmer-name actors, the literal `operator`, deregistered ids, null
+/// actors, an agent that worked the task and has since been removed).
+/// Read and write responses share this one mapping, so the wire type has a
+/// single fill policy.
+fn inject_wire_roles(
     mut export: kallipai_task::TaskExport,
     roles: &std::collections::HashMap<String, String>,
 ) -> kallipai_task::TaskExport {
@@ -79,6 +81,19 @@ fn inject_actor_roles(
             .as_deref()
             .and_then(|actor| roles.get(actor))
             .cloned();
+    }
+    if let Some(usage) = export.usage.as_mut() {
+        // One fill for every agent row in the usage face: the top-level
+        // sums and the per-window rows are the same wire field.
+        let fill = |agents: &mut Vec<kallipai_common::protocol::UsageAgentExport>| {
+            for agent in agents {
+                agent.agent_role = roles.get(&agent.agent_id).cloned();
+            }
+        };
+        fill(&mut usage.agents);
+        for segment in &mut usage.segments {
+            fill(&mut segment.agents);
+        }
     }
     export
 }
@@ -160,7 +175,7 @@ async fn create(
         .map_err(api_error)?;
     let id = task.id;
     let export = store(&state)?.export(id).await.map_err(api_error)?;
-    let export = inject_actor_roles(export, &snapshot);
+    let export = inject_wire_roles(export, &snapshot);
     notify(&state, "create", &export);
     Ok(Json(export))
 }
@@ -173,12 +188,13 @@ async fn start(
 ) -> TaskResult<kallipai_task::TaskExport> {
     let actor = acting_agent(&auth);
     let snapshot = role_snapshot(&state).await;
+    let usage = crate::usage_snapshot::capture_usage(&state).await;
     store(&state)?
-        .start(id, &actor, body.force)
+        .start(id, &actor, body.force, Some(usage))
         .await
         .map_err(api_error)?;
     let export = store(&state)?.export(id).await.map_err(api_error)?;
-    let export = inject_actor_roles(export, &snapshot);
+    let export = inject_wire_roles(export, &snapshot);
     notify(&state, "start", &export);
     Ok(Json(export))
 }
@@ -207,7 +223,7 @@ async fn show(
 ) -> TaskResult<kallipai_task::TaskExport> {
     let snapshot = role_snapshot(&state).await;
     let export = store(&state)?.export(id).await.map_err(api_error)?;
-    Ok(Json(inject_actor_roles(export, &snapshot)))
+    Ok(Json(inject_wire_roles(export, &snapshot)))
 }
 
 async fn export_one(
@@ -216,7 +232,7 @@ async fn export_one(
 ) -> TaskResult<kallipai_task::TaskExport> {
     let snapshot = role_snapshot(&state).await;
     let export = store(&state)?.export(id).await.map_err(api_error)?;
-    Ok(Json(inject_actor_roles(export, &snapshot)))
+    Ok(Json(inject_wire_roles(export, &snapshot)))
 }
 
 async fn export_all(
@@ -226,7 +242,7 @@ async fn export_all(
     let all = store(&state)?.export_all().await.map_err(api_error)?;
     Ok(Json(
         all.into_iter()
-            .map(|export| inject_actor_roles(export, &snapshot))
+            .map(|export| inject_wire_roles(export, &snapshot))
             .collect(),
     ))
 }
@@ -244,7 +260,7 @@ async fn confirm(
         .await
         .map_err(api_error)?;
     let export = store(&state)?.export(id).await.map_err(api_error)?;
-    let export = inject_actor_roles(export, &snapshot);
+    let export = inject_wire_roles(export, &snapshot);
     notify(&state, "confirm", &export);
     Ok(Json(export))
 }
@@ -258,7 +274,7 @@ async fn review(
     let snapshot = role_snapshot(&state).await;
     store(&state)?.review(id, &actor).await.map_err(api_error)?;
     let export = store(&state)?.export(id).await.map_err(api_error)?;
-    let export = inject_actor_roles(export, &snapshot);
+    let export = inject_wire_roles(export, &snapshot);
     notify(&state, "review", &export);
     Ok(Json(export))
 }
@@ -270,9 +286,13 @@ async fn pause(
 ) -> TaskResult<kallipai_task::TaskExport> {
     let actor = acting_agent(&auth);
     let snapshot = role_snapshot(&state).await;
-    store(&state)?.pause(id, &actor).await.map_err(api_error)?;
+    let usage = crate::usage_snapshot::capture_usage(&state).await;
+    store(&state)?
+        .pause(id, &actor, Some(usage))
+        .await
+        .map_err(api_error)?;
     let export = store(&state)?.export(id).await.map_err(api_error)?;
-    let export = inject_actor_roles(export, &snapshot);
+    let export = inject_wire_roles(export, &snapshot);
     notify(&state, "pause", &export);
     Ok(Json(export))
 }
@@ -285,12 +305,13 @@ async fn resume(
 ) -> TaskResult<kallipai_task::TaskExport> {
     let actor = acting_agent(&auth);
     let snapshot = role_snapshot(&state).await;
+    let usage = crate::usage_snapshot::capture_usage(&state).await;
     store(&state)?
-        .resume(id, &actor, body.force)
+        .resume(id, &actor, body.force, Some(usage))
         .await
         .map_err(api_error)?;
     let export = store(&state)?.export(id).await.map_err(api_error)?;
-    let export = inject_actor_roles(export, &snapshot);
+    let export = inject_wire_roles(export, &snapshot);
     notify(&state, "resume", &export);
     Ok(Json(export))
 }
@@ -308,7 +329,7 @@ async fn note(
         .await
         .map_err(api_error)?;
     let export = store(&state)?.export(id).await.map_err(api_error)?;
-    let export = inject_actor_roles(export, &snapshot);
+    let export = inject_wire_roles(export, &snapshot);
     notify(&state, "note", &export);
     Ok(Json(export))
 }
@@ -321,7 +342,12 @@ async fn close(
 ) -> TaskResult<kallipai_task::TaskExport> {
     let actor = acting_agent(&auth);
     let snapshot = role_snapshot(&state).await;
-    let closed = store(&state)?.close(id, &actor, body, blobs(&state)?);
+    let usage = crate::usage_snapshot::capture_usage(&state).await;
+    // Captured before the store call: `close` ingests the dossier archive
+    // first, and that ingest's spend lands in no window. The boundary is
+    // deliberate — moving the capture after the ingest would cost the
+    // same-transaction guarantee the snapshot rests on.
+    let closed = store(&state)?.close(id, &actor, body, blobs(&state)?, Some(usage));
     match closed.await {
         Ok(_) => {}
         // The gate message carries identity ids; the human face wants
@@ -339,7 +365,7 @@ async fn close(
         Err(e) => return Err(api_error(e)),
     };
     let export = store(&state)?.export(id).await.map_err(api_error)?;
-    let export = inject_actor_roles(export, &snapshot);
+    let export = inject_wire_roles(export, &snapshot);
     notify(&state, "close", &export);
     Ok(Json(export))
 }
@@ -352,12 +378,13 @@ async fn reopen(
 ) -> TaskResult<kallipai_task::TaskExport> {
     let actor = acting_agent(&auth);
     let snapshot = role_snapshot(&state).await;
+    let usage = crate::usage_snapshot::capture_usage(&state).await;
     store(&state)?
-        .reopen(id, &actor, body.force)
+        .reopen(id, &actor, body.force, Some(usage))
         .await
         .map_err(api_error)?;
     let export = store(&state)?.export(id).await.map_err(api_error)?;
-    let export = inject_actor_roles(export, &snapshot);
+    let export = inject_wire_roles(export, &snapshot);
     notify(&state, "reopen", &export);
     Ok(Json(export))
 }
@@ -375,7 +402,7 @@ async fn archive(
         .await
         .map_err(api_error)?;
     let export = store(&state)?.export(id).await.map_err(api_error)?;
-    let export = inject_actor_roles(export, &snapshot);
+    let export = inject_wire_roles(export, &snapshot);
     notify(&state, "archive", &export);
     Ok(Json(export))
 }
@@ -557,7 +584,7 @@ mod tests {
     fn actor_role_injection_covers_every_actor_shape() {
         let roles =
             std::collections::HashMap::from([("agent-1".to_string(), "reviewer-c".to_string())]);
-        let export = inject_actor_roles(
+        let export = inject_wire_roles(
             export_with_events(&[
                 Some("agent-1"),
                 Some("reviewer-c"),
@@ -595,6 +622,7 @@ mod tests {
             association: None,
             archive_hash: None,
             archive_entries: None,
+            usage: None,
             events: actors
                 .iter()
                 .map(|a| kallipai_common::protocol::EventExport {
@@ -611,6 +639,59 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    /// One usage row, with the role left for the fill to supply.
+    fn usage_agent(
+        agent_id: &str,
+        consumed_tokens: u64,
+    ) -> kallipai_common::protocol::UsageAgentExport {
+        kallipai_common::protocol::UsageAgentExport {
+            agent_id: agent_id.to_string(),
+            agent_role: None,
+            consumed_tokens,
+            prompt_tokens: consumed_tokens,
+            completion_tokens: 0,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+        }
+    }
+
+    /// The usage face carries agent rows at two levels; one role map fills
+    /// both, and an id that no longer resolves stays null.
+    #[test]
+    fn usage_agent_rows_get_roles_at_both_levels() {
+        let mut export = export_with_events(&[]);
+        let rows = vec![usage_agent("agent-1", 20), usage_agent("gone", 10)];
+        export.usage = Some(kallipai_common::protocol::TaskUsageExport {
+            total_tokens: 30,
+            open: false,
+            open_since: None,
+            segments: vec![kallipai_common::protocol::UsageSegmentExport {
+                from_event: "start".into(),
+                to_event: "close".into(),
+                from_at: "2025-10-09T08:53:20Z".into(),
+                to_at: "2025-10-09T09:53:20Z".into(),
+                total_tokens: 30,
+                agents: rows.clone(),
+            }],
+            agents: rows,
+            gaps: vec![],
+            partial: false,
+            non_monotonic: vec![],
+        });
+        let roles: std::collections::HashMap<String, String> =
+            [("agent-1".to_string(), "reviewer-c".to_string())]
+                .into_iter()
+                .collect();
+
+        let export = inject_wire_roles(export, &roles);
+        let usage = export.usage.expect("usage");
+        assert_eq!(usage.agents[0].agent_role.as_deref(), Some("reviewer-c"));
+        assert_eq!(usage.agents[1].agent_role, None);
+        let window_rows = &usage.segments[0].agents;
+        assert_eq!(window_rows[0].agent_role.as_deref(), Some("reviewer-c"));
+        assert_eq!(window_rows[1].agent_role, None);
     }
 
     /// Close with a packed dossier: the content address and entry count

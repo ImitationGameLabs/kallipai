@@ -11,7 +11,7 @@ use kallipai_client::TagmaClient;
 use kallipai_common::protocol::{
     ClosedReason, DOSSIER_MAX_BYTES, REPORT_MAX_BYTES, TaskCloseRequest, TaskConfirmFile,
     TaskConfirmRequest, TaskCreateRequest, TaskExport, TaskForceRequest, TaskListQuery,
-    TaskNoteRequest, TaskStatus,
+    TaskNoteRequest, TaskStatus, TaskUsageExport,
 };
 
 use crate::args::task::{
@@ -390,6 +390,7 @@ fn print_show(e: &TaskExport) {
             None => println!("closed: {reason}"),
         }
     }
+    print_usage(e.usage.as_ref());
     println!("events:");
     for ev in &e.events {
         let scope = match (&ev.from_status, &ev.to_status) {
@@ -408,6 +409,71 @@ fn print_show(e: &TaskExport) {
                 .unwrap_or("-")
         );
     }
+}
+
+/// Print the token-accounting line: what the task's active windows cost,
+/// with the caveat the number needs. A task that predates the snapshots
+/// says so instead of reporting a zero.
+fn print_usage(usage: Option<&TaskUsageExport>) {
+    match usage {
+        Some(usage) => println!("{}", usage_line(usage)),
+        None => println!("usage: not recorded"),
+    }
+}
+
+/// The line itself, split out from the printing so the shapes it takes
+/// (no window, a single token or gap, a partial task) stay testable.
+fn usage_line(usage: &TaskUsageExport) -> String {
+    let windows = usage.segments.len();
+    // The window clause is dropped when there is no window: "0 active
+    // windows" carries nothing a reader of a running task needs.
+    let mut line = if windows == 0 {
+        format!(
+            "usage: {} {}",
+            usage.total_tokens,
+            plural(usage.total_tokens, "token", "tokens")
+        )
+    } else {
+        format!(
+            "usage: {} {} over {} active {}",
+            usage.total_tokens,
+            plural(usage.total_tokens, "token", "tokens"),
+            windows,
+            plural(windows as u64, "window", "windows"),
+        )
+    };
+    let per_agent: Vec<String> = usage
+        .agents
+        .iter()
+        .map(|agent| {
+            let name = agent.agent_role.as_deref().unwrap_or(&agent.agent_id);
+            format!("{name} {}", agent.consumed_tokens)
+        })
+        .collect();
+    if !per_agent.is_empty() {
+        line.push_str(&format!(" ({})", per_agent.join(", ")));
+    }
+    if usage.partial {
+        // `partial` also covers incompleteness that leaves no gap rows (a
+        // failed capture, an unreadable snapshot), so the count is attached
+        // only when there is one.
+        match usage.gaps.len() {
+            0 => line.push_str(", partial"),
+            gaps => line.push_str(&format!(
+                ", partial ({gaps} {})",
+                plural(gaps as u64, "gap", "gaps")
+            )),
+        }
+    }
+    if let Some(since) = &usage.open_since {
+        line.push_str(&format!(", window open since {since}"));
+    }
+    line
+}
+
+/// `1 token` / `2 tokens`: the unit that goes with a count.
+fn plural<'a>(count: u64, one: &'a str, many: &'a str) -> &'a str {
+    if count == 1 { one } else { many }
 }
 
 fn close_reason(reason: TaskCloseReason) -> ClosedReason {
@@ -600,6 +666,7 @@ mod list_render_tests {
             association: None,
             archive_hash: None,
             archive_entries: None,
+            usage: None,
             events: vec![
                 confirm_event(1, "agent-1", Some("reviewer-c")),
                 confirm_event(2, "agent-2", Some("reviewer-h")),
@@ -667,5 +734,127 @@ mod list_render_tests {
         assert!(confirm_matches_confirmer(&view, "reviewer-c"));
         assert!(confirm_matches_confirmer(&view, "agent-1"));
         assert!(!confirm_matches_confirmer(&view, "agent-2"));
+    }
+}
+
+#[cfg(test)]
+mod usage_line_tests {
+    use super::*;
+    use kallipai_common::protocol::{
+        UsageAgentExport, UsageGapExport, UsageGapReason, UsageSegmentExport,
+    };
+
+    fn accounted(total_tokens: u64) -> TaskUsageExport {
+        TaskUsageExport {
+            total_tokens,
+            open: false,
+            open_since: None,
+            segments: Vec::new(),
+            agents: Vec::new(),
+            gaps: Vec::new(),
+            partial: false,
+            non_monotonic: Vec::new(),
+        }
+    }
+
+    fn segment(from: &str, to: &str) -> UsageSegmentExport {
+        UsageSegmentExport {
+            from_event: from.to_string(),
+            to_event: to.to_string(),
+            from_at: "2025-10-09T08:53:20Z".to_string(),
+            to_at: "2025-10-09T09:53:20Z".to_string(),
+            total_tokens: 10,
+            agents: Vec::new(),
+        }
+    }
+
+    fn gap(agent_id: &str) -> UsageGapExport {
+        UsageGapExport {
+            agent_id: agent_id.to_string(),
+            segment: 1,
+            reason: UsageGapReason::MissingTerminal,
+        }
+    }
+
+    #[test]
+    fn a_single_token_stays_singular() {
+        assert_eq!(usage_line(&accounted(1)), "usage: 1 token");
+    }
+
+    #[test]
+    fn a_task_without_a_closed_window_drops_the_window_clause() {
+        let mut usage = accounted(0);
+        usage.open = true;
+        usage.open_since = Some("2025-10-09T08:53:20Z".to_string());
+        assert_eq!(
+            usage_line(&usage),
+            "usage: 0 tokens, window open since 2025-10-09T08:53:20Z"
+        );
+    }
+
+    #[test]
+    fn windows_and_gaps_read_in_the_singular_and_the_plural() {
+        let mut usage = accounted(1_000);
+        usage.segments = vec![segment("start", "close")];
+        assert_eq!(
+            usage_line(&usage),
+            "usage: 1000 tokens over 1 active window"
+        );
+        usage.segments.push(segment("resume", "close"));
+        assert_eq!(
+            usage_line(&usage),
+            "usage: 1000 tokens over 2 active windows"
+        );
+        usage.partial = true;
+        assert_eq!(
+            usage_line(&usage),
+            "usage: 1000 tokens over 2 active windows, partial"
+        );
+        usage.gaps = vec![gap("a")];
+        assert_eq!(
+            usage_line(&usage),
+            "usage: 1000 tokens over 2 active windows, partial (1 gap)"
+        );
+        usage.gaps.push(gap("b"));
+        assert_eq!(
+            usage_line(&usage),
+            "usage: 1000 tokens over 2 active windows, partial (2 gaps)"
+        );
+    }
+
+    #[test]
+    fn agent_rows_prefer_the_role_and_fall_back_to_the_id() {
+        let mut usage = accounted(30);
+        usage.agents = vec![
+            UsageAgentExport {
+                agent_id: "11111111-1111-1111-1111-111111111111".to_string(),
+                agent_role: Some("dev".to_string()),
+                consumed_tokens: 20,
+                prompt_tokens: 20,
+                completion_tokens: 0,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+            },
+            UsageAgentExport {
+                agent_id: "agent-b".to_string(),
+                agent_role: None,
+                consumed_tokens: 10,
+                prompt_tokens: 10,
+                completion_tokens: 0,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+            },
+        ];
+        assert_eq!(usage_line(&usage), "usage: 30 tokens (dev 20, agent-b 10)");
+    }
+
+    #[test]
+    fn a_task_with_no_window_but_with_gaps_reads_as_partial() {
+        // The shape a pre-feature task takes when only its terminal carried
+        // a snapshot: nothing to sum, and the agents it named are gaps.
+        let mut usage = accounted(0);
+        usage.partial = true;
+        usage.gaps = vec![gap("a")];
+        assert_eq!(usage_line(&usage), "usage: 0 tokens, partial (1 gap)");
     }
 }

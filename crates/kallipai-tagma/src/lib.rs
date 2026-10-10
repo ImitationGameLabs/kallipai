@@ -33,6 +33,7 @@ pub mod sse;
 pub mod state;
 pub mod task_watcher;
 pub mod token;
+pub mod usage_snapshot;
 pub mod work_schedule;
 
 #[cfg(any(test, feature = "test-support"))]

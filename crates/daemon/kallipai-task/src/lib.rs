@@ -13,6 +13,7 @@ pub mod gates;
 pub mod migration;
 pub mod model;
 pub mod store;
+pub mod usage;
 
 pub use entities::task::Model as Task;
 pub use entities::task_event::Model as TaskEvent;

@@ -1043,6 +1043,25 @@ closed-only gate records a single `archive` event carrying a gate
 payload (`archive_requires_closed` plus the escaped status), unlike the
 standalone `force_*` events of the other gated verbs.
 
+Every `TaskExport` also carries `usage` when the task's trail holds token
+accounting snapshots. `total_tokens` is summed over the task's **active
+windows** -- the `start` | `resume` | `reopen` to `pause` | `close`
+intervals -- with one entry in `segments` for each window it could sum,
+and per-agent rows inside each; a window that never closed, or whose
+edges are incomplete, contributes none. `open` plus `open_since` mark a
+window that has not closed yet (its spend is not in the total); `partial`
+with `gaps` marks an agent at least one end of a window did not read,
+each gap naming the window and the reason (`missing_baseline` |
+`missing_terminal`). That window number is the 1-based ordinal of the
+window in trail order: it counts windows that contributed no segment, so
+it need not match an index into `segments`. `non_monotonic` names the
+agents whose counters went backwards between two snapshots, whose
+negative deltas are clamped to zero.
+
+The total covers the windows, not the task alone: work the same agent did
+elsewhere while a window was open lands in these numbers too. A task whose
+trail holds no snapshot at all omits the field rather than reporting zero.
+
 ### SSE Event Types
 
 These are the **internal** event stream's variants (`GET /agents/{id}/events`),

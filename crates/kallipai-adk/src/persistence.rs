@@ -15,6 +15,7 @@ mod scan;
 mod store;
 #[cfg(test)]
 mod test_support;
+mod usage;
 
 pub(crate) use archive::copy_dir_all;
 pub use archive::{archive_agent_dir, deactivate_agent_dir, reactivate_agent_dir};
@@ -36,3 +37,4 @@ pub use scan::{
     scan_inactive,
 };
 pub use store::{Degradation, DegradationKind};
+pub use usage::read_cumulative_usage;
