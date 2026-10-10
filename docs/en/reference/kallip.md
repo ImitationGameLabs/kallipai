@@ -79,6 +79,8 @@ all go through here.
 | `subagent remove <ID>`    | Remove a direct subagent.                        |
 | `subagent interrupt <ID>` | Interrupt a direct subagent's current operation. |
 | `subagent metadata <ID>`  | Update a direct subagent's role/description.     |
+| `subagent workspace relocate <ID> <PATH>` | Move a subagent's workspace to a prepared directory. |
+| `subagent workspace mv <ID> <PATH>` | Park the agent, then move the workspace directory itself. |
 
 Scoping notes (server-enforced):
 
@@ -95,6 +97,9 @@ Scoping notes (server-enforced):
   parent spawning a read-only `guest` reviewer). The tagma rejects a value
   above the parent's class with `403`. The flag is required. The granted class
   is shown by `kallip`/`GET /agents/{id}/permissions`.
+- `subagent workspace` (both verbs) is reserved for the **operator or the
+  root agent**; a busy agent, or one that still has live subagents, is
+  refused. Details and the cache note are below the examples.
 
 ```bash
 $ kallip subagent list
@@ -106,6 +111,26 @@ b4c2d3e5-...
 The spawn reads an optional initial prompt from stdin: `< /dev/null` above
 means "no prompt" and keeps the spawn from swallowing a surrounding script's
 stdin when the id is captured. Pipe or heredoc the prompt instead.
+
+#### `subagent workspace`: Move a Subagent's Workspace
+
+`kallip subagent workspace relocate <ID> <PATH>` moves a subagent to a new
+workspace in one command: deactivate, retarget the recorded workspace root,
+restore. The target directory must already hold the agent's files (an empty
+target is refused); this verb never moves files itself.
+
+`kallip subagent workspace mv <ID> <PATH>` parks the agent, then
+moves the recorded workspace directory to the new path (a plain
+rename: the source disappears; cross-device moves are refused),
+then retargets and restores.
+
+Both verbs are idempotent. Each step probes the current state, so a retried
+command resumes from wherever the previous run stopped. A refusal at the park
+step (a busy agent, or one with live subagents) leaves the agent
+untouched; a failure past it leaves the agent deactivated (cold), never
+half-restored. The restore rebuilds the agent's system prompt, so its prefix
+cache does not carry over; that is expected after a workspace switch, not a
+fault.
 
 ### `profile-set`: Manage Named Profile Sets
 

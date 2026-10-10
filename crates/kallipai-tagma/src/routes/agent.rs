@@ -21,8 +21,8 @@ use tracing::{debug, error, info, warn};
 
 use kallipai_common::protocol::{
     CreateAgentRequest, CreateAgentResponse, ListAgentsQuery, ProfileSetUpdateRequest,
-    UpdateActivityRequest, UpdateAgentMetadataRequest, WorkspaceRootUpdateRequest,
-    WorkspaceRootUpdated,
+    RelocateRequest, Relocated, UpdateActivityRequest, UpdateAgentMetadataRequest,
+    WorkspaceRootUpdateRequest, WorkspaceRootUpdated,
 };
 
 use super::ListAgentsResponse;
@@ -419,15 +419,20 @@ pub async fn update_metadata(
     Ok(Json(summary))
 }
 
-/// `PUT /agents/{id}/workspace-root` — relocate a parked agent's workspace.
+/// `PUT /agents/{id}/workspace-root` — retarget a deactivated agent's
+/// workspace record.
 ///
-/// Parked-only by design: the body must live in the inactive area, and a
+/// Deactivated-only by design: the body must live in the inactive area, and a
 /// live body for the same id is a double-body hazard that refuses the
 /// route. The orchestration around this mutation is the relocation
 /// runbook: deactivate, move the files (externally — git semantics stay
 /// out of the tagma), this route, then re-restore. Validation fails
 /// closed before the single meta write; once it lands the new path is
 /// the truth and rollback is the same runbook executed the other way.
+///
+/// The `POST /agents/{id}/relocate` orchestration runs the same validation
+/// through [`retarget_parked_workspace`], so the primitive and the
+/// one-command form cannot drift.
 pub async fn update_workspace_root(
     State(state): State<SharedState>,
     auth: crate::auth::AuthIdentity,
@@ -436,17 +441,216 @@ pub async fn update_workspace_root(
 ) -> Result<Json<WorkspaceRootUpdated>, ApiError> {
     authorize_relocation(&state, auth.identity()).await?;
 
-    // Eligibility: a parked body must exist, and no live double.
-    let inactive = persistence::inactive_dir(&id).map_err(ApiError::internal)?;
-    if !inactive.is_dir() {
-        return Err(ApiError::not_found("no parked body for this agent id"));
-    }
+    let (old, new) = retarget_parked_workspace(&state, &id, &body.workspace_root, false).await?;
+    Ok(Json(WorkspaceRootUpdated {
+        agent_id: id.to_string(),
+        old_workspace_root: old,
+        workspace_root: new,
+    }))
+}
+
+/// `POST /agents/{id}/relocate` — the one-command workspace move: park
+/// the agent, retarget the recorded workspace root, restore. With
+/// `with_files`, a plain directory move runs after the park (rename
+/// semantics: the source disappears; cross-device moves fail without a
+/// copy fallback), so the destructive step never touches a live agent.
+///
+/// Every step probes the current shape before acting, so a retried
+/// request resumes from wherever the previous one stopped. A refusal at
+/// the park gate (busy, live subagents) leaves the agent untouched; a
+/// failure past the gate leaves it deactivated (cold), never
+/// half-restored, and a failed restore re-parks the body — identity is
+/// never replaced here.
+pub async fn relocate_agent(
+    State(state): State<SharedState>,
+    auth: crate::auth::AuthIdentity,
+    Path(id): Path<AgentId>,
+    Json(body): Json<RelocateRequest>,
+) -> Result<Json<Relocated>, ApiError> {
+    authorize_relocation(&state, auth.identity()).await?;
+    let mut steps = Vec::new();
+
+    // Resolve the current workspace record first: the live body's meta
+    // when one exists, the deactivated body's meta otherwise. Both the
+    // move step and the response's old-path field key off it.
+    let current_meta = if persistence::agent_dir(&id)
+        .map_err(ApiError::internal)?
+        .is_dir()
+    {
+        persistence::read_meta(&id).map_err(ApiError::internal)?
+    } else {
+        let inactive = persistence::inactive_dir(&id).map_err(ApiError::internal)?;
+        if !inactive.is_dir() {
+            return Err(ApiError::not_found(
+                "no live or deactivated body for this agent id",
+            ));
+        }
+        persistence::read_meta_from_dir(&inactive).map_err(ApiError::internal)?
+    };
+    let old_workspace_root = current_meta.workspace_root.display().to_string();
+
+    // Park: a live body goes through the shared deactivate gates (busy
+    // and live-subagent refusals); an already-deactivated body skips
+    // ahead. A live directory with no registry entry (a torn-down
+    // leftover) parks directly — the gates are registry-shaped and there
+    // is nothing left to interrupt.
     if persistence::agent_dir(&id)
         .map_err(ApiError::internal)?
         .is_dir()
     {
+        let live_in_registry = {
+            let registry = state.registry.read().await;
+            registry.get(&id).is_some()
+        };
+        if live_in_registry {
+            deactivate_core(&state, &id, false)
+                .await
+                .map_err(|e| match e {
+                    DeactivateErr::Busy(id) => ApiError::conflict(format!(
+                        "agent {id} is busy; interrupt it first (kallip subagent interrupt)"
+                    )),
+                    DeactivateErr::HasSubagents(id) => ApiError::conflict(format!(
+                        "agent {id} has live subagents; deactivate or remove them first"
+                    )),
+                    DeactivateErr::Failed(detail) => ApiError::conflict(detail),
+                })?;
+            steps.push("deactivated into the inactive area".to_string());
+        } else {
+            persistence::deactivate_agent_dir(&id)
+                .map_err(|e| ApiError::internal(e.to_string()))?;
+            state.invalidate();
+            steps.push("parked the live body (no registry entry)".to_string());
+        }
+    } else {
+        let inactive = persistence::inactive_dir(&id).map_err(ApiError::internal)?;
+        if !inactive.is_dir() {
+            return Err(ApiError::not_found(
+                "no live or deactivated body for this agent id",
+            ));
+        }
+        steps.push("already deactivated; resuming".to_string());
+    }
+
+    if body.with_files {
+        let target = std::path::PathBuf::from(&body.workspace_root);
+        // Canonical compare first: a target that already IS the recorded
+        // root (moved, recorded, or the same path spelled differently)
+        // needs no move.
+        if target.canonicalize().ok().as_ref() == Some(&current_meta.workspace_root) {
+            steps.push(format!(
+                "move: target {} already holds the workspace",
+                target.display()
+            ));
+        } else {
+            let src_there = current_meta.workspace_root.is_dir();
+            let dst_there = target.exists();
+            match (src_there, dst_there) {
+                (true, false) => {
+                    std::fs::rename(&current_meta.workspace_root, &target).map_err(|e| {
+                        ApiError::bad_request(format!(
+                            "cannot move {} to {}: {e}",
+                            current_meta.workspace_root.display(),
+                            target.display()
+                        ))
+                    })?;
+                    steps.push(format!(
+                        "moved {} to {}",
+                        current_meta.workspace_root.display(),
+                        target.display()
+                    ));
+                }
+                (false, true) => {
+                    steps.push("move: source gone, target present (already moved)".to_string());
+                }
+                (true, true) => {
+                    return Err(ApiError::bad_request(format!(
+                        "both the recorded workspace {} and the target {} exist; \
+                         a plain move needs the target absent (resolve manually)",
+                        current_meta.workspace_root.display(),
+                        target.display()
+                    )));
+                }
+                (false, false) => {
+                    return Err(ApiError::bad_request(format!(
+                        "neither the recorded workspace {} nor the target {} exists; \
+                         nothing to move",
+                        current_meta.workspace_root.display(),
+                        target.display()
+                    )));
+                }
+            }
+        }
+    }
+
+    // Retarget the record (shared validation; the relocate form also
+    // refuses an empty target directory — the files-not-moved mistake).
+    let (old_record, new_record) =
+        retarget_parked_workspace(&state, &id, &body.workspace_root, true).await?;
+    if old_record == new_record {
+        steps.push(format!("workspace root already {new_record}"));
+    } else {
+        steps.push(format!("workspace root: {old_record} -> {new_record}"));
+    }
+
+    // Restore: the same boot path the tagma's own restart uses. The
+    // system prompt is rebuilt from the new path, so the agent's prefix
+    // cache does not carry over — expected, not a fault.
+    let role = current_meta.role.clone();
+    let (dir, meta) = restore_reactivate(&state, &id, &role)
+        .await
+        .map_err(restore_err)?;
+    restore_boot(&state, &id, &dir, meta, &role)
+        .await
+        .map_err(restore_err)?;
+    steps.push("restored".to_string());
+
+    Ok(Json(Relocated {
+        agent_id: id.to_string(),
+        old_workspace_root,
+        workspace_root: new_record,
+        steps,
+    }))
+}
+
+/// Both restore-core failures mean the same thing to relocate: the body
+/// stays parked (or is reported as needing manual cleanup) and the
+/// command can be retried; identity is never replaced.
+fn restore_err(e: RestoreStepErr) -> ApiError {
+    match e {
+        RestoreStepErr::Degraded(notes) => ApiError::conflict(notes.join("; ")),
+        RestoreStepErr::Failed(detail) => ApiError::conflict(detail),
+    }
+}
+
+/// Shared validation and single meta write behind a workspace retarget:
+/// eligibility (a deactivated body in the inactive area, no live double),
+/// boundary checks (the target exists as a directory, workspace
+/// disjointness, the supervisor nesting predicate, a lock-conflict probe,
+/// the worktree gitdir self-consistency check), then the one atomic truth
+/// switch. A target that already equals the recorded root is a no-op, so
+/// the call is idempotent.
+///
+/// `require_nonempty` is the relocate-only foolproofing: a fresh empty
+/// directory at the target almost always means the files were not moved
+/// yet, so the orchestrated form refuses before the record flips; the
+/// primitive stays permissive for deliberate fresh-directory use.
+async fn retarget_parked_workspace(
+    state: &SharedState,
+    id: &AgentId,
+    new_root: &str,
+    require_nonempty: bool,
+) -> Result<(String, String), ApiError> {
+    // Eligibility: a deactivated body must exist, and no live double.
+    let inactive = persistence::inactive_dir(id).map_err(ApiError::internal)?;
+    if !inactive.is_dir() {
+        return Err(ApiError::not_found("no deactivated body for this agent id"));
+    }
+    if persistence::agent_dir(id)
+        .map_err(ApiError::internal)?
+        .is_dir()
+    {
         return Err(ApiError::conflict(
-            "agent has a live body; only parked agents can be relocated",
+            "agent has a live body; only deactivated agents can be relocated",
         ));
     }
 
@@ -464,7 +668,7 @@ pub async fn update_workspace_root(
     // Canonical domain from here on. canonicalize succeeds for plain files
     // too, so the directory check is explicit (a file target must not
     // reach the write point).
-    let new_canon = std::path::PathBuf::from(&body.workspace_root)
+    let new_canon = std::path::PathBuf::from(new_root)
         .canonicalize()
         .map_err(|_| ApiError::bad_request("workspace_root must be an existing directory"))?;
     if !new_canon.is_dir() {
@@ -487,7 +691,7 @@ pub async fn update_workspace_root(
         if !visited.insert(link.clone()) {
             return Err(ApiError::internal("circular supervisor chain"));
         }
-        let (created_by, ws) = resolve_ancestor(&state, &link).await?;
+        let (created_by, ws) = resolve_ancestor(state, &link).await?;
         if supervisor_ws.is_none() {
             supervisor_ws = Some(ws);
         }
@@ -506,12 +710,12 @@ pub async fn update_workspace_root(
     // restore-time acquire would raise. Not enforcement — the in-memory
     // lock set can change between here and restore; restore remains the
     // authority and its failure semantics cover the race.
-    // Guest parked bodies skip the probe: restore never acquires a lock
+    // Guest deactivated bodies skip the probe: restore never acquires a lock
     // for a Guest, so a probe hit there would be a false positive.
     if meta.permissions_class == PermissionClass::Normal
         && let Some((holder, conflict)) = state
             .lock_manager
-            .probe_conflict(&id, &new_canon, &chain_ids)
+            .probe_conflict(id, &new_canon, &chain_ids)
             .map_err(ApiError::internal)?
     {
         return Err(ApiError::conflict(format!(
@@ -544,14 +748,237 @@ pub async fn update_workspace_root(
         }
     }
 
+    // All checks above still ran: an already-settled target only skips
+    // the write itself (an idempotent retry), never the validation.
+    if new_canon == meta.workspace_root {
+        let settled = new_canon.display().to_string();
+        return Ok((settled.clone(), settled));
+    }
+
+    if require_nonempty
+        && new_canon
+            .read_dir()
+            .map_err(ApiError::internal)?
+            .next()
+            .is_none()
+    {
+        return Err(ApiError::bad_request(
+            "target workspace is empty; move the agent's files there first",
+        ));
+    }
+
     // The single truth switch: one atomic write flips old to new.
     let updated =
         persistence::update_agent_workspace(&inactive, &new_canon).map_err(ApiError::internal)?;
-    Ok(Json(WorkspaceRootUpdated {
-        agent_id: id.to_string(),
-        old_workspace_root: old,
-        workspace_root: updated.workspace_root.display().to_string(),
-    }))
+    Ok((old, updated.workspace_root.display().to_string()))
+}
+
+/// Create a workspace directory, idempotently. Spawn needs the directory
+/// to exist before registration; restore recreates a vanished workspace
+/// (including parents) rather than waking an agent that cannot write
+/// its own workspace.
+pub(crate) fn ensure_workspace_dir(ws: &std::path::Path) -> Result<(), String> {
+    std::fs::create_dir_all(ws)
+        .map_err(|e| format!("cannot create workspace {}: {e}", ws.display()))
+}
+
+/// The id-targeted deactivate sequence shared by converge's batch face and
+/// the relocate orchestration: refuse a busy (non-idle, non-parked-wait)
+/// agent, refuse live subagents, unregister, tear down, and park the body
+/// in the inactive area. `force` interrupts a busy target first.
+///
+/// The refusal details stay uncontextualized so each caller can phrase
+/// them for its own face (a converge row says "batch stopped"; relocate
+/// says "interrupt it first").
+pub(crate) enum DeactivateErr {
+    /// The target is mid-round: `{0}` is the agent id.
+    Busy(String),
+    /// The target supervises live subagents: `{0}` is the agent id.
+    HasSubagents(String),
+    /// Anything else (vanished mid-operation, park write failed): the
+    /// detail string, passed through verbatim.
+    Failed(String),
+}
+
+pub(crate) async fn deactivate_core(
+    state: &SharedState,
+    id: &AgentId,
+    force: bool,
+) -> Result<Vec<String>, DeactivateErr> {
+    let mut notes = Vec::new();
+    let entry = {
+        let mut registry = state.registry.write().await;
+        let Some(entry) = registry.get(id) else {
+            return Err(DeactivateErr::Failed(format!(
+                "agent {id} vanished mid-operation"
+            )));
+        };
+        if let Some(live) = entry.as_live() {
+            let busy = !matches!(
+                live.agent.get_state(),
+                crate::state::AgentState::Idle | crate::state::AgentState::Parked
+            );
+            if busy && !force {
+                return Err(DeactivateErr::Busy(id.to_string()));
+            }
+            if busy {
+                notes.push(
+                    "force escape: the busy target was interrupted before teardown".to_string(),
+                );
+            }
+        }
+        if !entry.subagent_ids().is_empty() {
+            return Err(DeactivateErr::HasSubagents(id.to_string()));
+        }
+        registry.unregister(id).ok_or_else(|| {
+            DeactivateErr::Failed(format!("agent {id} vanished during unregister"))
+        })?
+    };
+    if force {
+        // Interrupt before teardown so an in-flight round aborts cleanly
+        // instead of racing the cancel.
+        let _ = interrupt_core(state, id).await;
+    }
+    teardown_agent(state, id, entry).await;
+    persistence::deactivate_agent_dir(id).map_err(|e| {
+        DeactivateErr::Failed(format!(
+            "agent {id} is unregistered but the park failed: {e:#}"
+        ))
+    })?;
+    state.invalidate();
+    Ok(notes)
+}
+
+/// Error taxonomy of the restore cores. `Degraded` marks an unusable
+/// identity: converge replaces the body with a fresh spawn, relocate
+/// refuses with the body left parked. `Failed` marks a hard stop with the
+/// body parked (or reported as needing manual cleanup).
+pub(crate) enum RestoreStepErr {
+    Degraded(Vec<String>),
+    Failed(String),
+}
+
+/// First half of the shared restore sequence: blind-spot recheck (the id
+/// must be absent, the role free), read the deactivated body's meta,
+/// ensure the recorded workspace exists, and move the body back into the
+/// live area. Returns the live dir plus its meta for the caller's
+/// between-halves work (converge aligns the meta to the declaration
+/// here; relocate goes straight through to the boot).
+pub(crate) async fn restore_reactivate(
+    state: &SharedState,
+    id: &AgentId,
+    role: &str,
+) -> Result<(std::path::PathBuf, persistence::AgentMeta), RestoreStepErr> {
+    {
+        let registry = state.registry.read().await;
+        if registry.get(id).is_some() {
+            return Err(RestoreStepErr::Failed(format!(
+                "agent {id} came alive mid-operation"
+            )));
+        }
+        if let Some((holder, _)) = registry
+            .iter()
+            .find(|(_, e)| e.identity().config.role == role)
+        {
+            return Err(RestoreStepErr::Failed(format!(
+                "role {role:?} is now held by agent {holder}"
+            )));
+        }
+    }
+    let inactive_dir = match persistence::inactive_dir(id) {
+        Ok(dir) => dir,
+        Err(e) => {
+            return Err(RestoreStepErr::Degraded(vec![format!(
+                "inactive body unreadable: {e:#}"
+            )]));
+        }
+    };
+    let meta = match persistence::read_meta_from_dir(&inactive_dir) {
+        Ok(meta) => meta,
+        Err(e) => {
+            return Err(RestoreStepErr::Degraded(vec![format!(
+                "the inactive body's metadata is unreadable ({e:#})"
+            )]));
+        }
+    };
+    // A deactivated body whose recorded workspace vanished must fail
+    // rather than wake unable to write its own workspace.
+    if let Err(e) = ensure_workspace_dir(&meta.workspace_root) {
+        return Err(RestoreStepErr::Failed(e));
+    }
+    if let Err(e) = persistence::reactivate_agent_dir(id) {
+        return Err(RestoreStepErr::Failed(format!(
+            "could not move the inactive body back to the live area: {e:#}"
+        )));
+    }
+    let dir = match persistence::agent_dir(id) {
+        Ok(dir) => dir,
+        Err(e) => {
+            return Err(RestoreStepErr::Failed(format!(
+                "live dir unresolved: {e:#}"
+            )));
+        }
+    };
+    Ok((dir, meta))
+}
+
+/// Second half of the shared restore sequence: boot the reactivated body
+/// through the same `restore_inactive` path the tagma boot uses, then
+/// register under the write lock with the same re-checks; a raced
+/// violation is undone (task torn down, body re-parked) so the abort
+/// leaves no ghost.
+pub(crate) async fn restore_boot(
+    state: &SharedState,
+    id: &AgentId,
+    dir: &std::path::Path,
+    meta: persistence::AgentMeta,
+    role: &str,
+) -> Result<(), RestoreStepErr> {
+    match crate::lifecycle::restore_inactive(
+        state.shutdown.clone(),
+        state.clone(),
+        persistence::PendingRestore {
+            agent_id: id.clone(),
+            agent_dir: dir.to_path_buf(),
+            meta,
+        },
+    )
+    .await
+    {
+        Ok((rid, entry)) => {
+            let mut registry = state.registry.write().await;
+            let violated = registry.get(id).is_some()
+                || registry
+                    .iter()
+                    .any(|(_, e)| e.identity().config.role == role);
+            if violated {
+                drop(registry);
+                teardown_agent(state, &rid, crate::state::RegistryEntry::Live(entry)).await;
+                let parked = persistence::deactivate_agent_dir(id);
+                let mut detail = "registry changed during the restore (role or id taken); the body was re-parked".to_string();
+                if parked.is_err() {
+                    detail.push_str(" (re-park failed; manual cleanup needed)");
+                }
+                return Err(RestoreStepErr::Failed(detail));
+            }
+            registry.register(rid, crate::state::RegistryEntry::Live(entry));
+            drop(registry);
+            state.invalidate();
+            Ok(())
+        }
+        Err(e) => {
+            // The body cannot come up: park it back (best effort) so the
+            // failure surfaces with the identity intact and parked. A
+            // failed re-park is surfaced in the notes, never swallowed.
+            let mut loss = vec![format!("restore failed ({e:#}); the body was re-parked")];
+            if let Err(park) = persistence::deactivate_agent_dir(id) {
+                loss.push(format!(
+                    "old body re-park failed; manual cleanup needed ({park:#})"
+                ));
+            }
+            Err(RestoreStepErr::Degraded(loss))
+        }
+    }
 }
 
 /// The operator or the root agent — the same mutation authority as the

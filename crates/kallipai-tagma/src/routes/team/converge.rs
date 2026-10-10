@@ -945,16 +945,6 @@ pub(super) enum RestoreFallout {
     Failed(String),
 }
 
-/// Create a team body's workspace directory, idempotently. Spawn needs
-/// the directory to exist before registration; restore needs the
-/// recorded root to be usable before waking the body, so a vanished
-/// workspace fails the row instead of producing an agent that cannot
-/// write its own workspace.
-fn ensure_workspace_dir(ws: &std::path::Path) -> Result<(), String> {
-    std::fs::create_dir_all(ws)
-        .map_err(|e| format!("cannot create workspace {}: {e}", ws.display()))
-}
-
 /// Spawn one declared role under the tagma root: derived workspace
 /// (`<root workspace>/team/<role>`), declaration prompt and skills,
 /// carve-out delegation. The reference monitor inside `spawn_subagent`
@@ -976,7 +966,7 @@ async fn spawn_action(
     let ws = root_ws.join("team").join(&a.role);
     // The workspace must exist before AgentConfig pins it and the body
     // registers; creation is idempotent for already-present roots.
-    ensure_workspace_dir(&ws)?;
+    crate::routes::agent::ensure_workspace_dir(&ws)?;
     let mut config = AgentConfig::load(d.prompt.clone(), d.skills.clone(), Some(ws.clone()))
         .map_err(|e| e.to_string())?;
     config.role = a.role.clone();
@@ -1009,65 +999,21 @@ pub(super) async fn restore_action(state: &SharedState, a: &PlannedAction) -> Re
     let Some(id) = a.target.clone() else {
         return RestoreFallout::Failed("restore row without a lock id".to_string());
     };
-    // Blind-spot re-read: the id must still be absent and the role free.
+    let (dir, mut meta) = match crate::routes::agent::restore_reactivate(state, &id, &a.role).await
     {
-        let registry = state.registry.read().await;
-        if registry.get(&id).is_some() {
-            return RestoreFallout::Failed(format!(
-                "agent {id} came alive in the plan→execute window; batch stopped, nothing applied for this row"
-            ));
+        Ok(v) => v,
+        Err(crate::routes::agent::RestoreStepErr::Degraded(notes)) => {
+            // The core reports the damage neutrally; only converge
+            // replaces the body, so the replacement context lands here.
+            let mut loss = vec!["IDENTITY LOSS".to_string()];
+            loss.extend(notes);
+            return degraded(state, a, &id, loss).await;
         }
-        if let Some((holder, _)) = registry
-            .iter()
-            .find(|(_, e)| e.identity().config.role == a.role)
-        {
-            return RestoreFallout::Failed(format!(
-                "role {:?} is now held by agent {holder}; batch stopped",
-                a.role
-            ));
-        }
-    }
-    let inactive_dir = match kallipai_adk::persistence::inactive_dir(&id) {
-        Ok(dir) => dir,
-        Err(e) => {
-            return degraded(
-                state,
-                a,
-                &id,
-                vec![format!("inactive body unreadable: {e:#}")],
-            )
-            .await;
+        Err(crate::routes::agent::RestoreStepErr::Failed(detail)) => {
+            return RestoreFallout::Failed(format!("{detail}; batch stopped"));
         }
     };
-    let mut meta = match kallipai_adk::persistence::read_meta_from_dir(&inactive_dir) {
-        Ok(meta) => meta,
-        Err(e) => {
-            return degraded(
-                state,
-                a,
-                &id,
-                vec![format!(
-                    "IDENTITY LOSS: the inactive body's metadata is unreadable ({e:#}); spawned a fresh replacement"
-                )],
-            )
-            .await;
-        }
-    };
-    // A parked body whose recorded workspace vanished must fail this
-    // row rather than wake unable to write its own workspace.
-    if let Err(e) = ensure_workspace_dir(&meta.workspace_root) {
-        return RestoreFallout::Failed(e);
-    }
-    if let Err(e) = kallipai_adk::persistence::reactivate_agent_dir(&id) {
-        return RestoreFallout::Failed(format!(
-            "could not move the inactive body back to the live area: {e:#}"
-        ));
-    }
-    let dir = match kallipai_adk::persistence::agent_dir(&id) {
-        Ok(dir) => dir,
-        Err(e) => return RestoreFallout::Failed(format!("live dir unresolved: {e:#}")),
-    };
-    // Same-round alignment on the parked body, before the config rebuild:
+    // Same-round alignment on the reactivated body, before the config rebuild:
     // the restored agent comes up already conforming to the declaration.
     let mut notes = Vec::new();
     if let Some(d) = &a.declared {
@@ -1131,60 +1077,15 @@ pub(super) async fn restore_action(state: &SharedState, a: &PlannedAction) -> Re
             notes.push("declared skills apply at spawn; restored context unchanged".to_string());
         }
     }
-    // Run the boot restore path over the reactivated body.
-    match crate::lifecycle::restore_inactive(
-        state.shutdown.clone(),
-        state.clone(),
-        kallipai_adk::persistence::PendingRestore {
-            agent_id: id.clone(),
-            agent_dir: dir.clone(),
-            meta,
-        },
-    )
-    .await
-    {
-        Ok((rid, entry)) => {
-            // Register under the write lock with the same re-checks; a
-            // raced violation is undone (task torn down, body re-parked)
-            // so the abort leaves no ghost.
-            let mut registry = state.registry.write().await;
-            let violated = registry.get(&id).is_some()
-                || registry
-                    .iter()
-                    .any(|(_, e)| e.identity().config.role == a.role);
-            if violated {
-                drop(registry);
-                crate::routes::agent::teardown_agent(
-                    state,
-                    &rid,
-                    crate::state::RegistryEntry::Live(entry),
-                )
-                .await;
-                let parked = kallipai_adk::persistence::deactivate_agent_dir(&id);
-                let mut detail = "registry changed in the plan→execute window (role or id taken); batch stopped, the body was re-parked".to_string();
-                if parked.is_err() {
-                    detail.push_str(" (re-park failed; manual cleanup needed)");
-                }
-                return RestoreFallout::Failed(detail);
-            }
-            registry.register(rid, crate::state::RegistryEntry::Live(entry));
-            drop(registry);
-            state.invalidate();
-            RestoreFallout::Restored { id, notes }
+    match crate::routes::agent::restore_boot(state, &id, &dir, meta, &a.role).await {
+        Ok(()) => RestoreFallout::Restored { id, notes },
+        Err(crate::routes::agent::RestoreStepErr::Degraded(loss)) => {
+            let mut wrapped = vec!["IDENTITY LOSS".to_string()];
+            wrapped.extend(loss);
+            degraded(state, a, &id, wrapped).await
         }
-        Err(e) => {
-            // The body cannot come up — park it back (best effort) and
-            // spawn a fresh replacement. A failed re-park is surfaced in
-            // the notes, never swallowed.
-            let mut loss = vec![format!(
-                "IDENTITY LOSS: restore failed ({e:#}); spawned a fresh replacement"
-            )];
-            if let Err(park) = kallipai_adk::persistence::deactivate_agent_dir(&id) {
-                loss.push(format!(
-                    "old body re-park failed; manual cleanup needed ({park:#})"
-                ));
-            }
-            degraded(state, a, &id, loss).await
+        Err(crate::routes::agent::RestoreStepErr::Failed(detail)) => {
+            RestoreFallout::Failed(format!("{detail}; batch stopped"))
         }
     }
 }
@@ -1322,78 +1223,16 @@ async fn deactivate_action(
     let Some(id) = a.target.clone() else {
         return Err("deactivation row without a live target".to_string());
     };
-    let mut notes = Vec::new();
-    let entry = {
-        let mut registry = state.registry.write().await;
-        let Some(entry) = registry.get(&id) else {
-            return Err(format!(
-                "agent {id} vanished in the plan→execute window; batch stopped"
-            ));
-        };
-        if let Some(live) = entry.as_live() {
-            let busy = !matches!(
-                live.agent.get_state(),
-                crate::state::AgentState::Idle | crate::state::AgentState::Parked
-            );
-            if busy && !force {
-                return Err(format!(
-                    "agent {id} turned busy in the plan→execute window; batch stopped (re-run, or pass force)"
-                ));
-            }
-            if busy {
-                notes.push(
-                    "force escape: the busy target was interrupted before teardown".to_string(),
-                );
-            }
+    match crate::routes::agent::deactivate_core(state, &id, force).await {
+        Ok(notes) => Ok(notes),
+        Err(crate::routes::agent::DeactivateErr::Busy(id)) => Err(format!(
+            "agent {id} turned busy in the plan→execute window; batch stopped (re-run, or pass force)"
+        )),
+        Err(crate::routes::agent::DeactivateErr::HasSubagents(id)) => Err(format!(
+            "agent {id} gained live subagents in the plan→execute window; batch stopped"
+        )),
+        Err(crate::routes::agent::DeactivateErr::Failed(detail)) => {
+            Err(format!("{detail}; batch stopped"))
         }
-        if !entry.subagent_ids().is_empty() {
-            return Err(format!(
-                "agent {id} gained live subagents in the plan→execute window; batch stopped"
-            ));
-        }
-        registry
-            .unregister(&id)
-            .ok_or_else(|| format!("agent {id} vanished during unregister"))?
-    };
-    if force {
-        // Interrupt before teardown so an in-flight round aborts cleanly
-        // instead of racing the cancel.
-        let _ = crate::routes::agent::interrupt_core(state, &id).await;
-    }
-    crate::routes::agent::teardown_agent(state, &id, entry).await;
-    kallipai_adk::persistence::deactivate_agent_dir(&id)
-        .map_err(|e| format!("agent {id} is unregistered but the park failed: {e:#}"))?;
-    state.invalidate();
-    Ok(notes)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn ensure_workspace_dir_creates_missing_and_accepts_present() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let ws = tmp.path().join("team").join("dev");
-
-        // Missing: created, including the missing parent chain.
-        ensure_workspace_dir(&ws).unwrap();
-        assert!(ws.is_dir());
-
-        // Present: idempotent, still a directory, no error.
-        ensure_workspace_dir(&ws).unwrap();
-        assert!(ws.is_dir());
-    }
-
-    #[test]
-    fn ensure_workspace_dir_fails_when_a_parent_is_a_file() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let blocker = tmp.path().join("blocker");
-        std::fs::write(&blocker, "not a directory").unwrap();
-        let ws = blocker.join("team");
-
-        let err = ensure_workspace_dir(&ws).unwrap_err();
-        assert!(err.contains("cannot create workspace"), "{err}");
-        assert!(err.contains("blocker"), "{err}");
     }
 }

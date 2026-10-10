@@ -734,11 +734,7 @@ async fn window_violation_stops_the_batch_at_the_failed_deactivate() {
     // fails and the fail-fast stop leaves the align row unexecuted.
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].outcome, TeamRowOutcome::Failed);
-    assert!(
-        results[0]
-            .detail
-            .contains("vanished in the plan→execute window")
-    );
+    assert!(results[0].detail.contains("vanished mid-operation"));
 }
 
 #[tokio::test]

@@ -59,6 +59,8 @@ kallip subagent <subcommand> [args]
 | `subagent remove <ID>`    | 移除直接 subagent。                                   |
 | `subagent interrupt <ID>` | 中断直接 subagent 当前操作。                              |
 | `subagent metadata <ID>`  | 更新直接 subagent 的 role/description。                |
+| `subagent workspace relocate <ID> <PATH>` | 把子代理的 workspace 迁到已备好的目录。 |
+| `subagent workspace mv <ID> <PATH>` | 先停泊代理，再搬 workspace 目录本身。 |
 
 作用域说明（服务端强制）：
 
@@ -66,6 +68,7 @@ kallip subagent <subcommand> [args]
 - `subagent remove` / `subagent interrupt` 授权**任意祖先**（`require_superior`），所以这里“直接 subagent”的表述只是 CLI 便利，不是服务端限制。
 - `subagent spawn` 要求 `--workspace-root`、`--profile-set` 与 `--permission-class`；未知的 profile set 名称在 spawn 时被拒。`--role` 对每次 subagent 创建都要求非空。
 - `subagent spawn --permission-class {normal,guest}` 显式**降级** subagent 的 FS 访问等级，使其低于父级自身等级（如 `normal` 父级创建只读 `guest` 评审者）。高于父级等级的取值被 tagma 以 `403` 拒绝。该标志必填。被授予的等级可由 `kallip`/`GET /agents/{id}/permissions` 查看。
+- `subagent workspace`（两个动词）保留给 **operator 或 root 代理**；忙碌中，或仍有活跃子代理的代理会被拒绝。细节与前缀缓存说明见下方小节。
 
 ```bash
 $ kallip subagent list
@@ -75,6 +78,14 @@ b4c2d3e5-...
 ```
 
 spawn 从 stdin 读取可选的初始 prompt：上面的 `< /dev/null` 表示“无 prompt”，id 被捕获时也避免 spawn 吞掉外层脚本的 stdin。要传 prompt 就用管道或 heredoc。
+
+#### `subagent workspace`：迁移子代理的 workspace
+
+`kallip subagent workspace relocate <ID> <PATH>` 一条命令完成迁移：停泊（deactivate）、改写 workspace 记录、恢复（restore）。目标目录必须已经放好该代理的文件（空目标会被拒绝）；该动词本身不搬文件。
+
+`kallip subagent workspace mv <ID> <PATH>` 先停泊代理，再把记录中的 workspace 目录原样搬到新路径（普通 rename：源目录消失；跨文件系统的搬移会被拒绝），然后改写记录并恢复。
+
+两个动词都幂等。每一步先探测当前状态，重跑会从上次停下的位置续行。在停泊这一步被拒（忙碌中，或仍有活跃子代理），代理保持原态；停泊之后任何一步失败，代理都停在冷停泊态，不会半恢复。恢复时代理的 system prompt 会按新路径重建，前缀缓存随之失效；这是切换 workspace 后的预期行为，不是故障。
 
 ### `profile-set`：管理命名 profile set
 

@@ -57,11 +57,15 @@ pub(crate) struct MetadataArgs {
     pub description: Option<String>,
 }
 
+/// Args for `kallip subagent workspace relocate` and `... workspace mv`:
+/// the shared target form. Both verbs orchestrate deactivate ->
+/// retarget the record -> restore on the daemon, and both resume from
+/// wherever a previous run stopped (idempotent re-runs).
 #[derive(Args)]
-pub(crate) struct WorkspaceRootArgs {
+pub(crate) struct RelocateArgs {
     /// Agent ID or role.
     pub id: AgentId,
-    /// New workspace root (must exist; the agent must be parked).
+    /// New workspace root (an existing directory).
     pub workspace_root: String,
 }
 
@@ -80,6 +84,27 @@ pub(crate) enum SubagentCommand {
     Interrupt(IdArgs),
     /// Update a direct subagent's role and/or description
     Metadata(MetadataArgs),
-    /// Relocate a parked subagent's workspace (operator or root only)
-    WorkspaceRoot(WorkspaceRootArgs),
+    /// Move a subagent's workspace (relocate or mv)
+    Workspace {
+        #[command(subcommand)]
+        command: WorkspaceCommand,
+    },
+}
+
+/// Move a subagent's workspace. Both verbs deactivate the agent,
+/// retarget the recorded workspace root, and restore it; a busy agent
+/// or one with live subagents is refused (interrupt or remove first).
+/// The restore rebuilds the agent's system prompt, so its prefix
+/// cache does not carry over (expected, not a fault). Reserved for the
+/// operator or the root agent.
+#[derive(Subcommand)]
+pub(crate) enum WorkspaceCommand {
+    /// Relocate to a directory you prepared: the target must already
+    /// hold the agent's files (an empty target is refused); this verb
+    /// never moves files itself.
+    Relocate(RelocateArgs),
+    /// Deactivate the agent, then move the recorded workspace directory
+    /// to the new path (a plain rename: the source disappears;
+    /// cross-device moves are refused), then retarget and restore.
+    Mv(RelocateArgs),
 }

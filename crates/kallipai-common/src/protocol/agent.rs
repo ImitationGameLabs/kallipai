@@ -294,11 +294,12 @@ pub struct ProfileSetUpdateRequest {
     pub profile_set: String,
 }
 
-/// Request body for `PUT /agents/{id}/workspace-root` — relocate a parked
-/// agent's workspace. The body must be in the inactive area (parked-only:
-/// a live agent's workspace is held by its lock, sandbox decision and
-/// running env — hot relocation is out of scope). The caller is the
-/// operator or the root agent, mirroring the converge mutation guard.
+/// Request body for `PUT /agents/{id}/workspace-root` — retarget a
+/// deactivated agent's recorded workspace root. The body must be in the
+/// inactive area (deactivated-only: a live agent's workspace is held by
+/// its lock, sandbox decision and running env — hot relocation is out of
+/// scope). The caller is the operator or the root agent, mirroring the
+/// converge mutation guard.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkspaceRootUpdateRequest {
     pub workspace_root: String,
@@ -312,6 +313,32 @@ pub struct WorkspaceRootUpdated {
     pub agent_id: String,
     pub old_workspace_root: String,
     pub workspace_root: String,
+}
+
+/// Request body for `POST /agents/{id}/relocate` — the one-command
+/// workspace move: deactivate the agent, optionally move the directory
+/// (`with_files`, plain rename), retarget the recorded workspace root,
+/// and restore. Each step is idempotent, so a retried request resumes
+/// from wherever the previous one stopped. The caller is the operator
+/// or the root agent, mirroring the workspace-root mutation guard.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RelocateRequest {
+    pub workspace_root: String,
+    /// Move the directory at the recorded root to the new path (plain
+    /// rename: the source disappears; cross-device moves are refused).
+    /// Runs after the park, before the retarget.
+    pub with_files: bool,
+}
+
+/// Response for `POST /agents/{id}/relocate`: the old and new workspace
+/// paths plus one note per orchestration step, for the caller's audit
+/// trail.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Relocated {
+    pub agent_id: String,
+    pub old_workspace_root: String,
+    pub workspace_root: String,
+    pub steps: Vec<String>,
 }
 
 /// Request body for `PUT /profiles/default` — transfer the default-set marker

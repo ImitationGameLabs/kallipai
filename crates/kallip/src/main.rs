@@ -19,7 +19,7 @@ use args::{
     policy::PolicyCommand,
     profile::ProfileSetCommand,
     skill::SkillCommand,
-    subagent::SubagentCommand,
+    subagent::{SubagentCommand, WorkspaceCommand},
 };
 use clap::{CommandFactory, Parser};
 use kallip::file::FilesClient;
@@ -365,21 +365,14 @@ async fn main() -> Result<()> {
                         }
                     }
                 }
-                SubagentCommand::WorkspaceRoot(args) => {
-                    let id = client.resolve_agent_ref(args.id.as_ref()).await?;
-                    let updated = client
-                        .update_workspace_root(
-                            &id,
-                            kallipai_common::protocol::WorkspaceRootUpdateRequest {
-                                workspace_root: args.workspace_root,
-                            },
-                        )
-                        .await?;
-                    println!(
-                        "workspace-root: {} -> {}",
-                        updated.old_workspace_root, updated.workspace_root
-                    );
-                }
+                SubagentCommand::Workspace { command } => match command {
+                    WorkspaceCommand::Relocate(args) => {
+                        relocate_workspace(&client, args, false).await?;
+                    }
+                    WorkspaceCommand::Mv(args) => {
+                        relocate_workspace(&client, args, true).await?;
+                    }
+                },
             }
         }
         Commands::Approval(cmd) => match cmd {
@@ -870,6 +863,33 @@ fn print_agent_list(agents: &[kallipai_common::protocol::AgentSummary], empty_ms
     }
 }
 
+/// Run one `subagent workspace` verb against the daemon and print the
+/// per-step notes. `with_files` selects the mv verb (the move runs after
+/// the park); the relocate verb expects the target prepared.
+async fn relocate_workspace(
+    client: &TagmaClient,
+    args: args::subagent::RelocateArgs,
+    with_files: bool,
+) -> anyhow::Result<()> {
+    let id = client.resolve_agent_ref(args.id.as_ref()).await?;
+    let relocated = client
+        .relocate_agent(
+            &id,
+            kallipai_common::protocol::RelocateRequest {
+                workspace_root: args.workspace_root,
+                with_files,
+            },
+        )
+        .await?;
+    println!(
+        "relocated: {}  {} -> {}",
+        relocated.agent_id, relocated.old_workspace_root, relocated.workspace_root
+    );
+    for step in &relocated.steps {
+        println!("- {step}");
+    }
+    Ok(())
+}
 /// Print an agent's role/description summary (e.g. after a metadata update).
 fn print_agent_summary(updated: &kallipai_common::protocol::AgentSummary) {
     println!(

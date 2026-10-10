@@ -1109,3 +1109,546 @@ async fn dangling_agent_recoverable_via_bind() {
     .unwrap();
     assert_eq!(summary.profile_set.as_deref(), Some("alt"));
 }
+
+#[test]
+fn ensure_workspace_dir_creates_missing_and_accepts_present() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let ws = tmp.path().join("team").join("dev");
+
+    // Missing: created, including the missing parent chain.
+    super::ensure_workspace_dir(&ws).unwrap();
+    assert!(ws.is_dir());
+
+    // Present: idempotent, still a directory, no error.
+    super::ensure_workspace_dir(&ws).unwrap();
+    assert!(ws.is_dir());
+}
+
+#[test]
+fn ensure_workspace_dir_fails_when_a_parent_is_a_file() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let blocker = tmp.path().join("blocker");
+    std::fs::write(&blocker, "not a directory").unwrap();
+    let ws = blocker.join("team");
+
+    let err = super::ensure_workspace_dir(&ws).unwrap_err();
+    assert!(err.contains("cannot create workspace"), "{err}");
+    assert!(err.contains("blocker"), "{err}");
+}
+
+// -- relocate: the one-command workspace move (`POST /agents/{id}/relocate`) --
+
+/// Park a body through the real persistence path: create the live dir,
+/// then deactivate it into the inactive area with the given meta.
+fn parked_body(id: &AgentId, meta: kallipai_adk::persistence::AgentMeta) {
+    use kallipai_adk::persistence as p;
+    p::create_agent_dir(id, meta).unwrap();
+    p::deactivate_agent_dir(id).unwrap();
+}
+
+fn sub_meta(
+    ws: std::path::PathBuf,
+    created_by: Option<&AgentId>,
+    role: &str,
+) -> kallipai_adk::persistence::AgentMeta {
+    kallipai_adk::persistence::AgentMeta {
+        workspace_root: ws,
+        created_by: created_by.cloned(),
+        role: role.to_string(),
+        description: String::new(),
+        profile_set: None,
+        permissions_class: PermissionClass::Normal,
+        delegation_mode: DelegationMode::CarveOut,
+    }
+}
+
+/// A counting spawn stub (the converge-harness pattern) so the restore
+/// step boots without a real runtime.
+fn relocate_spawn_stub(
+    calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    fail: bool,
+) -> crate::lifecycle::SpawnFn {
+    std::sync::Arc::new(move |_args: crate::lifecycle::SpawnArgs| {
+        calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let fresh = crate::test_helpers::make_entry_with_rx(None, "stub-token".to_string());
+        let crate::state::AgentEntry {
+            identity, agent, ..
+        } = fresh.0;
+        let _keep_rx_open = fresh.1;
+        Box::pin(async move {
+            if fail {
+                anyhow::bail!("stub spawn failure");
+            }
+            Ok((agent, identity))
+        })
+    })
+}
+
+async fn call_relocate(
+    state: crate::state::SharedState,
+    id: &AgentId,
+    bearer: Identity,
+    new_ws: &std::path::Path,
+    with_files: bool,
+) -> Result<axum::Json<kallipai_common::protocol::Relocated>, kallipai_common::protocol::ApiError> {
+    super::relocate_agent(
+        State(state),
+        AuthIdentity::test_new(bearer),
+        Path(id.clone()),
+        axum::Json(kallipai_common::protocol::RelocateRequest {
+            workspace_root: new_ws.display().to_string(),
+            with_files,
+        }),
+    )
+    .await
+}
+
+/// Shared arrange: a parked root supervisor and a parked sub body whose
+/// recorded workspace exists; the target is populated inside the
+/// supervisor boundary.
+struct RelocateFixture {
+    _sup_ws: tempfile::TempDir,
+    old_ws: PathBuf,
+    new_ws: PathBuf,
+    id: AgentId,
+}
+
+fn relocate_fixture(role: &str, seed_old_ws: bool) -> RelocateFixture {
+    let sup_ws = tempfile::TempDir::new().unwrap();
+    let old_ws = sup_ws.path().join("old-home");
+    let new_ws = sup_ws.path().join("new-home");
+    if seed_old_ws {
+        std::fs::create_dir_all(&old_ws).unwrap();
+        std::fs::write(old_ws.join("marker.txt"), "data").unwrap();
+    }
+    std::fs::create_dir_all(&new_ws).unwrap();
+    std::fs::write(new_ws.join("marker.txt"), "moved data").unwrap();
+    let sup = AgentId::random();
+    let id = AgentId::random();
+    // The supervisor keeps a LIVE body: the restore-time chain walk reads
+    // the live-area meta.json of each ancestor, so a parked supervisor
+    // would starve it (a deactivated supervisor must be restored first —
+    // top-down order, which relocate inherits from boot restore).
+    kallipai_adk::persistence::create_agent_dir(
+        &sup,
+        sub_meta(sup_ws.path().to_path_buf(), None, "root"),
+    )
+    .unwrap();
+    parked_body(&id, sub_meta(old_ws.clone(), Some(&sup), role));
+    RelocateFixture {
+        _sup_ws: sup_ws,
+        old_ws,
+        new_ws,
+        id,
+    }
+}
+/// A live body for the park-gate refusals: the agent dir sits in the live
+/// area (relocate_fixture parks it instead), and the caller registers the
+/// registry entry that carries the busy/subagent shape under test.
+fn relocate_live_fixture(role: &str) -> RelocateFixture {
+    let sup_ws = tempfile::TempDir::new().unwrap();
+    let old_ws = sup_ws.path().join("old-home");
+    let new_ws = sup_ws.path().join("new-home");
+    std::fs::create_dir_all(&old_ws).unwrap();
+    std::fs::write(old_ws.join("marker.txt"), "data").unwrap();
+    std::fs::create_dir_all(&new_ws).unwrap();
+    std::fs::write(new_ws.join("marker.txt"), "moved data").unwrap();
+    let sup = AgentId::random();
+    let id = AgentId::random();
+    kallipai_adk::persistence::create_agent_dir(
+        &sup,
+        sub_meta(sup_ws.path().to_path_buf(), None, "root"),
+    )
+    .unwrap();
+    kallipai_adk::persistence::create_agent_dir(&id, sub_meta(old_ws.clone(), Some(&sup), role))
+        .unwrap();
+    RelocateFixture {
+        _sup_ws: sup_ws,
+        old_ws,
+        new_ws,
+        id,
+    }
+}
+
+#[tokio::test]
+async fn relocate_parks_retargets_and_restores_in_one_call() {
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let state =
+        crate::test_helpers::make_state_with_spawn(relocate_spawn_stub(calls.clone(), false));
+    let fx = relocate_fixture("dev", true);
+
+    let relocated = call_relocate(state.clone(), &fx.id, Identity::Operator, &fx.new_ws, false)
+        .await
+        .expect("relocate must succeed");
+    assert_eq!(
+        relocated.old_workspace_root,
+        fx.old_ws.display().to_string()
+    );
+    assert_eq!(relocated.workspace_root, fx.new_ws.display().to_string());
+    assert!(relocated.steps.iter().any(|s| s.contains("deactivated")));
+    assert!(relocated.steps.iter().any(|s| s.contains("workspace root")));
+    assert!(relocated.steps.iter().any(|s| s == "restored"));
+    assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+    // The body is live again, the parked copy is gone, the record follows.
+    assert!(state.registry.read().await.get(&fx.id).is_some());
+    assert!(
+        !kallipai_adk::persistence::inactive_dir(&fx.id)
+            .unwrap()
+            .is_dir()
+    );
+    let meta = kallipai_adk::persistence::read_meta(&fx.id).unwrap();
+    assert_eq!(meta.workspace_root, fx.new_ws);
+}
+
+#[tokio::test]
+async fn relocate_rerun_over_a_settled_agent_is_an_idempotent_success() {
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let state =
+        crate::test_helpers::make_state_with_spawn(relocate_spawn_stub(calls.clone(), false));
+    let fx = relocate_fixture("dev", true);
+
+    let _ = call_relocate(state.clone(), &fx.id, Identity::Operator, &fx.new_ws, false)
+        .await
+        .expect("first relocate must succeed");
+    let again = call_relocate(state.clone(), &fx.id, Identity::Operator, &fx.new_ws, false)
+        .await
+        .expect("rerun must succeed");
+    // The rerun parks the restored body, skips the write, restores again.
+    assert!(
+        again
+            .steps
+            .iter()
+            .any(|s| s.contains("workspace root already"))
+    );
+    assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 2);
+    assert!(state.registry.read().await.get(&fx.id).is_some());
+}
+
+#[tokio::test]
+async fn relocate_with_files_moves_the_directory_after_the_park() {
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let state =
+        crate::test_helpers::make_state_with_spawn(relocate_spawn_stub(calls.clone(), false));
+    let fx = relocate_fixture("dev", true);
+    // The move form needs the target absent so the rename can land.
+    std::fs::remove_file(fx.new_ws.join("marker.txt")).unwrap();
+    std::fs::remove_dir(&fx.new_ws).unwrap();
+
+    let relocated = call_relocate(state.clone(), &fx.id, Identity::Operator, &fx.new_ws, true)
+        .await
+        .expect("the move form must succeed");
+    // The move sits between the park and the retarget, so the destructive
+    // step never touches a live body.
+    let position = |needles: &[&str]| {
+        relocated
+            .steps
+            .iter()
+            .position(|s| needles.iter().any(|n| s.starts_with(*n)))
+            .unwrap_or_else(|| panic!("no {needles:?} step: {:#?}", relocated.steps))
+    };
+    let parked = position(&["deactivated", "parked", "already"]);
+    let moved = position(&["moved "]);
+    let retargeted = position(&["workspace root"]);
+    assert!(
+        parked < moved && moved < retargeted,
+        "the move runs after the park and before the retarget: {:#?}",
+        relocated.steps
+    );
+    assert!(!fx.old_ws.exists(), "the source must disappear (plain mv)");
+    assert_eq!(
+        std::fs::read_to_string(fx.new_ws.join("marker.txt")).unwrap(),
+        "data"
+    );
+    let meta = kallipai_adk::persistence::read_meta(&fx.id).unwrap();
+    assert_eq!(meta.workspace_root, fx.new_ws);
+}
+
+#[tokio::test]
+async fn relocate_with_files_moves_a_live_agents_directory_after_the_park() {
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let state =
+        crate::test_helpers::make_state_with_spawn(relocate_spawn_stub(calls.clone(), false));
+    let fx = relocate_live_fixture("dev");
+    let entry = make_entry(None, format!("agent-{}", fx.id));
+    state
+        .registry
+        .write()
+        .await
+        .register(fx.id.clone(), RegistryEntry::Live(entry));
+    // The move form needs the target absent so the rename can land.
+    std::fs::remove_file(fx.new_ws.join("marker.txt")).unwrap();
+    std::fs::remove_dir(&fx.new_ws).unwrap();
+
+    let relocated = call_relocate(state.clone(), &fx.id, Identity::Operator, &fx.new_ws, true)
+        .await
+        .expect("the live move form must succeed");
+
+    // The park step comes from the real deactivate path, not the resume
+    // branch, and the move follows it, so the destructive step never
+    // touches a live body.
+    let step = |needle: &str| {
+        relocated
+            .steps
+            .iter()
+            .position(|s| s.starts_with(needle))
+            .unwrap_or_else(|| panic!("no {needle} step: {:#?}", relocated.steps))
+    };
+    let parked = step("deactivated into the inactive area");
+    let moved = step("moved ");
+    assert!(
+        parked < moved && moved < step("workspace root"),
+        "the park comes first, the move after it: {:#?}",
+        relocated.steps
+    );
+    assert_eq!(relocated.steps.last().map(String::as_str), Some("restored"));
+    // The source is gone and its files landed at the new root.
+    assert!(!fx.old_ws.exists(), "the source must disappear (plain mv)");
+    assert_eq!(
+        std::fs::read_to_string(fx.new_ws.join("marker.txt")).unwrap(),
+        "data"
+    );
+    // Live again on the new root, the parked copy gone, the record follows.
+    assert!(state.registry.read().await.get(&fx.id).is_some());
+    assert!(
+        !kallipai_adk::persistence::inactive_dir(&fx.id)
+            .unwrap()
+            .is_dir()
+    );
+    let meta = kallipai_adk::persistence::read_meta(&fx.id).unwrap();
+    assert_eq!(meta.workspace_root, fx.new_ws);
+    assert!(
+        calls.load(std::sync::atomic::Ordering::Relaxed) >= 1,
+        "the restore boots the retargeted body"
+    );
+}
+
+#[tokio::test]
+async fn relocate_with_files_resumes_when_the_move_already_happened() {
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let state =
+        crate::test_helpers::make_state_with_spawn(relocate_spawn_stub(calls.clone(), false));
+    let fx = relocate_fixture("dev", true);
+    // Simulate a crash between the move and the record flip: the source
+    // is gone, the target holds the content, the record still says old.
+    std::fs::remove_dir_all(&fx.new_ws).unwrap();
+    std::fs::rename(&fx.old_ws, &fx.new_ws).unwrap();
+
+    let relocated = call_relocate(state.clone(), &fx.id, Identity::Operator, &fx.new_ws, true)
+        .await
+        .expect("resume must succeed");
+    assert!(relocated.steps.iter().any(|s| s.contains("already moved")));
+    let meta = kallipai_adk::persistence::read_meta(&fx.id).unwrap();
+    assert_eq!(meta.workspace_root, fx.new_ws);
+}
+
+#[tokio::test]
+async fn relocate_with_files_refuses_an_ambiguous_move() {
+    let state = crate::test_helpers::make_state();
+    let fx = relocate_fixture("dev", true);
+    // Both the recorded root and the target exist: plain mv semantics
+    // refuse rather than merge or overwrite.
+    let err = call_relocate(state, &fx.id, Identity::Operator, &fx.new_ws, true)
+        .await
+        .expect_err("an ambiguous move must fail");
+    assert!(err.to_string().contains("exist"), "{err}");
+    // Nothing moved: the source still holds the content, the body stays
+    // parked, the record still points at the old root.
+    assert!(fx.old_ws.join("marker.txt").is_file());
+    assert!(
+        kallipai_adk::persistence::inactive_dir(&fx.id)
+            .unwrap()
+            .is_dir()
+    );
+}
+
+#[tokio::test]
+async fn relocate_with_files_refuses_when_nothing_exists_to_move() {
+    let state = crate::test_helpers::make_state();
+    let fx = relocate_fixture("dev", true);
+    std::fs::remove_dir_all(&fx.new_ws).unwrap();
+    std::fs::remove_dir_all(&fx.old_ws).unwrap();
+
+    let err = call_relocate(state, &fx.id, Identity::Operator, &fx.new_ws, true)
+        .await
+        .expect_err("nothing to move must fail");
+    assert!(err.to_string().contains("nothing to move"), "{err}");
+}
+
+#[tokio::test]
+async fn relocate_refuses_an_empty_target_directory() {
+    let state = crate::test_helpers::make_state();
+    let fx = relocate_fixture("dev", true);
+    std::fs::remove_file(fx.new_ws.join("marker.txt")).unwrap();
+
+    let err = call_relocate(state, &fx.id, Identity::Operator, &fx.new_ws, false)
+        .await
+        .expect_err("an empty target must fail the foolproofing gate");
+    assert!(err.to_string().contains("empty"), "{err}");
+    // The record never flipped.
+    let inactive = kallipai_adk::persistence::inactive_dir(&fx.id).unwrap();
+    let meta = kallipai_adk::persistence::read_meta_from_dir(&inactive).unwrap();
+    assert_eq!(meta.workspace_root, fx.old_ws);
+}
+
+#[tokio::test]
+async fn relocate_404s_without_a_body() {
+    let state = crate::test_helpers::make_state();
+    let id = AgentId::random();
+
+    let err = call_relocate(
+        state,
+        &id,
+        Identity::Operator,
+        PathBuf::from("/tmp/x").as_path(),
+        false,
+    )
+    .await
+    .expect_err("a missing body must 404");
+    assert!(
+        err.to_string().contains("no live or deactivated body"),
+        "{err}"
+    );
+}
+
+#[tokio::test]
+async fn relocate_refuses_when_the_role_is_taken() {
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let state =
+        crate::test_helpers::make_state_with_spawn(relocate_spawn_stub(calls.clone(), false));
+    let fx = relocate_fixture("dev", true);
+    // A squatter live agent holds the parked body's role.
+    let squatter = AgentId::random();
+    let mut entry = crate::test_helpers::make_entry(None, format!("agent-{squatter}"));
+    entry.identity.config.role = "dev".to_string();
+    state
+        .registry
+        .write()
+        .await
+        .register(squatter, RegistryEntry::Live(entry));
+
+    let err = call_relocate(state.clone(), &fx.id, Identity::Operator, &fx.new_ws, false)
+        .await
+        .expect_err("a taken role must fail the restore");
+    assert!(err.to_string().contains("is now held by"), "{err}");
+    assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+    // The body stays parked, identity intact.
+    assert!(
+        kallipai_adk::persistence::inactive_dir(&fx.id)
+            .unwrap()
+            .is_dir()
+    );
+    assert!(state.registry.read().await.get(&fx.id).is_none());
+}
+
+#[tokio::test]
+async fn relocate_re_parks_the_body_when_the_boot_fails() {
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let state =
+        crate::test_helpers::make_state_with_spawn(relocate_spawn_stub(calls.clone(), true));
+    let fx = relocate_fixture("dev", true);
+
+    let err = call_relocate(state.clone(), &fx.id, Identity::Operator, &fx.new_ws, false)
+        .await
+        .expect_err("a failed boot must fail the relocate");
+    assert!(err.to_string().contains("restore failed"), "{err}");
+    assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+    // Identity preserved: the body is parked again, the record already
+    // points at the new root (the move is done; only the wake failed).
+    assert!(
+        kallipai_adk::persistence::inactive_dir(&fx.id)
+            .unwrap()
+            .is_dir()
+    );
+    assert!(state.registry.read().await.get(&fx.id).is_none());
+    let inactive = kallipai_adk::persistence::inactive_dir(&fx.id).unwrap();
+    let meta = kallipai_adk::persistence::read_meta_from_dir(&inactive).unwrap();
+    assert_eq!(meta.workspace_root, fx.new_ws);
+}
+
+#[tokio::test]
+async fn relocate_is_reserved_for_the_operator_or_the_root_agent() {
+    let state = crate::test_helpers::make_state();
+    let fx = relocate_fixture("dev", true);
+    let nobody = AgentId::random();
+
+    let err = call_relocate(
+        state,
+        &fx.id,
+        Identity::Agent { id: nobody },
+        &fx.new_ws,
+        false,
+    )
+    .await
+    .expect_err("a non-root agent must be refused");
+    assert!(err.to_string().contains("reserved"), "{err}");
+}
+#[tokio::test]
+async fn relocate_refuses_a_busy_live_agent() {
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let state =
+        crate::test_helpers::make_state_with_spawn(relocate_spawn_stub(calls.clone(), false));
+    let fx = relocate_live_fixture("dev");
+    let entry = make_entry(None, format!("agent-{}", fx.id));
+    entry.agent.state.store(
+        crate::state::AgentState::BUSY,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    state
+        .registry
+        .write()
+        .await
+        .register(fx.id.clone(), RegistryEntry::Live(entry));
+
+    let err = call_relocate(state.clone(), &fx.id, Identity::Operator, &fx.new_ws, true)
+        .await
+        .expect_err("a busy agent must be refused at the park gate");
+    assert!(err.to_string().contains("interrupt it first"), "{err}");
+    assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+    // Untouched: the refusal fires before unregister, teardown, or the move.
+    assert!(state.registry.read().await.get(&fx.id).is_some());
+    assert!(
+        kallipai_adk::persistence::agent_dir(&fx.id)
+            .unwrap()
+            .is_dir()
+    );
+    assert!(fx.old_ws.join("marker.txt").is_file());
+}
+
+#[tokio::test]
+async fn relocate_refuses_an_agent_with_live_subagents() {
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let state =
+        crate::test_helpers::make_state_with_spawn(relocate_spawn_stub(calls.clone(), false));
+    let fx = relocate_live_fixture("dev");
+    let entry = make_entry(None, format!("agent-{}", fx.id));
+    state
+        .registry
+        .write()
+        .await
+        .register(fx.id.clone(), RegistryEntry::Live(entry));
+
+    // A live child under the target: register() pushes it into the parent's
+    // subagent_ids, the production bookkeeping the gate reads.
+    let child = AgentId::random();
+    let child_entry = make_entry(Some(fx.id.clone()), format!("agent-{child}"));
+    state
+        .registry
+        .write()
+        .await
+        .register(child.clone(), RegistryEntry::Live(child_entry));
+
+    let err = call_relocate(state.clone(), &fx.id, Identity::Operator, &fx.new_ws, true)
+        .await
+        .expect_err("live subagents must be refused at the park gate");
+    assert!(err.to_string().contains("live subagents"), "{err}");
+    assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+    // Untouched: parent and child stay registered, nothing moved.
+    assert!(state.registry.read().await.get(&fx.id).is_some());
+    assert!(state.registry.read().await.get(&child).is_some());
+    assert!(
+        kallipai_adk::persistence::agent_dir(&fx.id)
+            .unwrap()
+            .is_dir()
+    );
+    assert!(fx.old_ws.join("marker.txt").is_file());
+}

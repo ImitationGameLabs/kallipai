@@ -19,9 +19,9 @@ pub use agent::{
     AttachmentIngestResponse, CreateAgentRequest, CreateAgentResponse, DELEGATION_CARVE_OUT,
     DELEGATION_FULL_HANDOFF, DeleteSetResponse, DeliveryMode, DutyStatus, ListAgentsQuery,
     ListAgentsResponse, LockState, MaxToolRounds, MessageRequest, MessageResponse, Modality,
-    ParkedReason, ProfileSetUpdateRequest, SetDefaultRequest, SetReference, TagmaUsageTotals,
-    UpdateActivityRequest, UpdateAgentMetadataRequest, WorkspaceRootUpdateRequest,
-    WorkspaceRootUpdated,
+    ParkedReason, ProfileSetUpdateRequest, RelocateRequest, Relocated, SetDefaultRequest,
+    SetReference, TagmaUsageTotals, UpdateActivityRequest, UpdateAgentMetadataRequest,
+    WorkspaceRootUpdateRequest, WorkspaceRootUpdated,
 };
 pub use approval::{
     ApprovalDecisionBody, ApprovalEntry, ListApprovalsQuery, ListApprovalsResponse,

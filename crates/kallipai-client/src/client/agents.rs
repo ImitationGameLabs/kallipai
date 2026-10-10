@@ -11,8 +11,8 @@ use just_llm_client::JsonEventStream;
 use kallipai_common::agentid::AgentId;
 use kallipai_common::protocol::{
     AgentSummary, CreateAgentRequest, CreateAgentResponse, ListAgentsResponse,
-    ProfileSetUpdateRequest, SseEvent, UpdateActivityRequest, UpdateAgentMetadataRequest,
-    WorkspaceRootUpdateRequest, WorkspaceRootUpdated,
+    ProfileSetUpdateRequest, RelocateRequest, Relocated, SseEvent, UpdateActivityRequest,
+    UpdateAgentMetadataRequest,
 };
 
 impl TagmaClient {
@@ -146,18 +146,16 @@ impl TagmaClient {
         .await
     }
 
-    /// Relocate a parked agent's workspace. Caller must be the operator or
-    /// the root agent; the body must live in the inactive area.
-    pub async fn update_workspace_root(
-        &self,
-        id: &AgentId,
-        body: WorkspaceRootUpdateRequest,
-    ) -> Result<WorkspaceRootUpdated> {
+    /// Relocate an agent's workspace in one command: deactivate, retarget
+    /// the record, restore (with `with_files`, the move runs after the
+    /// park). Idempotent: a retried call resumes from wherever the
+    /// previous one stopped. Caller must be the operator or the root agent.
+    pub async fn relocate_agent(&self, id: &AgentId, body: RelocateRequest) -> Result<Relocated> {
         self.handle_response(
             self.with_auth(
                 self.inner
                     .http
-                    .put(self.url(&format!("/agents/{id}/workspace-root")))
+                    .post(self.url(&format!("/agents/{id}/relocate")))
                     .json(&body),
             )
             .send()
