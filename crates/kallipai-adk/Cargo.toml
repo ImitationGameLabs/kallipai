@@ -23,6 +23,7 @@ uuid = { workspace = true }
 dirs = { workspace = true }
 tracing = { workspace = true }
 futures-util = { workspace = true }
+getrandom = { workspace = true }
 regex = { workspace = true }
 thiserror = { workspace = true }
 time = { workspace = true }

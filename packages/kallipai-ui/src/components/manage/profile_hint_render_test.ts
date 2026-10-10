@@ -49,7 +49,7 @@ Deno.test(
       src.includes("{#if probeReport.modelsHint}"),
       "the hint branch must be gated on the hint field",
     );
-    const verdict = src.indexOf("{probeReport.status}");
+    const verdict = src.indexOf("{probeStatusLabel(probeReport.status)}");
     const hint = src.indexOf("{#if probeReport.modelsHint}");
     assert(verdict !== -1, "the verdict line must exist to be ordered against");
     assert(hint !== -1, "the hint branch must exist to be ordered against");

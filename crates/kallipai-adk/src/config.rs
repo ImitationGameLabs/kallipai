@@ -1,19 +1,22 @@
 use std::path::PathBuf;
+use std::sync::Once;
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 
 use crate::env_util::{DEFAULT_CONTEXT_WINDOW_TOKENS, parse_env, parse_env_list};
-use crate::retry::RetryPolicy;
+use crate::retry::decision::{RETRY_JITTER_MAX, backoff_schedule};
+use crate::retry::{RetryPolicy, max_sends};
 use kallipai_common::AgentId;
 
 mod defaults;
 use defaults::{
-    DEFAULT_CONTEXT_THRESHOLDS, DEFAULT_MAX_HEARTBEAT_ROUNDS, DEFAULT_MAX_RETRIES,
-    DEFAULT_MAX_TOOL_ROUNDS, DEFAULT_MAX_TRANSIENT_RETRIES, DEFAULT_OUTPUT_RESERVE_TOKENS,
-    DEFAULT_PINNED_BUDGET_RATIO, DEFAULT_RETRY_BASE_DELAY_SECS, DEFAULT_RETRY_MAX_DELAY_SECS,
-    DEFAULT_RETRY_TIMEOUT_SECS, DEFAULT_SUMMARY_MAX_TOKENS, DEFAULT_SYSTEM_PROMPT,
-    DEFAULT_TOKEN_BUDGET_WARNINGS, DEFAULT_TOOL_TIMEOUT_SECS, MAX_RETRIES_LIMIT,
-    RETRY_DELAY_SECS_LIMIT, RETRY_TIMEOUT_SECS_LIMIT,
+    CALL_WORST_ASSUMED, DEFAULT_CONTEXT_THRESHOLDS, DEFAULT_MAX_HEARTBEAT_ROUNDS,
+    DEFAULT_MAX_RETRIES, DEFAULT_MAX_TOOL_ROUNDS, DEFAULT_MAX_TRANSIENT_RETRIES,
+    DEFAULT_OUTPUT_RESERVE_TOKENS, DEFAULT_PINNED_BUDGET_RATIO, DEFAULT_RETRY_BASE_DELAY_SECS,
+    DEFAULT_RETRY_MAX_DELAY_SECS, DEFAULT_RETRY_TIMEOUT_SECS, DEFAULT_SUMMARY_MAX_TOKENS,
+    DEFAULT_SYSTEM_PROMPT, DEFAULT_TOKEN_BUDGET_WARNINGS, DEFAULT_TOOL_TIMEOUT_SECS,
+    MAX_RETRIES_LIMIT, RETRY_DELAY_SECS_LIMIT, RETRY_TIMEOUT_SECS_LIMIT,
 };
 pub(crate) use defaults::{
     DEFAULT_MESSAGE_FULL_TOKENS, DEFAULT_TOOL_RESULT_FULL_TOKENS,
@@ -199,14 +202,53 @@ impl AgentConfig {
         if retry_timeout_secs > RETRY_TIMEOUT_SECS_LIMIT {
             bail!("KALLIPAI_RETRY_TIMEOUT_SECS must be at most {RETRY_TIMEOUT_SECS_LIMIT}");
         }
-        // All four retry knobs are env-tunable: sustained rate-limit parking (429 retries
-        // while queued) proved operators need to reshape the retry window without a rebuild.
+
+        // Single-value checks cannot catch a combination that is legal per knob
+        // but self-contradictory. Both pairs are rejected at load time on purpose:
+        // a deployment carrying one must stop booting rather than run behind a
+        // warning nobody reads.
+        if retry_base_delay_secs > retry_max_delay_secs {
+            bail!(
+                "KALLIPAI_RETRY_BASE_DELAY_SECS ({retry_base_delay_secs}s) is greater than KALLIPAI_RETRY_MAX_DELAY_SECS ({retry_max_delay_secs}s): the backoff cap would sit below the sequence's own starting point. Ranges: KALLIPAI_RETRY_BASE_DELAY_SECS > 0 and <= {RETRY_DELAY_SECS_LIMIT}; KALLIPAI_RETRY_MAX_DELAY_SECS > 0 and <= {RETRY_DELAY_SECS_LIMIT}. A working combination: KALLIPAI_RETRY_BASE_DELAY_SECS={DEFAULT_RETRY_BASE_DELAY_SECS} KALLIPAI_RETRY_MAX_DELAY_SECS={DEFAULT_RETRY_MAX_DELAY_SECS} KALLIPAI_RETRY_TIMEOUT_SECS={DEFAULT_RETRY_TIMEOUT_SECS}"
+            );
+        }
+        if retry_max_delay_secs >= retry_timeout_secs {
+            bail!(
+                "KALLIPAI_RETRY_MAX_DELAY_SECS ({retry_max_delay_secs}s) is at or above KALLIPAI_RETRY_TIMEOUT_SECS ({retry_timeout_secs}s): one backoff would consume the whole retry deadline, which reads as a misconfiguration. Ranges: KALLIPAI_RETRY_MAX_DELAY_SECS > 0 and <= {RETRY_DELAY_SECS_LIMIT}; KALLIPAI_RETRY_TIMEOUT_SECS > 0 and <= {RETRY_TIMEOUT_SECS_LIMIT}. A working combination: KALLIPAI_RETRY_BASE_DELAY_SECS={DEFAULT_RETRY_BASE_DELAY_SECS} KALLIPAI_RETRY_MAX_DELAY_SECS={DEFAULT_RETRY_MAX_DELAY_SECS} KALLIPAI_RETRY_TIMEOUT_SECS={DEFAULT_RETRY_TIMEOUT_SECS}"
+            );
+        }
+        // All four retry knobs are env-tunable: reshaping the retry policy is an operator
+        // decision that should not need a rebuild.
         let retry_policy = RetryPolicy {
             max_retries,
             base_delay: std::time::Duration::from_secs(retry_base_delay_secs),
             max_delay: std::time::Duration::from_secs(retry_max_delay_secs),
             retry_timeout: std::time::Duration::from_secs(retry_timeout_secs),
         };
+
+        match retry_budget_verdict(&retry_policy) {
+            RetryBudgetVerdict::Fits => {}
+            RetryBudgetVerdict::FactoryOverrun {
+                worst_secs,
+                timeout_secs,
+            } => FACTORY_OVERRUN_REPORTED.call_once(|| {
+                tracing::info!(
+                    worst_case_secs = worst_secs,
+                    retry_timeout_secs = timeout_secs,
+                    "factory retry knobs: the worst-case wall clock of one episode exceeds the retry deadline, so a long episode is cut mid-backoff"
+                )
+            }),
+            RetryBudgetVerdict::TunedOverrun {
+                worst_secs,
+                timeout_secs,
+            } => TUNED_OVERRUN_REPORTED.call_once(|| {
+                tracing::warn!(
+                    worst_case_secs = worst_secs,
+                    retry_timeout_secs = timeout_secs,
+                    "retry knobs: the worst-case wall clock of one episode exceeds the retry deadline, so an episode is cut mid-backoff; raise KALLIPAI_RETRY_TIMEOUT_SECS or lower the delay knobs"
+                )
+            }),
+        }
 
         let workspace_root = workspace_root.canonicalize().with_context(|| {
             format!(
@@ -417,6 +459,67 @@ fn check_context_budget(
         ));
     }
     Ok(())
+}
+
+/// Worst-case wall clock of one episode: the sum of the retry core's own backoff
+/// schedule over the waits an episode can make, plus one call per send at
+/// `CALL_WORST_ASSUMED`. Both the schedule and the send count come from the core,
+/// so this cannot drift from what the shells perform; the per-call term is the
+/// assumed one.
+fn retry_worst_case(policy: &RetryPolicy) -> Duration {
+    let waits = (0..policy.max_retries).fold(Duration::ZERO, |waits, exponent| {
+        waits.saturating_add(backoff_schedule(policy, exponent, RETRY_JITTER_MAX))
+    });
+    waits.saturating_add(CALL_WORST_ASSUMED.saturating_mul(max_sends(policy)))
+}
+
+/// The two retry-budget reports are process-wide facts: the knobs come from the
+/// process environment, so every agent loaded in this process would repeat the
+/// same line. Each tier reports once.
+static FACTORY_OVERRUN_REPORTED: Once = Once::new();
+static TUNED_OVERRUN_REPORTED: Once = Once::new();
+
+/// What the startup check has to say about the retry knobs' worst-case wall
+/// clock.
+#[derive(Debug)]
+enum RetryBudgetVerdict {
+    /// The worst case fits inside `retry_timeout`: nothing to report.
+    Fits,
+    /// The worst case overruns the deadline and every knob still holds its
+    /// factory value. The factory set is itself a cut configuration, so this is
+    /// one explanatory line rather than a warning.
+    FactoryOverrun { worst_secs: u64, timeout_secs: u64 },
+    /// The worst case overruns the deadline and at least one knob differs from
+    /// the factory set: warn, and name both reals.
+    TunedOverrun { worst_secs: u64, timeout_secs: u64 },
+}
+
+/// Verdict for the retry knobs' worst-case wall clock, judged on the values
+/// alone: the check cannot know who set them.
+fn retry_budget_verdict(policy: &RetryPolicy) -> RetryBudgetVerdict {
+    let worst_secs = retry_worst_case(policy).as_secs();
+    let timeout_secs = policy.retry_timeout.as_secs();
+    if worst_secs <= timeout_secs {
+        RetryBudgetVerdict::Fits
+    } else if retry_knobs_are_factory(policy) {
+        RetryBudgetVerdict::FactoryOverrun {
+            worst_secs,
+            timeout_secs,
+        }
+    } else {
+        RetryBudgetVerdict::TunedOverrun {
+            worst_secs,
+            timeout_secs,
+        }
+    }
+}
+
+/// True when all four retry knobs still hold their factory values.
+fn retry_knobs_are_factory(policy: &RetryPolicy) -> bool {
+    policy.max_retries == DEFAULT_MAX_RETRIES
+        && policy.base_delay.as_secs() == DEFAULT_RETRY_BASE_DELAY_SECS
+        && policy.max_delay.as_secs() == DEFAULT_RETRY_MAX_DELAY_SECS
+        && policy.retry_timeout.as_secs() == DEFAULT_RETRY_TIMEOUT_SECS
 }
 
 #[cfg(test)]

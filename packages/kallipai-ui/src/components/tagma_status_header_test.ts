@@ -7,6 +7,8 @@ import { assert } from "@std/assert";
 
 const HEADER = new URL("./TagmaStatusHeader.svelte", import.meta.url);
 const LAYOUT = new URL("../lib/shell/RootLayout.svelte", import.meta.url);
+const ROWS = new URL("./TagmaAgentRows.svelte", import.meta.url);
+const UPSTREAM = new URL("./UpstreamFacts.svelte", import.meta.url);
 
 function source(url: URL): string {
   return new TextDecoder().decode(Deno.readFileSync(url));
@@ -67,5 +69,31 @@ Deno.test(
     // on its own (budget is 0 while unlimited), so no fill shows.
     assert(src.includes("s.tokenBudgetUnlimited"));
     assert(src.includes("? tagma_status_unlimited()"));
+  },
+);
+
+Deno.test(
+  "the shared fact table renders in the fleet panel, never per agent row",
+  { permissions: { read: [HEADER, ROWS, UPSTREAM] } },
+  () => {
+    const header = source(HEADER);
+    const rows = source(ROWS);
+    const facts = source(UPSTREAM);
+    // The table is tagma-wide: one block, mounted in both fleet containers
+    // (the sidebar section and the transient panel -- the same two the rows
+    // ride), always fed the tagma-level prop.
+    const mounts = header.split("<UpstreamFacts {facts} />").length - 1;
+    assert(
+      mounts === 2,
+      `expected the fact block in both fleet containers, found ${mounts}`,
+    );
+    assert(header.includes("facts?: readonly FactView[]"));
+    // Per-agent rows carry that agent's own parked reason, never the table.
+    assert(!rows.includes("UpstreamFacts"));
+    assert(!rows.includes("FactView"));
+    // An empty table renders no block at all; the lines come from the whole
+    // table, not from one agent's slice of it.
+    assert(facts.includes("{#if lines.length > 0}"));
+    assert(facts.includes("factLines(facts,"));
   },
 );

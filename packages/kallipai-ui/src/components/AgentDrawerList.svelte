@@ -113,7 +113,7 @@
         {/if}
         {#if row.parkedReason}
           <div class="truncate text-sm text-warning-600-400 ps-7">
-            {parkedReasonText(row.parkedReason)}
+            {parkedReasonText(row.parkedReason, Math.floor(Date.now() / 1000))}
           </div>
         {/if}
       </div>

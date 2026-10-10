@@ -12,6 +12,7 @@
   import type {
     Modality,
     ProfileModel,
+    ProfileProbeStatus,
     ReasoningEffort,
   } from "@kallipai/kallipai-client";
 
@@ -41,6 +42,11 @@
   } from "../../lib/manage/compute.ts";
   import ModalityTags from "../ModalityTags.svelte";
   import ReqMark from "../ReqMark.svelte";
+  import {
+    probeStatusAdvice,
+    probeStatusColor,
+    probeStatusLabel,
+  } from "../../lib/manage/profiles-view.ts";
   import {
     common_cancel,
     common_save,
@@ -86,7 +92,7 @@
     occupiedIds?: string[];
     /** Latest probe report for the in-form Test (rendered inline). */
     probeReport?: {
-      status: string;
+      status: ProfileProbeStatus;
       detail: string | null;
       modelsHint?: "not_listed" | null;
     } | null;
@@ -286,7 +292,12 @@
 
           {#if probeReport}
             <div class="border-t border-surface-300 pt-2 text-xs">
-              <span class="font-mono">{probeReport.status}</span>
+              <span class={probeStatusColor(probeReport.status)}>
+                {probeStatusLabel(probeReport.status)}
+              </span>
+              <p class="opacity-70 mt-1">
+                {probeStatusAdvice(probeReport.status, "profile")}
+              </p>
               {#if probeReport.detail}
                 <span class="opacity-60 ml-2 font-mono break-all">
                   {probeReport.detail}

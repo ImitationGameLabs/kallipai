@@ -37,8 +37,21 @@ export type WireParkedReason =
         readonly budget: number;
       };
     }
+  | { readonly quotaBlocked: WireQuotaBlockedInfo }
   | "maxRoundsExceeded"
   | "transientRetryExhausted";
+
+/** The structured reason a quota or payment block parks an agent: which endpoint
+ * (provider id) and account hit the wall, the moment the upstream said service
+ * resumes, and the evidence. `accountHint` is 8 hex of the credential
+ * fingerprint; `reset` is the display face of the upstream's own hint, omitted
+ * when it gave none or gave one past the trust bound. */
+export interface WireQuotaBlockedInfo {
+  readonly endpoint: string;
+  readonly accountHint: string;
+  readonly reset?: number;
+  readonly detail: string;
+}
 
 /** Armed chain-transient retry counters (`retrying` on summaries and
  * status responses). `retry_in_secs` is the relative backoff delay. */
@@ -140,6 +153,10 @@ export interface WireAgentManagementSummary {
 /** `GET /agents` response wrapper. */
 export interface ListAgentsManagementResponse {
   readonly agents: readonly WireAgentManagementSummary[];
+  /** Facts this tagma's agents learned about upstream endpoints and accounts;
+   * tagma-wide, so it rides the list once instead of on every entry. Absent on
+   * responses from older servers. */
+  readonly upstream_facts?: readonly FactView[];
 }
 
 /** Cumulative token usage per agent. */
@@ -169,6 +186,33 @@ export interface RetryRecord {
   readonly error: string;
   readonly delay_secs: number;
   readonly endpoint: string | null;
+}
+
+/** What an upstream fact is about (`FactView.kind`), in the wire's snake_case. */
+export type FactKind = "quota" | "payment" | "endpoint_auth" | "endpoint_shape";
+
+/** The endpoint a fact was observed on (`FactView.endpoint`): the display face of
+ * the endpoint-level key. `base_url` is omitted for providers that need none. */
+export interface FactEndpoint {
+  readonly family: string;
+  readonly base_url?: string;
+}
+
+/** One upstream-failure fact, shared tagma-wide: what one agent learned about an
+ * endpoint or an account, readable by every agent and shown by the status and
+ * fleet surfaces (`AgentStatusResponse.upstream_facts` and
+ * `ListAgentsManagementResponse.upstream_facts`). The credential never crosses
+ * the wire: `account_hint` is 8 hex of its fingerprint. `until` is the
+ * upstream's own reset hint, omitted when it gave none or gave one past the
+ * trust bound (shown as unknown rather than as a promise). */
+export interface FactView {
+  readonly kind: FactKind;
+  readonly until?: number;
+  readonly detail: string;
+  readonly recorded_at: number;
+  /** Omitted for an account-level fact, which is not about one endpoint. */
+  readonly endpoint?: FactEndpoint;
+  readonly account_hint: string;
 }
 
 /** Runtime-active model profile (`AgentStatusResponse.profile`): the id of the
@@ -229,6 +273,10 @@ export interface AgentStatusResponse {
   /** Tagma-wide single-launch usage totals. Absent only on responses from
    * tagma versions that predate the field. */
   readonly usage_totals?: TagmaUsageTotals;
+  /** Facts this tagma's agents learned about upstream endpoints and accounts;
+   * tagma-wide, so every status response carries the same list. Absent on
+   * responses from older servers. */
+  readonly upstream_facts?: readonly FactView[];
 }
 
 /** `PUT /agents/{id}/metadata` request body. */
@@ -431,7 +479,11 @@ export type ProfileProbeStatus =
   | "unreachable"
   | "unauthorized"
   | "invalid_config"
-  | "partial";
+  | "partial"
+  /** The provider answered HTTP, but the probe path failed: the status
+   * separates a wrong list address (404) from a rate limit (429) from
+   * an upstream fault (5xx). */
+  | { readonly upstream_status: { readonly status: number } };
 
 /** Probe outcome for one endpoint: model-list/balance info on success, reason otherwise. */
 export interface ProfileProviderProbeReport {

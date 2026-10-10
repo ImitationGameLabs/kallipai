@@ -3,15 +3,17 @@
 use serde::{Deserialize, Serialize};
 
 /// How many retry records the store keeps. The status endpoint renders the
-/// most recent 20 and the per-endpoint retry budget counts in-window
-/// records, so the bound only bites far past any configured budget.
+/// most recent 20, so the bound is what the reporting surface shows; retry
+/// budgets are counted in memory and never read this log.
 pub const RETRY_LOG_KEEP: usize = 20;
 
-/// Coarse failure class for a retry, decided by the runtime at record time
+/// Coarse failure class of a retry observation, decided by the runtime at record time
 /// from the HTTP status (or transport nature) of the failed attempt. The
 /// rendered provider error body stays in `error` for archival; `kind` is
 /// what status output groups and summarizes on, so vendor wording never
 /// leaks into the summary line.
+/// A kind is recorded for the trigger, not for a performed retry: a class that
+/// advances the chain instead of retrying records its kind with no wait.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum RetryKind {
@@ -46,24 +48,29 @@ impl RetryKind {
     }
 }
 
-/// Persistent record of a single retry attempt.
+/// One retry observation: the failure class the runtime met, the send attempt it
+/// was charged to, and the wait a further attempt would take. A record does
+/// not imply that a further send happened — a class that advances the chain
+/// instead of retrying is recorded with `delay_secs: 0.0` and no next attempt (see [`RetryKind`]).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RetryRecord {
-    /// Unix epoch seconds when this retry was triggered.
+    /// Unix epoch seconds when the failure was observed.
     pub timestamp: u64,
-    /// Which tool round the retry belongs to.
+    /// Which tool round the observation belongs to.
     pub round: usize,
-    /// Retry attempt number (1-based).
+    /// Send attempt this observation was charged to (1-based).
     pub attempt: u32,
     /// Maximum retry attempts configured.
     pub max_attempts: u32,
-    /// Short description of the error that triggered this retry.
+    /// Short description of the error that triggered this record.
     pub error: String,
-    /// Backoff delay in seconds before the next attempt.
+    /// Seconds a further attempt would wait. `0.0` means there is no next
+    /// attempt: the failure class advanced the chain instead of retrying, so the record
+    /// is an observation rather than a retry that ran.
     pub delay_secs: f64,
-    /// Provider id this retry was against (`None` on legacy records). Scopes the per-provider
-    /// retry budget during within-set failover: the budget is provider-keyed because rate
-    /// limits are provider-scoped (two profiles sharing one provider share one budget).
+    /// Provider id this retry was against (`None` on legacy records). Each record names the
+    /// endpoint it was observed on; the retry budget itself belongs to the episode, not to
+    /// the endpoint.
     #[serde(default)]
     pub endpoint: Option<String>,
     /// Coarse failure class (see [`RetryKind`]); defaults to transport on
@@ -71,8 +78,12 @@ pub struct RetryRecord {
     #[serde(default)]
     pub kind: RetryKind,
     /// When the rate-limit window is expected to reopen, as epoch seconds
-    /// (`now + retry-after` at record time). `None` when the failure
-    /// carried no reset hint.
+    /// (`now +` the reset hint the response body carried at record time). `None`
+    /// when the failure carried no reset hint.
+    ///
+    /// The upstream's own value, as it gave it: this record is the offline
+    /// aggregation face (`reset − first rejection`), so the trust bound the
+    /// display surfaces apply to a fact's hint does not apply here.
     #[serde(default)]
     pub quota_reset: Option<u64>,
 }

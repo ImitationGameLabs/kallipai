@@ -3,6 +3,7 @@ use crate::tools::context::ContextUnpinTool;
 use kallipai_common::policy::PolicyPreset;
 
 use kallipai_shell::tools::names;
+use serial_test::serial;
 
 #[test]
 fn permission_class_from_str_display_round_trip() {
@@ -233,6 +234,7 @@ fn pinned_budget_matches_effective_times_ratio() {
 }
 
 #[test]
+#[serial]
 fn policy_preset_from_env_unset_returns_default() {
     temp_env::with_vars_unset(["KALLIPAI_POLICY_PRESET"], || {
         assert_eq!(policy_preset_from_env(), PolicyPreset::Default);
@@ -240,6 +242,7 @@ fn policy_preset_from_env_unset_returns_default() {
 }
 
 #[test]
+#[serial]
 fn policy_preset_from_env_empty_returns_default() {
     temp_env::with_vars([("KALLIPAI_POLICY_PRESET", Some(""))], || {
         assert_eq!(policy_preset_from_env(), PolicyPreset::Default);
@@ -247,6 +250,7 @@ fn policy_preset_from_env_empty_returns_default() {
 }
 
 #[test]
+#[serial]
 fn policy_preset_from_env_explicit_default() {
     temp_env::with_vars([("KALLIPAI_POLICY_PRESET", Some("default"))], || {
         assert_eq!(policy_preset_from_env(), PolicyPreset::Default);
@@ -254,6 +258,7 @@ fn policy_preset_from_env_explicit_default() {
 }
 
 #[test]
+#[serial]
 fn policy_preset_from_env_auto() {
     temp_env::with_vars([("KALLIPAI_POLICY_PRESET", Some("auto"))], || {
         assert_eq!(policy_preset_from_env(), PolicyPreset::Auto);
@@ -261,6 +266,7 @@ fn policy_preset_from_env_auto() {
 }
 
 #[test]
+#[serial]
 fn policy_preset_from_env_allow_all() {
     temp_env::with_vars([("KALLIPAI_POLICY_PRESET", Some("allow-all"))], || {
         assert_eq!(policy_preset_from_env(), PolicyPreset::AllowAll);
@@ -268,6 +274,7 @@ fn policy_preset_from_env_allow_all() {
 }
 
 #[test]
+#[serial]
 fn policy_preset_from_env_whitespace_padded() {
     temp_env::with_vars([("KALLIPAI_POLICY_PRESET", Some("  auto  "))], || {
         assert_eq!(policy_preset_from_env(), PolicyPreset::Auto);
@@ -275,6 +282,7 @@ fn policy_preset_from_env_whitespace_padded() {
 }
 
 #[test]
+#[serial]
 #[should_panic(expected = "KALLIPAI_POLICY_PRESET: invalid policy preset")]
 fn policy_preset_from_env_invalid_panics() {
     temp_env::with_vars([("KALLIPAI_POLICY_PRESET", Some("gibberish"))], || {
@@ -283,6 +291,7 @@ fn policy_preset_from_env_invalid_panics() {
 }
 
 #[test]
+#[serial]
 #[should_panic(expected = "KALLIPAI_POLICY_PRESET: invalid policy preset")]
 fn policy_preset_from_env_ask_all_no_longer_valid() {
     // `ask-all` was dropped; it must now be a fatal misconfiguration rather
@@ -293,6 +302,7 @@ fn policy_preset_from_env_ask_all_no_longer_valid() {
 }
 
 #[test]
+#[serial]
 fn retry_policy_env_unset_mirrors_retry_policy_default() {
     // The env-unset production path and RetryPolicy::default must agree on every field,
     // so the documented defaults hold no matter which side built the config. retry.rs
@@ -316,6 +326,7 @@ fn retry_policy_env_unset_mirrors_retry_policy_default() {
 }
 
 #[test]
+#[serial]
 fn retry_knob_bounds_accept_exact_limits() {
     // The bounds are inclusive: the exact limit must load, pinning the parsed
     // values (so an off-by-one in the comparison cannot pass unnoticed).
@@ -348,6 +359,7 @@ fn retry_knob_bounds_accept_exact_limits() {
 /// One past each bound must be a fatal misconfiguration, not a slow panic
 /// (Instant overflow) or a silent wrap (u32::MAX retries -> zero attempts).
 #[test]
+#[serial]
 fn retry_knob_bounds_reject_overflow() {
     for (key, value) in [
         ("KALLIPAI_MAX_RETRIES", "1001"),
@@ -361,5 +373,177 @@ fn retry_knob_bounds_reject_overflow() {
                 "{key}={value} must be rejected"
             );
         });
+    }
+}
+
+/// A zero base delay is refused at the load: the schedule's own starting point
+/// would collapse to jitter alone, so the documented lower bound is enforced
+/// where the value enters. The jitter draw's modulus is `RETRY_JITTER_MAX`, not
+/// this value, so no downstream guard would catch a zero.
+#[test]
+#[serial]
+fn a_zero_base_delay_fails_the_load() {
+    temp_env::with_vars([("KALLIPAI_RETRY_BASE_DELAY_SECS", Some("0"))], || {
+        let err = AgentConfig::load(None, Vec::new(), None)
+            .expect_err("a zero base delay must be rejected")
+            .to_string();
+        assert!(
+            err.contains("KALLIPAI_RETRY_BASE_DELAY_SECS must be greater than zero"),
+            "the message names the knob and the bound: {err}"
+        );
+    });
+}
+
+/// A pair of individually legal values that contradict each other must fail
+/// the load, and the message must name both values, both ranges and a working
+/// example: a rejection an operator cannot act on is half a rejection.
+#[test]
+#[serial]
+fn contradictory_backoff_pair_fails_the_load() {
+    temp_env::with_vars(
+        [
+            ("KALLIPAI_RETRY_BASE_DELAY_SECS", Some("90")),
+            ("KALLIPAI_RETRY_MAX_DELAY_SECS", Some("60")),
+        ],
+        || {
+            let err = AgentConfig::load(None, Vec::new(), None)
+                .expect_err("base delay above the cap must be rejected")
+                .to_string();
+            for needle in [
+                "KALLIPAI_RETRY_BASE_DELAY_SECS (90s)",
+                "KALLIPAI_RETRY_MAX_DELAY_SECS (60s)",
+                "KALLIPAI_RETRY_BASE_DELAY_SECS > 0 and <= 3600",
+                "KALLIPAI_RETRY_BASE_DELAY_SECS=1 KALLIPAI_RETRY_MAX_DELAY_SECS=60 KALLIPAI_RETRY_TIMEOUT_SECS=300",
+            ] {
+                assert!(err.contains(needle), "error must contain {needle}: {err}");
+            }
+        },
+    );
+}
+
+/// A cap that reaches the deadline is rejected for the same reason: one
+/// backoff would eat the whole sequence.
+#[test]
+#[serial]
+fn backoff_cap_at_the_deadline_fails_the_load() {
+    temp_env::with_vars(
+        [
+            ("KALLIPAI_RETRY_MAX_DELAY_SECS", Some("300")),
+            ("KALLIPAI_RETRY_TIMEOUT_SECS", Some("300")),
+        ],
+        || {
+            let err = AgentConfig::load(None, Vec::new(), None)
+                .expect_err("cap at the deadline must be rejected")
+                .to_string();
+            for needle in [
+                "KALLIPAI_RETRY_MAX_DELAY_SECS (300s)",
+                "KALLIPAI_RETRY_TIMEOUT_SECS (300s)",
+                "KALLIPAI_RETRY_TIMEOUT_SECS > 0 and <= 86400",
+                "KALLIPAI_RETRY_BASE_DELAY_SECS=1 KALLIPAI_RETRY_MAX_DELAY_SECS=60 KALLIPAI_RETRY_TIMEOUT_SECS=300",
+            ] {
+                assert!(err.contains(needle), "error must contain {needle}: {err}");
+            }
+        },
+    );
+}
+
+/// The factory set overruns its own deadline (973s against 300s) and lands in
+/// the explanatory tier: warning on the shipped default would be pure noise.
+#[test]
+fn factory_retry_knobs_land_in_the_explanatory_tier() {
+    let policy = RetryPolicy::default();
+    let worst = retry_worst_case(&policy);
+    assert_eq!(worst, std::time::Duration::from_secs(973));
+    match retry_budget_verdict(&policy) {
+        RetryBudgetVerdict::FactoryOverrun {
+            worst_secs,
+            timeout_secs,
+        } => {
+            assert_eq!(worst_secs, worst.as_secs());
+            assert_eq!(timeout_secs, 300);
+        }
+        other => panic!("factory knobs must land in the explanatory tier: {other:?}"),
+    }
+}
+
+/// Changing one knob escalates the same overrun to the warning tier, which
+/// carries both reals.
+#[test]
+fn a_changed_retry_knob_lands_in_the_warning_tier() {
+    let policy = RetryPolicy {
+        max_delay: std::time::Duration::from_secs(120),
+        ..RetryPolicy::default()
+    };
+    match retry_budget_verdict(&policy) {
+        RetryBudgetVerdict::TunedOverrun {
+            worst_secs,
+            timeout_secs,
+        } => {
+            assert_eq!(worst_secs, 1157);
+            assert_eq!(timeout_secs, 300);
+        }
+        other => panic!("a tuned cap must land in the warning tier: {other:?}"),
+    }
+}
+
+/// A deadline above the worst case has nothing to report.
+#[test]
+fn a_deadline_above_the_worst_case_stays_quiet() {
+    let policy = RetryPolicy {
+        retry_timeout: std::time::Duration::from_secs(2_000),
+        ..RetryPolicy::default()
+    };
+    assert!(matches!(
+        retry_budget_verdict(&policy),
+        RetryBudgetVerdict::Fits
+    ));
+}
+
+/// The deadline comparison is inclusive: a deadline set exactly at the worst
+/// case still fits.
+#[test]
+fn a_deadline_exactly_at_the_worst_case_stays_quiet() {
+    let policy = RetryPolicy {
+        retry_timeout: retry_worst_case(&RetryPolicy::default()),
+        ..RetryPolicy::default()
+    };
+    assert!(matches!(
+        retry_budget_verdict(&policy),
+        RetryBudgetVerdict::Fits
+    ));
+}
+
+/// Every one of the four knobs counts as a change: a field the factory check
+/// forgot would report a tuned configuration as the factory one and swallow
+/// the warning.
+#[test]
+fn every_retry_knob_counts_as_a_change() {
+    let factory = RetryPolicy::default();
+    let tuned = [
+        RetryPolicy {
+            max_retries: factory.max_retries + 1,
+            ..factory.clone()
+        },
+        RetryPolicy {
+            base_delay: factory.base_delay + std::time::Duration::from_secs(1),
+            ..factory.clone()
+        },
+        RetryPolicy {
+            max_delay: factory.max_delay + std::time::Duration::from_secs(60),
+            ..factory.clone()
+        },
+        RetryPolicy {
+            retry_timeout: factory.retry_timeout + std::time::Duration::from_secs(60),
+            ..factory.clone()
+        },
+    ];
+    for policy in tuned {
+        assert!(
+            matches!(
+                retry_budget_verdict(&policy),
+                RetryBudgetVerdict::TunedOverrun { .. }
+            ),
+            "a tuned knob must land in the warning tier: {policy:?}"
+        );
     }
 }

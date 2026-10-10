@@ -44,5 +44,13 @@
   "tagma_profile_created": "Created {date}",
   "tagma_profile_message": "Message",
   "tagma_rooms_section_empty": "No rooms yet -- create one or browse public rooms.",
-  "tagma_rooms_section_manage": "Manage rooms"
+  "tagma_rooms_section_manage": "Manage rooms",
+  "tagma_facts_title": "Upstream facts",
+  "tagma_facts_kind_quota": "quota",
+  "tagma_facts_kind_payment": "payment",
+  "tagma_facts_kind_endpoint_auth": "endpoint auth",
+  "tagma_facts_kind_endpoint_shape": "endpoint shape",
+  "tagma_facts_scope_account": "account-wide",
+  "tagma_facts_account": "account {hint}",
+  "tagma_facts_reopens": "reopens in {when}"
 }

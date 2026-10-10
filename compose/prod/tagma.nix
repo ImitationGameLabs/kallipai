@@ -72,9 +72,9 @@ in
         KALLIPAI_TAGMA_ADDR = "0.0.0.0:3000";
         # A rootful container has no uid mapping, so the tagma would run as the
         # host's real root -- which the real-root boot guard refuses by default
-        # (docs/en/reference/env/daemon.md). This flag is the explicit, documented escape:
-        # instances inherit the container's root. Rootless or userns-remap
-        # deployments remain the preferred shapes.
+        # (docs/en/reference/environment-variables/daemon.md). This flag is the
+        # explicit, documented escape: instances inherit the container's root.
+        # Rootless or userns-remap deployments remain the preferred shapes.
         KALLIPAI_TAGMA_ACCEPT_UNSAFE_RUN_AS_ROOT = "1";
         RUST_LOG = "info";
         # KALLIPAI_AUTH_TOKEN (operator token), KALLIPAI_TAGMA_RELAY_ENROLLMENT_CODE

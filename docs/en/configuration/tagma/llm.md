@@ -22,7 +22,7 @@ The layers relate like this: an agent never binds a single profile; it binds a p
 
 Each layer exists on its own for a concrete reason.
 
-**Provider is its own layer because rate limits and the retry budget are endpoint-scoped.** Rate limiting is an endpoint-level behavior: several profiles sharing one endpoint share one retry budget instead of each keeping its own. Gathering endpoint details into the provider makes the budget's ownership land on this layer naturally.
+**Provider is its own layer because an upstream rejection is scoped to a credential and the endpoint it was used against.** The shared fact table keys what one agent learned that way: a quota or payment block follows the credential, so every endpoint on it is affected, while a rejected credential or a repeated response shape names one endpoint. The provider declares the `api_key`, `family`, and `base_url` those keys are built from, so the fact table's ownership lands on this layer naturally.
 
 **A profile declares its capabilities because the context window follows the new profile's declaration on failover.** Windows may differ within a set; when a switch happens, the context is handled against the newly active profile's declared window, and budget-invariant checks rely on that declared value. The window is therefore a property of the profile, not a global constant.
 

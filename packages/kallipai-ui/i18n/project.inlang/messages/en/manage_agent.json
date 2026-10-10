@@ -36,7 +36,7 @@
   "manage_agent_cumulative_out": "Cumulative (out)",
   "manage_agent_cumulative_cache_write": "Cumulative (cache write)",
   "manage_agent_cumulative_cache_read": "Cumulative (cache read)",
-  "manage_agent_recent_retries": "Recent Retries",
+  "manage_agent_recent_retries": "Retry records",
   "manage_agent_status_failed": "Could not load agent status.",
   "manage_agent_retry_line": "{date} — {error} ({outcome})",
   "manage_agent_retry_show_relative": "Show relative time",

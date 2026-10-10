@@ -5,7 +5,7 @@
 //! bridge converts them to the SSE wire-format events defined in
 //! `kallipai_common::protocol::SseEvent`.
 
-use kallipai_common::protocol::{FailoverChainExhaustion, TransientRetryInfo};
+use kallipai_common::protocol::{FailoverChainExhaustion, QuotaBlockedInfo, TransientRetryInfo};
 
 /// Events emitted by the agent runner during execution.
 ///
@@ -100,6 +100,12 @@ pub enum AgentEvent {
         detail: String,
         transient_retry: Option<TransientRetryInfo>,
     },
+    /// The endpoint's account is out of quota or credit and no candidate could
+    /// serve (terminal for the turn). Unlike [`FailoverChainExhausted`](Self::FailoverChainExhausted)
+    /// this **arms no timer and adds no transient re-run**: recovery comes from an
+    /// external trigger only (a user message or a task delivery). Bridges to
+    /// `SseEvent::QuotaBlocked`; emitted by `run_and_report`.
+    QuotaBlocked(QuotaBlockedInfo),
 }
 
 impl AgentEvent {
@@ -126,6 +132,7 @@ impl AgentEvent {
                 | Self::Interrupted
                 | Self::TokenBudgetExceeded { .. }
                 | Self::FailoverChainExhausted { .. }
+                | Self::QuotaBlocked(..)
         )
     }
 }
@@ -166,7 +173,8 @@ mod tests {
                 | AgentEvent::Cancelled
                 | AgentEvent::Interrupted
                 | AgentEvent::TokenBudgetExceeded { .. }
-                | AgentEvent::FailoverChainExhausted { .. } => {
+                | AgentEvent::FailoverChainExhausted { .. }
+                | AgentEvent::QuotaBlocked(..) => {
                     assert!(terminal, "{v:?}");
                 }
             };
@@ -230,6 +238,12 @@ mod tests {
             detail: String::new(),
             transient_retry: None,
         },
+        AgentEvent::QuotaBlocked(QuotaBlockedInfo {
+            endpoint: String::new(),
+            account_hint: String::new(),
+            reset: Some(0),
+            detail: String::new(),
+        }),
     ];
 
     /// Vocabulary snapshot: the Debug shape of every variant — variant name
@@ -242,7 +256,7 @@ mod tests {
     /// empty/zero values; semantics live in the classification snapshot.
     #[test]
     fn schema_snapshot() {
-        assert_eq!(SAMPLES.len(), 22, "variant count drifted — extend SAMPLES");
+        assert_eq!(SAMPLES.len(), 23, "variant count drifted — extend SAMPLES");
         let expected: &[&str] = &[
             "Reasoning(\"\")",
             "AssistantContent(\"\")",
@@ -266,6 +280,7 @@ mod tests {
             "Interrupted",
             "TokenBudgetExceeded { consumed: 0, budget: 0 }",
             "FailoverChainExhausted { reason: NoFailoverConfigured, detail: \"\", transient_retry: None }",
+            "QuotaBlocked(QuotaBlockedInfo { endpoint: \"\", account_hint: \"\", reset: Some(0), detail: \"\" })",
         ];
         for (v, want) in SAMPLES.iter().zip(expected) {
             assert_eq!(format!("{v:?}"), *want);
@@ -294,4 +309,9 @@ pub enum AgentOutcome {
         reason: FailoverChainExhaustion,
         detail: String,
     },
+    /// The endpoint's account is out of quota or credit and no candidate could
+    /// serve: the agent parks with the structured reason and waits for an
+    /// external trigger. Sibling of `FailoverChainExhausted` in the round-end
+    /// taxonomy, minus the transient re-run: no timer is armed.
+    QuotaBlocked(QuotaBlockedInfo),
 }

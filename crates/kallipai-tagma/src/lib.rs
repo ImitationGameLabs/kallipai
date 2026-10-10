@@ -13,6 +13,7 @@ pub mod credentials;
 pub mod delivery;
 pub mod direct;
 pub mod duty;
+pub mod endpoint_health;
 pub mod engine;
 pub mod env_governance;
 pub mod external;

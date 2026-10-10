@@ -15,6 +15,7 @@ use just_llm_client::types::generation::{GenerationRequest, Message, ToolCall, U
 /// just-agent-libs migration; test signatures never name the upstream type.
 pub(crate) type TurnMessage = Message;
 use just_llm_client::{LlmBackend, ToolDispatcher};
+use kallipai_common::facts::{Block, BlockedFact, EndpointHealth, FactView, is_active};
 use tokio_util::sync::CancellationToken;
 
 use crate::agent_task::AgentContext;
@@ -24,7 +25,7 @@ use crate::context::{ContextStore, ContextSummarizer};
 use crate::failover::{FailoverState, ProfileSnapshot};
 use crate::policy::{AgentPolicy, AuthorizedToolExecutor};
 use crate::profile::{BackendSource, Profile, ProfileRegistry, ProfileSet};
-use crate::retry::RetryPolicy;
+use crate::retry::{AttemptOrigin, Episode, RetryPolicy};
 use crate::token_budget::TokenBudget;
 
 /// Network-free DeepSeek backend (construction touches no network).
@@ -139,6 +140,8 @@ pub(crate) async fn ctx_from_source(
         executor,
         summarizer: ContextSummarizer::new(config.summary_max_tokens),
         config,
+        episode: Episode::new(kallipai_common::timefmt::now_epoch()),
+        attempt_origin: AttemptOrigin::System,
         agent_dir: None,
         history: None,
         cancel: CancellationToken::new(),
@@ -153,6 +156,7 @@ pub(crate) async fn ctx_from_source(
         wait_armed_secs: 0,
         token_budget: TokenBudget::new(1_000_000, 0),
         usage_stats: crate::usage_stats::UsageStats::default(),
+        endpoint_health: None,
         pending_profile_reset: Arc::new(std::sync::Mutex::new(None)),
         message_puller: None,
         persist_failures: Default::default(),
@@ -173,6 +177,51 @@ pub(crate) fn map_source(providers: &[&str]) -> Arc<dyn BackendSource> {
 /// default retry policy.
 pub(crate) async fn make_ctx(profiles: Vec<Profile>, providers: &[&str]) -> AgentContext {
     ctx_from_source(profiles, map_source(providers), RetryPolicy::default()).await
+}
+
+/// The status a request carrying the placeholder key draws from the live
+/// endpoint. A mock that answers with it keeps a round's own path through the
+/// retry layers, so the wake tests reach the same classification without
+/// touching the network.
+pub(crate) const PLACEHOLDER_KEY_STATUS: u16 = 401;
+
+/// A `MapSource` of loopback-mock backends: every provider id maps to a real
+/// OpenAI-compatible backend pointed at a mock server, so a round's HTTP call
+/// never leaves the host and a wall-clock budget races neither DNS nor TLS. The
+/// mock answers every request with `status`. Keep the returned server alive for as
+/// long as the context is used.
+pub(crate) async fn mock_source(
+    providers: &[&str],
+    status: u16,
+) -> (Arc<dyn BackendSource>, wiremock::MockServer) {
+    let server = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .respond_with(wiremock::ResponseTemplate::new(status))
+        .mount(&server)
+        .await;
+    let backend = just_llm_client::provider::OpenAiCompatBackend::new(
+        reqwest::Client::builder().use_rustls_tls(),
+        "test-key",
+        Some(&server.uri()),
+    )
+    .expect("openai-compat backend constructs without network");
+    let mut map = HashMap::new();
+    for provider in providers {
+        map.insert((*provider).into(), backend.clone() as Arc<dyn LlmBackend>);
+    }
+    (Arc::new(MapSource(map)), server)
+}
+
+/// A context over `profiles` whose backends answer from a loopback mock server with
+/// `status`; the returned server handle must outlive the context.
+pub(crate) async fn ctx_with_mock(
+    profiles: Vec<Profile>,
+    providers: &[&str],
+    status: u16,
+) -> (AgentContext, wiremock::MockServer) {
+    let (source, server) = mock_source(providers, status).await;
+    let ctx = ctx_from_source(profiles, source, RetryPolicy::default()).await;
+    (ctx, server)
 }
 
 /// A [`Usage`] with only `prompt_tokens` set (and derived `total_tokens`).
@@ -353,7 +402,7 @@ impl LlmBackend for RecordingBackend {
         &self,
         _request: GenerationRequest,
     ) -> Result<reqwest::Request, just_llm_client::BackendError> {
-        unimplemented!("tests exercise only the streaming path")
+        unimplemented!("the recording backend covers the streaming path only")
     }
 
     fn prepare_streaming(
@@ -387,7 +436,7 @@ impl LlmBackend for RecordingBackend {
         _response: reqwest::Response,
     ) -> Result<just_llm_client::types::generation::GenerationResponse, just_llm_client::BackendError>
     {
-        unimplemented!("tests exercise only the streaming path")
+        unimplemented!("the recording backend covers the streaming path only")
     }
 
     async fn parse_streaming(
@@ -433,16 +482,28 @@ impl LlmBackend for RecordingBackend {
 
     fn render_messages(
         &self,
-        _messages: &[Message],
+        messages: &[Message],
     ) -> Result<String, just_llm_client::BackendError> {
-        unimplemented!("tests exercise only the streaming path")
+        // Token estimation renders through the backend. The recording backend has
+        // no wire format, so it renders the text face: enough for a stable count,
+        // and enough for a round to run end to end against it.
+        Ok(messages
+            .iter()
+            .filter_map(|m| m.content())
+            .collect::<Vec<_>>()
+            .join("\n"))
     }
 
     fn render_tools(
         &self,
-        _tools: &[just_llm_client::types::generation::ToolDefinition],
+        tools: &[just_llm_client::types::generation::ToolDefinition],
     ) -> Result<String, just_llm_client::BackendError> {
-        unimplemented!("tests exercise only the streaming path")
+        // Tool schemas are rendered by name: the count is what estimation needs.
+        Ok(tools
+            .iter()
+            .map(|t| t.function.name.as_str())
+            .collect::<Vec<_>>()
+            .join("\n"))
     }
 
     fn family() -> &'static str {
@@ -454,6 +515,96 @@ impl LlmBackend for RecordingBackend {
         _api_key: &str,
         _base_url: Option<&str>,
     ) -> Result<Arc<dyn LlmBackend>, just_llm_client::BackendConstructError> {
-        unimplemented!("tests exercise only the streaming path")
+        unimplemented!("the recording backend covers the streaming path only")
     }
+}
+
+/// Records what the retry paths wrote into the shared fact table, so a test can
+/// assert a write happened with no tagma behind the context — and answers reads
+/// from what it holds, so a seeded fact reaches a verdict.
+#[derive(Default)]
+pub(crate) struct RecordingHealth {
+    blocks: Mutex<Vec<(String, Block)>>,
+    /// Provider ids listed in one inner vector share an account. Ids the groups
+    /// do not name read as different accounts, the fail-open default.
+    accounts: Mutex<Vec<Vec<String>>>,
+}
+
+impl RecordingHealth {
+    /// Everything recorded so far, oldest first.
+    pub(crate) fn recorded(&self) -> Vec<(String, Block)> {
+        self.blocks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// Seed a fact as if another agent had written it: no write happens on this
+    /// context, which is what a reader's own reading must pick up.
+    pub(crate) fn seed(&self, provider_id: &str, block: Block) {
+        self.blocks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push((provider_id.to_string(), block));
+    }
+
+    /// Declare two provider ids as one account: the credential they share, which
+    /// this double has no hash for.
+    pub(crate) fn share_account(&self, a: &str, b: &str) {
+        self.accounts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(vec![a.to_string(), b.to_string()]);
+    }
+}
+
+impl EndpointHealth for RecordingHealth {
+    fn record(&self, provider_id: &str, block: Block) {
+        self.blocks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push((provider_id.to_string(), block));
+    }
+
+    fn blocked_for(&self, provider_id: &str, now: u64) -> Option<BlockedFact> {
+        let accounts = self.accounts.lock().unwrap_or_else(|e| e.into_inner());
+        // An id shares this provider's account when one group names both.
+        let same_account = |id: &str| {
+            accounts.iter().any(|group| {
+                group.iter().any(|member| member == id)
+                    && group.iter().any(|member| member == provider_id)
+            })
+        };
+        // Newest first: the same reading order the tagma's table uses. An
+        // account-level fact answers for every endpoint on the credential, which
+        // is what `share_account` declares here.
+        self.blocks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .rev()
+            .find(|(id, block)| {
+                is_active(block.recorded_at, block.until, now)
+                    && (id == provider_id || (block.kind.is_account_level() && same_account(id)))
+            })
+            .map(|(holder, block)| BlockedFact {
+                block: block.clone(),
+                // The holder's hint, as the tagma's table computes it from the
+                // credential the fact was recorded through — not the asker's.
+                account_hint: account_hint(holder),
+            })
+    }
+
+    fn snapshot(&self, _now: u64) -> Vec<FactView> {
+        Vec::new()
+    }
+}
+
+/// A deterministic stand-in for the tagma's 8-hex credential hint: the double
+/// has no credential to hash.
+pub(crate) fn account_hint(provider_id: &str) -> String {
+    let digest = provider_id.bytes().fold(0u32, |acc, byte| {
+        acc.wrapping_mul(31).wrapping_add(u32::from(byte))
+    });
+    format!("{digest:08x}")
 }

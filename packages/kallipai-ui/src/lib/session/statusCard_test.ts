@@ -3,6 +3,8 @@
 // waiting for the reconciliation poll (this is the relay `tagma_status` /
 // direct-SSE event path the chat page feeds), overlapping nudges collapse
 // into one request, and detach() clears rows and stops further pulls.
+// The same response's tagma-wide fact table is mirrored here too: one copy
+// for the tagma, not one per agent (the fleet panel renders it once).
 // Rune-bearing module under `deno test`: passthrough $state shim (the
 // channels_openBudget_test pattern). The seam is OfflineBackend over a stub
 // TagmaClient, so the real adapter runs and only the HTTP client is faked.
@@ -18,6 +20,7 @@ declare global {
 (globalThis as Record<string, unknown>)["$state"] = (v: unknown) => v;
 
 import type {
+  FactView,
   ListAgentsManagementResponse,
   TagmaClient,
   WireAgentManagementSummary,
@@ -66,10 +69,14 @@ class StubClient {
   /** Mutable so a test can flip an observable field between refreshes
    * (the fixture rows are readonly). */
   rootActivity = "thinking";
+  /** The tagma-wide fact table the same response carries (not an agent
+   * field): mutable so a test can change it between refreshes. */
+  facts: readonly FactView[] = [];
   listAgents(): Promise<ListAgentsManagementResponse> {
     this.rosterCalls++;
     return Promise.resolve({
       agents: [{ ...root, activity: this.rootActivity }, sub],
+      upstream_facts: this.facts,
     });
   }
   getAgentStatus(): Promise<never> {
@@ -335,5 +342,84 @@ Deno.test(
     // detach() clears every cached value, the mirror included.
     statusCardStore.detach();
     assertEquals(statusCardStore.summary, undefined);
+  },
+);
+
+// --- The tagma-wide fact table, mirrored from the same roster response ------
+
+/** Wire-shaped facts: the table the tagma learned, as the response carries it
+ * (tagma-wide, so it rides the list once instead of on every entry). */
+const FACTS: readonly FactView[] = [
+  {
+    kind: "quota",
+    until: 1_700_003_600,
+    detail: "insufficient_quota",
+    recorded_at: 1_699_999_940,
+    endpoint: { family: "openai" },
+    account_hint: "3f9a1b2c",
+  },
+  {
+    kind: "payment",
+    detail: "billing hard limit reached",
+    recorded_at: 1_699_999_970,
+    account_hint: "aa11bb22",
+  },
+];
+
+Deno.test("the roster response's fact table lands whole, once", async () => {
+  const stub = new StubClient();
+  stub.facts = FACTS;
+  try {
+    statusCardStore.attach(backend(stub));
+    await flush();
+    // The store holds the table itself -- same count, same content as the
+    // wire list, and not a per-agent copy of it.
+    assertEquals(statusCardStore.upstreamFacts.length, FACTS.length);
+    assertEquals(statusCardStore.upstreamFacts, FACTS);
+  } finally {
+    stub.facts = [];
+    statusCardStore.detach();
+  }
+});
+
+Deno.test(
+  "an unchanged fact table keeps its identity across refreshes",
+  async () => {
+    const stub = new StubClient();
+    stub.facts = FACTS;
+    try {
+      statusCardStore.attach(backend(stub));
+      await flush();
+      const before = statusCardStore.upstreamFacts;
+      statusCardStore.nudge();
+      await flush();
+      assertStrictEquals(statusCardStore.upstreamFacts, before);
+    } finally {
+      stub.facts = [];
+      statusCardStore.detach();
+    }
+  },
+);
+
+Deno.test(
+  "a changed fact table swaps the reference, detach clears it",
+  async () => {
+    const stub = new StubClient();
+    stub.facts = FACTS;
+    try {
+      statusCardStore.attach(backend(stub));
+      await flush();
+      const before = statusCardStore.upstreamFacts;
+      stub.facts = FACTS.slice(0, 1);
+      statusCardStore.nudge();
+      await flush();
+      assertEquals(statusCardStore.upstreamFacts.length, 1);
+      assertEquals(statusCardStore.upstreamFacts === before, false);
+      statusCardStore.detach();
+      assertEquals(statusCardStore.upstreamFacts.length, 0);
+    } finally {
+      stub.facts = [];
+      statusCardStore.detach();
+    }
   },
 );

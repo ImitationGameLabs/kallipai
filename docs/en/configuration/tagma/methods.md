@@ -173,14 +173,17 @@ failover candidate) is validated at spawn: a window that violates a budget
 invariant rejects the spawn outright (fail-fast) rather than silently falling
 back.
 
-The retry budget is **per-endpoint**, not per-profile: rate limits are
-endpoint-scoped, so two profiles sharing one endpoint share one budget. A
-profile's transient retries accumulate within `retry_timeout` (the retry
-deadline that `KALLIPAI_RETRY_TIMEOUT_SECS`, default 300, configures)
-**across rounds**. This is intentional rate-limit backpressure (a persistently failing endpoint
-gets fewer retries, forcing failover or a round error), and it matches the
-pre-failover agent-wide behavior for the active profile. The index only advances
-forward, so a failed-over-from endpoint's accumulated budget never re-bites.
+The retry budget belongs to the **episode**, not to an endpoint or a profile: an
+episode is one stretch from a first attempt to a verdict, and it allows
+`max_retries + 1` sends (`KALLIPAI_MAX_RETRIES`, default 10). `retry_timeout`
+(`KALLIPAI_RETRY_TIMEOUT_SECS`, default 300) bounds how long that episode stays
+on trial, measured from its first attempt; a mid-stream failure continues the
+same episode, so the send count and the deadline both cover the whole stretch.
+Advancing the chain opens a fresh episode, so the profile that takes over starts
+with its own budget and its own deadline. The index only advances forward, so the
+chain never returns to the profile it left behind. What profiles sharing an
+endpoint do share is the upstream fact table: a quota or credential verdict one
+agent paid for is readable by every other agent in the tagma.
 
 Edge case: an agent whose recorded set name matches no live set dangles: the
 record keeps the name, restore tolerates it as a placeholder, but prompt

@@ -2,9 +2,10 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::sse::{FailoverChainExhaustion, TransientRetryInfo};
+use super::sse::{FailoverChainExhaustion, QuotaBlockedInfo, TransientRetryInfo};
 use crate::agentid::AgentId;
 use crate::context::ContextUsage;
+use crate::facts::FactView;
 use crate::policy::PolicyPreset;
 use crate::retry::RetryRecord;
 
@@ -81,6 +82,12 @@ pub enum ParkedReason {
     /// Chain-transient retries spent their attempt budget; the final FCE parked the
     /// agent instead of re-arming another backoff.
     TransientRetryExhausted,
+    /// The endpoint's account is out of quota or credit and no candidate could
+    /// serve: the agent parks until an external trigger (a user message or a task
+    /// delivery) wakes it. The payload carries the whole reason — which endpoint
+    /// and account, when the upstream said service resumes, and the evidence — so
+    /// no surface has to re-derive it from prose.
+    QuotaBlocked(QuotaBlockedInfo),
 }
 
 impl std::fmt::Display for ParkedReason {
@@ -94,6 +101,17 @@ impl std::fmt::Display for ParkedReason {
             Self::TokenBudgetExceeded { .. } => f.write_str("token budget exceeded"),
             Self::MaxRoundsExceeded => f.write_str("max rounds exceeded"),
             Self::TransientRetryExhausted => f.write_str("transient retries exhausted"),
+            Self::QuotaBlocked(info) => {
+                let resumption = match info.reset {
+                    Some(reset) => format!("upstream says it resumes at {reset} (unix seconds)"),
+                    None => "the upstream gave no usable resumption time".to_owned(),
+                };
+                write!(
+                    f,
+                    "quota blocked on endpoint {} (account {}): {resumption}; evidence: {}",
+                    info.endpoint, info.account_hint, info.detail
+                )
+            }
         }
     }
 }
@@ -262,6 +280,11 @@ pub struct AgentSummary {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ListAgentsResponse {
     pub agents: Vec<AgentSummary>,
+    /// Facts this tagma's agents learned about upstream endpoints and accounts;
+    /// see [`FactView`]. Tagma-wide, so it rides the list once instead of on
+    /// every entry. Absent on responses from older servers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub upstream_facts: Vec<FactView>,
 }
 
 /// Query params for `GET /agents`. Omit `created_by` to list all agents (the
@@ -453,6 +476,11 @@ pub struct AgentStatusResponse {
     /// responses from tagma versions that predate the field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage_totals: Option<TagmaUsageTotals>,
+    /// Facts this tagma's agents learned about upstream endpoints and accounts;
+    /// see [`FactView`]. Tagma-wide, so every status response carries the same
+    /// list. Absent on responses from older servers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub upstream_facts: Vec<FactView>,
 }
 
 /// The input modality a model profile accepts or a file attachment carries.
@@ -624,8 +652,9 @@ pub struct AgentPermissionsResponse {
 mod tests {
     use super::{
         AttachmentIngestRequest, CreateAgentRequest, DeliveryMode, MessageRequest, MessageResponse,
-        Modality,
+        Modality, ParkedReason,
     };
+    use crate::protocol::sse::QuotaBlockedInfo;
 
     #[test]
     fn message_request_without_defer_keeps_historical_wire_shape() {
@@ -794,5 +823,46 @@ mod tests {
             back.usage_totals.as_ref().unwrap().cache_read_tokens,
             parsed.usage_totals.as_ref().unwrap().cache_read_tokens,
         );
+    }
+
+    /// The parked reason's quota payload keeps the external-tag wire shape: the
+    /// variant name wraps the fields, camelCase inside. Pinned as bytes so a
+    /// rename or a nesting mistake is red before a client sees it.
+    #[test]
+    fn parked_reason_quota_blocked_wire_bytes_are_pinned() {
+        let reason = ParkedReason::QuotaBlocked(QuotaBlockedInfo {
+            endpoint: "p1".to_owned(),
+            account_hint: "01234567".to_owned(),
+            reset: Some(1_700_000_600),
+            detail: "HTTP 429 slow down".to_owned(),
+        });
+        let json = serde_json::to_string(&reason).unwrap();
+        assert_eq!(
+            json,
+            "{\"quotaBlocked\":{\"endpoint\":\"p1\",\"accountHint\":\"01234567\",\"reset\":1700000600,\"detail\":\"HTTP 429 slow down\"}}"
+        );
+        let back: ParkedReason = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, reason);
+    }
+
+    /// The prose face carries all three elements — which endpoint and account,
+    /// when the upstream said service resumes, and the evidence — and says so
+    /// when the upstream gave no usable moment.
+    #[test]
+    fn the_quota_prose_names_every_element() {
+        let info = |reset| QuotaBlockedInfo {
+            endpoint: "p1".to_owned(),
+            account_hint: "01234567".to_owned(),
+            reset,
+            detail: "HTTP 429 slow down".to_owned(),
+        };
+        let text = ParkedReason::QuotaBlocked(info(Some(1_700_000_600))).to_string();
+        assert!(text.contains("endpoint p1"), "{text}");
+        assert!(text.contains("account 01234567"), "{text}");
+        assert!(text.contains("1700000600"), "{text}");
+        assert!(text.contains("HTTP 429 slow down"), "{text}");
+
+        let without = ParkedReason::QuotaBlocked(info(None)).to_string();
+        assert!(without.contains("no usable resumption time"), "{without}");
     }
 }

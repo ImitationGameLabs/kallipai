@@ -48,6 +48,7 @@ Uses `KALLIPAI_AUTH_TOKEN` (mandatory) and `KALLIPAI_TAGMA_URL`
 | 3    | Cancelled                           |
 | 4    | Token budget exceeded               |
 | 5    | Failover chain exhausted            |
+| 6    | Quota or payment block (parked)     |
 
 ### Output
 
@@ -81,9 +82,12 @@ so the runner emits only a completion hint by default.
 ```
 
 `exit` is one of `success`, `error`, `max_rounds`, `cancelled`,
-`budget_exceeded`, `failover_chain_exhausted`. If the tagma is unreachable, the
-agent id is unknown, or `post_message` fails, no JSON object is emitted; the
-error is printed to stderr and the exit code is `1`.
+`budget_exceeded`, `failover_chain_exhausted`, `quota_blocked`. If the tagma is
+unreachable, the agent id is unknown, or `post_message` fails, no JSON object is
+emitted; the error is printed to stderr and the exit code is `1`. `quota_blocked`
+(exit code 6) means the account behind the endpoint is out of quota or credit and
+no candidate could serve: the agent parked waiting for an external trigger, and
+nothing will re-run on its own.
 
 ```bash
 kallipai-run --json --prompt "Refactor the config loader"

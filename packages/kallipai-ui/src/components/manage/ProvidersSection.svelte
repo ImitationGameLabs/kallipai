@@ -13,6 +13,7 @@
   } from "@kallipai/kallipai-client";
   import {
     modelsCountLabel,
+    probeStatusAdvice,
     probeStatusColor,
     probeStatusLabel,
   } from "../../lib/manage/profiles-view.ts";
@@ -119,9 +120,12 @@
         </dl>
         {#if report}
           <div class="border-t border-surface-300 pt-2 text-xs space-y-1">
-            <span class={probeStatusColor[report.status]}>
+            <span class={probeStatusColor(report.status)}>
               {probeStatusLabel(report.status)}
             </span>
+            <p class="opacity-70">
+              {probeStatusAdvice(report.status, "endpoint")}
+            </p>
             {#if report.latency_ms != null}
               <span class="opacity-60 ml-2">{report.latency_ms}ms</span>
             {/if}

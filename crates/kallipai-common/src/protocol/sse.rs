@@ -18,20 +18,26 @@ use crate::approval::ApprovalStatus;
 /// are enumerable and clients branch on them, whereas a failover hop's cause is an opaque
 /// per-backend error.
 ///
-/// **Terminal-reason coalescing:** a chain that skips candidates for *mixed* reasons (some
-/// unbuildable, some window-infeasible) surfaces [`AllCandidatesInfeasible`](Self::AllCandidatesInfeasible)
-/// — the per-candidate `warn!`s in `advance_failover` carry each skip's precise cause. A single
-/// infeasible candidate wins the reason even when the majority were unbuildable: the
-/// window-infeasibility mode is the subtler, more actionable one to surface (the operator can
-/// retune the budget shape without redeploying credentials). Intentional — do not "fix" it to
-/// last-reason or counts without revisiting the operator-UX rationale.
+/// **Terminal-reason coalescing:** a chain that skips candidates for *mixed*
+/// reasons surfaces the subtler mode: [`AllCandidatesInfeasible`](Self::AllCandidatesInfeasible)
+/// when any candidate's window could not serve the budget, else
+/// [`AllCandidatesUnbuildable`](Self::AllCandidatesUnbuildable) when any backend refused to
+/// build, else [`AllBackupsExhausted`](Self::AllBackupsExhausted) when every candidate ahead
+/// was already marked in the shared fact table. The per-candidate `warn!`s in
+/// `advance_failover` carry each skip's precise cause. A single infeasible candidate wins
+/// the reason even when the majority were unbuildable: the window-infeasibility mode is
+/// the subtler, more actionable one to surface (the operator can retune the budget shape
+/// without redeploying credentials). Intentional — do not "fix" it to last-reason or
+/// counts without revisiting the operator-UX rationale.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum FailoverChainExhaustion {
     /// The set has a single profile — failover was never configured.
     NoFailoverConfigured,
-    /// A multi-profile set, but the active profile was already the last (the chain
-    /// was advanced through and now its tail has failed terminally).
+    /// A multi-profile set with no candidate left to move to: the chain was advanced
+    /// through and its tail failed terminally, or every candidate ahead was already
+    /// marked in the shared fact table (switching into one would only repeat the
+    /// failure another agent already paid for).
     AllBackupsExhausted,
     /// Remaining candidate profiles existed but every one's backend refused to build
     /// (configuration / credential failure, distinct from the runtime trigger).
@@ -71,6 +77,32 @@ pub struct TransientRetryInfo {
     pub attempt: u32,
     pub max_attempts: u32,
     pub retry_in_secs: f64,
+}
+
+/// The structured reason a quota or payment block parks an agent: which endpoint
+/// and account hit the wall, the moment the upstream said it reopens, and the
+/// evidence. Carried by [`SseEvent::QuotaBlocked`] and, on the runtime side, by
+/// the matching `AgentEvent`, so the payload has one shape and one owner: the
+/// event that reports it.
+///
+/// `account_hint` is the first eight hex of the credential fingerprint — enough
+/// for a reader to tell two accounts apart, never the credential itself.
+/// `reset` is the *display* face of the upstream's hint ([`crate::facts::display_until`]):
+/// a moment further out than the trust bound reads as `None`, which is what
+/// "the upstream did not say, or said something nobody should believe" means to
+/// every consumer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuotaBlockedInfo {
+    /// The endpoint (provider id) that hit the wall.
+    pub endpoint: String,
+    /// First eight hex of the credential fingerprint behind that endpoint.
+    pub account_hint: String,
+    /// When the upstream said service resumes, as a value a reader may show.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reset: Option<u64>,
+    /// Bounded excerpt of the upstream's own words.
+    pub detail: String,
 }
 
 /// Wire-format event for SSE transport (tagma to client).
@@ -169,6 +201,14 @@ pub enum SseEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         transient_retry: Option<TransientRetryInfo>,
     },
+
+    /// The endpoint's account is out of quota or credit and no candidate could
+    /// serve: the agent parks with the structured reason instead of a free-text
+    /// error, so the surfaces can show which endpoint and account, when the
+    /// upstream said service resumes, and the evidence. Terminal for the turn;
+    /// **no timer is armed and no transient re-run follows** — recovery comes
+    /// from an external trigger (a user message or a task delivery).
+    QuotaBlocked(QuotaBlockedInfo),
 }
 impl SseEvent {
     /// Whether this event terminates the current turn/stream.
@@ -190,6 +230,7 @@ impl SseEvent {
                 | Self::Interrupted
                 | Self::TokenBudgetExceeded { .. }
                 | Self::FailoverChainExhausted { .. }
+                | Self::QuotaBlocked(..)
         )
     }
 
@@ -252,7 +293,8 @@ mod tests {
                 | SseEvent::Cancelled
                 | SseEvent::Interrupted
                 | SseEvent::TokenBudgetExceeded { .. }
-                | SseEvent::FailoverChainExhausted { .. } => {
+                | SseEvent::FailoverChainExhausted { .. }
+                | SseEvent::QuotaBlocked(..) => {
                     assert!(terminal && boundary, "{v:?}");
                 }
             };
@@ -322,6 +364,12 @@ mod tests {
             detail: String::new(),
             transient_retry: None,
         },
+        SseEvent::QuotaBlocked(QuotaBlockedInfo {
+            endpoint: String::new(),
+            account_hint: String::new(),
+            reset: Some(0),
+            detail: String::new(),
+        }),
     ];
 
     /// Wire-shape snapshot: the serde tag and the exact field-name set of
@@ -359,6 +407,10 @@ mod tests {
             ("interrupted", &[]),
             ("tokenBudgetExceeded", &["budget", "consumed"]),
             ("failoverChainExhausted", &["detail", "reason"]),
+            (
+                "quotaBlocked",
+                &["accountHint", "detail", "endpoint", "reset"],
+            ),
         ];
         assert_eq!(
             ALL_VARIANTS.len(),
@@ -503,5 +555,44 @@ mod tests {
                 }
             };
         }
+    }
+
+    /// The quota-blocked payload rides the event flat, under the camelCase field
+    /// names the wire contract uses: pinning the exact bytes is what makes a
+    /// rename or a nesting mistake red before a client sees it.
+    #[test]
+    fn quota_blocked_wire_bytes_are_pinned() {
+        let info = QuotaBlockedInfo {
+            endpoint: "p1".to_owned(),
+            account_hint: "01234567".to_owned(),
+            reset: Some(1_700_000_600),
+            detail: "HTTP 429 slow down".to_owned(),
+        };
+        let json = serde_json::to_string(&SseEvent::QuotaBlocked(info)).unwrap();
+        assert_eq!(
+            json,
+            "{\"type\":\"quotaBlocked\",\"endpoint\":\"p1\",\"accountHint\":\"01234567\",\"reset\":1700000600,\"detail\":\"HTTP 429 slow down\"}"
+        );
+    }
+
+    /// A missing (or untrustworthy) reset moment omits the field entirely, so an
+    /// old client reading the payload sees the same shape it always did — the
+    /// same rule the armed transient-retry payload follows.
+    #[test]
+    fn a_quota_block_without_a_usable_reset_omits_the_field() {
+        let info = QuotaBlockedInfo {
+            endpoint: "p1".to_owned(),
+            account_hint: "01234567".to_owned(),
+            reset: None,
+            detail: "HTTP 429".to_owned(),
+        };
+        let json = serde_json::to_string(&SseEvent::QuotaBlocked(info)).unwrap();
+        assert!(!json.contains("reset"), "{json}");
+        let back: SseEvent = serde_json::from_str(&json).unwrap();
+        let SseEvent::QuotaBlocked(back) = back else {
+            panic!("round-trips as the same variant");
+        };
+        assert_eq!(back.reset, None);
+        assert_eq!(back.account_hint, "01234567");
     }
 }

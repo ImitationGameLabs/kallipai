@@ -403,6 +403,7 @@
               rootRow: statusCardStore.rootRow,
               subRows: statusCardStore.subRows,
             }}
+            facts={statusCardStore.upstreamFacts}
             {sideLayout}
             onToggleSide={() => {
               sideWanted = !sideWanted;

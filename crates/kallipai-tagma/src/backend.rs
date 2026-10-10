@@ -56,8 +56,12 @@ pub(crate) fn resolve_user_agent(provided: Option<&str>) -> &str {
 /// exists, its family is registered with `factory`, and an openai-compatible provider declares a
 /// `base_url`. Cheap — no construction — so misconfiguration fails fast at startup, before any
 /// agent relies on a failover profile. Unreferenced providers are not checked (dead config).
+/// It also warns — and never fails — when two referenced providers share one API key:
+/// their account is one, so a quota or credential rejection on either is
+/// account-level for both.
 fn validate_providers(cfg: &ProfileConfig, factory: &BackendFactory) -> Result<()> {
     let families: Vec<&str> = factory.families().collect();
+    let mut by_credential: HashMap<&str, Vec<&str>> = HashMap::new();
     for set in cfg.sets.values() {
         for profile in &set.profiles {
             let provider = cfg.endpoints.get(&profile.endpoint).with_context(|| {
@@ -80,6 +84,24 @@ fn validate_providers(cfg: &ProfileConfig, factory: &BackendFactory) -> Result<(
                     provider.id
                 );
             }
+            by_credential
+                .entry(provider.api_key.as_str())
+                .or_default()
+                .push(provider.id.as_str());
+        }
+    }
+    // Providers sharing one credential share the account behind it, so a quota
+    // or credential rejection on one is account-level for the other too. Legal,
+    // and usually unintentional: one line at startup, naming the ids and not
+    // the key.
+    for ids in by_credential.values_mut() {
+        ids.sort_unstable();
+        ids.dedup();
+        if ids.len() > 1 {
+            warn!(
+                providers = %ids.join(", "),
+                "providers share one credential, so a rejection on one is account-level for all of them"
+            );
         }
     }
     Ok(())

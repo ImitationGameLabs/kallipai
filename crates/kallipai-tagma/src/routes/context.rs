@@ -6,11 +6,13 @@ use kallipai_adk::context::AgenticContext;
 use kallipai_adk::persistence;
 use kallipai_adk::policy::classifier;
 use kallipai_common::agentid::AgentId;
+use kallipai_common::facts::EndpointHealth;
 use kallipai_common::policy::ExecPolicy;
 use kallipai_common::protocol::{
     ActiveProfile, AgentPermissionsResponse, AgentStatusResponse, AgentUsageStats, ApiError,
     TagmaUsageTotals,
 };
+use kallipai_common::retry::RETRY_LOG_KEEP;
 
 use crate::state::SharedState;
 
@@ -37,7 +39,7 @@ pub async fn agent_status(
         .retry_log
         .iter()
         .rev()
-        .take(20)
+        .take(RETRY_LOG_KEEP)
         .cloned()
         .collect::<Vec<_>>();
     let snap = state.token_budget.snapshot();
@@ -58,6 +60,9 @@ pub async fn agent_status(
         cache_read_tokens: totals.cache_read_tokens,
         cache_hit_rate: totals.cache_hit_rate(),
     };
+    let upstream_facts = state
+        .endpoint_health
+        .snapshot(kallipai_common::timefmt::now_epoch());
     Ok(Json(AgentStatusResponse {
         state: live.agent.get_state(),
         context,
@@ -76,6 +81,7 @@ pub async fn agent_status(
         }),
         usage,
         usage_totals: Some(usage_totals),
+        upstream_facts,
     }))
 }
 

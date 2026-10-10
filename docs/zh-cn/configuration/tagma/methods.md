@@ -107,6 +107,6 @@ set 按名字寻址：root agent 绑定配置的 `default` set，每个 subagent
 
 前进时，上下文窗口跟随新 profile 声明的 `max_context_window`（set 内窗口可以不同；一个 set 放不同窗口的模型是支持的）。若携带的上下文现在超过新的（可能更小的）窗口，runner 在重试前先压缩，该轮因此能在切换后存活。窗口会违反预算不变式的候选在前进**之前**被跳过（agent 因此绝不会向小窗口模型发送超限请求）；无可行候选时，链条报告为无可行窗口错误：每个候选都与预算冲突（调 `KALLIPAI_SUMMARY_MAX_TOKENS` / `KALLIPAI_PINNED_BUDGET_RATIO` 或加大窗口）。**活跃** profile 的窗口（非故障转移候选）在 spawn 时校验：违反预算不变式的窗口直接拒绝 spawn（fail-fast），而非悄悄回落。
 
-重试预算是**逐端点**的，不是逐 profile：速率限制以端点为界，共享一个端点的两个 profile 共享一份预算。一个 profile 的暂时性重试在 `retry_timeout`（时限由 `KALLIPAI_RETRY_TIMEOUT_SECS` 配置，默认 300）之内**跨轮**累计。这是刻意的速率限制反压（持续失败的端点拿到更少重试，逼出故障转移或轮错误），也与故障转移前 agent 级活跃 profile 的行为一致。索引只向前走，被故障转移掉的端点其累计预算不会再咬回来。
+重试预算属于 **episode**（一次重试回合），既不属于端点，也不属于 profile：一个 episode 从首次尝试走到判定，允许 `max_retries + 1` 次发送（`KALLIPAI_MAX_RETRIES`，默认 10）。`retry_timeout`（`KALLIPAI_RETRY_TIMEOUT_SECS`，默认 300）界定该 episode 的观察期，从首次尝试起算；中途断流仍属同一 episode，因此发送次数与时限覆盖整段。前进会开启新的 episode，接手的 profile 从自己的预算与自己的时限开始。索引只向前走，链条不会回到它离开的 profile。共享同一端点的 profile 共享的是上游事实表：一个 agent 付出代价换来的配额或凭据判定，tagma 内其他 agent 也读得到。
 
 边界情形：记录的 set 名匹配不到任何活 set 的 agent 会悬空：记录保留名字，恢复容忍占位，但 prompt 投递以 `409` 拒绝，直到该 set 以该名字回归。

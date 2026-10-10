@@ -63,6 +63,7 @@
     providerIdsOf,
   } from "../../lib/manage/profiles-view.ts";
   import type {
+    ProfileProbeStatus,
     ProfileProvider,
     Modality,
     ProfileProviderProbeReport,
@@ -465,7 +466,7 @@
     idx: number;
   }>({ open: false, setName: "", idx: 0 });
   let profileProbeReport = $state<{
-    status: string;
+    status: ProfileProbeStatus;
     detail: string | null;
     modelsHint?: "not_listed" | null;
   } | null>(null);
@@ -544,7 +545,7 @@
   }>({ open: false, mode: "new", idx: 0 });
   // Latest in-form probe result, rendered inside the dialog.
   let parkingProbeReport = $state<{
-    status: string;
+    status: ProfileProbeStatus;
     detail: string | null;
     modelsHint?: "not_listed" | null;
   } | null>(null);

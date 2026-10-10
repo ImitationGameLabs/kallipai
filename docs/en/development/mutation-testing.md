@@ -56,7 +56,7 @@ filter by mutant name, `-o` sets the output directory, `--iterate` reuses
 earlier results, and defaults can live in `.cargo/mutants.toml`.
 
 Measured on this repository (48 cores, warm `target/`) for the file above: 91
-mutants, an unmutated baseline of about 5s, about 6s per viable mutant (and
+mutants, an unmutated baseline of a few seconds, about 6s per viable mutant (and
 under a second for each unviable one, which fails the build), and 8 minutes
 wall clock in total. A cold `target/` adds the crate's build time to the
 baseline, and a whole-crate run scales with the mutant count.
@@ -84,36 +84,37 @@ and diffs under `log/` and `diff/`. The four outcomes mean different things:
 The measured run for `crates/kallipai-adk/src/retry/decision.rs` reports:
 
 ```text
-91 mutants tested in 8m: 4 missed, 70 caught, 17 unviable
+91 mutants tested in 8m: 74 caught, 17 unviable
 ```
 
-All 17 unviable mutants are non-compiling by construction: `Default::default()`
-substituted for constructors of types that have no `Default` impl, and one `&&`
-replaced by `||` that does not type-check. The same file without
-`CARGO_BUILD_WARNINGS=allow` reports `1 missed, 24 caught, 66 unviable`; 49 of
-those unviable mutants are warning-denied builds, and they hide three of the
-four survivors below. That is why the environment variable belongs to the
-invocation rather than being an option.
+All 17 unviable mutants are non-compiling by construction: fifteen substitute
+`Default::default()` for a value of a type with no `Default` impl, and two
+replace `&&` with `||` that does not type-check. The same file without
+`CARGO_BUILD_WARNINGS=allow` reports `25 caught, 66 unviable`: 49 of those
+unviable mutants are warning-denied builds that the environment variable turns
+back into real tests, so the default environment reports 25 caught where the
+variable reports 74.
 
-The four survivors, each a test gap rather than an equivalent mutant:
+Four survivors this file has produced, each a test gap rather than an equivalent
+mutant, with what closed it:
 
 - `shape_key`'s `TransportError::Deserialize` arm and the
-  `serde_json::error::Category::Data` arm inside it. Deleting either one drops
-  the frame-shape key to `None`. The `shape_key` test covers the whole-body
-  provider path and the malformed, utf8, and oversized-body variants, but never
-  constructs a `TransportError::Deserialize`, so `ShapeKey::FrameStructure` is
-  unasserted.
-- `from_transport`'s `TransportError::Deserialize` arm, again unconstructed by
-  any test. Deleting it downgrades an SSE frame that failed to parse to
-  `Unclassified` and the suite still passes. The variant is reachable: the
-  upstream client produces it from its SSE event parser, and the error chain
-  reaches `from_transport` both through `classify` (as
-  `ProviderError::Transport`) and through `shape_key`.
-- `from_status`'s `status.is_server_error()` guard. Replacing the guard with
-  `true` reclassifies every status no earlier arm matches -- a 405, 409, or 410
-  -- from `RequestPermanent` to `Transient(TransientKind::Server)`. The status
-  tests cover 400, 401, 402, 403, 404, 408, 422, 429, 500, and 503, and none of
-  the unenumerated 4xx codes.
+  `serde_json::error::Category::Data` arm inside it — two mutants: deleting
+  either one dropped the frame-shape key to `None` while the suite stayed green,
+  so `shape_key_names_the_shape_class_leaf` asserts the frame site's key.
+- `from_transport`'s `TransportError::Deserialize` arm, the SSE frame that
+  failed to parse: deleting it downgraded that failure to `Unclassified`, so
+  `typed_source_rows_of_the_table` carries the frame rows on both sides of
+  `from_json_category`, including the `ProviderError::Transport` wrap the client
+  produces.
+- `from_status`'s `status.is_server_error()` guard, which decides the statuses
+  no arm above it names: widening it to `true` reclassified a 405 as
+  `Transient(TransientKind::Server)`, so `http_status_rows_of_the_table` pins an
+  unenumerated 4xx beside a server error.
+
+The pattern is the same each time: name the reachable behavior, assert it beside
+the row that covers its neighbours, and rerun. The run quoted above reports no
+survivors.
 
 ## Thresholds
 

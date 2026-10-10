@@ -127,6 +127,16 @@ pub async fn bridge_task(
                                     AgentEvent::FailoverChainExhausted { detail, .. } => {
                                         error!(id = %agent_id, "failover chain exhausted: {detail}");
                                     }
+                                    AgentEvent::QuotaBlocked(info) => {
+                                        error!(
+                                            id = %agent_id,
+                                            endpoint = %info.endpoint,
+                                            account_hint = %info.account_hint,
+                                            reset = ?info.reset,
+                                            "quota blocked, parking: {}",
+                                            info.detail
+                                        );
+                                    }
                                     _ => {
                                         // Only Error/FCE log today; Idle is
                                         // silent by design. A future error-class
@@ -195,6 +205,14 @@ pub async fn bridge_task(
                                             (AgentState::PARKED, Some(parked_reason), None)
                                         }
                                     },
+                                    // A quota or payment block parks with the
+                                    // payload the event carries: the reason is
+                                    // structured, so nothing here re-derives it.
+                                    AgentEvent::QuotaBlocked(info) => (
+                                        AgentState::PARKED,
+                                        Some(ParkedReason::QuotaBlocked(info.clone())),
+                                        None,
+                                    ),
                                     _ => unreachable!(
                                         "is_terminal() variant missing in terminal triage"
                                     ),
@@ -397,6 +415,7 @@ fn convert_event(event: AgentEvent) -> Option<SseEvent> {
             detail,
             transient_retry,
         }),
+        AgentEvent::QuotaBlocked(info) => Some(SseEvent::QuotaBlocked(info)),
         AgentEvent::Cancelled => Some(SseEvent::Cancelled),
         AgentEvent::Interrupted => Some(SseEvent::Interrupted),
         AgentEvent::TokenBudgetExceeded { consumed, budget } => {

@@ -2788,6 +2788,7 @@ dependencies = [
  "base64 0.22.1",
  "dirs",
  "futures-util",
+ "getrandom 0.4.2",
  "http",
  "just-llm-client",
  "kallipai-blob-store",

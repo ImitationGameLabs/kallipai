@@ -18,6 +18,7 @@ use crate::agent_task::{RoundToken, run_and_report};
 use crate::failover::{FailoverOutcome, ProfileReset};
 use crate::policy::ToolCallOutcome;
 use crate::profile::{BackendSource, ProfileRegistry, ProfileSet};
+use crate::retry::AttemptOrigin;
 use crate::runner::BreakUntil;
 use crate::test_support::{MapSource, ctx_from_source, make_ctx, profile};
 use crate::tool_execution::{run_tool_bounded, synthesize_unanswered_results};
@@ -404,6 +405,16 @@ async fn mount_break_args_stream(server: &MockServer, args: &str) {
         .await;
 }
 
+/// Build a 200 SSE body carrying one tool call for `name` with the raw
+/// `arguments` JSON. The quotes inside `arguments` are escaped for the SSE
+/// envelope, or the call fails to parse.
+fn tool_call_sse_body(name: &str, args: &str) -> String {
+    let escaped = args.replace('"', "\\\"");
+    "data: {\"id\":\"s\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"@NAME@\",\"arguments\":\"@ARGS@\"}}]}}]}\n\ndata: [DONE]\n"
+        .replace("@NAME@", name)
+        .replace("@ARGS@", &escaped)
+}
+
 /// A `MapSource` mapping endpoint id → wiremock backend.
 fn wiremock_source(map: HashMap<String, Arc<dyn LlmBackend>>) -> Arc<dyn BackendSource> {
     Arc::new(MapSource(map))
@@ -599,7 +610,7 @@ async fn switch_takes_effect_next_request_and_resets_failover_chain() {
     ctx.record_turn(vec![user_msg("switch time")]).await;
     let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentEvent>(256);
     let (_prompt_tx, mut prompt_rx) = tokio::sync::mpsc::channel::<String>(16);
-    let terminated = run_and_report(&mut ctx, &tx, &mut prompt_rx).await;
+    let terminated = run_and_report(&mut ctx, &tx, &mut prompt_rx, AttemptOrigin::System).await;
     assert!(!terminated);
     let _ = rx.try_recv();
 
@@ -648,7 +659,7 @@ async fn break_wait_parks_waiting_with_armed_timer() {
 
     let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentEvent>(256);
     let (_prompt_tx, mut prompt_rx) = tokio::sync::mpsc::channel::<String>(16);
-    let terminated = run_and_report(&mut ctx, &tx, &mut prompt_rx).await;
+    let terminated = run_and_report(&mut ctx, &tx, &mut prompt_rx, AttemptOrigin::System).await;
     assert!(!terminated);
 
     let mut events = Vec::new();
@@ -690,7 +701,7 @@ async fn break_idle_parks_idle_without_timer() {
 
     let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentEvent>(256);
     let (_prompt_tx, mut prompt_rx) = tokio::sync::mpsc::channel::<String>(16);
-    let terminated = run_and_report(&mut ctx, &tx, &mut prompt_rx).await;
+    let terminated = run_and_report(&mut ctx, &tx, &mut prompt_rx, AttemptOrigin::System).await;
     assert!(!terminated);
 
     let mut events = Vec::new();
@@ -782,7 +793,7 @@ async fn bare_assistant_heartbeats_then_force_idles_at_cap() {
 
     let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentEvent>(256);
     let (_prompt_tx, mut prompt_rx) = tokio::sync::mpsc::channel::<String>(16);
-    let terminated = run_and_report(&mut ctx, &tx, &mut prompt_rx).await;
+    let terminated = run_and_report(&mut ctx, &tx, &mut prompt_rx, AttemptOrigin::System).await;
 
     let mut events = Vec::new();
     while let Ok(ev) = rx.try_recv() {
@@ -866,7 +877,7 @@ async fn mid_stream_drop_retries_and_emits_stream_reset() {
     };
     // The retried full content — not the abandoned "PARTIAL".
     assert_eq!(content, "done");
-    // Exactly one mid-stream retry, carrying the shared per-endpoint budget telemetry.
+    // Exactly one mid-stream retry, carrying the episode's send-budget telemetry.
     assert_eq!(stream_resets(&events), vec![(1, 2)]);
     // No failover: the same endpoint recovered.
     assert!(failover_hops(&events).is_empty());
@@ -1266,4 +1277,51 @@ async fn drained_notices_merge_into_one_turn_in_fifo_order() {
     let second = injected[0].find("preview: second").unwrap();
     assert!(first < second, "FIFO order must hold across notices");
     assert!(injected[0].contains("[/Interjected message]"));
+}
+
+/// A tool round is a new execution: it does not inherit the previous round's
+/// send budget. Round 0 spends its whole (zero-retry) budget and asks for a
+/// tool call; round 1 must still reach the provider. Inheriting the ledger
+/// would refuse round 1's first send and error the run instead.
+#[tokio::test]
+async fn a_tool_round_does_not_inherit_the_previous_rounds_send_budget() {
+    let server = MockServer::start().await;
+    // The tool call is served to the first request only; later requests get a
+    // plain answer. The harness registers no tools, so the call itself comes
+    // back as a failure envelope — the round loop continues either way.
+    let _tool_call = Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_raw(
+                    tool_call_sse_body("bash_read", "{\"path\":\"/nonexistent\"}").into_bytes(),
+                    "text/event-stream",
+                ),
+        )
+        .up_to_n_times(1)
+        .mount_as_scoped(&server)
+        .await;
+    mount_ok_stream(&server, "done").await;
+
+    let mut map = HashMap::new();
+    map.insert("ep1".into(), wiremock_backend(&server.uri()));
+    let profiles = vec![profile("p1", "ep1", 500_000)];
+    let mut ctx = ctx_from_source(profiles, wiremock_source(map), fast_policy()).await;
+    // Two tool rounds, and a policy whose whole send budget is one request:
+    // the second round sends only if its ledger starts fresh.
+    ctx.config.max_tool_rounds = 2;
+    ctx.config.retry_policy.max_retries = 0;
+
+    let (outcome, _events) = run_rounds(&mut ctx).await;
+
+    assert!(
+        matches!(outcome, Ok(RoundOutcome::BareAssistant { ref content, .. }) if content == "done"),
+        "the second round must reach the provider, got {outcome:?}"
+    );
+    assert_eq!(
+        server.received_requests().await.unwrap().len(),
+        2,
+        "one tool round plus one answering round"
+    );
 }

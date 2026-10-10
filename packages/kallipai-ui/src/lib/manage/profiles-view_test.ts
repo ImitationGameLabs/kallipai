@@ -20,7 +20,9 @@ import {
   modelsCountLabel,
   occupiedIdsOf,
   parkedLiveSnapshot,
+  probeStatusAdvice,
   probeStatusColor,
+  probeStatusKey,
   probeStatusLabel,
   profileKey,
   providerIdsOf,
@@ -226,38 +228,89 @@ Deno.test("occupiedIdsOf: missing draft yields []", () => {
 
 // --- probeStatusLabel / probeStatusColor / modelsCountLabel ---
 
+function statuses(): ProfileProbeStatus[] {
+  return [
+    "ok",
+    "partial",
+    "unreachable",
+    "unauthorized",
+    "invalid_config",
+    { upstream_status: { status: 429 } },
+  ];
+}
+
 Deno.test(
   "probeStatusLabel: every status maps to a distinct non-empty label",
   () => {
-    const labels = (
-      [
-        "ok",
-        "partial",
-        "unreachable",
-        "unauthorized",
-        "invalid_config",
-      ] as const
-    ).map((s) => probeStatusLabel(s));
-    assertEquals(new Set(labels).size, 5);
+    const labels = statuses().map((s) => probeStatusLabel(s));
+    assertEquals(new Set(labels).size, 6);
   },
 );
 
 Deno.test(
   "probeStatusColor: mapping pinned — the three failures share the error color",
   () => {
-    assertEquals(probeStatusColor.ok, "text-success-500 dark:text-success-400");
     assertEquals(
-      probeStatusColor.partial,
+      probeStatusColor("ok"),
+      "text-success-500 dark:text-success-400",
+    );
+    assertEquals(
+      probeStatusColor("partial"),
       "text-warning-500 dark:text-warning-400",
     );
     assertEquals(
-      probeStatusColor.unreachable,
+      probeStatusColor("unreachable"),
       "text-error-500 dark:text-error-400",
     );
-    assertEquals(probeStatusColor.unauthorized, probeStatusColor.unreachable);
-    assertEquals(probeStatusColor.invalid_config, probeStatusColor.unreachable);
+    assertEquals(
+      probeStatusColor("unauthorized"),
+      probeStatusColor("unreachable"),
+    );
+    assertEquals(
+      probeStatusColor("invalid_config"),
+      probeStatusColor("unreachable"),
+    );
+    assertEquals(
+      probeStatusColor({ upstream_status: { status: 429 } }),
+      probeStatusColor("unreachable"),
+    );
   },
 );
+
+Deno.test(
+  "probeStatusAdvice: every verdict gives a distinct line, the upstream ones by status",
+  () => {
+    const lines = statuses().map((s) => probeStatusAdvice(s, "profile"));
+    assertEquals(new Set(lines).size, 6);
+    const upstream = [404, 429, 500, 418].map((status) =>
+      probeStatusAdvice({ upstream_status: { status } }, "profile"),
+    );
+    assertEquals(new Set(upstream).size, 4);
+    assertEquals(upstream[2].includes("500"), true);
+    assertEquals(upstream[3].includes("418"), true);
+  },
+);
+
+Deno.test(
+  "probeStatusAdvice: the ok line states the face's own coverage",
+  () => {
+    const endpoint = probeStatusAdvice("ok", "endpoint");
+    const profile = probeStatusAdvice("ok", "profile");
+    assertEquals(endpoint !== profile, true);
+    assertEquals(endpoint.includes("model list"), true);
+    assertEquals(endpoint.includes("256"), false);
+    assertEquals(profile.includes("256"), true);
+    assertEquals(profile.includes("mid-stream"), true);
+  },
+);
+
+Deno.test("probeStatusKey: the object arm normalizes to its wire tag", () => {
+  assertEquals(probeStatusKey("ok"), "ok");
+  assertEquals(
+    probeStatusKey({ upstream_status: { status: 500 } }),
+    "upstream_status",
+  );
+});
 
 Deno.test("modelsCountLabel: 1 is singular, 2 is plural", () => {
   assertEquals(modelsCountLabel(1) !== modelsCountLabel(2), true);

@@ -11,6 +11,7 @@
     ProfileModelProbeReport,
   } from "@kallipai/kallipai-client";
   import {
+    probeStatusAdvice,
     probeStatusColor,
     probeStatusLabel,
   } from "../../lib/manage/profiles-view.ts";
@@ -125,9 +126,12 @@
   </dl>
   {#if report}
     <div class="text-xs">
-      <span class={probeStatusColor[report.status]}>
+      <span class={probeStatusColor(report.status)}>
         {probeStatusLabel(report.status)}
       </span>
+      <p class="opacity-70 mt-1">
+        {probeStatusAdvice(report.status, "profile")}
+      </p>
       {#if report.detail}
         <span class="opacity-60 ml-2 font-mono break-all">
           {report.detail}

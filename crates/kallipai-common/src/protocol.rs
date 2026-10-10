@@ -31,7 +31,7 @@ pub use error::ApiError;
 pub use external::{AuthoredEvent, SignalEvent};
 pub use inbox::{InboxEntry, InboxListQuery, InboxSummary};
 pub use skill::{SkillMeta, parse_frontmatter, parse_frontmatter_description};
-pub use sse::{FailoverChainExhaustion, SseEvent, TransientRetryInfo};
+pub use sse::{FailoverChainExhaustion, QuotaBlockedInfo, SseEvent, TransientRetryInfo};
 pub use task::{
     AssociationExport, ClosedReason, DOSSIER_MAX_BYTES, EventExport, REPORT_MAX_BYTES,
     TASK_BODY_LIMIT_BYTES, TaskCloseRequest, TaskConfirmFile, TaskConfirmRequest,

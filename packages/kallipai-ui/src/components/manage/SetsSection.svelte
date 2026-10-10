@@ -226,11 +226,11 @@
       {#if setReport.length > 0}
         <div class="flex items-center gap-2 flex-wrap text-xs">
           {#if setReport.every((r) => r.status === "ok")}
-            <span class={probeStatusColor.ok}>
+            <span class={probeStatusColor("ok")}>
               {manage_profiles_probe_set_ok()}
             </span>
           {:else}
-            <span class={probeStatusColor.invalid_config}>
+            <span class={probeStatusColor("invalid_config")}>
               {manage_profiles_probe_set_fail()}
               {setReport
                 .filter((r) => r.status !== "ok")

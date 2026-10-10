@@ -12,7 +12,11 @@
 // max window as denominator; faulted/parked agents get no context column --
 // their status response is a 409 or meaningless.
 
-import type { AgentState, WireParkedReason } from "@kallipai/kallipai-client";
+import type {
+  AgentState,
+  FactView,
+  WireParkedReason,
+} from "@kallipai/kallipai-client";
 import { type ManagementBackend } from "../manage/backend.ts";
 import { startVisibleInterval } from "../visibleInterval.ts";
 import type { TagmaStatusSummary } from "../tagmata.svelte.ts";
@@ -67,6 +71,10 @@ class StatusCardStore {
   // like the rows, so a drawer opened on any route reads the last known
   // truth instead of a waiting placeholder.
   summary = $state<TagmaStatusSummary | undefined>(undefined);
+  // The shared fact table, one copy for the whole tagma: the wire sends it
+  // once per list response, never once per agent, so the fleet panel renders
+  // it in a single tagma-level block. Kept across suspend() like the rows.
+  upstreamFacts = $state<readonly FactView[]>([]);
 
   private backend: ManagementBackend | null = null;
   // The suspended backend's tagma; attach() compares it against the
@@ -82,6 +90,10 @@ class StatusCardStore {
   // intervals outright.
   private rosterBackstopStop: (() => void) | null = null;
   private lastSubSignature = "";
+  /** Fact-table signature: the array identity survives a refresh that
+   * changed nothing, so the panel's fact block does not re-render per
+   * poll (the rows' own signature precedent). */
+  private lastFactSignature = "";
   // Denominator data: the profile registry pulled once per attach (it
   // changes rarely and only takes effect on apply), and each agent's
   // active profile id captured by the slow context poll.
@@ -130,11 +142,13 @@ class StatusCardStore {
     this.rootRow = null;
     this.subRows = [];
     this.summary = undefined;
+    this.upstreamFacts = [];
     this.contexts.clear();
     this.liveAgentIds.clear();
     this.profileWindows.clear();
     this.profileIds.clear();
     this.lastSubSignature = "";
+    this.lastFactSignature = "";
     this.lastRootSignature = "";
     this.contextsPrimed = false;
     this.contextCooldown.clear();
@@ -216,6 +230,14 @@ class StatusCardStore {
     try {
       const resp = await backend.listAgents();
       if (this.backend !== backend) return; // detached mid-flight
+      // The tagma-wide half of the same response: mirrored once, and only
+      // when it changed (an unchanged table must not swap the reference).
+      const facts = resp.upstream_facts ?? [];
+      const factSignature = JSON.stringify(facts);
+      if (factSignature !== this.lastFactSignature) {
+        this.lastFactSignature = factSignature;
+        this.upstreamFacts = facts;
+      }
       this.liveAgentIds.clear();
       for (const a of resp.agents) this.liveAgentIds.add(a.id);
       let root: StatusCardRow | undefined;

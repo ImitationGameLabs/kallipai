@@ -438,7 +438,10 @@ mod tests {
             .await
             .unwrap()
             .0;
-        assert_ne!(resp.results[0].status, ProbeStatus::Ok);
+        assert_eq!(
+            resp.results[0].status,
+            ProbeStatus::UpstreamStatus { status: 404 }
+        );
         assert_eq!(resp.sets[0].profiles[0].status, ProbeStatus::Ok);
         assert!(resp.sets[0].profiles[0].models_hint.is_none());
         assert!(resp.sets[0].all_ok);

@@ -12,7 +12,9 @@
 //!
 //! Statuses are layered so the UI can tell apart the failure classes an
 //! operator can act on differently: `invalid_config` (fix the definition),
-//! `unreachable` (network/endpoint down), `unauthorized` (credential).
+//! `upstream_status` (the provider answered HTTP but the probe path failed:
+//! fix the list address or retry later), `unreachable` (network/endpoint
+//! down), `unauthorized` (credential).
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -97,9 +99,13 @@ pub enum ProbeStatus {
     Unreachable,
     /// HTTP 401/403 — the credential was rejected.
     Unauthorized,
-    /// The definition failed backend construction, or the provider answered
-    /// with an unexpected HTTP status (404/429/5xx on the probe path).
+    /// The definition failed backend construction, or a 2xx body could not
+    /// be parsed — the local side of the probe.
     InvalidConfig,
+    /// The provider answered HTTP, but the probe path itself failed (404 on
+    /// the model list, 429, 5xx). The status rides along so the UI can tell
+    /// a wrong list address from a rate limit from an upstream fault.
+    UpstreamStatus { status: u16 },
     /// Provider responded, but the family offers no zero-cost probe
     /// capability — liveness could not be established without a chat call.
     Partial,
@@ -627,9 +633,15 @@ fn classify_backend_error(e: &just_llm_client::BackendError) -> (ProbeStatus, St
             (ProbeStatus::Unauthorized, detail)
         }
         // The provider answered HTTP — reachable, but the probe path itself
-        // failed (404 on /models, 429, 5xx, ...). InvalidConfig is the
-        // closest actionable bucket: inspect the definition/provider.
-        Some(_) => (ProbeStatus::InvalidConfig, detail),
+        // failed (404 on /models, 429, 5xx, ...). The status is the
+        // actionable part: it separates a wrong list address from a rate
+        // limit from an upstream fault.
+        Some(code) => (
+            ProbeStatus::UpstreamStatus {
+                status: code.as_u16(),
+            },
+            detail,
+        ),
         None => (ProbeStatus::Unreachable, detail),
     }
 }
@@ -803,6 +815,21 @@ mod tests {
             body: "bad key".into(),
         });
         assert_eq!(classify_backend_error(&e).0, ProbeStatus::Unauthorized);
+    }
+
+    #[test]
+    fn classify_an_upstream_http_failure_carries_its_status() {
+        for status in [404_u16, 429, 500] {
+            let code = reqwest::StatusCode::from_u16(status).unwrap();
+            let e = backend_error_with_transport(just_llm_client::TransportError::HttpStatus {
+                status: code,
+                body: String::new(),
+            });
+            assert_eq!(
+                classify_backend_error(&e).0,
+                ProbeStatus::UpstreamStatus { status }
+            );
+        }
     }
 
     #[test]

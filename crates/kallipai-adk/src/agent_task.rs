@@ -11,6 +11,7 @@ use crate::event::{AgentEvent, AgentOutcome};
 use crate::lifecycle::LifecycleState;
 use crate::tools::DEFAULT_BREAK_TIMEOUT_SECS;
 use kallipai_common::protocol::{ParkedReason, TransientRetryInfo};
+use kallipai_common::timefmt;
 
 use crate::approval::ApprovalStore;
 use crate::config::{
@@ -20,6 +21,7 @@ use crate::context::estimate_text;
 use crate::context::{ContextStore, ContextSummarizer, TurnId};
 use crate::history::{HistoryWriter, RecordKind};
 use crate::policy::AuthorizedToolExecutor;
+use crate::retry::{AttemptOrigin, Episode};
 use crate::runner;
 use crate::text_slice::converge_under_cap;
 use just_llm_client::types::generation::Message;
@@ -117,6 +119,17 @@ pub struct AgentContext {
     pub executor: AuthorizedToolExecutor,
     pub summarizer: ContextSummarizer,
     pub config: AgentConfig,
+    /// Retry accounting for the current episode: sends charged and the moment the
+    /// episode started. Replaced at every tool round, at every failover advance,
+    /// and before a rejected request is re-sent without its images; a mid-stream
+    /// re-entry keeps it. See [`Episode`].
+    pub episode: Episode,
+    /// Whether the next attempt is the wake-triggered execution's first: the
+    /// first send of a wake that carried a user message or a task delivery reads
+    /// [`AttemptOrigin::External`] once, and every later attempt reads `System`.
+    /// Set at each `run_and_report` entry from the wake that caused it and taken
+    /// by the pre-send reading. See [`AttemptOrigin`].
+    pub attempt_origin: AttemptOrigin,
     /// Agent directory for persistence.
     pub agent_dir: Option<PathBuf>,
     /// Append-only conversation history writer. `Some` when `agent_dir` is `Some`.
@@ -141,7 +154,7 @@ pub struct AgentContext {
     /// trigger a spurious round.
     pub retry_at: Arc<std::sync::Mutex<Option<tokio::time::Instant>>>,
     /// Consecutive transient (failover-chain-exhausted) parks. Survives outer-loop
-    /// wakes so a retry sequence accumulates; reset on any non-transient round
+    /// wakes so consecutive parks count together; reset on any non-transient round
     /// outcome. Hard-parks (surfaces to the operator) once it exceeds
     /// `config.max_transient_retries`.
     pub transient_fails: u32,
@@ -173,6 +186,10 @@ pub struct AgentContext {
     /// Cloned from `AppState` — same underlying map across all agents;
     /// the two accounting points record into one shared view.
     pub usage_stats: crate::usage_stats::UsageStats,
+    /// Tagma-wide upstream-fact table, shared by every agent. Cloned from
+    /// `AppState`; `None` in contexts with no tagma behind them (unit
+    /// tests), which reads as no facts at all — every read is fail-open.
+    pub endpoint_health: Option<Arc<dyn kallipai_common::facts::EndpointHealth>>,
     /// Pending profile-reset cell: the tagma's apply handler writes a
     /// [`ProfileReset`](crate::failover::ProfileReset) here; the agent task drains it at the top of
     /// [`run_and_report`] and rebuilds its failover state + client. Shared
@@ -314,6 +331,26 @@ impl AgentContext {
         self.record_turn_with_attachments(vec![Message::user(&guarded)], attachments)
             .await
     }
+
+    /// Start a fresh retry episode: the send budget and its deadline both restart.
+    ///
+    /// Called at each tool round (so a rerun of the prompt starts clean, and no
+    /// round inherits the previous round's sends), at every failover advance
+    /// (another profile may recover, so it gets its own budget), and before a
+    /// rejected request is re-sent without its images. A mid-stream re-entry
+    /// does not reset: it continues the episode, so a flapping endpoint cannot
+    /// mint budget by dropping connections.
+    pub fn start_episode(&mut self) {
+        self.episode = Episode::new(timefmt::now_epoch());
+    }
+
+    /// Take the wake origin for the next attempt: the first attempt of a
+    /// wake-triggered execution reads `External` once, and every later attempt
+    /// reads `System` — the user asking is served once, not on every retry the
+    /// execution then makes. See [`AttemptOrigin`].
+    pub(crate) fn take_attempt_origin(&mut self) -> AttemptOrigin {
+        std::mem::replace(&mut self.attempt_origin, AttemptOrigin::System)
+    }
 }
 #[cfg(test)]
 static SPILL_ROOT_OVERRIDE: std::sync::Mutex<Option<std::path::PathBuf>> =
@@ -420,7 +457,7 @@ pub async fn agent_task(
             return;
         }
         ctx.record_turn(vec![Message::user(&p)]).await;
-        if run_and_report(&mut ctx, &agent_tx, &mut prompt_rx).await {
+        if run_and_report(&mut ctx, &agent_tx, &mut prompt_rx, AttemptOrigin::External).await {
             return;
         }
     }
@@ -439,7 +476,7 @@ pub async fn agent_task(
                         clear_transient_retry(&ctx);
                         clear_wait_timer(&ctx);
                         ctx.record_message_turn(&text).await;
-                        if run_and_report(&mut ctx, &agent_tx, &mut prompt_rx).await {
+                        if run_and_report(&mut ctx, &agent_tx, &mut prompt_rx, AttemptOrigin::External).await {
                             break;
                         }
                         // Post-round inbox drain: a kick round un-parks the
@@ -453,7 +490,7 @@ pub async fn agent_task(
                             && let Some(msg) = puller.pull_undelivered().await
                         {
                             ctx.record_message_turn(&msg).await;
-                            if run_and_report(&mut ctx, &agent_tx, &mut prompt_rx).await {
+                            if run_and_report(&mut ctx, &agent_tx, &mut prompt_rx, AttemptOrigin::External).await {
                                 break;
                             }
                         }
@@ -520,7 +557,7 @@ pub async fn agent_task(
                 if should_run {
                     clear_transient_retry(&ctx);
                     clear_wait_timer(&ctx);
-                    if run_and_report(&mut ctx, &agent_tx, &mut prompt_rx).await {
+                    if run_and_report(&mut ctx, &agent_tx, &mut prompt_rx, AttemptOrigin::External).await {
                         break;
                     }
                 }
@@ -532,7 +569,7 @@ pub async fn agent_task(
             _ = ctx.retry_notify.notified() => {
                 if transient_retry_due(&ctx) {
                     clear_transient_retry(&ctx);
-                    if run_and_report(&mut ctx, &agent_tx, &mut prompt_rx).await {
+                    if run_and_report(&mut ctx, &agent_tx, &mut prompt_rx, AttemptOrigin::System).await {
                         break;
                     }
                 }
@@ -554,7 +591,7 @@ pub async fn agent_task(
                         ctx.record_turn(vec![Message::user(wait_elapsed_text(armed_secs))])
                             .await;
                     }
-                    if run_and_report(&mut ctx, &agent_tx, &mut prompt_rx).await {
+                    if run_and_report(&mut ctx, &agent_tx, &mut prompt_rx, AttemptOrigin::System).await {
                         break;
                     }
                 }
@@ -625,7 +662,12 @@ pub async fn run_and_report(
     ctx: &mut AgentContext,
     agent_tx: &tokio::sync::mpsc::Sender<AgentEvent>,
     prompt_rx: &mut tokio::sync::mpsc::Receiver<String>,
+    origin: AttemptOrigin,
 ) -> bool {
+    // The wake that caused this execution decides how its first attempt reads:
+    // an external one is served once even against a marked endpoint, a timer one
+    // is not. Taken by the first pre-send reading below.
+    ctx.attempt_origin = origin;
     // Drain any pending profile reset before starting the round loop.
     apply_pending_profile_reset(ctx);
     // Every entry here is from a non-Running state by construction (the outer
@@ -792,6 +834,25 @@ pub async fn run_and_report(
                             });
                     }
                 }
+                return false;
+            }
+            Ok(runner::RoundOutcome::Park(AgentOutcome::QuotaBlocked(info))) => {
+                // A quota or payment block: park with the structured reason and
+                // arm nothing. No timer, no re-run, and `transient_fails` is left
+                // where it stands — this is not a transient park. The one way out
+                // is an external trigger (a user message or a task delivery),
+                // which the delivery gate already kicks on.
+                agent_tx
+                    .send(AgentEvent::QuotaBlocked(info.clone()))
+                    .await
+                    .ok();
+                ctx.lifecycle
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .transition(LifecycleState::Parked {
+                        reason: ParkedReason::QuotaBlocked(info),
+                        at: std::time::Instant::now(),
+                    });
                 return false;
             }
             Ok(runner::RoundOutcome::Park(AgentOutcome::TokenBudgetExceeded {
@@ -1210,9 +1271,11 @@ mod tests {
             }
         }
 
-        let mut ctx = crate::test_support::make_ctx(
+        // Loopback mock: this poll waits on a turn the round writes after it sends.
+        let (mut ctx, _server) = crate::test_support::ctx_with_mock(
             vec![crate::test_support::profile("test", "ep1", 4096)],
             &["ep1"],
+            crate::test_support::PLACEHOLDER_KEY_STATUS,
         )
         .await;
 
@@ -1276,12 +1339,14 @@ mod tests {
                 }
             }
         }
-
-        let mut ctx = crate::test_support::make_ctx(
+        // Loopback mock, as in the prompt twin: this poll waits on the notify turn.
+        let (mut ctx, _server) = crate::test_support::ctx_with_mock(
             vec![crate::test_support::profile("test", "ep1", 4096)],
             &["ep1"],
+            crate::test_support::PLACEHOLDER_KEY_STATUS,
         )
         .await;
+
         let flag = Arc::new(AtomicBool::new(true));
         ctx.message_puller = Some(Arc::new(StubPuller(flag.clone())));
 
@@ -1360,9 +1425,11 @@ mod tests {
     /// profile reset: `apply_pending_profile_reset`'s tagma tests.)
     #[tokio::test]
     async fn approval_decision_wakes_agent_and_drives_round() {
-        let ctx = crate::test_support::make_ctx(
+        // Loopback mock, as in the inbox twin: this poll waits on the approval notice.
+        let (ctx, _server) = crate::test_support::ctx_with_mock(
             vec![crate::test_support::profile("test", "ep1", 4096)],
             &["ep1"],
+            crate::test_support::PLACEHOLDER_KEY_STATUS,
         )
         .await;
 
@@ -1495,12 +1562,14 @@ mod tests {
                 }
             }
         }
-
-        let mut ctx = crate::test_support::make_ctx(
+        // Loopback mock: the drain shows up only if the round finishes in the budget.
+        let (mut ctx, _server) = crate::test_support::ctx_with_mock(
             vec![crate::test_support::profile("test", "ep1", 4096)],
             &["ep1"],
+            crate::test_support::PLACEHOLDER_KEY_STATUS,
         )
         .await;
+
         *ctx.lifecycle.lock().unwrap_or_else(|e| e.into_inner()) = LifecycleState::Parked {
             reason: ParkedReason::FatalError {
                 message: "test park".to_string(),
@@ -1557,5 +1626,250 @@ mod tests {
             kick_at < msg_at,
             "the kick round runs first; the drained message is its own later turn"
         );
+    }
+
+    /// A rerun of the prompt is a new execution: the episode ledger restarts, so
+    /// the rerun sends. Carrying the spent ledger over would turn every send into a
+    /// failover and park again without a single request.
+    #[tokio::test]
+    async fn a_rerun_starts_a_fresh_episode_and_sends() {
+        use crate::test_support::{
+            MapSource, RecordingBackend, ctx_from_source, profile, user_msg,
+        };
+        use just_llm_client::{BackendError, LlmBackend, TransportError};
+
+        fn endpoint_down() -> BackendError {
+            BackendError::provider(
+                "recording",
+                TransportError::HttpStatus {
+                    status: reqwest::StatusCode::SERVICE_UNAVAILABLE,
+                    body: "down".to_owned(),
+                },
+            )
+        }
+
+        let backend = RecordingBackend::new();
+        // Execution 1: both sends of the episode fail transiently, so the episode is
+        // spent by the time the chain exhausts and the agent parks for a retry.
+        backend.queue_error(endpoint_down());
+        backend.queue_error(endpoint_down());
+        // Execution 2: the endpoint answers (plus the heartbeat rounds that follow).
+        for _ in 0..5 {
+            backend.queue_stream("resp-1");
+        }
+
+        let source = Arc::new(MapSource(std::collections::HashMap::from([(
+            "p1".to_string(),
+            backend.clone() as Arc<dyn LlmBackend>,
+        )])));
+        let policy = crate::retry::RetryPolicy {
+            max_retries: 1,
+            base_delay: std::time::Duration::from_millis(1),
+            max_delay: std::time::Duration::from_millis(2),
+            retry_timeout: std::time::Duration::from_secs(10),
+        };
+        let mut ctx = ctx_from_source(vec![profile("a", "p1", 100_000)], source, policy).await;
+        ctx.record_turn(vec![user_msg("q1")]).await;
+
+        let (tx, _rx) = tokio::sync::mpsc::channel::<AgentEvent>(64);
+        let (_prompt_tx, mut prompt_rx) = tokio::sync::mpsc::channel::<String>(16);
+
+        assert!(
+            !run_and_report(&mut ctx, &tx, &mut prompt_rx, AttemptOrigin::System).await,
+            "a transient exhaustion parks the round instead of terminating the task"
+        );
+        assert_eq!(
+            backend.take_requests().len(),
+            2,
+            "the episode spent its two sends"
+        );
+        assert_eq!(
+            ctx.episode.attempts(),
+            2,
+            "the parked agent keeps the spent ledger"
+        );
+
+        assert!(!run_and_report(&mut ctx, &tx, &mut prompt_rx, AttemptOrigin::System).await);
+        let rerun = backend.take_requests();
+        assert!(
+            !rerun.is_empty(),
+            "the rerun sends: its episode budget is fresh"
+        );
+        assert_eq!(rerun[0].model, "a-model");
+    }
+
+    /// `start_episode` replaces the ledger: sends charged in the previous episode do
+    /// not carry over, and the deadline restarts with the new one.
+    #[tokio::test]
+    async fn start_episode_replaces_the_ledger() {
+        let mut ctx = crate::test_support::make_ctx(
+            vec![crate::test_support::profile("a", "ep1", 4096)],
+            &["ep1"],
+        )
+        .await;
+        ctx.episode = crate::retry::Episode::new(kallipai_common::timefmt::now_epoch() - 100);
+        ctx.episode = ctx.episode.after_attempt();
+        ctx.episode = ctx.episode.after_attempt();
+
+        ctx.start_episode();
+
+        assert_eq!(ctx.episode.attempts(), 0, "the send count restarts");
+        assert_eq!(
+            ctx.episode.elapsed(kallipai_common::timefmt::now_epoch()),
+            std::time::Duration::ZERO,
+            "the deadline restarts with the episode"
+        );
+    }
+
+    /// A quota rejection ends the round as a structured park instead of arming a
+    /// transient re-run: the endpoint is asked once, the agent parks with the
+    /// payload, and no fuse is left.
+    #[tokio::test]
+    async fn a_quota_block_parks_without_arming_a_rerun() {
+        use crate::test_support::{
+            MapSource, RecordingBackend, ctx_from_source, profile, user_msg,
+        };
+        use just_llm_client::{BackendError, LlmBackend, TransportError};
+
+        let backend = RecordingBackend::new();
+        // Four errors are queued: a re-run would spend one, so the request count
+        // pins the no-re-run claim.
+        for _ in 0..4 {
+            backend.queue_error(BackendError::provider(
+                "recording",
+                TransportError::HttpStatus {
+                    status: reqwest::StatusCode::TOO_MANY_REQUESTS,
+                    body: "slow down".to_owned(),
+                },
+            ));
+        }
+        let source = Arc::new(MapSource(std::collections::HashMap::from([(
+            "p1".to_string(),
+            backend.clone() as Arc<dyn LlmBackend>,
+        )])));
+        let mut ctx = ctx_from_source(
+            vec![profile("a", "p1", 100_000)],
+            source,
+            crate::retry::RetryPolicy::default(),
+        )
+        .await;
+        ctx.record_turn(vec![user_msg("q1")]).await;
+        let retry_at = ctx.retry_at.clone();
+        let wait_until = ctx.wait_until.clone();
+
+        let (tx, _rx) = tokio::sync::mpsc::channel::<AgentEvent>(64);
+        let (_prompt_tx, mut prompt_rx) = tokio::sync::mpsc::channel::<String>(16);
+
+        assert!(
+            !run_and_report(&mut ctx, &tx, &mut prompt_rx, AttemptOrigin::System).await,
+            "a quota stop parks the round instead of terminating the task"
+        );
+        assert_eq!(
+            backend.take_requests().len(),
+            1,
+            "the endpoint is asked exactly once"
+        );
+        assert_eq!(ctx.transient_fails, 0, "a stop is not a transient failure");
+        assert!(
+            retry_at.lock().unwrap().is_none(),
+            "a stop must leave no retry fuse armed"
+        );
+        assert!(
+            wait_until.lock().unwrap().is_none(),
+            "a stop must leave no wait fuse armed"
+        );
+        let parked = ctx
+            .lifecycle
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        match parked {
+            LifecycleState::Parked {
+                reason: ParkedReason::QuotaBlocked(info),
+                ..
+            } => {
+                assert_eq!(info.endpoint, "p1");
+                assert!(
+                    info.detail.contains("429"),
+                    "the payload carries the evidence: {info:?}"
+                );
+            }
+            other => panic!("expected a structured quota park, got {other:?}"),
+        }
+    }
+
+    /// A repeated response shape stops the round instead of arming a transient
+    /// re-run: the first shape failure retries, the second stops, and the agent
+    /// parks with the shape-class message rather than a retry-exhaustion one.
+    #[tokio::test]
+    async fn a_mid_stream_shape_repeat_parks_without_arming_a_rerun() {
+        use crate::test_support::{
+            MapSource, RecordingBackend, ctx_from_source, profile, user_msg,
+        };
+        use just_llm_client::{LlmBackend, TransportError};
+
+        let backend = RecordingBackend::new();
+        // Four drops are queued: a re-run would spend one, so the request count
+        // pins the no-re-run claim.
+        for _ in 0..4 {
+            backend.queue_dropped_stream(
+                vec![just_llm_client::types::generation::GenerationEvent::Text {
+                    delta: "partial".to_owned(),
+                }],
+                TransportError::InvalidResponse(
+                    "stream closed before the terminal event".to_owned(),
+                ),
+            );
+        }
+        let source = Arc::new(MapSource(std::collections::HashMap::from([(
+            "p1".to_string(),
+            backend.clone() as Arc<dyn LlmBackend>,
+        )])));
+        let policy = crate::retry::RetryPolicy {
+            base_delay: std::time::Duration::from_millis(1),
+            max_delay: std::time::Duration::from_millis(5),
+            ..crate::retry::RetryPolicy::default()
+        };
+        let mut ctx = ctx_from_source(vec![profile("a", "p1", 100_000)], source, policy).await;
+        ctx.record_turn(vec![user_msg("q1")]).await;
+        let retry_at = ctx.retry_at.clone();
+        let wait_until = ctx.wait_until.clone();
+
+        let (tx, _rx) = tokio::sync::mpsc::channel::<AgentEvent>(64);
+        let (_prompt_tx, mut prompt_rx) = tokio::sync::mpsc::channel::<String>(16);
+
+        assert!(
+            !run_and_report(&mut ctx, &tx, &mut prompt_rx, AttemptOrigin::System).await,
+            "a shape stop parks the round instead of terminating the task"
+        );
+        assert_eq!(
+            backend.take_requests().len(),
+            2,
+            "the first shape failure retries, the repeat stops"
+        );
+        assert_eq!(ctx.transient_fails, 0, "a stop is not a transient failure");
+        assert!(
+            retry_at.lock().unwrap().is_none(),
+            "a stop must leave no retry fuse armed"
+        );
+        assert!(
+            wait_until.lock().unwrap().is_none(),
+            "a stop must leave no wait fuse armed"
+        );
+        let parked = ctx
+            .lifecycle
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        match parked {
+            LifecycleState::Parked {
+                reason: ParkedReason::FatalError { message },
+                ..
+            } => assert!(
+                message.contains("the response shape failed twice in this episode"),
+                "{message}"
+            ),
+            other => panic!("expected a FatalError park, got {other:?}"),
+        }
     }
 }

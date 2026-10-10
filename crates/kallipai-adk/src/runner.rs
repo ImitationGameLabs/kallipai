@@ -69,6 +69,10 @@ pub(crate) async fn run_agent_rounds(
     let tool_timeout = Duration::from_secs(ctx.config.tool_timeout_secs);
 
     for round in 0..ctx.config.max_tool_rounds {
+        // A tool round is a new execution: its sends get a fresh budget and deadline.
+        // This is the only per-round reset of the ledger; the prompt entry does not
+        // seed one, so a round never inherits the previous round's sends.
+        ctx.start_episode();
         drain_interjections(ctx, prompt_rx).await;
 
         // -- Pre-call token budget check (shared tree-wide counter) --
@@ -125,6 +129,11 @@ pub(crate) async fn run_agent_rounds(
             .await
         {
             AcquireResult::Consumed(c) => c,
+            // A stop carries the whole verdict in its message: the round errors with
+            // it directly. Degrading images and resending would re-send a request the
+            // chain already ruled out (a quota rejection reads as a provider
+            // rejection), so the stop must not go through that path.
+            AcquireResult::Stop { message } => return Err(anyhow::Error::msg(message)),
             AcquireResult::Outcome(outcome) => return Ok(RoundOutcome::Park(outcome)),
             AcquireResult::Error(e) => {
                 match degrade_on_image_rejection(ctx, &e, tools, tx, round_cancel, round).await {
@@ -133,6 +142,9 @@ pub(crate) async fn run_agent_rounds(
                         return Ok(RoundOutcome::Park(outcome));
                     }
                     Some(AcquireResult::Error(_)) | None => return Err(e),
+                    Some(AcquireResult::Stop { message }) => {
+                        return Err(anyhow::Error::msg(message));
+                    }
                 }
             }
         };

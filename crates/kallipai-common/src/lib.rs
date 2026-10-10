@@ -3,6 +3,7 @@ pub mod approval;
 pub mod authtoken;
 pub mod context;
 pub mod declaration;
+pub mod facts;
 pub mod idtype;
 pub mod message;
 pub mod policy;

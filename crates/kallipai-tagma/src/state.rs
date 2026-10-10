@@ -238,6 +238,10 @@ pub struct AppState {
     /// Per-agent, single-launch token usage shared process-wide. In-memory
     /// only (resets at boot); cloned into every spawned agent's context.
     pub usage_stats: kallipai_adk::usage_stats::UsageStats,
+    /// Tagma-wide upstream-fact table shared by all agents (see
+    /// [`crate::endpoint_health::EndpointHealthTable`]). Cloned into every
+    /// spawned agent's context.
+    pub endpoint_health: Arc<crate::endpoint_health::EndpointHealthTable>,
     /// Profile registry loaded once at startup (config file or implicit env profile).
     /// Shared so the pre-built backends survive across agents.
     pub profiles: Arc<ArcSwap<ProfileBundle>>,
@@ -823,6 +827,7 @@ impl AppState {
         gateway_signals: Option<tokio::sync::mpsc::UnboundedSender<kallipai_adk::GatewaySignal>>,
     ) -> Self {
         let (invalidations, _) = tokio::sync::watch::channel(0u64);
+        let endpoint_health = crate::endpoint_health::EndpointHealthTable::new(profiles.clone());
         Self {
             spawn_fn: crate::lifecycle::spawn_agent_boxed(),
             registry: RwLock::new(AgentRegistry::with_invalidation(invalidations.clone())),
@@ -834,6 +839,7 @@ impl AppState {
             max_subagents,
             prompt_queue_size,
             usage_stats,
+            endpoint_health,
             token_budget,
             files_token,
             profiles,

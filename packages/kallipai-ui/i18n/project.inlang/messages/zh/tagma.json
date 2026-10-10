@@ -44,5 +44,13 @@
   "tagma_profile_created": "创建于 {date}",
   "tagma_profile_message": "发消息",
   "tagma_rooms_section_empty": "暂无群聊——创建一个或浏览公开群聊。",
-  "tagma_rooms_section_manage": "管理群聊"
+  "tagma_rooms_section_manage": "管理群聊",
+  "tagma_facts_title": "上游事实",
+  "tagma_facts_kind_quota": "配额",
+  "tagma_facts_kind_payment": "付款",
+  "tagma_facts_kind_endpoint_auth": "端点认证",
+  "tagma_facts_kind_endpoint_shape": "端点形态",
+  "tagma_facts_scope_account": "全账号",
+  "tagma_facts_account": "账号 {hint}",
+  "tagma_facts_reopens": "{when}后恢复"
 }

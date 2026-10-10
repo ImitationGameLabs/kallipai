@@ -22,7 +22,7 @@ use clap::Parser;
 use futures_util::{Stream, StreamExt};
 use kallipai_client::TagmaClient;
 use kallipai_common::agentid::AgentId;
-use kallipai_common::protocol::SseEvent;
+use kallipai_common::protocol::{ParkedReason, SseEvent};
 
 #[derive(Parser)]
 #[command(
@@ -52,7 +52,8 @@ struct Cli {
 ///
 /// Mapped to process exit codes via `#[repr(u8)]`:
 /// 0 = success (agent went idle), 1 = error, 2 = max rounds exceeded,
-/// 3 = cancelled, 4 = token budget exceeded, 5 = failover chain exhausted.
+/// 3 = cancelled, 4 = token budget exceeded, 5 = failover chain exhausted,
+/// 6 = quota or payment block (parked, nothing armed).
 ///
 /// Serialized to the JSON `"exit"` field as a snake_case string
 /// (`"success"`, `"max_rounds"`, …) via [`serde::Serialize`].
@@ -66,6 +67,11 @@ enum RunExit {
     Cancelled = 3,
     BudgetExceeded = 4,
     FailoverChainExhausted = 5,
+    /// The endpoint's account is out of quota or credit and no candidate could
+    /// serve: the agent parked waiting for an external trigger. Distinct from
+    /// `FailoverChainExhausted` — nothing was armed and nothing will re-run on
+    /// its own.
+    QuotaBlocked = 6,
 }
 
 impl From<RunExit> for ExitCode {
@@ -129,6 +135,7 @@ async fn run() -> Result<ExitCode> {
             RunExit::Cancelled => "cancelled",
             RunExit::BudgetExceeded => "exceeded token budget",
             RunExit::FailoverChainExhausted => "failover chain exhausted",
+            RunExit::QuotaBlocked => "parked on a quota or payment block",
             RunExit::Error => "errored",
         };
         eprintln!(
@@ -234,6 +241,12 @@ where
                     eprintln!("failover chain exhausted ({reason}): {detail}");
                     RunExit::FailoverChainExhausted
                 }
+                SseEvent::QuotaBlocked(info) => {
+                    // One prose source: the parked reason's own Display, so the
+                    // CLI and the park-kick turn read identically.
+                    eprintln!("{}", ParkedReason::QuotaBlocked(info));
+                    RunExit::QuotaBlocked
+                }
                 _ => unreachable!("terminal event {event:?} has no RunExit mapping"),
             };
         }
@@ -330,7 +343,8 @@ where
             | SseEvent::Cancelled
             | SseEvent::Interrupted
             | SseEvent::TokenBudgetExceeded { .. }
-            | SseEvent::FailoverChainExhausted { .. } => {
+            | SseEvent::FailoverChainExhausted { .. }
+            | SseEvent::QuotaBlocked(..) => {
                 unreachable!("terminal event {event:?} handled above")
             }
         }

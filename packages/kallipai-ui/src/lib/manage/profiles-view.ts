@@ -15,6 +15,16 @@ import type {
 } from "@kallipai/kallipai-client";
 import { KallipaiError } from "@kallipai/kallipai-common";
 import {
+  manage_profiles_probe_advice_invalid,
+  manage_profiles_probe_advice_ok_endpoint,
+  manage_profiles_probe_advice_ok_profile,
+  manage_profiles_probe_advice_partial,
+  manage_profiles_probe_advice_unreachable,
+  manage_profiles_probe_advice_unauthorized,
+  manage_profiles_probe_advice_upstream_error,
+  manage_profiles_probe_advice_upstream_not_found,
+  manage_profiles_probe_advice_upstream_rate_limited,
+  manage_profiles_probe_advice_upstream_unexpected,
   manage_profiles_probe_models_one,
   manage_profiles_probe_models_other,
   manage_profiles_probe_status_invalid,
@@ -22,6 +32,7 @@ import {
   manage_profiles_probe_status_partial,
   manage_profiles_probe_status_unauthorized,
   manage_profiles_probe_status_unreachable,
+  manage_profiles_probe_status_upstream,
 } from "../../paraglide/messages.js";
 
 /** `${setName}:${profileId}` — profile ids can repeat across sets. */
@@ -94,7 +105,31 @@ export function occupiedIdsOf(
   return [...ids, ...(draft?.parking ?? []).map((p) => p.id)];
 }
 
+/** The six keys the color table is keyed by: the object arm carries no
+ * string value of its own, so it normalizes to its wire tag. */
+export type ProbeStatusKey =
+  | "ok"
+  | "unreachable"
+  | "unauthorized"
+  | "invalid_config"
+  | "partial"
+  | "upstream_status";
+
+/** Which face a verdict came from: the provider card reads the model list
+ * (zero-cost), the profile card and dialog send one billed call. The
+ * advice differs, so the caller states the face. */
+export type ProbeFace = "endpoint" | "profile";
+
+export function probeStatusKey(s: ProfileProbeStatus): ProbeStatusKey {
+  return typeof s === "string" ? s : "upstream_status";
+}
+
 export function probeStatusLabel(s: ProfileProbeStatus): string {
+  if (typeof s !== "string") {
+    return manage_profiles_probe_status_upstream({
+      status: s.upstream_status.status,
+    });
+  }
   switch (s) {
     case "ok":
       return manage_profiles_probe_status_ok();
@@ -109,13 +144,56 @@ export function probeStatusLabel(s: ProfileProbeStatus): string {
   }
 }
 
-export const probeStatusColor: Record<ProfileProbeStatus, string> = {
+const PROBE_STATUS_COLORS: Record<ProbeStatusKey, string> = {
   ok: "text-success-500 dark:text-success-400",
   partial: "text-warning-500 dark:text-warning-400",
   unreachable: "text-error-500 dark:text-error-400",
   unauthorized: "text-error-500 dark:text-error-400",
   invalid_config: "text-error-500 dark:text-error-400",
+  upstream_status: "text-error-500 dark:text-error-400",
 };
+
+/** The color a verdict renders in: by key, so the object arm takes the
+ * failure color. */
+export function probeStatusColor(s: ProfileProbeStatus): string {
+  return PROBE_STATUS_COLORS[probeStatusKey(s)];
+}
+
+/** One line of advice under a verdict, by verdict and by face: the endpoint
+ * face reads the model list (nothing inference-shaped is sent), the profile
+ * face sends one non-streaming 256-token call. */
+export function probeStatusAdvice(
+  s: ProfileProbeStatus,
+  face: ProbeFace,
+): string {
+  if (typeof s !== "string") {
+    const status = s.upstream_status.status;
+    if (status === 404) {
+      return manage_profiles_probe_advice_upstream_not_found();
+    }
+    if (status === 429) {
+      return manage_profiles_probe_advice_upstream_rate_limited();
+    }
+    if (status >= 500) {
+      return manage_profiles_probe_advice_upstream_error({ status });
+    }
+    return manage_profiles_probe_advice_upstream_unexpected({ status });
+  }
+  switch (s) {
+    case "ok":
+      return face === "endpoint"
+        ? manage_profiles_probe_advice_ok_endpoint()
+        : manage_profiles_probe_advice_ok_profile();
+    case "partial":
+      return manage_profiles_probe_advice_partial();
+    case "unreachable":
+      return manage_profiles_probe_advice_unreachable();
+    case "unauthorized":
+      return manage_profiles_probe_advice_unauthorized();
+    case "invalid_config":
+      return manage_profiles_probe_advice_invalid();
+  }
+}
 
 export function modelsCountLabel(count: number): string {
   return count === 1

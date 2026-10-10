@@ -163,7 +163,7 @@ async fn main() -> Result<()> {
                     // The summary carries our classification, not the vendor's
                     // wording; the archived error body stays out of the line view.
                     println!(
-                        "retries: {} (last: {})",
+                        "retry records: {} (last: {})",
                         status.recent_retries.len(),
                         status.recent_retries[0].kind.as_str()
                     );
@@ -184,6 +184,33 @@ async fn main() -> Result<()> {
                             r.max_attempts,
                             r.round,
                             r.delay_secs,
+                        );
+                    }
+                }
+                if !status.upstream_facts.is_empty() {
+                    println!();
+                    // The shared fact table as this agent reads it: which endpoints
+                    // and accounts the upstream is refusing, and until when. The
+                    // account hint is the eight-hex face, never the credential.
+                    println!("upstream facts: {}", status.upstream_facts.len());
+                    for fact in &status.upstream_facts {
+                        let scope = fact
+                            .endpoint
+                            .as_ref()
+                            .map(|endpoint| endpoint.family.clone())
+                            .unwrap_or_else(|| "account".to_string());
+                        let until = fact
+                            .until
+                            .map(|until| {
+                                format!("  reopens {}", timefmt::format_relative(now, until))
+                            })
+                            .unwrap_or_default();
+                        println!(
+                            "  {:<14} {:<9} {}{until}  {}",
+                            fact.kind.as_str(),
+                            scope,
+                            fact.account_hint,
+                            fact_excerpt(&fact.detail)
                         );
                     }
                 }
@@ -765,6 +792,17 @@ fn render_agent_block(a: &kallipai_common::protocol::AgentSummary, now: u64) -> 
 fn print_agent_blocks(agents: &[kallipai_common::protocol::AgentSummary], now: u64) {
     let blocks: Vec<String> = agents.iter().map(|a| render_agent_block(a, now)).collect();
     println!("{}", blocks.join("\n\n"));
+}
+
+/// A one-line excerpt of a fact's evidence for the status list: long enough to
+/// recognize the failure, short enough to keep the row readable.
+fn fact_excerpt(detail: &str) -> String {
+    const LIMIT: usize = 80;
+    let mut excerpt: String = detail.chars().take(LIMIT).collect();
+    if detail.chars().count() > LIMIT {
+        excerpt.push('…');
+    }
+    excerpt.replace('\n', " ")
 }
 
 /// `kallip status` with no argument: the whole fleet at a glance — clock,

@@ -49,12 +49,15 @@
     tagma_status_waiting,
   } from "../paraglide/messages.js";
   import TagmaAgentRows from "./TagmaAgentRows.svelte";
+  import UpstreamFacts from "./UpstreamFacts.svelte";
   import AgentPills from "./AgentPills.svelte";
   import type { StatusCardRow } from "../lib/session/statusCard.svelte.ts";
+  import type { FactView } from "@kallipai/kallipai-client";
 
   let {
     status,
     agentRows,
+    facts = [],
     sideLayout = false,
     onToggleSide,
   }: {
@@ -63,6 +66,9 @@
       rootRow: StatusCardRow | null;
       subRows: readonly StatusCardRow[];
     };
+    /** The tagma-wide fact table: one block in the fleet panel, never
+     *  per agent (the table belongs to the tagma, not to one agent). */
+    facts?: readonly FactView[];
     /** Render as a right sidebar panel instead of the top bar (the page
      *  gates this to lg+). */
     sideLayout?: boolean;
@@ -241,8 +247,11 @@
       {/if}
     </div>
   {/if}
-  {#if sideLayout && agentRows}
-    <TagmaAgentRows rootRow={agentRows.rootRow} subRows={agentRows.subRows} />
+  {#if sideLayout}
+    <UpstreamFacts {facts} />
+    {#if agentRows}
+      <TagmaAgentRows rootRow={agentRows.rootRow} subRows={agentRows.subRows} />
+    {/if}
   {/if}
 </svelte:element>
 
@@ -294,6 +303,7 @@
             </div>
           {/if}
         </div>
+        <UpstreamFacts {facts} />
         {#if agentRows}
           <TagmaAgentRows
             rootRow={agentRows.rootRow}

@@ -134,15 +134,12 @@ pub struct ContextStore {
     next_turn_id: u64,
     /// Historical retry records, persisted across agent restarts.
     ///
-    /// On append, records older than the retry window are evicted first (they
-    /// can no longer count toward the per-endpoint budget, so dropping them
-    /// only frees slots), then the log is bounded to [`RETRY_LOG_KEEP`]
-    /// most-recent records: the status endpoint renders only that many, and an
-    /// unbounded persistent log would grow with every transient failure
-    /// across restarts (via `context.json`). The budget counts by `timestamp`
-    /// within `retry_timeout`; when `max_retries` exceeds the bound the bound
-    /// wins, clamping the count short of the gate — bounded storage over
-    /// budget precision in that configuration.
+    /// The log is an observation surface, not a budget ledger: retries are bounded
+    /// by the in-memory episode ledger, so what is kept here affects reporting
+    /// only. On append, records older than the retry window are evicted, then the
+    /// log is bounded to [`RETRY_LOG_KEEP`] most-recent records: the status endpoint
+    /// renders only that many, and an unbounded persistent log would grow with
+    /// every transient failure across restarts (via `context.json`).
     #[serde(default)]
     pub retry_log: Vec<RetryRecord>,
     /// Maximum tokens for the pinned layer. 0 = no limit.
@@ -397,9 +394,8 @@ impl ContextStore {
         self.attachment_blobs = blobs;
     }
     /// Append retry records, first evicting records older than `keep_since`
-    /// (a unix-seconds cutoff — stale for the budget, so eviction only frees
-    /// slots for in-window records), then keeping only the
-    /// [`RETRY_LOG_KEEP`] most recent as an absolute bound.
+    /// (a unix-seconds cutoff that scopes the log to the retry window), then
+    /// keeping only the [`RETRY_LOG_KEEP`] most recent as an absolute bound.
     pub fn record_retries(
         &mut self,
         records: impl IntoIterator<Item = RetryRecord>,

@@ -30,7 +30,9 @@
   function rowTooltip(row: StatusCardRow): string | undefined {
     const parts = [
       row.description,
-      row.parkedReason ? parkedReasonText(row.parkedReason) : undefined,
+      row.parkedReason
+        ? parkedReasonText(row.parkedReason, Math.floor(Date.now() / 1000))
+        : undefined,
     ].filter((p): p is string => !!p);
     return parts.length > 0 ? parts.join(" - ") : undefined;
   }

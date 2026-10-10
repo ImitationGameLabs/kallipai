@@ -14,6 +14,7 @@ use kallipai_adk::config::{
 use kallipai_adk::persistence;
 use kallipai_common::agentid::AgentId;
 use kallipai_common::authtoken::MintedToken;
+use kallipai_common::facts::EndpointHealth;
 use kallipai_common::policy::ExecPolicy;
 use kallipai_common::protocol::ApiError;
 use serde::Deserialize;
@@ -338,7 +339,12 @@ pub async fn list_agents(
         })
         .map(|(id, entry)| state.summarize(id, entry))
         .collect();
-    Json(ListAgentsResponse { agents: summaries })
+    Json(ListAgentsResponse {
+        agents: summaries,
+        upstream_facts: state
+            .endpoint_health
+            .snapshot(kallipai_common::timefmt::now_epoch()),
+    })
 }
 
 /// `PUT /agents/{id}/metadata` — update `role` and/or `description`.
