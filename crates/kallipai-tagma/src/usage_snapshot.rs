@@ -15,7 +15,7 @@
 //! The capture runs before the verb's gate checks, so a refused move pays
 //! it too: the trade is deliberate (the snapshot rides in the same
 //! transaction as the state move, which no post-gate placement can give).
-//! It is bounded by [`CAPTURE_BUDGET`] for the same reason a move must not
+//! It is bounded by `CAPTURE_BUDGET` for the same reason a move must not
 //! wait on a slow body. The budget spans the awaits a capture takes (the
 //! registry read, a contended store lock); it cannot preempt a synchronous
 //! filesystem call once it is inside the kernel, which is where a slow
@@ -50,7 +50,7 @@ enum Source {
 const CAPTURE_BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Reads every agent's cumulative counters into one snapshot, bounded by
-/// [`CAPTURE_BUDGET`].
+/// `CAPTURE_BUDGET`.
 pub async fn capture_usage(state: &AppState) -> UsageSnapshot {
     match tokio::time::timeout(CAPTURE_BUDGET, capture_usage_inner(state)).await {
         Ok(snapshot) => snapshot,
