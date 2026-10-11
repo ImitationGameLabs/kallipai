@@ -440,6 +440,9 @@ The suites today: the sandbox suite (a scripted end-to-end agent driving
   `bash -c` cwd and process-group behavior); any `[[test]]` target added
   later is picked up automatically.
 
+Mutation testing is a separate on-demand workflow rather than part of this
+suite; see [Mutation testing](mutation-testing.md).
+
 ### Reset (Clean Slate)
 
 When the backend changes in a way that invalidates existing data (a schema

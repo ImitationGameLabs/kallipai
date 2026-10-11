@@ -17,6 +17,10 @@ common.craneLib.devShell (
       shared.tooling
       # Root-workspace only (the app's Cargo project is not a workspace member).
       ++ [ pkgs.cargo-hakari ]
+      # Mutation testing over the root workspace's Rust crates. DevShell-only:
+      # a full run is minutes to hours of compilation, so it is never a gate
+      # and never runs in CI (see docs/en/development/mutation-testing.md).
+      ++ [ pkgs.cargo-mutants ]
       # aifed is Linux-only; keep it out of the darwin devShell.
       ++ lib.optionals pkgs.stdenv.isLinux [ pkgs.aifed ];
   }
