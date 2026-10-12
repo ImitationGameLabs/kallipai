@@ -85,7 +85,7 @@ export async function userFetch<T>(
 }
 
 // -- wire shapes -----------------------------------------------------------
-// Verbatim from the server (management/user_routes.rs): the owner is
+// Verbatim from the server (management/user_routes/): the owner is
 // always the caller and is never echoed; the key appears only masked.
 
 export interface UserProviderRow {
