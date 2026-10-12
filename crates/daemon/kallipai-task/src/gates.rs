@@ -2,7 +2,7 @@
 //! performs the gated action.
 //!
 //! Serialization point: SQLite WAL. Every write transaction takes the
-//! write lock with its first statement (see `store::take_write_lock`),
+//! write lock with its first statement (see `store::tx::take_write_lock`),
 //! so the gate check reads under the lock: two concurrent gated
 //! transitions queue on `busy_timeout` instead of racing — the loser
 //! waits for the winner to commit, then re-checks the gate against the
