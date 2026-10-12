@@ -41,7 +41,7 @@ pub(super) struct ProfileWire {
 }
 
 #[derive(Deserialize)]
-pub(super) struct SetWire {
+struct SetWire {
     /// The set name doubles as its map key; the config schema keeps a single
     /// source of truth for it.
     name: String,
@@ -51,12 +51,12 @@ pub(super) struct SetWire {
 
 #[derive(Deserialize)]
 pub(crate) struct ProfileConfigWire {
-    pub(super) sets: Vec<SetWire>,
+    sets: Vec<SetWire>,
     /// Tri-state like the endpoint fields: an absent key lets the collection
     /// resolve (exactly one set becomes the default), a present name must
     /// reference one of `sets`.
     #[serde(default)]
-    pub(super) default: Option<String>,
+    default: Option<String>,
     pub(super) endpoints: HashMap<String, ProviderPatch>,
     /// Tri-state like the endpoint fields: an absent key keeps the live
     /// parking (an old client PUTting its full config cannot clear it);

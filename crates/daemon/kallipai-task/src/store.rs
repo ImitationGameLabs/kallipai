@@ -2,14 +2,14 @@
 //!
 //! Write verbs run inside a transaction that holds the write lock from
 //! its first statement (gate check + row update + event insert land
-//! together or not at all; see `take_write_lock`). Events carry the dual
+//! together or not at all; see `tx::take_write_lock`). Events carry the dual
 //! actor position: `actor` = who triggered the verb, `assignee` = who
 //! executes the work at that moment.
 //!
-//! The verbs live in submodules: `lifecycle` (the write verbs),
-//! `query` (the read verbs and the export faces), `rows` (row assembly)
-//! and `tx` (the transaction helpers they share). The types and the two
-//! constructors stay here as the module face.
+//! The verbs live in submodules: `lifecycle` (the write verbs), `query`
+//! (the read verbs, the export faces and the gated archive), `rows` (row
+//! assembly) and `tx` (the transaction helpers they share). The types
+//! and the two constructors stay here as the module face.
 
 use crate::Error;
 use crate::model::TaskStatus;

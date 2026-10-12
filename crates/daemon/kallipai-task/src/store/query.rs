@@ -1,5 +1,6 @@
 //! The read verbs: list and count, the report payload migration and its
-//! reads, single-task fetch, the event trail and the export faces.
+//! reads, single-task fetch, the event trail and the export faces — plus
+//! `archive_task`, the one gated write that moves a task out of the list.
 
 use super::rows::{apply_task_filter, to_export, to_row};
 use super::tx::{
