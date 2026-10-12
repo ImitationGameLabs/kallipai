@@ -46,8 +46,10 @@ export const CSRF_HEADER = "X-Requested-With";
 export const CSRF_HEADER_VALUE = "kallipai";
 
 /** Request bodies for the ceremony begins. Mirrors the archeion DTOs in
- * `crates/platform/kallipai-archeion/src/routes/auth.rs` (`RegisterBeginRequest`,
- * `LoginBeginRequest`): the username is the login id (login resolves by
+ * `crates/platform/kallipai-archeion/src/routes/auth/register.rs`
+ * (`RegisterBeginRequest`) and
+ * `crates/platform/kallipai-archeion/src/routes/auth/login.rs`
+ * (`LoginBeginRequest`): the username is the login id (login resolves by
  * username); email is no longer collected at registration -- it is an optional
  * contact channel the user links later in settings. */
 export interface RegisterBeginRequest {

@@ -393,7 +393,7 @@ async fn get_tagma(
 // ---------------------------------------------------------------------------
 
 /// Max tagma label length (after trim). Mirrors `MAX_DISPLAY_NAME_LEN` in
-/// `routes/auth.rs`.
+/// `routes/auth/register.rs`.
 const MAX_TAGMA_LABEL_LEN: usize = 64;
 
 #[derive(Deserialize)]

@@ -10,13 +10,14 @@ use sea_orm::{ActiveModelTrait, ActiveValue::Set};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
+use super::admin_login::admin_login;
+use super::availability::{AvailabilityQuery, UsernameAvailabilityStatus, username_availability};
+use super::login::{LoginBeginRequest, LoginFinishRequest};
+use super::register::{RegisterBeginRequest, RegisterFinishRequest};
 use super::{
-    AvailabilityQuery, CHALLENGE_TTL, DiscoverableAuthentication, KIND_LOGIN,
-    KIND_LOGIN_DISCOVERABLE, KIND_REGISTER, LoginBeginRequest, LoginFinishRequest,
-    PublicKeyCredential, RegisterBeginRequest, RegisterFinishRequest, RegisterPublicKeyCredential,
-    UsernameAvailabilityStatus, admin_login, discoverable_registration_challenge, login_begin,
-    login_discoverable_begin, login_discoverable_finish, register_begin, register_finish,
-    username_availability,
+    CHALLENGE_TTL, KIND_LOGIN, KIND_LOGIN_DISCOVERABLE, KIND_REGISTER,
+    discoverable_registration_challenge, login_begin, login_discoverable_begin,
+    login_discoverable_finish, register_begin, register_finish,
 };
 use crate::auth::AuthPrincipal;
 use crate::db::entity::{external_identities, sessions, users, webauthn_challenges};
@@ -25,6 +26,10 @@ use axum::extract::Query;
 use kallipai_archeion_common::principal::Principal;
 use sea_orm::EntityTrait;
 use sea_orm::{ColumnTrait, PaginatorTrait, QueryFilter};
+use webauthn_rs::prelude::{
+    DiscoverableAuthentication, PublicKeyCredential, RegisterPublicKeyCredential,
+};
+use webauthn_rs_core::proto::RegistrationState;
 
 /// The availability probe's four outcomes plus the missing-param case, in
 /// refusal order: shape beats everything, reserved beats the DB lookup, and
@@ -206,7 +211,7 @@ async fn register_begin_writes_discoverable_reg_state() {
         "register ceremony must carry user_id"
     );
     // Bare core RegistrationState -- the shape finish rehydrates.
-    let _: super::RegistrationState =
+    let _: RegistrationState =
         serde_json::from_value(rows[0].state.clone()).expect("deserialize bare reg state");
 }
 

@@ -105,8 +105,9 @@ async fn me(
         .map_err(map_db_err)?;
     let external_identities: Vec<ExternalIdentitySummary> =
         external_identities.into_iter().map(Into::into).collect();
-    // The admin marker row is the same source verify_session reads
-    // (routes/auth.rs), so /me reports the session's admin status.
+    // The admin marker row is the same source `verify_session`
+    // (`routes/internal.rs`) reads and `routes/auth/admin_login.rs` writes,
+    // so /me reports the session's admin status.
     let local_admin = external_identities::Entity::find()
         .filter(external_identities::Column::UserId.eq(user_id.to_string()))
         .filter(external_identities::Column::Provider.eq(LOCAL_ADMIN_PROVIDER))

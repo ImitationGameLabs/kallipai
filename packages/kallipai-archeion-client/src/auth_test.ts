@@ -12,7 +12,7 @@ import type { ArcheionClient } from "./http.ts";
 
 // `classifyRegisterConflict` is the only code in this package whose
 // correctness depends on EXACT string matching against the archeion's 409 prose
-// (crates/platform/kallipai-archeion/src/routes/auth.rs: "username already taken").
+// (crates/platform/kallipai-archeion/src/routes/auth/register.rs: "username already taken").
 // Registration collects no email, so username is the only collision. These
 // tests pin that contract: a server-side copy change must update the switch or
 // fail here.

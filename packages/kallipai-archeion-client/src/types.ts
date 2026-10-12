@@ -1,5 +1,5 @@
 // Response + error shapes for the archeion `/v1` HTTP surface. These mirror the
-// serde DTOs in `crates/platform/kallipai-archeion/src/routes/` (`auth.rs`, `tagmata.rs`,
+// serde DTOs in `crates/platform/kallipai-archeion/src/routes/` (`auth/*`, `tagmata.rs`,
 // `admin.rs`). Timestamps are RFC3339 strings (time::OffsetDateTime serde)
 // unless noted.
 
