@@ -17,7 +17,7 @@ pub(crate) mod task;
 pub(crate) mod team;
 
 use axum::Router;
-use kallipai_common::protocol::{ListAgentsResponse, ListApprovalsQuery, MessageRequest};
+use kallipai_common::protocol::{ListApprovalsQuery, MessageRequest};
 use state::SharedState;
 use tower_http::cors::CorsLayer;
 

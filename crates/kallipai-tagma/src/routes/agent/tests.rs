@@ -1,15 +1,15 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use super::{
-    AgentConfig, AgentId, DelegationMode, MAX_ACTIVITY_CHARS, PermissionClass, interrupt_agent,
-    list_agents, remove_agent, resolve_granted_class, truncate_chars,
-};
+use super::lifecycle::{MAX_ACTIVITY_CHARS, truncate_chars};
+use super::permissions::resolve_granted_class;
+use super::{interrupt_agent, list_agents, remove_agent};
 use crate::auth::{AuthIdentity, Identity};
 use crate::lifecycle::{
     EstablishLockFailure, compose_system_prompt, establish_workspace_lock, inject_identity_env,
     meta_skill_content, resolve_root_agent,
 };
+use crate::state::AgentState;
 use crate::state::RegistryEntry;
 use crate::test_helpers::{
     add_faulted_root, add_faulted_sub, add_root, add_sub, make_entry, make_entry_with_rx,
@@ -17,6 +17,8 @@ use crate::test_helpers::{
 };
 use axum::extract::{Path, Query, State};
 use kallipai_adk::config::PermissionProfile;
+use kallipai_adk::config::{AgentConfig, DelegationMode, PermissionClass};
+use kallipai_common::agentid::AgentId;
 use kallipai_common::protocol::ListAgentsQuery;
 
 #[test]
@@ -559,7 +561,7 @@ async fn list_agents_includes_faulted() {
         .iter()
         .find(|a| a.id == faulted)
         .expect("faulted agent listed");
-    assert_eq!(f.state, super::AgentState::Faulted);
+    assert_eq!(f.state, AgentState::Faulted);
     assert_eq!(f.faulted_reason.as_deref(), Some("restore failed: boom"));
     assert!(agents.iter().any(|a| a.id == live));
 }
@@ -772,7 +774,7 @@ async fn update_duty_rejects_non_operator() {
         State(state),
         AuthIdentity::test_new(Identity::Agent { id: agent.clone() }),
         Path(agent),
-        axum::Json(super::UpdateDutyRequest {
+        axum::Json(super::lifecycle::UpdateDutyRequest {
             status: crate::duty::DutyStatus::OffDuty,
         }),
     )
@@ -796,7 +798,7 @@ async fn update_duty_toggles_on_off() {
         State(state.clone()),
         AuthIdentity::test_new(Identity::Operator),
         Path(agent.clone()),
-        axum::Json(super::UpdateDutyRequest {
+        axum::Json(super::lifecycle::UpdateDutyRequest {
             status: crate::duty::DutyStatus::OffDuty,
         }),
     )
@@ -809,7 +811,7 @@ async fn update_duty_toggles_on_off() {
         State(state),
         AuthIdentity::test_new(Identity::Operator),
         Path(agent),
-        axum::Json(super::UpdateDutyRequest {
+        axum::Json(super::lifecycle::UpdateDutyRequest {
             status: crate::duty::DutyStatus::OnDuty,
         }),
     )
@@ -859,7 +861,7 @@ async fn update_duty_on_notifies_agent() {
         State(state.clone()),
         AuthIdentity::test_new(Identity::Operator),
         Path(agent.clone()),
-        axum::Json(super::UpdateDutyRequest {
+        axum::Json(super::lifecycle::UpdateDutyRequest {
             status: crate::duty::DutyStatus::OnDuty,
         }),
     )

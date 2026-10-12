@@ -563,7 +563,7 @@ mod tests {
     #[test]
     fn bootstrap_surfaces_discovery_floor() {
         // The compiled meta-skill (appended to every agent's prompt at spawn,
-        // routes/agent.rs) is the ONLY guaranteed surface an agent sees before
+        // lifecycle/identity.rs) is the ONLY guaranteed surface an agent sees before
         // it discovers anything. It is kept deliberately thin: a discovery
         // pointer, and the one universal control
         // primitive the agent cannot behave correctly without (it would loop

@@ -49,7 +49,7 @@ fn delegation_mode_from_str_display_round_trip() {
 fn default_system_prompt_stays_high_altitude() {
     // The base prompt must stay at agent altitude: posture and the
     // tool/round execution model. Agent identity is injected per-agent by
-    // the tagma (routes/agent.rs `compose_system_prompt`); tool mechanics
+    // the tagma (lifecycle/identity.rs `compose_system_prompt`); tool mechanics
     // belong in each tool's `description()` and the skill system belongs in
     // the bootstrap meta-skill the tagma appends at runtime. This guard
     // prevents tool/CLI usage from creeping back into the prompt and

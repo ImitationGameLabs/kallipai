@@ -141,7 +141,7 @@ pub(crate) fn parse_requested_class(raw: &str) -> Result<PermissionClass, ApiErr
 /// surfaces loudly. Because the gate compares granted classes, a supervisor
 /// that was itself downgraded can no longer grant a child above itself —
 /// the intended "weak supervisor can never escalate" property.
-pub(crate) fn resolve_granted_class(
+pub(super) fn resolve_granted_class(
     supervisor_class: PermissionClass,
     requested: PermissionClass,
 ) -> Result<PermissionClass, ApiError> {
