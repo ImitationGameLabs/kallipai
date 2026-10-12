@@ -223,6 +223,63 @@ pub(crate) async fn ctx_with_mock(
     let ctx = ctx_from_source(profiles, source, RetryPolicy::default()).await;
     (ctx, server)
 }
+/// The window the compaction-failure pins shrink to: two `over_budget_turn_text`
+/// turns exceed it while the budget shape stays feasible. The feasibility floor
+/// rules out a 20K window — the tool-result truncated cap (10K) must stay well
+/// below the summarizer input budget (window − output reserve − summary max), and
+/// that budget must in turn exceed half the effective budget: each turn sits near
+/// the halfway mark, so each must fit the summarizer on its own while the pair
+/// together exceeds the effective budget.
+pub(crate) const FAILURE_PIN_WINDOW: usize = 40_000;
+
+/// Shrink `ctx`'s window to `window` and re-sync the store's pinned-budget guard —
+/// the first two of the three steps `acquisition::reapply_window` applies on
+/// failover. The third, `mark_needs_full_estimate`, is deliberately omitted: these
+/// tests feed the gates `total_estimated_tokens`, a plain per-turn sum that never
+/// consults the anchor flag the marker guards. Lets a test build an over-budget
+/// store from small turns instead of the 600K-char wedge turn.
+pub(crate) async fn set_context_window(ctx: &mut AgentContext, window: usize) {
+    ctx.config
+        .set_context_window(window)
+        .expect("the test window must satisfy the budget invariants");
+    let budget = ctx.config.pinned_budget();
+    ctx.store.lock().await.set_pinned_budget(budget);
+}
+
+/// A user turn sized for [`FAILURE_PIN_WINDOW`]: the 20_000-char literal below
+/// estimates to roughly 20K tokens (CJK text scores about one token per char), so
+/// one turn fits the summarizer input budget while two exceed the effective
+/// budget. The size is tied to that literal, not derived from the window constant;
+/// the seed helper asserts both relations, so a drift fails loudly.
+pub(crate) fn over_budget_turn_text() -> String {
+    "错".repeat(20_000)
+}
+
+/// Seed `ctx`'s store with two [`over_budget_turn_text`] turns and assert the two
+/// budget relations the compaction-failure pins rest on: the pair exceeds the
+/// effective budget (otherwise no gate reaches compaction) and one turn fits the
+/// summarizer input budget (otherwise compaction takes the oversized-turn slice
+/// path instead of the summarize path). Returns the non-pinned turn count and the
+/// store's token estimate.
+pub(crate) async fn seed_over_budget_store(ctx: &mut AgentContext) -> (usize, usize) {
+    let mut store = ctx.store.lock().await;
+    store.push_turn(vec![user_msg(over_budget_turn_text())]);
+    let single_turn = store.total_estimated_tokens();
+    store.push_turn(vec![user_msg(over_budget_turn_text())]);
+    let tokens = store.total_estimated_tokens();
+    let effective = ctx.config.effective_budget();
+    assert!(
+        tokens > effective,
+        "precondition: the store ({tokens}) must exceed the effective budget ({effective})"
+    );
+    let input_budget = effective.saturating_sub(ctx.summarizer.max_tokens as usize);
+    assert!(
+        single_turn < input_budget,
+        "precondition: one turn ({single_turn}) must fit the summarizer input budget ({input_budget})"
+    );
+    let turns = store.turns().iter().filter(|t| !t.is_pinned()).count();
+    (turns, tokens)
+}
 
 /// A [`Usage`] with only `prompt_tokens` set (and derived `total_tokens`).
 pub(crate) fn usage(prompt_tokens: u32) -> Usage {

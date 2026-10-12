@@ -10,17 +10,21 @@ use just_llm_client::{
 use kallipai_common::protocol::FailoverChainExhaustion;
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
-    matchers::{method, path},
+    matchers::{body_string_contains, method, path},
 };
 
 use crate::acquisition::advance_failover;
 use crate::agent_task::{RoundToken, run_and_report};
+use crate::context::AgenticContext;
 use crate::failover::{FailoverOutcome, ProfileReset};
 use crate::policy::ToolCallOutcome;
 use crate::profile::{BackendSource, ProfileRegistry, ProfileSet};
 use crate::retry::AttemptOrigin;
 use crate::runner::BreakUntil;
-use crate::test_support::{MapSource, ctx_from_source, make_ctx, profile};
+use crate::test_support::{
+    FAILURE_PIN_WINDOW, MapSource, RecordingHealth, ctx_from_source, make_ctx,
+    over_budget_turn_text, profile, seed_over_budget_store, set_context_window,
+};
 use crate::tool_execution::{run_tool_bounded, synthesize_unanswered_results};
 use crate::tools::DEFAULT_BREAK_TIMEOUT_SECS;
 
@@ -368,6 +372,79 @@ async fn mount_ok_stream(server: &MockServer, content: &str) {
         .await;
 }
 
+/// The marker every summarizer request body carries: `ContextSummarizer::prompt` rides
+/// the request as a user message, and a round's own requests never carry it.
+const SUMMARY_MARKER: &str = "compaction-probe-marker-3f19";
+
+/// Point `ctx`'s summarizer at [`SUMMARY_MARKER`].
+fn mark_summarizer(ctx: &mut AgentContext) {
+    ctx.summarizer.prompt = SUMMARY_MARKER.to_owned();
+}
+
+/// Mount the summarizer's answer: `status` for any request whose body carries the
+/// marker. The summary mock is the narrower one (body marker) and outranks the
+/// catch-all `mount_ok_stream` (priority 1 against its default 5), so mount order
+/// never decides which mock answers.
+async fn mount_summary_status(server: &MockServer, status: u16) {
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .and(body_string_contains(SUMMARY_MARKER))
+        .respond_with(ResponseTemplate::new(status))
+        .with_priority(1)
+        .mount(server)
+        .await;
+}
+
+/// What the server saw, split by kind: `(summary, round)` counts.
+async fn request_counts(server: &MockServer) -> (usize, usize) {
+    let requests = server.received_requests().await.unwrap_or_default();
+    let summary = requests
+        .iter()
+        .filter(|r| String::from_utf8_lossy(&r.body).contains(SUMMARY_MARKER))
+        .count();
+    (summary, requests.len() - summary)
+}
+
+/// A round context over `window`: `context_thresholds = vec![80]` drops the progressive
+/// warning level, so a single round reaches compaction instead of re-composing. The
+/// summarizer answers `400` while the round's own requests stream normally.
+async fn round_ctx(server: &MockServer, window: usize) -> AgentContext {
+    let mut map = HashMap::new();
+    map.insert("ep1".into(), wiremock_backend(&server.uri()));
+    let mut ctx = ctx_from_source(
+        vec![profile("p1", "ep1", 500_000)],
+        wiremock_source(map),
+        fast_policy(),
+    )
+    .await;
+    mark_summarizer(&mut ctx);
+    ctx.config.context_thresholds = vec![80];
+    set_context_window(&mut ctx, window).await;
+    ctx
+}
+
+/// The over-budget shape: the seeded pair exceeds [`FAILURE_PIN_WINDOW`], so the round
+/// reaches compaction and the summarizer call fails there.
+async fn failing_round_ctx(server: &MockServer) -> AgentContext {
+    let mut ctx = round_ctx(server, FAILURE_PIN_WINDOW).await;
+    seed_over_budget_store(&mut ctx).await;
+    ctx
+}
+
+/// The same round over a window the same turns fit: it compacts nothing, so its event
+/// stream is the control [`failing_round_ctx`] must match kind for kind. The pair is
+/// pushed without [`seed_over_budget_store`], whose budget relations hold only for the
+/// shrunken window.
+async fn roomy_round_ctx(server: &MockServer) -> AgentContext {
+    let ctx = round_ctx(server, 500_000).await;
+    {
+        let mut store = ctx.store.lock().await;
+        store.push_turn(vec![user_msg(over_budget_turn_text())]);
+        store.push_turn(vec![user_msg(over_budget_turn_text())]);
+    }
+    ctx
+}
+
 /// Mount a 200 streaming response that emits a single `break` tool call (no
 /// content). Drives the round loop's `break` short-circuit path.
 async fn mount_break_stream(server: &MockServer) {
@@ -443,6 +520,12 @@ fn failover_hops(events: &[AgentEvent]) -> Vec<(String, String)> {
             _ => None,
         })
         .collect()
+}
+
+/// The kinds of `events`, payload-free: `AgentEvent` carries no `PartialEq`, so the
+/// discriminants are the comparable form.
+fn event_kinds(events: &[AgentEvent]) -> Vec<std::mem::Discriminant<AgentEvent>> {
+    events.iter().map(std::mem::discriminant).collect()
 }
 
 /// The `(attempt, max_attempts)` carried by each `StreamReset` event, in order.
@@ -1323,5 +1406,104 @@ async fn a_tool_round_does_not_inherit_the_previous_rounds_send_budget() {
         server.received_requests().await.unwrap().len(),
         2,
         "one tool round plus one answering round"
+    );
+}
+
+// --- compaction-failure visibility ---
+
+/// A failed compaction is invisible to the round: the round finishes on its own
+/// answer, the chain does not advance, no endpoint fact is written, no summary is
+/// pinned, no turn is evicted, and the event stream matches a round that compacts
+/// nothing kind for kind.
+#[tokio::test]
+async fn a_failed_compaction_is_invisible_to_the_round() {
+    let server = MockServer::start().await;
+    mount_ok_stream(&server, "done").await;
+    mount_summary_status(&server, 400).await;
+    let mut ctx = failing_round_ctx(&server).await;
+    let health = Arc::new(RecordingHealth::default());
+    ctx.endpoint_health = Some(health.clone());
+    let turns_before = ctx
+        .store
+        .lock()
+        .await
+        .turns()
+        .iter()
+        .filter(|t| !t.is_pinned())
+        .count();
+
+    let (outcome, events) = run_rounds(&mut ctx).await;
+
+    assert!(
+        matches!(outcome, Ok(RoundOutcome::BareAssistant { .. })),
+        "the round must finish on its own answer, got {outcome:?}"
+    );
+    assert_eq!(
+        request_counts(&server).await,
+        (1, 1),
+        "one compaction attempt plus the round's own request"
+    );
+    assert!(
+        failover_hops(&events).is_empty(),
+        "a failed compaction must not advance the chain"
+    );
+    assert!(
+        stream_resets(&events).is_empty(),
+        "a failed compaction must not reset the stream"
+    );
+    // The control: the same round with room to spare, so nothing compacts. Its event
+    // stream is what the failed round must match kind for kind.
+    let control = MockServer::start().await;
+    mount_ok_stream(&control, "done").await;
+    mount_summary_status(&control, 400).await;
+    let mut roomy = roomy_round_ctx(&control).await;
+    let (roomy_outcome, roomy_events) = run_rounds(&mut roomy).await;
+    assert!(
+        matches!(roomy_outcome, Ok(RoundOutcome::BareAssistant { .. })),
+        "the control round must finish on its own answer, got {roomy_outcome:?}"
+    );
+    assert_eq!(
+        event_kinds(&roomy_events),
+        event_kinds(&events),
+        "a failed compaction must not add, drop, or reorder an event kind"
+    );
+    assert!(
+        health.recorded().is_empty(),
+        "a failed compaction writes no endpoint fact"
+    );
+    let store = ctx.store.lock().await;
+    assert!(
+        store.pinned_labels().is_empty(),
+        "no summary pin and no warning turn: {:?}",
+        store.pinned_labels()
+    );
+    assert_eq!(
+        store.turns().iter().filter(|t| !t.is_pinned()).count(),
+        turns_before + 1,
+        "the round adds its own turn and evicts nothing"
+    );
+}
+
+/// Every round re-attempts the failed compaction while the context stays over
+/// budget: no latch and no cross-round memory, seen from the consumer's seat.
+#[tokio::test]
+async fn every_round_attempts_compaction_again_while_the_context_stays_over_budget() {
+    let server = MockServer::start().await;
+    mount_ok_stream(&server, "done").await;
+    mount_summary_status(&server, 400).await;
+    let mut ctx = failing_round_ctx(&server).await;
+
+    for round in 0..3 {
+        let (outcome, _events) = run_rounds(&mut ctx).await;
+        assert!(
+            matches!(outcome, Ok(RoundOutcome::BareAssistant { .. })),
+            "round {round} must finish on its own answer, got {outcome:?}"
+        );
+    }
+
+    assert_eq!(
+        request_counts(&server).await,
+        (3, 3),
+        "one compaction attempt and one round request per round"
     );
 }

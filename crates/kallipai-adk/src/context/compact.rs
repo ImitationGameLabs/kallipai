@@ -266,8 +266,10 @@ pub(crate) async fn compact_if_needed(ctx: &AgentContext) -> Result<bool> {
 mod tests {
     use super::*;
     use crate::retry::RetryPolicy;
-    use crate::test_support::{MapSource, ctx_from_source, profile};
-    use crate::test_support::{tool_result_msg, user_msg};
+    use crate::test_support::{
+        FAILURE_PIN_WINDOW, MapSource, ctx_from_source, ctx_with_mock, profile,
+        seed_over_budget_store, set_context_window, tool_result_msg, user_msg,
+    };
     use just_llm_client::LlmBackend;
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -450,5 +452,51 @@ mod tests {
         assert!(content.contains("chart caption"), "got: {content}");
         // The image itself contributes no words — text only.
         assert!(!content.contains("aGk="));
+    }
+
+    /// A failed summarizer call surfaces as an error and leaves the store exactly as it
+    /// was: no summary pinned, no turn evicted. Dressing the failure up as
+    /// `NothingToCompact` would hide a lost compaction behind a benign verdict.
+    #[tokio::test]
+    async fn a_failed_summary_call_leaves_the_context_untouched() {
+        let (mut ctx, _server) =
+            ctx_with_mock(vec![profile("p1", "ep1", 500_000)], &["ep1"], 400).await;
+        set_context_window(&mut ctx, FAILURE_PIN_WINDOW).await;
+        let (turns_before, tokens_before) = seed_over_budget_store(&mut ctx).await;
+
+        let result = summarize_and_evict(&ctx).await;
+
+        assert!(
+            result.is_err(),
+            "a 400 from the summarizer must surface as an error"
+        );
+        let store = ctx.store.lock().await;
+        assert!(
+            !store.pinned_labels().iter().any(|l| l == "context_summary"),
+            "a failed call must not pin a summary"
+        );
+        assert_eq!(
+            store.turns().iter().filter(|t| !t.is_pinned()).count(),
+            turns_before,
+            "a failed call must not evict turns"
+        );
+        assert_eq!(store.total_estimated_tokens(), tokens_before);
+    }
+
+    /// The pre-loop wrapper propagates the same failure: it reports the error instead of
+    /// swallowing it into a `false` that reads as "the context already fits".
+    #[tokio::test]
+    async fn pre_loop_compaction_reports_a_failed_summary_call() {
+        let (mut ctx, _server) =
+            ctx_with_mock(vec![profile("p1", "ep1", 500_000)], &["ep1"], 400).await;
+        set_context_window(&mut ctx, FAILURE_PIN_WINDOW).await;
+        seed_over_budget_store(&mut ctx).await;
+
+        let result = compact_if_needed(&ctx).await;
+
+        assert!(
+            result.is_err(),
+            "the pre-loop wrapper must report the failure, not answer `false`"
+        );
     }
 }

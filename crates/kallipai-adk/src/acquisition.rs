@@ -1385,8 +1385,9 @@ mod tests {
     use crate::retry::AttemptOrigin;
     use crate::retry::{Episode, RetryCall, RetryPolicy, stream_with_retry};
     use crate::test_support::{
-        MapSource, RecordingBackend, RecordingHealth, account_hint, ctx_from_source, profile,
-        request, system_msg, user_msg,
+        FAILURE_PIN_WINDOW, MapSource, RecordingBackend, RecordingHealth, account_hint,
+        ctx_from_source, mock_source, profile, request, seed_over_budget_store, set_context_window,
+        system_msg, user_msg,
     };
     use just_llm_client::LlmBackend;
     use just_llm_client::types::generation::ReasoningEffort;
@@ -3440,6 +3441,58 @@ mod tests {
             backend.take_requests().len(),
             2,
             "the first drop retries in place; the repeat stops without a third send"
+        );
+    }
+
+    /// A failed compaction during a failover advance sends the prior messages as they
+    /// are: the rebuilt window is not lost, and the chain still advances. Both profiles
+    /// declare [`FAILURE_PIN_WINDOW`]: `advance_failover` re-applies the *target*
+    /// profile's window before compacting, so that declaration is what makes the single
+    /// attempt happen — the explicit `set_context_window` below only serves the seed
+    /// precondition.
+    ///
+    /// The summarizer prompt this test installs: the one POST must carry it, which
+    /// proves the mock answered the compaction call and not a round request.
+    const SUMMARY_PROBE_MARKER: &str = "acquisition-summary-probe-marker";
+
+    #[tokio::test]
+    async fn failover_compaction_failure_sends_the_prior_messages_as_is() {
+        let (source, server) = mock_source(&["p1", "p2"], 400).await;
+        let mut ctx = ctx_from_source(
+            vec![
+                profile("a", "p1", FAILURE_PIN_WINDOW),
+                profile("b", "p2", FAILURE_PIN_WINDOW),
+            ],
+            source,
+            RetryPolicy::default(),
+        )
+        .await;
+        set_context_window(&mut ctx, FAILURE_PIN_WINDOW).await;
+        seed_over_budget_store(&mut ctx).await;
+        ctx.summarizer.prompt = SUMMARY_PROBE_MARKER.to_owned();
+        let prior_messages = vec![user_msg("carried turn")];
+
+        let outcome = advance_failover(
+            &mut ctx,
+            prior_messages.clone(),
+            anyhow::anyhow!("endpoint dead"),
+            &CancellationToken::new(),
+        )
+        .await;
+
+        let FailoverOutcome::Advanced { messages, .. } = outcome else {
+            panic!("a failed compaction must not stop the advance, got {outcome:?}");
+        };
+        assert_eq!(
+            messages, prior_messages,
+            "the prior window is sent unchanged"
+        );
+        let requests = server.received_requests().await.unwrap_or_default();
+        assert_eq!(requests.len(), 1, "one compaction attempt");
+        let body = String::from_utf8_lossy(&requests[0].body);
+        assert!(
+            body.contains(SUMMARY_PROBE_MARKER),
+            "the single POST must be the summarizer request, not a round request"
         );
     }
 }
