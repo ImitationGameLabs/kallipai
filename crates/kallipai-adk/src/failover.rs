@@ -244,6 +244,11 @@ pub(crate) enum FailoverOutcome {
     Cancelled,
     /// Compaction ran and hit the tagma token budget.
     BudgetExceeded { consumed: u64, budget: u64 },
+    /// Compaction on the endpoint just advanced to failed with a verdict that ends
+    /// the round: the carried context cannot be compacted to fit the new window, so
+    /// re-sending it would repeat the same failure. Carries the operator-facing
+    /// message the round ends with.
+    Stop { message: String },
 }
 
 impl std::fmt::Debug for FailoverOutcome {
@@ -262,6 +267,7 @@ impl std::fmt::Debug for FailoverOutcome {
             Self::BudgetExceeded { consumed, budget } => {
                 write!(f, "BudgetExceeded({consumed}/{budget})")
             }
+            Self::Stop { message } => write!(f, "Stop({message})"),
         }
     }
 }

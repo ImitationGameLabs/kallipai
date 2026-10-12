@@ -18,7 +18,7 @@ use crate::config::{
     AgentConfig, DEFAULT_MESSAGE_FULL_TOKENS, DEFAULT_TOOL_RESULT_TRUNCATED_TOKENS,
 };
 use crate::context::estimate_text;
-use crate::context::{ContextStore, ContextSummarizer, TurnId};
+use crate::context::{CompactionLedger, ContextStore, ContextSummarizer, TurnId};
 use crate::history::{HistoryWriter, RecordKind};
 use crate::policy::AuthorizedToolExecutor;
 use crate::retry::{AttemptOrigin, Episode};
@@ -165,6 +165,11 @@ pub struct AgentContext {
     /// legal-edge table in debug builds. `Running` is held only inside
     /// `run_and_report`.
     pub lifecycle: std::sync::Mutex<LifecycleState>,
+    /// Compaction-failure accounting for this agent: the failing stretch's
+    /// attempt count and endpoint facts, plus the latch deadline that keeps the
+    /// pre-call gate from repeating a doomed summarizer call before the backend
+    /// has had time to recover.
+    pub compaction: CompactionLedger,
     /// The armed wait-timer deadline (`break(wait)` or a budget-blocked
     /// re-arm), or `None`. Mirrors `retry_at`'s authority pattern: the wait
     /// select arm honors a stored permit only when this is `Some(t)` with
@@ -447,13 +452,20 @@ pub async fn agent_task(
     mut prompt_rx: tokio::sync::mpsc::Receiver<String>,
     agent_tx: tokio::sync::mpsc::Sender<AgentEvent>,
 ) {
-    // Pre-loop compaction: handle context overflow from restored agents.
-    if let Err(e) = crate::context::compact_if_needed(&ctx).await {
-        tracing::warn!("pre-loop compaction failed: {e:#}");
-    }
+    // Pre-loop compaction: a restored agent whose context is over budget is
+    // compacted before the first round. The wrapper charges a failure and warns;
+    // what it records waits for the first round's gate (a stop the gate fails
+    // on, a backoff the gate honors), so this execution emits no error event
+    // for a stop it has not taken. The wake restarts the count, not those
+    // records (see `restart`).
+    crate::context::compact_pre_loop(&mut ctx).await;
 
     if let Some(p) = initial_prompt {
         if p.is_empty() {
+            // No round runs for an empty prompt, and this execution ends here: the
+            // context — and the ledger with it — is dropped when the task's future
+            // returns, so a stop the pre-loop parked is never taken at a gate.
+            // What the failure wrote to the history is its only trace.
             return;
         }
         ctx.record_turn(vec![Message::user(&p)]).await;
@@ -626,6 +638,11 @@ fn apply_pending_profile_reset(ctx: &mut AgentContext) {
     match ctx.failover.reset_and_rebuild(reset.set, reset.registry) {
         Ok(new_client) => {
             ctx.client = new_client;
+            ctx.compaction.clear(timefmt::now_epoch());
+            // A reset swaps the endpoint, so a verdict the old endpoint's
+            // summarizer reached is moot for the new one: the ledger starts over
+            // here rather than parking the first round after the switch on a
+            // verdict of the endpoint the agent just left.
             // Fresh chain for the fresh client: the reset may switch providers, and a
             // response id issued by the old one is meaningless to the new.
             // Store rides the reset's active profile (read before `reset.set` moves into
@@ -668,6 +685,13 @@ pub async fn run_and_report(
     // an external one is served once even against a marked endpoint, a timer one
     // is not. Taken by the first pre-send reading below.
     ctx.attempt_origin = origin;
+    // An external wake restarts the compaction count: a prompt from outside is new
+    // work, so the failure count and its deadline start over with it. What the last
+    // verdict left behind — an armed backoff, a stop waiting for a gate — stays,
+    // because both answer for the context a round would send, not for the count.
+    if origin == AttemptOrigin::External {
+        ctx.compaction.restart(timefmt::now_epoch());
+    }
     // Drain any pending profile reset before starting the round loop.
     apply_pending_profile_reset(ctx);
     // Every entry here is from a non-Running state by construction (the outer
@@ -1871,5 +1895,195 @@ mod tests {
             ),
             other => panic!("expected a FatalError park, got {other:?}"),
         }
+    }
+
+    /// A stop the pre-loop wrapper met outside a round is the verdict the round
+    /// fails on: an external wake restarts the count and keeps the stop, so the
+    /// gate takes it before sending — one summarizer request, one history line,
+    /// and the round ends on the message the wrapper itself reached.
+    #[tokio::test]
+    async fn a_pre_loop_stop_fails_the_round_after_an_external_wake() {
+        // The same setup twice: once for the message the parked verdict carries
+        // (the gate called where the wrapper left it), once for the round that
+        // reads it after a wake.
+        let (mut taken_ctx, taken_server) = stop_pin_ctx().await;
+        let prompt_tokens = taken_ctx.store.lock().await.total_estimated_tokens();
+        crate::context::compact_pre_loop(&mut taken_ctx).await;
+        let action = crate::budget_gate::enforce_pre_call_budget(
+            &mut taken_ctx,
+            prompt_tokens,
+            0,
+            &CancellationToken::new(),
+        )
+        .await;
+        let crate::budget_gate::BudgetAction::Fail(error) = action else {
+            panic!("the parked stop ends the round");
+        };
+        let verdict = crate::llm_error::render_error(error.as_ref());
+        assert_eq!(
+            taken_server
+                .received_requests()
+                .await
+                .unwrap_or_default()
+                .len(),
+            1,
+            "the wrapper's own failure is the only request"
+        );
+
+        let (mut ctx, server) = stop_pin_ctx().await;
+        let dir = tempfile::tempdir().unwrap();
+        ctx.history = Some(HistoryWriter::new(dir.path().to_owned()));
+        crate::context::compact_pre_loop(&mut ctx).await;
+        assert_eq!(ctx.compaction.attempts(), 1, "the wrapper charged the send");
+
+        let (tx, _rx) = tokio::sync::mpsc::channel::<AgentEvent>(256);
+        let (_prompt_tx, mut prompt_rx) = tokio::sync::mpsc::channel::<String>(16);
+        assert!(
+            !run_and_report(&mut ctx, &tx, &mut prompt_rx, AttemptOrigin::External).await,
+            "a stop parks the round instead of terminating the task"
+        );
+
+        assert_eq!(
+            server.received_requests().await.unwrap_or_default().len(),
+            1,
+            "the wake keeps the stop: the summarizer is not asked again"
+        );
+        assert_eq!(history_lines(dir.path()), 1, "one line for the failure");
+        assert_eq!(
+            ctx.compaction.attempts(),
+            0,
+            "the wake restarts the count the wrapper charged"
+        );
+        assert!(
+            !ctx.compaction.is_latched(timefmt::now_epoch()),
+            "a stop is taken by the gate, not delayed by a wait"
+        );
+        let parked = ctx
+            .lifecycle
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        match parked {
+            LifecycleState::Parked {
+                reason: ParkedReason::FatalError { message },
+                ..
+            } => assert_eq!(
+                message, verdict,
+                "the round ends on the wrapper's own verdict"
+            ),
+            other => panic!("expected a FatalError park, got {other:?}"),
+        }
+    }
+
+    /// An external wake restarts the count and keeps what the last verdict left:
+    /// the backoff a pre-loop failure armed still holds, so the wake's own gate
+    /// calls send without asking the summarizer again.
+    #[tokio::test]
+    async fn an_external_wake_restarts_the_count_and_keeps_the_armed_backoff() {
+        use std::time::Duration;
+
+        const MARKER: &str = "wake-keeps-the-verdict-marker";
+        let (source, server) = crate::test_support::mock_source(&["ep1"], 500).await;
+        let mut ctx = crate::test_support::ctx_from_source(
+            vec![crate::test_support::profile("p1", "ep1", 500_000)],
+            source,
+            crate::retry::RetryPolicy {
+                base_delay: Duration::from_secs(60),
+                ..crate::retry::RetryPolicy::default()
+            },
+        )
+        .await;
+        crate::test_support::set_context_window(&mut ctx, crate::test_support::FAILURE_PIN_WINDOW)
+            .await;
+        crate::test_support::seed_over_budget_store(&mut ctx).await;
+        ctx.config.context_thresholds = vec![80];
+        ctx.summarizer.prompt = MARKER.to_owned();
+
+        // The round's own sends answer with a short stream — a bare assistant keeps
+        // the round loop turning without asking anything of the summarizer — while
+        // the requests carrying the marker, which are the summarizer's, fail. That
+        // failure is what arms the backoff.
+        let stream = "data: {\"id\":\"s\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n";
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/chat/completions"))
+            .and(wiremock::matchers::body_string_contains(MARKER))
+            .respond_with(wiremock::ResponseTemplate::new(500))
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/chat/completions"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_raw(stream.as_bytes().to_vec(), "text/event-stream"),
+            )
+            .with_priority(1)
+            .mount(&server)
+            .await;
+
+        // The stretch the last round left open: one send charged, the backoff
+        // armed for a minute, which would cover the wake's own gate calls.
+        crate::context::compact_pre_loop(&mut ctx).await;
+        assert_eq!(ctx.compaction.attempts(), 1);
+        assert!(
+            ctx.compaction.is_latched(timefmt::now_epoch()),
+            "the pre-loop failure armed the backoff"
+        );
+
+        let (tx, _rx) = tokio::sync::mpsc::channel::<AgentEvent>(256);
+        let (_prompt_tx, mut prompt_rx) = tokio::sync::mpsc::channel::<String>(16);
+        let _ = run_and_report(&mut ctx, &tx, &mut prompt_rx, AttemptOrigin::External).await;
+
+        let summaries = server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|r| String::from_utf8_lossy(&r.body).contains(MARKER))
+            .count();
+        assert_eq!(
+            summaries, 1,
+            "the wake keeps the armed backoff: the summarizer is not asked again"
+        );
+        assert_eq!(
+            ctx.compaction.attempts(),
+            0,
+            "the wake starts the count over"
+        );
+        assert!(
+            ctx.compaction.is_latched(timefmt::now_epoch()),
+            "the armed backoff outlives the count reset"
+        );
+    }
+
+    /// An over-budget context whose summarizer answers `400` — the class table's
+    /// terminal class — so the pre-loop wrapper reaches a stop.
+    async fn stop_pin_ctx() -> (AgentContext, wiremock::MockServer) {
+        let (source, server) = crate::test_support::mock_source(&["ep1"], 400).await;
+        let mut ctx = crate::test_support::ctx_from_source(
+            vec![crate::test_support::profile("p1", "ep1", 500_000)],
+            source,
+            crate::retry::RetryPolicy::default(),
+        )
+        .await;
+        crate::test_support::set_context_window(&mut ctx, crate::test_support::FAILURE_PIN_WINDOW)
+            .await;
+        crate::test_support::seed_over_budget_store(&mut ctx).await;
+        // One threshold leaves no progressive-warning level above the trigger, so
+        // the gate reaches the compaction branch on its first call.
+        ctx.config.context_thresholds = vec![80];
+        (ctx, server)
+    }
+
+    /// How many records the history log holds: one line per appended record.
+    fn history_lines(dir: &std::path::Path) -> usize {
+        let mut lines = 0;
+        for entry in std::fs::read_dir(dir.join("history")).expect("the history dir exists") {
+            let path = entry.expect("a readable entry").path();
+            let text = std::fs::read_to_string(path).expect("a readable history file");
+            lines += text.lines().filter(|line| !line.is_empty()).count();
+        }
+        lines
     }
 }

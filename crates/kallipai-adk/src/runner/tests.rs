@@ -15,15 +15,14 @@ use wiremock::{
 
 use crate::acquisition::advance_failover;
 use crate::agent_task::{RoundToken, run_and_report};
-use crate::context::AgenticContext;
 use crate::failover::{FailoverOutcome, ProfileReset};
 use crate::policy::ToolCallOutcome;
 use crate::profile::{BackendSource, ProfileRegistry, ProfileSet};
 use crate::retry::AttemptOrigin;
 use crate::runner::BreakUntil;
 use crate::test_support::{
-    FAILURE_PIN_WINDOW, MapSource, RecordingHealth, ctx_from_source, make_ctx,
-    over_budget_turn_text, profile, seed_over_budget_store, set_context_window,
+    FAILURE_PIN_WINDOW, MapSource, ctx_from_source, make_ctx, profile, seed_over_budget_store,
+    set_context_window,
 };
 use crate::tool_execution::{run_tool_bounded, synthesize_unanswered_results};
 use crate::tools::DEFAULT_BREAK_TIMEOUT_SECS;
@@ -141,8 +140,14 @@ async fn advance_lands_on_next_buildable() {
     let mut ctx = make_ctx(profiles, &["ep1", "ep2"]).await;
     let before_window = ctx.config.context_window_tokens;
 
-    let outcome =
-        advance_failover(&mut ctx, vec![], anyhow::anyhow!("trigger"), &no_cancel()).await;
+    let outcome = advance_failover(
+        &mut ctx,
+        vec![],
+        anyhow::anyhow!("trigger"),
+        &no_cancel(),
+        0,
+    )
+    .await;
 
     match outcome {
         FailoverOutcome::Advanced { from, to, messages } => {
@@ -164,8 +169,14 @@ async fn advance_lands_on_next_buildable() {
 #[tokio::test]
 async fn advance_chain_exhausted_single_profile() {
     let mut ctx = make_ctx(vec![profile("p1", "ep1", 500_000)], &["ep1"]).await;
-    let outcome =
-        advance_failover(&mut ctx, vec![], anyhow::anyhow!("trigger"), &no_cancel()).await;
+    let outcome = advance_failover(
+        &mut ctx,
+        vec![],
+        anyhow::anyhow!("trigger"),
+        &no_cancel(),
+        0,
+    )
+    .await;
     match outcome {
         FailoverOutcome::ChainExhausted {
             reason: FailoverChainExhaustion::NoFailoverConfigured,
@@ -189,7 +200,7 @@ async fn advance_cancelled_when_round_cancelled() {
     .await;
     let cancel = CancellationToken::new();
     cancel.cancel();
-    let outcome = advance_failover(&mut ctx, vec![], anyhow::anyhow!("trigger"), &cancel).await;
+    let outcome = advance_failover(&mut ctx, vec![], anyhow::anyhow!("trigger"), &cancel, 0).await;
     assert!(matches!(outcome, FailoverOutcome::Cancelled));
     assert_eq!(
         ctx.failover.profile_idx(),
@@ -207,8 +218,14 @@ async fn advance_skips_unbuildable_lands_on_next() {
         profile("p3", "ep3", 500_000),
     ];
     let mut ctx = make_ctx(profiles, &["ep1", "ep3"]).await;
-    let outcome =
-        advance_failover(&mut ctx, vec![], anyhow::anyhow!("trigger"), &no_cancel()).await;
+    let outcome = advance_failover(
+        &mut ctx,
+        vec![],
+        anyhow::anyhow!("trigger"),
+        &no_cancel(),
+        0,
+    )
+    .await;
     match outcome {
         FailoverOutcome::Advanced { from, to, .. } => {
             assert_eq!(from, "p1");
@@ -229,8 +246,14 @@ async fn advance_all_unbuildable_chain_exhausted() {
         &["ep1"],
     )
     .await;
-    let outcome =
-        advance_failover(&mut ctx, vec![], anyhow::anyhow!("trigger"), &no_cancel()).await;
+    let outcome = advance_failover(
+        &mut ctx,
+        vec![],
+        anyhow::anyhow!("trigger"),
+        &no_cancel(),
+        0,
+    )
+    .await;
     assert!(
         matches!(
             outcome,
@@ -254,8 +277,14 @@ async fn advance_reapplies_smaller_window() {
     // p2 declares a smaller but valid window → config window tracks it after advance.
     let profiles = vec![profile("p1", "ep1", 500_000), profile("p2", "ep2", 100_000)];
     let mut ctx = make_ctx(profiles, &["ep1", "ep2"]).await;
-    let outcome =
-        advance_failover(&mut ctx, vec![], anyhow::anyhow!("trigger"), &no_cancel()).await;
+    let outcome = advance_failover(
+        &mut ctx,
+        vec![],
+        anyhow::anyhow!("trigger"),
+        &no_cancel(),
+        0,
+    )
+    .await;
     assert!(matches!(outcome, FailoverOutcome::Advanced { .. }));
     assert_eq!(ctx.config.context_window_tokens, 100_000);
     assert_eq!(ctx.failover.profile_idx(), 1);
@@ -272,8 +301,14 @@ async fn advance_skips_window_that_violates_invariant() {
     ];
     let mut ctx = make_ctx(profiles, &["ep1", "ep2", "ep3"]).await;
 
-    let outcome =
-        advance_failover(&mut ctx, vec![], anyhow::anyhow!("trigger"), &no_cancel()).await;
+    let outcome = advance_failover(
+        &mut ctx,
+        vec![],
+        anyhow::anyhow!("trigger"),
+        &no_cancel(),
+        0,
+    )
+    .await;
 
     match outcome {
         FailoverOutcome::Advanced { from, to, messages } => {
@@ -302,8 +337,14 @@ async fn advance_all_infeasible_chain_exhausted() {
     )
     .await;
     let before = ctx.config.context_window_tokens;
-    let outcome =
-        advance_failover(&mut ctx, vec![], anyhow::anyhow!("trigger"), &no_cancel()).await;
+    let outcome = advance_failover(
+        &mut ctx,
+        vec![],
+        anyhow::anyhow!("trigger"),
+        &no_cancel(),
+        0,
+    )
+    .await;
     assert!(
         matches!(
             outcome,
@@ -409,12 +450,22 @@ async fn request_counts(server: &MockServer) -> (usize, usize) {
 /// warning level, so a single round reaches compaction instead of re-composing. The
 /// summarizer answers `400` while the round's own requests stream normally.
 async fn round_ctx(server: &MockServer, window: usize) -> AgentContext {
+    round_ctx_with_policy(server, window, fast_policy()).await
+}
+
+/// The same shape over `policy`: a compaction failure's verdict reads the retry
+/// policy, so a pin about the backoff it arms needs its own.
+async fn round_ctx_with_policy(
+    server: &MockServer,
+    window: usize,
+    policy: crate::retry::RetryPolicy,
+) -> AgentContext {
     let mut map = HashMap::new();
     map.insert("ep1".into(), wiremock_backend(&server.uri()));
     let mut ctx = ctx_from_source(
         vec![profile("p1", "ep1", 500_000)],
         wiremock_source(map),
-        fast_policy(),
+        policy,
     )
     .await;
     mark_summarizer(&mut ctx);
@@ -428,20 +479,6 @@ async fn round_ctx(server: &MockServer, window: usize) -> AgentContext {
 async fn failing_round_ctx(server: &MockServer) -> AgentContext {
     let mut ctx = round_ctx(server, FAILURE_PIN_WINDOW).await;
     seed_over_budget_store(&mut ctx).await;
-    ctx
-}
-
-/// The same round over a window the same turns fit: it compacts nothing, so its event
-/// stream is the control [`failing_round_ctx`] must match kind for kind. The pair is
-/// pushed without [`seed_over_budget_store`], whose budget relations hold only for the
-/// shrunken window.
-async fn roomy_round_ctx(server: &MockServer) -> AgentContext {
-    let ctx = round_ctx(server, 500_000).await;
-    {
-        let mut store = ctx.store.lock().await;
-        store.push_turn(vec![user_msg(over_budget_turn_text())]);
-        store.push_turn(vec![user_msg(over_budget_turn_text())]);
-    }
     ctx
 }
 
@@ -520,12 +557,6 @@ fn failover_hops(events: &[AgentEvent]) -> Vec<(String, String)> {
             _ => None,
         })
         .collect()
-}
-
-/// The kinds of `events`, payload-free: `AgentEvent` carries no `PartialEq`, so the
-/// discriminants are the comparable form.
-fn event_kinds(events: &[AgentEvent]) -> Vec<std::mem::Discriminant<AgentEvent>> {
-    events.iter().map(std::mem::discriminant).collect()
 }
 
 /// The `(attempt, max_attempts)` carried by each `StreamReset` event, in order.
@@ -704,6 +735,80 @@ async fn switch_takes_effect_next_request_and_resets_failover_chain() {
     assert_eq!(snapshot.profile_id, "q0");
     // The cell is drained — a second wake must not re-apply.
     assert!(ctx.pending_profile_reset.lock().unwrap().is_none());
+}
+
+/// A pending profile reset swaps the endpoint, so a stop the pre-loop pass
+/// parked for the old endpoint no longer answers for the context the new one
+/// would send: the round starts the ledger over and asks the new endpoint's
+/// summarizer, instead of ending on the verdict of the endpoint just left.
+#[tokio::test]
+async fn a_profile_reset_drops_the_stop_the_old_endpoint_parked() {
+    let (source, server) = crate::test_support::mock_source(&["ep1"], 400).await;
+    let profiles = vec![profile("p0", "ep1", 500_000)];
+    let mut ctx = ctx_from_source(
+        profiles,
+        source.clone(),
+        crate::retry::RetryPolicy::default(),
+    )
+    .await;
+    set_context_window(&mut ctx, FAILURE_PIN_WINDOW).await;
+    seed_over_budget_store(&mut ctx).await;
+    // One threshold leaves no progressive-warning level above the trigger, so
+    // the gate reaches the compaction branch on its first call.
+    ctx.config.context_thresholds = vec![80];
+
+    // The pre-loop pass meets the endpoint failure and parks its stop.
+    crate::context::compact_pre_loop(&mut ctx).await;
+    assert_eq!(ctx.compaction.attempts(), 1, "the wrapper charged the send");
+
+    // The pending reset the tagma's bind writes: a one-profile "fresh" set. Its
+    // window matches the one the context is over budget for, so the round still
+    // reaches compaction and the only thing that moved is the endpoint that owns
+    // the verdict.
+    let fresh = ProfileSet {
+        name: "fresh".into(),
+        description: None,
+        profiles: vec![profile("q0", "ep1", FAILURE_PIN_WINDOW)],
+    };
+    let sets = std::collections::BTreeMap::from([("fresh".to_string(), fresh.clone())]);
+    let registry = Arc::new(ProfileRegistry::new(sets, source).unwrap());
+    *ctx.pending_profile_reset.lock().unwrap() = Some(ProfileReset {
+        set: fresh,
+        registry,
+    });
+
+    let (tx, _rx) = tokio::sync::mpsc::channel::<AgentEvent>(256);
+    let (_prompt_tx, mut prompt_rx) = tokio::sync::mpsc::channel::<String>(16);
+    assert!(
+        !run_and_report(&mut ctx, &tx, &mut prompt_rx, AttemptOrigin::External).await,
+        "the round's own failure parks it"
+    );
+
+    assert_eq!(
+        ctx.failover.profile_snapshot().profile_id,
+        "q0",
+        "the reset landed on the fresh set"
+    );
+    assert_eq!(
+        server.received_requests().await.unwrap_or_default().len(),
+        2,
+        "the reset drops the parked stop: the round asks the summarizer once"
+    );
+    let parked = ctx
+        .lifecycle
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    assert!(
+        matches!(
+            parked,
+            crate::lifecycle::LifecycleState::Parked {
+                reason: kallipai_common::protocol::ParkedReason::FatalError { .. },
+                ..
+            }
+        ),
+        "the round ends parked on its own compaction verdict"
+    );
 }
 
 #[tokio::test]
@@ -1411,87 +1516,73 @@ async fn a_tool_round_does_not_inherit_the_previous_rounds_send_budget() {
 
 // --- compaction-failure visibility ---
 
-/// A failed compaction is invisible to the round: the round finishes on its own
-/// answer, the chain does not advance, no endpoint fact is written, no summary is
-/// pinned, no turn is evicted, and the event stream matches a round that compacts
-/// nothing kind for kind.
+/// A compaction failure the class table rules terminal ends the round with its
+/// own reason: the agent parks as a fatal error, the message reaches the event
+/// stream, and the round's own request is never sent.
 #[tokio::test]
-async fn a_failed_compaction_is_invisible_to_the_round() {
+async fn a_stopped_compaction_ends_the_round_with_its_reason() {
     let server = MockServer::start().await;
     mount_ok_stream(&server, "done").await;
     mount_summary_status(&server, 400).await;
     let mut ctx = failing_round_ctx(&server).await;
-    let health = Arc::new(RecordingHealth::default());
-    ctx.endpoint_health = Some(health.clone());
-    let turns_before = ctx
-        .store
-        .lock()
-        .await
-        .turns()
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentEvent>(256);
+    let (_prompt_tx, mut prompt_rx) = tokio::sync::mpsc::channel::<String>(16);
+    let terminated = run_and_report(&mut ctx, &tx, &mut prompt_rx, AttemptOrigin::System).await;
+
+    assert!(!terminated, "a fatal park is not a lifecycle termination");
+    let mut events = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        events.push(event);
+    }
+    let message = events
         .iter()
-        .filter(|t| !t.is_pinned())
-        .count();
-
-    let (outcome, events) = run_rounds(&mut ctx).await;
-
+        .find_map(|event| match event {
+            AgentEvent::Error(message) => Some(message.clone()),
+            _ => None,
+        })
+        .expect("a stopped compaction must surface an error event");
     assert!(
-        matches!(outcome, Ok(RoundOutcome::BareAssistant { .. })),
-        "the round must finish on its own answer, got {outcome:?}"
+        message.contains("compaction failed"),
+        "the message must name the failure: {message}"
+    );
+    assert!(
+        message.contains("the request itself was rejected"),
+        "the message must carry the class label: {message}"
     );
     assert_eq!(
         request_counts(&server).await,
-        (1, 1),
-        "one compaction attempt plus the round's own request"
+        (1, 0),
+        "the summarizer was asked once and the round never sent its own request"
     );
-    assert!(
-        failover_hops(&events).is_empty(),
-        "a failed compaction must not advance the chain"
-    );
-    assert!(
-        stream_resets(&events).is_empty(),
-        "a failed compaction must not reset the stream"
-    );
-    // The control: the same round with room to spare, so nothing compacts. Its event
-    // stream is what the failed round must match kind for kind.
-    let control = MockServer::start().await;
-    mount_ok_stream(&control, "done").await;
-    mount_summary_status(&control, 400).await;
-    let mut roomy = roomy_round_ctx(&control).await;
-    let (roomy_outcome, roomy_events) = run_rounds(&mut roomy).await;
-    assert!(
-        matches!(roomy_outcome, Ok(RoundOutcome::BareAssistant { .. })),
-        "the control round must finish on its own answer, got {roomy_outcome:?}"
-    );
-    assert_eq!(
-        event_kinds(&roomy_events),
-        event_kinds(&events),
-        "a failed compaction must not add, drop, or reorder an event kind"
-    );
-    assert!(
-        health.recorded().is_empty(),
-        "a failed compaction writes no endpoint fact"
-    );
-    let store = ctx.store.lock().await;
-    assert!(
-        store.pinned_labels().is_empty(),
-        "no summary pin and no warning turn: {:?}",
-        store.pinned_labels()
-    );
-    assert_eq!(
-        store.turns().iter().filter(|t| !t.is_pinned()).count(),
-        turns_before + 1,
-        "the round adds its own turn and evicts nothing"
-    );
+    let parked = ctx
+        .lifecycle
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    match parked {
+        crate::lifecycle::LifecycleState::Parked {
+            reason: kallipai_common::protocol::ParkedReason::FatalError { message },
+            ..
+        } => assert!(message.contains("compaction failed"), "{message}"),
+        other => panic!("expected a FatalError park, got {other:?}"),
+    }
 }
 
-/// Every round re-attempts the failed compaction while the context stays over
-/// budget: no latch and no cross-round memory, seen from the consumer's seat.
+/// The stretch the ledger carries is what bounds the attempts, not the number of
+/// rounds: a backoff longer than the test body leaves three over-budget rounds
+/// sharing one summarizer call while each round still sends its own request.
 #[tokio::test]
-async fn every_round_attempts_compaction_again_while_the_context_stays_over_budget() {
+async fn attempts_are_bounded_by_the_ledger_not_the_round_count() {
     let server = MockServer::start().await;
     mount_ok_stream(&server, "done").await;
-    mount_summary_status(&server, 400).await;
-    let mut ctx = failing_round_ctx(&server).await;
+    mount_summary_status(&server, 500).await;
+    let policy = crate::retry::RetryPolicy {
+        base_delay: Duration::from_secs(60),
+        ..crate::retry::RetryPolicy::default()
+    };
+    let mut ctx = round_ctx_with_policy(&server, FAILURE_PIN_WINDOW, policy).await;
+    seed_over_budget_store(&mut ctx).await;
 
     for round in 0..3 {
         let (outcome, _events) = run_rounds(&mut ctx).await;
@@ -1503,7 +1594,12 @@ async fn every_round_attempts_compaction_again_while_the_context_stays_over_budg
 
     assert_eq!(
         request_counts(&server).await,
-        (3, 3),
-        "one compaction attempt and one round request per round"
+        (1, 3),
+        "one compaction attempt covers the three rounds, each of which sends"
+    );
+    assert_eq!(
+        ctx.compaction.attempts(),
+        1,
+        "one send charged to the stretch"
     );
 }

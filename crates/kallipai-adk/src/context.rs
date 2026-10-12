@@ -40,6 +40,12 @@ pub use turn::TurnKind;
 /// history sidecar, not in these views).
 pub(crate) const IMAGE_PLACEHOLDER: &str = "[image omitted]";
 
-pub(crate) use compact::{CompactOutcome, compact_if_needed, summarize_and_evict};
+/// The compaction ledger is part of the context's public shape: a spawn site
+/// constructs the context and owns its initial state.
+pub use compact::CompactionLedger;
+pub(crate) use compact::{
+    CompactOutcome, CompactionVerdict, compact_pre_loop, note_compaction_failure,
+    summarize_and_evict,
+};
 pub(crate) use estimate::estimate_context_tokens;
 pub(crate) use warnings::{check_progressive_warnings, check_token_budget_warnings};

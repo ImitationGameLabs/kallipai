@@ -14,7 +14,8 @@ use tracing::{debug, error, info, warn};
 
 use crate::agent_task::AgentContext;
 use crate::context::{
-    CompactOutcome, compose_context, message_has_images, strip_message_images, summarize_and_evict,
+    CompactOutcome, CompactionVerdict, compose_context, message_has_images,
+    note_compaction_failure, strip_message_images, summarize_and_evict,
 };
 use crate::event::{AgentEvent, AgentOutcome};
 use crate::failover::FailoverOutcome;
@@ -317,11 +318,14 @@ pub(crate) async fn acquire_stream(
                 let step = step_failover(
                     ctx,
                     &mut messages,
-                    fact,
-                    rendered,
-                    exhaustion,
+                    FailedSend {
+                        trigger: fact,
+                        reason: rendered,
+                        exhaustion,
+                    },
                     tx,
                     round_cancel,
+                    round,
                 )
                 .await;
                 match step {
@@ -373,11 +377,14 @@ pub(crate) async fn acquire_stream(
                 let step = step_failover(
                     ctx,
                     &mut messages,
-                    spent.into(),
-                    rendered,
-                    Exhaustion::Transient,
+                    FailedSend {
+                        trigger: spent.into(),
+                        reason: rendered,
+                        exhaustion: Exhaustion::Transient,
+                    },
                     tx,
                     round_cancel,
+                    round,
                 )
                 .await;
                 match step {
@@ -469,11 +476,14 @@ pub(crate) async fn acquire_stream(
                 let step = step_failover(
                     ctx,
                     &mut messages,
-                    e.into(),
-                    reason,
-                    Exhaustion::Transient,
+                    FailedSend {
+                        trigger: e.into(),
+                        reason,
+                        exhaustion: Exhaustion::Transient,
+                    },
                     tx,
                     round_cancel,
+                    round,
                 )
                 .await;
                 match step {
@@ -503,11 +513,14 @@ pub(crate) async fn acquire_stream(
                 let step = step_failover(
                     ctx,
                     &mut messages,
-                    error.into(),
-                    rendered,
-                    exhaustion,
+                    FailedSend {
+                        trigger: error.into(),
+                        reason: rendered,
+                        exhaustion,
+                    },
                     tx,
                     round_cancel,
+                    round,
                 )
                 .await;
                 match step {
@@ -666,11 +679,14 @@ pub(crate) async fn acquire_stream(
                         match step_failover(
                             ctx,
                             &mut messages,
-                            promoted.into(),
-                            rendered,
-                            exhaustion,
+                            FailedSend {
+                                trigger: promoted.into(),
+                                reason: rendered,
+                                exhaustion,
+                            },
                             tx,
                             round_cancel,
+                            round,
                         )
                         .await
                         {
@@ -718,11 +734,14 @@ pub(crate) async fn acquire_stream(
                         match step_failover(
                             ctx,
                             &mut messages,
-                            promoted.into(),
-                            rendered,
-                            Exhaustion::Transient,
+                            FailedSend {
+                                trigger: promoted.into(),
+                                reason: rendered,
+                                exhaustion: Exhaustion::Transient,
+                            },
                             tx,
                             round_cancel,
+                            round,
                         )
                         .await
                         {
@@ -790,7 +809,9 @@ pub(crate) async fn acquire_stream(
 /// Unix-seconds cutoff for retry-log retention: records older than the retry
 /// window are pruned on append. The window is a log-retention policy only:
 /// the episode ledger, not the log, is what bounds retries.
-fn retry_keep_since(ctx: &AgentContext) -> u64 {
+/// The compaction recorder shares it so both writers keep one log under
+/// one cutoff.
+pub(crate) fn retry_keep_since(ctx: &AgentContext) -> u64 {
     timefmt::now_epoch().saturating_sub(ctx.config.retry_policy.retry_timeout.as_secs())
 }
 
@@ -878,6 +899,15 @@ fn emit_fact_signal(ctx: &AgentContext, blocked: Option<&BlockedFact>) {
         return;
     };
     emit_gateway_signal(ctx, (status, None));
+}
+
+/// A send that failed, and the caller's reading of it: the trigger error, the
+/// operator-facing reason captured before the error moves into the walk, and the
+/// exhaustion reading that decides what an exhausted chain means.
+struct FailedSend {
+    trigger: Error,
+    reason: String,
+    exhaustion: Exhaustion,
 }
 
 /// What a chain exhaustion means for the trigger that caused it — why the chain
@@ -1123,13 +1153,17 @@ fn log_fact_skip(ctx: &AgentContext, endpoint_id: &str, reading: &TableReading, 
 async fn step_failover(
     ctx: &mut AgentContext,
     messages: &mut Vec<Message>,
-    trigger: Error,
-    reason: String,
-    exhaustion: Exhaustion,
+    failed: FailedSend,
     tx: &tokio::sync::mpsc::Sender<AgentEvent>,
     round_cancel: &CancellationToken,
+    round: usize,
 ) -> FailoverStep {
-    match advance_failover(ctx, std::mem::take(messages), trigger, round_cancel).await {
+    let FailedSend {
+        trigger,
+        reason,
+        exhaustion,
+    } = failed;
+    match advance_failover(ctx, std::mem::take(messages), trigger, round_cancel, round).await {
         FailoverOutcome::Advanced {
             from,
             to,
@@ -1197,6 +1231,7 @@ async fn step_failover(
                 budget,
             }))
         }
+        FailoverOutcome::Stop { message } => FailoverStep::Done(AcquireResult::Stop { message }),
     }
 }
 
@@ -1224,6 +1259,7 @@ pub(crate) async fn advance_failover(
     prior_messages: Vec<Message>,
     trigger: anyhow::Error,
     round_cancel: &CancellationToken,
+    round: usize,
 ) -> FailoverOutcome {
     // Honor a cancel that raced in between the failover decision and the chain advance — takes
     // precedence over chain-exhaustion.
@@ -1301,6 +1337,9 @@ pub(crate) async fn advance_failover(
                     .conversation()
                     .with_store(candidate.store.unwrap_or(true));
                 reapply_window(ctx, &from).await;
+                // The new endpoint replaces the ledger: the stretch so far was about
+                // the endpoint that just failed, and this one has not been tried yet.
+                ctx.compaction.clear(timefmt::now_epoch());
                 // The carried context may now exceed the (possibly smaller) window — compact so
                 // the rebuilt request fits. summarize_and_evict no-ops when the context already
                 // fits (it checks before any LLM call); it uses ctx.client, already swapped to
@@ -1312,8 +1351,15 @@ pub(crate) async fn advance_failover(
                         return FailoverOutcome::BudgetExceeded { consumed, budget };
                     }
                     Err(err) => {
-                        warn!("failover compaction failed, sending as-is: {err:#}");
-                        prior_messages
+                        warn!("failover compaction failed on the new endpoint: {err:#}");
+                        match note_compaction_failure(ctx, &err, round).await {
+                            CompactionVerdict::Stop { message } => {
+                                return FailoverOutcome::Stop { message };
+                            }
+                            CompactionVerdict::Retry { .. } | CompactionVerdict::Defer { .. } => {
+                                prior_messages
+                            }
+                        }
                     }
                 };
                 return FailoverOutcome::Advanced {
@@ -1382,6 +1428,7 @@ async fn reapply_window(ctx: &mut AgentContext, from: &str) {
 mod tests {
     use super::*;
 
+    use crate::budget_gate::{BudgetAction, enforce_pre_call_budget};
     use crate::retry::AttemptOrigin;
     use crate::retry::{Episode, RetryCall, RetryPolicy, stream_with_retry};
     use crate::test_support::{
@@ -1458,6 +1505,7 @@ mod tests {
             vec![user_msg("q1")],
             anyhow::anyhow!("endpoint dead"),
             &CancellationToken::new(),
+            0,
         )
         .await;
         assert!(matches!(outcome, FailoverOutcome::Advanced { .. }));
@@ -1471,6 +1519,7 @@ mod tests {
             vec![user_msg("q2")],
             anyhow::anyhow!("endpoint dead"),
             &CancellationToken::new(),
+            0,
         )
         .await;
         assert!(matches!(outcome, FailoverOutcome::Advanced { .. }));
@@ -1533,6 +1582,7 @@ mod tests {
             vec![user_msg("q1")],
             anyhow::anyhow!("endpoint dead"),
             &CancellationToken::new(),
+            0,
         )
         .await;
         assert!(matches!(outcome, FailoverOutcome::Advanced { .. }));
@@ -3445,19 +3495,22 @@ mod tests {
     }
 
     /// A failed compaction during a failover advance sends the prior messages as they
-    /// are: the rebuilt window is not lost, and the chain still advances. Both profiles
-    /// declare [`FAILURE_PIN_WINDOW`]: `advance_failover` re-applies the *target*
-    /// profile's window before compacting, so that declaration is what makes the single
-    /// attempt happen — the explicit `set_context_window` below only serves the seed
-    /// precondition.
+    /// are: the rebuilt window is not lost, the chain still advances, and the ledger
+    /// starts over for the new endpoint — the stretch that failed against the old one
+    /// is not charged against the one about to be tried.
     ///
-    /// The summarizer prompt this test installs: the one POST must carry it, which
-    /// proves the mock answered the compaction call and not a round request.
+    /// Both profiles declare [`FAILURE_PIN_WINDOW`]: `advance_failover` re-applies the
+    /// *target* profile's window before compacting, so that declaration is what makes
+    /// the attempt happen — the explicit `set_context_window` below only serves the
+    /// seed precondition.
+    ///
+    /// The summarizer prompt this test installs: every POST must carry it, which proves
+    /// the mock answered compaction calls and not a round request.
     const SUMMARY_PROBE_MARKER: &str = "acquisition-summary-probe-marker";
 
     #[tokio::test]
-    async fn failover_compaction_failure_sends_the_prior_messages_as_is() {
-        let (source, server) = mock_source(&["p1", "p2"], 400).await;
+    async fn the_advance_arm_records_the_class_and_clears_the_ledger_for_the_new_endpoint() {
+        let (source, server) = mock_source(&["p1", "p2"], 429).await;
         let mut ctx = ctx_from_source(
             vec![
                 profile("a", "p1", FAILURE_PIN_WINDOW),
@@ -3468,15 +3521,29 @@ mod tests {
         )
         .await;
         set_context_window(&mut ctx, FAILURE_PIN_WINDOW).await;
+        // The progressive-warning levels would re-compose before the compaction branch;
+        // one threshold leaves the auto-compact trigger as the only one in play.
+        ctx.config.context_thresholds = vec![80];
         seed_over_budget_store(&mut ctx).await;
         ctx.summarizer.prompt = SUMMARY_PROBE_MARKER.to_owned();
+        let health = Arc::new(RecordingHealth::default());
+        ctx.endpoint_health = Some(health.clone());
         let prior_messages = vec![user_msg("carried turn")];
+
+        // The pre-call gate charges the first failure to the ledger before the
+        // advance: the stretch is one send old when the new endpoint is built.
+        let prompt_tokens = ctx.store.lock().await.total_estimated_tokens();
+        let gated =
+            enforce_pre_call_budget(&mut ctx, prompt_tokens, 0, &CancellationToken::new()).await;
+        assert!(matches!(gated, BudgetAction::Proceed));
+        assert_eq!(ctx.compaction.attempts(), 1);
 
         let outcome = advance_failover(
             &mut ctx,
             prior_messages.clone(),
             anyhow::anyhow!("endpoint dead"),
             &CancellationToken::new(),
+            0,
         )
         .await;
 
@@ -3487,12 +3554,35 @@ mod tests {
             messages, prior_messages,
             "the prior window is sent unchanged"
         );
-        let requests = server.received_requests().await.unwrap_or_default();
-        assert_eq!(requests.len(), 1, "one compaction attempt");
-        let body = String::from_utf8_lossy(&requests[0].body);
+        assert_eq!(
+            ctx.compaction.attempts(),
+            1,
+            "the new endpoint's stretch starts at the attempt just made"
+        );
         assert!(
-            body.contains(SUMMARY_PROBE_MARKER),
-            "the single POST must be the summarizer request, not a round request"
+            ctx.compaction.is_latched(timefmt::now_epoch()),
+            "the defer verdict keeps the gate quiet until the main send's outcome"
+        );
+        let requests = server.received_requests().await.unwrap_or_default();
+        assert_eq!(requests.len(), 2, "one compaction attempt per endpoint");
+        for request in &requests {
+            let body = String::from_utf8_lossy(&request.body);
+            assert!(
+                body.contains(SUMMARY_PROBE_MARKER),
+                "every POST must be a summarizer request, not a round request"
+            );
+        }
+        assert_eq!(
+            health.recorded().len(),
+            2,
+            "each arm writes its class to the endpoint-health view"
+        );
+        let log = ctx.store.lock().await.retry_log.clone();
+        assert_eq!(log.len(), 2, "each arm reaches the retry log");
+        assert!(
+            log.iter().all(|record| record.kind == RetryKind::RateLimit),
+            "429 is the quota class in both arms: {:?}",
+            log.iter().map(|record| record.kind).collect::<Vec<_>>()
         );
     }
 }

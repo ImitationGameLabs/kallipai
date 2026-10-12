@@ -105,6 +105,21 @@ pub enum SystemEvent {
     AgentRestore,
     /// Context compaction summarized and evicted turns.
     CompactionSummary,
+    /// A compaction attempt failed and the stretch ended.
+    ///
+    /// Carries what the operator acts on: how many sends the stretch spent,
+    /// against which cap, the class the shared table gave the failure, and
+    /// the rendered detail.
+    CompactionFailure {
+        /// Sends charged to the failing stretch.
+        attempt: u32,
+        /// The policy's own cap for that stretch.
+        max_attempts: u32,
+        /// The failure class's own label.
+        class: String,
+        /// The rendered backend error.
+        detail: String,
+    },
     /// Legacy log event; kept so older history lines still parse.
     ReferenceInvalidated {
         /// The turn whose sidecar record carries the invalidated reference.

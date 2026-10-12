@@ -151,6 +151,7 @@ pub(crate) async fn ctx_from_source(
         retry_at: Arc::new(std::sync::Mutex::new(None)),
         transient_fails: 0,
         lifecycle: std::sync::Mutex::new(crate::lifecycle::LifecycleState::Idle),
+        compaction: crate::context::CompactionLedger::new(kallipai_common::timefmt::now_epoch()),
         wait_until: Arc::new(std::sync::Mutex::new(None)),
         wait_notify: Arc::new(tokio::sync::Notify::new()),
         wait_armed_secs: 0,
@@ -210,6 +211,27 @@ pub(crate) async fn mock_source(
         map.insert((*provider).into(), backend.clone() as Arc<dyn LlmBackend>);
     }
     (Arc::new(MapSource(map)), server)
+}
+
+/// Mount a 200 JSON completion carrying `content`, outranking any catch-all mount
+/// on the same server: the summarizer calls the non-streaming `chat_completion`,
+/// so the body is a completion envelope rather than SSE. Priority 1 (against the
+/// default 5) lets a test keep a failing catch-all mounted and still answer one
+/// summary call successfully.
+pub(crate) async fn mount_summary(server: &wiremock::MockServer, content: &str) {
+    let body = format!(
+        "{{\"id\":\"1\",\"object\":\"chat.completion\",\"created\":1,\"model\":\"m\",\"choices\":[{{\"index\":0,\"message\":{{\"role\":\"assistant\",\"content\":\"{content}\"}},\"finish_reason\":\"stop\"}}],\"usage\":{{\"prompt_tokens\":1,\"completion_tokens\":1,\"total_tokens\":2}}}}"
+    );
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path("/chat/completions"))
+        .respond_with(
+            wiremock::ResponseTemplate::new(200)
+                .insert_header("content-type", "application/json")
+                .set_body_raw(body.into_bytes(), "application/json"),
+        )
+        .with_priority(1)
+        .mount(server)
+        .await;
 }
 
 /// A context over `profiles` whose backends answer from a loopback mock server with

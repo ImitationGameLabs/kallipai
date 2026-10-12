@@ -1,16 +1,26 @@
 //! Context compaction: summarize old turns into a pinned summary to stay within budget.
 //!
 //! [`summarize_and_evict`] runs bounded summarize-and-evict passes; [`compact_if_needed`] is the
-//! pre-loop wrapper for restored agents. [`CompactOutcome`] reports the result.
+//! pre-loop wrapper for restored agents. [`CompactOutcome`] reports the result. A failed
+//! summarizer call is classified, charged to [`CompactionLedger`] and decided by
+//! [`note_compaction_failure`] — the one recorder the gate, the pre-loop wrapper and the
+//! failover-advance arm share — into a [`CompactionVerdict`].
+
+use std::time::Duration;
 
 use anyhow::Result;
+use just_llm_client::BackendError;
 use just_llm_client::types::generation::{ContentPart, Message};
+use kallipai_common::retry::{RetryKind, RetryRecord};
+use kallipai_common::timefmt;
 use tracing::{info, warn};
 
 use super::turn::{Turn, TurnKind};
 use crate::agent_task::AgentContext;
 use crate::context::AgenticContext;
 use crate::history::{RecordKind, SystemEvent};
+use crate::retry::decision::{self, Attempt, Decision, FailureClass, Phase, ShapeKey};
+use crate::retry::{Episode, max_sends};
 use crate::text_slice::head_tail_slice;
 
 /// Outcome of context compaction via [`summarize_and_evict`].
@@ -262,20 +272,386 @@ pub(crate) async fn compact_if_needed(ctx: &AgentContext) -> Result<bool> {
     }
 }
 
+/// Pre-loop compaction for a restored agent: run the wrapper and charge any
+/// failure to the ledger.
+///
+/// The verdict is taken, but a stop is not acted on here: this runs outside a
+/// round, where the lifecycle table admits only Idle -> Running, so a park is
+/// not expressible and an error event would report a stop the agent has not
+/// made. What it reaches waits in the ledger instead: a stop as the message the
+/// round's gate fails on, a backoff as the armed latch. The round that follows
+/// reads both at its gate, so one failure costs one request and one history
+/// line.
+///
+/// A pre-loop pass that returned at all is not a failure (compacted, nothing to
+/// compact, or declined on the summarizer budget), so it ends whatever stretch
+/// the ledger was carrying.
+pub(crate) async fn compact_pre_loop(ctx: &mut AgentContext) {
+    match compact_if_needed(ctx).await {
+        Ok(_) => {
+            ctx.compaction.clear(timefmt::now_epoch());
+        }
+        Err(error) => {
+            warn!("pre-loop compaction failed: {error:#}");
+            // The pre-loop precedes the first round, so its records carry round 0.
+            if let CompactionVerdict::Stop { message } =
+                note_compaction_failure(ctx, &error, 0).await
+            {
+                // A stop cannot be taken here (this runs outside a round), so it
+                // is parked for the round's gate, which fails on it before
+                // sending. New work restarts the count and leaves the verdict
+                // where it is (`restart`).
+                ctx.compaction.record_stop(message);
+            }
+        }
+    }
+}
+
+/// The compaction attempt ledger: one failing stretch of summarizer calls.
+///
+/// A stretch starts at its first failure — the clock the policy's deadline is
+/// measured against — and its accounting ends when compaction succeeds (in the
+/// gate or at the pre-loop wrapper), the store is back within the budget, or the
+/// chain advances to a new endpoint. Its budget is the retry policy's own:
+/// `max_sends` sends and `retry_timeout` of wall clock, so an operator tuning
+/// retries tunes this too.
+///
+/// A stop met outside a round is parked here rather than acted on: the round's
+/// gate takes it and fails, so the verdict the wrapper reached is the one an
+/// operator reads.
+///
+/// The accounting and what a verdict leaves behind have separate lifetimes. New
+/// work restarts the count (`restart`); an armed backoff and a stop waiting for
+/// a gate stay with it, because both answer for the context a round would send,
+/// not for the count. They go where they no longer answer for anything: the gate
+/// taking the stop, a summary landing, the store back within budget, the chain
+/// advancing (`clear`).
+///
+/// The shape memory an episode carries belongs to the count, not to what a
+/// verdict left behind: `restart` rebuilds the episode, so a shape that spent
+/// its slot reads as unused to the work that follows. Unlike the latch and the
+/// parked stop, that memory does not cross a restart.
+#[derive(Debug)]
+pub struct CompactionLedger {
+    episode: Episode,
+    /// The moment (epoch seconds) before which no further attempt is made.
+    ///
+    /// It outlives `restart`: a backoff armed outside a round still holds when
+    /// new work arrives, so that work's first gate does not ask the summarizer
+    /// again inside the window.
+    latch_until: Option<u64>,
+    /// A stop the pre-loop wrapper met outside a round, waiting for the round's
+    /// gate to take it.
+    ///
+    /// It outlives `restart` too: new work gets a fresh count, not a fresh
+    /// verdict.
+    pending_stop: Option<String>,
+}
+
+impl CompactionLedger {
+    /// A fresh ledger: nothing charged, nothing latched.
+    pub fn new(now: u64) -> Self {
+        Self {
+            episode: Episode::new(now),
+            latch_until: None,
+            pending_stop: None,
+        }
+    }
+
+    /// Whether the backoff the last failure armed is still running.
+    pub(crate) fn is_latched(&self, now: u64) -> bool {
+        matches!(self.latch_until, Some(until) if now < until)
+    }
+
+    /// The sends charged to this stretch.
+    pub(crate) fn attempts(&self) -> u32 {
+        self.episode.attempts()
+    }
+
+    /// End the stretch: the count, the latch and a parked stop all go; `restart` is
+    /// the new-work reset that keeps the latch and the stop.
+    pub(crate) fn clear(&mut self, now: u64) {
+        *self = Self::new(now);
+    }
+
+    /// Restart the count for new work. What the last verdict left behind — the
+    /// armed latch and a parked stop — stays: both answer for the context a round
+    /// would send, so the round this work starts reads them at its gate.
+    pub(crate) fn restart(&mut self, now: u64) {
+        let latch_until = self.latch_until;
+        let pending_stop = self.pending_stop.take();
+        *self = Self::new(now);
+        self.latch_until = latch_until;
+        self.pending_stop = pending_stop;
+    }
+
+    /// Charge one send and hand back the failed attempt the verdict reads.
+    ///
+    /// The failure that opens the stretch starts its clock: the deadline is
+    /// measured from the first failure, not from the moment the ledger was
+    /// built, because an agent can carry a fresh ledger across many rounds
+    /// below the compaction threshold.
+    fn charge_failure(
+        &mut self,
+        class: FailureClass,
+        shape: Option<ShapeKey>,
+        now: u64,
+        jitter: Duration,
+    ) -> Attempt {
+        if self.episode.attempts() == 0 {
+            self.episode = Episode::new(now);
+        }
+        self.episode = self.episode.after_attempt();
+        Attempt::failed(Phase::Connect, class, shape, now, jitter)
+    }
+
+    /// Spend the stretch's one shape slot for a retry this path performs, so a
+    /// repeat of the same shape reads as the endpoint's business.
+    fn spend_shape_slot(&mut self, error: &BackendError) {
+        crate::retry::spend_shape_slot(&mut self.episode, error);
+    }
+
+    /// Arm a wait: no attempt before `until`.
+    fn arm(&mut self, until: u64) {
+        self.latch_until = Some(until);
+    }
+
+    /// Park a stop met outside a round: the round's gate takes it and fails.
+    fn record_stop(&mut self, message: String) {
+        self.pending_stop = Some(message);
+    }
+
+    /// Take the parked stop, if any: a stop is acted on once.
+    pub(crate) fn take_pending_stop(&mut self) -> Option<String> {
+        self.pending_stop.take()
+    }
+
+    /// Test hook: move the latch deadline to `now`, which un-latches the ledger
+    /// without sleeping (a pin cannot advance a clock).
+    #[cfg(test)]
+    pub(crate) fn expire_latch(&mut self, now: u64) {
+        self.latch_until = Some(now);
+    }
+
+    /// Test hook: the armed deadline, so a pin asserts what a verdict armed
+    /// without re-deriving the jitter.
+    #[cfg(test)]
+    pub(crate) fn latch_until(&self) -> Option<u64> {
+        self.latch_until
+    }
+}
+
+/// What one failed compaction attempt decided.
+#[derive(Debug)]
+pub(crate) enum CompactionVerdict {
+    /// Transient: the latch is armed and the round proceeds; the next attempt
+    /// waits out the policy's backoff.
+    Retry { after: Duration },
+    /// A class the failover chain owns: the observation is written, the round
+    /// proceeds, and the main send handles the endpoint.
+    Defer { reason: &'static str },
+    /// No send can help, or the stretch is spent: the round ends with this
+    /// operator-facing message.
+    Stop { message: String },
+}
+
+/// The deadline a wait arms: whole seconds, rounded up and never below one, so
+/// a sub-second backoff still holds the gate off for a moment instead of
+/// arming the instant it failed.
+fn latch_deadline(now: u64, wait: Duration) -> u64 {
+    let secs = wait
+        .as_secs()
+        .saturating_add(u64::from(wait.subsec_nanos() > 0));
+    now.saturating_add(secs.max(1))
+}
+
+/// Record one failed compaction attempt and return its verdict.
+///
+/// The single recorder behind all three call sites (the pre-call gate, the
+/// pre-loop wrapper, the failover-advance arm), so a compaction failure is
+/// classified, charged and decided the same way wherever it is met: the class
+/// from the shared table ([`decision::classify`], connect phase) and the verdict
+/// from the shared verdict function ([`decision::decide`]) over this ledger's
+/// facts — the pair the retry shell consults.
+pub(crate) async fn note_compaction_failure(
+    ctx: &mut AgentContext,
+    error: &anyhow::Error,
+    round: usize,
+) -> CompactionVerdict {
+    let now = timefmt::now_epoch();
+    let policy = ctx.config.retry_policy.clone();
+    let backend = error
+        .chain()
+        .find_map(|node| node.downcast_ref::<BackendError>());
+    let class = backend
+        .map(|backend| decision::classify(backend, Phase::Connect))
+        .unwrap_or(FailureClass::Unclassified);
+    let attempt = ctx.compaction.charge_failure(
+        class,
+        backend.and_then(decision::shape_key),
+        now,
+        crate::retry::jitter_now(),
+    );
+    let verdict = decision::decide(&ctx.compaction.episode.facts(&attempt), &policy);
+
+    match verdict {
+        Decision::Retry { after } => {
+            let Some(kind) = decision::retry_kind(&class) else {
+                // A retryable class always maps to a record kind; recording the
+                // attempt under a made-up one would be worse than stopping.
+                return stop_compaction(
+                    ctx,
+                    class,
+                    error,
+                    backend,
+                    "the failure class carries no retry kind",
+                )
+                .await;
+            };
+            let record = retry_record(ctx, round, now, kind, after.as_secs_f64(), error);
+            ctx.store
+                .lock()
+                .await
+                .record_retries([record], crate::acquisition::retry_keep_since(ctx));
+            ctx.persist().await;
+            // A shape-class retry spends the stretch's one shape slot for that
+            // key, so a repeat of the same shape reads as the endpoint's
+            // business; only a retry this path performs spends the slot.
+            if let Some(backend) = backend {
+                ctx.compaction.spend_shape_slot(backend);
+            }
+            ctx.compaction.arm(latch_deadline(now, after));
+            CompactionVerdict::Retry { after }
+        }
+        Decision::AdvanceFailover { reason } => {
+            if let Some(backend) = backend {
+                crate::retry::record_endpoint_fact(
+                    ctx.endpoint_health.as_deref(),
+                    &ctx.failover.current_profile().endpoint,
+                    class,
+                    backend,
+                    now,
+                );
+            }
+            // The main path records the class whether the chain then advances or
+            // runs out; only the classes that reach an advance carry a kind.
+            if let Some(kind) = decision::retry_kind(&class) {
+                let record = retry_record(ctx, round, now, kind, 0.0, error);
+                ctx.store
+                    .lock()
+                    .await
+                    .record_retries([record], crate::acquisition::retry_keep_since(ctx));
+                ctx.persist().await;
+            }
+            // The endpoint is the main send's business now; the latch holds the
+            // gate off for one policy backoff — a moment, not the send's own
+            // outcome.
+            let wait = crate::retry::backoff_delay(&policy, 0);
+            ctx.compaction.arm(latch_deadline(now, wait));
+            CompactionVerdict::Defer { reason }
+        }
+        Decision::Stop { reason, .. } | Decision::Fatal { reason } => {
+            stop_compaction(ctx, class, error, backend, reason).await
+        }
+        Decision::Proceed => {
+            // A settled failure always yields a verdict about it: `Proceed` is the
+            // pre-send reading, and this attempt already failed.
+            stop_compaction(
+                ctx,
+                class,
+                error,
+                backend,
+                "the verdict for a failed attempt was to proceed",
+            )
+            .await
+        }
+    }
+}
+
+/// The record a compaction failure leaves in the retry log: the shape the retry
+/// shell writes, so an operator reads one log.
+fn retry_record(
+    ctx: &AgentContext,
+    round: usize,
+    now: u64,
+    kind: RetryKind,
+    delay_secs: f64,
+    error: &anyhow::Error,
+) -> RetryRecord {
+    RetryRecord {
+        timestamp: now,
+        round,
+        attempt: ctx.compaction.attempts(),
+        max_attempts: ctx.config.retry_policy.max_retries,
+        error: format!("{error:#}"),
+        delay_secs,
+        endpoint: Some(ctx.failover.current_profile().endpoint.clone()),
+        kind,
+        quota_reset: None,
+    }
+}
+
+/// End the stretch: write the durable history line and build the message the
+/// round ends with.
+///
+/// The message carries the class's own label, the attempt count against the
+/// policy's cap, and how far over budget the context sits — the numbers the
+/// round could not honor, which is what the operator acts on. The history line
+/// is the agent's own append-only account of what ended the stretch: the park
+/// reason is in-memory current state, and the `Error` event is a notification to
+/// a superior the agent may not have.
+async fn stop_compaction(
+    ctx: &mut AgentContext,
+    class: FailureClass,
+    error: &anyhow::Error,
+    backend: Option<&BackendError>,
+    reason: &str,
+) -> CompactionVerdict {
+    let attempt = ctx.compaction.attempts();
+    let max_attempts = max_sends(&ctx.config.retry_policy);
+    let detail = match backend {
+        Some(backend) => crate::llm_error::render_error(backend),
+        None => format!("{error:#}"),
+    };
+    let label = class.label();
+    let consumed = ctx.store.lock().await.total_estimated_tokens();
+    let budget = ctx.config.effective_budget();
+    ctx.append_history(
+        None,
+        &[],
+        0,
+        RecordKind::System,
+        Some(SystemEvent::CompactionFailure {
+            attempt,
+            max_attempts,
+            class: label.to_string(),
+            detail,
+        }),
+        &[],
+    );
+    CompactionVerdict::Stop {
+        message: format!(
+            "compaction failed: {reason} (class: {label}; attempt {attempt} of {max_attempts}; \
+             context {consumed} tokens over the {budget}-token budget)"
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::history::{HistoryRecord, HistoryWriter};
     use crate::retry::RetryPolicy;
+    use crate::retry::decision::TransientKind;
     use crate::test_support::{
-        FAILURE_PIN_WINDOW, MapSource, ctx_from_source, ctx_with_mock, profile,
+        FAILURE_PIN_WINDOW, MapSource, ctx_from_source, ctx_with_mock, mount_summary, profile,
         seed_over_budget_store, set_context_window, tool_result_msg, user_msg,
     };
     use just_llm_client::LlmBackend;
     use std::collections::HashMap;
     use std::sync::Arc;
     use std::time::Duration;
-    use wiremock::matchers::{method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
+    use wiremock::MockServer;
 
     /// Fast retry policy so the wiremock suite stays snappy.
     fn fast_policy() -> RetryPolicy {
@@ -295,23 +671,6 @@ mod tests {
             Some(uri),
         )
         .expect("openai-compat backend constructs without network")
-    }
-
-    /// Mount a 200 JSON completion response carrying `content` — the summarizer
-    /// calls the non-streaming `chat_completion`, so this is not SSE.
-    async fn mount_summary(server: &MockServer, content: &str) {
-        let body = format!(
-            "{{\"id\":\"1\",\"object\":\"chat.completion\",\"created\":1,\"model\":\"m\",\"choices\":[{{\"index\":0,\"message\":{{\"role\":\"assistant\",\"content\":\"{content}\"}},\"finish_reason\":\"stop\"}}],\"usage\":{{\"prompt_tokens\":1,\"completion_tokens\":1,\"total_tokens\":2}}}}"
-        );
-        Mock::given(method("POST"))
-            .and(path("/chat/completions"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .insert_header("content-type", "application/json")
-                    .set_body_raw(body.into_bytes(), "application/json"),
-            )
-            .mount(server)
-            .await;
     }
 
     /// An agent whose profiles point at a wiremock server that answers every
@@ -483,10 +842,11 @@ mod tests {
         assert_eq!(store.total_estimated_tokens(), tokens_before);
     }
 
-    /// The pre-loop wrapper propagates the same failure: it reports the error instead of
-    /// swallowing it into a `false` that reads as "the context already fits".
+    /// A failed summarizer call surfaces as an error from `compact_if_needed`
+    /// instead of being swallowed into a `false` that reads as "the context
+    /// already fits": the wrapper and the gate both need the error to record it.
     #[tokio::test]
-    async fn pre_loop_compaction_reports_a_failed_summary_call() {
+    async fn a_failed_summary_call_surfaces_from_compact_if_needed() {
         let (mut ctx, _server) =
             ctx_with_mock(vec![profile("p1", "ep1", 500_000)], &["ep1"], 400).await;
         set_context_window(&mut ctx, FAILURE_PIN_WINDOW).await;
@@ -496,7 +856,158 @@ mod tests {
 
         assert!(
             result.is_err(),
-            "the pre-loop wrapper must report the failure, not answer `false`"
+            "the helper must report the failure, not answer `false`"
+        );
+    }
+
+    /// A stopped stretch leaves a durable line in the agent's own history: the
+    /// park reason is in-memory current state and the `Error` event is a
+    /// notification to a superior the agent may not have, so the append-only log
+    /// is the account an operator reads after the fact.
+    #[tokio::test]
+    async fn a_stopped_compaction_writes_the_history_record() {
+        let (mut ctx, _server) =
+            ctx_with_mock(vec![profile("p1", "ep1", 500_000)], &["ep1"], 400).await;
+        set_context_window(&mut ctx, FAILURE_PIN_WINDOW).await;
+        seed_over_budget_store(&mut ctx).await;
+        let dir = tempfile::tempdir().unwrap();
+        ctx.history = Some(HistoryWriter::new(dir.path().to_owned()));
+
+        let Err(error) = summarize_and_evict(&ctx).await else {
+            panic!("a 400 from the summarizer must surface as an error");
+        };
+        let verdict = note_compaction_failure(&mut ctx, &error, 3).await;
+
+        assert!(
+            matches!(verdict, CompactionVerdict::Stop { .. }),
+            "a 400 is the class table's terminal class"
+        );
+        let file = std::fs::read_dir(dir.path().join("history"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let line = std::fs::read_to_string(file).unwrap();
+        let record: HistoryRecord = serde_json::from_str(line.trim_end()).unwrap();
+
+        assert_eq!(record.kind, RecordKind::System);
+        let Some(SystemEvent::CompactionFailure {
+            attempt,
+            max_attempts,
+            class,
+            detail,
+        }) = record.event
+        else {
+            panic!("a stopped compaction must write its own history event");
+        };
+        assert_eq!(attempt, 1, "the stretch spent one send");
+        assert_eq!(
+            max_attempts,
+            max_sends(&ctx.config.retry_policy),
+            "the cap is the policy's send budget"
+        );
+        assert_eq!(class, "the request itself was rejected");
+        assert!(
+            !detail.is_empty(),
+            "the rendered backend detail rides the line"
+        );
+    }
+    /// A shape-class failure spends the stretch's one shape slot: the repeat of
+    /// the same shape is the endpoint's business, so the recorder defers it to
+    /// the main send instead of asking the summarizer for that shape again.
+    #[tokio::test]
+    async fn a_repeated_summarizer_shape_yields_to_the_main_send() {
+        let (mut ctx, _server) =
+            ctx_with_mock(vec![profile("p1", "ep1", 500_000)], &["ep1"], 500).await;
+        set_context_window(&mut ctx, FAILURE_PIN_WINDOW).await;
+        seed_over_budget_store(&mut ctx).await;
+        let error = anyhow::Error::new(BackendError::provider(
+            "probe",
+            just_llm_client::TransportError::InvalidResponse("a body of the wrong shape".into()),
+        ));
+
+        let first = note_compaction_failure(&mut ctx, &error, 0).await;
+        let repeat = note_compaction_failure(&mut ctx, &error, 0).await;
+
+        assert!(
+            matches!(first, CompactionVerdict::Retry { .. }),
+            "the first shape failure is retryable"
+        );
+        assert!(
+            matches!(repeat, CompactionVerdict::Defer { .. }),
+            "the repeat of the same shape defers to the main send"
+        );
+        assert_eq!(ctx.compaction.attempts(), 2, "both sends were charged");
+    }
+
+    /// The parked stop is taken once: the gate fails on it, and a later gate call
+    /// reads the context afresh instead of replaying the same verdict.
+    #[tokio::test]
+    async fn a_parked_stop_is_taken_once() {
+        let (mut ctx, _server) =
+            ctx_with_mock(vec![profile("p1", "ep1", 500_000)], &["ep1"], 400).await;
+        set_context_window(&mut ctx, FAILURE_PIN_WINDOW).await;
+        let (_, prompt_tokens) = seed_over_budget_store(&mut ctx).await;
+        ctx.config.context_thresholds = vec![80];
+
+        compact_pre_loop(&mut ctx).await;
+        assert_eq!(ctx.compaction.attempts(), 1, "the wrapper charged the send");
+
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let first =
+            crate::budget_gate::enforce_pre_call_budget(&mut ctx, prompt_tokens, 0, &cancel).await;
+        assert!(
+            matches!(first, crate::budget_gate::BudgetAction::Fail(_)),
+            "the parked stop ends the round"
+        );
+        assert_eq!(
+            ctx.compaction.attempts(),
+            1,
+            "the parked stop is taken without a summarizer send"
+        );
+
+        let second =
+            crate::budget_gate::enforce_pre_call_budget(&mut ctx, prompt_tokens, 1, &cancel).await;
+        assert!(
+            matches!(second, crate::budget_gate::BudgetAction::Fail(_)),
+            "the context still does not fit: the gate reads it afresh"
+        );
+        assert_eq!(
+            ctx.compaction.attempts(),
+            2,
+            "the parked stop is taken once, not replayed"
+        );
+    }
+
+    /// A landing pre-loop compaction clears the stretch: the round that follows
+    /// does not inherit the earlier failure's latch or its spent budget.
+    #[tokio::test]
+    async fn a_pre_loop_success_clears_the_stretch() {
+        let (mut ctx, _server) = summary_ctx().await;
+        set_context_window(&mut ctx, FAILURE_PIN_WINDOW).await;
+        seed_over_budget_store(&mut ctx).await;
+        ctx.config.context_thresholds = vec![80];
+        // A stretch an earlier round left open: one send charged, the backoff
+        // armed well past this call.
+        ctx.compaction.charge_failure(
+            FailureClass::Transient(TransientKind::Server),
+            None,
+            timefmt::now_epoch(),
+            Duration::ZERO,
+        );
+        ctx.compaction.arm(timefmt::now_epoch() + 600);
+
+        compact_pre_loop(&mut ctx).await;
+
+        assert_eq!(
+            ctx.compaction.attempts(),
+            0,
+            "the landing summary ends the stretch"
+        );
+        assert!(
+            !ctx.compaction.is_latched(timefmt::now_epoch()),
+            "the old latch does not survive a landing summary"
         );
     }
 }

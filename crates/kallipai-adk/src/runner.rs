@@ -115,10 +115,13 @@ pub(crate) async fn run_agent_rounds(
             }
         };
 
-        match enforce_pre_call_budget(ctx, prompt_tokens, round_cancel).await {
+        match enforce_pre_call_budget(ctx, prompt_tokens, round, round_cancel).await {
             BudgetAction::Recompose => continue,
             BudgetAction::Return(outcome) => return Ok(RoundOutcome::Park(outcome)),
             BudgetAction::Proceed => {}
+            // A compaction failure no send can help with ends the round: the error
+            // carries the verdict's message and parks the agent (see the caller).
+            BudgetAction::Fail(error) => return Err(error),
         }
 
         // -- Within-set failover acquisition: consume the stream with mid-stream transport
@@ -153,6 +156,9 @@ pub(crate) async fn run_agent_rounds(
             BudgetAction::Recompose => continue,
             BudgetAction::Return(outcome) => return Ok(RoundOutcome::Park(outcome)),
             BudgetAction::Proceed => {}
+            // The post-stream gate does not compact, so no failure verdict can
+            // reach it; the arm keeps the shared verdict type total.
+            BudgetAction::Fail(error) => return Err(error),
         }
 
         // -- Bare assistant response (no tool calls): the agent did not call `break`,

@@ -251,6 +251,9 @@ pub(crate) async fn spawn_agent(mut args: SpawnArgs) -> anyhow::Result<(Agent, A
         retry_at: Arc::new(std::sync::Mutex::new(None)),
         transient_fails: 0,
         lifecycle: std::sync::Mutex::new(kallipai_adk::LifecycleState::Idle),
+        compaction: kallipai_adk::context::CompactionLedger::new(
+            kallipai_common::timefmt::now_epoch(),
+        ),
         wait_until: Arc::new(std::sync::Mutex::new(None)),
         wait_notify: Arc::new(tokio::sync::Notify::new()),
         wait_armed_secs: 0,
