@@ -255,7 +255,7 @@ pub(crate) async fn ctx_with_mock(
 pub(crate) const FAILURE_PIN_WINDOW: usize = 40_000;
 
 /// Shrink `ctx`'s window to `window` and re-sync the store's pinned-budget guard —
-/// the first two of the three steps `acquisition::reapply_window` applies on
+/// the first two of the three steps `acquisition::failover::reapply_window` applies on
 /// failover. The third, `mark_needs_full_estimate`, is deliberately omitted: these
 /// tests feed the gates `total_estimated_tokens`, a plain per-turn sum that never
 /// consults the anchor flag the marker guards. Lets a test build an over-budget

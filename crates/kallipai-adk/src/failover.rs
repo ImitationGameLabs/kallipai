@@ -10,7 +10,7 @@
 //! the client is actually using (which drifts from the spawn-time active after an advance).
 //!
 //! The advance *transition* itself — advancing on a `Failover` outcome, swapping the client,
-//! re-applying the window, compacting — lives in `crate::acquisition::advance_failover`, not here:
+//! re-applying the window, compacting — lives in `crate::acquisition::failover::advance_failover`, not here:
 //! it spills across the agent context (client/window/store) and so cannot be a pure self-method.
 //! This module owns the state and the accessors that DRY the chain indexing; the acquisition
 //! module owns the driving.
@@ -214,7 +214,7 @@ pub struct ProfileSnapshot {
     pub model: String,
 }
 
-/// Outcome of one within-set failover advance attempt (see `crate::acquisition::advance_failover`).
+/// Outcome of one within-set failover advance attempt (see `crate::acquisition::failover::advance_failover`).
 ///
 /// `messages` is returned on [`Advanced`](Self::Advanced) — recomputed if compaction ran, else
 /// unchanged — so the acquisition loop can rebind its local without `advance_failover` taking

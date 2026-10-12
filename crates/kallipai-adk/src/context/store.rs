@@ -619,7 +619,7 @@ impl ContextStore {
         store
     }
     /// Set the pinned token budget. Called at agent setup and re-synced on within-set failover
-    /// (see `acquisition::reapply_window`).
+    /// (see `acquisition::failover::reapply_window`).
     pub fn set_pinned_budget(&mut self, budget: usize) {
         self.pinned_token_budget = budget;
     }

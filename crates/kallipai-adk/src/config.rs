@@ -382,13 +382,13 @@ impl AgentConfig {
     /// invariants. The single installer: every window — including the implicit env profile's
     /// (`profile::from_env` reads `KALLIPAI_CONTEXT_WINDOW_TOKENS` into `max_context_window`) —
     /// flows through here at spawn, and within-set failover re-applies the advanced profile's
-    /// window via `acquisition::reapply_window`. `context_window_tokens` is thus a derived snapshot of
+    /// window via `acquisition::failover::reapply_window`. `context_window_tokens` is thus a derived snapshot of
     /// the active profile's declared window, not an independent config knob.
     ///
     /// Validates **before** mutating: on an invariant violation the field is left untouched and
     /// `Err` is returned, so a caller that treats the failure as "keep the prior window" gets
     /// exactly that. Failover pre-checks with `try_context_window` instead and *skips* an
-    /// infeasible candidate before committing the advance (see `acquisition::advance_failover`).
+    /// infeasible candidate before committing the advance (see `acquisition::failover::advance_failover`).
     pub fn set_context_window(&mut self, tokens: usize) -> Result<()> {
         self.try_context_window(tokens)?;
         self.context_window_tokens = tokens;
@@ -416,7 +416,7 @@ impl AgentConfig {
 /// (env values) and [`AgentConfig::set_context_window`] (profile override) so the two paths
 /// cannot drift. `pinned_budget` is recomputed locally here because `ContextStore`'s
 /// `set_pinned_budget` runs later and independently (at spawn via the tagma, and on within-set
-/// failover via `acquisition::reapply_window`).
+/// failover via `acquisition::failover::reapply_window`).
 fn check_context_budget(
     context_window_tokens: usize,
     output_reserve_tokens: usize,
