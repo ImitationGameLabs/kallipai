@@ -101,6 +101,20 @@ impl ForwardOutcome {
             Self::ProxyError => "proxy_error",
         }
     }
+    /// Whether the outcome is a gate refusal: the selection gates
+    /// answered the request before an upstream was reached. The five
+    /// variants are enumerated here, beside the enum, so a new gate
+    /// variant cannot silently escape the warrant and counter faces.
+    pub(crate) fn is_gate(self) -> bool {
+        matches!(
+            self,
+            Self::GatedAuth
+                | Self::GatedRoute
+                | Self::GatedVisibility
+                | Self::GatedParking
+                | Self::GatedPayload
+        )
+    }
 
     /// The upstream status-line class. Everything outside 2xx/4xx/5xx
     /// (3xx redirects, unusual codes) is `UpstreamOther`.

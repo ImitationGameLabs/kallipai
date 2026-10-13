@@ -35,11 +35,17 @@ pub struct Selection {
     pub base_path: String,
     /// The upstream URL authority verbatim (the Host header value).
     pub authority: String,
+    /// The profile the request rides: the terminal failure line
+    /// names it, so a failure is attributable to a profile.
+    pub profile_id: String,
 }
 
 pub struct GatewayCtx {
     pub route: Route,
     pub selection: Option<Selection>,
+    /// The authenticated tagma, staged at the identity gate: the
+    /// terminal failure line names the caller behind a failure.
+    pub tagma_id: Option<String>,
     /// The forwarding clock: `t0` at the Forward branch entry,
     /// `t1` at the first upstream response header. The duration
     /// metrics observe them at the terminal phase.

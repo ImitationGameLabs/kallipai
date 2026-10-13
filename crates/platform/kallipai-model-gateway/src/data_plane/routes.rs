@@ -327,5 +327,6 @@ pub(crate) async fn select_route(
         api_family: served.family.clone(),
         base_path: parsed.base_path,
         authority: parsed.authority,
+        profile_id,
     })
 }

@@ -27,6 +27,8 @@
 //! passes through the bridge -- the framework proxies it verbatim.
 
 mod context;
+#[cfg(test)]
+mod failure_line_tests;
 pub mod routes;
 #[cfg(test)]
 mod tests;
@@ -158,6 +160,7 @@ impl ProxyHttp for GatewayProxy {
         GatewayCtx {
             route: Route::NotFound,
             selection: None,
+            tagma_id: None,
             t0: None,
             t1: None,
             pending_outcome: None,
@@ -222,6 +225,9 @@ impl ProxyHttp for GatewayProxy {
                 let Some(identity) = self.authenticate_or_respond(session, ctx).await? else {
                     return Ok(true);
                 };
+                // The authenticated tagma is staged for the terminal
+                // failure line: the caller behind a failure is named.
+                ctx.tagma_id = Some(identity.tagma_id.clone());
                 // The selection decides everything the later phases do;
                 // an error here is the client-visible answer.
                 match routes::select_route(
@@ -443,6 +449,15 @@ impl ProxyHttp for GatewayProxy {
             ctx.upstream_status,
         );
         self.state.metrics.record_forward(endpoint, outcome);
+        // The failure line: one structured record per failed forward,
+        // carrying the attribution the counters carry.
+        log_forward_failure(
+            endpoint,
+            outcome,
+            ctx,
+            e,
+            ctx.t0.map(|t0| Instant::now().duration_since(t0)),
+        );
         // The forwarded-traffic instruments: the in-flight gauge pairs
         // with its selection-time increment, and the end-to-end
         // duration is a forwarded-traffic histogram (instant gate
@@ -486,6 +501,75 @@ fn terminal_outcome(
         // bucket keeps the outcome sums closed.
         ForwardOutcome::UpstreamOther
     }
+}
+
+/// One failure line at the severity the outcome deserves: the field set
+/// is identical at both severities, so the level picks the macro and the
+/// fields are written once.
+macro_rules! failure_line {
+    ($level:expr, $($field:tt)*) => {
+        match $level {
+            tracing::Level::ERROR => tracing::error!($($field)*),
+            _ => tracing::warn!($($field)*),
+        }
+    };
+}
+
+/// The severity a failed forward records at: the gateway's own
+/// forwarding trouble -- a dial failure, a mid-stream proxy error -- is
+/// an ERROR, while a gate rejection is a WARN (the caller's request was
+/// refused, not the platform's health dented).
+fn failure_level(outcome: ForwardOutcome) -> tracing::Level {
+    match outcome {
+        ForwardOutcome::ConnectError | ForwardOutcome::ProxyError => tracing::Level::ERROR,
+        _ => tracing::Level::WARN,
+    }
+}
+
+/// Whether the terminal phase writes the failure line: an error
+/// terminates the forward on the wire, and a gate refused the client
+/// before one was reached. The gates -- and a gate-side internal
+/// failure, which renders its own 5xx the same way -- answer the
+/// client themselves, so the logging phase sees no error for them:
+/// their line warrants on the outcome alone. The upstream answers
+/// (2xx through other) are the request's normal terminations and
+/// stay off the failure stream.
+fn warrants_failure_line(outcome: ForwardOutcome, errored: bool) -> bool {
+    errored || outcome.is_gate() || outcome == ForwardOutcome::ProxyError
+}
+
+/// The failure line: one structured record per failed forward, naming
+/// the attribution the counters carry, so a log reader and a dashboard
+/// reader see the same request. It warrants on an error (the wire
+/// failure path) or on a gate outcome; the gate line carries no error
+/// field. A failure before a selection existed (the identity gate)
+/// records none of the selection's fields, and the clock is absent
+/// before the forward branch staged it.
+fn log_forward_failure(
+    endpoint: forward::dialect::Endpoint,
+    outcome: ForwardOutcome,
+    ctx: &GatewayCtx,
+    error: Option<&pingora::Error>,
+    elapsed: Option<std::time::Duration>,
+) {
+    if !warrants_failure_line(outcome, error.is_some()) {
+        return;
+    }
+    let selection = ctx.selection.as_ref();
+    failure_line!(
+        failure_level(outcome),
+        endpoint = crate::metrics::endpoint_label(endpoint),
+        outcome = outcome.as_str(),
+        api_family = selection.map(|s| s.api_family.as_str()),
+        authority = selection.map(|s| s.authority.as_str()),
+        profile_id = selection.map(|s| s.profile_id.as_str()),
+        tagma_id = ctx.tagma_id.as_deref(),
+        upstream_status = ctx.upstream_status,
+        connected = ctx.connected,
+        elapsed_ms = elapsed.map(|d| d.as_millis() as u64),
+        error = error.map(tracing::field::display),
+        "the forward failed"
+    );
 }
 
 /// The pingora error taxonomy folded into the four connect-failure

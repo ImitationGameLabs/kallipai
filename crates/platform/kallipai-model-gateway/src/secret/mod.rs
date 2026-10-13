@@ -200,6 +200,16 @@ impl ProviderCredential {
             ],
         }
     }
+    /// A placeholder credential for tests that need a `Selection` but
+    /// never reach the wire (the failure-line unit tests): the key is
+    /// a stand-in and no egress point reads it.
+    #[cfg(test)]
+    pub(crate) fn placeholder() -> Self {
+        Self {
+            endpoint_prefix: "https://upstream.test/v1".to_string(),
+            api_key: "test-key".to_string(),
+        }
+    }
 }
 
 impl std::fmt::Debug for ProviderCredential {
