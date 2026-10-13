@@ -34,3 +34,6 @@ subtle = { workspace = true }
 tokio = { workspace = true }
 tower = { workspace = true }
 kallipai-testkit = { workspace = true }
+# The `log` bridge guard test (tests/log_bridge.rs) drives the real `log`
+# facade, so the crate needs it in test builds:
+log = { workspace = true }

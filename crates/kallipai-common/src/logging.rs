@@ -156,19 +156,23 @@ where
     }
 }
 
-/// Install the process-wide subscriber. With a resolved `dir` the rolling
-/// file is the only event channel and stdout carries the one signpost
-/// line; without one, events go to stdout. The panic hook keeps its
-/// default behavior, so panics reach stderr either way.
-/// Installing over an existing global subscriber silently does nothing (the
-/// set_global_default error is swallowed); the services install exactly once
-/// at startup, so this only matters for embedders.
+/// Install the process-wide subscriber, and with it the `log`
+/// compatibility layer: producers that only speak `log` -- the proxy's
+/// failed-forward line, a dependency's stray warning -- reach the same
+/// channels as tracing events. With a resolved `dir` the rolling file is
+/// the only event channel and stdout carries the one signpost line;
+/// without one, events go to stdout. The panic hook keeps its default
+/// behavior, so panics reach stderr either way. A global default that
+/// already exists skips the subscriber install, an existing `log` logger
+/// skips the layer, and both errors are swallowed; the services install
+/// exactly once at startup, so this only matters for embedders.
 pub fn init_service_logging(
     filter: &tracing_subscriber::EnvFilter,
     service: &str,
     dir: Option<&Path>,
 ) {
-    tracing::subscriber::set_global_default(service_layers(filter, service, dir, std::io::stdout))
+    service_layers(filter, service, dir, std::io::stdout)
+        .try_init()
         .ok();
 }
 

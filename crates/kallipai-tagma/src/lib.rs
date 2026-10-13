@@ -705,6 +705,9 @@ fn logs_target() -> Result<std::path::PathBuf> {
 /// panic hook chains the default stderr banner exactly when stderr
 /// is the writer -- the variable, or that fallback -- and suppresses
 /// it while the file layer is live: the details live in the log file.
+/// The subscriber also carries the `log` compatibility layer, so
+/// producers that only speak `log`, a dependency's stray warning among
+/// them, land in the same channel.
 pub fn init_logging(filter: &tracing_subscriber::EnvFilter) {
     use tracing_subscriber::prelude::*;
 
@@ -759,14 +762,12 @@ pub fn init_logging(filter: &tracing_subscriber::EnvFilter) {
     let file_layer_live = file_layer.is_some();
     match file_layer {
         // The file layer alone carries the events.
-        Some(file) => {
-            tracing::subscriber::set_global_default(tracing_subscriber::registry().with(file)).ok()
-        }
+        Some(file) => tracing_subscriber::registry().with(file).try_init().ok(),
         // The variable asked for stderr, or the file layer failed to build.
-        None => tracing::subscriber::set_global_default(
-            tracing_subscriber::registry().with(stderr_layer()),
-        )
-        .ok(),
+        None => tracing_subscriber::registry()
+            .with(stderr_layer())
+            .try_init()
+            .ok(),
     };
 
     // Forward panics into the subscriber: the default hook's stderr write

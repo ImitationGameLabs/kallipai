@@ -2945,6 +2945,7 @@ dependencies = [
  "getrandom 0.4.2",
  "jiff",
  "kallipai-testkit",
+ "log",
  "serde",
  "serde_json",
  "sha2 0.11.0",
