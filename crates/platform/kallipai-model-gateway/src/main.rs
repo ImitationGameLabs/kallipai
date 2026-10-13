@@ -35,6 +35,8 @@ mod state;
 #[cfg(test)]
 mod test_support;
 
+use std::time::Duration;
+
 use anyhow::{Context, Result};
 use clap::Parser;
 use tracing::info;
@@ -57,8 +59,10 @@ async fn main() -> Result<()> {
     kallipai_common::logging::init_service_logging(&filter, "model-gateway", log_dir.as_deref());
 
     // The durable store (profile/credential registry) is connected and
-    // the full schema migrations are applied at boot.
-    let db = db::connect_and_migrate(&args.database_url).await?;
+    // the full schema migrations are applied at boot. The slow-statement
+    // threshold is this service's own knob (default 100 ms).
+    let sql_slow = Duration::from_millis(args.sql_slow_ms);
+    let db = db::connect_and_migrate(&args.database_url, sql_slow).await?;
 
     // The admin face authenticates against the platform identity (the
     // archeion): the internal URL plus the shared internal secret from

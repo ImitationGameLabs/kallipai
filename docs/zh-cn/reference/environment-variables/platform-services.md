@@ -17,3 +17,4 @@ order: 30
 | `KALLIPAI_MODEL_GATEWAY_ARCHEION_URL` | 否   | _（未设；管理面关闭）_  | 管理面鉴权所用的 archeion 内部根地址（如 `http://127.0.0.1:7100`）。须与 `KALLIPAI_MODEL_GATEWAY_INTERNAL_TOKEN_FILE` 成对设置；缺任一，管理面拒绝一切请求，分发面与转发面不受影响。 |
 | `KALLIPAI_MODEL_GATEWAY_INTERNAL_TOKEN_FILE` | 否   | _（未设；管理面关闭）_  | archeion 内部共享令牌文件，启动时读一次；NixOS 模块固定指向 archeion 首启生成的 `/var/lib/kallipai/archeion/internal-token`，与 lesche、keryx、files、instances 读的是同一文件。 |
 | `KALLIPAI_MODEL_GATEWAY_PUBLIC_BASE_URL` | 否   | `http://127.0.0.1:7501` | 网关对外发布的基址，作为每个分发 profile 的 `base_url`；消费者在其后追加 wire path（如 `chat/completions`）。`/v1` 后缀是客户端约定：网关自身的转发路由不带前缀，前置的 edge host 在代理前剥掉 `/v1`。直连数据面（前面没有剥前缀的 edge）时基址必须是不带路径的裸 origin：路径含 `/v1` 会得到 `404`。应使用 model-gateway host 形态，勿用 api-edge 的 `/v1/model-gateway` 段（该段路由到管理面，管理面没有转发路由）。 |
+| `KALLIPAI_MODEL_GATEWAY_SQL_SLOW_MS` | 否   | `100` | SQL 语句耗时超过该毫秒数时，model gateway 以 `warn` 记录；每条语句一律以 `debug` 记录（默认 `info` 过滤下静默），存储失败以 `error` 记录。取值非数字则启动失败，不静默回落默认值。 |

@@ -59,6 +59,18 @@ pub struct Args {
     /// fails fast at boot rather than silently running stateless.
     #[arg(long, env = "KALLIPAI_MODEL_GATEWAY_DATABASE_URL")]
     pub database_url: String,
+
+    /// Statement duration above which a SQL statement is logged at WARN,
+    /// in milliseconds. Statements are logged at DEBUG regardless (quiet
+    /// under the default `info` filter) and a storage failure at ERROR.
+    /// A non-numeric value fails boot: clap refuses it rather than
+    /// silently falling back to the default.
+    #[arg(
+        long,
+        env = "KALLIPAI_MODEL_GATEWAY_SQL_SLOW_MS",
+        default_value_t = 100
+    )]
+    pub sql_slow_ms: u64,
     /// Archeion internal root the admin face authenticates against (e.g.
     /// `http://127.0.0.1:7100`). Unset closes the management face: every
     /// admin request is refused with 401 while the distribution and
@@ -104,5 +116,32 @@ mod tests {
         assert_eq!(args.public_base_url, "http://127.0.0.1:7501");
         // The two faces must stay on distinct ports.
         assert_ne!(args.listen_addr, args.management_listen_addr);
+    }
+
+    /// The SQL slow-statement threshold defaults to the platform-wide
+    /// 100 ms, and a non-numeric value is refused at parse time: a typo
+    /// must fail boot rather than silently defaulting.
+    #[test]
+    fn sql_slow_threshold_defaults_and_is_typed() {
+        // SAFETY: single-threaded test setup, and nothing else in
+        // this crate reads this var, so no concurrent access.
+        unsafe { std::env::remove_var("KALLIPAI_MODEL_GATEWAY_SQL_SLOW_MS") };
+        let args = Args::parse_from([
+            "kallipai-model-gateway",
+            "--database-url",
+            "postgres://user:pass@host/db",
+        ]);
+        assert_eq!(args.sql_slow_ms, 100);
+
+        let err = Args::try_parse_from([
+            "kallipai-model-gateway",
+            "--database-url",
+            "postgres://user:pass@host/db",
+            "--sql-slow-ms",
+            "fast",
+        ])
+        .err()
+        .expect("a non-numeric threshold must be refused");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
     }
 }

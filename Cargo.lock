@@ -3277,6 +3277,7 @@ dependencies = [
  "just-llm-client",
  "kallipai-archeion-common",
  "kallipai-common",
+ "log",
  "pingora",
  "prometheus",
  "reqwest",
