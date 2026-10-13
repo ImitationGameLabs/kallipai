@@ -314,3 +314,20 @@ docker run --rm \
 ```
 
 Then create an agent via the tagma API with `workspace_root: /workspace`.
+
+#### All Five Images At Once
+
+`scripts/build-and-load-images.sh` builds all five images and loads their
+tarballs into the local daemon in one run. It calls
+`nix build --no-link --print-out-paths` per attribute, so no `result`
+symlink is created or overwritten, and it stops at the first failure:
+
+```sh
+scripts/build-and-load-images.sh            # all five
+scripts/build-and-load-images.sh tagma      # one image
+```
+
+The five attributes are `kallipai-archeion-image`, `kallipai-lesche-image`,
+`kallipai-keryx-image`, `kallipai-files-image` and `kallipai-tagma-image`. The
+selector is the middle word (`archeion`, `lesche`, `keryx`, `files`, `tagma`);
+`--help` prints the same list.
