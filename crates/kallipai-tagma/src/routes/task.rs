@@ -135,7 +135,13 @@ fn api_error(err: kallipai_task::Error) -> ApiError {
         | E::MalformedBase64 { .. }
         | E::MalformedArchive { .. }
         | E::ReportNotUtf8 => ApiError::bad_request(err.to_string()),
-        _ => ApiError::internal(err.to_string()),
+        // Everything left is a server-side fault (storage, io, encoding,
+        // time): logged at error with the store context, then surfaced as
+        // an internal error. Client-refusal variants are all matched above.
+        _ => {
+            tracing::error!(error = %err, "storage failure: task store operation failed");
+            ApiError::internal(err.to_string())
+        }
     }
 }
 

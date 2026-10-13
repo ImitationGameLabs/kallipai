@@ -134,7 +134,7 @@ pub async fn list_files(
         clamp_limit(query.limit),
     )
     .await
-    .map_err(ApiError::internal)?;
+    .map_err(crate::metadata::map_db_err)?;
 
     let mut out = Vec::with_capacity(rows.len());
     for (record, size) in rows {

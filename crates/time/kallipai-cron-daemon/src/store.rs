@@ -16,10 +16,11 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use sea_orm::entity::prelude::*;
 use sea_orm::{
-    ActiveValue::Set, Condition, ConnectOptions, Database, DatabaseConnection, EntityTrait,
-    PaginatorTrait, QueryFilter, QueryOrder,
+    ActiveValue::Set, Condition, Database, DatabaseConnection, EntityTrait, PaginatorTrait,
+    QueryFilter, QueryOrder,
 };
 use sea_orm_migration::MigratorTrait;
+use std::time::Duration;
 use time::OffsetDateTime;
 use time::UtcOffset;
 use tokio::fs;
@@ -77,15 +78,16 @@ pub struct ScheduleStore {
 impl ScheduleStore {
     /// Open (or create) the SQLite database at `path`, apply migrations, and
     /// install WAL + `synchronous=NORMAL` + `busy_timeout` on every pooled
-    /// connection. The parent directory is created if missing.
-    pub async fn open(path: &Path) -> Result<Self> {
+    /// connection. The parent directory is created if missing. `sql_slow` is
+    /// the slow-statement WARN threshold of the shared logging tiers.
+    pub async fn open(path: &Path, sql_slow: Duration) -> Result<Self> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)
                 .await
                 .with_context(|| format!("create schedule db dir {}", parent.display()))?;
         }
         let url = format!("sqlite://{}?mode=rwc", path.display());
-        let mut opts = ConnectOptions::new(url);
+        let mut opts = kallipai_db_helper::connect_options(&url, sql_slow);
         // Three concurrent writers (scheduler, deliverer, HTTP) + the
         // occasional read; WAL lets reads overlap writes.
         opts.max_connections(8);
@@ -431,9 +433,12 @@ mod tests {
 
     async fn open_tmp() -> (ScheduleStore, TempDir) {
         let dir = TempDir::new().unwrap();
-        let store = ScheduleStore::open(&dir.path().join("cron.sqlite"))
-            .await
-            .unwrap();
+        let store = ScheduleStore::open(
+            &dir.path().join("cron.sqlite"),
+            std::time::Duration::from_millis(100),
+        )
+        .await
+        .unwrap();
         (store, dir)
     }
 

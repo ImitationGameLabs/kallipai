@@ -9,6 +9,7 @@ license.workspace = true
 base64 = { workspace = true }
 kallipai-blob-store = { workspace = true }
 kallipai-common = { workspace = true }
+kallipai-db-helper = { workspace = true }
 sea-orm = { workspace = true, features = ["sqlx-sqlite"] }
 sea-orm-migration = { workspace = true, features = ["sqlx-sqlite"] }
 sqlx = { workspace = true }

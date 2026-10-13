@@ -16,16 +16,19 @@ use anyhow::Result;
 use kallipai_common::protocol::ApiError;
 use sea_orm::{Database, DatabaseConnection, DbErr, TransactionError};
 use sea_orm_migration::MigratorTrait;
-use tracing::info;
+use std::time::Duration;
+use tracing::{error, info};
 
 /// A cloned handle to the durable store. Cheap to clone (one shared pool).
 pub type Db = DatabaseConnection;
 
 /// Map a sea-orm [`DbErr`] to an HTTP 500. A DB failure is a transient
-/// server-side fault, never a client error. (A `From<DbErr> for ApiError` impl
+/// server-side fault, never a client error; every failure logs one ERROR
+/// event at this single mapping point. (A `From<DbErr> for ApiError` impl
 /// would violate the orphan rule -- both types are foreign -- so each call site
 /// maps explicitly.)
 pub fn map_db_err(e: DbErr) -> ApiError {
+    error!(error = %e, "database failure: mapping to an internal error response");
     ApiError::internal(format_args!("database error: {e}"))
 }
 
@@ -72,10 +75,15 @@ pub fn flatten_txn<T>(r: Result<T, TransactionError<TxnError>>) -> Result<T, Api
     }
 }
 
-/// Connect to Postgres and apply all pending lesche migrations.
-pub async fn connect_and_migrate(url: &str) -> Result<Db> {
-    let db = Database::connect(url).await?;
+/// Connect to Postgres and apply all pending lesche migrations. `sql_slow` is
+/// the statement duration above which a query is logged at WARN; the connect
+/// options are built by `kallipai_db_helper::connect_options`.
+pub async fn connect_and_migrate(url: &str, sql_slow: Duration) -> Result<Db> {
+    let db = Database::connect(kallipai_db_helper::connect_options(url, sql_slow)).await?;
     migration::Migrator::up(&db, None).await?;
-    info!("lesche connected to Postgres");
+    info!(
+        sql_slow_ms = sql_slow.as_millis(),
+        "lesche connected to Postgres; SQL log tiers: every statement at debug, slow statements at warn, a storage failure at error"
+    );
     Ok(db)
 }

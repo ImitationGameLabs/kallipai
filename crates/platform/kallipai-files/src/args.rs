@@ -35,6 +35,14 @@ pub struct Args {
     /// fails fast at boot rather than silently running with no store.
     #[arg(long, env = "KALLIPAI_FILES_DATABASE_URL")]
     pub database_url: String,
+
+    /// Statement duration above which a SQL statement is logged at WARN,
+    /// in milliseconds. Statements are logged at DEBUG regardless (quiet
+    /// under the default `info` filter) and a storage failure at ERROR.
+    /// A non-numeric value fails boot: clap refuses it rather than
+    /// silently falling back to the default.
+    #[arg(long, env = "KALLIPAI_FILES_SQL_SLOW_MS", default_value_t = 100)]
+    pub sql_slow_ms: u64,
     /// Maximum accepted upload body, in megabytes. A larger stream is cut
     /// off with 413. The default (100 MB) is a starting point; the
     /// operator may tune it (structure is unaffected).
@@ -92,4 +100,48 @@ pub struct Args {
     /// `0` disables the threshold.
     #[arg(long, env = "KALLIPAI_FILES_BLOB_COMPRESSION_ABOVE_BYTES", default_value_t = 8 * 1024 * 1024)]
     pub blob_compression_above_bytes: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Args;
+    use clap::Parser;
+
+    /// The slow-SQL threshold defaults to 100 ms and refuses non-numeric
+    /// values instead of silently falling back.
+    #[test]
+    fn sql_slow_threshold_defaults_and_is_typed() {
+        // SAFETY: single-threaded test setup, and nothing else in
+        // this crate reads this var, so no concurrent access.
+        unsafe { std::env::remove_var("KALLIPAI_FILES_SQL_SLOW_MS") };
+        let args = Args::parse_from([
+            "kallipai-files",
+            "--database-url",
+            "postgres://x",
+            "--blob-root",
+            "/tmp/kallipai-files-gate/blob",
+            "--archeion-internal-url",
+            "http://127.0.0.1:1",
+            "--archeion-internal-token-file",
+            "/tmp/kallipai-files-gate/token",
+        ]);
+        assert_eq!(args.sql_slow_ms, 100);
+
+        let err = Args::try_parse_from([
+            "kallipai-files",
+            "--database-url",
+            "postgres://x",
+            "--blob-root",
+            "/tmp/kallipai-files-gate/blob",
+            "--archeion-internal-url",
+            "http://127.0.0.1:1",
+            "--archeion-internal-token-file",
+            "/tmp/kallipai-files-gate/token",
+            "--sql-slow-ms",
+            "fast",
+        ])
+        .err()
+        .expect("a non-numeric threshold must be refused");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
+    }
 }

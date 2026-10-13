@@ -8,8 +8,7 @@ pub mod migration;
 use std::time::Duration;
 
 use anyhow::Result;
-use log::LevelFilter;
-use sea_orm::{ConnectOptions, Database, DatabaseConnection, DbErr};
+use sea_orm::{Database, DatabaseConnection, DbErr};
 use sea_orm_migration::MigratorTrait;
 use tracing::{error, info};
 
@@ -19,28 +18,15 @@ pub type Db = DatabaseConnection;
 /// Connect to Postgres and apply all pending gateway migrations.
 ///
 /// `sql_slow` is the statement duration above which a query is logged at
-/// WARN; the connect options are built by `connect_options`.
+/// WARN; the connect options are built by kallipai_db_helper::connect_options.
 pub async fn connect_and_migrate(url: &str, sql_slow: Duration) -> Result<Db> {
-    let db = Database::connect(connect_options(url, sql_slow)).await?;
+    let db = Database::connect(kallipai_db_helper::connect_options(url, sql_slow)).await?;
     migration::Migrator::up(&db, None).await?;
     info!(
         sql_slow_ms = sql_slow.as_millis(),
         "kallipai-model-gateway connected to Postgres; SQL log tiers: every statement at debug, slow statements at warn, a storage failure at error"
     );
     Ok(db)
-}
-
-/// The pool options the gateway connects with: sqlx statement logging on,
-/// every statement at DEBUG (the default `info` filter keeps those quiet),
-/// a WARN above `sql_slow`, and a storage failure at ERROR through
-/// [`map_db_err`].
-fn connect_options(url: &str, sql_slow: Duration) -> ConnectOptions {
-    let mut options = ConnectOptions::new(url.to_owned());
-    options
-        .sqlx_logging(true)
-        .sqlx_logging_level(LevelFilter::Debug)
-        .sqlx_slow_statements_logging_settings(LevelFilter::Warn, sql_slow);
-    options
 }
 
 /// Map a sea-orm [`DbErr`] to an HTTP error. A storage-level unique
@@ -108,7 +94,7 @@ mod tests {
     use sea_orm::{DbErr, RuntimeErr};
     use tracing_subscriber::prelude::*;
 
-    use super::{connect_options, map_db_err};
+    use super::map_db_err;
 
     /// A stand-in for the driver's database error: the tier branch reads
     /// the SQLSTATE, and the Postgres detail is absent from a shape that
@@ -189,7 +175,7 @@ mod tests {
     fn connect_options_set_the_sql_log_tiers() {
         for threshold_ms in [100_u64, 2500] {
             let slow = Duration::from_millis(threshold_ms);
-            let options = connect_options("postgres://user:pass@host/db", slow);
+            let options = kallipai_db_helper::connect_options("postgres://user:pass@host/db", slow);
             assert!(options.get_sqlx_logging());
             assert_eq!(options.get_sqlx_logging_level(), log::LevelFilter::Debug);
             assert_eq!(

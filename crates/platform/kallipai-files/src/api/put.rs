@@ -149,7 +149,7 @@ pub async fn put_file(
     let record_id =
         crate::metadata::repo::register_upload(&state.db, &blob_id, size, &resolved, &owner, None)
             .await
-            .map_err(ApiError::internal)?;
+            .map_err(crate::metadata::map_db_err)?;
 
     Ok((
         StatusCode::CREATED,

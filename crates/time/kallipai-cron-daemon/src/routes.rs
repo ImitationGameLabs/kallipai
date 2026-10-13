@@ -38,6 +38,13 @@ pub fn cors_layer() -> CorsLayer {
     kallipai_common::cors::permissive_cors_layer()
 }
 
+/// Map a schedule-store failure onto the HTTP face: the failure is logged
+/// at error with the store context, then surfaced as an internal error.
+fn map_store_err(e: anyhow::Error) -> ApiError {
+    tracing::error!(error = %e, "storage failure: schedule store operation failed");
+    ApiError::internal(format_args!("store error: {e}"))
+}
+
 /// Build the management router.
 pub fn router() -> Router<SharedState> {
     Router::new()
@@ -77,11 +84,7 @@ async fn status(
     Query(q): Query<AgentQuery>,
 ) -> Result<Json<StatusResponse>, ApiError> {
     verify(&state, &bearer, &q.agent).await?;
-    let (active, pending, next_fire) = state
-        .store
-        .stats(&q.agent)
-        .await
-        .map_err(ApiError::internal)?;
+    let (active, pending, next_fire) = state.store.stats(&q.agent).await.map_err(map_store_err)?;
     Ok(Json(StatusResponse {
         healthy: state.liveness.check().is_ok(),
         active_schedules: active,
@@ -114,11 +117,7 @@ async fn create_schedule(
         next_fire: Some(next_fire),
         last_fire: None,
     };
-    state
-        .store
-        .create(&schedule)
-        .await
-        .map_err(ApiError::internal)?;
+    state.store.create(&schedule).await.map_err(map_store_err)?;
     Ok((StatusCode::CREATED, Json(schedule)))
 }
 
@@ -138,7 +137,7 @@ async fn list_schedules(
         .store
         .list(&q.agent, status, q.tag.as_deref())
         .await
-        .map_err(ApiError::internal)?;
+        .map_err(map_store_err)?;
     let total = schedules.len();
     Ok(Json(SchedulesListResponse { schedules, total }))
 }
@@ -153,7 +152,7 @@ async fn get_next_schedule(
         .store
         .get_next(&q.agent)
         .await
-        .map_err(ApiError::internal)?;
+        .map_err(map_store_err)?;
     Ok(Json(next))
 }
 
@@ -166,7 +165,7 @@ async fn get_schedule(
     verify(&state, &bearer, &q.agent).await?;
     // Cross-owner is indistinguishable from not-found (uniform 404, matching
     // delete + the client's existing NOT_FOUND branch): no ownership oracle.
-    let sched = state.store.get(&id).await.map_err(ApiError::internal)?;
+    let sched = state.store.get(&id).await.map_err(map_store_err)?;
     match sched {
         Some(s) if s.agent_id == q.agent => Ok(Json(s)),
         _ => Err(ApiError::not_found("schedule not found")),
@@ -195,8 +194,8 @@ async fn update_schedule(
         .store
         .update_status(&id, &q.agent, status)
         .await
-        .map_err(ApiError::internal)?;
-    match state.store.get(&id).await.map_err(ApiError::internal)? {
+        .map_err(map_store_err)?;
+    match state.store.get(&id).await.map_err(map_store_err)? {
         Some(s) if s.agent_id == q.agent => Ok(Json(s)),
         _ => Err(ApiError::not_found("schedule not found")),
     }
@@ -213,7 +212,7 @@ async fn delete_schedule(
         .store
         .delete(&id, &q.agent)
         .await
-        .map_err(ApiError::internal)?;
+        .map_err(map_store_err)?;
     Ok(if removed {
         StatusCode::NO_CONTENT
     } else {

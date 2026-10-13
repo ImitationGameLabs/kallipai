@@ -103,9 +103,12 @@ mod tests {
 
     async fn open() -> (ScheduleStore, Scheduler, TempDir) {
         let dir = TempDir::new().unwrap();
-        let store = ScheduleStore::open(&dir.path().join("c.sqlite"))
-            .await
-            .unwrap();
+        let store = ScheduleStore::open(
+            &dir.path().join("c.sqlite"),
+            std::time::Duration::from_millis(100),
+        )
+        .await
+        .unwrap();
         let liveness = Liveness::new(Duration::from_secs(5), Duration::from_secs(30));
         let scheduler = Scheduler::new(store.clone(), Duration::from_millis(1000), liveness);
         (store, scheduler, dir)

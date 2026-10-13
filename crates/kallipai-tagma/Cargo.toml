@@ -13,6 +13,7 @@ path = "src/lib.rs"
 jiff = { workspace = true }
 kallipai-adk = { workspace = true, features = ["landlock", "seccomp"] }
 kallipai-common = { workspace = true, features = ["axum"] }
+kallipai-db-helper = { workspace = true }
 kallipai-task = { workspace = true }
 kallipai-blob-store = { workspace = true }
 kallipai-daemon-common = { workspace = true }

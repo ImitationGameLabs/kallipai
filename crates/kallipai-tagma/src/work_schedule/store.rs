@@ -1,12 +1,12 @@
 //! SQLite-backed work-schedule store (sea-orm + sqlx-sqlite).
 
 use std::path::Path;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use sea_orm::entity::prelude::*;
 use sea_orm::{
-    ActiveValue::Set, ConnectOptions, Database, DatabaseConnection, EntityTrait, QueryFilter,
-    QueryOrder,
+    ActiveValue::Set, Database, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder,
 };
 use sea_orm_migration::MigratorTrait;
 use time::OffsetDateTime;
@@ -63,14 +63,14 @@ pub struct WorkScheduleStore {
 }
 
 impl WorkScheduleStore {
-    pub async fn open(path: &Path) -> Result<Self> {
+    pub async fn open(path: &Path, sql_slow: Duration) -> Result<Self> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)
                 .await
                 .with_context(|| format!("create ws db dir {}", parent.display()))?;
         }
         let url = format!("sqlite://{}?mode=rwc", path.display());
-        let mut opts = ConnectOptions::new(url);
+        let mut opts = kallipai_db_helper::connect_options(&url, sql_slow);
         opts.max_connections(4);
         opts.map_sqlx_sqlite_opts(|o| {
             o.journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
@@ -90,7 +90,7 @@ impl WorkScheduleStore {
     /// Open an in-memory store (for tests).
     #[cfg(test)]
     pub async fn open_in_memory() -> Self {
-        let mut opts = ConnectOptions::new("sqlite::memory:".to_owned());
+        let mut opts = sea_orm::ConnectOptions::new("sqlite::memory:".to_owned());
         opts.max_connections(1);
         let db = Database::connect(opts).await.expect("in-memory db");
         super::migration::Migrator::up(&db, None)
@@ -240,9 +240,12 @@ mod tests {
 
     async fn open_tmp() -> (WorkScheduleStore, TempDir) {
         let dir = TempDir::new().unwrap();
-        let store = WorkScheduleStore::open(&dir.path().join("ws.sqlite"))
-            .await
-            .unwrap();
+        let store = WorkScheduleStore::open(
+            &dir.path().join("ws.sqlite"),
+            std::time::Duration::from_millis(100),
+        )
+        .await
+        .unwrap();
         (store, dir)
     }
 

@@ -31,6 +31,7 @@ members = [
   "crates/platform/kallipai-files",
   "crates/platform/kallipai-model-gateway",
   "crates/kallipai-blob-store",
+  "crates/kallipai-db-helper",
   "crates/kallipai-testkit",
 ]
 
@@ -73,6 +74,7 @@ kallipai-task = { path = "crates/daemon/kallipai-task" }
 kallipctl = { path = "crates/daemon/kallipctl" }
 kallipai-instances = { path = "crates/platform/kallipai-instances" }
 kallipai-blob-store = { path = "crates/kallipai-blob-store" }
+kallipai-db-helper = { path = "crates/kallipai-db-helper" }
 kallipai-files = { path = "crates/platform/kallipai-files" }
 kallipai-testkit = { path = "crates/kallipai-testkit" }
 

@@ -33,10 +33,11 @@ mod decode;
 mod entity;
 
 use std::path::Path;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use sea_orm::entity::prelude::*;
-use sea_orm::{ConnectOptions, Database, DatabaseConnection, QueryOrder, QuerySelect, Select};
+use sea_orm::{Database, DatabaseConnection, QueryOrder, QuerySelect, Select};
 use sea_orm_migration::MigratorTrait;
 use tracing::warn;
 
@@ -65,9 +66,9 @@ use entity::{ActiveModel, Column, Entity, Model};
 /// pending migrations. The parent directory must already exist with owner-only
 /// permissions (the caller — `activate_relay` — sets that up alongside
 /// `credentials/`).
-pub(crate) async fn open(path: &Path) -> Result<Db> {
+pub(crate) async fn open(path: &Path, sql_slow: Duration) -> Result<Db> {
     let url = format!("sqlite://{}?mode=rwc", path.display());
-    let mut opts = ConnectOptions::new(url);
+    let mut opts = kallipai_db_helper::connect_options(&url, sql_slow);
     // A small pool is enough: one writer (the pump) + a couple of concurrent
     // TagmaControl::History readers. WAL lets reads overlap writes.
     opts.max_connections(8);
@@ -268,7 +269,12 @@ mod tests {
 
     async fn open_tmp() -> (Db, TempDir) {
         let dir = TempDir::new().unwrap();
-        let db = open(&dir.path().join("h.sqlite")).await.unwrap();
+        let db = open(
+            &dir.path().join("h.sqlite"),
+            std::time::Duration::from_millis(100),
+        )
+        .await
+        .unwrap();
         (db, dir)
     }
 
@@ -307,9 +313,13 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("h.sqlite");
         {
-            let _db = open(&path).await.unwrap();
+            let _db = open(&path, std::time::Duration::from_millis(100))
+                .await
+                .unwrap();
         }
-        let db = open(&path).await.unwrap();
+        let db = open(&path, std::time::Duration::from_millis(100))
+            .await
+            .unwrap();
         let id = ap(&db, Some("u1"), "outbound", "x").await;
         assert!(id > 0);
         assert_eq!(read_last_n(&db, Some("u1"), 10).await.unwrap().len(), 1);

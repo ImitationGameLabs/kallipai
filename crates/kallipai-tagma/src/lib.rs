@@ -48,10 +48,18 @@ use kallipai_testkit::wait_for;
 use state::AppState;
 use state::ProfileBundle;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 pub use args::Args;
+
+/// Boot-time storage-failure logging: a store that fails to open is logged
+/// at error before the boot aborts. Runtime store operations keep their own
+/// designed degradation paths (best-effort warn), which this does not touch.
+fn log_store_open(what: &str, err: &impl std::fmt::Display) {
+    tracing::error!(store = what, error = %err, "storage failure: store open failed at boot");
+}
 
 pub async fn run(args: Args, operator_pin: Option<String>) -> Result<()> {
     // Real-root guard first: logging is live by now, and no filesystem
@@ -249,14 +257,21 @@ pub async fn run(args: Args, operator_pin: Option<String>) -> Result<()> {
     state.hook_rules.set(Arc::new(hook_rules)).ok();
 
     // Open the work-schedule store and install it on AppState.
-    let ws_store = work_schedule::WorkScheduleStore::open(&work_schedule_path()?)
+    let sql_slow = Duration::from_millis(args.sql_slow_ms);
+    info!(
+        sql_slow_ms = args.sql_slow_ms,
+        "SQL statement log tiers: every statement at debug, slow statements at warn; a store that fails to open at boot is logged at error"
+    );
+    let ws_store = work_schedule::WorkScheduleStore::open(&work_schedule_path()?, sql_slow)
         .await
+        .inspect_err(|e| log_store_open("work-schedule", e))
         .context("open work-schedule store")?;
     state.work_schedules.set(ws_store).ok();
 
     // Open the inbox store and install it on AppState.
-    let inbox_store = inbox::InboxStore::open(&inbox_path()?)
+    let inbox_store = inbox::InboxStore::open(&inbox_path()?, sql_slow)
         .await
+        .inspect_err(|e| log_store_open("inbox", e))
         .context("open inbox store")?;
     state.inboxes.set(inbox_store).ok();
 
@@ -265,8 +280,10 @@ pub async fn run(args: Args, operator_pin: Option<String>) -> Result<()> {
     // schema to head. This process is the SOLE writer of tasks.sqlite.
     let task_store = kallipai_task::TaskStore::open(
         &kallipai_adk::persistence::data_dir_root()?.join("tasks.sqlite"),
+        sql_slow,
     )
     .await
+    .inspect_err(|e| log_store_open("task", e))
     .context("open task store")?;
     state.tasks.set(Arc::new(task_store)).ok();
     // The two blob stores read their own settings sections
@@ -354,8 +371,9 @@ pub async fn run(args: Args, operator_pin: Option<String>) -> Result<()> {
     // conversation id (unset until first-run enrollment resolves it), not the
     // store's presence, so the store is always ready the moment the id lands.
     // On a never-enrolled tagma the file stays empty (writes are id-gated).
-    let history = relay::chat_history::open(&chat_history_path()?)
+    let history = relay::chat_history::open(&chat_history_path()?, sql_slow)
         .await
+        .inspect_err(|e| log_store_open("chat_history", e))
         .context("open chat_history store")?;
 
     // The message burst limits (agent `send` rate cap), read from args once.

@@ -463,9 +463,12 @@ async fn install_projector(
     TempDir,
 ) {
     let dir = TempDir::new().unwrap();
-    let db = crate::relay::chat_history::open(&dir.path().join("h.sqlite"))
-        .await
-        .unwrap();
+    let db = crate::relay::chat_history::open(
+        &dir.path().join("h.sqlite"),
+        std::time::Duration::from_millis(100),
+    )
+    .await
+    .unwrap();
     let projector = ExternalProjector::new(
         Arc::downgrade(state),
         Some(db.clone()),

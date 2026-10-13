@@ -1,0 +1,10 @@
+[package]
+name = "kallipai-db-helper"
+description = "Shared SeaORM connect options carrying the kallipai SQL logging tiers"
+edition = "2024"
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+log = { workspace = true }
+sea-orm = { workspace = true }

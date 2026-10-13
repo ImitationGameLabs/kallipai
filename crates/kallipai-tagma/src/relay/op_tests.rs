@@ -138,9 +138,12 @@ async fn setup_with_history(
     TempDir,
 ) {
     let dir = TempDir::new().unwrap();
-    let db = chat_history::open(&dir.path().join("history.sqlite"))
-        .await
-        .unwrap();
+    let db = chat_history::open(
+        &dir.path().join("history.sqlite"),
+        std::time::Duration::from_millis(100),
+    )
+    .await
+    .unwrap();
     let (handle, key, capture, _signals, prompt_rx, root_id, state, db) =
         setup_inner(events_cap, Some(db.clone())).await;
     (

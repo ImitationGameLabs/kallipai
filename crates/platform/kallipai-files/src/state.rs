@@ -4,6 +4,7 @@
 use std::error::Error;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::metadata::{self, Db};
 use axum::Router;
@@ -64,6 +65,9 @@ pub struct BootConfig {
     pub listen_addr: String,
     /// Postgres URL for the metadata store.
     pub database_url: String,
+    /// Statement duration above which a SQL statement is logged at WARN (the
+    /// logging tiers themselves come from `kallipai_db_helper`).
+    pub sql_slow: Duration,
     /// Archeion internal base URL for `/internal/*` calls.
     pub archeion_internal_url: String,
     /// Shared secret bearer for the archeion internal API.
@@ -131,7 +135,7 @@ fn cors_layer(origins: &str) -> CorsLayer {
 /// Migration failure is fatal (fail fast: connect, migrate, or exit) --
 /// the caller sees the error and the process exits nonzero.
 pub async fn run(boot: BootConfig) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let db = metadata::connect_and_migrate(&boot.database_url).await?;
+    let db = metadata::connect_and_migrate(&boot.database_url, boot.sql_slow).await?;
     let state = AppState {
         db: db.clone(),
         blob: LocalBackend::arc_with_policy(&boot.blob_root, boot.blob_policy),

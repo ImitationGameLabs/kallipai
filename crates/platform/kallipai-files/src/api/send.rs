@@ -108,7 +108,7 @@ pub async fn send_file(
         &landing.to,
     )
     .await
-    .map_err(ApiError::internal)?;
+    .map_err(crate::metadata::map_db_err)?;
 
     // Best-effort event push (fire-and-forget): the delivery itself is
     // committed; a failed push only logs, because the file is safely in

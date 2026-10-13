@@ -26,6 +26,7 @@ mod state;
 mod test_support;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use axum::Router;
@@ -67,7 +68,8 @@ async fn main() -> Result<()> {
     // carries it as `Option<Db>` so the mock routing tests can pass `None`
     // (they do not exercise persistence); the relay fan-out branches on
     // `state.db.as_ref()`.
-    let db = chat::db::connect_and_migrate(&args.database_url).await?;
+    let sql_slow = Duration::from_millis(args.sql_slow_ms);
+    let db = chat::db::connect_and_migrate(&args.database_url, sql_slow).await?;
 
     let conv_state: SharedConvState = Arc::new(state::ConversationsState {
         control,

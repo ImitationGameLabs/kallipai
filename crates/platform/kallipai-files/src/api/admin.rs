@@ -51,7 +51,7 @@ pub async fn list_events(
     let events =
         crate::metadata::repo::list_delivery_events(&state.db, query.blob_id.as_deref(), limit)
             .await
-            .map_err(ApiError::internal)?;
+            .map_err(crate::metadata::map_db_err)?;
     let views = events
         .into_iter()
         .map(|event| {

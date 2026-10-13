@@ -743,6 +743,7 @@ async fn service_boots_and_answers_health() {
         let boot = kallipai_files::state::BootConfig {
             listen_addr: addr.to_string(),
             database_url: db_url.clone(),
+            sql_slow: std::time::Duration::from_millis(100),
             archeion_internal_url: "http://127.0.0.1:1".to_owned(),
             archeion_internal_token: "unused".to_owned(),
             notify_url: String::new(),

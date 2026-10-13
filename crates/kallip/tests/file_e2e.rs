@@ -169,7 +169,7 @@ async fn spawn_world() -> World {
     let archeion_url = spawn_mini_archeion(registry).await;
 
     let db_url = common::test_db_url().await;
-    let db = connect_and_migrate(&db_url)
+    let db = connect_and_migrate(&db_url, std::time::Duration::from_millis(100))
         .await
         .expect("connect and migrate");
     let state = AppState {

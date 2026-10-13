@@ -14,12 +14,13 @@ pub mod entities;
 pub mod migration;
 
 use std::path::Path;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use sea_orm::entity::prelude::*;
 use sea_orm::{
-    ActiveValue::Set, ConnectOptions, Database, DatabaseConnection, EntityTrait, QueryFilter,
-    QueryOrder, QuerySelect, Statement,
+    ActiveValue::Set, Database, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder,
+    QuerySelect, Statement,
 };
 use sea_orm_migration::MigratorTrait;
 use serde::{Deserialize, Serialize};
@@ -60,14 +61,14 @@ pub struct InboxStore {
 }
 
 impl InboxStore {
-    pub async fn open(path: &Path) -> Result<Self> {
+    pub async fn open(path: &Path, sql_slow: Duration) -> Result<Self> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)
                 .await
                 .with_context(|| format!("create inbox db dir {}", parent.display()))?;
         }
         let url = format!("sqlite://{}?mode=rwc", path.display());
-        let mut opts = ConnectOptions::new(url);
+        let mut opts = kallipai_db_helper::connect_options(&url, sql_slow);
         opts.max_connections(4);
         opts.map_sqlx_sqlite_opts(|o| {
             o.journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
@@ -86,7 +87,7 @@ impl InboxStore {
 
     #[cfg(any(test, feature = "test-support"))]
     pub async fn open_in_memory() -> Self {
-        let mut opts = ConnectOptions::new("sqlite::memory:".to_owned());
+        let mut opts = sea_orm::ConnectOptions::new("sqlite::memory:".to_owned());
         opts.max_connections(1);
         let db = Database::connect(opts).await.expect("in-memory db");
         migration::Migrator::up(&db, None)
@@ -559,12 +560,16 @@ mod tests {
         let path = dir.path().join("inboxes.sqlite");
         let id = AgentId::random();
         {
-            let store = InboxStore::open(&path).await.unwrap();
+            let store = InboxStore::open(&path, std::time::Duration::from_millis(100))
+                .await
+                .unwrap();
             store
                 .push(id.clone(), event("operator", "persistent"))
                 .await;
         }
-        let store = InboxStore::open(&path).await.unwrap();
+        let store = InboxStore::open(&path, std::time::Duration::from_millis(100))
+            .await
+            .unwrap();
         assert_eq!(store.len_for(&id).await, 1);
         assert!(
             store
@@ -607,7 +612,8 @@ async fn migration_backfills_and_preserves() {
 
     // Seed at the m_01 schema (old columns).
     {
-        let mut opts = ConnectOptions::new(format!("sqlite://{}?mode=rwc", path.display()));
+        let mut opts =
+            sea_orm::ConnectOptions::new(format!("sqlite://{}?mode=rwc", path.display()));
         opts.max_connections(1);
         let db = Database::connect(opts).await.unwrap();
         db.execute(Statement::from_sql_and_values(
@@ -634,7 +640,9 @@ async fn migration_backfills_and_preserves() {
     }
 
     // Open with new migration -- table-rebuild should run.
-    let store = InboxStore::open(&path).await.unwrap();
+    let store = InboxStore::open(&path, std::time::Duration::from_millis(100))
+        .await
+        .unwrap();
     let id: AgentId = "agent-x".parse().unwrap();
     let msg = store
         .pull_undelivered(&id)

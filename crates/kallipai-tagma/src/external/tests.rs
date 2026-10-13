@@ -37,9 +37,12 @@ async fn record_outbound_persists_and_publishes() {
             .unwrap();
     }
     let dir = TempDir::new().unwrap();
-    let db = chat_history::open(&dir.path().join("h.sqlite"))
-        .await
-        .unwrap();
+    let db = chat_history::open(
+        &dir.path().join("h.sqlite"),
+        std::time::Duration::from_millis(100),
+    )
+    .await
+    .unwrap();
     let conv = ConversationId::for_tagma(&tagma_id());
     let projector = ExternalProjector::new(
         Arc::downgrade(&state),
@@ -98,9 +101,12 @@ async fn record_inbound_persists_and_publishes() {
             .unwrap();
     }
     let dir = TempDir::new().unwrap();
-    let db = chat_history::open(&dir.path().join("h.sqlite"))
-        .await
-        .unwrap();
+    let db = chat_history::open(
+        &dir.path().join("h.sqlite"),
+        std::time::Duration::from_millis(100),
+    )
+    .await
+    .unwrap();
     let conv = ConversationId::for_tagma(&tagma_id());
     let projector = ExternalProjector::new(
         Arc::downgrade(&state),
@@ -213,9 +219,12 @@ async fn direct_and_relay_partitions_persist_and_filter() {
             .unwrap();
     }
     let dir = TempDir::new().unwrap();
-    let db = chat_history::open(&dir.path().join("h.sqlite"))
-        .await
-        .unwrap();
+    let db = chat_history::open(
+        &dir.path().join("h.sqlite"),
+        std::time::Duration::from_millis(100),
+    )
+    .await
+    .unwrap();
     let projector = ExternalProjector::new(
         Arc::downgrade(&state),
         Some(db.clone()),

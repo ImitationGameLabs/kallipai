@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 kallipai-archeion-common = { workspace = true }
 kallipai-lesche-common = { workspace = true }
+kallipai-db-helper = { workspace = true }
 kallipai-common = { workspace = true, features = ["axum", "logging"] }
 axum = { workspace = true }
 tokio = { workspace = true }

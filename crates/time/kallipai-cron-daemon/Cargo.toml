@@ -9,6 +9,7 @@ license.workspace = true
 kallipai-cron-common = { workspace = true }
 kallipai-common = { workspace = true, features = ["axum"] }
 kallipai-client = { workspace = true }
+kallipai-db-helper = { workspace = true }
 sea-orm = { workspace = true, features = ["sqlx-sqlite"] }
 sea-orm-migration = { workspace = true, features = ["sqlx-sqlite"] }
 sqlx = { workspace = true }

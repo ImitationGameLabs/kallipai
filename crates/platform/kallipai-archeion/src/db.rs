@@ -19,7 +19,7 @@ use sea_orm::{
     ColumnTrait, Database, DatabaseConnection, DbErr, EntityTrait, QueryFilter, TransactionError,
 };
 use sea_orm_migration::MigratorTrait;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 /// A cloned handle to the durable store. `DatabaseConnection` is internally
 /// `Arc`'d, so cloning is cheap and shares one connection pool.
@@ -27,9 +27,11 @@ pub type Db = DatabaseConnection;
 
 /// Map a sea-orm [`DbErr`] to an HTTP 500. Handlers propagate this via `?` after
 /// `.await`ing a query; a DB failure is a transient server-side fault, never a
-/// client error. (A `From<DbErr> for ApiError` impl would violate the orphan
+/// client error; every failure logs one ERROR event at this single mapping
+/// point. (A `From<DbErr> for ApiError` impl would violate the orphan
 /// rule — both types are foreign — so each call site maps explicitly.)
 pub fn map_db_err(e: DbErr) -> ApiError {
+    error!(error = %e, "database failure: mapping to an internal error response");
     ApiError::internal(format_args!("database error: {e}"))
 }
 
@@ -125,8 +127,8 @@ pub(crate) async fn gc_expired_oauth_states(db: &Db) {
 
 /// Connect to Postgres (retrying with a capped backoff, since the archeion may boot
 /// before its DB in a composed deploy) and apply all pending migrations.
-pub async fn connect_and_migrate(url: &str) -> Result<Db> {
-    let db = connect(url).await?;
+pub async fn connect_and_migrate(url: &str, sql_slow: Duration) -> Result<Db> {
+    let db = connect(url, sql_slow).await?;
     migration::Migrator::up(&db, None).await?;
     Ok(db)
 }
@@ -134,12 +136,15 @@ pub async fn connect_and_migrate(url: &str) -> Result<Db> {
 /// Connect to Postgres, retrying with a capped, jittered exponential backoff
 /// until the DB is reachable. The jitter de-synchronizes replicas booting
 /// together against a recovering DB; the cap bounds each sleep.
-async fn connect(url: &str) -> Result<Db> {
+async fn connect(url: &str, sql_slow: Duration) -> Result<Db> {
     let mut delay = Duration::from_secs(1);
     loop {
-        match Database::connect(url).await {
+        match Database::connect(kallipai_db_helper::connect_options(url, sql_slow)).await {
             Ok(db) => {
-                info!("connected to Postgres");
+                info!(
+                    sql_slow_ms = sql_slow.as_millis(),
+                    "connected to Postgres; SQL log tiers: every statement at debug, slow statements at warn, a storage failure at error"
+                );
                 return Ok(db);
             }
             Err(e) => {

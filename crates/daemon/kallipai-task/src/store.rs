@@ -16,6 +16,7 @@ use crate::model::TaskStatus;
 use sea_orm::{ConnectOptions, Database, DatabaseConnection};
 use sea_orm_migration::MigratorTrait as _;
 use std::path::Path;
+use std::time::Duration;
 
 mod lifecycle;
 mod query;
@@ -55,14 +56,14 @@ pub struct TaskStore {
 }
 
 impl TaskStore {
-    pub async fn open(path: &Path) -> Result<Self, Error> {
+    pub async fn open(path: &Path, sql_slow: Duration) -> Result<Self, Error> {
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent).await.map_err(|e| {
                 Error::Other(format!("create task db dir {}: {e}", parent.display()))
             })?;
         }
         let url = format!("sqlite://{}?mode=rwc", path.display());
-        let mut opts = ConnectOptions::new(url);
+        let mut opts = kallipai_db_helper::connect_options(&url, sql_slow);
         // 5s busy_timeout x BUSY_RETRIES(3) retries: a write queueing
         // behind sustained contention waits ~20s at worst before the store
         // surfaces the underlying busy error.

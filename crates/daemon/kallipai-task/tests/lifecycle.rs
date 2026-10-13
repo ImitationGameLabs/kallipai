@@ -656,8 +656,18 @@ async fn concurrent_starts_on_separate_pools_both_land() {
     // assignees queue on busy_timeout instead of a deferred snapshot
     // upgrade racing into SQLITE_BUSY.
     let dir = dev_tempdir("task-conc");
-    let a = TaskStore::open(&dir.join("tasks.sqlite")).await.unwrap();
-    let b = TaskStore::open(&dir.join("tasks.sqlite")).await.unwrap();
+    let a = TaskStore::open(
+        &dir.join("tasks.sqlite"),
+        std::time::Duration::from_millis(100),
+    )
+    .await
+    .unwrap();
+    let b = TaskStore::open(
+        &dir.join("tasks.sqlite"),
+        std::time::Duration::from_millis(100),
+    )
+    .await
+    .unwrap();
     let ta = a
         .create(spec("a", "alice", &[]), "root", no_resolver())
         .await
@@ -793,7 +803,9 @@ async fn archived_tasks_leave_the_default_view() {
 async fn close_with_a_damaged_stored_roster_fails_loudly() {
     let tmp = tempfile::tempdir().unwrap();
     let db_path = tmp.path().join("tasks.db");
-    let store = TaskStore::open(&db_path).await.unwrap();
+    let store = TaskStore::open(&db_path, std::time::Duration::from_millis(100))
+        .await
+        .unwrap();
     let t = store
         .create(spec("corrupt roster", "dev", &[]), "root", no_resolver())
         .await
@@ -1287,7 +1299,9 @@ async fn close_gate_refusal_leaves_task_open_and_blob_ingested() {
 async fn report_payload_migration_is_idempotent() {
     let tmp = tempfile::tempdir().unwrap();
     let db_path = tmp.path().join("tasks.db");
-    let store = TaskStore::open(&db_path).await.unwrap();
+    let store = TaskStore::open(&db_path, std::time::Duration::from_millis(100))
+        .await
+        .unwrap();
     let blob_root = tempfile::tempdir().unwrap();
     let blobs: Arc<dyn kallipai_blob_store::BlobStore> =
         Arc::new(LocalBackend::new(blob_root.path().join("blobs")));

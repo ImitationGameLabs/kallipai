@@ -43,6 +43,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let boot = BootConfig {
         listen_addr: args.listen_addr,
         database_url: args.database_url,
+        sql_slow: Duration::from_millis(args.sql_slow_ms),
         archeion_internal_url: args.archeion_internal_url,
         archeion_internal_token: kallipai_common::secret_file::read_trimmed_with_retry(
             std::path::Path::new(&args.archeion_internal_token_file),

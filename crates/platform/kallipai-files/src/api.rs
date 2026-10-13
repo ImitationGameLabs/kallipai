@@ -41,7 +41,7 @@ pub(crate) async fn load_record(
     file_records::Entity::find_by_id(id)
         .one(&state.db)
         .await
-        .map_err(ApiError::internal)?
+        .map_err(crate::metadata::map_db_err)?
         .ok_or_else(|| ApiError::not_found("no such file record"))
 }
 
@@ -156,6 +156,6 @@ pub async fn delete_file(
     }
     crate::metadata::repo::remove_record(&state.db, id)
         .await
-        .map_err(ApiError::internal)?;
+        .map_err(crate::metadata::map_db_err)?;
     Ok(StatusCode::NO_CONTENT)
 }

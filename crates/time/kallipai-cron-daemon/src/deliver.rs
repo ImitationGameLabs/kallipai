@@ -18,7 +18,7 @@ use kallipai_client::TagmaClient;
 use kallipai_common::protocol::ApiError;
 use time::OffsetDateTime;
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use crate::state::Liveness;
 use crate::store::ScheduleStore;
@@ -65,7 +65,7 @@ impl Deliverer {
                     // ages out and `/health` reports the deliverer stale.
                     self.liveness.saw_deliver();
                     if let Err(e) = self.deliver_once().await {
-                        warn!(error = %e, "delivery sweep failed");
+                        error!(error = %e, "delivery sweep failed");
                     }
                 }
             }

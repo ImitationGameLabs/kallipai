@@ -501,7 +501,7 @@ pub(crate) async fn provision_test_db() -> crate::chat::db::Db {
     .expect("create test database");
     drop(root);
     let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/{db_name}");
-    crate::chat::db::connect_and_migrate(&url)
+    crate::chat::db::connect_and_migrate(&url, std::time::Duration::from_millis(100))
         .await
         .expect("connect + migrate")
 }

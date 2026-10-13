@@ -115,7 +115,8 @@ async fn main() -> Result<()> {
 
     // Connect to Postgres (retrying with a capped backoff) and apply pending
     // migrations before serving a single request.
-    let db = crate::db::connect_and_migrate(&args.database_url).await?;
+    let sql_slow = Duration::from_millis(args.sql_slow_ms);
+    let db = crate::db::connect_and_migrate(&args.database_url, sql_slow).await?;
 
     // Build the WebAuthn relying party via the high-level wrapper's safe
     // builder (validates rp_id is an effective domain of rp_origin) AND a bare

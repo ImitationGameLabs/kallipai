@@ -33,6 +33,14 @@ pub struct Args {
     /// Deliverer poll interval in milliseconds.
     #[arg(long, env = "KALLIPAI_CRON_DELIVER_MS", default_value = "500")]
     pub deliver_interval_ms: u64,
+
+    /// Statement duration above which a SQL statement is logged at WARN,
+    /// in milliseconds. Statements are logged at DEBUG regardless (quiet
+    /// under the default `info` filter) and a storage failure at ERROR.
+    /// A non-numeric value fails boot: clap refuses it rather than
+    /// silently falling back to the default.
+    #[arg(long, env = "KALLIPAI_CRON_SQL_SLOW_MS", default_value_t = 100)]
+    pub sql_slow_ms: u64,
 }
 
 /// Default data directory: platform data dir + `kallipai/cron`.
@@ -110,5 +118,31 @@ mod tests {
         // extracts host `::1` and accepts it — lenient toward loopback intent,
         // never exposing a non-loopback address.
         assert!(is_loopback("::1:3010"));
+    }
+
+    /// The slow-SQL threshold defaults to 100 ms and refuses non-numeric
+    /// values instead of silently falling back.
+    #[test]
+    fn sql_slow_threshold_defaults_and_is_typed() {
+        // SAFETY: single-threaded test setup, and nothing else in
+        // this crate reads this var, so no concurrent access.
+        unsafe { std::env::remove_var("KALLIPAI_CRON_SQL_SLOW_MS") };
+        let args = Args::parse_from([
+            "kallipai-cron-daemon",
+            "--data-dir",
+            "/tmp/kallipai-cron-gate",
+        ]);
+        assert_eq!(args.sql_slow_ms, 100);
+
+        let err = Args::try_parse_from([
+            "kallipai-cron-daemon",
+            "--data-dir",
+            "/tmp/kallipai-cron-gate",
+            "--sql-slow-ms",
+            "fast",
+        ])
+        .err()
+        .expect("a non-numeric threshold must be refused");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
     }
 }

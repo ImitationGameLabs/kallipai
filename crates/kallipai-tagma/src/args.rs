@@ -65,4 +65,34 @@ pub struct Args {
     /// quota; normal use within the TTL window should never reach it).
     #[arg(long, env = "KALLIPAI_TAGMA_RELAY_HISTORY_CAP")]
     pub relay_history_cap: Option<u64>,
+
+    /// Statement duration above which a SQL statement is logged at WARN,
+    /// in milliseconds. Statements are logged at DEBUG regardless (quiet
+    /// under the default `info` filter); a store that fails to open at boot
+    /// is logged at ERROR. A non-numeric value fails boot: clap refuses it
+    /// rather than silently falling back to the default.
+    #[arg(long, env = "KALLIPAI_TAGMA_SQL_SLOW_MS", default_value_t = 100)]
+    pub sql_slow_ms: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Args;
+    use clap::Parser;
+
+    /// The slow-SQL threshold defaults to 100 ms and refuses non-numeric
+    /// values instead of silently falling back.
+    #[test]
+    fn sql_slow_threshold_defaults_and_is_typed() {
+        // SAFETY: single-threaded test setup, and nothing else in
+        // this crate reads this var, so no concurrent access.
+        unsafe { std::env::remove_var("KALLIPAI_TAGMA_SQL_SLOW_MS") };
+        let args = Args::parse_from(["kallipai-tagma"]);
+        assert_eq!(args.sql_slow_ms, 100);
+
+        let err = Args::try_parse_from(["kallipai-tagma", "--sql-slow-ms", "fast"])
+            .err()
+            .expect("a non-numeric threshold must be refused");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
+    }
 }

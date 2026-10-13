@@ -64,8 +64,9 @@ async fn main() -> Result<()> {
         },
     };
     let db_path = data_dir.join("cron.sqlite");
-    info!(db = %db_path.display(), "opening schedule store");
-    let store = ScheduleStore::open(&db_path).await?;
+    info!(db = %db_path.display(), sql_slow_ms = args.sql_slow_ms, "opening schedule store");
+    let sql_slow = Duration::from_millis(args.sql_slow_ms);
+    let store = ScheduleStore::open(&db_path, sql_slow).await?;
 
     // The tagma client for delivery: reads KALLIPAI_TAGMA_URL + KALLIPAI_AUTH_TOKEN.
     // KALLIPAI_AUTH_TOKEN must hold the tagma's operator secret so injected
