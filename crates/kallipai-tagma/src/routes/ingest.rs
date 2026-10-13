@@ -52,12 +52,9 @@ pub(crate) async fn ingest_attachment(
     // files round-trip.
     enforce(&state, &target, req.modality).await?;
 
-    let bytes = crate::files::fetch_record_bytes(
-        &state.files_http,
-        state.files_token.as_deref(),
-        req.record_id,
-    )
-    .await?;
+    let bytes =
+        crate::files::fetch_record_bytes(&state.files_http, &state.files_access(), req.record_id)
+            .await?;
     // The fetched bytes become the local master copy (fail-closed: the
     // ingest fails rather than recording a reference whose bytes no
     // store holds), then the turn is recorded against that anchor.
@@ -1022,5 +1019,141 @@ mod tests {
         let registry = state.registry.read().await;
         let entry = registry.get(&id).unwrap().as_live().unwrap();
         assert!(entry.agent.store.lock().await.turns().is_empty());
+    }
+
+    // -- the resolved-platform fetch (record-form ingest) --------------------
+
+    /// One platform face as boot resolves it from a relay entry.
+    fn platform_face(name: &str, origin: &str, token: Option<&str>) -> crate::state::PlatformFace {
+        crate::state::PlatformFace {
+            name: name.to_owned(),
+            origin: origin.to_owned(),
+            base: format!("{origin}/v1/model-gateway"),
+            token: token.map(|t| t.to_owned()),
+        }
+    }
+
+    /// The image-capable state carrying these configured platform faces.
+    fn state_with_platforms(faces: Vec<crate::state::PlatformFace>) -> crate::state::SharedState {
+        let mut inner = match std::sync::Arc::try_unwrap(make_state_with_image_set()) {
+            Ok(inner) => inner,
+            Err(_) => panic!("make_state_with_image_set hands out the sole reference"),
+        };
+        inner.platforms = std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(faces));
+        std::sync::Arc::new(inner)
+    }
+
+    /// A registered image-capable agent plus the dirs and mirror backend its
+    /// ingest writes land in (bind the second return value to keep both temp
+    /// dirs alive for the test).
+    fn image_ingest_target(
+        state: &crate::state::SharedState,
+    ) -> (
+        AgentId,
+        Vec<tempfile::TempDir>,
+        std::sync::Arc<dyn kallipai_blob_store::BlobStore>,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let mirror = tempfile::tempdir().unwrap();
+        let backend = kallipai_blob_store::LocalBackend::arc(mirror.path().to_owned());
+        assert!(state.attachment_blobs.set(backend.clone()).is_ok());
+        let id = AgentId::random();
+        let mut entry = make_entry(None, "tok".to_owned());
+        entry.identity.agent_dir = Some(dir.path().to_owned());
+        {
+            let mut reg = state.registry.try_write().unwrap();
+            reg.register(id.clone(), RegistryEntry::Live(entry));
+        }
+        seed_default_snapshot(state, &id);
+        (id, vec![dir, mirror], backend)
+    }
+
+    fn ingest_request(record_id: uuid::Uuid) -> AttachmentIngestRequest {
+        AttachmentIngestRequest {
+            record_id,
+            modality: Modality::Image,
+            media_type: None,
+            caption: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn ingest_attachment_fetches_from_the_resolved_platform() {
+        let (origin, seen) = crate::test_helpers::spawn_files_stub(200, b"png-bytes").await;
+        let state = state_with_platforms(vec![platform_face("alpha", &origin, Some("face-token"))]);
+        let (id, _tmp, backend) = image_ingest_target(&state);
+        let record_id = uuid::Uuid::from_u128(0xa11ce);
+
+        let response = kallipai_testkit::with_env_async(&[("KALLIPAI_POLIS_URL", None)], async {
+            ingest_attachment(
+                State(state.clone()),
+                AuthIdentity::test_new(Identity::Operator),
+                Path(id.clone()),
+                Json(ingest_request(record_id)),
+            )
+            .await
+            .unwrap()
+        })
+        .await;
+
+        let requests = seen.lock().unwrap().clone();
+        assert_eq!(requests.len(), 1, "one fetch, got {requests:?}");
+        assert_eq!(requests[0].0, format!("/v1/files/{record_id}"));
+        assert_eq!(requests[0].1.as_deref(), Some("Bearer face-token"));
+        let blob_id =
+            kallipai_blob_store::BlobId::parse(&response.blob_id).expect("a canonical blob id");
+        assert_eq!(backend.get(&blob_id).await.unwrap(), b"png-bytes");
+        let registry = state.registry.read().await;
+        let entry = registry.get(&id).unwrap().as_live().unwrap();
+        assert_eq!(entry.agent.store.lock().await.turns().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn ingest_attachment_ignores_the_platform_origin_variable() {
+        // The record's origin is the configured face, never the process
+        // environment: an origin named by KALLIPAI_POLIS_URL must stay
+        // untouched (agent shells inherit this environment wholesale).
+        let (decoy_origin, decoy_seen) =
+            crate::test_helpers::spawn_files_stub(200, b"decoy-bytes").await;
+        let (face_origin, face_seen) =
+            crate::test_helpers::spawn_files_stub(200, b"face-bytes").await;
+        let state = state_with_platforms(vec![platform_face(
+            "alpha",
+            &face_origin,
+            Some("face-token"),
+        )]);
+        let (id, _tmp, backend) = image_ingest_target(&state);
+        let record_id = uuid::Uuid::from_u128(0xdec0);
+
+        let response = kallipai_testkit::with_env_async(
+            &[("KALLIPAI_POLIS_URL", Some(decoy_origin.as_str()))],
+            async {
+                ingest_attachment(
+                    State(state.clone()),
+                    AuthIdentity::test_new(Identity::Operator),
+                    Path(id.clone()),
+                    Json(ingest_request(record_id)),
+                )
+                .await
+                .unwrap()
+            },
+        )
+        .await;
+
+        let decoy_requests = decoy_seen.lock().unwrap().clone();
+        assert!(
+            decoy_requests.is_empty(),
+            "the environment named no origin, got {decoy_requests:?}"
+        );
+        let face_requests = face_seen.lock().unwrap().clone();
+        assert_eq!(
+            face_requests.len(),
+            1,
+            "the configured face serves the record"
+        );
+        assert_eq!(face_requests[0].1.as_deref(), Some("Bearer face-token"));
+        let blob_id =
+            kallipai_blob_store::BlobId::parse(&response.blob_id).expect("a canonical blob id");
+        assert_eq!(backend.get(&blob_id).await.unwrap(), b"face-bytes");
     }
 }

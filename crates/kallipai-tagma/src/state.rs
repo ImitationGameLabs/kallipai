@@ -277,14 +277,6 @@ pub struct AppState {
     /// media fetch): one client reuses its connection pool across requests,
     /// and clones are cheap (an internal `Arc`).
     pub files_http: reqwest::Client,
-    /// The files-service bearer token, taken from the tagma's own
-    /// registered credential (the primary relay entry's stored
-    /// enrollment) at boot. `None` on a never-enrolled tagma: record
-    /// fetches then fail with 503 (the path form, local blobs, is
-    /// unaffected). Never read from the environment: agent shells
-    /// inherit this process env wholesale, so a token there would leak
-    /// into every agent.
-    pub files_token: Option<String>,
     /// Tagma-wide directory write-lock coordinator. Shared across all agents so
     /// one agent holding a dir's write-lock blocks another. The tagma build
     /// enforces locks via landlock on Linux (mandatory); advisory elsewhere.
@@ -793,7 +785,6 @@ impl AppState {
             preset,
             kallipai_adk::usage_stats::UsageStats::default(),
             kallipai_adk::token_budget::TokenBudget::unlimited(),
-            None,
             std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
                 crate::profile_source::SourceSlot::new(std::sync::Arc::new(
                     crate::profile_source::LocalProfileSource::new(),
@@ -818,7 +809,6 @@ impl AppState {
         preset: PolicyPreset,
         usage_stats: kallipai_adk::usage_stats::UsageStats,
         token_budget: kallipai_adk::token_budget::TokenBudget,
-        files_token: Option<String>,
         profile_source: Arc<ArcSwap<crate::profile_source::SourceSlot>>,
         gateway_params: std::sync::Arc<
             arc_swap::ArcSwap<Option<crate::profile_source::GatewayParams>>,
@@ -841,14 +831,13 @@ impl AppState {
             usage_stats,
             endpoint_health,
             token_budget,
-            files_token,
             profiles,
             profile_source,
             gateway_params,
             platforms: std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(platforms)),
             gateway_signals,
-            // Bounded so a wedged files connection cannot hang the boot
-            // path (restore re-assembly awaits this client).
+            // Bounded so a wedged files connection cannot hang a media
+            // fetch, the ingest route being this client's only user.
             files_http: reqwest::Client::builder()
                 .connect_timeout(Duration::from_secs(10))
                 .timeout(Duration::from_secs(60))
@@ -926,6 +915,30 @@ impl AppState {
     ) {
         let mut slots = self.relays.lock().unwrap_or_else(|e| e.into_inner());
         slots.insert(name.to_owned(), (handle, join));
+    }
+
+    /// The platforms this tagma can fetch stored records from: every
+    /// configured face carrying a usable enrollment, in configuration
+    /// order, as the files-service access triple (name for attribution,
+    /// origin, token). A face with no stored credential — or with a
+    /// blank one, which the credential store can leave behind — cannot
+    /// authenticate a fetch, so it does not appear.
+    pub(crate) fn files_access(&self) -> Vec<crate::files::FilesAccess> {
+        self.platforms
+            .load()
+            .iter()
+            .filter_map(|face| {
+                let token = face.token.as_deref()?.trim();
+                if token.is_empty() {
+                    return None;
+                }
+                Some(crate::files::FilesAccess {
+                    name: face.name.clone(),
+                    origin: face.origin.clone(),
+                    token: token.to_owned(),
+                })
+            })
+            .collect()
     }
 
     /// Record a just-stored enrollment token on its platform face.

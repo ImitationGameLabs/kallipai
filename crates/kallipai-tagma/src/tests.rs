@@ -15,40 +15,36 @@ fn polis_toml_rejects_the_relay_table_name() {
 }
 
 #[test]
-fn files_token_follows_the_primary_entry_scan() {
-    let root = tempfile::tempdir().unwrap();
-    let entry = |name: &str| RelayEntry {
-        name: name.to_owned(),
-        polis_url: "http://archeion".to_owned(),
-        enrollment_code: None,
+fn files_access_lists_enrolled_faces_in_config_order() {
+    let mut inner = match std::sync::Arc::try_unwrap(crate::test_helpers::make_state()) {
+        Ok(inner) => inner,
+        Err(_) => panic!("make_state hands out the sole reference"),
     };
-    let entries = [entry("alpha"), entry("beta")];
-    // No stored credentials anywhere: no token.
-    assert_eq!(files_token_from_entries(&entries, root.path()), None);
-    // The first entry in config order holding stored credentials
-    // wins.
-    std::fs::create_dir_all(root.path().join("beta")).unwrap();
-    credentials::save_tagma(
-        &root.path().join("beta"),
-        "b-id",
-        "b-token",
-        "http://archeion",
-    );
+    let face = |name: &str, token: Option<&str>| state::PlatformFace {
+        name: name.to_owned(),
+        origin: format!("http://{name}"),
+        base: format!("http://{name}/v1/model-gateway"),
+        token: token.map(|t| t.to_owned()),
+    };
+    inner.platforms = std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(vec![
+        face("alpha", None),
+        face("blank", Some("   ")),
+        face("beta", Some("b-token")),
+        face("gamma", Some("g-token")),
+    ]));
+    let state = std::sync::Arc::new(inner);
+    let access = state.files_access();
     assert_eq!(
-        files_token_from_entries(&entries, root.path()).as_deref(),
-        Some("b-token")
+        access.len(),
+        2,
+        "only enrolled faces with a credential can fetch"
     );
-    std::fs::create_dir_all(root.path().join("alpha")).unwrap();
-    credentials::save_tagma(
-        &root.path().join("alpha"),
-        "a-id",
-        "a-token",
-        "http://archeion",
-    );
-    assert_eq!(
-        files_token_from_entries(&entries, root.path()).as_deref(),
-        Some("a-token")
-    );
+    assert_eq!(access[0].name, "beta");
+    assert_eq!(access[0].origin, "http://beta");
+    assert_eq!(access[0].token, "b-token");
+    assert_eq!(access[1].name, "gamma");
+    assert_eq!(access[1].origin, "http://gamma");
+    assert_eq!(access[1].token, "g-token");
 }
 
 #[test]

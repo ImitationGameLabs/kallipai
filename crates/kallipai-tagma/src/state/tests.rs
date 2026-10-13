@@ -689,7 +689,6 @@ fn with_limits_sets_max_agents() {
         PolicyPreset::Default,
         kallipai_adk::usage_stats::UsageStats::default(),
         kallipai_adk::token_budget::TokenBudget::unlimited(),
-        None,
         std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
             crate::profile_source::SourceSlot::new(std::sync::Arc::new(
                 crate::profile_source::LocalProfileSource::new(),

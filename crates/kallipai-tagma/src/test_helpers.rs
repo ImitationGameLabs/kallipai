@@ -633,3 +633,41 @@ fn install_global_test_subscriber() {
     // test binary, and ctor runs once before any test thread exists.
     tracing::subscriber::set_global_default(subscriber).ok();
 }
+
+/// Every request a [`spawn_files_stub`] answered: path + authorization.
+pub type SeenRequests = std::sync::Arc<std::sync::Mutex<Vec<(String, Option<String>)>>>;
+
+/// A stand-in files service on a loopback port: `GET /v1/files/{id}`
+/// answers `status` with `body`, recording every request it answered
+/// (path + authorization header).
+pub async fn spawn_files_stub(status: u16, body: &'static [u8]) -> (String, SeenRequests) {
+    use axum::response::IntoResponse;
+    let seen: SeenRequests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let recorded = seen.clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let app = axum::Router::new().route(
+        "/v1/files/{id}",
+        axum::routing::get(
+            move |axum::extract::Path(id): axum::extract::Path<String>,
+                  headers: axum::http::HeaderMap| {
+                let recorded = recorded.clone();
+                async move {
+                    let auth = headers
+                        .get("authorization")
+                        .and_then(|value| value.to_str().ok())
+                        .map(str::to_owned);
+                    recorded
+                        .lock()
+                        .unwrap()
+                        .push((format!("/v1/files/{id}"), auth));
+                    (axum::http::StatusCode::from_u16(status).unwrap(), body).into_response()
+                }
+            },
+        ),
+    );
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    (format!("http://{addr}"), seen)
+}

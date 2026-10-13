@@ -771,7 +771,6 @@ async fn mutating_profile_routes_are_409_under_proxy_source() {
         kallipai_common::policy::PolicyPreset::Default,
         kallipai_adk::usage_stats::UsageStats::default(),
         kallipai_adk::token_budget::TokenBudget::unlimited(),
-        None,
         source,
         std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
             None::<crate::profile_source::GatewayParams>,
@@ -965,7 +964,6 @@ fn make_proxy_state(
         kallipai_common::policy::PolicyPreset::Default,
         kallipai_adk::usage_stats::UsageStats::default(),
         kallipai_adk::token_budget::TokenBudget::unlimited(),
-        None,
         source,
         std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(gateway_params)),
         Vec::new(),
@@ -987,7 +985,6 @@ fn make_state_with_source(
         kallipai_common::policy::PolicyPreset::Default,
         kallipai_adk::usage_stats::UsageStats::default(),
         kallipai_adk::token_budget::TokenBudget::unlimited(),
-        None,
         std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
             crate::profile_source::SourceSlot::new(source),
         )),

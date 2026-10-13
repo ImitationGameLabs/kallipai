@@ -126,8 +126,13 @@ The `kallip file` family (put/get/send/ls) is a thin face over these
 routes; credentials ride the environment (`KALLIPAI_POLIS_URL`, whose
 `/v1/files` derivation is the CLI's base URL, +
 `KALLIPAI_FILES_TOKEN`), never CLI flags. Server-side callers
-authenticate as themselves: the tagma presents its registered
-enrollment credential for record media fetches. See
+authenticate as themselves: the tagma asks each enrolled platform face
+in configuration order, presenting that face's stored credential and
+taking the origin from the same face — its own process environment
+names neither. A `404` means the record is not on that face, so the walk
+asks the next one; any other failure stops the walk and names the face
+it came from, and a walk that exhausts the faces names every face
+asked. See
 [kallip CLI reference](kallip.md).
 
 Source: [`crates/platform/kallipai-files/src/`](https://github.com/ImitationGameLabs/kallipai/tree/main/crates/platform/kallipai-files/src/).

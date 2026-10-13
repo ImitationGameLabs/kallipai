@@ -187,18 +187,6 @@ pub async fn run(args: Args, operator_pin: Option<String>) -> Result<()> {
     // panic with a backtrace. Unset boots unlimited; `0` boots paused.
     let token_budget = AppState::startup_token_budget(std::env::var("KALLIPAI_TOKEN_BUDGET").ok())
         .context("invalid KALLIPAI_TOKEN_BUDGET")?;
-    // The files-service token comes from the tagma's own registered
-    // credential (the primary relay entry's stored enrollment), never
-    // from the environment: agent shells inherit this process env
-    // wholesale, so a token there would leak into every agent — a
-    // legacy one is removed at boot (see `env_governance`). The scan must
-    // precede `restore_agents`, whose re-assembly fetches record bytes
-    // through the token. Two-phase by design: this build-time scan runs before
-    // the relay plan resolves, so on a first-registration boot
-    // (enrollment happens in the plan phase) the slot stays `None` for
-    // that session — nothing to fetch yet — and the next boot picks
-    // the credential up.
-    let files_token = resolve_files_token(&args)?;
     // The gateway-signal intake runs in every mode: the adk acquisition
     // loop publishes at most one 401/403 per exhausted failover chain,
     // and the consumer refreshes the snapshot and poisons the source on
@@ -219,7 +207,6 @@ pub async fn run(args: Args, operator_pin: Option<String>) -> Result<()> {
         kallipai_adk::config::policy_preset_from_env(),
         kallipai_adk::usage_stats::UsageStats::default(),
         token_budget,
-        files_token,
         profile_slot,
         std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(gateway_params)),
         platforms,
@@ -946,28 +933,6 @@ fn resolve_primary_identity(
         }
     }
     Ok((None, None))
-}
-
-/// The files-service token: the primary relay entry's stored enrollment
-/// token (same config-order scan as [`resolve_primary_identity`], whose
-/// first entry owns the tagma identity). `None` when no entry has stored
-/// credentials — record fetches then degrade to 503, while the path form
-/// (local blobs) is unaffected. Runs at `SharedState` build time, before
-/// `restore_agents` (re-assembly fetches through this token); the
-/// gateway-base derivation and the relay plan re-walk the same entries
-/// later in boot (small directory reads, intentionally unshared).
-fn resolve_files_token(args: &args::Args) -> Result<Option<String>> {
-    let entries = resolve_relay_entries(args)?;
-    let root = credentials_dir()?;
-    Ok(files_token_from_entries(&entries, &root))
-}
-
-/// First stored enrollment token in config order, or `None` — the same
-/// "primary archeion" order [`resolve_primary_identity`] scans in.
-fn files_token_from_entries(entries: &[RelayEntry], root: &std::path::Path) -> Option<String> {
-    entries
-        .iter()
-        .find_map(|entry| credentials::load_tagma(&root.join(&entry.name)).map(|s| s.token))
 }
 
 /// Resolve every configured relay entry's platform face: entry order
