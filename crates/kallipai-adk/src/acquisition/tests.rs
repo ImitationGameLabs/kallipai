@@ -18,8 +18,7 @@ use kallipai_common::timefmt;
 use tokio_util::sync::CancellationToken;
 
 use crate::budget_gate::{BudgetAction, enforce_pre_call_budget};
-use crate::retry::AttemptOrigin;
-use crate::retry::{Episode, RetryCall, RetryPolicy, stream_with_retry};
+use crate::retry::{AttemptOrigin, Episode, RetryCall, RetryPolicy, stream_with_retry};
 use crate::test_support::{
     FAILURE_PIN_WINDOW, MapSource, RecordingBackend, RecordingHealth, account_hint,
     ctx_from_source, mock_source, profile, request, seed_over_budget_store, set_context_window,
@@ -27,8 +26,9 @@ use crate::test_support::{
 };
 use just_llm_client::LlmBackend;
 use just_llm_client::types::generation::ReasoningEffort;
-use kallipai_common::facts::{Block, BlockKind, QUOTA_RESET_TRUST_MAX_SECS};
-use kallipai_common::facts::{BlockedFact, EndpointHealth, FactView};
+use kallipai_common::facts::{
+    Block, BlockKind, BlockedFact, EndpointHealth, FactView, QUOTA_RESET_TRUST_MAX_SECS,
+};
 use kallipai_common::retry::RetryKind;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -1523,6 +1523,9 @@ async fn a_fact_written_mid_walk_stops_the_next_send() {
     ctx.endpoint_health = Some(Arc::new(FactLandsMidWalk {
         walk_endpoint: seeded(BlockKind::EndpointAuth, None),
         sibling: seeded(BlockKind::EndpointAuth, None),
+        // The count matters: 1 would mark the sibling for the walk itself, 3 would
+        // let the attempt read past it, and either way the window this test pins
+        // is gone.
         sibling_reads_before_visible: 2,
         sibling_reads: AtomicUsize::new(0),
     }));

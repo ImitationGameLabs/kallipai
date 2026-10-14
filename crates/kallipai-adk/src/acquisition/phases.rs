@@ -54,9 +54,9 @@ pub(crate) async fn acquire_stream(
     let mut retry_records = Vec::new();
     let consumed = loop {
         let endpoint_id = ctx.failover.current_profile().endpoint.clone();
-        // The clock, the attempt origin and the table's reading are all taken
-        // here, so a chain that advanced is seen with fresh values: the verdict
-        // on them is `enter_attempt`'s, which owns what a carried fact means.
+        // The endpoint, the clock, the attempt origin and the table's reading are
+        // all taken here, so a chain that advanced is seen with fresh values: the
+        // verdict on them is `enter_attempt`'s, which owns what a carried fact means.
         let now = timefmt::now_epoch();
         let origin = ctx.take_attempt_origin();
         let reading = table_reading(ctx, now);
@@ -74,10 +74,7 @@ pub(crate) async fn acquire_stream(
         {
             // The attempt proceeds to the send.
             PreSend::Send => {}
-            // The chain advanced: the loop head takes the endpoint, the clock,
-            // the attempt origin and the table reading again, so a fact another
-            // agent wrote while the walk ran still stops this send.
-            PreSend::ReLoop => continue,
+            PreSend::Advanced => continue,
             PreSend::Done(result) => return result,
         }
         let request = build_request(ctx, &messages, &tools);
@@ -251,7 +248,7 @@ enum PreSend {
     /// The chain advanced. The driver runs the loop head again, so the endpoint,
     /// the clock, the attempt origin and the table reading are all taken afresh:
     /// a fact another agent wrote while the walk ran still stops the send.
-    ReLoop,
+    Advanced,
     /// The round ends here, with this result.
     Done(AcquireResult),
 }
@@ -263,7 +260,7 @@ enum PreSend {
 /// re-entry continues the episode), so the attempt starts over rather than erroring
 /// the round.
 ///
-/// `PreSend::Send` means the attempt proceeds, `PreSend::ReLoop` means the chain
+/// `PreSend::Send` means the attempt proceeds, `PreSend::Advanced` means the chain
 /// advanced and the driver takes the attempt from the top, `PreSend::Done` ends the
 /// round with the result.
 async fn enter_attempt(
@@ -318,7 +315,7 @@ async fn enter_attempt(
             }
             // The walk recovered: the driver starts the attempt over against the
             // new endpoint and re-reads the table there.
-            return PreSend::ReLoop;
+            return PreSend::Advanced;
         }
         // The table's verdict with nowhere to go: the round stops here, with
         // no request made and the fact as the evidence.
@@ -374,7 +371,7 @@ async fn enter_attempt(
             }
             // The walk advanced: the driver starts the attempt over against the
             // new endpoint.
-            return PreSend::ReLoop;
+            return PreSend::Advanced;
         }
         // A pre-send reading cannot fail the round on its own: the arm keeps
         // the match exhaustive, and a round error beats a panic.
