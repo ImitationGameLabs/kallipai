@@ -23,8 +23,8 @@ use crate::spill;
 use super::tail::{read_pipes_tail, read_tail, remove_pipes_spill};
 use super::watch::{pump_log_chunk, task_reasons, watch};
 use super::{
-    BgReadOutput, EXIT_NONE, KILL_JOIN, OnTaskTerminal, STATE_KILLED, STATE_RUNNING, TaskId,
-    TaskState,
+    BgReadOutput, BgTaskHandle, BgTaskSink, EXIT_NONE, KILL_JOIN, MAX_BG_SUMMARIES, OnTaskTerminal,
+    STATE_KILLED, STATE_RUNNING, TaskId, TaskState,
 };
 
 struct BackgroundTask {
@@ -40,6 +40,13 @@ struct BackgroundTask {
     /// Reason slot for the capped-sink pump (disk cap / poison degrade);
     /// surfaced in the read body.
     cap_reason: Arc<Mutex<Option<String>>>,
+    /// Launch text and the directory the task really runs in, recorded at
+    /// spawn/adopt for the status view; the command is already single-lined
+    /// and capped (see [`summarize_command`]).
+    command: String,
+    cwd: PathBuf,
+    /// Spawn time, epoch seconds — the age anchor of the status view.
+    started_at: u64,
     cancel: CancellationToken,
     handle: Option<tokio::task::JoinHandle<()>>,
 }
@@ -137,6 +144,11 @@ pub(crate) struct BackgroundRegistry {
     disk_cap: usize,
     env: HashMap<OsString, OsString>,
     on_terminal: Option<OnTaskTerminal>,
+    /// Optional shared cell published on every change to the running set, so
+    /// a host can read what runs without taking the backend's async lock — a
+    /// long foreground command holds that lock for its whole life. See
+    /// [`BgTaskSink`].
+    bg_tasks: Option<BgTaskSink>,
     /// When set (Linux + `landlock` feature), each background `bash` is
     /// landlock-restricted to the owning agent's current access decision.
     #[cfg(all(target_os = "linux", feature = "landlock"))]
@@ -153,6 +165,7 @@ impl BackgroundRegistry {
         max_bg_bytes: usize,
         env: HashMap<OsString, OsString>,
         on_terminal: Option<OnTaskTerminal>,
+        bg_tasks: Option<BgTaskSink>,
     ) -> Self {
         Self {
             tasks: HashMap::new(),
@@ -161,6 +174,7 @@ impl BackgroundRegistry {
             disk_cap: DEFAULT_DISK_CAP,
             env,
             on_terminal,
+            bg_tasks,
             #[cfg(all(target_os = "linux", feature = "landlock"))]
             access_source: None,
             exec_gate: None,
@@ -188,8 +202,16 @@ impl BackgroundRegistry {
         self
     }
 
-    /// Spawn `command` as a background task; returns its id.
-    pub(crate) async fn spawn(&mut self, command: &str) -> Result<TaskId, ShellError> {
+    /// Spawn `command` as a background task in `cwd`; returns its id.
+    ///
+    /// `cwd` is resolved by the caller — the same resolution the foreground
+    /// path uses — applied to the child, and carried in the summary the
+    /// status view reads.
+    pub(crate) async fn spawn(
+        &mut self,
+        command: &str,
+        cwd: PathBuf,
+    ) -> Result<TaskId, ShellError> {
         let id = uuid::Uuid::new_v4().to_string();
         // Each task owns a private output dir under the spill tree —
         // `spill_root()/bg/<task-id>/out.log`. No in-process cleanup: the
@@ -209,7 +231,8 @@ impl BackgroundRegistry {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .process_group(0)
-            .kill_on_drop(true);
+            .kill_on_drop(true)
+            .current_dir(&cwd);
         // Apply builder env (parity with foreground exec) + color suppression.
         for (key, value) in &self.env {
             cmd.env(key, value);
@@ -334,7 +357,7 @@ impl BackgroundRegistry {
             cancel: cancel.clone(),
             max_bg_bytes: self.max_bg_bytes,
             id: id.clone(),
-            on_terminal: self.on_terminal.clone(),
+            on_terminal: terminal_observer(self.on_terminal.clone(), self.bg_tasks.as_ref()),
             exec_gate: self.exec_gate.clone(),
             output: output.clone(),
             cap_reason: Some(cap_reason.clone()),
@@ -357,10 +380,14 @@ impl BackgroundRegistry {
                 stalled,
                 bytes,
                 cap_reason,
+                command: summarize_command(command),
+                cwd,
+                started_at: epoch_secs(),
                 cancel,
                 handle: Some(handle),
             },
         );
+        self.publish();
         Ok(id)
     }
 
@@ -386,6 +413,9 @@ impl BackgroundRegistry {
     /// via `mark_terminal`, unwind guard disarmed once the watcher exists),
     /// so there is no window where the task is half-registered and no path
     /// that leaks the running-bg tally.
+    /// `command` and `cwd` are recorded for the status view: the converted
+    /// child keeps running in the cwd it was forked into.
+    #[allow(clippy::too_many_arguments)] // the adoption entry's own shape
     pub(crate) async fn adopt(
         &mut self,
         child: Child,
@@ -393,6 +423,8 @@ impl BackgroundRegistry {
         pumps: Pumps,
         output: TaskOutput,
         epoch_at_fork: Option<u64>,
+        command: &str,
+        cwd: PathBuf,
     ) -> AdoptOutcome {
         let gate = self.exec_gate.clone();
         let _gate = crate::gate::ExecGate::read(&gate).await;
@@ -430,7 +462,7 @@ impl BackgroundRegistry {
             cancel: cancel.clone(),
             max_bg_bytes: self.max_bg_bytes,
             id: id.clone(),
-            on_terminal: self.on_terminal.clone(),
+            on_terminal: terminal_observer(self.on_terminal.clone(), self.bg_tasks.as_ref()),
             exec_gate: self.exec_gate.clone(),
             output: output.clone(),
             cap_reason: None,
@@ -450,11 +482,69 @@ impl BackgroundRegistry {
                 stalled,
                 bytes,
                 cap_reason: Arc::new(Mutex::new(None)),
+                command: summarize_command(command),
+                cwd,
+                started_at: epoch_secs(),
                 cancel,
                 handle: Some(handle),
             },
         );
+        self.publish();
         AdoptOutcome::Adopted(id)
+    }
+
+    /// The in-flight tasks as published entries, newest first, capped at
+    /// [`MAX_BG_SUMMARIES`].
+    ///
+    /// Only tasks still running are listed: a task leaving the running state
+    /// drops out of the list rather than being reported as terminal, so the
+    /// list never shows a finished task. Ties on the spawn second break on
+    /// the id, so the order is stable across reads. This is a pure read of the
+    /// registry's own atomics — it takes no backend lock.
+    pub(crate) fn handles(&self) -> Vec<BgTaskHandle> {
+        let mut out: Vec<BgTaskHandle> = self
+            .tasks
+            .iter()
+            .filter(|(_, task)| task.state.load(Ordering::Relaxed) == STATE_RUNNING)
+            .map(|(id, task)| BgTaskHandle {
+                id: id.clone(),
+                stalled: task.stalled.clone(),
+                bytes: task.bytes.clone(),
+                command: task.command.clone(),
+                cwd: task.cwd.clone(),
+                started_at: task.started_at,
+            })
+            .collect();
+        out.sort_by(|a, b| {
+            b.started_at
+                .cmp(&a.started_at)
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        out.truncate(MAX_BG_SUMMARIES);
+        out
+    }
+
+    /// Replace the installed sink's contents with the current running set.
+    ///
+    /// Called wherever `tasks` changes and on every terminal transition, so a
+    /// reader sees the running set rather than a lagging copy of it, and each
+    /// published entry carries live counters, so a reader needs no republish
+    /// to see a task's current output size. The critical section moves a
+    /// `Vec<BgTaskHandle>` and never awaits, so a host read cannot queue
+    /// behind the shell's async work. The snapshot is taken under the sink
+    /// lock: the terminal observer drops a finished task from the cell from
+    /// the watcher task, so a snapshot collected outside the lock could put
+    /// one back in the list.
+    fn publish(&self) {
+        let Some(sink) = &self.bg_tasks else {
+            return;
+        };
+        // A poisoned lock means a reader panicked; the list is a display aid,
+        // so a failed update is skipped rather than propagated.
+        if let Ok(mut published) = sink.lock() {
+            // The snapshot is taken under this lock: see the doc above.
+            *published = self.handles();
+        }
     }
 
     /// Read a background task's accumulated output and status.
@@ -512,6 +602,7 @@ impl BackgroundRegistry {
         // watcher already reported terminal.
         mark_terminal(&task.state, STATE_KILLED, self.exec_gate.as_ref());
         remove_pipes_spill(&task.output);
+        self.publish();
         // `task` drops here: nothing is removed — `out.log` persists under
         // `bg/<task-id>/` for the system cleanup. The watcher has already
         // finished (we awaited the handle above), so nothing reads it again
@@ -541,6 +632,7 @@ impl Drop for BackgroundRegistry {
                 pgroup::force_kill_group(pid as i32);
             }
         }
+        self.publish();
     }
 }
 
@@ -594,4 +686,56 @@ pub(crate) fn mark_terminal(
     {
         g.dec_bg();
     }
+}
+
+/// Display cap for a recorded command, in characters (not bytes): the status
+/// view needs enough to recognize the command, not to replay it.
+pub(super) const MAX_COMMAND_CHARS: usize = 200;
+
+/// Collapse `command` to a single line — every whitespace run (newlines,
+/// tabs, carriage returns) becomes one space — and cap it: the kept text
+/// holds at most [`MAX_COMMAND_CHARS`] characters, and a cut appends one
+/// ellipsis character, so a cut summary runs one character past the cap.
+/// Recorded once, at the source, so the summary and every later consumer
+/// see the same bounded text: a multi-line heredoc cannot tear a display
+/// apart, and no consumer has to re-cap.
+fn summarize_command(command: &str) -> String {
+    let single = command.split_whitespace().collect::<Vec<_>>().join(" ");
+    if single.chars().count() <= MAX_COMMAND_CHARS {
+        return single;
+    }
+    let mut capped: String = single.chars().take(MAX_COMMAND_CHARS).collect();
+    capped.push('…');
+    capped
+}
+
+/// Current time in epoch seconds; 0 if the clock predates the epoch. The
+/// value only feeds age displays, so a degenerate clock degrades to a zero
+/// age instead of failing the spawn.
+fn epoch_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Compose the terminal observer with the snapshot sink: a task that reaches
+/// a terminal state leaves the published list at once — the list is the
+/// running set, not a history — before the host's own observer runs. Without
+/// an installed sink the host observer passes through untouched.
+fn terminal_observer(
+    on_terminal: Option<OnTaskTerminal>,
+    sink: Option<&BgTaskSink>,
+) -> Option<OnTaskTerminal> {
+    let Some(sink) = sink.cloned() else {
+        return on_terminal;
+    };
+    Some(Arc::new(move |id, state, code, reason| {
+        if let Ok(mut published) = sink.lock() {
+            published.retain(|task| task.id != id);
+        }
+        if let Some(observer) = &on_terminal {
+            observer(id, state, code, reason);
+        }
+    }))
 }

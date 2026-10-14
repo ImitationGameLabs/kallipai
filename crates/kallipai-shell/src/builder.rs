@@ -317,6 +317,9 @@ impl ShellBuilder {
             self.max_bg_bytes,
             self.env.clone(),
             self.on_terminal.clone().map(|o| o.0),
+            // No running-task sink yet: the host installs one when it wants
+            // the list published (see `BgTaskSink`).
+            None,
         );
         let background = background.with_disk_cap(self.disk_cap);
         // Share the access-decision snapshot source with the background registry

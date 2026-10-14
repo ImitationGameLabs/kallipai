@@ -3,12 +3,14 @@
 
 use std::collections::HashMap;
 use std::ffi::OsString;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use crate::error::ShellError;
 
+use super::registry::MAX_COMMAND_CHARS;
 use super::tail::read_tail;
 
 use super::*;
@@ -22,7 +24,29 @@ fn registry() -> BackgroundRegistry {
         10 * 1024 * 1024,
         HashMap::new(),
         None,
+        None,
     )
+}
+
+/// A registry with a running-task sink installed, plus that sink — the shape
+/// a host uses to read the list without touching the backend lock.
+fn registry_with_sink() -> (BackgroundRegistry, BgTaskSink) {
+    let sink: BgTaskSink = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let reg = BackgroundRegistry::new(
+        OsString::from("bash"),
+        10 * 1024 * 1024,
+        HashMap::new(),
+        None,
+        Some(sink.clone()),
+    );
+    (reg, sink)
+}
+
+/// The cwd handed to a registry spawn under test: the child starts there and
+/// the registry records it, so a real directory keeps the assertions
+/// comparable to production values.
+fn test_cwd() -> PathBuf {
+    std::env::current_dir().unwrap()
 }
 
 /// The headline carve-exclusion test, exercised through the real
@@ -36,7 +60,7 @@ fn registry() -> BackgroundRegistry {
 async fn running_bg_blocks_carve_while_task_runs() {
     let gate = crate::gate::ExecGate::new();
     let mut reg = registry().with_exec_gate(gate.clone());
-    let id = reg.spawn("sleep 30").await.unwrap();
+    let id = reg.spawn("sleep 30", test_cwd()).await.unwrap();
 
     // The spawn incs the tally before returning; wait for it to land.
     for _ in 0..50 {
@@ -70,7 +94,7 @@ async fn running_bg_blocks_carve_while_task_runs() {
 #[tokio::test]
 async fn spawn_then_read_exited_task() {
     let mut reg = registry();
-    let id = reg.spawn("echo hello").await.unwrap();
+    let id = reg.spawn("echo hello", test_cwd()).await.unwrap();
     // Wait for the task to exit and the watcher to notice.
     for _ in 0..50 {
         let out = reg.read(&id, 4096).unwrap();
@@ -91,7 +115,10 @@ async fn spawn_then_read_exited_task() {
 async fn spawn_applies_color_vars() {
     let mut reg = registry();
     let id = reg
-        .spawn("echo \"$TERM/$NO_COLOR/$CLICOLOR\"; test -z \"$LS_COLORS\" && echo empty")
+        .spawn(
+            "echo \"$TERM/$NO_COLOR/$CLICOLOR\"; test -z \"$LS_COLORS\" && echo empty",
+            test_cwd(),
+        )
         .await
         .unwrap();
     for _ in 0..50 {
@@ -109,7 +136,7 @@ async fn spawn_applies_color_vars() {
 #[tokio::test]
 async fn kill_stops_a_long_task() {
     let mut reg = registry();
-    let id = reg.spawn("sleep 30").await.unwrap();
+    let id = reg.spawn("sleep 30", test_cwd()).await.unwrap();
     tokio::time::sleep(Duration::from_millis(300)).await;
     reg.kill(&id).await.unwrap();
     let err = reg.read(&id, 4096).unwrap_err();
@@ -131,7 +158,7 @@ async fn read_unknown_task_errors() {
 async fn background_cap_stops_pump_and_surfaces_reason() {
     let mut reg = registry().with_disk_cap(4096);
     let id = reg
-        .spawn("for i in {1..1000000}; do echo hello; done")
+        .spawn("for i in {1..1000000}; do echo hello; done", test_cwd())
         .await
         .unwrap();
     for _ in 0..100 {
@@ -210,9 +237,10 @@ async fn size_watchdog_kills_overflow() {
         4096, // tiny cap
         HashMap::new(),
         None,
+        None,
     );
     let id = reg
-        .spawn("for i in {1..1000000}; do echo hello; done")
+        .spawn("for i in {1..1000000}; do echo hello; done", test_cwd())
         .await
         .unwrap();
     for _ in 0..100 {
@@ -241,6 +269,7 @@ fn tracking_registry(
             *captured.lock().unwrap() =
                 Some((id.to_string(), state, code, reason.map(str::to_owned)));
         })),
+        None,
     );
     (reg, received)
 }
@@ -248,7 +277,7 @@ fn tracking_registry(
 #[tokio::test]
 async fn on_terminal_fires_on_exit() {
     let (mut reg, received) = tracking_registry(10 * 1024 * 1024);
-    let id = reg.spawn("exit 7").await.unwrap();
+    let id = reg.spawn("exit 7", test_cwd()).await.unwrap();
     for _ in 0..50 {
         if received.lock().unwrap().is_some() {
             break;
@@ -278,7 +307,7 @@ async fn terminal_notice_and_read_carry_cap_reason() {
     // (never-reached) size watchdog: ~2.2 MB of bounded output vs 4 KiB.
     let mut reg = reg.with_disk_cap(4096);
     let id = reg
-        .spawn("for i in {1..200000}; do echo line-$i; done")
+        .spawn("for i in {1..200000}; do echo line-$i; done", test_cwd())
         .await
         .unwrap();
     for _ in 0..100 {
@@ -327,7 +356,7 @@ async fn on_terminal_fires_on_size_watchdog() {
     // tiny cap → the size watchdog kills quickly.
     let (mut reg, received) = tracking_registry(4096);
     let id = reg
-        .spawn("for i in {1..1000000}; do echo hello; done")
+        .spawn("for i in {1..1000000}; do echo hello; done", test_cwd())
         .await
         .unwrap();
     for _ in 0..100 {
@@ -344,4 +373,242 @@ async fn on_terminal_fires_on_size_watchdog() {
     assert_eq!(cb_reason, None, "a watchdog kill carries no pump reason");
     assert_eq!(cb_id, id);
     assert_eq!(cb_state, TaskState::Killed);
+}
+
+/// The recorded trio reaches the summary: command text, cwd, and spawn time.
+/// A multi-line command is collapsed to a single line — newlines and tabs
+/// become single spaces — so no consumer has to defend its layout against a
+/// heredoc.
+#[tokio::test]
+async fn handles_record_command_cwd_and_started_at() {
+    let mut reg = registry();
+    let cwd = std::env::temp_dir();
+    let before = epoch_now();
+    let id = reg
+        .spawn("sleep 30\n\t&& echo a\t\tb", cwd.clone())
+        .await
+        .unwrap();
+    let handles = reg.handles();
+    assert_eq!(handles.len(), 1, "the one running task is summarized");
+    let summary = handles[0].summary();
+    assert_eq!(summary.id, id);
+    assert_eq!(
+        summary.cwd, cwd,
+        "the recorded cwd is what the caller passed"
+    );
+    assert_eq!(
+        summary.command, "sleep 30 && echo a b",
+        "whitespace runs collapse to single spaces"
+    );
+    assert!(
+        summary.started_at >= before && summary.started_at <= epoch_now(),
+        "spawn time is bracketed by the test's own clock"
+    );
+    assert!(!summary.stalled, "a silent task is not stalled");
+    assert_eq!(summary.bytes, 0, "nothing has been written yet");
+    reg.kill(&id).await.unwrap();
+}
+
+/// Only running tasks are summarized: once a task is terminal it leaves the
+/// list instead of being reported as finished — so there is no terminal
+/// group, and the list cannot grow into a history.
+#[tokio::test]
+async fn handles_drop_a_task_once_it_is_terminal() {
+    let mut reg = registry();
+    let id = reg.spawn("echo done", test_cwd()).await.unwrap();
+    for _ in 0..50 {
+        if reg.read(&id, 4096).unwrap().state == TaskState::Exited {
+            assert!(reg.handles().is_empty(), "an exited task is not listed");
+            return;
+        }
+        tokio::time::sleep(WATCH_POLL).await;
+    }
+    panic!("task did not exit in time");
+}
+
+/// Newest first, capped at the snapshot cap: with more running tasks than the
+/// cap, the list holds the newest and drops the oldest. The oldest task is
+/// spawned a second earlier so the drop is unambiguous — same-second spawns
+/// order on the id, which is random.
+#[tokio::test]
+async fn handles_are_newest_first_and_capped() {
+    let mut reg = registry();
+    let oldest = reg.spawn("sleep 30", test_cwd()).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    let mut newer = Vec::new();
+    for _ in 0..MAX_BG_SUMMARIES {
+        newer.push(reg.spawn("sleep 30", test_cwd()).await.unwrap());
+    }
+    let handles = reg.handles();
+    assert_eq!(
+        handles.len(),
+        MAX_BG_SUMMARIES,
+        "capped at the snapshot cap"
+    );
+    assert!(
+        !handles.iter().any(|s| s.id == oldest),
+        "the oldest task is the one dropped"
+    );
+    assert!(
+        newer.iter().all(|id| handles.iter().any(|s| &s.id == id)),
+        "every newer task is listed"
+    );
+    for pair in handles.windows(2) {
+        assert!(
+            pair[0].started_at >= pair[1].started_at,
+            "newest first: {pair:?}"
+        );
+    }
+    for id in &newer {
+        reg.kill(id).await.unwrap();
+    }
+    reg.kill(&oldest).await.unwrap();
+}
+
+/// The command cap counts characters, not bytes, and a cut is marked: a
+/// multibyte tail keeps its characters whole (a byte-wise cut would split
+/// one), and the marker tells the reader the text is short of the original.
+/// The cap is applied once, at the source, so consumers never re-cap.
+#[tokio::test]
+async fn command_is_capped_by_characters_and_marked() {
+    let mut reg = registry();
+    let prefix = "sleep 30; echo ";
+    let id = reg
+        .spawn(&format!("{prefix}{}", "é".repeat(300)), test_cwd())
+        .await
+        .unwrap();
+    let handles = reg.handles();
+    assert_eq!(handles.len(), 1);
+    let command = &handles[0].command;
+    assert_eq!(
+        command.chars().count(),
+        MAX_COMMAND_CHARS + 1,
+        "the cap plus the cut marker"
+    );
+    assert!(command.ends_with('…'), "a cut is marked: {command}");
+    assert_eq!(
+        command.matches('é').count(),
+        MAX_COMMAND_CHARS - prefix.chars().count(),
+        "multibyte characters survive whole"
+    );
+    assert!(command.starts_with(prefix), "the head is kept: {command}");
+    reg.kill(&id).await.unwrap();
+}
+/// The cap is compared against the whole command: one that fits exactly is
+/// passed through untouched, and the first character over the cap is what
+/// earns the marker.
+#[tokio::test]
+async fn command_length_is_compared_against_the_cap_exactly() {
+    let mut reg = registry();
+    let prefix = "sleep 30; # ";
+    let at_cap = format!(
+        "{prefix}{}",
+        "x".repeat(MAX_COMMAND_CHARS - prefix.chars().count())
+    );
+    let over_cap = format!("{at_cap}y");
+    let first = reg.spawn(&at_cap, test_cwd()).await.unwrap();
+    let second = reg.spawn(&over_cap, test_cwd()).await.unwrap();
+    let mut commands: Vec<String> = reg.handles().into_iter().map(|s| s.command).collect();
+    commands.sort();
+    let mut expected = vec![at_cap.clone(), format!("{at_cap}…")];
+    expected.sort();
+    assert_eq!(
+        commands, expected,
+        "at the cap: verbatim; one over: cut and marked"
+    );
+    reg.kill(&first).await.unwrap();
+    reg.kill(&second).await.unwrap();
+}
+
+/// Wall clock in epoch seconds, for bracketing a recorded spawn time.
+fn epoch_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+}
+
+/// The sink follows the running set: a spawn publishes the task, a kill
+/// removes it, and a task that exits on its own leaves at its terminal
+/// transition — the list is the running set, not a history.
+#[tokio::test]
+async fn sink_publishes_the_running_set() {
+    let (mut reg, sink) = registry_with_sink();
+    let first = reg.spawn("sleep 30", test_cwd()).await.unwrap();
+    let second = reg.spawn("echo done", test_cwd()).await.unwrap();
+    assert_eq!(
+        published(&sink).len(),
+        2,
+        "both running tasks are published"
+    );
+    reg.kill(&first).await.unwrap();
+    let after_kill = published(&sink);
+    assert_eq!(after_kill.len(), 1, "a killed task leaves the list");
+    assert_eq!(after_kill[0].id, second);
+    for _ in 0..50 {
+        if reg.read(&second, 4096).unwrap().state == TaskState::Exited {
+            assert!(
+                published(&sink).is_empty(),
+                "an exited task leaves the list"
+            );
+            return;
+        }
+        tokio::time::sleep(WATCH_POLL).await;
+    }
+    panic!("task did not exit in time");
+}
+
+/// A published entry's byte count follows the task itself: the cell is
+/// replaced only when the running set changes, so a reader must see the bytes
+/// written since that publish rather than the count frozen at publish time.
+/// The command writes, pauses past a watcher poll, then writes again — the
+/// running set does not change in between.
+#[tokio::test]
+async fn published_bytes_follow_a_running_task() {
+    let (mut reg, sink) = registry_with_sink();
+    let id = reg
+        .spawn("printf aaaa; sleep 2; printf bbbb; sleep 30", test_cwd())
+        .await
+        .unwrap();
+    let first = await_bytes(&sink, |bytes| bytes > 0).await;
+    let second = await_bytes(&sink, |bytes| bytes > first).await;
+    assert!(
+        second > first,
+        "the count grows without another publish: {first} then {second}"
+    );
+    assert_eq!(published(&sink).len(), 1, "the running set did not change");
+    assert_eq!(published(&sink)[0].id, id);
+    reg.kill(&id).await.unwrap();
+}
+
+/// Poll the published cell for an entry whose byte count satisfies `ok`.
+async fn await_bytes(sink: &BgTaskSink, ok: impl Fn(usize) -> bool) -> usize {
+    for _ in 0..100 {
+        if let Some(bytes) = published(sink).first().map(|task| task.summary().bytes)
+            && ok(bytes)
+        {
+            return bytes;
+        }
+        tokio::time::sleep(WATCH_POLL).await;
+    }
+    panic!("the published byte count never satisfied the test");
+}
+
+/// Dropping the registry empties the sink: the tasks go away with the agent's
+/// runtime, so a reader must not keep seeing the last frame as running.
+#[tokio::test]
+async fn sink_is_empty_after_the_registry_is_dropped() {
+    let (mut reg, sink) = registry_with_sink();
+    let _id = reg.spawn("sleep 30", test_cwd()).await.unwrap();
+    assert_eq!(published(&sink).len(), 1);
+    drop(reg);
+    assert!(
+        published(&sink).is_empty(),
+        "the last frame is cleared with the registry"
+    );
+}
+
+/// The sink's contents, for assertions.
+fn published(sink: &BgTaskSink) -> Vec<BgTaskHandle> {
+    sink.lock().unwrap().clone()
 }

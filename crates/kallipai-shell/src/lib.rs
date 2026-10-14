@@ -69,6 +69,17 @@ pub use error::ShellError;
 pub use gate::{ExecGate, ExecGateFailure, ExecReadGuard, ExecWriteGuard};
 pub use tools::{BashExec, BashExecOutput, BgKill, BgRead};
 
+/// The published entries of running background tasks and their read
+/// projection, plus the shared cell a host installs to receive them (see
+/// [`BgTaskSink`] and [`BgTaskHandle`]).
+pub use supervisor::{BgTaskHandle, BgTaskSink, BgTaskSummary};
+
+/// The cap on the published background-task list. It must equal the tagma
+/// protocol's `BACKGROUND_TASK_LIST_MAX`; `kallipai-adk` asserts the pair
+/// equal at compile time, so a drift is a build error rather than a silently
+/// shortened list.
+pub use supervisor::MAX_BG_SUMMARIES;
+
 // The mock backend is public API behind the `testutils` feature so downstream
 // crates can drive shell-tool tests without a real process. It is also compiled
 // during this crate's own tests.

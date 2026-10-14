@@ -9,7 +9,9 @@
 //! two-phase kill on cancel. Modeled on the tagma's agent registry
 //! (`state.rs`).
 
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 mod registry;
@@ -31,6 +33,15 @@ const STALL_QUIESCENCE: Duration = Duration::from_secs(3);
 const STALL_TAIL: u64 = 4 * 1024;
 /// Bounded wait for a watcher task to finish after cancel.
 const KILL_JOIN: Duration = Duration::from_secs(5);
+
+/// Snapshot cap for the per-agent background-task view: a defensive bound
+/// (the concurrent in-flight count does not realistically reach it),
+/// applied at the source so the published list is bounded by construction.
+/// It must stay equal to the tagma protocol's `BACKGROUND_TASK_LIST_MAX`,
+/// which caps the same list on the wire: a larger shell cap would let the
+/// tagma drop entries without saying so. `kallipai-adk` asserts the two
+/// equal at compile time.
+pub const MAX_BG_SUMMARIES: usize = 20;
 
 const EXIT_NONE: i32 = -1;
 const STATE_RUNNING: u8 = 0;
@@ -104,3 +115,72 @@ pub struct BgReadOutput {
     /// field-level consumers need not parse the output text.
     pub reason: Option<String>,
 }
+
+/// One in-flight background task, as read from the published cell.
+///
+/// A read-only projection: counters as of the call, no output. The command text
+/// is already collapsed to a single line and capped in length by the registry,
+/// so consumers print it verbatim; `started_at` is epoch seconds, and rendering
+/// an age from it is the display side's business.
+#[derive(Debug, Clone)]
+pub struct BgTaskSummary {
+    /// Task id (UUID v4 string), the same one handed to the LLM.
+    pub id: String,
+    /// `true` if the stall watchdog flagged an interactive-prompt lockup.
+    pub stalled: bool,
+    /// Total bytes of output written so far.
+    pub bytes: usize,
+    /// The launched command, single-lined and capped (see the type docs).
+    pub command: String,
+    /// The directory the task started in, recorded at spawn; a launch-time snapshot.
+    pub cwd: PathBuf,
+    /// Spawn time, epoch seconds.
+    pub started_at: u64,
+}
+
+/// One published entry: the fixed launch facts of a running task, plus the live
+/// counters its watcher updates.
+///
+/// The counters are the watcher's own atomics, so a read reports the task's
+/// current output size and stall flag rather than the values it had when the
+/// running set last changed. `id`, `command`, `cwd`, and `started_at` never
+/// change after the entry is published.
+#[derive(Debug, Clone)]
+pub struct BgTaskHandle {
+    /// Task id (UUID v4 string), the same one handed to the LLM.
+    pub id: String,
+    /// Stall flag, shared with the task's watcher.
+    pub stalled: Arc<AtomicBool>,
+    /// Captured-output byte count, shared with the task's watcher.
+    pub bytes: Arc<AtomicUsize>,
+    /// The launched command, single-lined and capped (see [`BgTaskSummary`]).
+    pub command: String,
+    /// The directory the task started in, recorded at spawn; a launch-time snapshot.
+    pub cwd: PathBuf,
+    /// Spawn time, epoch seconds.
+    pub started_at: u64,
+}
+
+impl BgTaskHandle {
+    /// Read the entry as the status projection, counters as of this call.
+    pub fn summary(&self) -> BgTaskSummary {
+        BgTaskSummary {
+            id: self.id.clone(),
+            stalled: self.stalled.load(Ordering::Relaxed),
+            bytes: self.bytes.load(Ordering::Relaxed),
+            command: self.command.clone(),
+            cwd: self.cwd.clone(),
+            started_at: self.started_at,
+        }
+    }
+}
+
+/// The shared cell a host installs to receive the running background tasks.
+///
+/// The registry replaces its contents whenever the running set changes and
+/// empties it when the registry goes away, so a reader never sees a finished
+/// task. A `std` mutex on purpose: reading it must not queue behind the
+/// backend's async lock, which a long foreground command holds throughout. Each
+/// entry carries live counters (see [`BgTaskHandle`]), so a read of the cell is
+/// never a stale frame.
+pub type BgTaskSink = Arc<std::sync::Mutex<Vec<BgTaskHandle>>>;

@@ -195,8 +195,7 @@ impl ShellBackend for ProcessBackend {
         capture: CaptureMode,
     ) -> Result<BashExecOutput, ShellError> {
         // Resolve an existing spawn cwd; fall back if the cached one was deleted.
-        let spawn_cwd =
-            std::fs::canonicalize(&self.cwd).unwrap_or_else(|_| self.config.fallback_cwd.clone());
+        let spawn_cwd = cwd::spawn_dir(&self.cwd, &self.config.fallback_cwd);
 
         // The cwd marker rides a private fd channel (see `CwdProbe`), not the
         // output stream. Set it up before building the script; on failure
@@ -448,6 +447,8 @@ impl ShellBackend for ProcessBackend {
                         },
                         output,
                         epoch_at_fork,
+                        command,
+                        spawn_cwd.clone(),
                     )
                     .await
                 {
@@ -526,7 +527,11 @@ impl ShellBackend for ProcessBackend {
     }
 
     async fn spawn_background(&mut self, command: &str) -> Result<String, ShellError> {
-        self.background.spawn(command).await
+        // A background task starts where a foreground command would: the same
+        // resolution, the same directory. Recording that directory is then
+        // honest — the status view reports where the task really runs.
+        let spawn_cwd = cwd::spawn_dir(&self.cwd, &self.config.fallback_cwd);
+        self.background.spawn(command, spawn_cwd).await
     }
 
     async fn read_background(

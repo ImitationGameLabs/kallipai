@@ -1,4 +1,5 @@
 use super::*;
+use crate::BgTaskSink;
 use crate::builder::ShellBuilder;
 
 use kallipai_testkit::{DevDir, wait_for};
@@ -129,15 +130,32 @@ async fn exec_cd_persists_across_calls() {
     assert!(!out.output.as_deref().unwrap().contains("__ja_pwd"));
 }
 
+/// A foreground command that outlives its timeout is converted into a
+/// background task that keeps the directory it was forked into: the record is
+/// the task's own start, not the process cwd at the moment of conversion.
 #[tokio::test]
 async fn exec_timeout_converts_to_background_task() {
-    let mut backend = ShellBuilder::new().build().await.unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let agent_dir = std::fs::canonicalize(dir.path()).unwrap();
+    let process_cwd = std::fs::canonicalize(std::env::current_dir().unwrap()).unwrap();
+    assert_ne!(
+        agent_dir, process_cwd,
+        "the test tells the two directories apart"
+    );
+    let elsewhere = tempfile::tempdir().unwrap();
+    let elsewhere_dir = std::fs::canonicalize(elsewhere.path()).unwrap();
+    // The host-side cell the adoption must fill.
+    let sink: BgTaskSink = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+
+    let mut backend = ShellBuilder::new()
+        .initial_cwd(agent_dir.clone())
+        .bg_tasks_sink(sink.clone())
+        .build()
+        .await
+        .unwrap();
+    let command = "pwd -P > started-in.txt; sleep 43 & wait";
     let out = backend
-        .exec(
-            "sleep 43 & wait",
-            Duration::from_millis(400),
-            CaptureMode::Merged,
-        )
+        .exec(command, Duration::from_millis(400), CaptureMode::Merged)
         .await
         .unwrap();
     assert!(out.timed_out);
@@ -149,11 +167,52 @@ async fn exec_timeout_converts_to_background_task() {
     // The converted task reads like any background task.
     let read = backend.read_background(&id, 4096).await.unwrap();
     assert_eq!(read.state, supervisor::TaskState::Running);
+    // The converted task is summarized with the command it was launched with
+    // and the cwd it was forked into.
+    let witness = agent_dir.join("started-in.txt");
+    wait_for!("the task to report its start directory", witness.exists());
+    assert_eq!(
+        std::fs::read_to_string(&witness).unwrap().trim(),
+        agent_dir.display().to_string(),
+        "the converted child started in the agent directory"
+    );
+    assert_eq!(
+        recorded_cwd(&backend, &id),
+        agent_dir,
+        "the record holds the directory the task started in, not the process cwd"
+    );
+    // Adoption publishes into the host-side cell: the converted task is in
+    // the published set as soon as `exec` returns, without waiting for
+    // another publish point.
+    let published = sink.lock().unwrap().clone();
+    let entry = published
+        .iter()
+        .find(|task| task.id == id)
+        .expect("the converted task is published while it runs");
+    assert_eq!(entry.command, command);
+    // A later foreground command moves the shell; the snapshot does not move.
+    backend
+        .exec(
+            &format!("cd {}", elsewhere_dir.display()),
+            Duration::from_secs(10),
+            CaptureMode::Merged,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        recorded_cwd(&backend, &id),
+        agent_dir,
+        "the record is a snapshot, not a live value"
+    );
     // Killing it reaps the whole process group.
     backend.kill_background(&id).await.unwrap();
     wait_for!(
         "the killed group to be reaped",
         !stray_process_exists("sleep 43")
+    );
+    wait_for!(
+        "the killed task to leave the published set",
+        !sink.lock().unwrap().iter().any(|task| task.id == id)
     );
 }
 
@@ -1471,4 +1530,86 @@ async fn spilled_file_is_readable_by_landlocked_cat() {
         reread.contains("HEAD"),
         "landlocked cat read the spill back"
     );
+}
+
+/// A background task starts in the agent's working directory, not in the
+/// process cwd: the two differ here, so an inherited cwd fails the task's own
+/// `pwd -P`. The record is a snapshot — a later foreground `cd` does not move
+/// it.
+#[tokio::test]
+async fn background_tasks_start_in_the_agent_working_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    let agent_dir = std::fs::canonicalize(dir.path()).unwrap();
+    let process_cwd = std::fs::canonicalize(std::env::current_dir().unwrap()).unwrap();
+    assert_ne!(
+        agent_dir, process_cwd,
+        "the test tells the two directories apart"
+    );
+    let elsewhere = tempfile::tempdir().unwrap();
+    let elsewhere_dir = std::fs::canonicalize(elsewhere.path()).unwrap();
+
+    let mut backend = ShellBuilder::new()
+        .initial_cwd(agent_dir.clone())
+        .build()
+        .await
+        .unwrap();
+    let id = backend
+        .spawn_background("pwd -P > started-in.txt; touch bg-relative.txt; sleep 30")
+        .await
+        .unwrap();
+    assert_eq!(
+        recorded_cwd(&backend, &id),
+        agent_dir,
+        "the recorded cwd is where the task starts"
+    );
+
+    let witness = agent_dir.join("started-in.txt");
+    for _ in 0..50 {
+        if witness.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let started_in = std::fs::read_to_string(&witness).unwrap();
+    assert_eq!(
+        started_in.trim(),
+        agent_dir.display().to_string(),
+        "the task's own pwd is the agent directory"
+    );
+    assert!(
+        agent_dir.join("bg-relative.txt").exists(),
+        "a relative write lands in the agent directory"
+    );
+
+    backend
+        .exec(
+            &format!("cd {}", elsewhere_dir.display()),
+            Duration::from_secs(10),
+            CaptureMode::Merged,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        backend.cwd(),
+        elsewhere_dir.as_path(),
+        "the foreground command moved the sticky cwd"
+    );
+    assert_eq!(
+        recorded_cwd(&backend, &id),
+        agent_dir,
+        "the record is a snapshot, not a live value"
+    );
+    backend.kill_background(&id).await.unwrap();
+}
+
+/// The cwd the published entries carry for a running task, by id.
+fn recorded_cwd(backend: &ProcessBackend, id: &str) -> PathBuf {
+    backend
+        .background
+        .handles()
+        .iter()
+        .find(|s| s.id == id)
+        .expect("the spawned task is summarized while it runs")
+        .cwd
+        .clone()
 }
