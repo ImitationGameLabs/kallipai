@@ -8,7 +8,7 @@ use just_llm_client::ToolDispatcher;
 use just_llm_client::types::generation::{FunctionDefinition, ToolDefinition, ToolType};
 use kallipai_common::AgentId;
 use kallipai_common::policy::ExecPolicy;
-use kallipai_shell::{ShellBuilder, shell_tool_set};
+use kallipai_shell::{BgTaskSink, MAX_BG_SUMMARIES, ShellBuilder, shell_tool_set};
 use serde_json::json;
 use tokio::sync::Mutex;
 
@@ -17,6 +17,14 @@ use crate::context::ContextStore;
 use crate::dirlock::DirLockManager;
 pub mod context;
 pub mod skill;
+
+/// The published background-task list is capped by the shell at
+/// `MAX_BG_SUMMARIES` and carried on the wire up to
+/// `BACKGROUND_TASK_LIST_MAX`: the tagma drops anything past the wire cap
+/// without a trace, so a shell cap above it would shorten the list silently.
+/// This layer sees both crates, so the pair is asserted equal here and a
+/// drift is a build error.
+const _: () = assert!(MAX_BG_SUMMARIES == kallipai_common::protocol::BACKGROUND_TASK_LIST_MAX);
 
 pub use skill::{
     META_SKILL_NAME, load_skill, meta_skill_content, seed_skills_if_empty, skill_dir,
@@ -47,6 +55,10 @@ pub struct ToolDispatchInputs<'a> {
     /// carve-outs (WRITE on the tagma). The same `Arc` is stored on the agent so
     /// the carve-out can reach it.
     pub exec_gate: Arc<kallipai_shell::ExecGate>,
+    /// Shared cell the shell registry republishes this agent's running
+    /// background tasks into. The tagma keeps its own clone for the status
+    /// surfaces, so it reads what still runs without the backend lock.
+    pub bg_tasks: BgTaskSink,
 }
 
 /// Builds the tool registry exposed by `kallip`.
@@ -68,11 +80,13 @@ pub async fn build_tool_dispatch(inputs: ToolDispatchInputs<'_>) -> Result<ToolD
         lock_manager,
         agent_id,
         exec_gate,
+        bg_tasks,
     } = inputs;
     let builder = ShellBuilder::new()
         .initial_cwd(config.workspace_root.clone())
         .envs(env)
         .exec_gate(exec_gate)
+        .bg_tasks_sink(bg_tasks)
         // The notice carries the exit code and the termination reason when
         // there is one (disk cap, poison degrade): a capped task reads as
         // "exited" and without the reason the agent cannot tell why it died

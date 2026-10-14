@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicU64};
 
 use just_llm_client::types::generation::Message;
+use kallipai_adk::BgTaskSink;
 use kallipai_adk::agent_task::{self, AgentContext};
 use kallipai_adk::approval::ApprovalStore;
 use kallipai_adk::config::AgentConfig;
@@ -160,6 +161,14 @@ pub(crate) async fn spawn_agent(mut args: SpawnArgs) -> anyhow::Result<(Agent, A
     // spawned under this agent (reached via the returned `Agent.exec_gate`).
     let exec_gate = kallipai_adk::ExecGate::new();
 
+    // Running background-task cell: the shell registry republishes it on
+    // every change to this agent's running set (spawn, adoption, kill,
+    // terminal state, drop), so the status surfaces can read what the
+    // agent still runs without waiting on the backend's async lock, which
+    // a foreground command holds for its whole life. Rides on the returned
+    // `Agent`, like `activity`.
+    let bg_tasks: BgTaskSink = Arc::new(std::sync::Mutex::new(Vec::new()));
+
     let dispatch = build_tool_dispatch(ToolDispatchInputs {
         ctx: args.store.clone(),
         config: &args.config,
@@ -169,6 +178,7 @@ pub(crate) async fn spawn_agent(mut args: SpawnArgs) -> anyhow::Result<(Agent, A
         lock_manager: args.shared_state.lock_manager.clone(),
         agent_id: args.agent_id.clone(),
         exec_gate: exec_gate.clone(),
+        bg_tasks: bg_tasks.clone(),
     })
     .await?;
 
@@ -321,6 +331,7 @@ pub(crate) async fn spawn_agent(mut args: SpawnArgs) -> anyhow::Result<(Agent, A
             preset: args.preset,
             exec_policy: args.exec_policy,
             exec_gate,
+            bg_tasks,
             pending_profile_reset,
             profile_snapshot,
             parked,

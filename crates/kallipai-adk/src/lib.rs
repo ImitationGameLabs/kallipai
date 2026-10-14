@@ -43,5 +43,6 @@ pub use acquisition::GatewaySignal;
 pub use kallipai_shell::tools::names;
 
 // Re-exported so the tagma can mint the per-agent exec gate (storing it on
-// `Agent`) and read its WRITE-side failure, without a direct `kallipai-shell` dep.
-pub use kallipai_shell::{ExecGate, ExecGateFailure};
+// `Agent`), read its WRITE-side failure, and hold that agent's running-task
+// cell, all without a direct `kallipai-shell` dep.
+pub use kallipai_shell::{BgTaskSink, ExecGate, ExecGateFailure};

@@ -130,6 +130,7 @@ fn make_entry_inner(
             preset,
             exec_policy: Arc::new(std::sync::RwLock::new(exec_policy)),
             exec_gate: kallipai_adk::ExecGate::new(),
+            bg_tasks: Arc::new(std::sync::Mutex::new(Vec::new())),
             pending_profile_reset: Arc::new(std::sync::Mutex::new(None)),
             profile_snapshot: Arc::new(std::sync::Mutex::new(
                 kallipai_adk::ProfileSnapshot::default(),

@@ -10,7 +10,7 @@ use std::sync::Arc;
 use crate::backend::ProcessBackend;
 use crate::error::ShellError;
 use crate::spill;
-use crate::supervisor::{self, TaskState, TerminalObserver};
+use crate::supervisor::{self, BgTaskSink, TaskState, TerminalObserver};
 
 const DEFAULT_FALLBACK_CWD: &str = "/tmp";
 /// In-memory tail retained per stream (stdout/stderr) before clipping.
@@ -120,6 +120,10 @@ pub struct ShellBuilder {
     /// backends built without coordination (e.g. unit tests); the READ guard is
     /// then a no-op. Not feature-gated: the gate is platform-independent.
     pub(super) exec_gate: Option<Arc<crate::gate::ExecGate>>,
+    /// Optional shared cell the background registry republishes on every
+    /// change to the running set, so a host can read what runs without
+    /// taking the backend's async lock. See [`crate::BgTaskSink`].
+    pub(super) bg_tasks: Option<BgTaskSink>,
 }
 
 impl ShellBuilder {
@@ -138,6 +142,7 @@ impl ShellBuilder {
             #[cfg(all(target_os = "linux", feature = "landlock"))]
             access_source: None,
             exec_gate: None,
+            bg_tasks: None,
         }
     }
 
@@ -245,6 +250,16 @@ impl ShellBuilder {
         self
     }
 
+    /// Installs the cell the background registry republishes on every change
+    /// to the running set (spawn, adoption, kill, terminal state, drop). The
+    /// caller keeps its own clone and reads it instead of waiting on the
+    /// backend's async lock, which a foreground command holds for its whole
+    /// life.
+    pub fn bg_tasks_sink(mut self, sink: BgTaskSink) -> Self {
+        self.bg_tasks = Some(sink);
+        self
+    }
+
     /// Validates the configuration.
     pub fn validate(&self) -> Result<(), ShellError> {
         if self.shell.is_empty() {
@@ -317,9 +332,7 @@ impl ShellBuilder {
             self.max_bg_bytes,
             self.env.clone(),
             self.on_terminal.clone().map(|o| o.0),
-            // No running-task sink yet: the host installs one when it wants
-            // the list published (see `BgTaskSink`).
-            None,
+            self.bg_tasks.clone(),
         );
         let background = background.with_disk_cap(self.disk_cap);
         // Share the access-decision snapshot source with the background registry

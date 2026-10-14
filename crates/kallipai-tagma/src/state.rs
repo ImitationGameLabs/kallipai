@@ -540,6 +540,11 @@ pub struct Agent {
     /// (spawn, failover advance, profile apply) keep it current; the tagma only
     /// reads it, for the status surfaces.
     pub profile_snapshot: Arc<std::sync::Mutex<kallipai_adk::ProfileSnapshot>>,
+    /// Running background-task snapshots, shared (same `Arc`) with the shell
+    /// backend this agent's tools run through: the registry republishes it on
+    /// every change to the running set, and the tagma only reads it (status
+    /// surfaces). Emptied when that registry drops, i.e. with the runtime.
+    pub bg_tasks: kallipai_adk::BgTaskSink,
 }
 
 impl Agent {

@@ -1613,3 +1613,57 @@ fn recorded_cwd(backend: &ProcessBackend, id: &str) -> PathBuf {
         .cwd
         .clone()
 }
+
+/// The running set is readable without the backend's async lock: a foreground
+/// command holds that lock for its whole life, so a reader routed through the
+/// backend would block. The test pins the lock held across a foreground exec
+/// and reads the published cell in the same window.
+#[tokio::test]
+async fn running_set_is_readable_while_a_foreground_command_holds_the_lock() {
+    let sink: supervisor::BgTaskSink = Arc::new(Mutex::new(Vec::new()));
+    let backend = Arc::new(tokio::sync::Mutex::new(
+        ShellBuilder::new()
+            .bg_tasks_sink(sink.clone())
+            .build()
+            .await
+            .unwrap(),
+    ));
+    let task_id = backend
+        .lock()
+        .await
+        .spawn_background("sleep 30")
+        .await
+        .unwrap();
+
+    let (held_tx, held_rx) = tokio::sync::oneshot::channel();
+    let foreground = {
+        let backend = Arc::clone(&backend);
+        tokio::spawn(async move {
+            let mut guard = backend.lock().await;
+            let _ = held_tx.send(());
+            guard
+                .exec("sleep 5", Duration::from_secs(120), CaptureMode::Merged)
+                .await
+        })
+    };
+    held_rx.await.expect("the foreground task took the lock");
+
+    let published = sink.lock().unwrap().clone();
+    assert_eq!(published.len(), 1, "the running task is published");
+    assert_eq!(published[0].id, task_id);
+    assert_eq!(published[0].command, "sleep 30");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), backend.lock())
+            .await
+            .is_err(),
+        "a reader routed through the backend would block here"
+    );
+
+    backend
+        .lock()
+        .await
+        .kill_background(&task_id)
+        .await
+        .unwrap();
+    foreground.await.unwrap().unwrap();
+}
