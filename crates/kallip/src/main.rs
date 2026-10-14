@@ -28,7 +28,7 @@ use kallipai_client::profile::{ProfileConfig, ProfileSet};
 use kallipai_client::types::LescheSessionEntry;
 use kallipai_common::agentid::AgentId;
 use kallipai_common::policy::{ExecDecision, ExecOverride};
-use kallipai_common::protocol::ProfileSetUpdateRequest;
+use kallipai_common::protocol::{BACKGROUND_TASK_LIST_MAX, BgTaskView, ProfileSetUpdateRequest};
 use kallipai_common::timefmt;
 use kallipai_common::tokens::parse_token_amount;
 use uuid::Uuid;
@@ -237,6 +237,17 @@ async fn main() -> Result<()> {
                         println!();
                         println!("profile set: {}", active.profile_set);
                     }
+                }
+                // Host-side background tasks: the server sends the field only
+                // to the operator and the root agent, so an absent field prints
+                // nothing at all.
+                if let Some(block) = background_tasks_block(
+                    status.background_tasks.as_deref(),
+                    now,
+                    std::env::var("HOME").ok().as_deref(),
+                ) {
+                    println!();
+                    println!("{block}");
                 }
             }
             AgentCommand::Activity(args) => {
@@ -805,6 +816,129 @@ fn fact_excerpt(detail: &str) -> String {
     excerpt.replace('\n', " ")
 }
 
+/// Render the working directory for the background-task list: `$HOME` becomes
+/// `~`, and a path that does not fit on one line keeps its trailing
+/// directory components — the part that identifies the workspace — behind an
+/// elision marked at the head. Only a single component too long to fit on its
+/// own is cut inside itself.
+fn display_working_dir(cwd: &str, home: Option<&str>) -> String {
+    const MAX_CHARS: usize = 44;
+    const ELISION: &str = "…/";
+    let shortened = match home.filter(|home| !home.is_empty()) {
+        Some(home) if cwd == home => "~".to_string(),
+        Some(home) => {
+            let prefix = format!("{home}/");
+            match cwd.strip_prefix(prefix.as_str()) {
+                Some(rest) => format!("~/{rest}"),
+                None => cwd.to_string(),
+            }
+        }
+        None => cwd.to_string(),
+    };
+    if shortened.chars().count() <= MAX_CHARS {
+        return shortened;
+    }
+    let mut kept: Vec<&str> = Vec::new();
+    let mut width = ELISION.chars().count();
+    for component in shortened.split('/').filter(|part| !part.is_empty()).rev() {
+        let cost = if kept.is_empty() {
+            component.chars().count()
+        } else {
+            component.chars().count() + 1
+        };
+        if width + cost > MAX_CHARS {
+            break;
+        }
+        width += cost;
+        kept.push(component);
+    }
+    if kept.is_empty() {
+        let last = shortened.rsplit('/').next().unwrap_or(shortened.as_str());
+        let skip = last.chars().count().saturating_sub(MAX_CHARS - 1);
+        let tail: String = last.chars().skip(skip).collect();
+        return format!("…{tail}");
+    }
+    kept.reverse();
+    format!("{ELISION}{}", kept.join("/"))
+}
+
+/// Wall-clock age of a running task, in the two coarsest units that stay
+/// useful: `42s`, `12m 32s`, `1h 04m`, `2d 10h`.
+fn humanize_elapsed(secs: u64) -> String {
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 60 * 60 {
+        format!("{}m {:02}s", secs / 60, secs % 60)
+    } else if secs < 24 * 60 * 60 {
+        format!("{}h {:02}m", secs / (60 * 60), (secs / 60) % 60)
+    } else {
+        format!("{}d {:02}h", secs / (24 * 60 * 60), (secs / (60 * 60)) % 24)
+    }
+}
+
+/// Byte magnitude for the background-task list: whole bytes below a kibibyte,
+/// in the largest unit that keeps the number short.
+fn humanize_bytes(bytes: u64) -> String {
+    const KIB: u64 = 1024;
+    const MIB: u64 = 1024 * KIB;
+    const GIB: u64 = 1024 * MIB;
+    if bytes < KIB {
+        format!("{bytes} B")
+    } else if bytes < MIB {
+        format!("{:.1} KiB", bytes as f64 / KIB as f64)
+    } else if bytes < GIB {
+        format!("{:.1} MiB", bytes as f64 / MIB as f64)
+    } else {
+        format!("{:.1} GiB", bytes as f64 / GIB as f64)
+    }
+}
+
+/// One background-task block: labelled fields on their own lines, because this
+/// view is read top to bottom rather than scanned. The command is printed
+/// exactly as the shell recorded it — already flattened and capped at source.
+fn render_background_task_block(task: &BgTaskView, now: u64, home: Option<&str>) -> String {
+    let state = if task.stalled { "stalled" } else { "running" };
+    format!(
+        "id={}\nstate={state}\ncmd={}\nworking_dir={}\nelapsed={}\noutput_size={}",
+        task.id,
+        task.command,
+        display_working_dir(&task.cwd, home),
+        humanize_elapsed(now.saturating_sub(task.started_at)),
+        humanize_bytes(task.bytes),
+    )
+}
+
+/// The whole host-side background-task group: the count line plus one block per
+/// task, or `None` when the server left the field out (a caller that is neither
+/// the operator nor the root agent, or a server that predates the field) — the
+/// group is then absent rather than printed empty. A list at the wire cap is
+/// reported as `20+`: the shell publishes at most the same number of tasks, so
+/// a client cannot tell a complete list from a truncated one.
+fn background_tasks_block(
+    tasks: Option<&[BgTaskView]>,
+    now: u64,
+    home: Option<&str>,
+) -> Option<String> {
+    let tasks = tasks?;
+    let count = if tasks.len() >= BACKGROUND_TASK_LIST_MAX {
+        format!("{BACKGROUND_TASK_LIST_MAX}+")
+    } else {
+        tasks.len().to_string()
+    };
+    let blocks: Vec<String> = tasks
+        .iter()
+        .take(BACKGROUND_TASK_LIST_MAX)
+        .map(|task| render_background_task_block(task, now, home))
+        .collect();
+    let mut group = format!("background tasks: {count}");
+    if !blocks.is_empty() {
+        group.push('\n');
+        group.push('\n');
+        group.push_str(&blocks.join("\n\n"));
+    }
+    Some(group)
+}
+
 /// `kallip status` with no argument: the whole fleet at a glance — clock,
 /// budget, anomaly-sorted agent blocks, and the drill-down tip.
 async fn print_status_overview(client: &TagmaClient, utc: bool) -> Result<()> {
@@ -1164,5 +1298,133 @@ mod tests {
     fn unlimited_reject_hint_ignores_unrelated_errors() {
         let err = anyhow::anyhow!("connection refused");
         assert_eq!(unlimited_reject_hint(&err), None);
+    }
+
+    fn bg_task(id: &str, stalled: bool, bytes: u64, command: &str, cwd: &str) -> BgTaskView {
+        BgTaskView {
+            id: id.to_string(),
+            stalled,
+            bytes,
+            command: command.to_string(),
+            cwd: cwd.to_string(),
+            started_at: 1_000,
+        }
+    }
+
+    /// The deep view's task group end to end: count line, one block per task,
+    /// and the fields in the order the reader needs them.
+    #[test]
+    fn background_task_group_renders_one_block_per_task() {
+        let tasks = vec![
+            bg_task(
+                "9f2c1a04",
+                false,
+                4198,
+                "cargo test --workspace --all-features",
+                "/home/simplex/Projects/kallipai-workspace/kallipai-dev",
+            ),
+            bg_task(
+                "3d0f77aa",
+                true,
+                512,
+                "curl -sS --max-time 2 'http://127.0.0.1:8080/v1/health?deep=true'",
+                "/home/simplex/team/workspaces/deep/nested/agent-x",
+            ),
+        ];
+        let group =
+            background_tasks_block(Some(&tasks), 1_752, Some("/home/simplex")).expect("present");
+        assert_eq!(
+            group,
+            "background tasks: 2\n\n\
+             id=9f2c1a04\nstate=running\ncmd=cargo test --workspace --all-features\n\
+             working_dir=~/Projects/kallipai-workspace/kallipai-dev\nelapsed=12m 32s\n\
+             output_size=4.1 KiB\n\n\
+             id=3d0f77aa\nstate=stalled\n\
+             cmd=curl -sS --max-time 2 'http://127.0.0.1:8080/v1/health?deep=true'\n\
+             working_dir=~/team/workspaces/deep/nested/agent-x\nelapsed=12m 32s\n\
+             output_size=512 B"
+        );
+    }
+
+    /// An absent field is not an empty group: a caller that may not see the
+    /// host-side list prints nothing at all, while an entitled caller with no
+    /// running tasks still gets the count line.
+    #[test]
+    fn absent_task_field_prints_nothing_and_an_empty_list_prints_the_count() {
+        assert_eq!(
+            background_tasks_block(None, 1_752, Some("/home/simplex")),
+            None
+        );
+        assert_eq!(
+            background_tasks_block(Some(&[]), 1_752, Some("/home/simplex")),
+            Some("background tasks: 0".to_string())
+        );
+    }
+
+    /// A full list reads as a lower bound: the shell's published list is capped
+    /// at the same number, so the client cannot tell a complete list from a
+    /// truncated one. A longer input cannot arrive, for the same reason.
+    #[test]
+    fn a_full_task_list_is_reported_as_a_lower_bound() {
+        let tasks: Vec<BgTaskView> = (0..BACKGROUND_TASK_LIST_MAX)
+            .map(|i| bg_task(&format!("task-{i}"), false, 0, "sleep 1", "/tmp/work"))
+            .collect();
+        let group = background_tasks_block(Some(&tasks), 1_752, None).expect("present");
+        assert!(group.starts_with("background tasks: 20+\n\n"));
+        assert_eq!(group.matches("\nid=").count(), BACKGROUND_TASK_LIST_MAX);
+    }
+
+    /// Working directories shorten for the eye only: `$HOME` becomes `~`, and a
+    /// path that does not fit on one line keeps the trailing components that
+    /// name the workspace, cut inside a component only when it cannot fit.
+    #[test]
+    fn working_directories_are_shortened_for_display() {
+        assert_eq!(
+            display_working_dir("/home/simplex/Projects/kallipai-dev", Some("/home/simplex")),
+            "~/Projects/kallipai-dev"
+        );
+        assert_eq!(
+            display_working_dir("/home/simplex", Some("/home/simplex")),
+            "~"
+        );
+        assert_eq!(
+            display_working_dir("/srv/work", Some("/home/simplex")),
+            "/srv/work"
+        );
+        assert_eq!(
+            display_working_dir("/home/simplex/Projects/x", None),
+            "/home/simplex/Projects/x"
+        );
+        assert_eq!(
+            display_working_dir(
+                "/home/simplex/.local/share/kallipai/tagmata/team/workspaces/deep/nested/agent-x",
+                Some("/home/simplex")
+            ),
+            "…/team/workspaces/deep/nested/agent-x"
+        );
+        let at_cap = format!("/x/{}", "e".repeat(42));
+        assert_eq!(
+            display_working_dir(&at_cap, None),
+            format!("…/{}", "e".repeat(42))
+        );
+        let monster = format!("/tmp/{}", "d".repeat(50));
+        let cut = display_working_dir(&monster, None);
+        assert!(cut.starts_with('…'));
+        assert!(!cut.contains('/'));
+        assert_eq!(cut.chars().count(), 44);
+        assert!(cut.ends_with(&"d".repeat(43)));
+    }
+
+    /// Both magnitude renderers switch unit where the number stops being
+    /// readable, and pad minutes and hours to two digits.
+    #[test]
+    fn elapsed_and_output_size_pick_the_unit_that_stays_readable() {
+        assert_eq!(humanize_elapsed(42), "42s");
+        assert_eq!(humanize_elapsed(752), "12m 32s");
+        assert_eq!(humanize_elapsed(3_840), "1h 04m");
+        assert_eq!(humanize_elapsed(208_800), "2d 10h");
+        assert_eq!(humanize_bytes(512), "512 B");
+        assert_eq!(humanize_bytes(4_198), "4.1 KiB");
+        assert_eq!(humanize_bytes(5 * 1024 * 1024), "5.0 MiB");
     }
 }

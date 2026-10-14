@@ -95,6 +95,21 @@ pub fn require_operator(identity: &Identity) -> Result<(), ApiError> {
     }
 }
 
+/// Whether the caller is the operator or the tagma's root agent. Host-side
+/// views and declaration-wide mutations are reserved to those two callers,
+/// so the predicate lives here rather than in each route module.
+pub async fn is_operator_or_root(state: &SharedState, identity: &Identity) -> bool {
+    match identity {
+        Identity::Operator => true,
+        Identity::Agent { id } => {
+            let registry = state.registry.read().await;
+            registry
+                .root_agent()
+                .is_some_and(|(root_id, _)| root_id == id)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

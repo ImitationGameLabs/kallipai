@@ -439,6 +439,29 @@ pub struct TagmaUsageTotals {
     pub cache_hit_rate: f64,
 }
 
+/// The most background tasks a status response carries. The shell publishes
+/// at most this many, so a list of this size is a lower bound rather than a
+/// complete set — the client cannot see the remainder.
+/// It must equal the shell's `MAX_BG_SUMMARIES`, the cap the shell applies
+/// when it publishes that list, and `kallipai-adk` asserts the pair equal
+/// at compile time.
+pub const BACKGROUND_TASK_LIST_MAX: usize = 20;
+
+/// One background task an agent's shell currently holds. Command and cwd
+/// are recorded at spawn and never canonicalised afterwards, so a path
+/// that has since disappeared still renders as it was passed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BgTaskView {
+    pub id: String,
+    pub stalled: bool,
+    /// Bytes of output captured so far.
+    pub bytes: u64,
+    pub command: String,
+    pub cwd: String,
+    /// Unix epoch seconds the task started at.
+    pub started_at: u64,
+}
+
 /// Combined agent status: lifecycle state + context usage + recent retry history.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentStatusResponse {
@@ -480,6 +503,11 @@ pub struct AgentStatusResponse {
     /// list. Absent on responses from older servers.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub upstream_facts: Vec<FactView>,
+    /// Background tasks the agent's shell currently holds, newest first.
+    /// Present only for the operator and the root agent; absent on older
+    /// servers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background_tasks: Option<Vec<BgTaskView>>,
 }
 
 /// The input modality a model profile accepts or a file attachment carries.

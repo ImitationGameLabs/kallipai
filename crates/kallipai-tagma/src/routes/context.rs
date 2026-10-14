@@ -17,12 +17,16 @@ use kallipai_common::retry::RETRY_LOG_KEEP;
 use crate::state::SharedState;
 
 /// GET /agents/{id}/status — return context usage and retry history.
-/// Any authenticated identity may query any agent's status.
+/// Any authenticated identity may query any agent's status — the task list is operator/root only.
 pub async fn agent_status(
     State(state): State<SharedState>,
-    _auth: crate::auth::AuthIdentity,
+    auth: crate::auth::AuthIdentity,
     Path(id): Path<AgentId>,
 ) -> Result<impl IntoResponse, ApiError> {
+    // Resolve the entitlement before taking the registry lock: the predicate
+    // takes a read lock of its own, and nesting the two would deadlock against
+    // a writer waiting in between.
+    let bg_tasks_visible = crate::auth::is_operator_or_root(&state, auth.identity()).await;
     let registry = state.registry.read().await;
     let entry = registry
         .get(&id)
@@ -33,6 +37,7 @@ pub async fn agent_status(
     // Take the brief std snapshots before the async store lock — no nesting.
     let activity = live.agent.activity_snapshot();
     let profile_snap = live.agent.active_profile_snapshot();
+    let bg_tasks = bg_tasks_visible.then(|| live.agent.bg_tasks_snapshot());
     let store = live.agent.store.lock().await;
     let context = store.usage_snapshot();
     let recent_retries = store
@@ -82,6 +87,7 @@ pub async fn agent_status(
         usage,
         usage_totals: Some(usage_totals),
         upstream_facts,
+        background_tasks: bg_tasks,
     }))
 }
 
@@ -227,7 +233,9 @@ pub async fn update_exec_policy(
 mod tests {
     use super::*;
     use crate::auth::{AuthIdentity, Identity};
-    use crate::test_helpers::{add_root, make_state};
+    use crate::test_helpers::{add_root, add_sub, make_state};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     /// The status surface must carry the runtime-active profile from the
     /// shared cell: seed the cell directly (only the runtime's FailoverState
@@ -269,5 +277,140 @@ mod tests {
         assert_eq!(profile.profile_set, "set1");
         assert_eq!(profile.model, "deepseek-chat");
         assert_eq!(profile.provider, "oc-go");
+    }
+
+    /// Call the status handler as `identity` and return the raw response body:
+    /// the wire bytes are what a client actually consumes.
+    async fn status_body(state: &SharedState, identity: Identity, id: &AgentId) -> Vec<u8> {
+        let resp = agent_status(
+            State(state.clone()),
+            AuthIdentity::test_new(identity),
+            Path(id.clone()),
+        )
+        .await
+        .unwrap();
+        axum::body::to_bytes(
+            axum::response::IntoResponse::into_response(resp).into_body(),
+            usize::MAX,
+        )
+        .await
+        .unwrap()
+        .to_vec()
+    }
+
+    /// The same call, decoded.
+    async fn status_as(
+        state: &SharedState,
+        identity: Identity,
+        id: &AgentId,
+    ) -> AgentStatusResponse {
+        serde_json::from_slice(&status_body(state, identity, id).await).unwrap()
+    }
+
+    /// Seed one running task into the agent's host-side cell (only the shell
+    /// publishes there at runtime), with the cwd recorded verbatim. Returns
+    async fn seed_task(state: &SharedState, id: &AgentId) -> (Arc<AtomicBool>, Arc<AtomicUsize>) {
+        let stalled = Arc::new(AtomicBool::new(false));
+        let bytes = Arc::new(AtomicUsize::new(4_198));
+        let reg = state.registry.read().await;
+        let live = reg.get(id).unwrap().as_live().unwrap();
+        live.agent
+            .bg_tasks
+            .lock()
+            .unwrap()
+            .push(kallipai_shell::BgTaskHandle {
+                id: "9f2c1a04".to_string(),
+                stalled: stalled.clone(),
+                bytes: bytes.clone(),
+                command: "cargo test --workspace --all-features".to_string(),
+                cwd: std::path::PathBuf::from("~/work"),
+                started_at: 1_000,
+            });
+        (stalled, bytes)
+    }
+
+    /// Empty the cell again, so one caller's body can be compared across the
+    /// two states.
+    async fn clear_tasks(state: &SharedState, id: &AgentId) {
+        let reg = state.registry.read().await;
+        let live = reg.get(id).unwrap().as_live().unwrap();
+        live.agent.bg_tasks.lock().unwrap().clear();
+    }
+
+    /// The host-side task list reaches the two callers entitled to it: the root
+    /// agent itself and the operator.
+    #[tokio::test]
+    async fn background_tasks_reach_the_operator_and_the_root_agent() {
+        let state = make_state();
+        let root = AgentId::random();
+        {
+            let mut reg = state.registry.write().await;
+            add_root(&mut reg, &root);
+        }
+        seed_task(&state, &root).await;
+
+        for identity in [Identity::Agent { id: root.clone() }, Identity::Operator] {
+            let status = status_as(&state, identity, &root).await;
+            let tasks = status.background_tasks.expect("tasks are present");
+            assert_eq!(tasks.len(), 1);
+            assert_eq!(tasks[0].id, "9f2c1a04");
+            assert!(!tasks[0].stalled);
+            assert_eq!(tasks[0].bytes, 4198);
+            assert_eq!(tasks[0].command, "cargo test --workspace --all-features");
+            assert_eq!(tasks[0].cwd, "~/work");
+            assert_eq!(tasks[0].started_at, 1_000);
+        }
+    }
+
+    /// Any other caller — a plain agent included, and even one reading its own
+    /// status — receives the body a tagma without this field would send.
+    #[tokio::test]
+    async fn background_tasks_are_absent_for_every_other_caller() {
+        let state = make_state();
+        let root = AgentId::random();
+        let sub = AgentId::random();
+        {
+            let mut reg = state.registry.write().await;
+            add_root(&mut reg, &root);
+            add_sub(&mut reg, &sub, &root);
+        }
+        seed_task(&state, &root).await;
+
+        let identity = Identity::Agent { id: sub.clone() };
+        let status = status_as(&state, identity.clone(), &root).await;
+        assert!(status.background_tasks.is_none());
+
+        // Wire-level: seeding the tasks changes nothing for this caller.
+        let with_tasks = status_body(&state, identity.clone(), &root).await;
+        clear_tasks(&state, &root).await;
+        let cleared = status_body(&state, identity, &root).await;
+        assert_eq!(with_tasks, cleared);
+    }
+
+    /// The cell carries live counters, not a frozen frame: they are the same
+    /// atomics a watcher moves, so a status read reports the task's current
+    /// output size and stall flag rather than the values from the last publish.
+    #[tokio::test]
+    async fn background_tasks_report_live_counters() {
+        let state = make_state();
+        let root = AgentId::random();
+        {
+            let mut reg = state.registry.write().await;
+            add_root(&mut reg, &root);
+        }
+        let (stalled, bytes) = seed_task(&state, &root).await;
+        let before = status_as(&state, Identity::Operator, &root).await;
+        assert_eq!(before.background_tasks.unwrap()[0].bytes, 4_198);
+
+        bytes.store(9_001, Ordering::Relaxed);
+        stalled.store(true, Ordering::Relaxed);
+
+        let after = status_as(&state, Identity::Operator, &root).await;
+        let tasks = after.background_tasks.expect("tasks are present");
+        assert_eq!(
+            tasks[0].bytes, 9_001,
+            "the byte count is read at snapshot time"
+        );
+        assert!(tasks[0].stalled, "the stall flag is read at snapshot time");
     }
 }

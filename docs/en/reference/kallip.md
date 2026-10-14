@@ -60,6 +60,19 @@ kallip status <ID>
 
 Prints context token usage and recent retry history for the agent.
 
+Without an argument it lists the whole fleet instead: one block per agent,
+anomalies first.
+
+The per-agent view is a set of blank-line-separated groups — the clock, the
+lifecycle state, context and budget, retry records, upstream facts, the
+profile set, and the background tasks the agent's shell is running. The
+background-task group is **host-side**: the tagma sends it only to the
+operator and to the root agent, and leaves the field out for every other
+caller, so a body from before the field existed and a body for an
+unentitled caller are identical. Each task block carries its id, state,
+command, working directory, elapsed time, and captured output size; a list
+at the cap is reported as `20+`, a lower bound rather than a count.
+
 ### `subagent`: Manage Direct Subagents
 
 ```bash

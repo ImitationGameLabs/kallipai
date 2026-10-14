@@ -16,12 +16,13 @@ pub mod team;
 pub use agent::{
     ActiveProfile, AgentPermissionsResponse, AgentState, AgentStatusResponse, AgentSummary,
     AgentUsageStats, AttachmentIngestLocalResponse, AttachmentIngestRequest,
-    AttachmentIngestResponse, CreateAgentRequest, CreateAgentResponse, DELEGATION_CARVE_OUT,
-    DELEGATION_FULL_HANDOFF, DeleteSetResponse, DeliveryMode, DutyStatus, ListAgentsQuery,
-    ListAgentsResponse, LockState, MaxToolRounds, MessageRequest, MessageResponse, Modality,
-    ParkedReason, ProfileSetUpdateRequest, RelocateRequest, Relocated, SetDefaultRequest,
-    SetReference, TagmaUsageTotals, UpdateActivityRequest, UpdateAgentMetadataRequest,
-    WorkspaceRootUpdateRequest, WorkspaceRootUpdated,
+    AttachmentIngestResponse, BACKGROUND_TASK_LIST_MAX, BgTaskView, CreateAgentRequest,
+    CreateAgentResponse, DELEGATION_CARVE_OUT, DELEGATION_FULL_HANDOFF, DeleteSetResponse,
+    DeliveryMode, DutyStatus, ListAgentsQuery, ListAgentsResponse, LockState, MaxToolRounds,
+    MessageRequest, MessageResponse, Modality, ParkedReason, ProfileSetUpdateRequest,
+    RelocateRequest, Relocated, SetDefaultRequest, SetReference, TagmaUsageTotals,
+    UpdateActivityRequest, UpdateAgentMetadataRequest, WorkspaceRootUpdateRequest,
+    WorkspaceRootUpdated,
 };
 pub use approval::{
     ApprovalDecisionBody, ApprovalEntry, ListApprovalsQuery, ListApprovalsResponse,

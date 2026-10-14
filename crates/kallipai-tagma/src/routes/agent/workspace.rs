@@ -369,30 +369,18 @@ async fn retarget_parked_workspace(
     Ok((old, updated.workspace_root.display().to_string()))
 }
 
-/// The operator or the root agent — the same mutation authority as the
-/// converge face (see `authorize_converge`). A parked agent has no
-/// registry entry, so chain-based authorization is unavailable and the
-/// declaration owner is the right residual holder.
+/// Reserved for the operator or the root agent — the same mutation authority
+/// the converge face grants (see `crate::auth::is_operator_or_root`).
 async fn authorize_relocation(
     state: &SharedState,
     identity: &crate::auth::Identity,
 ) -> Result<(), ApiError> {
-    match identity {
-        crate::auth::Identity::Operator => Ok(()),
-        crate::auth::Identity::Agent { id } => {
-            let registry = state.registry.read().await;
-            if registry
-                .root_agent()
-                .is_some_and(|(root_id, _)| root_id == id)
-            {
-                Ok(())
-            } else {
-                Err(ApiError::forbidden(
-                    "workspace relocation is reserved for the operator or the root agent",
-                ))
-            }
-        }
+    if crate::auth::is_operator_or_root(state, identity).await {
+        return Ok(());
     }
+    Err(ApiError::forbidden(
+        "workspace relocation is reserved for the operator or the root agent",
+    ))
 }
 
 /// Resolve one supervisor-chain link to its (created_by, workspace_root)

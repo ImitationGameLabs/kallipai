@@ -23,7 +23,7 @@ pub use kallipai_common::protocol::AgentState;
 pub use kallipai_common::protocol::AgentSummary;
 use kallipai_common::protocol::ApiError;
 use kallipai_common::protocol::SseEvent;
-use kallipai_common::protocol::{LockState, ParkedReason, TransientRetryInfo};
+use kallipai_common::protocol::{BgTaskView, LockState, ParkedReason, TransientRetryInfo};
 use tokio::sync::{Mutex, Notify, RwLock, broadcast, mpsc};
 use tokio::task::{AbortHandle, JoinHandle};
 use tokio_util::sync::CancellationToken;
@@ -540,10 +540,12 @@ pub struct Agent {
     /// (spawn, failover advance, profile apply) keep it current; the tagma only
     /// reads it, for the status surfaces.
     pub profile_snapshot: Arc<std::sync::Mutex<kallipai_adk::ProfileSnapshot>>,
-    /// Running background-task snapshots, shared (same `Arc`) with the shell
-    /// backend this agent's tools run through: the registry republishes it on
-    /// every change to the running set, and the tagma only reads it (status
-    /// surfaces). Emptied when that registry drops, i.e. with the runtime.
+    /// Running background tasks, shared (same `Arc`) with the shell
+    /// backend this agent's tools run through: the registry republishes the
+    /// running set on every change to it, and each published entry carries
+    /// live counters, so a status read reports a task's current output size
+    /// and stall flag without taking the backend's async lock. Emptied when
+    /// that registry drops, i.e. with the runtime.
     pub bg_tasks: kallipai_adk::BgTaskSink,
 }
 
@@ -588,6 +590,30 @@ impl Agent {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
+    }
+
+    /// Snapshot the background tasks the shell is running, in the order the
+    /// shell published them (newest first), with each task's counters read as
+    /// of this call. Poison-tolerant (`into_inner`) like the other cell
+    /// snapshots, so a panicking holder cannot brick
+    /// `agent_status`.
+    pub fn bg_tasks_snapshot(&self) -> Vec<BgTaskView> {
+        self.bg_tasks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .map(|entry| {
+                let task = entry.summary();
+                BgTaskView {
+                    id: task.id,
+                    stalled: task.stalled,
+                    bytes: task.bytes as u64,
+                    command: task.command,
+                    cwd: task.cwd.to_string_lossy().into_owned(),
+                    started_at: task.started_at,
+                }
+            })
+            .collect()
     }
 
     /// Await both background tasks, bounded by `timeout`; force-abort on overrun.
