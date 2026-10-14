@@ -16,12 +16,10 @@ order: 21
 
 ## `kallip profile-set` 命令
 
-四个子命令覆盖检视、改绑、转移标记与删除：
+两个子命令覆盖检视与改绑：
 
 - `kallip profile-set list`：列出已配置的 profile set、各自的 profile 数与 default 标记。
 - `kallip profile-set bind <ID> <SET>`：把 agent 改绑到一个命名 set。活跃的 agent 在下次唤醒时换用新的故障转移链；停泊中的 agent 在恢复时解析。
-- `kallip profile-set default <SET>`：把 default set 标记转移给一个既有 set。
-- `kallip profile-set remove <SET>`：删除一个 set。default set 与 root 的 set 被拒绝；其余被引用的 set 会列出绑定它的 agent，需要 `--force`（这些 agent 被中断，然后保留悬空记录直到改绑）。
 
 `bind` 的 set 名必须精确匹配，未知名会列出可用的 set。
 

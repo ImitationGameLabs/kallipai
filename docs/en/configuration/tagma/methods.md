@@ -26,19 +26,13 @@ the manual-editing section below.
 
 ## The `kallip profile-set` Command
 
-Four subcommands cover inspection, rebinding, marker transfer, and removal:
+Two subcommands cover inspection and rebinding:
 
 - `kallip profile-set list`: list the configured profile sets, their profile
   counts, and the default marker.
 - `kallip profile-set bind <ID> <SET>`: rebind an agent to a named set. A live
   agent swaps its failover chain on its next wake-up; a parked one resolves it
   at restore.
-- `kallip profile-set default <SET>`: transfer the default-set marker to an
-  existing set.
-- `kallip profile-set remove <SET>`: remove a set. The default set and the
-  root's set are refused; other referenced sets list their bound agents and
-  need `--force` (they are interrupted, then keep a dangling record until
-  rebound).
 
 `bind` requires the exact set name; an unknown name lists the available sets.
 
