@@ -28,9 +28,11 @@ use crate::test_support::{
 use just_llm_client::LlmBackend;
 use just_llm_client::types::generation::ReasoningEffort;
 use kallipai_common::facts::{Block, BlockKind, QUOTA_RESET_TRUST_MAX_SECS};
+use kallipai_common::facts::{BlockedFact, EndpointHealth, FactView};
 use kallipai_common::retry::RetryKind;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Effort rides the current profile into the wire request: a profile declaring
 /// `effort` produces requests carrying that `reasoning_effort`.
@@ -1465,6 +1467,82 @@ async fn a_marked_candidate_is_skipped_for_the_next_one() {
     assert_eq!(requests[0].model, "c-model");
 }
 
+/// A sibling whose fact lands mid-walk: it answers unmarked for the walk's own
+/// readings and marked on the reading the attempt makes after it.
+struct FactLandsMidWalk {
+    walk_endpoint: Block,
+    sibling: Block,
+    sibling_reads_before_visible: usize,
+    sibling_reads: AtomicUsize,
+}
+
+impl EndpointHealth for FactLandsMidWalk {
+    fn record(&self, _provider_id: &str, _block: Block) {}
+
+    fn blocked_for(&self, provider_id: &str, _now: u64) -> Option<BlockedFact> {
+        let block = match provider_id {
+            "p1" => Some(&self.walk_endpoint),
+            "p2" => {
+                let read = self.sibling_reads.fetch_add(1, Ordering::SeqCst);
+                (read >= self.sibling_reads_before_visible).then_some(&self.sibling)
+            }
+            _ => None,
+        }?;
+        Some(BlockedFact {
+            block: block.clone(),
+            account_hint: account_hint(provider_id),
+        })
+    }
+
+    fn snapshot(&self, _now: u64) -> Vec<FactView> {
+        Vec::new()
+    }
+}
+
+/// The fact table is shared: a fact another agent writes while the walk runs
+/// ends the attempt the walk settled on. The walk's own reading of the sibling
+/// passes, the sibling is marked from the third read on, and the attempt the
+/// walk hands back takes the reading that sees it — so nothing is sent to an
+/// endpoint the table has just refused.
+#[tokio::test]
+async fn a_fact_written_mid_walk_stops_the_next_send() {
+    let backend = RecordingBackend::new();
+    // A stream is queued so a send would succeed: the request count pins the
+    // claim that no send happens.
+    backend.queue_stream("resp-1");
+    let source = Arc::new(MapSource(HashMap::from([
+        ("p1".to_string(), backend.clone() as Arc<dyn LlmBackend>),
+        ("p2".to_string(), backend.clone() as Arc<dyn LlmBackend>),
+    ])));
+    let mut ctx = ctx_from_source(
+        vec![profile("a", "p1", 100_000), profile("b", "p2", 100_000)],
+        source,
+        RetryPolicy::default(),
+    )
+    .await;
+    ctx.endpoint_health = Some(Arc::new(FactLandsMidWalk {
+        walk_endpoint: seeded(BlockKind::EndpointAuth, None),
+        sibling: seeded(BlockKind::EndpointAuth, None),
+        sibling_reads_before_visible: 2,
+        sibling_reads: AtomicUsize::new(0),
+    }));
+
+    let outcome = acquire_once(&mut ctx).await;
+
+    let AcquireResult::Stop { message } = outcome else {
+        panic!("a fact the sibling carries ends the round");
+    };
+    assert!(
+        message.contains("p2"),
+        "the fact that ended the round is the sibling's: {message}"
+    );
+    assert_eq!(
+        backend.take_requests().len(),
+        0,
+        "the send the mid-walk fact marks never happens"
+    );
+}
+
 /// The wake-triggered execution's first attempt sends once anyway: a user
 /// asking is served even against an endpoint the table has marked, at the
 /// price of one bounded attempt.
@@ -1943,6 +2021,81 @@ async fn an_account_level_fact_never_signals_the_gateway() {
     assert!(
         signal_rx.try_recv().is_err(),
         "a quota block is not an auth rejection, whatever status it carries"
+    );
+}
+
+/// The walk hands the round on: the endpoint that serves the attempt owns what
+/// the attempt leaves behind. The requested model pins where the send went, and
+/// the recorded fact, the retry record and the park all name that endpoint.
+#[tokio::test]
+async fn a_post_walk_failure_is_recorded_against_the_endpoint_that_served_it() {
+    let backend = RecordingBackend::new();
+    backend.queue_error(BackendError::provider(
+        "recording",
+        TransportError::HttpStatus {
+            status: reqwest::StatusCode::TOO_MANY_REQUESTS,
+            body: "slow down".to_owned(),
+        },
+    ));
+    let source = Arc::new(MapSource(HashMap::from([
+        ("p1".to_string(), backend.clone() as Arc<dyn LlmBackend>),
+        ("p2".to_string(), backend.clone() as Arc<dyn LlmBackend>),
+    ])));
+    let mut ctx = ctx_from_source(
+        vec![profile("a", "p1", 100_000), profile("b", "p2", 100_000)],
+        source,
+        RetryPolicy {
+            max_retries: 1,
+            ..RetryPolicy::default()
+        },
+    )
+    .await;
+    let health = Arc::new(RecordingHealth::default());
+    health.seed("p1", seeded_with_status(BlockKind::EndpointAuth, None, 401));
+    ctx.endpoint_health = Some(health.clone());
+
+    let outcome = acquire_once(&mut ctx).await;
+    let AcquireResult::Outcome(AgentOutcome::QuotaBlocked(info)) = outcome else {
+        panic!("the walk's 429 parks the round");
+    };
+    assert_eq!(
+        info.endpoint, "p2",
+        "the park names the endpoint that served the attempt"
+    );
+    assert_eq!(
+        info.account_hint,
+        account_hint("p2"),
+        "the hint is that endpoint's account"
+    );
+
+    let requests = backend.take_requests();
+    assert_eq!(
+        requests
+            .iter()
+            .map(|r| r.model.as_str())
+            .collect::<Vec<_>>(),
+        ["b-model"],
+        "the walk's new endpoint is the one that is asked"
+    );
+    let quota: Vec<String> = health
+        .recorded()
+        .into_iter()
+        .filter(|(_, block)| block.kind == BlockKind::Quota)
+        .map(|(endpoint, _)| endpoint)
+        .collect();
+    assert_eq!(
+        quota,
+        ["p2"],
+        "the failure belongs to the endpoint that served the attempt"
+    );
+
+    let log = ctx.store.lock().await.retry_log.clone();
+    assert!(
+        !log.is_empty()
+            && log
+                .iter()
+                .all(|record| record.endpoint.as_deref() == Some("p2")),
+        "the retry records name the endpoint that served the attempt"
     );
 }
 
