@@ -29,7 +29,7 @@ order: 21
 
 ### 文件位置
 
-profiles 配置文件位于实例配置根的 `profiles.toml`：`<config home>/kallipai/tagmata/<slug>/`。配置根推导不出（无 `KALLIPAI_TAGMA_SLUG`、无 config home）时，读取降级为隐式 env profile 并记警告；无配置根的写入则报错。没有配置文件（经 Harbor 与 `kallipai-run` 做基准/脚本的默认；Harbor 是外部 agent 基准测试框架）时用单一隐式 profile：其 `max_context_window` 从 `KALLIPAI_CONTEXT_WINDOW_TOKENS`（默认 `128000`）推导。
+profiles 配置文件位于实例配置根的 `profiles.toml`：`<config home>/kallipai/tagmata/<slug>/`。配置根推导不出（无 `KALLIPAI_TAGMA_SLUG`、无 config home）时 tagma 不加载任何 profile：读取记警告并以无 profile 状态启动；无配置根的写入则报错。没有配置文件时同样以无 profile 状态启动：在 Profiles 页面（或手写文件）加入首个 profile 之前不配置任何模型。
 
 有配置文件时，tagma 加载多个 provider/model 组合，每个 profile 自行声明 `max_context_window`。每个 profile 还可声明 `modalities`；省略默认纯文本，set 的生效模态是其成员的交集。
 
@@ -59,16 +59,16 @@ default = "primary"
 
 [endpoints.deepseek-primary]
 family = "deepseek"
-api_key = "${KALLIPAI_LLM_DEEPSEEK_API_KEY}" # env-var indirection keeps secrets out of the file
+api_key = "sk-your-deepseek-key" # a literal value
 
 [endpoints.openrouter]
 family = "openai-compatible"
-api_key = "${OPENROUTER_API_KEY}"
+api_key = "sk-or-your-openrouter-key"
 base_url = "https://openrouter.ai/api/v1"
 
 [endpoints.official-openai]
 family = "openai-responses"
-api_key = "${OPENAI_API_KEY}" # no base_url: talks to the official endpoint
+api_key = "sk-your-openai-key" # no base_url: talks to the official endpoint
 
 [sets.primary]
 description = "full-capability work"
@@ -94,14 +94,14 @@ description = "cheap delegation"
 - `model_list_base_url`（可选）：provider Test 拉取模型列表所用的 base，默认等于 `base_url`；列表与调用不在同一 base 的 provider 才需要填。填的是 base，不是完整的模型列表 URL——客户端会自行追加 `/models`。
 - `store`（可选，默认 `true`）保持服务端会话存储开启，`openai-responses` 因此每轮从存储链继续；`store = false`（或任何非 Responses 族）每轮重放完整会话。
 - `effort`（可选）请求推理力度：`low`、`medium`、`high`、`xhigh` 或 `max`。provider 在自身限度内尊重它（DeepSeek 官方把 `medium` 与 `xhigh` 降为 `high`，见其 [API 参考](https://api-docs.deepseek.com/api/create-chat-completion)）。
-- `api_key` / `base_url` / `model_list_base_url` 里的 `${VAR}` 从进程环境展开。
+- 值一律字面：API 密钥直接写在文件里。
 - 配置文件应为 `chmod 600`（组/其他可读时 tagma 会警告，因其可能含 API 密钥）。
 
 ### Set 选择
 
 set 按名字寻址：root agent 绑定配置的 `default` set，每个 subagent spawn 经 `profile_set` 显式声明自己的 set（未知名字被拒）。绑定记录在 agent 记录上，set 在文件中的顺序因此不承载含义。重命名或删除 set 会让已绑定的 agent 悬空；恢复容忍占位，但 prompt 投递以 `409` 拒绝，直到该 set 以该名字回归。
 
-`default` 标记在加载时解析：显式 `default = "<name>"` 必须指向存在的 set（匹配不到任何 set 的名字是配置错误）；恰有一个 set 且无标记时，该 set 即为 default，tagma 把标记写回文件、插在首个表头之前，注释、键序与 `${VAR}` 拼写因此原样保留；多个 set 而无标记是配置错误（显式点名一个）。手写的空标记（`default = ""`）读回为无标记，走单 set 自动标记路径而非报错。在这个角落里文件保留其显式空标记；自动标记写回被跳过，解析出的 default 仅存于内存。空的 `sets` 表以无 profile 态启动。
+`default` 标记在加载时解析：显式 `default = "<name>"` 必须指向存在的 set（匹配不到任何 set 的名字是配置错误）；恰有一个 set 且无标记时，该 set 即为 default，tagma 把标记写回文件、插在首个表头之前，注释、键序与取值写法因此原样保留；多个 set 而无标记是配置错误（显式点名一个）。手写的空标记（`default = ""`）读回为无标记，走单 set 自动标记路径而非报错。在这个角落里文件保留其显式空标记；自动标记写回被跳过，解析出的 default 仅存于内存。空的 `sets` 表以无 profile 态启动。
 
 被选 set 的第一个 profile 是活跃模型；其余 profile 构成 set 内故障转移链。活跃 profile 终态失败（HTTP 401/403/404，或暂时性重试耗尽）时，runner 前进到 set 中下一个 profile 并重试同一轮；请求级失败（400/422）则该轮报错。活跃 profile 索引在 agent 生命周期内保持，恢复时重置为 0。
 

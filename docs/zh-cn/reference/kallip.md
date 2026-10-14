@@ -339,7 +339,7 @@ kallip subagent interrupt $CHILD
 
 ### 环境变量
 
-`KALLIPAI_AUTH_TOKEN`（必填）与 `KALLIPAI_TAGMA_URL`（默认 `http://127.0.0.1:3000`）是主变量。含 LLM provider 配置与 agent 调优参数的完整参考见 [配置](../configuration/index.md)。
+`KALLIPAI_AUTH_TOKEN`（必填）与 `KALLIPAI_TAGMA_URL`（默认 `http://127.0.0.1:3000`）是主变量。含 agent 调优参数的完整参考见 [配置](../configuration/index.md)。
 
 ### 客户端库
 

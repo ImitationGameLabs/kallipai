@@ -409,9 +409,8 @@ pub struct ActiveProfile {
     pub profile_id: String,
     /// The endpoint (provider) id this profile connects through.
     pub provider: String,
-    /// For env-configured single-profile agents this is the raw
-    /// `KALLIPAI_LLM_MODEL` value, so an env-only setup still shows a
-    /// meaningful model string.
+    /// The model this profile selects — resolved from the agent's active profile, so the
+    /// wire always carries a meaningful model string for the agent that runs on it.
     pub model: String,
 }
 

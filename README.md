@@ -95,13 +95,14 @@ without a human in the loop. Or it can surface the decision to a human.
 ## Quick start
 
 ```bash
-KALLIPAI_LLM_PROVIDER=deepseek \
-KALLIPAI_LLM_MODEL=deepseek-v4-flash \
-KALLIPAI_LLM_DEEPSEEK_API_KEY=your-key \
-cargo run -p kallipai-tagma
+KALLIPAI_TAGMA_SLUG=main cargo run -p kallipai-tagma
 
 # Web frontend (the human entry point): deno task dev
 ```
+
+Model configuration lives in `profiles.toml`, or on the Profiles page. The tagma
+boots with no model configured until one is added:
+[model configuration methods](docs/en/configuration/tagma/methods.md).
 
 For terminals and scripts, the headless `kallip` CLI and the
 `kallipai-run` runner cover the same API.

@@ -242,7 +242,7 @@ pub struct AppState {
     /// [`crate::endpoint_health::EndpointHealthTable`]). Cloned into every
     /// spawned agent's context.
     pub endpoint_health: Arc<crate::endpoint_health::EndpointHealthTable>,
-    /// Profile registry loaded once at startup (config file or implicit env profile).
+    /// Profile registry loaded once at startup (from the local config file or the gateway).
     /// Shared so the pre-built backends survive across agents.
     pub profiles: Arc<ArcSwap<ProfileBundle>>,
     /// The configured model-profile source (local file or gateway

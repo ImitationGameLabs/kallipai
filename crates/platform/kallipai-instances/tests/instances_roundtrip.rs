@@ -205,7 +205,7 @@ async fn full_management_round_trip_with_guards() {
     assert!(body.contains("\"state\":\"running\""), "{body}");
 
     // Spawn a real instance (minimal boot env from the daemon lifecycle
-    // tests: operator token + the LLM profile trio).
+    // tests: the operator token plus KALLIPAI_-prefixed fixtures).
     let workspace = tempfile::tempdir().expect("workspace tempdir");
     let spawn_body = serde_json::json!({
         "slug": "web-e2e",
@@ -216,9 +216,9 @@ async fn full_management_round_trip_with_guards() {
         "user": daemon_user(),
         "env": [
             "KALLIPAI_OPERATOR_TOKEN=test-op-token",
-            "KALLIPAI_LLM_PROVIDER=deepseek",
-            "KALLIPAI_LLM_MODEL=test-model",
-            "KALLIPAI_LLM_DEEPSEEK_API_KEY=test-key",
+            "KALLIPAI_TEST_LLM_PROVIDER=deepseek",
+            "KALLIPAI_TEST_LLM_MODEL=test-model",
+            "KALLIPAI_TEST_LLM_API_KEY=test-key",
         ],
     })
     .to_string();
@@ -338,9 +338,9 @@ async fn relay_intent_spawn_persists_filled_urls() {
                 // degrades to local-only; the spawn must still
                 // succeed offline.
                 "KALLIPAI_OPERATOR_TOKEN=test-op-token".into(),
-                "KALLIPAI_LLM_PROVIDER=deepseek".into(),
-                "KALLIPAI_LLM_MODEL=test-model".into(),
-                "KALLIPAI_LLM_DEEPSEEK_API_KEY=test-key".into(),
+                "KALLIPAI_TEST_LLM_PROVIDER=deepseek".into(),
+                "KALLIPAI_TEST_LLM_MODEL=test-model".into(),
+                "KALLIPAI_TEST_LLM_API_KEY=test-key".into(),
                 "KALLIPAI_TAGMA_RELAY_ENROLLMENT_CODE=sk-x".into(),
             ],
             daemon_user(),
@@ -384,9 +384,9 @@ async fn local_spawn_meta_stays_free_of_relay_keys() {
             workspace.path().display().to_string(),
             vec![
                 "KALLIPAI_OPERATOR_TOKEN=test-op-token".into(),
-                "KALLIPAI_LLM_PROVIDER=deepseek".into(),
-                "KALLIPAI_LLM_MODEL=test-model".into(),
-                "KALLIPAI_LLM_DEEPSEEK_API_KEY=test-key".into(),
+                "KALLIPAI_TEST_LLM_PROVIDER=deepseek".into(),
+                "KALLIPAI_TEST_LLM_MODEL=test-model".into(),
+                "KALLIPAI_TEST_LLM_API_KEY=test-key".into(),
             ],
             daemon_user(),
         )
@@ -447,9 +447,9 @@ async fn spawn_without_user_key_still_parses_and_hits_guard() {
         "workspace": workspace.path().display().to_string(),
         "env": [
             "KALLIPAI_OPERATOR_TOKEN=test-op-token",
-            "KALLIPAI_LLM_PROVIDER=deepseek",
-            "KALLIPAI_LLM_MODEL=test-model",
-            "KALLIPAI_LLM_DEEPSEEK_API_KEY=test-key",
+            "KALLIPAI_TEST_LLM_PROVIDER=deepseek",
+            "KALLIPAI_TEST_LLM_MODEL=test-model",
+            "KALLIPAI_TEST_LLM_API_KEY=test-key",
         ],
     })
     .to_string();

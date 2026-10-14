@@ -116,5 +116,5 @@ a tagma that still has the agent registered: the same instance, or one that
 restored it from disk on startup. `--agent` does not validate the id format; an
 unknown id surfaces as a tagma error.
 
-For the complete environment variable reference including LLM provider
-configuration, see [Model configuration](../configuration/tagma/llm.md).
+Model configuration lives in the instance's `profiles.toml`; see
+[Model configuration](../configuration/tagma/llm.md).

@@ -4,7 +4,7 @@ description: 平台的配置方式，从环境变量到模型 profiles 文件与
 order: 10
 ---
 
-运行时配置以环境为先：每个组件都在启动时从 `KALLIPAI_*` 变量读取设置。LLM 后端还可经 profiles 配置文件调优（方法见[模型配置方法](tagma/methods.md)），NixOS 部署则经[模块 option](../deployment/nixos/index.md) 配置服务。
+运行时配置以环境为先：每个组件都在启动时从 `KALLIPAI_*` 变量读取设置。LLM 后端由实例的 `profiles.toml` 承担（文件形状与写法见[模型配置方法](tagma/methods.md)），NixOS 部署则经[模块 option](../deployment/nixos/index.md) 配置服务。
 
 把 `.env.example` 复制为 `.env`，填入必填值。用 `direnv` 的话，它会经 `.envrc` 自动加载 `.env`。
 

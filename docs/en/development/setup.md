@@ -27,8 +27,11 @@ For the NixOS host deployment, see
   running the daemon as root) when that port is below 1024.
 - [mkcert](https://github.com/FiloSottile/mkcert) for the dev TLS
   certificate (https edge only).
-- Copy `.env.example` to `.env` and fill in the LLM provider credentials. Arion
-  reads `.env` via `service.env_file`.
+- Copy `.env.example` to `.env` and fill in the deployment settings it
+  carries (domains, ports, tokens, relay credentials); Arion reads `.env`
+  via `service.env_file`. Model configuration lives in the instance's
+  `profiles.toml`; see
+  [Model configuration methods](../configuration/tagma/methods.md).
 
 ### Plain-http Quick Start (KALLIPAI_EDGE_TLS=off)
 
@@ -347,14 +350,15 @@ one `<slug>.json` per instance); the record and the instance's own
 `KALLIPAI_DAEMON_SOCKET_GROUP` is set; the system form):
 
 ```sh
-kallipctl spawn <slug> <workspace> -e KALLIPAI_LLM_PROVIDER=... \
-    -e KALLIPAI_LLM_MODEL=... -e KALLIPAI_LLM_DEEPSEEK_API_KEY=...
+kallipctl spawn <slug> <workspace> -e RUST_LOG=debug   # passthrough: KALLIPAI_*/RUST_LOG/PATH
 kallipctl spawn <slug> <workspace> --user <account>  # drop to a pre-declared user
 kallipctl list           # every record in the record area
 kallipctl health <slug>  # pid liveness via /proc/<pid>/comm
 kallipctl stop <slug>    # TERM, 10s grace, KILL
 ```
 
+Model configuration lives in the instance's own
+`<config home>/kallipai/tagmata/<slug>/profiles.toml`, which its Profiles page writes.
 The record carries the instance id, owning uid, workspace, user env,
 launch anchor, and the pointer at the data directory
 (`~/.local/share/kallipai/tagmata/<slug>`); the tagma publishes

@@ -108,9 +108,8 @@ pub(crate) async fn spawn_agent(mut args: SpawnArgs) -> anyhow::Result<(Agent, A
         args.root_agent_id.clone(),
     );
     let client = {
-        // Install the active profile's declared context window (authoritative on both paths — the
-        // implicit env profile derives it from KALLIPAI_CONTEXT_WINDOW_TOKENS), then build the
-        // client. The set's remaining profiles are the within-set failover chain, walked by the
+        // Install the active profile's declared context window, then build the client. The
+        // set's remaining profiles are the within-set failover chain, walked by the
         // runner on `RequestFailure::Failover`. The profile-less root instead
         // gets the sentinel client (see `backend::UnconfiguredBackend`).
         let profile = args.set.active_profile();

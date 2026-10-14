@@ -49,12 +49,11 @@ Four subcommands cover inspection, rebinding, marker transfer, and removal:
 The profiles config file lives at the instance config root's
 `profiles.toml`: `<config home>/kallipai/tagmata/<slug>/`.
 A config root that cannot be derived (no `KALLIPAI_TAGMA_SLUG`, no config
-home) degrades the read to the implicit env profile with a warning;
-a write with no config root errors out. Without a config file (the
-default for benchmark/scripting via Harbor, an external agent
-benchmarking framework, and `kallipai-run`), a single implicit profile is
-used: its `max_context_window` is derived from `KALLIPAI_CONTEXT_WINDOW_TOKENS`
-(default `128000`).
+home) leaves the tagma with no profiles: the read warns and boots
+profile-less, and a write with no config root errors out. No config file
+means the same profile-less boot: the tagma serves with no model
+configured until the Profiles page (or a hand-written file) adds the first
+profile.
 
 With a config file, the tagma loads multiple provider/model combinations, each
 profile declaring its own `max_context_window`.
@@ -93,16 +92,16 @@ default = "primary"
 
 [endpoints.deepseek-primary]
 family = "deepseek"
-api_key = "${KALLIPAI_LLM_DEEPSEEK_API_KEY}" # env-var indirection keeps secrets out of the file
+api_key = "sk-your-deepseek-key" # a literal value
 
 [endpoints.openrouter]
 family = "openai-compatible"
-api_key = "${OPENROUTER_API_KEY}"
+api_key = "sk-or-your-openrouter-key"
 base_url = "https://openrouter.ai/api/v1"
 
 [endpoints.official-openai]
 family = "openai-responses"
-api_key = "${OPENAI_API_KEY}" # no base_url: talks to the official endpoint
+api_key = "sk-your-openai-key" # no base_url: talks to the official endpoint
 
 [sets.primary]
 description = "full-capability work"
@@ -128,7 +127,7 @@ description = "cheap delegation"
 - `model_list_base_url` (optional) is the base the provider Test fetches the model list from; it defaults to `base_url` and exists for providers whose list lives at a different base. It takes a base, not the full model-list URL: the client appends `/models`.
 - `store` (optional, default `true`) keeps server-side conversation storage on, so `openai-responses` continues each turn from the stored chain; `store = false` (or any non-Responses family) replays the full conversation every turn.
 - `effort` (optional) requests a reasoning effort: `low`, `medium`, `high`, `xhigh`, or `max`. Providers honor it within their own limits (DeepSeek officially downgrades `medium` and `xhigh` to `high` per its [API reference](https://api-docs.deepseek.com/api/create-chat-completion)).
-- `${VAR}` in `api_key` / `base_url` / `model_list_base_url` is expanded from the process environment.
+- Values are literal: an API key is written into the file itself.
 - The config file should be `chmod 600` (the tagma warns if
   group/other-readable, since it may hold API keys).
 
@@ -145,7 +144,7 @@ The `default` marker resolves at load: an explicit `default = "<name>"` must
 name an existing set (a name matching nothing is a config error); with exactly
 one set and no marker, that set becomes the default and the tagma writes the
 marker back into the file, inserted ahead of the first table header, so
-comments, key order, and `${VAR}` spellings survive; several sets with no
+comments, key order, and value spellings survive; several sets with no
 marker is a config error (name one explicitly). A hand-written empty
 marker (`default = ""`) reads back as unmarked and takes the single-set
 auto-mark path rather than erroring. In that corner the file keeps its

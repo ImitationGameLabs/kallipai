@@ -10,8 +10,8 @@
 # operator token), KALLIPAI_TAGMA_RELAY_ENROLLMENT_CODE (first boot only),
 # KALLIPAI_POLIS_URL (the platform's public API origin, e.g.
 # https://api.kallipai.com -- enrollment, the keryx tunnel, envelopes and
-# key-exchange responses all derive from it), and
-# the LLM provider credentials. See docs/en/deployment/container.md.
+# key-exchange responses all derive from it).
+# Model configuration is the `profiles.toml` in the config volume. See docs/en/deployment/container.md.
 { lib, ... }:
 let
   # Resolve the workspace flake. `toString ../..` is the repo root (two levels
@@ -34,6 +34,9 @@ in
     # layer (data-root) or via a compose edit.
     docker-compose.volumes = {
       kallipai_tagma_data = { };
+      # The instance config root: profiles.toml (the model configuration) lives
+      # here, so a profile written on the Profiles page survives recreation.
+      kallipai_tagma_config = { };
       workspace = { };
     };
 
@@ -46,6 +49,7 @@ in
       service.ports = [ "3000:3000" ];
       service.volumes = [
         "kallipai_tagma_data:/var/lib/kallipai/tagmata/main"
+        "kallipai_tagma_config:/var/lib/.config/kallipai/tagmata/main"
         "workspace:/workspace"
       ];
       service.env_file = [ ".env" ];
@@ -68,6 +72,9 @@ in
         KALLIPAI_TAGMA_SLUG = "main";
         XDG_DATA_HOME = "/var/lib";
         XDG_STATE_HOME = "/var/lib";
+        # The instance config root: dirs::config_dir()/kallipai/tagmata/<slug>.
+        # Model configuration (profiles.toml) lives in the config volume.
+        XDG_CONFIG_HOME = "/var/lib/.config";
         KALLIPAI_WORKSPACE_ROOT = "/workspace";
         KALLIPAI_TAGMA_ADDR = "0.0.0.0:3000";
         # A rootful container has no uid mapping, so the tagma would run as the

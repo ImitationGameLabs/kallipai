@@ -25,6 +25,7 @@ __pycache__/
 *.pyc
 harbor-integration/.venv/
 harbor-integration/*.egg-info/
+harbor-integration/.localprofile.toml
 
 # Harbor job outputs
 harbor-integration/jobs/

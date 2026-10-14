@@ -15,16 +15,15 @@ Runtime tuning variables live in the environment variables reference:
 ### Inter-Variable Constraints
 
 Some variables have cross-validation rules enforced at startup for the
-implicit-profile window:
+active context window:
 
 - `KALLIPAI_OUTPUT_RESERVE_TOKENS` must be strictly less than the active context window.
 - `KALLIPAI_SUMMARY_MAX_TOKENS` must not exceed the pinned budget, calculated as
   `(the context window − KALLIPAI_OUTPUT_RESERVE_TOKENS) × KALLIPAI_PINNED_BUDGET_RATIO`.
 
-These are checked at startup against the implicit-profile window
-(`KALLIPAI_CONTEXT_WINDOW_TOKENS`); a config-file profile's window is checked per-profile
-at spawn (and again, lazily, on within-set failover). Config-file profile
-windows were never validated at tagma startup.
+These are checked at startup against the default window (128000 tokens);
+a profile's declared window is checked per-profile at spawn (and again,
+lazily, on within-set failover), never at tagma startup.
 
 - `KALLIPAI_CONTEXT_THRESHOLDS` must have at least 2 values, sorted ascending, each in
   `1`–`99`.

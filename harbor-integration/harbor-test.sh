@@ -17,7 +17,7 @@
 #
 # Prerequisites:
 #   - Completed setup (./harbor-integration/setup-venv.sh)
-#   - Provider API key exported (e.g. KALLIPAI_LLM_DEEPSEEK_API_KEY)
+#   - harbor-integration/.localprofile.toml (provider key and model)
 set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
@@ -54,6 +54,14 @@ if [[ ! -d harbor-integration/.venv ]]; then
   echo "==> Running setup first..."
   bash harbor-integration/setup-venv.sh
   echo ""
+fi
+
+# -- Ensure the operator profile exists --------------------------------------
+
+if [[ ! -f harbor-integration/.localprofile.toml ]]; then
+  echo "error: harbor-integration/.localprofile.toml not found" >&2
+  echo "copy harbor-integration/localprofile.example.toml beside it and fill in your provider and model" >&2
+  exit 1
 fi
 
 # -- Build tarball and point venv at it --------------------------------------

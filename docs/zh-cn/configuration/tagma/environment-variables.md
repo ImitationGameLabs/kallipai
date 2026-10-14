@@ -6,7 +6,7 @@ order: 15
 
 环境变量参考已移至独立子目录：[环境变量](../../reference/environment-variables/index.md)。
 
-- [Tagma](../../reference/environment-variables/tagma.md)：tagma 服务器进程（LLM provider、agent core 运行时调优）。
+- [Tagma](../../reference/environment-variables/tagma.md)：tagma 服务器进程（agent core 运行时调优、配置来源种子）。
 - [Agent shell 会话](../../reference/environment-variables/agent-shell.md)：注入每个 agent shell 的变量。
 - [平台服务](../../reference/environment-variables/platform-services.md)：全部六个 polis 服务的日志。
 

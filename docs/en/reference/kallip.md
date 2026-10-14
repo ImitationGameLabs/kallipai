@@ -439,7 +439,7 @@ kallip subagent interrupt $CHILD
 
 ### Environment Variables
 
-`KALLIPAI_AUTH_TOKEN` (required) and `KALLIPAI_TAGMA_URL` (default `http://127.0.0.1:3000`) are the primary variables. For the complete reference including LLM provider configuration and agent tuning parameters, see [Configuration](../configuration/index.md).
+`KALLIPAI_AUTH_TOKEN` (required) and `KALLIPAI_TAGMA_URL` (default `http://127.0.0.1:3000`) are the primary variables. For the complete reference including agent tuning parameters, see [Configuration](../configuration/index.md).
 
 ### Client Library
 

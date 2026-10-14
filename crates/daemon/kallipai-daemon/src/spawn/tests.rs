@@ -1146,7 +1146,7 @@ fn explicit_origin_passes_through() {
 /// No relay signal -- nothing is injected.
 #[test]
 fn local_only_env_stays_untouched() {
-    let out = fill_relay_defaults(&["KALLIPAI_LLM_PROVIDER=deepseek".into()], Some(POLIS));
+    let out = fill_relay_defaults(&["KALLIPAI_TEST_LLM_PROVIDER=deepseek".into()], Some(POLIS));
     assert!(!has(&out, "KALLIPAI_POLIS_URL="));
     assert!(!has(&out, "KALLIPAI_TAGMA_RELAY_"));
     assert_eq!(out.len(), 1);

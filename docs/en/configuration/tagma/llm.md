@@ -6,7 +6,7 @@ order: 20
 
 Part of the [Configuration reference](../index.md); this page covers the three-layer model behind model configuration.
 
-The provider-selection variables: [Tagma](../../reference/environment-variables/tagma.md).
+The settings live in the instance's `profiles.toml`; [Model configuration methods](methods.md) covers writing them.
 
 ## The Three-Layer Model
 

@@ -1,6 +1,6 @@
 //! Model profile registry: provider/model selection with named profile sets.
 //!
-//! Provides the data model, a TOML/env config loader (returning [`ProfileConfig`]), and re-exports
+//! Provides the data model, a TOML config loader (returning [`ProfileConfig`]), and re-exports
 //! the upstream [`GenerationClient`]. The tagma builds backends and assembles them into a
 //! [`ProfileRegistry`]; the runtime holds pre-built backends and does selection only.
 //!

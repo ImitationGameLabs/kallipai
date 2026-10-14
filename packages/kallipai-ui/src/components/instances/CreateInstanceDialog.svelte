@@ -15,9 +15,6 @@
     polisUrl: string;
     enrollmentCode: string;
     instanceToken: string;
-    llmProvider: string;
-    llmModel: string;
-    llmApiKey: string;
   }
 </script>
 
@@ -44,11 +41,10 @@
     manage_instances_method_cloud_title,
     manage_instances_method_local_desc,
     manage_instances_method_local_title,
+    manage_instances_model_gateway_hint,
     manage_instances_spawn_polis_label,
     manage_instances_spawn_enrollment_label,
-    manage_instances_spawn_llm_api_key_label,
-    manage_instances_spawn_llm_model_label,
-    manage_instances_spawn_llm_provider_label,
+    manage_instances_spawn_profiles_hint,
     manage_instances_spawn_slug_label,
     manage_instances_spawn_slug_placeholder,
     manage_instances_spawn_submit,
@@ -89,9 +85,6 @@
     polisUrl: "",
     enrollmentCode: "",
     instanceToken: "",
-    llmProvider: "",
-    llmModel: "",
-    llmApiKey: "",
   });
   let minted = $state<{ code: string } | null>(null);
   let copied = $state(false);
@@ -107,9 +100,6 @@
         polisUrl: "",
         enrollmentCode: "",
         instanceToken: "",
-        llmProvider: "",
-        llmModel: "",
-        llmApiKey: "",
       };
       minted = null;
       copied = false;
@@ -153,9 +143,6 @@
         polisUrl: fields.polisUrl,
         enrollmentCode: fields.enrollmentCode,
         instanceToken: fields.instanceToken,
-        llmProvider: fields.llmProvider,
-        llmModel: fields.llmModel,
-        llmApiKey: fields.llmApiKey,
       });
       return;
     }
@@ -216,6 +203,10 @@
           </button>
         </div>
 
+        <p class="text-xs opacity-60">
+          {manage_instances_model_gateway_hint()}
+        </p>
+
         {#if method === "cloud"}
           <form
             class="flex flex-col gap-4"
@@ -250,8 +241,7 @@
 
             {#if advanced}
               <!-- The manual launch fields: slug + workspace are required;
-                   the optional relay/LLM fields become the daemon env
-                   allowlist on the page side. -->
+                   the optional relay fields become the daemon env allowlist. -->
               <div class="grid gap-4 sm:grid-cols-2">
                 <label class="flex flex-col gap-1">
                   <span class="text-sm font-medium">
@@ -304,31 +294,9 @@
                     bind:value={fields.instanceToken}
                   />
                 </label>
-                <label class="flex flex-col gap-1">
-                  <span class="text-sm opacity-70">
-                    {manage_instances_spawn_llm_provider_label()}
-                  </span>
-                  <input
-                    class="input text-sm"
-                    bind:value={fields.llmProvider}
-                  />
-                </label>
-                <label class="flex flex-col gap-1">
-                  <span class="text-sm opacity-70">
-                    {manage_instances_spawn_llm_model_label()}
-                  </span>
-                  <input class="input text-sm" bind:value={fields.llmModel} />
-                </label>
-                <label class="flex flex-col gap-1 sm:col-span-2">
-                  <span class="text-sm opacity-70">
-                    {manage_instances_spawn_llm_api_key_label()}
-                  </span>
-                  <input
-                    class="input text-sm"
-                    type="password"
-                    bind:value={fields.llmApiKey}
-                  />
-                </label>
+                <p class="text-xs opacity-60 sm:col-span-2">
+                  {manage_instances_spawn_profiles_hint()}
+                </p>
               </div>
             {/if}
 

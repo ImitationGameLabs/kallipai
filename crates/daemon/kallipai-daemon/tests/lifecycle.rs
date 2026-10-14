@@ -170,16 +170,16 @@ fn spawn_health_stop_round_trip() {
     // Spawn a real tagma: direct/local mode (no relay env) — the relay
     // plan resolution fails fast with neither configured... which is a
     // boot failure, proving the rollback path too if it ever regresses.
-    // Minimal boot env: operator token plus the LLM profile trio the
-    // runtime requires before it serves (PROVIDER/MODEL/API_KEY).
+    // Minimal boot env: the operator token, plus KALLIPAI_-prefixed
+    // fixtures exercising the env-passthrough rule.
     let spawn = tokio_block_on(client.call(RequestBody::Spawn {
         slug: "e2e".into(),
         workspace: workspace.path().display().to_string(),
         env: vec![
             "KALLIPAI_OPERATOR_TOKEN=test-op-token".into(),
-            "KALLIPAI_LLM_PROVIDER=deepseek".into(),
-            "KALLIPAI_LLM_MODEL=test-model".into(),
-            "KALLIPAI_LLM_DEEPSEEK_API_KEY=test-key".into(),
+            "KALLIPAI_TEST_LLM_PROVIDER=deepseek".into(),
+            "KALLIPAI_TEST_LLM_MODEL=test-model".into(),
+            "KALLIPAI_TEST_LLM_API_KEY=test-key".into(),
         ],
         exe: None,
         user: daemon_user(),
@@ -386,9 +386,9 @@ fn start_filters_consumed_enrollment_code() {
         workspace: workspace.path().display().to_string(),
         env: vec![
             "KALLIPAI_OPERATOR_TOKEN=test-op-token".into(),
-            "KALLIPAI_LLM_PROVIDER=deepseek".into(),
-            "KALLIPAI_LLM_MODEL=test-model".into(),
-            "KALLIPAI_LLM_DEEPSEEK_API_KEY=test-key".into(),
+            "KALLIPAI_TEST_LLM_PROVIDER=deepseek".into(),
+            "KALLIPAI_TEST_LLM_MODEL=test-model".into(),
+            "KALLIPAI_TEST_LLM_API_KEY=test-key".into(),
         ],
         exe: None,
         user: daemon_user(),
@@ -497,9 +497,9 @@ fn spawn_rejects_slug_reuse_and_workspace_overlap() {
         workspace: workspace.path().display().to_string(),
         env: vec![
             "KALLIPAI_OPERATOR_TOKEN=t".into(),
-            "KALLIPAI_LLM_PROVIDER=deepseek".into(),
-            "KALLIPAI_LLM_MODEL=test-model".into(),
-            "KALLIPAI_LLM_DEEPSEEK_API_KEY=test-key".into(),
+            "KALLIPAI_TEST_LLM_PROVIDER=deepseek".into(),
+            "KALLIPAI_TEST_LLM_MODEL=test-model".into(),
+            "KALLIPAI_TEST_LLM_API_KEY=test-key".into(),
         ],
         exe: None,
         user: daemon_user(),
@@ -560,9 +560,9 @@ fn start_recovers_from_stale_runtime_json() {
         workspace: workspace.path().display().to_string(),
         env: vec![
             "KALLIPAI_OPERATOR_TOKEN=test-op-token".into(),
-            "KALLIPAI_LLM_PROVIDER=deepseek".into(),
-            "KALLIPAI_LLM_MODEL=test-model".into(),
-            "KALLIPAI_LLM_DEEPSEEK_API_KEY=test-key".into(),
+            "KALLIPAI_TEST_LLM_PROVIDER=deepseek".into(),
+            "KALLIPAI_TEST_LLM_MODEL=test-model".into(),
+            "KALLIPAI_TEST_LLM_API_KEY=test-key".into(),
         ],
         exe: None,
         user: daemon_user(),
@@ -646,9 +646,9 @@ fn start_rejects_when_stale_runtime_names_a_live_pid() {
         workspace: workspace.path().display().to_string(),
         env: vec![
             "KALLIPAI_OPERATOR_TOKEN=test-op-token".into(),
-            "KALLIPAI_LLM_PROVIDER=deepseek".into(),
-            "KALLIPAI_LLM_MODEL=test-model".into(),
-            "KALLIPAI_LLM_DEEPSEEK_API_KEY=test-key".into(),
+            "KALLIPAI_TEST_LLM_PROVIDER=deepseek".into(),
+            "KALLIPAI_TEST_LLM_MODEL=test-model".into(),
+            "KALLIPAI_TEST_LLM_API_KEY=test-key".into(),
         ],
         exe: None,
         user: daemon_user(),
@@ -716,9 +716,9 @@ fn manual_boot_with_slug_publishes_runtime_json() {
         .env("XDG_DATA_HOME", data_home.path())
         .env("KALLIPAI_TAGMA_ADDR", format!("127.0.0.1:{port}"))
         .env("KALLIPAI_OPERATOR_TOKEN", "test-op-token")
-        .env("KALLIPAI_LLM_PROVIDER", "deepseek")
-        .env("KALLIPAI_LLM_MODEL", "test-model")
-        .env("KALLIPAI_LLM_DEEPSEEK_API_KEY", "test-key")
+        .env("KALLIPAI_TEST_LLM_PROVIDER", "deepseek")
+        .env("KALLIPAI_TEST_LLM_MODEL", "test-model")
+        .env("KALLIPAI_TEST_LLM_API_KEY", "test-key")
         // Test-env isolation: a machine running inside the kallipai
         // stack (e.g. an agent) carries an ambient KALLIPAI_POLIS_URL;
         // leaked into the child it trips the tagma relay fail-fast
@@ -766,9 +766,9 @@ fn stop_refuses_tampered_runtime_pid_then_allows_restored() {
         workspace: workspace.path().display().to_string(),
         env: vec![
             "KALLIPAI_OPERATOR_TOKEN=test-op-token".into(),
-            "KALLIPAI_LLM_PROVIDER=deepseek".into(),
-            "KALLIPAI_LLM_MODEL=test-model".into(),
-            "KALLIPAI_LLM_DEEPSEEK_API_KEY=test-key".into(),
+            "KALLIPAI_TEST_LLM_PROVIDER=deepseek".into(),
+            "KALLIPAI_TEST_LLM_MODEL=test-model".into(),
+            "KALLIPAI_TEST_LLM_API_KEY=test-key".into(),
         ],
         exe: None,
         user: daemon_user(),

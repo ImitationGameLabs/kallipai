@@ -52,8 +52,9 @@ environment.systemPackages = [ pkgs.arion ];
 virtualisation.docker.enable = true;   # or podman + dockerSocket
 ```
 
-Copy `.env.example` to `.env` and fill in the LLM provider credentials
-(Arion reads `.env` via `service.env_file`).
+Copy `.env.example` to `.env` and fill in the deployment's tokens and relay
+credentials (Arion reads `.env` via `service.env_file`); model configuration is
+a file instead, see [Model Configuration](#model-configuration).
 
 ### Development Compositions
 
@@ -265,11 +266,26 @@ tagma rejects a workspace that contains or is contained by the data dir.
 ### Environment
 
 The compose files hardcode per-service defaults, and `.env` supplies
-the rest: provider credentials, tokens, and the prod-platform deploy
-secrets. Compose precedence means `service.environment` wins over
+the rest: tokens and the prod-platform deploy secrets. Compose precedence
+means `service.environment` wins over
 `env_file`, so values the dev compose hardcodes are not overridable
 via `.env` in that mode. The full variable tables live in the
 [environment-variables reference](../reference/environment-variables/index.md).
+
+#### Model Configuration
+
+Model configuration lives in a file. The tagma services set
+`XDG_CONFIG_HOME=/var/lib/.config` and mount the
+`kallipai_tagma_config` volume at the instance config root it resolves to
+(`/var/lib/.config/kallipai/tagmata/<slug>`), so the `profiles.toml` the
+Profiles page writes — or one copied in with `docker cp` — survives
+container recreation. The variable applies to every XDG consumer in the
+container, not just the tagma: a `git` or `gh` run inside an agent
+shell reads its tool configuration from that same config home. The file's
+shape is documented in
+[model configuration methods](../configuration/tagma/methods.md); a
+deployment on the model-gateway source takes its profiles from there
+instead.
 
 ### Without Arion (Plain Docker)
 
@@ -286,15 +302,22 @@ docker run --rm \
   --security-opt seccomp=unconfined --cap-add SYS_ADMIN \
   -p 3000:3000 \
   -v kallipai-tagma_data:/var/lib/kallipai/tagmata/main \
+  -v kallipai-tagma_config:/var/lib/.config/kallipai/tagmata/main \
   -v kallipai-tagma_workspace:/workspace \
-  -e KALLIPAI_LLM_PROVIDER=deepseek \
-  -e KALLIPAI_LLM_MODEL=deepseek-v4-flash \
-  -e KALLIPAI_LLM_DEEPSEEK_API_KEY="$DEEPSEEK_KEY" \
+  -e HOME=/var/lib -e KALLIPAI_TAGMA_SLUG=main \
+  -e XDG_DATA_HOME=/var/lib -e XDG_STATE_HOME=/var/lib \
+  -e XDG_CONFIG_HOME=/var/lib/.config \
+  -e KALLIPAI_WORKSPACE_ROOT=/workspace \
+  -e KALLIPAI_TAGMA_ADDR=0.0.0.0:3000 \
+  -e KALLIPAI_TAGMA_ACCEPT_UNSAFE_RUN_AS_ROOT=1 \
   kallipai-tagma:<gitVersion> kallipai-tagma
 ```
 
 (The image has no default `Cmd`: pass the binary name `kallipai-tagma`
-explicitly.)
+explicitly. The `-e` lines mirror the compose `tagma` service: the slug and
+the XDG homes are what make the mounted volumes — the config one included —
+land where the tagma looks for them, and the root escape is the documented
+flag for a rootful container with no uid mapping.)
 
 The platform's control plane runs from `kallipai-archeion-image` (behind your
 own TLS reverse proxy and a postgres):

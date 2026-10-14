@@ -12,8 +12,11 @@ Usage::
 
     pip install -e ./harbor-integration
     harbor run --dataset terminal-bench@2.0 \\
-        --agent-import-path "kallipai_harbor:KallipaiAdapter" \
-        --model "deepseek/deepseek-v4-flash"
+        --agent-import-path "kallipai_harbor:KallipaiAdapter"
+
+The provider, model, and API key come from
+``harbor-integration/.localprofile.toml`` (see the README), which the
+adapter ships into the container as the tagma's config file.
 """
 
 from __future__ import annotations
@@ -34,9 +37,12 @@ from harbor.agents.installed.base import (
 from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
 
+from kallipai_harbor.profiles import resolve_local_profile
 from kallipai_harbor.tagma import (
     PACKAGES,
     agents_dir as agents_dir_fn,
+    CONFIG_HOME,
+    PROFILE_STAGING,
     RUN_BIN,
     RUN_LOG,
     TagmaManager,
@@ -71,35 +77,10 @@ class KallipaiAdapter(BaseInstalledAgent):
 
     # -- Declarative environment variables --
     # These are resolved from Harbor kwargs / host env / defaults, and
-    # forwarded into the container for the tagma and runner.
-    # Note: API keys are provider-specific, matching kallipai's design:
-    #   deepseek           → KALLIPAI_LLM_DEEPSEEK_API_KEY
-    #   openai-compatible  → KALLIPAI_LLM_OPENAI_COMPAT_API_KEY
+    # forwarded into the container for the tagma and runner. Model access
+    # is deliberately absent: install() ships ``.localprofile.toml`` in as
+    # the tagma's config file instead, so no API key rides the environment.
     ENV_VARS: list[EnvVar] = [
-        EnvVar(
-            "llm_provider",
-            env="KALLIPAI_LLM_PROVIDER",
-            type="str",
-            env_fallback="KALLIPAI_LLM_PROVIDER",
-        ),
-        EnvVar(
-            "llm_model",
-            env="KALLIPAI_LLM_MODEL",
-            type="str",
-            env_fallback="KALLIPAI_LLM_MODEL",
-        ),
-        EnvVar(
-            "llm_deepseek_api_key",
-            env="KALLIPAI_LLM_DEEPSEEK_API_KEY",
-            type="str",
-            env_fallback="KALLIPAI_LLM_DEEPSEEK_API_KEY",
-        ),
-        EnvVar(
-            "llm_openai_compat_api_key",
-            env="KALLIPAI_LLM_OPENAI_COMPAT_API_KEY",
-            type="str",
-            env_fallback="KALLIPAI_LLM_OPENAI_COMPAT_API_KEY",
-        ),
         EnvVar(
             "operator_token",
             env="KALLIPAI_OPERATOR_TOKEN",
@@ -177,24 +158,25 @@ class KallipaiAdapter(BaseInstalledAgent):
         self._operator_token = env.get("KALLIPAI_OPERATOR_TOKEN") or str(uuid.uuid4())
         env["KALLIPAI_OPERATOR_TOKEN"] = self._operator_token
 
-        # 4. Apply Harbor's --model if provided.
-        #    Convention: --model "provider/model-name"
-        #    Maps to KALLIPAI_LLM_PROVIDER + KALLIPAI_LLM_MODEL.
-        if self.model_name and "/" in self.model_name:
-            provider, model = self.model_name.split("/", 1)
-            env.setdefault("KALLIPAI_LLM_PROVIDER", provider)
-            env.setdefault("KALLIPAI_LLM_MODEL", model)
+        # Ship the operator's LLM configuration in as a file: the tagma
+        # reads it from its config home, so the model settings have one
+        # source of truth and the key stays out of the environment.
+        await environment.upload_file(
+            source_path=resolve_local_profile(), target_path=PROFILE_STAGING
+        )
 
         # Slug boot: name this trial's instance (install-time generated),
         # and anchor the XDG homes at Harbor's bind-mounted /logs/agent so
         # the derived data root (/logs/agent/kallipai/tagmata/<slug>) and
         # the logs land on the host at <trial_dir>/agent/ for post-run
-        # inspection. The env reaches the tagma child only - Harbor's own
+        # inspection; the config home is the sibling holding the delivered
+        # profiles.toml. The env reaches the tagma child only - Harbor's own
         # process is untouched.
         self._slug = f"bench-{uuid.uuid4().hex[:8]}"
         env["KALLIPAI_TAGMA_SLUG"] = self._slug
         env["XDG_DATA_HOME"] = str(self.logs_dir)
         env["XDG_STATE_HOME"] = str(self.logs_dir)
+        env["XDG_CONFIG_HOME"] = str(CONFIG_HOME)
 
         # Harbor runs inside ephemeral containers; policy gates are not needed.
         env.setdefault("KALLIPAI_POLICY_PRESET", "allow-all")
@@ -205,11 +187,11 @@ class KallipaiAdapter(BaseInstalledAgent):
         # can verify TLS certificates when calling LLM providers.
         env.setdefault("SSL_CERT_FILE", "/etc/ssl/certs/ca-certificates.crt")
 
-        # 5. Start the tagma.
+        # 4. Start the tagma.
         self._tagma.set_operator_token(self._operator_token)
         await self._tagma.start(self, environment, env)
 
-        # 6. Wait for the tagma to become healthy.
+        # 5. Wait for the tagma to become healthy.
         await self._tagma.wait_ready(self, environment)
 
     # ------------------------------------------------------------------

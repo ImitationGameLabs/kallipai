@@ -71,11 +71,14 @@ in
   config = {
     project.name = "kallipai-dev-tagma";
 
-    docker-compose.volumes =
-      { }
-      // lib.optionalAttrs (dataBind == null) { kallipai_tagma_data = { }; }
-      // lib.optionalAttrs (workspaceBind == null) { tagma_workspace = { }; }
-      // lib.optionalAttrs (cronDataBind == null) { kallipai_cron_data = { }; };
+    # The instance config root volume: model configuration (profiles.toml)
+    # lives there, so a profile written on the Profiles page survives recreation.
+    docker-compose.volumes = {
+      kallipai_tagma_config = { };
+    }
+    // lib.optionalAttrs (dataBind == null) { kallipai_tagma_data = { }; }
+    // lib.optionalAttrs (workspaceBind == null) { tagma_workspace = { }; }
+    // lib.optionalAttrs (cronDataBind == null) { kallipai_cron_data = { }; };
 
     services.tagma = {
       service.capabilities.SYS_ADMIN = true;
@@ -86,6 +89,7 @@ in
       service.volumes = [
         dataVolume
         workspaceVolume
+        "kallipai_tagma_config:/var/lib/.config/kallipai/tagmata/main"
       ]
       # skills has no named volume of its own: unset -> skills live inside the
       # `kallipai_tagma_data` volume's skills/ subdir; set -> a bind overlays it.
@@ -121,6 +125,9 @@ in
         KALLIPAI_TAGMA_SLUG = "main";
         XDG_DATA_HOME = "/var/lib";
         XDG_STATE_HOME = "/var/lib";
+        # The instance config root (dirs::config_dir()/kallipai/tagmata/<slug>):
+        # model configuration (profiles.toml) lives in the config volume.
+        XDG_CONFIG_HOME = "/var/lib/.config";
         # The tagma eagerly creates the singleton root agent at startup; its
         # workspace is resolved by AgentConfig::load from KALLIPAI_WORKSPACE_ROOT.
         # Pin the mounted workspace volume, which is disjoint from

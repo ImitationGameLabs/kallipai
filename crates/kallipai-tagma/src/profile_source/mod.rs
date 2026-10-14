@@ -6,9 +6,8 @@
 //! code path. Two implementations:
 //!
 //! - [`LocalProfileSource`]: read the on-disk
-//!   `profiles.toml` (or the implicit env profile). A thin wrapper around
-//!   `kallipai_adk::profile::load()`; zero behavior drift is the acceptance
-//!   bar (existing tests keep their assertions).
+//!   `profiles.toml`. A thin wrapper around `kallipai_adk::profile::load()`; zero
+//!   behavior drift is the acceptance bar (existing tests keep their assertions).
 //! - `ProxyProfileSource`: fetch
 //!   sets/parking/default from the model gateway's distribution face and
 //!   adapt them into the same shape; the local profiles.toml belongs to
@@ -32,8 +31,8 @@ pub use proxy::ProxyProfileSource;
 /// management face can switch it at runtime through PUT /profiles).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ProfileSourceKind {
-    /// Read the local `profiles.toml` / implicit env profile (the mode's
-    /// default when settings.toml carries no [profiles.source] entry).
+    /// Read the local `profiles.toml` (the mode's default when settings.toml
+    /// carries no [profiles.source] entry).
     #[default]
     #[serde(rename = "local")]
     Local,
@@ -355,41 +354,27 @@ mod tests {
     }
 
     #[test]
-    fn local_source_passes_the_env_profile_through() {
-        // Zero-drift pin: the wrapper returns exactly what the historical
-        // `kallipai_adk::profile::load()` resolves — whichever path the
-        // process ends up on. The env vars alone do not guarantee the env
-        // path (another test's instance-roots injection + a written
-        // profiles.toml would win), so the stable contract is equivalence;
-        // the env-profile content is additionally pinned only when the
-        // roots are demonstrably absent (deterministic env fallback).
-        temp_env::with_vars(
-            [
-                ("KALLIPAI_TAGMA_SLUG", None::<&str>),
-                ("KALLIPAI_LLM_PROVIDER", Some("deepseek")),
-                ("KALLIPAI_LLM_MODEL", Some("deepseek-test")),
-                ("KALLIPAI_LLM_DEEPSEEK_API_KEY", Some("fake")),
-                ("KALLIPAI_CONTEXT_WINDOW_TOKENS", Some("200000")),
-            ],
-            || {
-                let runtime = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .expect("test runtime");
-                let via_wrapper = runtime
-                    .block_on(LocalProfileSource::new().load())
-                    .expect("profile loads");
-                let direct = kallipai_adk::profile::load().expect("direct load");
-                assert_eq!(format!("{via_wrapper:?}"), format!("{direct:?}"));
-                if kallipai_adk::persistence::data_dir_root().is_err() {
-                    // No instance roots: the config-file path cannot resolve,
-                    // so both loads deterministically took the env profile.
-                    let profile = &direct.sets["default"].profiles[0];
-                    assert_eq!(profile.model, "deepseek-test");
-                    assert_eq!(direct.default, "default");
-                }
-            },
-        );
+    fn local_source_passes_the_local_file_through() {
+        // Zero-drift pin: the wrapper returns exactly what
+        // `kallipai_adk::profile::load()` resolves — whichever path the process
+        // ends up on. The wrapper never invents a profile of its own, so the
+        // contract is equivalence; the empty shape is additionally pinned only
+        // when the roots are demonstrably absent (no config file to read).
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        let via_wrapper = runtime
+            .block_on(LocalProfileSource::new().load())
+            .expect("profile loads");
+        let direct = kallipai_adk::profile::load().expect("direct load");
+        assert_eq!(format!("{via_wrapper:?}"), format!("{direct:?}"));
+        if kallipai_adk::persistence::data_dir_root().is_err() {
+            // No instance roots: no config file can resolve, so both loads are the
+            // empty configuration rather than a synthesized profile.
+            assert!(direct.sets.is_empty());
+            assert!(direct.default.is_empty());
+        }
     }
 
     #[test]

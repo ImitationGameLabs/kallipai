@@ -182,20 +182,6 @@
     if (f.instanceToken.trim()) {
       env.push("KALLIPAI_AUTH_TOKEN=" + f.instanceToken.trim());
     }
-    if (f.llmProvider.trim()) {
-      env.push("KALLIPAI_LLM_PROVIDER=" + f.llmProvider.trim());
-    }
-    if (f.llmModel.trim()) {
-      env.push("KALLIPAI_LLM_MODEL=" + f.llmModel.trim());
-    }
-    // The key variable name follows the provider choice.
-    if (f.llmApiKey.trim()) {
-      const keyVar =
-        f.llmProvider.trim() === "openai-compatible"
-          ? "KALLIPAI_LLM_OPENAI_COMPAT_API_KEY"
-          : "KALLIPAI_LLM_DEEPSEEK_API_KEY";
-      env.push(keyVar + "=" + f.llmApiKey.trim());
-    }
     try {
       const result = await instancesStore.spawn({
         slug: f.slug,

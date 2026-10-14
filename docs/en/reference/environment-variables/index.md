@@ -4,8 +4,8 @@ description: KallipAI environment variables, organized by consumer.
 order: 25
 ---
 
-- [Tagma](tagma.md): the tagma server process: LLM provider selection and
-  agent core runtime tuning.
+- [Tagma](tagma.md): the tagma server process: agent core runtime tuning
+  and the profile-source seed.
 - [Agent shell sessions](agent-shell.md): variables injected into every agent
   shell by the tagma.
 - [Platform services](platform-services.md): logging for archeion (identity

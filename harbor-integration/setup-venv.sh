@@ -27,5 +27,6 @@ uv pip install harbor --python harbor-integration/.venv/bin/python
 echo ""
 echo "Done. Next steps:"
 echo ""
-echo "  1. export KALLIPAI_LLM_DEEPSEEK_API_KEY=<your-key>  (or KALLIPAI_LLM_OPENAI_COMPAT_API_KEY)"
+echo "  1. cp harbor-integration/localprofile.example.toml harbor-integration/.localprofile.toml"
+echo "     and fill in your provider key and model (see harbor-integration/README.md)"
 echo "  2. ./harbor-integration/harbor-test.sh"

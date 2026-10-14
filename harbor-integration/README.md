@@ -60,19 +60,32 @@ export KALLIPAI_PACKAGE_PATH=./result/kallipai-*-linux-x86_64.tar.gz
 
 `aifed`/`aifed-daemon` are symlinked into `/usr/local/bin` for bare-name lookup, and the adapter `command -v`-checks them at install time. If `AIFED_PACKAGE_PATH` is unset (e.g. cargo build fallback), the adapter skips aifed.
 
+## LLM configuration
+
+Model access comes from the file the adapter stages into the container: it
+copies `harbor-integration/.localprofile.toml` in, and the tagma reads it as
+its own `profiles.toml`:
+
+```bash
+cp harbor-integration/localprofile.example.toml harbor-integration/.localprofile.toml
+$EDITOR harbor-integration/.localprofile.toml
+```
+
+The file declares providers (`family`, `api_key`, optional `base_url`) and
+one or more profile sets (`id`, `endpoint`, `model`, `max_context_window`);
+the example carries the exact shape. A missing file fails the install before
+the tagma starts, naming the file.
+
 ## Environment Variables
 
-Set these on the **host** before running Harbor. They are forwarded into the container via Harbor's `ENV_VARS` mechanism.
+| Variable                  | Required | Description                                   |
+| ------------------------- | -------- | --------------------------------------------- |
+| `KALLIPAI_OPERATOR_TOKEN` | No       | Pre-set auth token; auto-generated if omitted |
 
-| Variable                             | Required | Description                                                                       |
-| ----------------------------------   | -------- | --------------------------------------------------------------------------------- |
-| `KALLIPAI_LLM_DEEPSEEK_API_KEY`      | Yes\*    | API key for DeepSeek provider                                                     |
-| `KALLIPAI_LLM_OPENAI_COMPAT_API_KEY` | Yes\*    | API key for OpenAI-compatible provider                                            |
-| `KALLIPAI_LLM_PROVIDER`              | No       | LLM backend: `deepseek` or `openai-compatible`. Auto-set from config `model_name` |
-| `KALLIPAI_LLM_MODEL`                 | No       | Model identifier. Auto-set from config `model_name`                               |
-| `KALLIPAI_OPERATOR_TOKEN`            | No       | Pre-set auth token; auto-generated if omitted                                     |
-
-\* Set the key matching your provider.
+Harbor's own `model_name` (from the config or `--model`) stays Harbor's
+record of what it asked for; the model that actually runs is the one in the
+profile file. Keep the two in step so benchmark results are labelled with
+the model they used.
 
 Note: tasks run uncapped (no `max_tool_rounds`); the agent runs until it
 finishes or the tagma token budget is exhausted, so complex tasks are not cut
@@ -83,7 +96,7 @@ off mid-completion.
 Pre-built config files are in `harbor-integration/configs/`. Each config encodes the agent, model, dataset, and output directory so you don't need to pass them as CLI flags.
 
 ```bash
-export KALLIPAI_LLM_DEEPSEEK_API_KEY=<your-key>
+# Configure harbor-integration/.localprofile.toml first (see above)
 
 # Quick verification (hello-world)
 ./harbor-integration/harbor-test.sh

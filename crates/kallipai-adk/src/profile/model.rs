@@ -37,10 +37,9 @@ pub struct Profile {
     /// The [`Provider::id`] this profile connects through.
     pub endpoint: String,
     pub model: String,
-    /// Declared context window — the authoritative source for this profile's window. Required on
-    /// both paths: config-file profiles declare it in TOML; the implicit env profile
-    /// (`profile::from_env`) derives it from `KALLIPAI_CONTEXT_WINDOW_TOKENS`. Installed into
-    /// `AgentConfig` at spawn via `set_context_window`, and re-applied on within-set failover.
+    /// Declared context window — the authoritative source for this profile's window. Every
+    /// profile declares it in `profiles.toml`; it is installed into `AgentConfig` at spawn
+    /// via `set_context_window`, and re-applied on within-set failover.
     pub max_context_window: usize,
     /// Server-side conversation storage for the upstream chain (`None` = enabled, matching
     /// the client default). Only Responses-family backends continue chains; `false` (and any

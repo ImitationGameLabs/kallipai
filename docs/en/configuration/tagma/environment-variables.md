@@ -8,7 +8,7 @@ The environment variable reference now lives in its own section:
 [Environment variables](../../reference/environment-variables/index.md).
 
 - [Tagma](../../reference/environment-variables/tagma.md): the tagma server
-  process (LLM provider, agent core runtime tuning).
+  process (agent core runtime tuning, the profile-source seed).
 - [Agent shell sessions](../../reference/environment-variables/agent-shell.md):
   variables injected into every agent shell.
 - [Platform services](../../reference/environment-variables/platform-services.md):

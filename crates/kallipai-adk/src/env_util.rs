@@ -1,15 +1,15 @@
 //! Shared env-var parsing helpers and the default context window.
 //!
 //! Neutral home for the generic env readers ([`parse_env`], [`parse_env_list`]) and the
-//! `KALLIPAI_CONTEXT_WINDOW_TOKENS` fallback ([`DEFAULT_CONTEXT_WINDOW_TOKENS`]), so neither
-//! `config` nor `profile` reaches across the other for them. Consumed by `AgentConfig::load` (env
-//! path) and by the implicit env profile (`profile::from_env`).
+//! pre-spawn default window ([`DEFAULT_CONTEXT_WINDOW_TOKENS`]): both are read here rather
+//! than defined at the use sites — `AgentConfig::load` reads all three, and
+//! `AgentConfig`'s `Default` reads the window.
 
 use anyhow::Result;
 
-/// Default context window (tokens) for `KALLIPAI_CONTEXT_WINDOW_TOKENS` when unset. Shared by
-/// `AgentConfig::load` (the implicit-profile budget-shape validation anchor) and `profile::from_env`
-/// (the implicit profile's `max_context_window`).
+/// Context window (tokens) used as the pre-spawn value in `AgentConfig::load`; the active
+/// profile's declared window replaces it at spawn via `set_context_window` (the sentinel
+/// set declares its own).
 pub(crate) const DEFAULT_CONTEXT_WINDOW_TOKENS: usize = 128_000;
 
 /// Parse a typed env var, returning `None` when unset and an error on a malformed value.

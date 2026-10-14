@@ -1,0 +1,29 @@
+# Operator-supplied LLM configuration for Harbor runs.
+#
+# The adapter copies this file into the container and the tagma reads it as
+# its own profiles.toml, so the model settings have one source of truth and
+# the API key stays in the file.
+#
+# Copy it beside itself and fill it in:
+#
+#   cp harbor-integration/localprofile.example.toml harbor-integration/.localprofile.toml
+#
+# `.localprofile.toml` is git-ignored: keep your key out of commits.
+
+default = "bench"
+
+# One entry per provider. `family` names the client family the tagma speaks
+# (`deepseek`, `openai-compatible`, ...); `base_url` is optional.
+[endpoints.ds]
+family = "deepseek"
+api_key = "<your-key>"
+base_url = "https://api.deepseek.com"
+
+# A set of profiles. The default set is the one a new agent binds to.
+[sets.bench]
+
+  [[sets.bench.profiles]]
+  id = "main"
+  endpoint = "ds"
+  model = "deepseek-v4-flash"
+  max_context_window = 128000

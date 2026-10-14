@@ -30,6 +30,15 @@ LOGS_DIR = Path("/logs/agent")
 TAGMA_LOG = LOGS_DIR / "tagma.log"
 RUN_LOG = LOGS_DIR / "run.log"
 
+# The container-side config home -- the tagma child's XDG_CONFIG_HOME.
+# A sibling of the data root, never inside it: the data root's agent
+# tree is hidden from the sandbox, and a config root under it would be
+# hidden along with it.
+CONFIG_HOME = LOGS_DIR / "config"
+
+# Where the adapter stages the delivered profile, before start() moves
+# it into place under the running identity.
+PROFILE_STAGING = Path("/tmp/kallipai-profile.toml")
 
 
 def agents_dir(xdg_data_home: str | Path, slug: str) -> Path:
@@ -41,6 +50,16 @@ def agents_dir(xdg_data_home: str | Path, slug: str) -> Path:
     a running tagma.
     """
     return Path(xdg_data_home) / "kallipai" / "tagmata" / slug / "agents"
+
+
+def profiles_path(config_home: str | Path, slug: str) -> Path:
+    """The instance's ``profiles.toml`` for a slug boot.
+
+    Mirrors ``kallipai_adk::persistence::config_dir_root``: the config
+    root is ``<xdg config>/kallipai/tagmata/<slug>``. Pure so tests
+    can pin the layout without a running tagma.
+    """
+    return Path(config_home) / "kallipai" / "tagmata" / slug / "profiles.toml"
 
 
 @dataclass(frozen=True)
@@ -155,11 +174,24 @@ class TagmaManager:
             ctx: The adapter instance (has ``exec_as_agent``).
             environment: Harbor ``BaseEnvironment`` for exec operations.
             env: Environment variables forwarded to the tagma process.
-                 Must include ``KALLIPAI_OPERATOR_TOKEN``.
+                 Must include ``KALLIPAI_OPERATOR_TOKEN`` and
+                 ``KALLIPAI_TAGMA_SLUG``, which names the config
+                 directory the delivered profile lands in.
         """
         # Ensure the log directory exists (it may not yet when the
         # bind mount is first set up).
         cmd = f"mkdir -p {LOGS_DIR}"
+
+        # Deliver the staged profile into the instance's config home
+        # under the run identity -- the same identity that reads it
+        # back, so owner and mode are right by construction and the
+        # key never rides argv.
+        profile = profiles_path(CONFIG_HOME, env["KALLIPAI_TAGMA_SLUG"])
+        cmd += (
+            f" && mkdir -p {profile.parent}"
+            f" && install -m 600 {PROFILE_STAGING} {profile}"
+            f" && rm -f {PROFILE_STAGING}"
+        )
 
         # Launch tagma in background with nohup, write PID file.
         cmd += (

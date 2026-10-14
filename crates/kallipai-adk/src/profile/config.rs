@@ -1,18 +1,16 @@
-//! Profile configuration: a TOML file of named profile sets, or an implicit
-//! single set from `KALLIPAI_LLM_*` env (the no-config-file path).
+//! Profile configuration: a TOML file of named profile sets.
 //!
-//! Progressive disclosure — Harbor / `kallipai-run` set only env vars and ship no config
-//! file, so they get the implicit single set with zero overhead. A `profiles.toml`
-//! unlocks multiple named sets / multi-profile failover. Both paths carry a declared
-//! `max_context_window` (the implicit profile derives it from
-//! `KALLIPAI_CONTEXT_WINDOW_TOKENS`).
+//! With no config file the tagma boots profile-less — no model configured, and the
+//! management page adds the first profile. Model settings never come from the
+//! environment: neither an endpoint nor a credential travels as an env var or argv
+//! into the tagma process. A `profiles.toml` (shipped into a Harbor container, or
+//! written by the management page) declares each profile's `max_context_window`.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result, bail};
-use just_llm_client::family;
 use serde::{Deserialize, Serialize};
 
 use super::model::{Profile, ProfileSet, Provider};
@@ -43,89 +41,32 @@ pub struct ProfileConfig {
     pub parking: Vec<Profile>,
 }
 
-/// Load profile configuration: from `<config_dir>/profiles.toml` when
-/// present, else an implicit single profile built from `KALLIPAI_LLM_*` env.
-pub fn load() -> Result<ProfileConfig> {
-    match resolve_config_path()? {
-        Some(path) => load_file(&path),
-        None => from_env(),
-    }
-}
-
-/// Build the implicit single-set config from `KALLIPAI_LLM_*` env (the env path).
-/// With no KALLIPAI_LLM_PROVIDER set, returns an empty config so the tagma
-/// boots profile-less; the management page then adds the first profile.
-///
-/// The implicit set is named `default` and marked default, so the env path and
-/// the config-file path present the same shape (a named, defaulted collection)
-/// with zero configuration. The profile's `max_context_window` is derived from
-/// `KALLIPAI_CONTEXT_WINDOW_TOKENS` (default `128_000`), so both paths carry an
-/// authoritative window installed via `set_context_window` at spawn.
-pub fn from_env() -> Result<ProfileConfig> {
-    // An unset provider boots the empty registry; a set-but-incomplete
-    // provider spec falls through to the hard errors below (fail loud on
-    // half-configuration, not a silent empty profile).
-    let Ok(provider) = std::env::var("KALLIPAI_LLM_PROVIDER") else {
-        return Ok(ProfileConfig {
+impl ProfileConfig {
+    /// The profile-less boot shape: no sets, no endpoints, no parked profiles.
+    ///
+    /// [`load`] returns this when there is no config file to read, so the tagma
+    /// starts with no model configured and the management page adds the first
+    /// profile.
+    pub fn empty() -> Self {
+        Self {
             sets: BTreeMap::new(),
             default: String::new(),
             endpoints: HashMap::new(),
             parking: Vec::new(),
-        });
-    };
-    let model = env_str("KALLIPAI_LLM_MODEL")?;
-    let (family_id, api_key, base_url) = match provider.as_str() {
-        family::DEEPSEEK => {
-            let key = env_str("KALLIPAI_LLM_DEEPSEEK_API_KEY")?;
-            let base = std::env::var("KALLIPAI_LLM_DEEPSEEK_BASE_URL").ok();
-            (family::DEEPSEEK, key, base)
         }
-        family::OPENAI_COMPATIBLE => {
-            let key = env_str("KALLIPAI_LLM_OPENAI_COMPAT_API_KEY")?;
-            let base = std::env::var("KALLIPAI_LLM_OPENAI_COMPAT_BASE_URL").ok();
-            (family::OPENAI_COMPATIBLE, key, base)
-        }
-        other => bail!("unsupported KALLIPAI_LLM_PROVIDER: {other}"),
-    };
-    let implicit_provider = Provider {
-        id: provider.clone(),
-        family: family_id.into(),
-        api_key,
-        base_url,
-        model_list_base_url: None,
-    };
-    // The implicit profile's window comes from the same env var `AgentConfig::load` uses as its
-    // budget-shape validation anchor — single source, no drift under static tagma env.
-    let max_context_window = crate::env_util::parse_env::<usize>("KALLIPAI_CONTEXT_WINDOW_TOKENS")?
-        .unwrap_or(crate::env_util::DEFAULT_CONTEXT_WINDOW_TOKENS);
-    let profile = Profile {
-        id: format!("{provider}/{model}"),
-        endpoint: provider.clone(),
-        model,
-        max_context_window,
-        // The implicit env profile keeps both behavior fields unset: the client defaults
-        // (store on, no effort) are exactly the unconfigured semantics.
-        store: None,
-        effort: None,
-        // The implicit env profile is text-only by default, like every
-        // un-annotated profile.
-        modalities: Profile::default_modalities(),
-    };
-    let mut endpoints = HashMap::new();
-    endpoints.insert(provider, implicit_provider);
-    Ok(ProfileConfig {
-        sets: BTreeMap::from([(
-            "default".to_string(),
-            ProfileSet {
-                name: "default".into(),
-                description: None,
-                profiles: vec![profile],
-            },
-        )]),
-        default: "default".into(),
-        endpoints,
-        parking: vec![],
-    })
+    }
+}
+
+/// Load profile configuration from `<config_dir>/profiles.toml`.
+///
+/// With no config file (or no derivable config root) the load returns the empty
+/// configuration: the tagma boots profile-less and the management page adds the
+/// first profile. The environment is never consulted for model settings.
+pub fn load() -> Result<ProfileConfig> {
+    match resolve_config_path()? {
+        Some(path) => load_file(&path),
+        None => Ok(ProfileConfig::empty()),
+    }
 }
 
 fn load_file(path: &Path) -> Result<ProfileConfig> {
@@ -162,25 +103,16 @@ fn load_file(path: &Path) -> Result<ProfileConfig> {
         .endpoints
         .into_iter()
         .map(|(id, body)| {
-            let api_key = expand_vars(&body.api_key)?;
-            // Re-check post-expansion: `${VAR}` that resolves to empty must not slip through
-            // (the pre-expansion check in `validate` only sees the literal).
-            if api_key.trim().is_empty() {
-                bail!("endpoint '{id}': api_key is required");
-            }
             let endpoint = Provider {
                 id: id.clone(),
                 family: body.family,
-                api_key,
-                base_url: body.base_url.map(|s| expand_vars(&s)).transpose()?,
-                model_list_base_url: body
-                    .model_list_base_url
-                    .map(|s| expand_vars(&s))
-                    .transpose()?,
+                api_key: body.api_key,
+                base_url: body.base_url,
+                model_list_base_url: body.model_list_base_url,
             };
-            Ok::<_, anyhow::Error>((id, endpoint))
+            (id, endpoint)
         })
-        .collect::<Result<_>>()?;
+        .collect();
 
     let (default, auto_marked) = normalize_default(&file.sets, &file.default)?;
     if auto_marked {
@@ -209,8 +141,7 @@ fn toml_tmp_path(path: &Path) -> PathBuf {
 
 /// Persist the auto-marked default by inserting a `default` key into the
 /// original file text, ahead of the first table header. Working on the text
-/// keeps comments, key order, and formatting intact; `${VAR}` spellings are
-/// copied verbatim, so unexpanded secrets never materialize on disk.
+/// keeps comments, key order, and formatting intact.
 fn write_back_default(raw: &str, default: &str, path: &Path) -> Result<()> {
     let marker = format!("default = \"{default}\"\n");
     // A top-level scalar must precede every table header; insert before the
@@ -273,15 +204,15 @@ fn write_back_default(raw: &str, default: &str, path: &Path) -> Result<()> {
 /// intent, so it lives under the config home, not the runtime data
 /// tree. Returns `None` both when the resolved file does not exist and
 /// when no roots are installed: either
-/// way there is no config file to read, and `load()` degrades to the
-/// implicit env profile instead of blocking boot.
+/// way there is no config file to read, and `load()` returns the empty
+/// configuration instead of blocking boot.
 fn resolve_config_path() -> Result<Option<PathBuf>> {
     let path = match config_dir_profile_path() {
         Ok(p) => p,
         Err(error) => {
             tracing::warn!(
                 %error,
-                "profiles config unavailable; using the implicit env profile"
+                "profiles config unavailable; booting without profiles"
             );
             return Ok(None);
         }
@@ -366,37 +297,6 @@ fn check_file_mode(path: &Path) {
             }
         }
     }
-}
-
-/// Expand `${VAR}` references against the process environment.
-///
-/// Intentionally minimal: literal `${VAR}` substitution only, applied to operator-controlled config
-/// values (`api_key`, `base_url` in `profiles.toml`) — no `$$` escaping, no default values, no
-/// nested/recursive expansion, and an unset or unterminated `${` is a hard error (config validation,
-/// not silent substitution). There is no injection surface: the inputs are operator config, never
-/// agent/LLM/user content. Pulling a full templating crate would trade this simple, fail-loud
-/// contract for incidental features.
-fn expand_vars(s: &str) -> Result<String> {
-    let mut out = String::with_capacity(s.len());
-    let mut rest = s;
-    while let Some(open) = rest.find("${") {
-        out.push_str(&rest[..open]);
-        let after = &rest[open + 2..];
-        let Some(close) = after.find('}') else {
-            bail!("unterminated ${{ in config value: {s:?}");
-        };
-        let name = &after[..close];
-        let val = std::env::var(name)
-            .with_context(|| format!("config references unset env var ${{{name}}}"))?;
-        out.push_str(&val);
-        rest = &after[close + 1..];
-    }
-    out.push_str(rest);
-    Ok(out)
-}
-
-fn env_str(name: &str) -> Result<String> {
-    std::env::var(name).with_context(|| format!("{name} must be set"))
 }
 
 /// Validate the parsed file: non-empty `api_key`; set names matching
@@ -631,66 +531,21 @@ api_key = "fake"
         assert!(!s.contains("effort"));
     }
 
-    fn ds_env() -> [(&'static str, Option<&'static str>); 4] {
-        [
-            ("KALLIPAI_LLM_PROVIDER", Some("deepseek")),
-            ("KALLIPAI_LLM_MODEL", Some("deepseek-test")),
-            ("KALLIPAI_LLM_DEEPSEEK_API_KEY", Some("fake")),
-            ("KALLIPAI_CONTEXT_WINDOW_TOKENS", Some("200000")),
-        ]
-    }
-
     #[test]
-    fn from_env_yields_single_named_default_set() {
-        temp_env::with_vars(ds_env(), || {
-            let cfg = from_env().unwrap();
-            // The env path yields one implicit set named "default", marked default.
-            let p = &cfg.sets["default"].profiles[0];
-            assert_eq!(p.model, "deepseek-test");
-            assert_eq!(p.max_context_window, 200_000); // implicit env profile derives the window from the env var
-            assert_eq!(cfg.default, "default");
-            assert!(cfg.parking.is_empty()); // env path has no draft space
-        });
-    }
-
-    #[test]
-    fn from_env_without_provider_boots_empty() {
-        temp_env::with_vars([("KALLIPAI_LLM_PROVIDER", None::<&str>)], || {
-            let cfg = from_env().unwrap();
+    #[serial]
+    fn without_a_config_file_the_load_is_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        // No profiles.toml under the installed config root: the load yields the
+        // empty configuration, so the tagma boots profile-less instead of
+        // synthesizing a profile out of the environment.
+        with_installed_roots(&tmp, || {
+            let cfg = load().unwrap();
             assert!(cfg.sets.is_empty());
             assert!(cfg.default.is_empty());
             assert!(cfg.endpoints.is_empty());
             assert!(cfg.parking.is_empty());
         });
     }
-
-    #[test]
-    fn from_env_half_configured_fails_loud() {
-        temp_env::with_vars(
-            [
-                ("KALLIPAI_LLM_PROVIDER", Some("deepseek")),
-                ("KALLIPAI_LLM_MODEL", None),
-            ],
-            || {
-                let err = from_env().unwrap_err();
-                assert!(format!("{err:#}").contains("KALLIPAI_LLM_MODEL"));
-            },
-        );
-    }
-
-    #[test]
-    fn from_env_rejects_unknown_provider() {
-        temp_env::with_vars(
-            [
-                ("KALLIPAI_LLM_PROVIDER", Some("anthropic")),
-                ("KALLIPAI_LLM_MODEL", Some("m")),
-            ],
-            || {
-                assert!(from_env().is_err());
-            },
-        );
-    }
-
     #[test]
     fn parse_valid_toml() {
         let toml = r#"
@@ -886,23 +741,6 @@ model = "m"
 max_context_window = 1000
 "#;
         assert!(toml::from_str::<ConfigFile>(toml).is_err());
-    }
-
-    #[test]
-    fn expand_vars_substitutes_env() {
-        temp_env::with_vars([("MY_SECRET", Some("shhh"))], || {
-            assert_eq!(
-                expand_vars("prefix-${MY_SECRET}-suffix").unwrap(),
-                "prefix-shhh-suffix"
-            );
-        });
-    }
-
-    #[test]
-    fn expand_vars_errors_on_unset() {
-        temp_env::with_vars_unset(["DEFINITELY_UNSET_VAR_X9Q"], || {
-            assert!(expand_vars("${DEFINITELY_UNSET_VAR_X9Q}").is_err());
-        });
     }
 
     #[test]
@@ -1290,7 +1128,7 @@ api_key = "fake"
         crate::persistence::set_instance_roots_for_tests(None);
         // The old HOME-level config silently shared one file across instances;
         // a run without installed roots gets no config file: the read side
-        // degrades to the env profile (a warning, not a boot gate), while the
+        // degrades to an empty configuration (a warning, not a boot gate), while the
         // write side fails loud — nowhere to land.
         assert!(resolve_config_path().unwrap().is_none());
         assert!(config_path().is_err());

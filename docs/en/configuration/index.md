@@ -5,9 +5,10 @@ order: 10
 ---
 
 Runtime configuration is environment-first: every component reads its settings from
-`KALLIPAI_*` variables at startup. The LLM backend can also be tuned through a
-profiles config file (see [Model configuration methods](tagma/methods.md)), and
-NixOS deployments configure services through [module options](../deployment/nixos/index.md).
+`KALLIPAI_*` variables at startup. The LLM backend is configured through the
+instance's `profiles.toml`, and NixOS deployments configure services through
+[module options](../deployment/nixos/index.md); the file's shape is in
+[Model configuration methods](tagma/methods.md).
 
 Copy `.env.example` to
 `.env` and fill in the required values. If you use `direnv`, it loads `.env`

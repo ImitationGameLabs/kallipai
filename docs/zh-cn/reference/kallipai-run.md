@@ -86,4 +86,4 @@ kallipai-run --verbose --prompt "Refactor the config loader"
 
 经 `--agent` 的后续运行保留 agent 的完整上下文。只对仍注册着该 agent 的 tagma 有效：同一实例，或启动时从磁盘恢复它的实例。`--agent` 不校验 id 格式；未知 id 表现为 tagma 错误。
 
-完整的环境变量参考（含 LLM provider 配置）见 [模型配置](../configuration/tagma/llm.md)。
+模型配置写在实例自己的 `profiles.toml` 里，见[模型配置](../configuration/tagma/llm.md)。

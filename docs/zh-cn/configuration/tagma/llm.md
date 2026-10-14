@@ -6,7 +6,7 @@ order: 20
 
 [配置参考](../index.md)的一部分；本页讲模型配置的三层抽象。
 
-provider 选择变量：[Tagma](../../reference/environment-variables/tagma.md)。
+设置写在实例的 `profiles.toml` 里；写法见[模型配置方法](methods.md)。
 
 ## 三层模型
 

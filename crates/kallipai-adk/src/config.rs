@@ -159,8 +159,8 @@ impl AgentConfig {
                     .map(PathBuf::from)
             })
             .unwrap_or(std::env::current_dir().context("failed to determine current directory")?);
-        let context_window_tokens = parse_env::<usize>("KALLIPAI_CONTEXT_WINDOW_TOKENS")?
-            .unwrap_or(DEFAULT_CONTEXT_WINDOW_TOKENS);
+        // Shape-check anchor: the active profile's declared window is installed at spawn
+        let context_window_tokens = DEFAULT_CONTEXT_WINDOW_TOKENS;
         let output_reserve_tokens = parse_env::<usize>("KALLIPAI_OUTPUT_RESERVE_TOKENS")?
             .unwrap_or(DEFAULT_OUTPUT_RESERVE_TOKENS);
         let summary_max_tokens =
@@ -379,12 +379,11 @@ impl AgentConfig {
     }
 
     /// Install `tokens` as the active context window after validating the window-dependent budget
-    /// invariants. The single installer: every window — including the implicit env profile's
-    /// (`profile::from_env` reads `KALLIPAI_CONTEXT_WINDOW_TOKENS` into `max_context_window`) —
-    /// flows through here at spawn, and within-set failover re-applies the advanced profile's
-    /// window via `acquisition::failover::reapply_window`. `context_window_tokens` is thus a derived snapshot of
-    /// the active profile's declared window, not an independent config knob.
-    ///
+    /// invariants. The single installer: every window — the config-file profile's and the
+    /// sentinel set's alike — flows through here at spawn, and within-set failover re-applies
+    /// the advanced profile's window via `acquisition::failover::reapply_window`.
+    /// `context_window_tokens` is thus a derived snapshot of the active profile's
+    /// declared window, not an independent config knob.
     /// Validates **before** mutating: on an invariant violation the field is left untouched and
     /// `Err` is returned, so a caller that treats the failure as "keep the prior window" gets
     /// exactly that. Failover pre-checks with `try_context_window` instead and *skips* an

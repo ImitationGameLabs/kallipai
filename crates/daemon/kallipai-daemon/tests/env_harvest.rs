@@ -156,9 +156,9 @@ fn harvest_bash_exists() -> bool {
 fn boot_env(extra: &[&str]) -> Vec<String> {
     let mut env = vec![
         "KALLIPAI_OPERATOR_TOKEN=test-op-token".to_owned(),
-        "KALLIPAI_LLM_PROVIDER=deepseek".to_owned(),
-        "KALLIPAI_LLM_MODEL=test-model".to_owned(),
-        "KALLIPAI_LLM_DEEPSEEK_API_KEY=test-key".to_owned(),
+        "KALLIPAI_TEST_LLM_PROVIDER=deepseek".to_owned(),
+        "KALLIPAI_TEST_LLM_MODEL=test-model".to_owned(),
+        "KALLIPAI_TEST_LLM_API_KEY=test-key".to_owned(),
     ];
     env.extend(extra.iter().map(|s| (*s).to_owned()));
     env
