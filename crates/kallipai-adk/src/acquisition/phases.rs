@@ -29,7 +29,7 @@ use anyhow::Error;
 use just_llm_client::types::generation::{
     GenerationRequest, Message, ToolChoice, ToolChoiceMode, ToolDefinition,
 };
-use kallipai_common::retry::RetryRecord;
+use kallipai_common::retry::{RetryAttempt, RetryRecord};
 use kallipai_common::timefmt;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info};
@@ -507,17 +507,18 @@ async fn on_mid_stream_failure(
                 && let Some(kind) = decision::retry_kind(&class)
             {
                 ctx.store.lock().await.record_retries(
-                    [RetryRecord {
-                        timestamp: now,
-                        round,
-                        attempt,
-                        max_attempts: policy.max_retries,
-                        error: crate::llm_error::render_error(&promoted),
-                        delay_secs: 0.0,
-                        endpoint: Some(endpoint_id.clone()),
+                    [RetryRecord::observed(
+                        RetryAttempt {
+                            round,
+                            attempt,
+                            max_attempts: policy.max_retries,
+                        },
+                        now,
+                        Some(endpoint_id.clone()),
                         kind,
-                        quota_reset: block.as_ref().and_then(|block| block.until),
-                    }],
+                        crate::llm_error::render_error(&promoted),
+                        block.as_ref().and_then(|block| block.until),
+                    )],
                     retry_keep_since(ctx),
                 );
                 ctx.persist().await;
@@ -614,17 +615,18 @@ async fn on_mid_stream_failure(
                 policy.max_retries,
                 delay_secs,
             );
-            let record = RetryRecord {
-                timestamp: timefmt::now_epoch(),
-                round,
-                attempt,
-                max_attempts: policy.max_retries,
-                error: error_msg,
-                delay_secs,
-                endpoint: Some(endpoint_id.clone()),
+            let record = RetryRecord::retry(
+                RetryAttempt {
+                    round,
+                    attempt,
+                    max_attempts: policy.max_retries,
+                },
+                timefmt::now_epoch(),
+                Some(endpoint_id.clone()),
                 kind,
-                quota_reset: None,
-            };
+                error_msg,
+                delay_secs,
+            );
             tokio::select! {
                 _ = tokio::time::sleep(after) => {
                     ctx.store.lock().await.record_retries([record], retry_keep_since(ctx));

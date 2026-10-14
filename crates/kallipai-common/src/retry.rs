@@ -87,3 +87,66 @@ pub struct RetryRecord {
     #[serde(default)]
     pub quota_reset: Option<u64>,
 }
+
+/// The send attempt a retry record is charged to: the three values every record
+/// carries, named once so a call site cannot swap them.
+#[derive(Debug, Clone, Copy)]
+pub struct RetryAttempt {
+    /// Which tool round the observation belongs to.
+    pub round: usize,
+    /// Send attempt this observation was charged to (1-based).
+    pub attempt: u32,
+    /// Maximum retry attempts configured.
+    pub max_attempts: u32,
+}
+
+impl RetryRecord {
+    /// A retry that ran: `delay_secs` is the wait its sender took, and no
+    /// rate-limit window is claimed — a rejection carrying a reset hint
+    /// advances the chain instead of retrying, so it is an [`Self::observed`]
+    /// record.
+    pub fn retry(
+        at: RetryAttempt,
+        now: u64,
+        endpoint: Option<String>,
+        kind: RetryKind,
+        error: String,
+        delay_secs: f64,
+    ) -> Self {
+        Self {
+            timestamp: now,
+            round: at.round,
+            attempt: at.attempt,
+            max_attempts: at.max_attempts,
+            error,
+            delay_secs,
+            endpoint,
+            kind,
+            quota_reset: None,
+        }
+    }
+
+    /// A failure observed without a wait: the class advanced the chain rather
+    /// than retrying, so `delay_secs` is zero and `quota_reset` carries the
+    /// upstream's own reset hint when the response gave one.
+    pub fn observed(
+        at: RetryAttempt,
+        now: u64,
+        endpoint: Option<String>,
+        kind: RetryKind,
+        error: String,
+        quota_reset: Option<u64>,
+    ) -> Self {
+        Self {
+            timestamp: now,
+            round: at.round,
+            attempt: at.attempt,
+            max_attempts: at.max_attempts,
+            error,
+            delay_secs: 0.0,
+            endpoint,
+            kind,
+            quota_reset,
+        }
+    }
+}

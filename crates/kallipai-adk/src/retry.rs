@@ -22,7 +22,7 @@ use tracing::{debug, error, warn};
 
 use crate::event::AgentEvent;
 use kallipai_common::facts::{BlockKind, EndpointHealth};
-use kallipai_common::retry::RetryRecord;
+use kallipai_common::retry::{RetryAttempt, RetryRecord};
 use kallipai_common::timefmt;
 
 pub(crate) mod decision;
@@ -322,17 +322,18 @@ pub async fn stream_with_retry(
                 // Capture the trigger timestamp + build the record before the sleep, but push it only
                 // once the retry actually happens: a cancel-truncated backoff must not persist
                 // a "scheduled but unexecuted" retry.
-                let record = RetryRecord {
-                    timestamp: timefmt::now_epoch(),
-                    round,
-                    attempt,
-                    max_attempts: policy.max_retries,
-                    error: error_msg,
-                    delay_secs,
-                    endpoint: Some(endpoint_id.to_string()),
+                let record = RetryRecord::retry(
+                    RetryAttempt {
+                        round,
+                        attempt,
+                        max_attempts: policy.max_retries,
+                    },
+                    timefmt::now_epoch(),
+                    Some(endpoint_id.to_string()),
                     kind,
-                    quota_reset: None,
-                };
+                    error_msg,
+                    delay_secs,
+                );
 
                 tokio::select! {
                     _ = tokio::time::sleep(after) => {
@@ -361,20 +362,21 @@ pub async fn stream_with_retry(
                     .as_ref()
                     .is_some_and(|block| block.kind.is_account_level());
                 if account_level && let Some(kind) = decision::retry_kind(&class) {
-                    retry_log.push(RetryRecord {
-                        timestamp: now,
-                        round,
-                        attempt,
-                        max_attempts: policy.max_retries,
-                        error: crate::llm_error::render_error(&error),
-                        delay_secs: 0.0,
-                        endpoint: Some(endpoint_id.to_string()),
+                    retry_log.push(RetryRecord::observed(
+                        RetryAttempt {
+                            round,
+                            attempt,
+                            max_attempts: policy.max_retries,
+                        },
+                        now,
+                        Some(endpoint_id.to_string()),
                         kind,
+                        crate::llm_error::render_error(&error),
                         // The upstream's own moment, as it gave it: this record is
                         // the offline aggregation face (`reset − first rejection`),
                         // so the display trust rule does not apply here.
-                        quota_reset: fact.as_ref().and_then(|block| block.until),
-                    });
+                        fact.as_ref().and_then(|block| block.until),
+                    ));
                 }
                 record_endpoint_fact(health, endpoint_id, class, &error, now);
                 return Err(RequestFailure::Switch {

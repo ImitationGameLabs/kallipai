@@ -11,7 +11,7 @@ use std::time::Duration;
 use anyhow::Result;
 use just_llm_client::BackendError;
 use just_llm_client::types::generation::{ContentPart, Message};
-use kallipai_common::retry::{RetryKind, RetryRecord};
+use kallipai_common::retry::{RetryAttempt, RetryRecord};
 use kallipai_common::timefmt;
 use tracing::{info, warn};
 
@@ -473,6 +473,8 @@ fn latch_deadline(now: u64, wait: Duration) -> u64 {
 /// from the shared table ([`decision::classify`], connect phase) and the verdict
 /// from the shared verdict function ([`decision::decide`]) over this ledger's
 /// facts — the pair the retry shell consults.
+/// The records it writes carry the retry shell's own shape ([`RetryRecord::retry`]
+/// and [`RetryRecord::observed`]), so an operator reads one log.
 pub(crate) async fn note_compaction_failure(
     ctx: &mut AgentContext,
     error: &anyhow::Error,
@@ -508,7 +510,18 @@ pub(crate) async fn note_compaction_failure(
                 )
                 .await;
             };
-            let record = retry_record(ctx, round, now, kind, after.as_secs_f64(), error);
+            let record = RetryRecord::retry(
+                RetryAttempt {
+                    round,
+                    attempt: ctx.compaction.attempts(),
+                    max_attempts: ctx.config.retry_policy.max_retries,
+                },
+                now,
+                Some(ctx.failover.current_profile().endpoint.clone()),
+                kind,
+                format!("{error:#}"),
+                after.as_secs_f64(),
+            );
             ctx.store
                 .lock()
                 .await
@@ -536,7 +549,18 @@ pub(crate) async fn note_compaction_failure(
             // The main path records the class whether the chain then advances or
             // runs out; only the classes that reach an advance carry a kind.
             if let Some(kind) = decision::retry_kind(&class) {
-                let record = retry_record(ctx, round, now, kind, 0.0, error);
+                let record = RetryRecord::observed(
+                    RetryAttempt {
+                        round,
+                        attempt: ctx.compaction.attempts(),
+                        max_attempts: ctx.config.retry_policy.max_retries,
+                    },
+                    now,
+                    Some(ctx.failover.current_profile().endpoint.clone()),
+                    kind,
+                    format!("{error:#}"),
+                    None,
+                );
                 ctx.store
                     .lock()
                     .await
@@ -565,29 +589,6 @@ pub(crate) async fn note_compaction_failure(
             )
             .await
         }
-    }
-}
-
-/// The record a compaction failure leaves in the retry log: the shape the retry
-/// shell writes, so an operator reads one log.
-fn retry_record(
-    ctx: &AgentContext,
-    round: usize,
-    now: u64,
-    kind: RetryKind,
-    delay_secs: f64,
-    error: &anyhow::Error,
-) -> RetryRecord {
-    RetryRecord {
-        timestamp: now,
-        round,
-        attempt: ctx.compaction.attempts(),
-        max_attempts: ctx.config.retry_policy.max_retries,
-        error: format!("{error:#}"),
-        delay_secs,
-        endpoint: Some(ctx.failover.current_profile().endpoint.clone()),
-        kind,
-        quota_reset: None,
     }
 }
 
