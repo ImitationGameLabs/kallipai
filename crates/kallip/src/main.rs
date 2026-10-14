@@ -134,9 +134,10 @@ async fn main() -> Result<()> {
                 let status = client.agent_status(&id).await?;
                 let now = now_epoch();
                 let zone = crate::task::display_zone(args.utc, &client).await;
-                // Four blank-line groups: a timezone-anchored clock first (readers
+                // Blank-line groups: a timezone-anchored clock first (readers
                 // calibrate against it instead of doing date arithmetic), then
-                // state, context, retries.
+                // state, context and budget, retries, upstream facts, the
+                // profile set, and the host-side background tasks.
                 println!("current datetime: {}", timefmt::format_display(now, &zone));
                 println!();
                 println!("state: {}", status.state);
