@@ -228,6 +228,12 @@ impl Attempt {
         }
     }
 
+    /// The table's reading this attempt was built with: the pre-send
+    /// verdict's own input, carried here rather than passed alongside.
+    pub(crate) fn reading(&self) -> &TableReading {
+        &self.reading
+    }
+
     /// An attempt that failed: the class the table gave it, its shape key when
     /// it has one, and the values the shell injected.
     ///

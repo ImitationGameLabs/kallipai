@@ -22,9 +22,7 @@ use super::{flush_retry_records, retry_keep_since};
 use crate::agent_task::AgentContext;
 use crate::context::{compose_context, message_has_images, strip_message_images};
 use crate::event::{AgentEvent, AgentOutcome};
-use crate::retry::decision::{
-    self, Attempt, AttemptOrigin, Decision, Phase, StopKind, TableReading,
-};
+use crate::retry::decision::{self, Attempt, AttemptOrigin, Decision, Phase, StopKind};
 use anyhow::Error;
 use just_llm_client::types::generation::{
     GenerationRequest, Message, ToolChoice, ToolChoiceMode, ToolDefinition,
@@ -61,17 +59,7 @@ pub(crate) async fn acquire_stream(
         let origin = ctx.take_attempt_origin();
         let reading = table_reading(ctx, now);
         let pre_send = Attempt::pre_send(Phase::Connect, origin, now, reading.clone());
-        match enter_attempt(
-            ctx,
-            &mut messages,
-            tx,
-            round_cancel,
-            round,
-            pre_send,
-            reading.clone(),
-        )
-        .await
-        {
+        match enter_attempt(ctx, &mut messages, tx, round_cancel, round, pre_send).await {
             // The attempt proceeds to the send.
             PreSend::Send => {}
             PreSend::Advanced => continue,
@@ -270,9 +258,9 @@ async fn enter_attempt(
     round_cancel: &CancellationToken,
     round: usize,
     pre_send: Attempt,
-    reading: TableReading,
 ) -> PreSend {
     let endpoint_id = ctx.failover.current_profile().endpoint.clone();
+    let reading = pre_send.reading();
     let verdict = decision::decide(&ctx.episode.facts(&pre_send), &ctx.config.retry_policy);
     match verdict {
         Decision::Proceed => {}
@@ -280,8 +268,8 @@ async fn enter_attempt(
         // fact's own reason, and running out of candidates stops the round
         // (no re-run: another attempt would meet the same fact).
         Decision::AdvanceFailover { reason } => {
-            log_fact_skip(ctx, &endpoint_id, &reading, reason);
-            let fact = fact_error(&reading);
+            log_fact_skip(ctx, &endpoint_id, reading, reason);
+            let fact = fact_error(reading);
             let rendered = crate::llm_error::render_error(fact.as_ref());
             // An account-level fact means the walk is the quota exit, so
             // running out parks with the structured reason; an endpoint-level
@@ -323,7 +311,7 @@ async fn enter_attempt(
             kind: StopKind::ExternalOnly,
             reason,
         } => {
-            log_fact_skip(ctx, &endpoint_id, &reading, reason);
+            log_fact_skip(ctx, &endpoint_id, reading, reason);
             if let Some(fact) = reading.blocked.as_ref()
                 && fact.block.kind.is_account_level()
             {
@@ -335,7 +323,7 @@ async fn enter_attempt(
             // fact says the same thing a rejection would.
             emit_fact_signal(ctx, reading.blocked.as_ref());
             return PreSend::Done(AcquireResult::Stop {
-                message: fact_stop_message(reason, ctx, &reading, fact_chain_note(ctx)),
+                message: fact_stop_message(reason, ctx, reading, fact_chain_note(ctx)),
             });
         }
         // The episode's own budget or deadline ran out. The wording of the
