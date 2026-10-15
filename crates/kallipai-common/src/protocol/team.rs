@@ -119,9 +119,9 @@ pub struct TeamConvergeRequest {
     /// mapping without touching the registry or the disk.
     #[serde(default)]
     pub dry_run: bool,
-    /// Escalation: preflight passes busy deactivation targets, and
-    /// each one is interrupted before teardown. The escape is recorded
-    /// in the affected result rows.
+    /// Escalation: preflight passes busy deactivation targets — those
+    /// neither idle nor parked, waiting and retrying among them. Each
+    /// one is torn down anyway; the escape is recorded in the affected rows.
     #[serde(default)]
     pub force: bool,
 }

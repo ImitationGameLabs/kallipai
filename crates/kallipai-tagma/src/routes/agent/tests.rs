@@ -1176,12 +1176,76 @@ fn relocate_spawn_stub(
         let crate::state::AgentEntry {
             identity, agent, ..
         } = fresh.0;
-        let _keep_rx_open = fresh.1;
         Box::pin(async move {
             if fail {
                 anyhow::bail!("stub spawn failure");
             }
             Ok((agent, identity))
+        })
+    })
+}
+
+/// A spawn stub that plays the racer's hand inside the boot window: it
+/// registers a live squatter holding the body's role (past the restore
+/// pre-check). With `occupy_inactive` it also fills the inactive slot, so
+/// the undo cannot re-park the body it just booted; without it the same
+/// race leaves the re-park free to succeed.
+fn racing_spawn_stub(
+    state_slot: std::sync::Arc<std::sync::OnceLock<crate::state::SharedState>>,
+    id_slot: std::sync::Arc<std::sync::OnceLock<AgentId>>,
+    role: &str,
+    occupy_inactive: bool,
+) -> crate::lifecycle::SpawnFn {
+    let role = role.to_string();
+    std::sync::Arc::new(move |_args: crate::lifecycle::SpawnArgs| {
+        let state = state_slot
+            .get()
+            .expect("the test hands the state over before relocating")
+            .clone();
+        let id = id_slot
+            .get()
+            .expect("the test hands the id over before relocating")
+            .clone();
+        let role = role.clone();
+        let fresh = crate::test_helpers::make_entry_with_rx(None, "stub-token".to_string());
+        let crate::state::AgentEntry {
+            identity, agent, ..
+        } = fresh.0;
+        Box::pin(async move {
+            let mut racer = crate::test_helpers::make_entry(None, "racer-token".to_string());
+            racer.identity.config.role = role;
+            let squatter = AgentId::random();
+            state
+                .registry
+                .write()
+                .await
+                .register(squatter, RegistryEntry::Live(racer));
+            let inactive = kallipai_adk::persistence::inactive_dir(&id).unwrap();
+            std::fs::create_dir_all(inactive.parent().unwrap()).unwrap();
+            if occupy_inactive {
+                std::fs::write(&inactive, "occupied").unwrap();
+            }
+            Ok((agent, identity))
+        })
+    })
+}
+
+/// A spawn stub that fails the boot while the inactive slot is taken: the
+/// undo's re-park cannot run, so the leftover live body has to be reported.
+/// Deterministic: a fixed failure, no timing and no runtime involved.
+fn failing_spawn_with_taken_inactive(
+    id_slot: std::sync::Arc<std::sync::OnceLock<AgentId>>,
+) -> crate::lifecycle::SpawnFn {
+    std::sync::Arc::new(move |_args: crate::lifecycle::SpawnArgs| {
+        let id = id_slot
+            .get()
+            .expect("the test hands the id over before relocating")
+            .clone();
+        Box::pin(async move {
+            let inactive = kallipai_adk::persistence::inactive_dir(&id).unwrap();
+            std::fs::create_dir_all(inactive.parent().unwrap()).unwrap();
+            std::fs::write(&inactive, "occupied").unwrap();
+            anyhow::bail!("stub spawn failure");
         })
     })
 }
@@ -1565,6 +1629,125 @@ async fn relocate_re_parks_the_body_when_the_boot_fails() {
     let inactive = kallipai_adk::persistence::inactive_dir(&fx.id).unwrap();
     let meta = kallipai_adk::persistence::read_meta_from_dir(&inactive).unwrap();
     assert_eq!(meta.workspace_root, fx.new_ws);
+}
+
+/// The raced variant of the role grab: the squatter registers while the body
+/// is booting, past the pre-check, and the undo cannot re-park it because the
+/// inactive slot is occupied — the leftover live body has to be reported, not
+/// papered over.
+#[tokio::test]
+async fn relocate_reports_the_leftover_live_body_when_the_raced_re_park_fails() {
+    // The state fixture installs the instance roots the persistence paths
+    // (the fixture's own agent dirs included) resolve against.
+    let slot: std::sync::Arc<std::sync::OnceLock<crate::state::SharedState>> =
+        std::sync::Arc::new(std::sync::OnceLock::new());
+    let id_slot: std::sync::Arc<std::sync::OnceLock<AgentId>> =
+        std::sync::Arc::new(std::sync::OnceLock::new());
+    let state = crate::test_helpers::make_state_with_spawn(racing_spawn_stub(
+        slot.clone(),
+        id_slot.clone(),
+        "dev",
+        true,
+    ));
+    assert!(slot.set(state.clone()).is_ok(), "the slot is filled once");
+    let fx = relocate_fixture("dev", true);
+    assert!(
+        id_slot.set(fx.id.clone()).is_ok(),
+        "the id slot is filled once"
+    );
+
+    let err = call_relocate(state.clone(), &fx.id, Identity::Operator, &fx.new_ws, false)
+        .await
+        .expect_err("the raced role grab must fail the restore");
+    let detail = err.to_string();
+    assert!(
+        detail.contains("registry changed during the restore"),
+        "{detail}"
+    );
+    assert!(detail.contains("needs manual cleanup"), "{detail}");
+    // The booted body was torn down and the registry let it go, but the body
+    // itself is still in the live area: that leftover is what the error names.
+    assert!(state.registry.read().await.get(&fx.id).is_none());
+    assert!(
+        kallipai_adk::persistence::agent_dir(&fx.id)
+            .unwrap()
+            .is_dir(),
+        "the body must still be in the live area"
+    );
+}
+
+/// The same race with the inactive slot left free: the undo re-parks the
+/// booted body, so the report names the re-park and nothing is left behind.
+#[tokio::test]
+async fn relocate_re_parks_the_body_when_the_raced_restore_is_undone() {
+    let slot: std::sync::Arc<std::sync::OnceLock<crate::state::SharedState>> =
+        std::sync::Arc::new(std::sync::OnceLock::new());
+    let id_slot: std::sync::Arc<std::sync::OnceLock<AgentId>> =
+        std::sync::Arc::new(std::sync::OnceLock::new());
+    let state = crate::test_helpers::make_state_with_spawn(racing_spawn_stub(
+        slot.clone(),
+        id_slot.clone(),
+        "dev",
+        false,
+    ));
+    assert!(slot.set(state.clone()).is_ok(), "the slot is filled once");
+    let fx = relocate_fixture("dev", true);
+    assert!(
+        id_slot.set(fx.id.clone()).is_ok(),
+        "the id slot is filled once"
+    );
+
+    let err = call_relocate(state.clone(), &fx.id, Identity::Operator, &fx.new_ws, false)
+        .await
+        .expect_err("the raced role grab must fail the restore");
+    let detail = err.to_string();
+    assert!(
+        detail.contains("registry changed during the restore"),
+        "{detail}"
+    );
+    assert!(detail.contains("the body was re-parked"), "{detail}");
+    assert!(!detail.contains("needs manual cleanup"), "{detail}");
+    // The undo left nothing behind: the body is back in the inactive area
+    // and the registry let it go.
+    assert!(state.registry.read().await.get(&fx.id).is_none());
+    assert!(
+        kallipai_adk::persistence::inactive_dir(&fx.id)
+            .unwrap()
+            .is_dir(),
+        "the body must be re-parked in the inactive area"
+    );
+}
+
+/// A boot that fails while the inactive slot is taken: the undo cannot
+/// re-park the body it moved to the live area, and the returned detail
+/// has to name the leftover instead of papering it over.
+#[tokio::test]
+async fn relocate_reports_the_leftover_live_body_when_the_failed_boot_cannot_re_park() {
+    let id_slot: std::sync::Arc<std::sync::OnceLock<AgentId>> =
+        std::sync::Arc::new(std::sync::OnceLock::new());
+    let state = crate::test_helpers::make_state_with_spawn(failing_spawn_with_taken_inactive(
+        id_slot.clone(),
+    ));
+    let fx = relocate_fixture("dev", true);
+    assert!(
+        id_slot.set(fx.id.clone()).is_ok(),
+        "the id slot is filled once"
+    );
+
+    let err = call_relocate(state.clone(), &fx.id, Identity::Operator, &fx.new_ws, false)
+        .await
+        .expect_err("a failed boot must fail the relocate");
+    let detail = err.to_string();
+    assert!(detail.contains("restore failed"), "{detail}");
+    assert!(detail.contains("the re-park failed"), "{detail}");
+    assert!(detail.contains("needs manual cleanup"), "{detail}");
+    assert!(
+        kallipai_adk::persistence::agent_dir(&fx.id)
+            .unwrap()
+            .is_dir(),
+        "the body must still be in the live area"
+    );
+    assert!(state.registry.read().await.get(&fx.id).is_none());
 }
 
 #[tokio::test]

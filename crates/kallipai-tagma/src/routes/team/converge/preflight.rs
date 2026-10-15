@@ -84,7 +84,7 @@ pub(crate) fn preflight_converge(
                 rejections.push(TeamRejection {
                     kind: TeamRejectionKind::Busy,
                     message: format!(
-                    "role {:?} agent {} is busy — wait for it to go idle (re-run), or pass force to interrupt it (recorded as an escape)",
+                    "role {:?} agent {} is busy — wait for it to go idle (re-run), or pass force to tear it down anyway (recorded as an escape)",
                     a.role, body.id
                 ),
             });

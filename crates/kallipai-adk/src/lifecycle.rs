@@ -68,6 +68,9 @@ impl LifecycleState {
     ///
     /// Birth (→`Idle`) is construction, not a transition; cancel/remove
     /// terminates the task without calling this.
+    /// Production callers reach this through `AgentContext::settle`, which
+    /// records the move; keep it that way so the log channel and this table
+    /// cannot drift apart.
     pub fn transition(&mut self, next: LifecycleState) {
         let legal = match self {
             Self::Idle => matches!(next, Self::Running),
@@ -83,6 +86,8 @@ impl LifecycleState {
                 matches!(next, Self::Running | Self::Retrying { .. } | Self::Idle)
             }
         };
+        // The table above is a debug-only track: release builds write the new
+        // state without checking it.
         debug_assert!(legal, "illegal lifecycle transition: {self:?} -> {next:?}");
         *self = next;
     }
@@ -154,42 +159,49 @@ mod tests {
     }
 
     #[test]
+    #[cfg(debug_assertions)]
     #[should_panic(expected = "illegal lifecycle transition")]
     fn rejects_parked_entry_from_non_running_states() {
         waiting().transition(parked());
     }
 
     #[test]
+    #[cfg(debug_assertions)]
     #[should_panic(expected = "illegal lifecycle transition")]
     fn rejects_waiting_entry_from_non_running_states() {
         LifecycleState::Idle.transition(waiting());
     }
 
     #[test]
+    #[cfg(debug_assertions)]
     #[should_panic(expected = "illegal lifecycle transition")]
     fn rejects_retrying_entry_from_non_running_states() {
         waiting().transition(retrying());
     }
 
     #[test]
+    #[cfg(debug_assertions)]
     #[should_panic(expected = "illegal lifecycle transition")]
     fn rejects_parked_escape_to_waiting() {
         parked().transition(waiting());
     }
 
     #[test]
+    #[cfg(debug_assertions)]
     #[should_panic(expected = "illegal lifecycle transition")]
     fn rejects_waiting_to_retrying_direct_transition() {
         waiting().transition(retrying());
     }
 
     #[test]
+    #[cfg(debug_assertions)]
     #[should_panic(expected = "illegal lifecycle transition")]
     fn rejects_retrying_to_waiting_direct_transition() {
         retrying().transition(waiting());
     }
 
     #[test]
+    #[cfg(debug_assertions)]
     #[should_panic(expected = "illegal lifecycle transition")]
     fn rejects_running_self_transition() {
         LifecycleState::Running.transition(LifecycleState::Running);

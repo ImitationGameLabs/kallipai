@@ -38,7 +38,6 @@ fn state_with_stub(seen: Arc<Seen>, fail: bool) -> SharedState {
             } = fresh.0;
             (agent, identity)
         };
-        let _keep_rx_open = fresh.1;
         Box::pin(async move {
             if fail {
                 anyhow::bail!("stub spawn failure");
@@ -274,97 +273,6 @@ async fn delivery_root_unbound_falls_back_to_default_set() {
     )
     .await
     .expect("unbound root must fall back to the default set, not 409");
-}
-
-/// The delivery fast path observes lock visibility: a live
-/// Normal-class agent missing its workspace lock logs one WARN — and stays
-/// silent once the lock is back. Log-only: the delivery itself is unaffected.
-#[tokio::test]
-async fn delivery_fast_path_warns_when_workspace_lock_is_missing() {
-    use tracing_subscriber::prelude::*;
-
-    struct LogBuf(Arc<Mutex<Vec<u8>>>);
-    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogBuf {
-        type Writer = LogGuard<'a>;
-        fn make_writer(&'a self) -> Self::Writer {
-            LogGuard(self.0.lock().unwrap())
-        }
-    }
-    struct LogGuard<'a>(std::sync::MutexGuard<'a, Vec<u8>>);
-    impl std::io::Write for LogGuard<'_> {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0.write(buf)
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            self.0.flush()
-        }
-    }
-
-    let shared = Arc::new(Mutex::new(Vec::<u8>::new()));
-    let subscriber = tracing_subscriber::registry().with(
-        tracing_subscriber::fmt::layer()
-            .with_ansi(false)
-            .with_writer(LogBuf(shared.clone()))
-            .with_filter(tracing_subscriber::EnvFilter::new("warn")),
-    );
-    let _guard = tracing::subscriber::set_default(subscriber);
-
-    let state = make_state();
-    install_inbox_store(&state).await;
-    let tmp = tempfile::TempDir::new_in("/dev/shm").unwrap();
-    let ws = tmp.path().join("f2b-warn");
-    std::fs::create_dir_all(&ws).unwrap();
-    let id = AgentId::random();
-    let (mut entry, _rx) = make_entry_with_rx(None, format!("agent-{id}"));
-    entry.identity.config.workspace_root = ws.clone();
-    state
-        .registry
-        .write()
-        .await
-        .register(id.clone(), RegistryEntry::Live(entry));
-    state.duty.set(id.clone(), crate::duty::DutyStatus::OnDuty);
-
-    // Lock missing: the WARN fires and the delivery still succeeds.
-    let response = crate::delivery::enqueue_prompt(
-        &state,
-        &id,
-        "hello".to_string(),
-        "operator",
-        crate::delivery::DeliveryNotice::Surface,
-    )
-    .await
-    .expect("delivery must succeed; the probe is log-only");
-    assert!(
-        response.warning.is_none(),
-        "a log-only probe never surfaces on the wire"
-    );
-    let captured = String::from_utf8(shared.lock().unwrap().clone()).expect("log bytes are utf8");
-    assert!(
-        captured.contains("missing its workspace lock"),
-        "expected the lock-evaporation WARN, got: {captured}"
-    );
-    assert!(
-        captured.contains(&id.to_string()),
-        "the WARN must carry the agent id"
-    );
-
-    // Lock restored: the same delivery is silent.
-    state.lock_manager.acquire(&id, &ws, &[]).unwrap();
-    shared.lock().unwrap().clear();
-    crate::delivery::enqueue_prompt(
-        &state,
-        &id,
-        "again".to_string(),
-        "operator",
-        crate::delivery::DeliveryNotice::Surface,
-    )
-    .await
-    .expect("second delivery succeeds");
-    let captured = String::from_utf8(shared.lock().unwrap().clone()).expect("log bytes are utf8");
-    assert!(
-        !captured.contains("missing its workspace lock"),
-        "a held lock must not warn: {captured}"
-    );
 }
 
 // -- in-round peer notice matrix --

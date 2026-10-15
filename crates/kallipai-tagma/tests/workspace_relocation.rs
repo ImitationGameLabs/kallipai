@@ -4,11 +4,14 @@
 //! the suite convention (see tests/roots_isolation.rs) they live in their
 //! own integration-test target: the singleton mutation cannot race the
 //! unit-test process.
+//! The park-interrupt arms (`interrupt_*`) live here for the same
+//! reason: they re-point the singleton too.
 
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use kallipai_adk::persistence::{AgentMeta, inactive_dir};
 use kallipai_common::agentid::AgentId;
+use kallipai_common::protocol::AgentState;
 use kallipai_tagma::routes::router;
 use kallipai_tagma::state::SharedState;
 use kallipai_tagma::test_helpers::make_state;
@@ -449,4 +452,161 @@ async fn relocation_500s_when_the_active_ancestor_meta_is_corrupt() {
     // The surface name goes to the tracing log, not the wire: the API
     // masks 500 bodies as the generic "internal error".
     assert_eq!(body["error"]["message"].as_str(), Some("internal error"));
+}
+
+/// Seed a live-area body for `id`: the deactivate core's input needs a live
+/// directory as well as a registry entry.
+fn seed_live_body(id: &AgentId, ws: &std::path::Path, created_by: Option<&AgentId>) {
+    kallipai_adk::persistence::create_agent_dir(
+        id,
+        AgentMeta {
+            workspace_root: ws.to_path_buf(),
+            created_by: created_by.cloned(),
+            role: String::new(),
+            description: String::new(),
+            profile_set: None,
+            permissions_class: kallipai_adk::config::PermissionClass::Normal,
+            delegation_mode: kallipai_adk::config::DelegationMode::CarveOut,
+        },
+    )
+    .unwrap();
+}
+
+/// Register a live entry for `id`: `bearer` is its auth token, `state_byte`
+/// the stored lifecycle byte, and `subagents` how many children it already
+/// has. Returns the prompt receiver plus a sender for queue-filling.
+async fn register_live(
+    state: &SharedState,
+    id: &AgentId,
+    created_by: Option<AgentId>,
+    bearer: &str,
+    state_byte: u8,
+    subagents: usize,
+) -> (
+    tokio::sync::mpsc::Receiver<String>,
+    tokio::sync::mpsc::Sender<String>,
+) {
+    let (mut entry, prompt_rx) =
+        kallipai_tagma::test_helpers::make_entry_with_rx(created_by, bearer.to_string());
+    entry
+        .agent
+        .state
+        .store(state_byte, std::sync::atomic::Ordering::Relaxed);
+    entry.subagent_ids = (0..subagents).map(|_| AgentId::random()).collect();
+    let prompt_tx = entry.agent.prompt_tx.clone();
+    state.registry.write().await.register(
+        id.clone(),
+        kallipai_tagma::state::RegistryEntry::Live(entry),
+    );
+    (prompt_rx, prompt_tx)
+}
+
+/// One HTTP round-trip against the real router for `POST /agents/{id}/interrupt`.
+async fn interrupt(
+    state: &SharedState,
+    id: &AgentId,
+    bearer: &str,
+) -> (StatusCode, serde_json::Value) {
+    let request = Request::builder()
+        .method(Method::POST)
+        .uri(format!("/agents/{id}/interrupt"))
+        .header(
+            axum::http::header::AUTHORIZATION,
+            format!("Bearer {bearer}"),
+        )
+        .body(Body::empty())
+        .expect("static parts");
+    let response = router()
+        .with_state(state.clone())
+        .oneshot(request)
+        .await
+        .unwrap_or_else(|infallible| match infallible {});
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("small body");
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+    (status, body)
+}
+
+/// A full prompt queue cannot take the interrupt's kick turn: the refusal is
+/// explicit, and the queue is left as it was.
+#[tokio::test]
+#[serial]
+async fn interrupt_refuses_when_the_prompt_queue_is_full() {
+    install_roots();
+    let state = make_state();
+    let sup = AgentId::random();
+    let (sup_rx, _sup_tx) = register_live(&state, &sup, None, "tok-sup", AgentState::IDLE, 0).await;
+    drop(sup_rx);
+
+    let full = AgentId::random();
+    let full_ws = sup_base().join(format!("full-{full}"));
+    std::fs::create_dir_all(&full_ws).unwrap();
+    seed_live_body(&full, &full_ws, Some(&sup));
+    let (mut full_rx, full_tx) = register_live(
+        &state,
+        &full,
+        Some(sup.clone()),
+        "tok-full",
+        AgentState::WAITING,
+        0,
+    )
+    .await;
+    for fill in 0..16 {
+        full_tx
+            .try_send(format!("filler {fill}"))
+            .expect("the queue holds sixteen turns");
+    }
+
+    let (status, body) = interrupt(&state, &full, "tok-sup").await;
+    assert_eq!(status, StatusCode::CONFLICT, "body: {body}");
+    let queued: Vec<String> = std::iter::from_fn(|| full_rx.try_recv().ok()).collect();
+    assert_eq!(
+        queued.len(),
+        16,
+        "the refused turn must not displace a queued one: {queued:?}"
+    );
+}
+
+/// The in-flight arm of the interrupt core: a busy agent holds an in-flight
+/// round token, and the round is cancelled rather than kicked.
+#[tokio::test]
+#[serial]
+async fn interrupt_cancels_an_in_flight_round() {
+    install_roots();
+    let state = make_state();
+    let sup = AgentId::random();
+    let (sup_rx, _sup_tx) = register_live(&state, &sup, None, "tok-sup", AgentState::IDLE, 0).await;
+    drop(sup_rx);
+
+    let busy = AgentId::random();
+    let busy_ws = sup_base().join(format!("busy-{busy}"));
+    std::fs::create_dir_all(&busy_ws).unwrap();
+    seed_live_body(&busy, &busy_ws, Some(&sup));
+    let (entry, _busy_rx) =
+        kallipai_tagma::test_helpers::make_entry_with_rx(Some(sup.clone()), "tok-busy".to_string());
+    entry
+        .agent
+        .state
+        .store(AgentState::BUSY, std::sync::atomic::Ordering::Relaxed);
+    // The core only cancels a round that is actually in flight.
+    let round = kallipai_adk::agent_task::RoundToken::new(&entry.agent.cancel);
+    let round_handle = round.handle().clone();
+    *entry
+        .agent
+        .round_cancel
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = Some(round);
+    state.registry.write().await.register(
+        busy.clone(),
+        kallipai_tagma::state::RegistryEntry::Live(entry),
+    );
+
+    let (status, body) = interrupt(&state, &busy, "tok-sup").await;
+    assert_eq!(status, StatusCode::ACCEPTED, "body: {body}");
+    assert!(
+        round_handle.is_cancelled(),
+        "the in-flight round is cancelled"
+    );
 }

@@ -315,7 +315,7 @@ pub(crate) async fn restore_action(state: &SharedState, a: &PlannedAction) -> Re
             )];
             if let Err(park) = kallipai_adk::persistence::deactivate_agent_dir(&id) {
                 loss.push(format!(
-                    "old body re-park failed; manual cleanup needed ({park:#})"
+                    "the re-park failed; the body is left in the live area and needs manual cleanup ({park:#})"
                 ));
             }
             return degraded(state, a, &id, loss).await;
@@ -465,7 +465,7 @@ async fn align_live(state: &SharedState, a: &PlannedAction) -> Result<Vec<String
 
 /// Park one live body into the inactive area: plan→execute window busy/children
 /// re-read, unregister, the shared teardown tail, then the rename.
-/// `force` interrupts a busy target first and says so in the notes (the
+/// `force` tears a busy target down anyway and says so in the notes (the
 /// auditable escape).
 async fn deactivate_action(
     state: &SharedState,

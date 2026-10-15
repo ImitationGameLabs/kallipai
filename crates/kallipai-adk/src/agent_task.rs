@@ -10,7 +10,7 @@ use tokio_util::sync::CancellationToken;
 use crate::event::{AgentEvent, AgentOutcome};
 use crate::lifecycle::LifecycleState;
 use crate::tools::DEFAULT_BREAK_TIMEOUT_SECS;
-use kallipai_common::protocol::{ParkedReason, TransientRetryInfo};
+use kallipai_common::protocol::{AgentState, ParkedReason, TransientRetryInfo};
 use kallipai_common::timefmt;
 
 use crate::approval::ApprovalStore;
@@ -218,7 +218,67 @@ pub struct AgentContext {
     pub gateway_signals: Option<tokio::sync::mpsc::UnboundedSender<crate::GatewaySignal>>,
 }
 
+/// The protocol-facing label of a lifecycle state: the log line and the protocol
+/// status vocabulary come from this table; the bridge maps the UI separately.
+fn state_label(state: &LifecycleState) -> AgentState {
+    match state {
+        LifecycleState::Running => AgentState::Busy,
+        LifecycleState::Idle => AgentState::Idle,
+        LifecycleState::Waiting { .. } => AgentState::Waiting,
+        LifecycleState::Parked { .. } => AgentState::Parked,
+        LifecycleState::Retrying { .. } => AgentState::Retrying,
+    }
+}
+
 impl AgentContext {
+    /// Apply the next authoritative lifecycle state and record the move.
+    ///
+    /// Every production transition goes through here, so the log channel and the
+    /// state machine cannot drift apart. `cause` is the site's own phrase
+    /// (`break(wait)`, `budget probe re-arm`, ...) — the coarser `origin` cannot
+    /// separate the wait timer from the retry timer.
+    ///
+    /// Takes the lifecycle lock internally: callers must not hold it.
+    ///
+    /// Applies the move before recording it, so a rejected transition (the
+    /// debug-asserted legality check) cannot leave a line claiming a move the
+    /// agent never made.
+    pub fn settle(&self, next: LifecycleState, cause: &'static str) {
+        let mut guard = self.lifecycle.lock().unwrap_or_else(|e| e.into_inner());
+        let from = state_label(&guard);
+        let agent = self
+            .config
+            .agent_id
+            .as_ref()
+            .map(|id| id.to_string())
+            .unwrap_or_else(|| "unbound".to_string());
+        guard.transition(next);
+        let to = state_label(&guard);
+        match &*guard {
+            LifecycleState::Parked { reason, .. } => tracing::warn!(
+                agent = %agent, from = %from, to = %to, cause = %cause, reason = %reason,
+                "agent parked"
+            ),
+            LifecycleState::Retrying {
+                attempt,
+                max_attempts,
+                ..
+            } => tracing::info!(
+                agent = %agent, from = %from, to = %to, cause = %cause,
+                attempt = *attempt, max = *max_attempts,
+                "agent state changed"
+            ),
+            LifecycleState::Running => tracing::info!(
+                agent = %agent, from = %from, to = %to, cause = %cause, origin = ?self.attempt_origin,
+                "agent state changed"
+            ),
+            LifecycleState::Idle | LifecycleState::Waiting { .. } => tracing::info!(
+                agent = %agent, from = %from, to = %to, cause = %cause,
+                "agent state changed"
+            ),
+        }
+    }
+
     /// Persist context and approval state to disk. Logs warnings on failure.
     ///
     /// Context-persist failures are counted; see `persist_failures`.
@@ -712,21 +772,18 @@ pub async fn run_and_report(
             .send(AgentEvent::Error(blocked.to_string()))
             .await
             .ok();
-        ctx.lifecycle
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .transition(LifecycleState::Parked {
+        ctx.settle(
+            LifecycleState::Parked {
                 reason: ParkedReason::FatalError {
                     message: blocked.to_string(),
                 },
                 at: std::time::Instant::now(),
-            });
+            },
+            "modality gate",
+        );
         return false;
     }
-    ctx.lifecycle
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .transition(LifecycleState::Running);
+    ctx.settle(LifecycleState::Running, "wake entry");
     let mut no_progress: u32 = 0;
     loop {
         let round = RoundToken::new(&ctx.cancel);
@@ -749,20 +806,17 @@ pub async fn run_and_report(
                 ctx.transient_fails = 0;
                 match until {
                     runner::BreakUntil::Idle => {
-                        ctx.lifecycle
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .transition(LifecycleState::Idle);
+                        ctx.settle(LifecycleState::Idle, "break(idle)");
                         agent_tx.send(AgentEvent::Idle).await.ok();
                     }
                     runner::BreakUntil::Wait { timeout_secs } => {
                         let deadline = arm_wait_timer(ctx, timeout_secs);
-                        ctx.lifecycle
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .transition(LifecycleState::Waiting {
+                        ctx.settle(
+                            LifecycleState::Waiting {
                                 until: deadline.into_std(),
-                            });
+                            },
+                            "break(wait)",
+                        );
                         agent_tx
                             .send(AgentEvent::Waiting { timeout_secs })
                             .await
@@ -778,10 +832,7 @@ pub async fn run_and_report(
                 no_progress += 1;
                 if no_progress > ctx.config.max_heartbeat_rounds {
                     // Self-monologue guardrail: force-idle instead of looping forever.
-                    ctx.lifecycle
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .transition(LifecycleState::Idle);
+                    ctx.settle(LifecycleState::Idle, "heartbeat limit");
                     agent_tx.send(AgentEvent::Idle).await.ok();
                     return false;
                 }
@@ -803,10 +854,7 @@ pub async fn run_and_report(
                     // Only the round token was cancelled (interrupt) → keep living.
                     CancelKind::Interrupt => {
                         agent_tx.send(AgentEvent::Interrupted).await.ok();
-                        ctx.lifecycle
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .transition(LifecycleState::Idle);
+                        ctx.settle(LifecycleState::Idle, "interrupt");
                         return false;
                     }
                 }
@@ -839,23 +887,23 @@ pub async fn run_and_report(
                     .ok();
                 match retry_deadline {
                     Some((deadline, _)) => {
-                        ctx.lifecycle
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .transition(LifecycleState::Retrying {
+                        ctx.settle(
+                            LifecycleState::Retrying {
                                 attempt: ctx.transient_fails,
                                 max_attempts: ctx.config.max_transient_retries,
                                 retry_at: deadline.into_std(),
-                            });
+                            },
+                            "transient retry armed",
+                        );
                     }
                     None => {
-                        ctx.lifecycle
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .transition(LifecycleState::Parked {
+                        ctx.settle(
+                            LifecycleState::Parked {
                                 reason: ParkedReason::TransientRetryExhausted,
                                 at: std::time::Instant::now(),
-                            });
+                            },
+                            "transient retries exhausted",
+                        );
                     }
                 }
                 return false;
@@ -870,13 +918,13 @@ pub async fn run_and_report(
                     .send(AgentEvent::QuotaBlocked(info.clone()))
                     .await
                     .ok();
-                ctx.lifecycle
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .transition(LifecycleState::Parked {
+                ctx.settle(
+                    LifecycleState::Parked {
                         reason: ParkedReason::QuotaBlocked(info),
                         at: std::time::Instant::now(),
-                    });
+                    },
+                    "quota blocked",
+                );
                 return false;
             }
             Ok(runner::RoundOutcome::Park(AgentOutcome::TokenBudgetExceeded {
@@ -895,23 +943,23 @@ pub async fn run_and_report(
                     .await
                     .ok();
                 let deadline = arm_wait_timer(ctx, DEFAULT_BREAK_TIMEOUT_SECS);
-                ctx.lifecycle
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .transition(LifecycleState::Waiting {
+                ctx.settle(
+                    LifecycleState::Waiting {
                         until: deadline.into_std(),
-                    });
+                    },
+                    "budget probe re-arm",
+                );
                 return false;
             }
             Ok(runner::RoundOutcome::Park(AgentOutcome::MaxRoundsExceeded)) => {
                 ctx.transient_fails = 0;
-                ctx.lifecycle
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .transition(LifecycleState::Parked {
+                ctx.settle(
+                    LifecycleState::Parked {
                         reason: ParkedReason::MaxRoundsExceeded,
                         at: std::time::Instant::now(),
-                    });
+                    },
+                    "max rounds",
+                );
                 agent_tx.send(AgentEvent::MaxRoundsExceeded).await.ok();
                 return false;
             }
@@ -919,10 +967,7 @@ pub async fn run_and_report(
                 // Not produced by the round loop today (only Break/BareAssistant/Park
                 // are); parked here for exhaustiveness and forward-compat.
                 ctx.transient_fails = 0;
-                ctx.lifecycle
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .transition(LifecycleState::Idle);
+                ctx.settle(LifecycleState::Idle, "park(idle)");
                 agent_tx.send(AgentEvent::Idle).await.ok();
                 return false;
             }
@@ -930,15 +975,15 @@ pub async fn run_and_report(
                 // Permanent (Fatal) error — park and surface; the operator acts.
                 ctx.transient_fails = 0;
                 let rendered = crate::llm_error::render_error(e.as_ref());
-                ctx.lifecycle
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .transition(LifecycleState::Parked {
+                ctx.settle(
+                    LifecycleState::Parked {
                         reason: ParkedReason::FatalError {
                             message: rendered.clone(),
                         },
                         at: std::time::Instant::now(),
-                    });
+                    },
+                    "fatal error",
+                );
                 agent_tx.send(AgentEvent::Error(rendered)).await.ok();
                 return false;
             }
@@ -1820,6 +1865,64 @@ mod tests {
             }
             other => panic!("expected a structured quota park, got {other:?}"),
         }
+    }
+
+    /// A rejected move trips the legality check and leaves the state where it
+    /// was: the state is applied before it is recorded, so a refused call
+    /// cannot advance the agent's lifecycle.
+    /// The refusal rides a debug assertion, so this test is gated to debug
+    /// builds: a release build writes the new state unchecked.
+    #[cfg(debug_assertions)]
+    #[tokio::test]
+    async fn an_illegal_move_is_rejected_and_leaves_the_state_untouched() {
+        let ctx = crate::test_support::make_ctx(
+            vec![crate::test_support::profile("test", "ep1", 4096)],
+            &["ep1"],
+        )
+        .await;
+
+        // A fresh context sits in idle, whose only edge leads to running: asking
+        // for a wait trips the legality assertion.
+        let rejected = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            ctx.settle(
+                LifecycleState::Waiting {
+                    until: std::time::Instant::now(),
+                },
+                "illegal move",
+            );
+        }));
+        assert!(rejected.is_err(), "the illegal move must be rejected");
+        assert_eq!(
+            *ctx.lifecycle.lock().unwrap_or_else(|e| e.into_inner()),
+            LifecycleState::Idle,
+            "the rejected wait must leave the state untouched"
+        );
+
+        // The parked arm is behind the same check: idle has no edge into
+        // parked either.
+        let rejected = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            ctx.settle(
+                LifecycleState::Parked {
+                    reason: ParkedReason::MaxRoundsExceeded,
+                    at: std::time::Instant::now(),
+                },
+                "illegal move",
+            );
+        }));
+        assert!(rejected.is_err(), "the illegal move must be rejected");
+        assert_eq!(
+            *ctx.lifecycle.lock().unwrap_or_else(|e| e.into_inner()),
+            LifecycleState::Idle,
+            "the rejected park must leave the state untouched"
+        );
+
+        // A legal move still lands: the refusals above did not wedge the context.
+        ctx.settle(LifecycleState::Running, "wake entry");
+        assert_eq!(
+            *ctx.lifecycle.lock().unwrap_or_else(|e| e.into_inner()),
+            LifecycleState::Running,
+            "the next legal move lands"
+        );
     }
 
     /// A repeated response shape stops the round instead of arming a transient

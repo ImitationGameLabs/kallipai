@@ -619,11 +619,13 @@ mod guard_tests {
 /// subscriber resolve to `Dispatch::none`, so a parallel test hitting a
 /// callsite first caches `Interest::never` and that event becomes
 /// undeliverable process-wide — even for tests holding their own scoped
-/// subscriber (the flaky lock-evaporation WARN family). A global default
-/// gives every first registration a real subscriber; per-test scoped
-/// subscribers still take precedence on top of it. Output goes to
-/// `io::sink`: this subscriber exists for interest registration, capture
-/// stays with each test's own subscriber.
+/// subscriber. A global default gives every first registration a real
+/// subscriber; per-test scoped subscribers still take precedence on top
+/// of it. Output goes to `io::sink`: this subscriber exists for interest
+/// registration, capture stays with each test's own subscriber.
+///
+/// The log-reading test it protects is the panic-forward harness,
+/// `tests::panic_forward_writes_error_event` in `tests.rs`.
 #[ctor(unsafe)]
 fn install_global_test_subscriber() {
     let subscriber = tracing_subscriber::fmt()

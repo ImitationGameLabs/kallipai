@@ -708,6 +708,131 @@ async fn restore_degrades_loudly_when_the_body_meta_is_unreadable() {
     }
 }
 
+/// A parked body whose recorded workspace cannot be created: the restore stops
+/// loudly instead of waking an agent that cannot write its own workspace.
+#[tokio::test]
+async fn restore_fails_loudly_when_the_recorded_workspace_is_unusable() {
+    let state = crate::test_helpers::make_state();
+    let id = AgentId::random();
+    let guard = dev_tempdir("conv-unusable-ws");
+    // A file where the workspace's parent directory has to be: the directory
+    // creation cannot make the tree.
+    let blocker = guard.path().join("blocker");
+    std::fs::write(&blocker, "not a directory").unwrap();
+    let recorded = blocker.join("ws");
+    let dir = kallipai_adk::persistence::inactive_dir(&id).unwrap();
+    std::fs::create_dir_all(&dir).unwrap();
+    let meta = kallipai_adk::persistence::AgentMeta {
+        workspace_root: recorded.clone(),
+        created_by: None,
+        role: "dev".to_string(),
+        description: String::new(),
+        permissions_class: Default::default(),
+        profile_set: Some("default".to_string()),
+        delegation_mode: Default::default(),
+    };
+    std::fs::write(
+        dir.join("meta.json"),
+        serde_json::to_string_pretty(&meta).unwrap(),
+    )
+    .unwrap();
+    let row = planned("dev", TeamAction::Restore, Some(id.clone()));
+    match restore_action(&state, &row).await {
+        RestoreFallout::Failed(detail) => {
+            assert!(
+                detail.contains("cannot create workspace"),
+                "detail: {detail}"
+            );
+        }
+        RestoreFallout::Restored { .. } | RestoreFallout::Degraded { .. } => {
+            panic!("restore must not land on an unusable workspace")
+        }
+    }
+}
+
+/// The auditable escape: a forced deactivate of a waiting target is reported in
+/// the row notes, and the body still lands in the inactive area.
+#[tokio::test]
+async fn a_forced_deactivate_reports_the_escape_and_parks_the_body() {
+    let state = crate::test_helpers::make_state();
+    let id = AgentId::random();
+    let (entry, _prompt_rx) = crate::test_helpers::make_entry_with_rx(None, "t".to_string());
+    crate::state::transition_state(
+        &entry.agent.state,
+        &entry.agent.state_since,
+        crate::state::AgentState::WAITING,
+    );
+    state
+        .registry
+        .write()
+        .await
+        .register(id.clone(), crate::state::RegistryEntry::Live(entry));
+    std::fs::create_dir_all(kallipai_adk::persistence::agent_dir(&id).unwrap()).unwrap();
+    let plan = vec![planned("dev", TeamAction::Deactivate, Some(id.clone()))];
+    let mut mapping = Vec::new();
+    let root: Option<LiveBody> = None;
+    let (results, aborted) = execute_converge(
+        &state,
+        &plan,
+        &mut mapping,
+        &root,
+        true,
+        "2026-01-01T00:00:00Z",
+    )
+    .await;
+    assert!(!aborted, "results: {results:?}");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].outcome, TeamRowOutcome::Applied);
+    assert!(
+        results[0].notes.iter().any(|n| n.contains("force escape")),
+        "notes: {:?}",
+        results[0].notes
+    );
+    // The deactivate path calls the interrupt core after unregistering the
+    // entry: the body still has to land in the inactive area.
+    assert!(
+        kallipai_adk::persistence::inactive_dir(&id)
+            .unwrap()
+            .exists(),
+        "the body must land in the inactive area"
+    );
+}
+
+/// The identity-loss branch: the park fails after the registry has already
+/// let the agent go. The unregister cannot be undone, so the failure has to
+/// be loud and name the body it leaves behind.
+#[tokio::test]
+async fn a_failed_park_reports_the_leftover_live_body() {
+    let state = crate::test_helpers::make_state();
+    let id = AgentId::random();
+    let (entry, _prompt_rx) = crate::test_helpers::make_entry_with_rx(None, "t".to_string());
+    state
+        .registry
+        .write()
+        .await
+        .register(id.clone(), crate::state::RegistryEntry::Live(entry));
+    let live_dir = kallipai_adk::persistence::agent_dir(&id).unwrap();
+    std::fs::create_dir_all(&live_dir).unwrap();
+    // A file where the inactive slot has to go: the park refuses to overwrite
+    // it, and it refuses after the unregister has already landed.
+    let inactive = kallipai_adk::persistence::inactive_dir(&id).unwrap();
+    std::fs::create_dir_all(inactive.parent().unwrap()).unwrap();
+    std::fs::write(&inactive, "occupied").unwrap();
+
+    let detail = match crate::routes::agent::deactivate_core(&state, &id, false).await {
+        Err(crate::routes::agent::DeactivateErr::Failed(detail)) => detail,
+        _ => panic!("a failed park must surface as DeactivateErr::Failed"),
+    };
+    assert!(detail.contains("the park failed"), "detail: {detail}");
+    // The registry let the agent go before the park: the leftover body is the
+    // point of the failure report, so it is still in the live area.
+    assert!(
+        state.registry.read().await.get(&id).is_none(),
+        "the unregister must have landed"
+    );
+    assert!(live_dir.exists(), "the body must still be in the live area");
+}
+
 #[tokio::test]
 async fn window_violation_stops_the_batch_at_the_failed_deactivate() {
     let state = crate::test_helpers::make_state();
@@ -781,7 +906,6 @@ fn spawn_stub(
         let crate::state::AgentEntry {
             identity, agent, ..
         } = fresh.0;
-        let _keep_rx_open = fresh.1;
         Box::pin(async move {
             if fail {
                 anyhow::bail!("stub spawn failure");
