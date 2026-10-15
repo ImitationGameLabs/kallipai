@@ -411,30 +411,17 @@ fn check_overlaps(
     Ok(())
 }
 
-/// Whether any credentials entry under `data_dir/credentials/` carries
-/// stored relay credentials (both `tagma.id` and `tagma.token`
-/// readable). Sorted entry traversal — the same shape as the scan's
-/// `read_tagma_id`, so the probe and the scan never disagree about
-/// what "enrolled" means. Deliberately read, not `exists`: an
-/// unreadable file counts as absent.
+/// Whether any credentials entry under `data_dir/credentials/` passes the
+/// shared enrollment predicate
+/// (`kallipai_daemon_common::credentials::read_enrolled_id`): both
+/// `tagma.id` and `tagma.token` readable and non-blank. The same predicate
+/// as the scan's `read_tagma_id`, so the probe and the scan never disagree
+/// about what enrolled means. Deliberately read, not `exists`: an
+/// unreadable file counts as absent, and a blank one is not an enrollment.
 fn stored_credentials_in_any_entry(data_dir: &Path) -> bool {
-    let creds = data_dir.join("credentials");
-    let Ok(entries) = std::fs::read_dir(&creds) else {
-        return false;
-    };
-    let mut names: Vec<String> = entries
-        .flatten()
-        .filter_map(|e| {
-            let is_dir = e.file_type().ok()?.is_dir();
-            is_dir.then(|| e.file_name().into_string().ok()).flatten()
-        })
-        .collect();
-    names.sort();
-    names.iter().any(|name| {
-        let entry = creds.join(name);
-        std::fs::read_to_string(entry.join("tagma.id")).is_ok()
-            && std::fs::read_to_string(entry.join("tagma.token")).is_ok()
-    })
+    kallipai_daemon_common::credentials::entry_dirs(data_dir)
+        .iter()
+        .any(|entry_dir| kallipai_daemon_common::credentials::read_enrolled_id(entry_dir).is_some())
 }
 
 #[cfg(test)]
@@ -1463,5 +1450,18 @@ mod tests {
         let dd = mk_stopped_data_dir(root.path(), "dd");
         adopt_at(root.path(), "team-a", ws.path(), &dd, &[])
             .expect("no credentials: nothing can degrade");
+    }
+
+    #[test]
+    fn the_probe_ignores_a_blank_credential_pair() {
+        let root = tempdir();
+        let ws = tempdir();
+        let dd = mk_stopped_data_dir(root.path(), "dd");
+        // A pair of blank files is what an interrupted enrollment leaves
+        // behind; it is not an enrollment, so the probe stays silent.
+        write(&dd.join("credentials/default/tagma.id"), " \n");
+        write(&dd.join("credentials/default/tagma.token"), "");
+        adopt_at(root.path(), "team-a", ws.path(), &dd, &[])
+            .expect("a blank pair cannot make an instance degrade");
     }
 }

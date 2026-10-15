@@ -69,17 +69,15 @@ impl From<SpawnError> for StartError {
 /// code — so replaying it after a completed enrollment bricks every restart.
 const CONSUMED_ENROLLMENT_CODE: &str = "KALLIPAI_TAGMA_RELAY_ENROLLMENT_CODE";
 
-/// Whether the instance already holds stored relay credentials — the exact
-/// predicate of tagma's Stored branch (`credentials::load_tagma`: both
-/// `tagma.id` and `tagma.token` readable under the entry dir; the daemon's
-/// env-sugar relay entry is named "default"). Deliberately read, not
-/// `exists`, so an unreadable file counts as absent on both sides.
-/// Cross-crate layout mirror — keep in sync with
-/// crates/kallipai-tagma/src/credentials.rs.
+/// Whether the instance already holds stored relay credentials — the shared
+/// enrollment predicate
+/// (`kallipai_daemon_common::credentials::read_enrolled_id`) applied to the
+/// daemon's env-sugar relay entry, named `default`. Deliberately read, not
+/// `exists`: an unreadable file counts as absent, and so does a blank one
+/// left behind by an interrupted enrollment.
 fn stored_credentials_exist(data_dir: &Path) -> bool {
-    let entry = data_dir.join("credentials").join("default");
-    std::fs::read_to_string(entry.join("tagma.id")).is_ok()
-        && std::fs::read_to_string(entry.join("tagma.token")).is_ok()
+    let entry = kallipai_daemon_common::credentials::entry_dir(data_dir, "default");
+    kallipai_daemon_common::credentials::read_enrolled_id(&entry).is_some()
 }
 
 /// Build the replay env for a restart. Two filters apply:
@@ -337,7 +335,7 @@ mod tests {
     }
 
     fn write_stored_credentials(data_dir: &std::path::Path) {
-        let entry = data_dir.join("credentials").join("default");
+        let entry = kallipai_daemon_common::credentials::entry_dir(data_dir, "default");
         std::fs::create_dir_all(&entry).expect("create entry dir");
         std::fs::write(entry.join("tagma.id"), "tagma-1").expect("write id");
         std::fs::write(entry.join("tagma.token"), "token").expect("write token");
@@ -402,6 +400,32 @@ mod tests {
             &[
                 "KALLIPAI_OPERATOR_TOKEN=t",
                 "KALLIPAI_TAGMA_RELAY_ENROLLMENT_CODE=sk-fresh",
+            ],
+            data.path(),
+        );
+        write_record_at(root.path(), &value);
+
+        let replay = replay_env(root.path(), "instance-1", &value);
+
+        assert_eq!(replay, value.env);
+        assert_eq!(persisted_env(root.path()), value.env);
+    }
+
+    #[test]
+    fn a_blank_credential_pair_does_not_count_as_spent() {
+        let root = tempfile::tempdir().expect("record tempdir");
+        let data = tempfile::tempdir().expect("data tempdir");
+        let entry = kallipai_daemon_common::credentials::entry_dir(data.path(), "default");
+        std::fs::create_dir_all(&entry).expect("create entry dir");
+        // An interrupted enrollment leaves a pair of blank files behind; that
+        // is not an enrollment, so the code is not spent and stays for the
+        // retry.
+        std::fs::write(entry.join("tagma.id"), " \n").expect("write blank id");
+        std::fs::write(entry.join("tagma.token"), "").expect("write blank token");
+        let value = record(
+            &[
+                "KALLIPAI_OPERATOR_TOKEN=t",
+                "KALLIPAI_TAGMA_RELAY_ENROLLMENT_CODE=sk-pending",
             ],
             data.path(),
         );

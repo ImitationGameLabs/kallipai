@@ -1,12 +1,12 @@
-//! Atomic secret-file primitives for boot-provisioned credentials.
+//! Atomic secret-file primitives for on-disk credentials.
 //!
-//! One lifecycle shape uses these mechanics: a service-generated secret is
-//! written once into persistent state and only read afterwards, so the
-//! value stays stable across restarts. The guarantees a reader gets: never
-//! a partial file (temp file + rename in the destination directory), and
-//! an on-disk mode that is explicit rather than umask-dependent. Boot
-//! provisioning callers (the platform-internal token, the minted admin
-//! token) share this shape.
+//! The guarantees a reader gets: never a partial file (temp file + rename
+//! in the destination directory), and an on-disk mode that is explicit
+//! rather than umask-dependent. Two writing shapes share these mechanics:
+//! a boot-provisioned secret, written once into persistent state and only
+//! read afterwards, and a credential file that is rewritten whenever the
+//! enrollment behind it is replaced. Each write publishes a whole file, so
+//! a reader never sees part of one value and part of another.
 
 use std::fs;
 use std::io::Write;
@@ -29,6 +29,9 @@ pub const BOOT_RETRY: Duration = Duration::from_secs(15);
 /// synced and renamed over the destination. The parent directory must exist:
 /// a missing directory is a deployment misconfiguration, not something to
 /// paper over with an implicit mkdir.
+///
+/// A failure at any step leaves the destination untouched; the staging file
+/// is removed when the temporary that owns it is dropped.
 pub fn write_atomic(path: &Path, contents: &[u8], mode: u32) -> anyhow::Result<()> {
     let parent = path
         .parent()

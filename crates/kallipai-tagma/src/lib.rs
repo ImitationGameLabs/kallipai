@@ -1112,7 +1112,7 @@ pub(crate) fn data_root() -> Result<std::path::PathBuf> {
 }
 
 fn credentials_dir() -> Result<std::path::PathBuf> {
-    data_root().map(|d| d.join("credentials"))
+    data_root().map(|d| kallipai_daemon_common::credentials::credentials_root(&d))
 }
 
 /// The single chat_history store path: `<data_root>/chat_history.sqlite`.
@@ -1305,7 +1305,9 @@ async fn activate_relay(
             // recording gets the configured origin written, and a record
             // naming the pre-rename origin is overwritten to the configured
             // one (the StoredReorigin verdict above already logged it).
-            credentials::backfill_archeion_url(&entry_dir, &entry.polis_url);
+            if let Err(error) = credentials::backfill_archeion_url(&entry_dir, &entry.polis_url) {
+                warn!(%error, relay = %entry.name, "could not record the enrollment origin");
+            }
             info!(relay = %entry.name, tagma = %stored.id, "relay: loaded stored tagma credentials");
             (
                 kallipai_archeion_common::ids::TagmaId::from(stored.id),
@@ -1320,11 +1322,13 @@ async fn activate_relay(
             .build()?
             .enroll(&code, &device)
             .await?;
-            credentials::save_tagma(&entry_dir, tagma_id.as_ref(), &token, &entry.polis_url);
+            credentials::save_tagma(&entry_dir, tagma_id.as_ref(), &token, &entry.polis_url)?;
             // The boot snapshot predates this write (platform_faces
             // runs before relay activation), so the switch-target
             // list would show the platform un-enrolled until a
-            // restart: record the token on the face now.
+            // restart: record the token on the face now. A failed save
+            // returned above, so the in-memory face is never told about an
+            // enrollment the disk did not accept.
             state.set_platform_token(&entry.name, token.clone());
             info!(relay = %entry.name, tagma = %tagma_id, "relay: enrolled with archeion");
             // First-run enroll boot: the projector's write-once ids are

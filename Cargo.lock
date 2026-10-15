@@ -3067,6 +3067,7 @@ dependencies = [
  "kallipai-testkit",
  "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

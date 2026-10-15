@@ -300,8 +300,12 @@ pub struct InstanceInfo {
     /// `credentials/<entry>/tagma.id`. None when the instance never enrolled
     /// (local-only) or the read failed — the panel join then degrades to the
     /// slug convention. `#[serde(default)]` keeps pre-field wire JSON parsing.
-    /// Discipline: `tagma.id` is the ONLY credentials file ever read;
-    /// `tagma.token` (0o600 secret) is never opened.
+    /// Discipline: the only credential actually handed out is `tagma.id`;
+    /// `tagma.token` (0o600) is opened to decide whether the enrollment is
+    /// blank and never carried out of the scan — not stored, not logged, not
+    /// serialized. Reading into the entry directory at all is a
+    /// touch-as-little-as-possible tradeoff rather than a permission rule:
+    /// the leaf directory is already 0o700.
     #[serde(default)]
     pub tagma_id: Option<String>,
     /// The instance's live listen port; None unless the instance is

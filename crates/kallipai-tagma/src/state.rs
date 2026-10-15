@@ -951,9 +951,10 @@ impl AppState {
     /// The platforms this tagma can fetch stored records from: every
     /// configured face carrying a usable enrollment, in configuration
     /// order, as the files-service access triple (name for attribution,
-    /// origin, token). A face with no stored credential — or with a
-    /// blank one, which the credential store can leave behind — cannot
-    /// authenticate a fetch, so it does not appear.
+    /// origin, token). A face with no stored credential — or with a blank
+    /// one, which the runtime `set_platform_token` path can hand over
+    /// independently of what the credential files say — cannot authenticate
+    /// a fetch, so it does not appear.
     pub(crate) fn files_access(&self) -> Vec<crate::files::FilesAccess> {
         self.platforms
             .load()

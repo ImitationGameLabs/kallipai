@@ -27,9 +27,8 @@ async fn operator_token_path(client: &DaemonClient, slug: &str) -> Result<std::p
         }
         _ => anyhow::bail!("unexpected daemon response while resolving {slug}"),
     };
-    Ok(data_dir
-        .join("credentials")
-        .join(kallipai_common::authtoken::OPERATOR_TOKEN_FILE))
+    let credentials = kallipai_daemon_common::credentials::credentials_root(&data_dir);
+    Ok(credentials.join(kallipai_common::authtoken::OPERATOR_TOKEN_FILE))
 }
 
 /// Read and parse the token file: the bare secret from the

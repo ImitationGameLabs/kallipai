@@ -379,32 +379,17 @@ pub(crate) fn read_runtime(dir: &Path) -> Option<RuntimeFile> {
     let text = std::fs::read_to_string(dir.join("runtime.json")).ok()?;
     serde_json::from_str(&text).ok()
 }
-/// The enrolled tagma identity: the first (sorted) credential entry
-/// under the data directory's `credentials/` carrying a non-empty `tagma.id`.
+/// The enrolled tagma identity: the first entry in name order under the
+/// data directory's `credentials/` that passes the shared enrollment
+/// predicate (`kallipai_daemon_common::credentials::read_enrolled_id`:
+/// `tagma.id` and `tagma.token` both readable and non-blank).
+///
+/// The token is opened only to decide blank-or-not; it is never returned,
+/// logged or serialized, and `InstanceInfo` carries the id alone.
 fn read_tagma_id(data_dir: &Path) -> Option<String> {
-    let creds = data_dir.join("credentials");
-    let Ok(entries) = std::fs::read_dir(&creds) else {
-        return None;
-    };
-    let mut names: Vec<String> = entries
-        .flatten()
-        .filter_map(|e| {
-            let is_dir = e.file_type().ok()?.is_dir();
-            is_dir.then(|| e.file_name().into_string().ok()).flatten()
-        })
-        .collect();
-    names.sort();
-    for name in names {
-        let path = creds.join(name).join("tagma.id");
-        // An empty tagma.id (an enroll interrupted mid-write) is not an
-        // identity: skip it and keep looking at the remaining entries.
-        if let Ok(text) = std::fs::read_to_string(&path)
-            && !text.trim().is_empty()
-        {
-            return Some(text.trim().to_owned());
-        }
-    }
-    None
+    kallipai_daemon_common::credentials::entry_dirs(data_dir)
+        .into_iter()
+        .find_map(|dir| kallipai_daemon_common::credentials::read_enrolled_id(&dir))
 }
 
 #[cfg(test)]
@@ -606,10 +591,11 @@ mod tests {
     }
 
     #[test]
-    fn tagma_id_reads_first_entry_and_never_the_token() {
+    fn tagma_id_reads_the_first_enrolled_entry() {
         let root = tempfile_dir("tagma-id");
         instance(&root, "team", "id-1", 1000);
-        // Two entries: alphabetical-first wins as the conservative primary.
+        // Two entries: the first truly enrolled one wins as the conservative
+        // primary.
         write(&root.join("data/team/credentials/b/tagma.id"), "tid-b\n");
         write(&root.join("data/team/credentials/a/tagma.id"), "tid-a\n");
         // The 0o600 secret sits next to the id; it must never surface.
@@ -619,6 +605,24 @@ mod tests {
         );
         let info = scan_instances(&root)[0].info();
         assert_eq!(info.tagma_id.as_deref(), Some("tid-a"));
+        let wire = serde_json::to_string(&info).expect("serialize InstanceInfo");
+        assert!(!wire.contains("sk-secret-token"));
+    }
+
+    #[test]
+    fn an_entry_with_an_id_but_no_token_is_not_enrolled() {
+        let root = tempfile_dir("tagma-id-half");
+        instance(&root, "team", "id-1", 1000);
+        // Name order alone does not win: the first entry carries an id but no
+        // token, so it is not enrolled and the scan keeps looking.
+        write(&root.join("data/team/credentials/a/tagma.id"), "tid-half\n");
+        write(&root.join("data/team/credentials/b/tagma.id"), "tid-b\n");
+        write(
+            &root.join("data/team/credentials/b/tagma.token"),
+            "sk-secret-token",
+        );
+        let info = scan_instances(&root)[0].info();
+        assert_eq!(info.tagma_id.as_deref(), Some("tid-b"));
         let wire = serde_json::to_string(&info).expect("serialize InstanceInfo");
         assert!(!wire.contains("sk-secret-token"));
     }

@@ -386,6 +386,41 @@ fn neither_credentials_nor_code_fails_fast() {
     assert!(!msg.contains("re-enroll"), "{msg}");
 }
 
+/// A stored-but-blank pair is not a stored pair: the loader reports nothing,
+/// so a boot that also carries a code takes the fresh-enrollment path — the
+/// same answer the daemon's scan, adopt probe and replay filter give.
+#[test]
+fn blank_stored_credentials_take_the_fresh_path() {
+    let dir = tempfile::TempDir::new().unwrap();
+    std::fs::write(dir.path().join("tagma.id"), " \n").unwrap();
+    std::fs::write(dir.path().join("tagma.token"), "\n").unwrap();
+    let stored = credentials::load_tagma(dir.path());
+    assert!(stored.is_none(), "a blank pair is not an enrollment");
+    let plan = resolve_enroll_entry(
+        stored.as_ref(),
+        "https://archeion.example.com",
+        Some("sk-code"),
+    )
+    .expect("a code with no stored pair enrolls fresh");
+    assert!(matches!(plan, EnrollEntry::Fresh { code } if code == "sk-code"));
+}
+
+/// A blank pair with no code lands in the fail-fast branch, not a third
+/// state: the message is the one a completely empty data directory produces.
+#[test]
+fn blank_credentials_without_a_code_fail_fast() {
+    let dir = tempfile::TempDir::new().unwrap();
+    std::fs::write(dir.path().join("tagma.id"), "").unwrap();
+    std::fs::write(dir.path().join("tagma.token"), "  ").unwrap();
+    let stored = credentials::load_tagma(dir.path());
+    assert!(stored.is_none(), "a blank pair is not an enrollment");
+    let error = resolve_enroll_entry(stored.as_ref(), "https://archeion.example.com", None)
+        .expect_err("nothing to reuse and nothing to enroll with");
+    let msg = format!("{error:#}");
+    assert!(msg.contains("first-run enrollment"), "{msg}");
+    assert!(msg.contains("local-only"), "{msg}");
+}
+
 /// The ignore warning names the env var, the stored identity, and the
 /// delete-to-re-enroll recovery; the unknown-origin spelling says so.
 #[test]
@@ -420,7 +455,8 @@ fn credential_origin_roundtrip_and_backfill() {
         "tagma-1",
         "token",
         "https://archeion.example.com",
-    );
+    )
+    .expect("roundtrip save");
     let reloaded = credentials::load_tagma(dir.path()).expect("roundtrip loads");
     assert_eq!(reloaded.id, "tagma-1");
     assert_eq!(reloaded.token, "token");
@@ -435,12 +471,14 @@ fn credential_origin_roundtrip_and_backfill() {
     let legacy_stored = credentials::load_tagma(legacy.path()).expect("legacy loads");
     assert_eq!(legacy_stored.archeion_url, None);
 
-    credentials::backfill_archeion_url(legacy.path(), "https://archeion.example.com");
+    credentials::backfill_archeion_url(legacy.path(), "https://archeion.example.com")
+        .expect("backfill writes the origin");
     assert_eq!(
         std::fs::read_to_string(legacy.path().join("archeion.url")).expect("backfilled"),
         "https://archeion.example.com"
     );
-    credentials::backfill_archeion_url(legacy.path(), "https://other.example.com");
+    credentials::backfill_archeion_url(legacy.path(), "https://other.example.com")
+        .expect("backfill rebinds the origin");
     assert_eq!(
         std::fs::read_to_string(legacy.path().join("archeion.url")).expect("rebound"),
         "https://other.example.com"
