@@ -22,8 +22,8 @@ base_url = "https://api.deepseek.com"
 # A set of profiles. The default set is the one a new agent binds to.
 [sets.bench]
 
-  [[sets.bench.profiles]]
-  id = "main"
-  endpoint = "ds"
-  model = "deepseek-v4-flash"
-  max_context_window = 128000
+[[sets.bench.profiles]]
+id = "main"
+endpoint = "ds"
+model = "deepseek-v4-flash"
+max_context_window = 128000
