@@ -40,6 +40,30 @@ pub struct Selection {
     pub profile_id: String,
 }
 
+/// Why a gateway-side forward failed before any upstream was reached:
+/// the `reason` field of the terminal failure line. The category is the
+/// machine-filterable half of the attribution, while the line's `error`
+/// field carries the readable text.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InternalFailureReason {
+    /// A store read behind the selection failed.
+    StoreError,
+    /// The served profile has no provider credential row.
+    MissingCredential,
+    /// The credential's endpoint prefix does not parse into a dial target.
+    UnparseableEndpointPrefix,
+}
+
+impl InternalFailureReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::StoreError => "store_error",
+            Self::MissingCredential => "missing_credential",
+            Self::UnparseableEndpointPrefix => "unparseable_endpoint_prefix",
+        }
+    }
+}
+
 pub struct GatewayCtx {
     pub route: Route,
     pub selection: Option<Selection>,
@@ -55,11 +79,19 @@ pub struct GatewayCtx {
     /// phase is the single terminal record point and prefers it
     /// over anything derived.
     pub pending_outcome: Option<crate::metrics::ForwardOutcome>,
+    /// Why a gateway-side internal failure happened, staged with the
+    /// pending outcome. Invariant: it is set only for an `internal_error`
+    /// line -- never for a gate refusal or a wire failure.
+    pub pending_reason: Option<InternalFailureReason>,
+    /// The gateway-side failure's own message, staged with the reason and
+    /// rendered in the line's `error` field. Same invariant: only the
+    /// `internal_error` line carries it.
+    pub pending_detail: Option<String>,
     /// The upstream status line staged at the first response
     /// header, for the terminal classification.
     pub upstream_status: Option<u16>,
     /// Whether the upstream connection was established or reused
     /// for this request: the discriminator between a connect
-    /// error and a proxy error at the terminal phase.
+    /// error and an upstream error at the terminal phase.
     pub connected: bool,
 }

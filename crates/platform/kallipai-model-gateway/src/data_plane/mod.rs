@@ -164,6 +164,8 @@ impl ProxyHttp for GatewayProxy {
             t0: None,
             t1: None,
             pending_outcome: None,
+            pending_reason: None,
+            pending_detail: None,
             upstream_status: None,
             connected: false,
         }
@@ -245,6 +247,8 @@ impl ProxyHttp for GatewayProxy {
                     }
                     Err(gate) => {
                         ctx.pending_outcome = Some(gate.outcome);
+                        ctx.pending_reason = gate.reason;
+                        ctx.pending_detail = gate.detail.clone();
                         wire::respond_axum(
                             session,
                             gate.into_response(),
@@ -475,7 +479,7 @@ impl ProxyHttp for GatewayProxy {
 
 /// The terminal forward outcome, decided once at the logging phase
 /// from the staged facts: a gate's pending outcome outranks every
-/// derived fact, an error after upstream contact is a proxy error
+/// derived fact, an error after upstream contact is an upstream error
 /// while one without contact never got past the dial, a clean answer
 /// derives from the upstream status, and the residual bucket keeps
 /// the outcome sums closed.
@@ -489,7 +493,7 @@ fn terminal_outcome(
         pending
     } else if errored {
         if connected || upstream_status.is_some() {
-            ForwardOutcome::ProxyError
+            ForwardOutcome::UpstreamError
         } else {
             ForwardOutcome::ConnectError
         }
@@ -516,33 +520,48 @@ macro_rules! failure_line {
 }
 
 /// The severity a failed forward records at: the gateway's own
-/// forwarding trouble -- a dial failure, a mid-stream proxy error -- is
-/// an ERROR, while a gate rejection is a WARN (the caller's request was
-/// refused, not the platform's health dented).
+/// forwarding trouble -- a dial failure, a mid-stream break, or a
+/// gateway-side internal failure -- is an ERROR, while a gate rejection
+/// and the upstream's own terminations are a WARN (the caller's request
+/// was refused or answered, not the platform's health dented). Every
+/// variant is spelled out: a new outcome cannot land on a severity by
+/// falling into a catch-all.
 fn failure_level(outcome: ForwardOutcome) -> tracing::Level {
     match outcome {
-        ForwardOutcome::ConnectError | ForwardOutcome::ProxyError => tracing::Level::ERROR,
-        _ => tracing::Level::WARN,
+        ForwardOutcome::ConnectError
+        | ForwardOutcome::UpstreamError
+        | ForwardOutcome::InternalError => tracing::Level::ERROR,
+        ForwardOutcome::GatedAuth
+        | ForwardOutcome::GatedRoute
+        | ForwardOutcome::GatedVisibility
+        | ForwardOutcome::GatedParking
+        | ForwardOutcome::GatedPayload
+        | ForwardOutcome::Upstream2xx
+        | ForwardOutcome::Upstream4xx
+        | ForwardOutcome::Upstream5xx
+        | ForwardOutcome::UpstreamOther => tracing::Level::WARN,
     }
 }
 
 /// Whether the terminal phase writes the failure line: an error
 /// terminates the forward on the wire, and a gate refused the client
-/// before one was reached. The gates -- and a gate-side internal
+/// before one was reached. The gates -- and a gateway-side internal
 /// failure, which renders its own 5xx the same way -- answer the
 /// client themselves, so the logging phase sees no error for them:
 /// their line warrants on the outcome alone. The upstream answers
 /// (2xx through other) are the request's normal terminations and
 /// stay off the failure stream.
 fn warrants_failure_line(outcome: ForwardOutcome, errored: bool) -> bool {
-    errored || outcome.is_gate() || outcome == ForwardOutcome::ProxyError
+    errored || outcome.is_gate() || outcome.is_gateway_side()
 }
 
 /// The failure line: one structured record per failed forward, naming
 /// the attribution the counters carry, so a log reader and a dashboard
 /// reader see the same request. It warrants on an error (the wire
 /// failure path) or on a gate outcome; the gate line carries no error
-/// field. A failure before a selection existed (the identity gate)
+/// field, while an internal failure names the gateway-side error that
+/// ended it and the reason category behind it. A failure before a
+/// selection existed (the identity gate)
 /// records none of the selection's fields, and the clock is absent
 /// before the forward branch staged it.
 fn log_forward_failure(
@@ -556,6 +575,12 @@ fn log_forward_failure(
         return;
     }
     let selection = ctx.selection.as_ref();
+    // The line's `error` field: the wire error when one ended the request,
+    // else the gateway-side failure's own message -- the response body
+    // carries the redacted `internal error` text instead. Both can be in
+    // hand on one request (an internal failure after a wire error); the
+    // wire error is the one that ended the forward, so it wins.
+    let wire_error = error.map(|error| error.to_string());
     failure_line!(
         failure_level(outcome),
         endpoint = crate::metrics::endpoint_label(endpoint),
@@ -567,7 +592,8 @@ fn log_forward_failure(
         upstream_status = ctx.upstream_status,
         connected = ctx.connected,
         elapsed_ms = elapsed.map(|d| d.as_millis() as u64),
-        error = error.map(tracing::field::display),
+        reason = ctx.pending_reason.map(|reason| reason.as_str()),
+        error = wire_error.or_else(|| ctx.pending_detail.clone()),
         "the forward failed"
     );
 }
@@ -663,7 +689,7 @@ mod terminal_outcome_tests {
         for (connected, status) in [(true, None), (true, Some(500)), (false, Some(500))] {
             assert_eq!(
                 terminal_outcome(None, true, connected, status),
-                ForwardOutcome::ProxyError,
+                ForwardOutcome::UpstreamError,
                 "connected={connected}, status={status:?}"
             );
         }

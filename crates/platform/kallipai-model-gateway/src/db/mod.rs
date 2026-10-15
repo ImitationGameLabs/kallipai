@@ -37,6 +37,15 @@ pub async fn connect_and_migrate(url: &str, sql_slow: Duration) -> Result<Db> {
 /// tier is stated once rather than per call site. (A `From<DbErr> for
 /// ApiError` impl would violate the orphan rule -- both types are
 /// foreign -- so handlers map explicitly, the lesche shape.)
+///
+/// One store failure on the selection path writes three ERROR records:
+/// this mapping's own line (below), the record `ApiError::internal`
+/// writes when it takes the same text on the common side, and the
+/// gateway's terminal failure line, which names the request, the
+/// `store_error` reason and the same sentence. Three records for one
+/// event is the deliberate price of that failure line carrying its own
+/// attribution; the common-side record stays untouched, since muting it
+/// would change a surface other services share.
 pub fn map_db_err(e: DbErr) -> kallipai_common::protocol::ApiError {
     if is_unique_violation(&e) {
         return kallipai_common::protocol::ApiError::conflict(
@@ -44,7 +53,14 @@ pub fn map_db_err(e: DbErr) -> kallipai_common::protocol::ApiError {
         );
     }
     error!(error = %e, "database failure: mapping to an internal error response");
-    kallipai_common::protocol::ApiError::internal(format_args!("database error: {e}"))
+    kallipai_common::protocol::ApiError::internal(store_error_detail(&e))
+}
+
+/// The sentence one store failure quotes: the store mapping hands it to
+/// the internal-error constructor, and the terminal failure line records
+/// the same text, so the two log records read as one event.
+pub fn store_error_detail(e: &DbErr) -> String {
+    format!("database error: {e}")
 }
 
 /// Whether the error is a Postgres unique violation (SQLSTATE 23505),

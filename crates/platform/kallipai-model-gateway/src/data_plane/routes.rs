@@ -23,7 +23,7 @@ use crate::routes::ApiError;
 use crate::secret;
 use crate::state::AppState;
 
-use super::context::{Route, Selection};
+use super::context::{InternalFailureReason, Route, Selection};
 
 /// The parsed upstream prefix: the peer parts plus the rewrite
 /// inputs.
@@ -118,12 +118,27 @@ pub(crate) async fn authenticate(
     TagmaIdentity::from_headers(state, headers).await
 }
 
-/// A selection-gate rejection: the client's rendered answer plus the
-/// outcome class the observability face counts the request under.
+/// What a selection-phase refusal or a gateway-side failure travels as:
+/// the client's rendered answer, the outcome class the observability
+/// face counts the request under, and -- on the failure side only --
+/// the reason category and readable text the failure line records.
 /// `request_filter` renders the response and stages the outcome; the
 /// `logging` phase is the single terminal record point.
+///
+/// One type carries two kinds of content. The three rejection
+/// constructors ([`Self::route`], [`Self::visibility`],
+/// [`Self::parking`]) set neither `reason` nor `detail`; the failure
+/// constructors ([`Self::internal`], [`Self::internal_with_response`])
+/// set both, and their response always renders a 5xx. The name still
+/// says "gate" because the selection gates were all this type once;
+/// renaming it belongs to whoever next moves this surface.
 pub(crate) struct GateError {
     pub(crate) outcome: ForwardOutcome,
+    /// The reason category of a gateway-side internal failure, and the
+    /// readable text behind it: the terminal failure line carries both.
+    /// Invariant: a gate refusal sets neither.
+    pub(crate) reason: Option<InternalFailureReason>,
+    pub(crate) detail: Option<String>,
     response: Box<axum::response::Response>,
 }
 
@@ -145,21 +160,75 @@ impl GateError {
     }
 
     /// A gateway-side failure on the forward path (5xx): store errors,
-    /// missing credentials, unparseable endpoint prefixes.
-    pub(crate) fn internal(error: ApiError) -> Self {
-        Self::gate(ForwardOutcome::ProxyError, error)
+    /// missing credentials, unparseable endpoint prefixes. The text names
+    /// the object behind the failure -- it is what the client's redacted
+    /// 500 hides and what the failure line records.
+    pub(crate) fn internal(reason: InternalFailureReason, detail: impl std::fmt::Display) -> Self {
+        let detail = detail.to_string();
+        Self::failure(
+            ForwardOutcome::InternalError,
+            Some(reason),
+            Some(detail.clone()),
+            ApiError::internal(&detail).into_response(),
+        )
+    }
+
+    /// The same failure where the response comes from the store mapping:
+    /// it renders the answer and owns the status it answers with, while
+    /// the line still takes the reason and the text.
+    pub(crate) fn internal_with_response(
+        reason: InternalFailureReason,
+        detail: impl std::fmt::Display,
+        error: ApiError,
+    ) -> Self {
+        Self::failure(
+            ForwardOutcome::InternalError,
+            Some(reason),
+            Some(detail.to_string()),
+            error.into_response(),
+        )
     }
 
     fn gate(outcome: ForwardOutcome, error: ApiError) -> Self {
+        Self::failure(outcome, None, None, error.into_response())
+    }
+
+    fn failure(
+        outcome: ForwardOutcome,
+        reason: Option<InternalFailureReason>,
+        detail: Option<String>,
+        response: axum::response::Response,
+    ) -> Self {
         Self {
             outcome,
-            response: Box::new(error.into_response()),
+            reason,
+            detail,
+            response: Box::new(response),
         }
     }
 
     pub(crate) fn into_response(self) -> axum::response::Response {
         *self.response
     }
+}
+
+/// A store failure behind the selection: the client answer keeps the
+/// store mapping's status, while the failure line names the reason and
+/// the sentence the mapping logged.
+///
+/// Two invariants hold. The response and the recorded text come from the
+/// same [`sea_orm::DbErr`] -- [`db::map_db_err`] renders the answer and
+/// [`db::store_error_detail`] the text -- so one failure reads the same
+/// in both places. And every call site today is a read on the selection
+/// path, so the mapping's unique-violation branch cannot be reached from
+/// here; it stays for the handlers that write.
+fn store_failure(error: sea_orm::DbErr) -> GateError {
+    let detail = db::store_error_detail(&error);
+    GateError::internal_with_response(
+        InternalFailureReason::StoreError,
+        detail,
+        db::map_db_err(error),
+    )
 }
 
 /// The forwarding selection: the explicit override, the visibility
@@ -192,13 +261,13 @@ pub(crate) async fn select_route(
             // accounts).
             let mut rows = registry::profiles_by_id(&state.db, explicit)
                 .await
-                .map_err(|e| GateError::internal(db::map_db_err(e)))?;
+                .map_err(store_failure)?;
             let Some(profile) = rows.pop() else {
                 return Err(GateError::route(ApiError::not_found("no such profile")));
             };
             let served = registry::served_profile(&state.db, profile)
                 .await
-                .map_err(|e| GateError::internal(db::map_db_err(e)))?
+                .map_err(store_failure)?
                 .ok_or_else(|| GateError::route(ApiError::not_found("no such profile")))?;
             let grant = visibility::profile_grant(
                 &state.db,
@@ -207,7 +276,7 @@ pub(crate) async fn select_route(
                 explicit,
             )
             .await
-            .map_err(|e| GateError::internal(db::map_db_err(e)))?;
+            .map_err(store_failure)?;
             match grant {
                 None if served.provider_owner == registry::CATALOG_OWNER => {
                     return Err(GateError::visibility(ApiError::forbidden(
@@ -231,7 +300,7 @@ pub(crate) async fn select_route(
                 registry::gateway_selection::Entity::find_by_id(identity.tagma_id.clone())
                     .one(&state.db)
                     .await
-                    .map_err(|e| GateError::internal(db::map_db_err(e)))?
+                    .map_err(store_failure)?
             else {
                 return Err(GateError::route(ApiError::not_found(
                     "no collection selected",
@@ -243,7 +312,7 @@ pub(crate) async fn select_route(
             ))
             .one(&state.db)
             .await
-            .map_err(|e| GateError::internal(db::map_db_err(e)))?
+            .map_err(store_failure)?
             else {
                 return Err(GateError::route(ApiError::not_found(
                     "the selected collection no longer exists",
@@ -261,7 +330,7 @@ pub(crate) async fn select_route(
                 endpoint.families(),
             )
             .await
-            .map_err(|e| GateError::internal(db::map_db_err(e)))?
+            .map_err(store_failure)?
             .ok_or_else(|| {
                 GateError::route(ApiError::not_found(
                     "the selected collection's default set has no member serving this endpoint",
@@ -275,7 +344,7 @@ pub(crate) async fn select_route(
             // domain.
             if !visibility::set_visible(&state.db, &identity.viewer, &default_set)
                 .await
-                .map_err(|e| GateError::internal(db::map_db_err(e)))?
+                .map_err(store_failure)?
             {
                 return Err(GateError::visibility(ApiError::forbidden(
                     "default profile is outside the visibility domain",
@@ -301,16 +370,18 @@ pub(crate) async fn select_route(
     let profile_id = served.profile.profile_id.clone();
     let credential = secret::credential_for_profile(&state.db, &served.profile)
         .await
-        .map_err(|e| GateError::internal(db::map_db_err(e)))?
+        .map_err(store_failure)?
         .ok_or_else(|| {
-            GateError::internal(ApiError::internal(format_args!(
-                "no provider credential for profile {profile_id}"
-            )))
+            GateError::internal(
+                InternalFailureReason::MissingCredential,
+                format_args!("no provider credential for profile {profile_id}"),
+            )
         })?;
     let parsed = parse_endpoint_prefix(credential.endpoint_prefix()).ok_or_else(|| {
-        GateError::internal(ApiError::internal(format_args!(
-            "the upstream endpoint prefix for profile {profile_id} does not parse"
-        )))
+        GateError::internal(
+            InternalFailureReason::UnparseableEndpointPrefix,
+            format_args!("the upstream endpoint prefix for profile {profile_id} does not parse"),
+        )
     })?;
     // SNI is the host: the certificate the upstream presents names the
     // host we dialed, and no per-credential SNI field exists.

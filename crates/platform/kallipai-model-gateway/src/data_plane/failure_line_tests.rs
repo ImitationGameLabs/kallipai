@@ -3,14 +3,13 @@
 //! forwarding suite drives a real listener instead; these read the line
 //! the terminal phase writes for one failed forward.
 
-use std::io::Write;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use pingora::ErrorType;
 use pingora::prelude::HttpPeer;
 
-use super::context::Selection;
+use super::context::{InternalFailureReason, Selection};
 use super::{GatewayCtx, Route, failure_level, log_forward_failure, warrants_failure_line};
 use crate::forward::dialect::Endpoint;
 use crate::metrics::ForwardOutcome;
@@ -40,7 +39,11 @@ fn failure_levels_split_the_gates_from_the_forward_failures() {
             "{outcome:?} is not the gateway's own trouble"
         );
     }
-    for outcome in [ForwardOutcome::ConnectError, ForwardOutcome::ProxyError] {
+    for outcome in [
+        ForwardOutcome::ConnectError,
+        ForwardOutcome::UpstreamError,
+        ForwardOutcome::InternalError,
+    ] {
         assert_eq!(
             failure_level(outcome),
             tracing::Level::ERROR,
@@ -93,6 +96,8 @@ fn the_failure_line_omits_the_fields_a_gate_never_staged() {
         t0: None,
         t1: None,
         pending_outcome: Some(ForwardOutcome::GatedAuth),
+        pending_reason: None,
+        pending_detail: None,
         upstream_status: None,
         connected: false,
     };
@@ -114,6 +119,7 @@ fn the_failure_line_omits_the_fields_a_gate_never_staged() {
         "api_family=",
         "elapsed_ms=",
         "error=",
+        "reason=",
     ] {
         assert!(!line.contains(absent), "{absent} is not staged: {line}");
     }
@@ -151,14 +157,18 @@ fn the_failure_line_warrants_on_errors_and_gates_only() {
             "{outcome:?} warrants with one"
         );
     }
-    for outcome in [ForwardOutcome::ConnectError, ForwardOutcome::ProxyError] {
+    for outcome in [
+        ForwardOutcome::ConnectError,
+        ForwardOutcome::UpstreamError,
+        ForwardOutcome::InternalError,
+    ] {
         assert!(
             warrants_failure_line(outcome, true),
             "{outcome:?} warrants through its error"
         );
     }
     // The wire-failure class splits at the error: ConnectError carries
-    // one by construction, while a gate-side internal failure answers
+    // one by construction, while a gateway-side internal failure answers
     // its own 5xx the way the gates do and stages no pingora error --
     // the outcome alone warrants its line.
     assert!(
@@ -166,22 +176,26 @@ fn the_failure_line_warrants_on_errors_and_gates_only() {
         "a connect failure warrants through its error only"
     );
     assert!(
-        warrants_failure_line(ForwardOutcome::ProxyError, false),
-        "a gate-side internal failure warrants on the outcome alone"
+        warrants_failure_line(ForwardOutcome::InternalError, false),
+        "a gateway-side internal failure warrants on the outcome alone"
     );
 }
 
-/// A gate-side internal failure (a store error behind the selection)
-/// stages ProxyError and answers its own 5xx: the line warrants on
-/// the outcome alone, at the severity of the gateway's own trouble,
-/// with no pingora error field to name.
+/// A gateway-side internal failure (a store error behind the selection)
+/// stages its own outcome and answers its own 5xx: the line warrants on
+/// the outcome alone, records at the severity of the gateway's own
+/// trouble, and names both the reason category and the failure text --
+/// the client's response body carries the redacted `internal error`
+/// instead.
 #[test]
-fn a_gate_side_internal_failure_warrants_its_line_without_an_error() {
+fn a_gateway_side_internal_failure_names_its_reason_and_text() {
     let (lines, _guard) = capture_lines();
-    let ctx = forwarding_ctx();
+    let mut ctx = forwarding_ctx();
+    ctx.pending_reason = Some(InternalFailureReason::MissingCredential);
+    ctx.pending_detail = Some("no provider credential for profile p8".to_string());
     log_forward_failure(
         Endpoint::ChatCompletions,
-        ForwardOutcome::ProxyError,
+        ForwardOutcome::InternalError,
         &ctx,
         None,
         Some(Duration::from_millis(4)),
@@ -191,8 +205,12 @@ fn a_gate_side_internal_failure_warrants_its_line_without_an_error() {
         line.contains("ERROR"),
         "a gateway-side failure records at error severity: {line}"
     );
-    assert!(line.contains("outcome=proxy_error"), "{line}");
-    assert!(!line.contains("error="), "no error is staged: {line}");
+    assert!(line.contains("outcome=internal_error"), "{line}");
+    assert!(line.contains("reason=missing_credential"), "{line}");
+    assert!(
+        line.contains("error=no provider credential for profile p8"),
+        "{line}"
+    );
 }
 
 /// An upstream answer without an error writes nothing: the normal
@@ -235,6 +253,8 @@ fn forwarding_ctx() -> GatewayCtx {
         t0: Some(Instant::now()),
         t1: None,
         pending_outcome: None,
+        pending_reason: None,
+        pending_detail: None,
         upstream_status: None,
         connected: false,
     }
@@ -247,7 +267,7 @@ fn capture_lines() -> (Arc<Mutex<Vec<u8>>>, tracing::subscriber::DefaultGuard) {
     let subscriber = tracing_subscriber::registry().with(
         tracing_subscriber::fmt::layer()
             .with_ansi(false)
-            .with_writer(SharedBuf(lines.clone()))
+            .with_writer(crate::test_support::SharedBuf(lines.clone()))
             .with_filter(tracing_subscriber::EnvFilter::new("warn")),
     );
     let guard = tracing::subscriber::set_default(subscriber);
@@ -262,26 +282,81 @@ fn captured(lines: &Arc<Mutex<Vec<u8>>>) -> String {
         .replace('"', "")
 }
 
-/// The capture writer: the formatted lines land in the shared buffer the
-/// test reads back.
-struct SharedBuf(Arc<Mutex<Vec<u8>>>);
-
-impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for SharedBuf {
-    type Writer = MutexGuardWriter<'a>;
-
-    fn make_writer(&'a self) -> Self::Writer {
-        MutexGuardWriter(self.0.lock().unwrap())
-    }
+/// The reason vocabulary the failure line's `reason` field filters on: the
+/// three values are pinned here the way the forward outcome vocabulary is
+/// pinned beside its enum, so a rename cannot reach the log consumers
+/// with the suite still green.
+#[test]
+fn internal_failure_reason_vocabulary_lock() {
+    let all = [
+        InternalFailureReason::StoreError,
+        InternalFailureReason::MissingCredential,
+        InternalFailureReason::UnparseableEndpointPrefix,
+    ];
+    let rendered: Vec<&str> = all.iter().map(|reason| reason.as_str()).collect();
+    assert_eq!(
+        rendered,
+        vec![
+            "store_error",
+            "missing_credential",
+            "unparseable_endpoint_prefix",
+        ]
+    );
 }
 
-struct MutexGuardWriter<'a>(std::sync::MutexGuard<'a, Vec<u8>>);
+/// The constructor table: every internal constructor lands on the
+/// internal_error outcome carrying the reason it was handed and the text
+/// the line records, while every rejection constructor lands on its gate
+/// outcome carrying neither. One table, so a constructor cannot quietly
+/// join the wrong side.
+#[test]
+fn the_constructors_stage_reason_and_detail_by_kind() {
+    use super::routes::GateError;
 
-impl Write for MutexGuardWriter<'_> {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0.write(buf)
+    let internals = [
+        (
+            InternalFailureReason::StoreError,
+            "database error: connection closed",
+        ),
+        (
+            InternalFailureReason::MissingCredential,
+            "no provider credential for profile p1",
+        ),
+        (
+            InternalFailureReason::UnparseableEndpointPrefix,
+            "the upstream endpoint prefix for profile p1 does not parse",
+        ),
+    ];
+    for (reason, text) in internals {
+        let error = GateError::internal(reason, text);
+        assert_eq!(error.outcome, ForwardOutcome::InternalError);
+        assert_eq!(error.reason, Some(reason));
+        assert_eq!(error.detail.as_deref(), Some(text));
+        assert_eq!(
+            error.into_response().status(),
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR
+        );
     }
 
-    fn flush(&mut self) -> std::io::Result<()> {
-        self.0.flush()
+    let rejections = [
+        (
+            ForwardOutcome::GatedRoute,
+            GateError::route(crate::routes::ApiError::not_found("no such profile")),
+        ),
+        (
+            ForwardOutcome::GatedVisibility,
+            GateError::visibility(crate::routes::ApiError::forbidden(
+                "not visible to the caller",
+            )),
+        ),
+        (
+            ForwardOutcome::GatedParking,
+            GateError::parking(crate::routes::ApiError::forbidden("profile is parked")),
+        ),
+    ];
+    for (outcome, error) in rejections {
+        assert_eq!(error.outcome, outcome);
+        assert_eq!(error.reason, None, "{outcome:?} stages no reason");
+        assert_eq!(error.detail, None, "{outcome:?} stages no detail");
     }
 }

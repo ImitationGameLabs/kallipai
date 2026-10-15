@@ -3,6 +3,7 @@
 //! crate talks to its own container so gateway tests never contend with the
 //! other services' containers. Needs Docker at test time.
 
+use std::io::Write;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use sea_orm::{ConnectionTrait, Database, DatabaseBackend, Statement};
@@ -10,6 +11,7 @@ use testcontainers_modules::postgres::Postgres;
 use testcontainers_modules::testcontainers::runners::AsyncRunner;
 use testcontainers_modules::testcontainers::{ImageExt, ReuseDirective};
 use tokio::sync::OnceCell;
+use tracing_subscriber::prelude::*;
 
 use crate::db::Db;
 
@@ -730,6 +732,59 @@ pub(crate) async fn seed_registry(db: &Db, upstream_base_url: &str) {
     .insert(db)
     .await
     .expect("insert platform publication");
+}
+
+/// The capture writer the line-reading suites share: the formatted lines
+/// land in the buffer the test reads back, whichever thread wrote them.
+pub(crate) struct SharedBuf(pub(crate) std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for SharedBuf {
+    type Writer = MutexGuardWriter<'a>;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        MutexGuardWriter(self.0.lock().unwrap())
+    }
+}
+
+pub(crate) struct MutexGuardWriter<'a>(pub(crate) std::sync::MutexGuard<'a, Vec<u8>>);
+
+impl Write for MutexGuardWriter<'_> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.0.flush()
+    }
+}
+
+/// The process-global capture the end-to-end line assertions read: the
+/// terminal phase writes from pingora's own thread, so the thread-local
+/// guard the unit tests use would miss it. Installed once for the whole
+/// binary and shared -- a second caller gets the same buffer instead of a
+/// panic, so the next end-to-end test calls this rather than installing a
+/// subscriber of its own. Every test's lines land in the one buffer, so
+/// an assertion selects its line with a needle only that test produces.
+pub(crate) fn global_capture() -> std::sync::Arc<std::sync::Mutex<Vec<u8>>> {
+    static LINES: std::sync::OnceLock<std::sync::Arc<std::sync::Mutex<Vec<u8>>>> =
+        std::sync::OnceLock::new();
+    LINES
+        .get_or_init(|| {
+            let lines = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let subscriber = tracing_subscriber::registry().with(
+                tracing_subscriber::fmt::layer()
+                    .with_ansi(false)
+                    .with_writer(SharedBuf(lines.clone()))
+                    .with_filter(tracing_subscriber::EnvFilter::new("warn")),
+            );
+            // The slot is wanted once. Losing it to a foreign subscriber
+            // leaves the buffer empty and surfaces as the assertion that
+            // never found its line; aborting here would take the whole
+            // binary down from whichever test installed second.
+            let _ = tracing::subscriber::set_global_default(subscriber);
+            lines
+        })
+        .clone()
 }
 
 #[cfg(test)]

@@ -90,6 +90,34 @@ async fn await_forward_count(
     panic!("forward outcome {outcome:?} never reached {expected}");
 }
 
+/// The process-global capture the line assertions read: installed once for
+/// the whole binary by the shared helper, so every end-to-end test reads
+/// the same buffer and selects its own line with a needle it alone
+/// produces.
+fn global_lines() -> std::sync::Arc<std::sync::Mutex<Vec<u8>>> {
+    crate::test_support::global_capture()
+}
+
+/// Await the captured line carrying `needle`, read back the way the unit
+/// tests read their own capture: quotes stripped by the fmt layer.
+async fn await_line(lines: &std::sync::Arc<std::sync::Mutex<Vec<u8>>>, needle: &str) -> String {
+    for _ in 0..500 {
+        let found = {
+            let text = String::from_utf8(lines.lock().unwrap().clone())
+                .expect("the fmt layer writes utf8")
+                .replace('"', "");
+            text.lines()
+                .find(|line| line.contains(needle))
+                .map(str::to_string)
+        };
+        if let Some(line) = found {
+            return line;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("no captured line carried {needle}");
+}
+
 /// A taken port is the caller's error, not a background panic: the
 /// probe bind fails before the thread exists.
 #[tokio::test]
@@ -1128,4 +1156,190 @@ async fn oversize_body_is_a_413_with_cors_headers() {
         head.to_ascii_lowercase()
             .contains("access-control-allow-origin: https://app.example")
     );
+}
+
+/// The internal-failure face end to end: the selected default set serves
+/// through a profile whose credential row is gone, so the failure happens
+/// on the gateway side, before the upstream -- and the observability face
+/// has to say so.
+#[tokio::test]
+async fn an_internal_failure_names_its_reason_and_profile() {
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+
+    let db = migrated_test_db().await;
+    let (upstream_base, _seen) = spawn_mock_upstream().await;
+    crate::test_support::seed_registry(&db, &upstream_base).await;
+    seed_selection(&db).await;
+
+    let removed = crate::secret::provider_credential::Entity::delete_many()
+        .filter(crate::secret::provider_credential::Column::ProviderId.eq("p1"))
+        .exec(&db)
+        .await
+        .expect("delete the head member's credential");
+    assert_eq!(removed.rows_affected, 1);
+    // The capture installs before the plane spawns: the terminal phase
+    // writes its line on pingora's own thread.
+    let lines = global_lines();
+
+    let (base, metrics) = spawn_plane_with_metrics(db).await;
+    let response = post_generation(
+        &base,
+        "/chat/completions",
+        TEST_TAGMA_BEARER,
+        None,
+        r#"{"model":"deepseek-chat","messages":[{"role":"user","content":"hi"}]}"#,
+        &[],
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        axum::http::StatusCode::INTERNAL_SERVER_ERROR
+    );
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(body["error"]["message"], "internal error");
+
+    await_forward_count(&metrics, crate::metrics::ForwardOutcome::InternalError, 1).await;
+    let line = await_line(&lines, "reason=missing_credential").await;
+    for field in [
+        "endpoint=chat",
+        "outcome=internal_error",
+        "tagma_id=tagma-under-test",
+        "reason=missing_credential",
+        "error=no provider credential for profile p1",
+        "connected=false",
+    ] {
+        assert!(line.contains(field), "{field} missing from {line}");
+    }
+}
+
+/// A stored endpoint prefix that is not an http(s) endpoint: the forward
+/// path refuses to guess a dial target, the client gets the redacted 5xx,
+/// and the line names the profile and the reason beside the request.
+#[tokio::test]
+async fn an_unparseable_endpoint_prefix_is_named_on_the_line() {
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+
+    let db = migrated_test_db().await;
+    let (upstream_base, _seen) = spawn_mock_upstream().await;
+    crate::test_support::seed_registry(&db, &upstream_base).await;
+    seed_selection(&db).await;
+    crate::registry::provider::Entity::update_many()
+        .col_expr(
+            crate::registry::provider::Column::BaseUrl,
+            sea_orm::sea_query::Expr::value("ftp://upstream.test/v1"),
+        )
+        .filter(crate::registry::provider::Column::Owner.eq("system"))
+        .filter(crate::registry::provider::Column::ProviderId.eq("p1"))
+        .exec(&db)
+        .await
+        .expect("point the served provider at an unparseable prefix");
+
+    let lines = global_lines();
+    let (base, metrics) = spawn_plane_with_metrics(db).await;
+    let response = post_generation(
+        &base,
+        "/chat/completions",
+        TEST_TAGMA_BEARER,
+        None,
+        r#"{"model":"deepseek-chat","messages":[{"role":"user","content":"hi"}]}"#,
+        &[],
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        axum::http::StatusCode::INTERNAL_SERVER_ERROR
+    );
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(body["error"]["message"], "internal error");
+
+    await_forward_count(&metrics, crate::metrics::ForwardOutcome::InternalError, 1).await;
+    let line = await_line(&lines, "reason=unparseable_endpoint_prefix").await;
+    for field in [
+        "endpoint=chat",
+        "outcome=internal_error",
+        "tagma_id=tagma-under-test",
+        "reason=unparseable_endpoint_prefix",
+        "error=the upstream endpoint prefix for profile p1 does not parse",
+        "connected=false",
+    ] {
+        assert!(line.contains(field), "{field} missing from {line}");
+    }
+}
+
+/// A store failure behind the selection: the credential read fails, the
+/// client gets the mapping's 5xx with the redacted text, and the line
+/// names the request, the `store_error` reason and the sentence the
+/// mapping logged -- the whole chain from the failing read to the record.
+#[tokio::test]
+async fn a_store_failure_behind_the_selection_is_named_on_the_line() {
+    use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
+
+    let db = migrated_test_db().await;
+    let (upstream_base, _seen) = spawn_mock_upstream().await;
+    crate::test_support::seed_registry(&db, &upstream_base).await;
+    seed_selection(&db).await;
+    db.execute(Statement::from_string(
+        DatabaseBackend::Postgres,
+        "DROP TABLE provider_credentials CASCADE".to_string(),
+    ))
+    .await
+    .expect("take the credential table away");
+
+    let lines = global_lines();
+    let (base, metrics) = spawn_plane_with_metrics(db).await;
+    let response = post_generation(
+        &base,
+        "/chat/completions",
+        TEST_TAGMA_BEARER,
+        None,
+        r#"{"model":"deepseek-chat","messages":[{"role":"user","content":"hi"}]}"#,
+        &[],
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        axum::http::StatusCode::INTERNAL_SERVER_ERROR
+    );
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(body["error"]["message"], "internal error");
+
+    await_forward_count(&metrics, crate::metrics::ForwardOutcome::InternalError, 1).await;
+    let line = await_line(&lines, "reason=store_error").await;
+    for field in [
+        "endpoint=chat",
+        "outcome=internal_error",
+        "tagma_id=tagma-under-test",
+        "reason=store_error",
+        "error=database error:",
+        "connected=false",
+    ] {
+        assert!(line.contains(field), "{field} missing from {line}");
+    }
+}
+
+/// The selection the failure-line tests ride: the tagma pinned to the
+/// baseline collection, whose default set anchors on `alpha` (the fixture
+/// set whose head member is profile p1).
+async fn seed_selection(db: &crate::db::Db) {
+    use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
+
+    crate::registry::gateway_selection::ActiveModel {
+        tagma_id: Set("tagma-under-test".to_string()),
+        owner: Set("system".to_string()),
+        collection_name: Set("baseline".to_string()),
+        updated_at: Set(time::OffsetDateTime::now_utc()),
+    }
+    .insert(db)
+    .await
+    .expect("insert selection");
+    crate::registry::collection::Entity::update_many()
+        .col_expr(
+            crate::registry::collection::Column::DefaultSetName,
+            sea_orm::sea_query::Expr::value("alpha"),
+        )
+        .filter(crate::registry::collection::Column::Owner.eq("system"))
+        .filter(crate::registry::collection::Column::Name.eq("baseline"))
+        .exec(db)
+        .await
+        .expect("anchor the default set");
 }

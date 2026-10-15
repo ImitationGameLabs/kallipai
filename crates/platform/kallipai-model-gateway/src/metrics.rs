@@ -8,7 +8,7 @@
 //! any other collector in the process. Recording is synchronous -- the
 //! pingora phases call inline; there is no background task.
 //!
-//! Label vocabularies are static (endpoint 3, forward outcome 11,
+//! Label vocabularies are static (endpoint 3, forward outcome 12,
 //! identity outcome 4, connect error class 4, upstream status class 4,
 //! API family 4 -- the registry's validation set). The one
 //! credential-sourced label is `upstream`: the upstream URL authority
@@ -79,10 +79,14 @@ pub(crate) enum ForwardOutcome {
     /// The upstream could not be reached: connection establishment
     /// failed.
     ConnectError,
-    /// The forward failed on the gateway side after the gates: an
-    /// internal selection failure (store error, missing credential,
-    /// unparseable prefix) or a mid-stream proxy error.
-    ProxyError,
+    /// The forward failed after an upstream was reached: the upstream
+    /// accepted the request and the exchange broke before the answer
+    /// landed (a mid-stream break included).
+    UpstreamError,
+    /// The forward failed on the gateway side, before any upstream was
+    /// reached: a store error behind the selection, a missing provider
+    /// credential, or an unparseable endpoint prefix.
+    InternalError,
 }
 
 impl ForwardOutcome {
@@ -98,13 +102,16 @@ impl ForwardOutcome {
             Self::Upstream5xx => "upstream_5xx",
             Self::UpstreamOther => "upstream_other",
             Self::ConnectError => "connect_error",
-            Self::ProxyError => "proxy_error",
+            Self::UpstreamError => "upstream_error",
+            Self::InternalError => "internal_error",
         }
     }
     /// Whether the outcome is a gate refusal: the selection gates
     /// answered the request before an upstream was reached. The five
     /// variants are enumerated here, beside the enum, so a new gate
-    /// variant cannot silently escape the warrant and counter faces.
+    /// variant cannot silently escape the warrant and counter faces; the
+    /// gateway-side internal failure is the non-refusal case, enumerated
+    /// by [`Self::is_gateway_side`].
     pub(crate) fn is_gate(self) -> bool {
         matches!(
             self,
@@ -114,6 +121,15 @@ impl ForwardOutcome {
                 | Self::GatedParking
                 | Self::GatedPayload
         )
+    }
+
+    /// Whether the outcome is the gateway's own failure with no upstream
+    /// and no wire error behind it: the one non-refusal outcome the
+    /// failure-line warrant admits on the outcome alone. Enumerated
+    /// here, beside the enum and next to [`Self::is_gate`], so a new
+    /// gateway-side variant cannot quietly lose its line.
+    pub(crate) fn is_gateway_side(self) -> bool {
+        matches!(self, Self::InternalError)
     }
 
     /// The upstream status-line class. Everything outside 2xx/4xx/5xx
@@ -301,7 +317,7 @@ impl Metrics {
         let upstream_responses = IntCounterVec::new(
             Opts::new(
                 "kallipai_model_gateway_upstream_responses_total",
-                "Upstream response status classes by upstream address and API family, one count per response at the first upstream header; mid-stream breaks after a healthy header land in the forward table's proxy_error, so the two tables do not sum equal.",
+                "Upstream response status classes by upstream address and API family, one count per response at the first upstream header; mid-stream breaks after a healthy header land in the forward table's upstream_error, so the two tables do not sum equal.",
             ),
             &["upstream", "api_family", "status_class"],
         )
@@ -417,7 +433,7 @@ impl Metrics {
     /// the first upstream header (the status line is in). Mid-stream
     /// breaks after a healthy header still count here under the status
     /// class the header carried; the forward table's terminal outcome
-    /// records the break as `proxy_error`, so the two tables do not sum
+    /// records the break as `upstream_error`, so the two tables do not sum
     /// equal (their difference is the mid-stream death count).
     pub(crate) fn record_upstream_response(
         &self,
@@ -577,7 +593,8 @@ mod tests {
             ForwardOutcome::Upstream5xx,
             ForwardOutcome::UpstreamOther,
             ForwardOutcome::ConnectError,
-            ForwardOutcome::ProxyError,
+            ForwardOutcome::UpstreamError,
+            ForwardOutcome::InternalError,
         ];
         let rendered: Vec<&str> = all.iter().map(|o| o.as_str()).collect();
         assert_eq!(
@@ -593,7 +610,8 @@ mod tests {
                 "upstream_5xx",
                 "upstream_other",
                 "connect_error",
-                "proxy_error",
+                "upstream_error",
+                "internal_error",
             ]
         );
     }
