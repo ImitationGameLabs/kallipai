@@ -203,6 +203,7 @@ fn stored_credentials_are_reused_without_a_code() {
 /// discriminating power: if the forward regresses to the default
 /// stderr-only path, the buffer stays empty and the assert fires.
 #[test]
+#[serial]
 fn panic_forward_writes_error_event() {
     use std::sync::{Arc, Mutex};
     use tracing_subscriber::prelude::*;
@@ -232,16 +233,120 @@ fn panic_forward_writes_error_event() {
             .with_filter(tracing_subscriber::EnvFilter::new("error")),
     );
     let _guard = tracing::subscriber::set_default(subscriber);
+    // The forward hook is process-global, so this block owns it: a hook
+    // that outlived its test would swallow the panic output of every test
+    // that runs after it. The guard drops back the recording sentinel
+    // installed below, not the harness hook that sentinel wrapped: the
+    // sentinel stays installed for the rest of the process, because taking
+    // the hook out leaves no path back to the hook itself. The sentinel
+    // delegates to that hook, and the restore is checked by identity below.
+    // The hook type `std::panic::set_hook` takes.
+    type PanicHook = Box<dyn Fn(&std::panic::PanicHookInfo) + Sync + Send + 'static>;
+
+    struct HookGuard(Option<PanicHook>);
+    impl Drop for HookGuard {
+        fn drop(&mut self) {
+            if let Some(previous) = self.0.take() {
+                std::panic::set_hook(previous);
+            }
+        }
+    }
+
+    // A recording sentinel stands in for the harness hook, so the restore
+    // is checked by identity: the panic raised after the drop must reach
+    // this sentinel instead of the forwarding hook. It delegates to the
+    // hook it replaced, which is where the harness output goes from there
+    // on. The sentinel outlives this test and counts process-wide, so it
+    // counts only raises on this thread: another test's off-thread panic is
+    // not one of this test's raises.
+    let previous = std::panic::take_hook();
+    let sentinel_hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let hits = sentinel_hits.clone();
+    let test_thread = std::thread::current().id();
+    std::panic::set_hook(Box::new(move |info: &std::panic::PanicHookInfo| {
+        if std::thread::current().id() == test_thread {
+            hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        previous(info);
+    }));
+    let restore_hook = HookGuard(Some(std::panic::take_hook()));
 
     std::panic::set_hook(Box::new(forward_panic_to_tracing));
     let _ = std::panic::catch_unwind(|| panic!("hook probe"));
 
     let captured = String::from_utf8(shared.lock().unwrap().clone()).expect("log bytes are utf8");
+    // A failing assert in this test can arrive with no reason at all: while
+    // the forwarding hook is installed - the state a broken restore leaves
+    // behind - the panic goes to the tracing buffer instead of stderr. Say
+    // it on stderr before the assert fires; passing runs print nothing. The
+    // write goes straight to stderr rather than through `eprintln!`, whose
+    // line a process abort drops with libtest's capture buffer unflushed.
+    let report = |what: String| {
+        use std::io::Write as _;
+        let _ = writeln!(
+            std::io::stderr(),
+            "panic_forward_writes_error_event: {what}"
+        );
+    };
+    if !captured.contains("panic") {
+        report(format!("no panic event in the buffer: {captured}"));
+    }
     assert!(
         captured.contains("panic"),
         "missing panic event: {captured}"
     );
+    if !captured.contains("hook probe") {
+        report(format!("the payload never reached the buffer: {captured}"));
+    }
     assert!(captured.contains("hook probe"), "payload lost: {captured}");
+
+    // Restoring is part of the contract, not aftercare: after the drop a
+    // fresh panic must reach the sentinel standing in for the hook
+    // installed before this test, and must leave this test's writer alone.
+    drop(restore_hook);
+    let _ = std::panic::catch_unwind(|| panic!("after restore"));
+    // The count is thread-scoped, so the raise above - this thread's - is
+    // the only one the sentinel may have counted by now. Read it here, so a
+    // filter that counts the other side fails on the spot.
+    let restored_count = sentinel_hits.load(std::sync::atomic::Ordering::SeqCst);
+    if restored_count != 1 {
+        report(format!(
+            "the sentinel counted {restored_count} raises after the restore, not one"
+        ));
+    }
+    assert_eq!(
+        restored_count, 1,
+        "the raise after the restore did not count once on the installing thread"
+    );
+    // The raise below is this test's own, on another thread: the sentinel
+    // outlives this test, so another thread's raise must leave the count
+    // alone. It is not a failure. The join reports whether the raise happened,
+    // so a count left alone cannot pass for a probe that never raised.
+    let probe_raised = std::thread::spawn(|| panic!("sibling thread probe"))
+        .join()
+        .is_err();
+    let after = String::from_utf8(shared.lock().unwrap().clone()).expect("log bytes are utf8");
+    let sentinel_count = sentinel_hits.load(std::sync::atomic::Ordering::SeqCst);
+    if sentinel_count != 1 {
+        report(format!(
+            "the sentinel counted {sentinel_count} raises, not one"
+        ));
+    }
+    if after != captured {
+        report(format!("the forward hook outlived the test: {after}"));
+    }
+    assert_eq!(
+        sentinel_count, 1,
+        "an off-thread raise reached the sentinel standing in for the harness hook"
+    );
+    if !probe_raised {
+        report("the sibling probe never raised".to_string());
+    }
+    assert!(
+        probe_raised,
+        "the sibling probe raised nothing to be ignored"
+    );
+    assert_eq!(after, captured, "the forward hook outlived the test");
 }
 
 /// The env switch accepts 1/true case-insensitively and nothing else:

@@ -339,6 +339,57 @@ fn an_out_of_order_trail_is_booked_not_panicked() {
 }
 
 #[test]
+fn a_window_opened_over_an_open_one_books_the_abandoned_window() {
+    // A second opening while one window is open is an inconsistent trail:
+    // the abandoned window is booked as a gap, and so is every agent its
+    // capture could not read; the gap names the window the trail actually
+    // reached (the abandoned one), not the window the next terminal pairs
+    // with.
+    let mut start = snap(&[("a", 100, 0)]);
+    start.skipped.push(SkippedAgent {
+        agent_id: "b".into(),
+        reason: "capture could not read the agent".into(),
+    });
+    let resume = snap(&[("a", 200, 0)]);
+    let close = snap(&[("a", 300, 0)]);
+    let events = vec![
+        event(1, "start", 10, Some(&start)),
+        event(2, "resume", 20, Some(&resume)),
+        event(3, "close", 30, Some(&close)),
+    ];
+    let usage = aggregate(&events).unwrap().expect("usage");
+    assert!(
+        usage.partial && !usage.open,
+        "an abandoned window makes the task partial"
+    );
+    assert_eq!(usage.gaps.len(), 2, "the unread agent is booked too");
+    let booked: Vec<(&str, usize, UsageGapReason)> = usage
+        .gaps
+        .iter()
+        .map(|gap| (gap.agent_id.as_str(), gap.segment, gap.reason))
+        .collect();
+    // Both gaps are MissingTerminal, the agent the capture could not read
+    // included: a window abandoned by the next open never reaches a
+    // terminal, so everything it carries is missing one. The paired path,
+    // where a skip at open becomes MissingBaseline, does not apply here.
+    // The choice is deliberate.
+    assert_eq!(
+        booked,
+        vec![
+            ("a", 1, UsageGapReason::MissingTerminal),
+            ("b", 1, UsageGapReason::MissingTerminal),
+        ],
+        "the abandoned window books its agent and the one it could not read"
+    );
+    // The surviving window is the one the resume opened: its spend is the
+    // resume -> close delta, and the abandoned window contributes nothing.
+    assert_eq!(usage.segments.len(), 1);
+    assert_eq!(usage.segments[0].from_event, "resume");
+    assert_eq!(usage.segments[0].to_event, "close");
+    assert_eq!(usage.total_tokens, 100);
+}
+
+#[test]
 fn review_neither_opens_nor_closes_a_window() {
     // `review` moves the gate, not the work: the window it happens inside
     // stays one window, and its spend stays in that window's delta.

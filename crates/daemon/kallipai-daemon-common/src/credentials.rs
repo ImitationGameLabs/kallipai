@@ -212,8 +212,11 @@ mod tests {
             entry_dirs(root.path()).is_empty(),
             "a missing credentials/ directory is an empty list, not an error"
         );
-        fs::create_dir_all(root.path().join("credentials/b")).expect("entry b");
-        fs::create_dir_all(root.path().join("credentials/a")).expect("entry a");
+        // Created out of alphabetical order, so a listing that echoed the
+        // directory order would not match the sorted expectation.
+        for name in ["b", "a", "d", "c"] {
+            fs::create_dir_all(root.path().join("credentials").join(name)).expect("entry");
+        }
         fs::write(root.path().join("credentials/loose"), "not a dir").expect("loose file");
         let names: Vec<String> = entry_dirs(root.path())
             .into_iter()
@@ -224,7 +227,7 @@ mod tests {
                     .into_owned()
             })
             .collect();
-        assert_eq!(names, ["a", "b"]);
+        assert_eq!(names, ["a", "b", "c", "d"]);
     }
 
     #[test]

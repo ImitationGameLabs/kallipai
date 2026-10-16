@@ -1189,6 +1189,7 @@ async fn rejected_response_leaves_inactive_agents_none() {
 /// over one scan each, taken back to back, the sets must agree (the
 /// listing is the substrate lock rebuild folds into the archive).
 #[tokio::test]
+#[serial]
 async fn inactive_listing_matches_the_scan() {
     let state = make_state();
     let auth = crate::auth::AuthIdentity::test_new(crate::auth::Identity::Operator);

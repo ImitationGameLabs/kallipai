@@ -1156,6 +1156,51 @@ mod tests {
         );
     }
 
+    /// The same fill one level up: the write and collection handlers read
+    /// the live registry themselves, so a role seeded there reaches the
+    /// create response and the collection face, not only the pure helper.
+    #[tokio::test]
+    async fn handler_faces_fill_actor_roles_from_the_registry() {
+        let state = make_state();
+        state
+            .tasks
+            .set(Arc::new(kallipai_task::TaskStore::open_in_memory().await))
+            .ok()
+            .expect("task store installs once");
+        let id = kallipai_common::agentid::AgentId::random();
+        let (mut entry, _rx) = make_entry_with_rx(None, format!("tok-{id}"));
+        entry.identity.config.role = "reviewer-c".to_string();
+        state
+            .registry
+            .write()
+            .await
+            .register(id.clone(), crate::state::RegistryEntry::Live(entry));
+        let auth =
+            crate::auth::AuthIdentity::test_new(crate::auth::Identity::Agent { id: id.clone() });
+
+        let created = create(
+            State(Arc::clone(&state)),
+            auth,
+            Json(TaskCreateRequest {
+                title: "role fill".into(),
+                ..Default::default()
+            }),
+        )
+        .await
+        .expect("create succeeds");
+        assert_eq!(created.0.events[0].actor.as_deref(), Some(id.as_ref()));
+        assert_eq!(
+            created.0.events[0].actor_role.as_deref(),
+            Some("reviewer-c")
+        );
+
+        let all = export_all(State(Arc::clone(&state)))
+            .await
+            .expect("export_all succeeds");
+        assert_eq!(all.0.len(), 1);
+        assert_eq!(all.0[0].events[0].actor_role.as_deref(), Some("reviewer-c"));
+    }
+
     /// The per-verb assertion: each successful verb advances the watch
     /// generation by exactly one — more would mean double wakes, fewer
     /// would mean a verb skipped its notify tail.

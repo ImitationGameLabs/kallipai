@@ -182,6 +182,7 @@ fn failure_phrase(kind: std::io::ErrorKind) -> &'static str {
 mod tests {
     use super::*;
     use kallipai_testkit::{DevDir, with_env};
+    use std::os::unix::fs::PermissionsExt;
 
     fn dev_tempdir(label: &str) -> DevDir {
         DevDir::new(label)
@@ -313,7 +314,21 @@ mod tests {
         assert_eq!(found, Some(live), "dead candidate skipped, live answered");
         drop(listener);
     }
-    use std::os::unix::fs::PermissionsExt;
+
+    /// Two live candidates: order decides. A chain that answered from the
+    /// wrong end would hand the caller a daemon it did not ask for, with
+    /// no error to show for it - the first answer is the contract.
+    #[test]
+    fn probe_prefers_the_first_live_candidate() {
+        let dir = dev_tempdir("sock");
+        let first = dir.join("first.sock");
+        let second = dir.join("second.sock");
+        let _first_listener = std::os::unix::net::UnixListener::bind(&first).unwrap();
+        let _second_listener = std::os::unix::net::UnixListener::bind(&second).unwrap();
+
+        let found = probe(&[first.clone(), second.clone()]).ok();
+        assert_eq!(found, Some(first), "two live candidates: the first wins");
+    }
 
     /// Euid 0 bypasses the permission bits the denial tests rely on;
     /// /proc/self carries the euid as its file owner on Linux.

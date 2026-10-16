@@ -63,11 +63,90 @@ async fn get_profiles_masks_api_keys() {
     assert_eq!(value["endpoints"]["test"]["api_key"], "********");
     // Non-key fields are untouched.
     assert_eq!(value["endpoints"]["test"]["family"], "deepseek");
+    // model_list_base_url follows the same JSON contract as base_url: the
+    // key is always present, and this endpoint leaves it unset, so it is
+    // null here.
+    let endpoint = &value["endpoints"]["test"];
+    assert!(endpoint.get("model_list_base_url").is_some());
+    assert_eq!(endpoint["model_list_base_url"], serde_json::Value::Null);
     // The additive source health block (local mode = defaults).
     assert_eq!(value["source"]["mode"], "local");
     assert_eq!(value["source"]["poisoned"], false);
     assert_eq!(value["source"]["token_state"], "ok");
     assert_eq!(value["source"]["refresh_failure_count"], 0);
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn put_profiles_echoes_a_set_model_list_base_url_through_the_mask() {
+    // The masked form must carry a list URL the endpoint sets, not only
+    // the key: a mask that wrote null for every endpoint would read as
+    // unset where the endpoint has one.
+    // Puts the on-disk profile config back when the test ends, pass or
+    // fail: an assertion that fires mid-test would otherwise leave the
+    // rewritten config behind for every later test to read.
+    struct ConfigGuard {
+        path: std::path::PathBuf,
+        original: Option<Vec<u8>>,
+    }
+    impl Drop for ConfigGuard {
+        fn drop(&mut self) {
+            match &self.original {
+                // A panic in a drop guard would abort while the test is
+                // already unwinding, so a failed restore reports instead.
+                Some(bytes) => {
+                    if let Err(err) = std::fs::write(&self.path, bytes) {
+                        eprintln!("profile config not restored: {err}");
+                    }
+                }
+                None => {
+                    let _ = std::fs::remove_file(&self.path);
+                }
+            }
+        }
+    }
+
+    crate::test_helpers::ensure_test_data_dir();
+    let disk = kallipai_adk::profile::config_path().unwrap();
+    // A read that failed for a reason other than a missing file is not
+    // evidence that no file exists: restoring would then delete a config
+    // that is there, so the test stops here instead.
+    let original = match std::fs::read(&disk) {
+        Ok(bytes) => Some(bytes),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+        Err(err) => panic!("profile config unreadable, nothing to restore: {err}"),
+    };
+    let _restore = ConfigGuard {
+        path: disk.clone(),
+        original,
+    };
+    let state = make_state();
+    let w: ProfileConfigWire = serde_json::from_value(serde_json::json!({
+        "endpoints": { "test": {
+            "id": "test",
+            "family": "deepseek",
+            "api_key": null,
+            "base_url": null,
+            "model_list_base_url": "https://list.example/v1"
+        }},
+        "sets": [{ "name": "default", "profiles": [{
+            "id": "test", "endpoint": "test", "model": "test", "max_context_window": 128000
+        }]}],
+        "default": "default"
+    }))
+    .unwrap();
+    let Json(saved) = put_profiles(State(state.clone()), op_auth(), Json(w))
+        .await
+        .unwrap();
+    assert_eq!(
+        saved["endpoints"]["test"]["model_list_base_url"],
+        "https://list.example/v1"
+    );
+    let Json(read) = get_profiles(State(state), op_auth()).await.unwrap();
+    assert_eq!(
+        read["endpoints"]["test"]["model_list_base_url"],
+        "https://list.example/v1"
+    );
 }
 
 #[test]
