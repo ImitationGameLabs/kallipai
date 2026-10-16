@@ -158,6 +158,17 @@ const status = (unlimited?: boolean): { event: string; data: string } => ({
   }),
 });
 
+// The fixture's own contract: the key is omitted when unset (an older
+// tagma's frame) and present when asked, so the default-path assertions
+// below cannot quietly become vacuous.
+Deno.test("the status fixture omits the unlimited key unless asked", () => {
+  assertEquals("token_budget_unlimited" in JSON.parse(status().data), false);
+  assertEquals(
+    "token_budget_unlimited" in JSON.parse(status(false).data),
+    true,
+  );
+});
+
 Deno.test(
   "DirectTransport maps the unlimited flag through the status drain",
   async () => {
