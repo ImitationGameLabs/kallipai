@@ -129,9 +129,11 @@ pub(crate) async fn authenticate(
 /// constructors ([`Self::route`], [`Self::visibility`],
 /// [`Self::parking`]) set neither `reason` nor `detail`; the failure
 /// constructors ([`Self::internal`], [`Self::internal_with_response`])
-/// set both, and their response always renders a 5xx. The name still
-/// says "gate" because the selection gates were all this type once;
-/// renaming it belongs to whoever next moves this surface.
+/// set both, and each carries its own response: a rendered 500 from
+/// [`Self::internal`], the store mapping's status for
+/// [`Self::internal_with_response`]. The name still says "gate" because
+/// the selection gates were all this type once; renaming it belongs to
+/// whoever next moves this surface.
 pub(crate) struct GateError {
     pub(crate) outcome: ForwardOutcome,
     /// The reason category of a gateway-side internal failure, and the
@@ -159,8 +161,8 @@ impl GateError {
         Self::gate(ForwardOutcome::GatedParking, error)
     }
 
-    /// A gateway-side failure on the forward path (5xx): store errors,
-    /// missing credentials, unparseable endpoint prefixes. The text names
+    /// A gateway-side failure on the forward path (5xx): missing
+    /// credentials, unparseable endpoint prefixes. The text names
     /// the object behind the failure -- it is what the client's redacted
     /// 500 hides and what the failure line records.
     pub(crate) fn internal(reason: InternalFailureReason, detail: impl std::fmt::Display) -> Self {

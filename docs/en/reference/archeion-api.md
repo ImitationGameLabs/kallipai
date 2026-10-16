@@ -126,8 +126,13 @@ The instances service mirrors the lesche's dual-channel auth: a bearer
 token verifies via `/internal/verify-bearer` (only `Principal::Admin`
 passes -- the app and CLI channel), and, absent a bearer, the archeion
 session cookie verifies via `/internal/verify-session`, passing only for
-the fixed local-admin account's session (`local_admin`; any other user
-session is 403, an absent one 401 with code `admin_session_required`).
+the fixed local-admin account's session (`local_admin`). A request with
+no session cookie is 401 with code `unauthorized`; another user's
+session is 403 with code `forbidden`; a session the archeion cannot
+resolve -- absent, expired, or otherwise unusable -- is 401 with code
+`admin_session_required`. Both channels fail closed when the archeion
+is unreachable or answers off-contract: 503 with code
+`auth_backend_unavailable`.
 Cookie-bearing state-changing requests carry the same two-pillar CSRF
 defense as the archeion/lesche/keryx (`SameSite=Strict` + the mandatory
 `X-Requested-With: kallipai` marker on non-GETs; bearer requests are

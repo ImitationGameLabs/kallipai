@@ -304,11 +304,13 @@ fn internal_failure_reason_vocabulary_lock() {
     );
 }
 
-/// The constructor table: every internal constructor lands on the
+/// The constructor table: the `internal` constructor lands on the
 /// internal_error outcome carrying the reason it was handed and the text
-/// the line records, while every rejection constructor lands on its gate
-/// outcome carrying neither. One table, so a constructor cannot quietly
-/// join the wrong side.
+/// the line records, while the rejection constructors land on their gate
+/// outcome carrying neither. The rows pin that staging contract rather
+/// than the inputs production hands each constructor -- a store failure
+/// reaches the line through `internal_with_response`. One table, so no
+/// constructor listed in it can quietly join the wrong side.
 #[test]
 fn the_constructors_stage_reason_and_detail_by_kind() {
     use super::routes::GateError;

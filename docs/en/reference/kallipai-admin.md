@@ -19,7 +19,7 @@ script for a given shell:
 kallipai-admin generate zsh    # or bash, fish, elvish, powershell
 ```
 
-On nix installs (the `kallipai-admin`, `kallipctl`, or `workspace` package)
+On nix installs (the `kallipai-admin` or `workspace` package)
 the scripts are generated at build time and installed automatically: bash,
 zsh, and fish completions land in the standard profile locations, and all
 five shells are kept under `share/kallipai/completions/kallipai-admin/` for

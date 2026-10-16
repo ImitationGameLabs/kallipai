@@ -28,8 +28,10 @@ use kallipai_daemon_common::wire::RequestBody;
 fn main() -> Result<()> {
     // The dynamic-completion hook runs before any runtime is up: the
     // slug completer does synchronous daemon IPC, and a runtime nested
-    // inside another would panic. With COMPLETE unset (every normal
-    // invocation) this is a no-op.
+    // inside another would panic. When COMPLETE names a shell the hook
+    // answers the completion request and exits, so the static `generate`
+    // path below (reached after parsing) never runs on that invocation;
+    // with COMPLETE unset, empty, or `0` this call is a no-op.
     clap_complete::CompleteEnv::with_factory(Cli::command).complete();
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
     rt.block_on(run())

@@ -17,7 +17,7 @@ order: 76
 kallipai-admin generate zsh    # 可选 bash、fish、elvish、powershell
 ```
 
-nix 安装（`kallipai-admin`、`kallipctl` 或 `workspace` 包）在构建期生成并
+nix 安装（`kallipai-admin` 或 `workspace` 包）在构建期生成并
 自动安装：bash、zsh、fish 补全落入各 shell 的标准 profile 路径；五种
 shell 的脚本同时保留在 `share/kallipai/completions/kallipai-admin/` 下，
 便于手工安装到其它环境。

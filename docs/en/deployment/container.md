@@ -330,11 +330,15 @@ docker load < result
 docker images | grep kallipai-archeion
 docker run --rm \
   -e KALLIPAI_ARCHEION_DATABASE_URL=postgres://kallipai:...@postgres:5432/kallipai \
-  -e KALLIPAI_ARCHEION_WEBAUTHN_RP_ID=app.<your-domain> \
+  -e KALLIPAI_ARCHEION_WEBAUTHN_RP_ID=<your-domain> \
   -e KALLIPAI_ARCHEION_WEBAUTHN_RP_ORIGIN=https://app.<your-domain> \
   -e KALLIPAI_ARCHEION_CORS_ORIGINS=https://app.<your-domain> \
   kallipai-archeion:<gitVersion>
 ```
+
+The WebAuthn RP id is the registrable domain the app face sits under; the
+origin and the CORS entry both point at that app subdomain.
+The id cannot change later without invalidating every bound passkey.
 
 Then create an agent via the tagma API with `workspace_root: /workspace`.
 

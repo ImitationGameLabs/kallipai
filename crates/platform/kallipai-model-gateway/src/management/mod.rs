@@ -12,17 +12,17 @@
 //! tagma token says nothing to /admin and vice versa).
 //!
 //! The admin credential is the platform identity (the archeion), not a
-//! second secret the operator must juggle: a request passes either with
-//! an admin bearer (a `Principal::Admin` token, the machine/CLI channel)
-//! or with the `kallipai_session` cookie of the fixed local-admin
-//! account (the browser channel, `verify_session`'s `local_admin`
-//! flag). A valid non-admin identity is authenticated but unauthorized
-//! (403); an invalid or absent credential is 401; an unreachable
-//! archeion fails closed with 503. Security posture versus a shared
-//! static secret: equivalent strength (opaque session hashes,
-//! HttpOnly + SameSite=Strict cookies, the same admin-account gate as
-//! instances) with attribution strengthened -- a shared secret could not
-//! say who acted; the session and the audit row can.
+//! second secret the operator must juggle: a request passes either with an
+//! admin bearer (a `Principal::Admin` token, the machine/CLI channel) or
+//! with the `kallipai_session` cookie of the fixed local-admin account
+//! (the browser channel, `verify_session`'s `local_admin` flag). A valid
+//! non-admin identity is authenticated but unauthorized (403); an invalid
+//! or absent credential is 401; an archeion that is unreachable or answers
+//! off-contract fails closed with 503. Security posture versus a shared
+//! static secret: equivalent strength (opaque session hashes, HttpOnly +
+//! SameSite=Strict cookies, the same admin-account gate as instances) with
+//! attribution strengthened -- a shared secret could not say who acted;
+//! the session and the audit row can.
 //!
 //! With no archeion wiring configured the face is closed, not absent:
 //! [`AdminAuth::Disabled`] rejects every request with 401 while the
@@ -80,7 +80,7 @@ pub trait AuthVerifier: Send + Sync {
     /// normally included). `None` = the archeion cannot address the
     /// tagma (unknown, pending, revoked, owner-disabled -- one
     /// collapsed answer, no oracle); `Err` = the backend could not be
-    /// reached (the caller fails closed).
+    /// reached or answered outside the contract (the caller fails closed).
     async fn enrollment_lookup(
         &self,
         tagma_id: &str,
@@ -198,7 +198,8 @@ impl EnrollmentCache {
 /// tagma, read at call time. An unconfigured management face has no
 /// authority to ask, which reads as `None` (nothing resolves or
 /// mints -- the same closed posture as the face's own routes). `Err`
-/// = the backend could not be reached (the caller fails closed).
+/// = the backend could not be reached or answered outside the contract
+/// (the caller fails closed).
 pub(crate) async fn enrollment_lookup(
     state: &AppState,
     tagma_id: &str,

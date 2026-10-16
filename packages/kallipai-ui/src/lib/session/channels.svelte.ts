@@ -556,6 +556,15 @@ export class ChannelsStore {
     }
     return undefined;
   }
+
+  /** Count one auto-open failure: an exponential cooldown (1s doubling,
+   *  capped at 60s) between automatic attempts, and a session terminal
+   *  after OPEN_FAILURE_LIMIT straight failures so a flapping peer cannot
+   *  drive a request storm. An offline-class failure (a `DataPlaneApiError`
+   *  with status 503) additionally asks the shell to correct stale presence:
+   *  the keryx just refused the KEX because the tagma is unreachable, which
+   *  is better evidence than a `tagma_offline` event missed during an SSE
+   *  gap. */
   private recordOpenFailure(tagmaId: string, e: unknown): void {
     const failures = (this.openBudgets.get(tagmaId)?.failures ?? 0) + 1;
     const delay = Math.min(

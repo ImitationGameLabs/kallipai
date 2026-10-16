@@ -37,10 +37,11 @@ let
   );
 
   # Allowlist branch over the crane cargo filter: any route-shapes.json
-  # under any crate joins the build source. Written as a single
-  # cleanSourceWith (an outer layer over cleanCargoSource cannot revive
-  # files, because cleanSourceWith composes filters with AND); this
-  # expands cleanCargoSource and adds one OR branch.
+  # under the source root joins the build source, whether or not it sits
+  # under a crate (the branch tests the basename alone). Written as a
+  # single cleanSourceWith (an outer layer over cleanCargoSource cannot
+  # revive files, because cleanSourceWith composes filters with AND);
+  # this expands cleanCargoSource and adds one OR branch.
   src = lib.cleanSourceWith {
     src = lib.cleanSource root;
     filter =
