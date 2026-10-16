@@ -788,8 +788,8 @@ async fn a_forced_deactivate_reports_the_escape_and_parks_the_body() {
         "notes: {:?}",
         results[0].notes
     );
-    // The deactivate path calls the interrupt core after unregistering the
-    // entry: the body still has to land in the inactive area.
+    // deactivate_core parks the body itself after teardown, so the body still
+    // has to land in the inactive area.
     assert!(
         kallipai_adk::persistence::inactive_dir(&id)
             .unwrap()

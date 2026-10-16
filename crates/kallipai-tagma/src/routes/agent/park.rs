@@ -65,11 +65,6 @@ pub(crate) async fn deactivate_core(
             DeactivateErr::Failed(format!("agent {id} vanished during unregister"))
         })?
     };
-    if force {
-        // The call lands after the unregister: the registry no longer holds the
-        // target, so interrupt_core returns not_found and changes nothing.
-        let _ = interrupt_core(state, id).await;
-    }
     teardown_agent(state, id, entry).await;
     persistence::deactivate_agent_dir(id).map_err(|e| {
         tracing::error!(id = %id, "agent is unregistered but the park failed; the body is left in the live area and needs manual cleanup: {e:#}");
