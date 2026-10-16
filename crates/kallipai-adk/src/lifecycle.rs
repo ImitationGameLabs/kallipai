@@ -159,50 +159,50 @@ mod tests {
         s.transition(LifecycleState::Idle);
     }
 
-    #[test]
     #[cfg(debug_assertions)]
+    #[test]
     #[should_panic(expected = "illegal lifecycle transition")]
     fn rejects_parked_entry_from_non_running_states() {
         waiting().transition(parked());
     }
 
-    #[test]
     #[cfg(debug_assertions)]
+    #[test]
     #[should_panic(expected = "illegal lifecycle transition")]
     fn rejects_waiting_entry_from_non_running_states() {
         LifecycleState::Idle.transition(waiting());
     }
 
-    #[test]
     #[cfg(debug_assertions)]
+    #[test]
     #[should_panic(expected = "illegal lifecycle transition")]
     fn rejects_retrying_entry_from_non_running_states() {
         waiting().transition(retrying());
     }
 
-    #[test]
     #[cfg(debug_assertions)]
+    #[test]
     #[should_panic(expected = "illegal lifecycle transition")]
     fn rejects_parked_escape_to_waiting() {
         parked().transition(waiting());
     }
 
-    #[test]
     #[cfg(debug_assertions)]
+    #[test]
     #[should_panic(expected = "illegal lifecycle transition")]
     fn rejects_waiting_to_retrying_direct_transition() {
         waiting().transition(retrying());
     }
 
-    #[test]
     #[cfg(debug_assertions)]
+    #[test]
     #[should_panic(expected = "illegal lifecycle transition")]
     fn rejects_retrying_to_waiting_direct_transition() {
         retrying().transition(waiting());
     }
 
-    #[test]
     #[cfg(debug_assertions)]
+    #[test]
     #[should_panic(expected = "illegal lifecycle transition")]
     fn rejects_running_self_transition() {
         LifecycleState::Running.transition(LifecycleState::Running);
