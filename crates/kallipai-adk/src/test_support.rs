@@ -180,6 +180,33 @@ pub(crate) async fn make_ctx(profiles: Vec<Profile>, providers: &[&str]) -> Agen
     ctx_from_source(profiles, map_source(providers), RetryPolicy::default()).await
 }
 
+/// Build an `AgentContext` whose restored context holds a real image part. The bound set serves
+/// text only (the profile default), so no profile can serve that part: a wake over this context
+/// is refused before the round loop. The recording backend comes back with the context, so a
+/// caller can assert the model was never asked.
+pub(crate) async fn ctx_with_unservable_image() -> (AgentContext, Arc<RecordingBackend>) {
+    let backend = RecordingBackend::new();
+    let source = Arc::new(MapSource(HashMap::from([(
+        "ep1".to_string(),
+        backend.clone() as Arc<dyn LlmBackend>,
+    )])));
+    let ctx = ctx_from_source(
+        vec![profile("p1", "ep1", 4096)],
+        source,
+        RetryPolicy::default(),
+    )
+    .await;
+    ctx.record_turn(vec![crate::context::ingest_message(
+        "chart",
+        &[crate::context::IngestImage {
+            media_type: "image/png".to_owned(),
+            bytes: vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A],
+        }],
+    )])
+    .await;
+    (ctx, backend)
+}
+
 /// The status a request carrying the placeholder key draws from the live
 /// endpoint. A mock that answers with it keeps a round's own path through the
 /// retry layers, so the wake tests reach the same classification without

@@ -361,6 +361,9 @@ pub(crate) async fn enqueue_prompt(
     // no warrant (guard matrix). Falls through on a raced un-park (the
     // state moved under the lock re-check — an ordinary race) so the
     // liveness path below delivers normally.
+    // A wake the modality gate refuses runs no round, so that drain
+    // never runs for it: the message stays undelivered for a wake that
+    // can serve it.
     enum ParkedWake {
         Kick(String, tokio::sync::mpsc::Sender<String>),
         ParkedWithoutReason,

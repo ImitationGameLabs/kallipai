@@ -529,7 +529,9 @@ pub async fn agent_task(
             return;
         }
         ctx.record_turn(vec![Message::user(&p)]).await;
-        if run_and_report(&mut ctx, &agent_tx, &mut prompt_rx, AttemptOrigin::External).await {
+        let disposition =
+            run_and_report(&mut ctx, &agent_tx, &mut prompt_rx, AttemptOrigin::External).await;
+        if disposition == WakeDisposition::Terminated {
             return;
         }
     }
@@ -548,7 +550,14 @@ pub async fn agent_task(
                         clear_transient_retry(&ctx);
                         clear_wait_timer(&ctx);
                         ctx.record_message_turn(&text).await;
-                        if run_and_report(&mut ctx, &agent_tx, &mut prompt_rx, AttemptOrigin::External).await {
+                        let disposition = run_and_report(
+                            &mut ctx,
+                            &agent_tx,
+                            &mut prompt_rx,
+                            AttemptOrigin::External,
+                        )
+                        .await;
+                        if disposition == WakeDisposition::Terminated {
                             break;
                         }
                         // Post-round inbox drain: a kick round un-parks the
@@ -557,12 +566,22 @@ pub async fn agent_task(
                         // for the next notify — the parked guard consumes
                         // notify permits, so notify alone never delivers them.
                         // pull_undelivered is an atomic drain; a racing notify
-                        // arm simply finds nothing left to pull.
-                        if let Some(ref puller) = ctx.message_puller
+                        // arm simply finds nothing left to pull. Gated on the wake
+                        // having run a round: a refused wake delivers nothing, so
+                        // its buffered message waits for a wake that can serve it.
+                        if disposition == WakeDisposition::Ran
+                            && let Some(ref puller) = ctx.message_puller
                             && let Some(msg) = puller.pull_undelivered().await
                         {
                             ctx.record_message_turn(&msg).await;
-                            if run_and_report(&mut ctx, &agent_tx, &mut prompt_rx, AttemptOrigin::External).await {
+                            let disposition = run_and_report(
+                                &mut ctx,
+                                &agent_tx,
+                                &mut prompt_rx,
+                                AttemptOrigin::External,
+                            )
+                            .await;
+                            if disposition == WakeDisposition::Terminated {
                                 break;
                             }
                         }
@@ -629,7 +648,14 @@ pub async fn agent_task(
                 if should_run {
                     clear_transient_retry(&ctx);
                     clear_wait_timer(&ctx);
-                    if run_and_report(&mut ctx, &agent_tx, &mut prompt_rx, AttemptOrigin::External).await {
+                    let disposition = run_and_report(
+                        &mut ctx,
+                        &agent_tx,
+                        &mut prompt_rx,
+                        AttemptOrigin::External,
+                    )
+                    .await;
+                    if disposition == WakeDisposition::Terminated {
                         break;
                     }
                 }
@@ -641,7 +667,14 @@ pub async fn agent_task(
             _ = ctx.retry_notify.notified() => {
                 if transient_retry_due(&ctx) {
                     clear_transient_retry(&ctx);
-                    if run_and_report(&mut ctx, &agent_tx, &mut prompt_rx, AttemptOrigin::System).await {
+                    let disposition = run_and_report(
+                        &mut ctx,
+                        &agent_tx,
+                        &mut prompt_rx,
+                        AttemptOrigin::System,
+                    )
+                    .await;
+                    if disposition == WakeDisposition::Terminated {
                         break;
                     }
                 }
@@ -663,7 +696,14 @@ pub async fn agent_task(
                         ctx.record_turn(vec![Message::user(wait_elapsed_text(armed_secs))])
                             .await;
                     }
-                    if run_and_report(&mut ctx, &agent_tx, &mut prompt_rx, AttemptOrigin::System).await {
+                    let disposition = run_and_report(
+                        &mut ctx,
+                        &agent_tx,
+                        &mut prompt_rx,
+                        AttemptOrigin::System,
+                    )
+                    .await;
+                    if disposition == WakeDisposition::Terminated {
                         break;
                     }
                 }
@@ -722,6 +762,25 @@ fn apply_pending_profile_reset(ctx: &mut AgentContext) {
     }
 }
 
+/// How the wake ended, as the outer loop needs to read it: `Ran` means the
+/// wake passed every pre-loop gate and entered the round loop, `NotRun` means a
+/// pre-loop gate refused it (today only the wake modality gate), and
+/// `Terminated` means the run must end (a lifecycle cancel mid-round).
+///
+/// The split matters because a round's aftermath is not free: the post-round
+/// inbox drain delivers buffered messages into a round, so a wake that never ran
+/// one must not drain.
+#[must_use]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WakeDisposition {
+    /// The wake entered the round loop (whatever its rounds then decided).
+    Ran,
+    /// A pre-loop gate refused the wake: no round started.
+    NotRun,
+    /// A lifecycle cancel ended the run: the task terminates.
+    Terminated,
+}
+
 /// Run agent rounds for one external wake and send results via channel.
 ///
 /// Owns the heartbeat loop: a bare-assistant round (no `break`, no tool calls) no
@@ -732,15 +791,15 @@ fn apply_pending_profile_reset(ctx: &mut AgentContext) {
 ///
 /// Owns the round-token lifecycle per iteration: mints a fresh child of the
 /// lifecycle token, publishes it into `ctx.round_cancel` (so `interrupt_agent` can
-/// reach it), runs the round, then clears the slot. Returns `true` only on a
-/// lifecycle cancel (the task should terminate); every other outcome returns
-/// `false` so the outer loop continues and the task stays alive.
+/// reach it), runs the round, then clears the slot. It returns
+/// [`WakeDisposition::Terminated`] only on a lifecycle cancel (the task should
+/// terminate); every other outcome keeps the task alive.
 pub async fn run_and_report(
     ctx: &mut AgentContext,
     agent_tx: &tokio::sync::mpsc::Sender<AgentEvent>,
     prompt_rx: &mut tokio::sync::mpsc::Receiver<String>,
     origin: AttemptOrigin,
-) -> bool {
+) -> WakeDisposition {
     // The wake that caused this execution decides how its first attempt reads:
     // an external one is served once even against a marked endpoint, a timer one
     // is not. Taken by the first pre-send reading below.
@@ -785,7 +844,7 @@ pub async fn run_and_report(
             },
             "modality gate",
         );
-        return false;
+        return WakeDisposition::NotRun;
     }
     let mut no_progress: u32 = 0;
     loop {
@@ -826,7 +885,7 @@ pub async fn run_and_report(
                             .ok();
                     }
                 }
-                return false;
+                return WakeDisposition::Ran;
             }
             Ok(runner::RoundOutcome::BareAssistant { content }) => {
                 // No `break`, no tool calls — heartbeat and continue. Reset the
@@ -837,7 +896,7 @@ pub async fn run_and_report(
                     // Self-monologue guardrail: force-idle instead of looping forever.
                     ctx.settle(LifecycleState::Idle, "heartbeat limit");
                     agent_tx.send(AgentEvent::Idle).await.ok();
-                    return false;
+                    return WakeDisposition::Ran;
                 }
                 ctx.record_turn(vec![Message::assistant(&content)]).await;
                 ctx.record_turn(vec![Message::user(HEARTBEAT_TEXT)]).await;
@@ -852,13 +911,13 @@ pub async fn run_and_report(
                             "agent task: lifecycle cancel mid-round, persisting and exiting"
                         );
                         terminate_cancelled(ctx, agent_tx).await;
-                        return true;
+                        return WakeDisposition::Terminated;
                     }
                     // Only the round token was cancelled (interrupt) → keep living.
                     CancelKind::Interrupt => {
                         agent_tx.send(AgentEvent::Interrupted).await.ok();
                         ctx.settle(LifecycleState::Idle, "interrupt");
-                        return false;
+                        return WakeDisposition::Ran;
                     }
                 }
             }
@@ -909,7 +968,7 @@ pub async fn run_and_report(
                         );
                     }
                 }
-                return false;
+                return WakeDisposition::Ran;
             }
             Ok(runner::RoundOutcome::Park(AgentOutcome::QuotaBlocked(info))) => {
                 // A quota or payment block: park with the structured reason and
@@ -928,7 +987,7 @@ pub async fn run_and_report(
                     },
                     "quota blocked",
                 );
-                return false;
+                return WakeDisposition::Ran;
             }
             Ok(runner::RoundOutcome::Park(AgentOutcome::TokenBudgetExceeded {
                 consumed,
@@ -952,7 +1011,7 @@ pub async fn run_and_report(
                     },
                     "budget probe re-arm",
                 );
-                return false;
+                return WakeDisposition::Ran;
             }
             Ok(runner::RoundOutcome::Park(AgentOutcome::MaxRoundsExceeded)) => {
                 ctx.transient_fails = 0;
@@ -964,7 +1023,7 @@ pub async fn run_and_report(
                     "max rounds",
                 );
                 agent_tx.send(AgentEvent::MaxRoundsExceeded).await.ok();
-                return false;
+                return WakeDisposition::Ran;
             }
             Ok(runner::RoundOutcome::Park(AgentOutcome::Idle)) => {
                 // Not produced by the round loop today (only Break/BareAssistant/Park
@@ -972,7 +1031,7 @@ pub async fn run_and_report(
                 ctx.transient_fails = 0;
                 ctx.settle(LifecycleState::Idle, "park(idle)");
                 agent_tx.send(AgentEvent::Idle).await.ok();
-                return false;
+                return WakeDisposition::Ran;
             }
             Err(e) => {
                 // Permanent (Fatal) error — park and surface; the operator acts.
@@ -988,7 +1047,7 @@ pub async fn run_and_report(
                     "fatal error",
                 );
                 agent_tx.send(AgentEvent::Error(rendered)).await.ok();
-                return false;
+                return WakeDisposition::Ran;
             }
         }
     }
@@ -1700,6 +1759,102 @@ mod tests {
         );
     }
 
+    /// A kick wake that the modality gate refuses never reaches the round loop, so
+    /// the post-round inbox drain never runs: the buffered message stays buffered
+    /// for a wake that can serve it. Draining it here would deliver a message into
+    /// a round the wake itself could not start.
+    #[tokio::test]
+    async fn a_refused_kick_wake_leaves_the_buffered_message_undelivered() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+        struct CountingPuller {
+            calls: Arc<AtomicUsize>,
+            pending: Arc<AtomicBool>,
+        }
+        #[async_trait::async_trait]
+        impl MessagePuller for CountingPuller {
+            async fn pull_undelivered(&self) -> Option<String> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                if self.pending.swap(false, Ordering::SeqCst) {
+                    Some("message while parked".to_string())
+                } else {
+                    None
+                }
+            }
+        }
+
+        let (mut ctx, backend) = crate::test_support::ctx_with_unservable_image().await;
+        *ctx.lifecycle.lock().unwrap_or_else(|e| e.into_inner()) = LifecycleState::Parked {
+            reason: ParkedReason::FatalError {
+                message: "test park".to_string(),
+            },
+            at: std::time::Instant::now(),
+        };
+        let calls = Arc::new(AtomicUsize::new(0));
+        ctx.message_puller = Some(Arc::new(CountingPuller {
+            calls: calls.clone(),
+            pending: Arc::new(AtomicBool::new(true)),
+        }));
+
+        let cancel = ctx.cancel.clone();
+        let store = ctx.store.clone();
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentEvent>(64);
+        let (ptx, prompt_rx) = tokio::sync::mpsc::channel::<String>(16);
+        let handle = tokio::spawn(agent_task(ctx, None, prompt_rx, tx));
+
+        // The kick turn, exactly as the delivery gate's auto-wake sends it.
+        ptx.send(
+            "[system] you were parked 1s ago: fatal error: test park. Decide whether to retry, adjust, or report."
+                .to_string(),
+        )
+        .await
+        .expect("kick send");
+
+        // Read the channel out to a quiet window: the refused wake emits its
+        // verdict and then nothing.
+        let mut events = Vec::new();
+        while let Ok(Some(event)) =
+            tokio::time::timeout(std::time::Duration::from_millis(300), rx.recv()).await
+        {
+            events.push(event);
+        }
+        cancel.cancel();
+        let _ = rx.recv().await;
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "a wake that never ran a round must not drain the inbox"
+        );
+        let guard = store.lock().await;
+        let drained = guard
+            .turns()
+            .iter()
+            .flat_map(|turn| &turn.messages)
+            .any(|m| {
+                m.content()
+                    .is_some_and(|content| content.contains("message while parked"))
+            });
+        drop(guard);
+        assert!(
+            !drained,
+            "the buffered message waits for a wake that can serve it"
+        );
+
+        handle.abort();
+
+        match events.as_slice() {
+            [AgentEvent::Error(text)] => assert!(
+                text.contains("cannot serve the restored context"),
+                "the refused kick wake surfaces the gate's verdict: {text}"
+            ),
+            other => panic!("expected exactly one Error event, got {other:?}"),
+        }
+        assert!(
+            backend.take_requests().is_empty(),
+            "the refused wake never reaches the model"
+        );
+    }
+
     /// A rerun of the prompt is a new execution: the episode ledger restarts, so
     /// the rerun sends. Carrying the spent ledger over would turn every send into a
     /// failover and park again without a single request.
@@ -1746,8 +1901,9 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::channel::<AgentEvent>(64);
         let (_prompt_tx, mut prompt_rx) = tokio::sync::mpsc::channel::<String>(16);
 
-        assert!(
-            !run_and_report(&mut ctx, &tx, &mut prompt_rx, AttemptOrigin::System).await,
+        assert_ne!(
+            run_and_report(&mut ctx, &tx, &mut prompt_rx, AttemptOrigin::System).await,
+            WakeDisposition::Terminated,
             "a transient exhaustion parks the round instead of terminating the task"
         );
         assert_eq!(
@@ -1761,7 +1917,10 @@ mod tests {
             "the parked agent keeps the spent ledger"
         );
 
-        assert!(!run_and_report(&mut ctx, &tx, &mut prompt_rx, AttemptOrigin::System).await);
+        assert_ne!(
+            run_and_report(&mut ctx, &tx, &mut prompt_rx, AttemptOrigin::System).await,
+            WakeDisposition::Terminated
+        );
         let rerun = backend.take_requests();
         assert!(
             !rerun.is_empty(),
@@ -1832,8 +1991,9 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::channel::<AgentEvent>(64);
         let (_prompt_tx, mut prompt_rx) = tokio::sync::mpsc::channel::<String>(16);
 
-        assert!(
-            !run_and_report(&mut ctx, &tx, &mut prompt_rx, AttemptOrigin::System).await,
+        assert_ne!(
+            run_and_report(&mut ctx, &tx, &mut prompt_rx, AttemptOrigin::System).await,
+            WakeDisposition::Terminated,
             "a quota stop parks the round instead of terminating the task"
         );
         assert_eq!(
@@ -1968,8 +2128,9 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::channel::<AgentEvent>(64);
         let (_prompt_tx, mut prompt_rx) = tokio::sync::mpsc::channel::<String>(16);
 
-        assert!(
-            !run_and_report(&mut ctx, &tx, &mut prompt_rx, AttemptOrigin::System).await,
+        assert_ne!(
+            run_and_report(&mut ctx, &tx, &mut prompt_rx, AttemptOrigin::System).await,
+            WakeDisposition::Terminated,
             "a shape stop parks the round instead of terminating the task"
         );
         assert_eq!(
@@ -2044,8 +2205,9 @@ mod tests {
 
         let (tx, _rx) = tokio::sync::mpsc::channel::<AgentEvent>(256);
         let (_prompt_tx, mut prompt_rx) = tokio::sync::mpsc::channel::<String>(16);
-        assert!(
-            !run_and_report(&mut ctx, &tx, &mut prompt_rx, AttemptOrigin::External).await,
+        assert_ne!(
+            run_and_report(&mut ctx, &tx, &mut prompt_rx, AttemptOrigin::External).await,
+            WakeDisposition::Terminated,
             "a stop parks the round instead of terminating the task"
         );
 
@@ -2121,36 +2283,15 @@ mod tests {
     /// no round runs, the park carries the gate's verdict, exactly one error
     /// event reaches the channel, and the model is never asked.
     async fn assert_gate_refusal_parks_from(from: &str, start: LifecycleState) {
-        let backend = crate::test_support::RecordingBackend::new();
-        let source = Arc::new(crate::test_support::MapSource(
-            std::collections::HashMap::from([(
-                "ep1".to_string(),
-                backend.clone() as Arc<dyn just_llm_client::LlmBackend>,
-            )]),
-        ));
-        // The bound set serves text only (the profile default), so a restored
-        // context holding a real image part has no profile that can serve it.
-        let mut ctx = crate::test_support::ctx_from_source(
-            vec![crate::test_support::profile("p1", "ep1", 4096)],
-            source,
-            crate::retry::RetryPolicy::default(),
-        )
-        .await;
-        ctx.record_turn(vec![crate::context::ingest_message(
-            "chart",
-            &[crate::context::IngestImage {
-                media_type: "image/png".to_owned(),
-                bytes: vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A],
-            }],
-        )])
-        .await;
+        let (mut ctx, backend) = crate::test_support::ctx_with_unservable_image().await;
         *ctx.lifecycle.lock().unwrap_or_else(|e| e.into_inner()) = start;
 
         let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentEvent>(64);
         let (_prompt_tx, mut prompt_rx) = tokio::sync::mpsc::channel::<String>(16);
 
-        assert!(
-            !run_and_report(&mut ctx, &tx, &mut prompt_rx, AttemptOrigin::System).await,
+        assert_eq!(
+            run_and_report(&mut ctx, &tx, &mut prompt_rx, AttemptOrigin::System).await,
+            WakeDisposition::NotRun,
             "{from}: a blocked wake parks instead of starting a round"
         );
         let parked = ctx

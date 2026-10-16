@@ -14,7 +14,7 @@ use wiremock::{
 };
 
 use crate::acquisition::advance_failover;
-use crate::agent_task::{RoundToken, run_and_report};
+use crate::agent_task::{RoundToken, WakeDisposition, run_and_report};
 use crate::failover::{FailoverOutcome, ProfileReset};
 use crate::policy::ToolCallOutcome;
 use crate::profile::{BackendSource, ProfileRegistry, ProfileSet};
@@ -724,8 +724,8 @@ async fn switch_takes_effect_next_request_and_resets_failover_chain() {
     ctx.record_turn(vec![user_msg("switch time")]).await;
     let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentEvent>(256);
     let (_prompt_tx, mut prompt_rx) = tokio::sync::mpsc::channel::<String>(16);
-    let terminated = run_and_report(&mut ctx, &tx, &mut prompt_rx, AttemptOrigin::System).await;
-    assert!(!terminated);
+    let disposition = run_and_report(&mut ctx, &tx, &mut prompt_rx, AttemptOrigin::System).await;
+    assert_ne!(disposition, WakeDisposition::Terminated);
     let _ = rx.try_recv();
 
     // The chain was rebuilt from the fresh set's head.
@@ -779,8 +779,9 @@ async fn a_profile_reset_drops_the_stop_the_old_endpoint_parked() {
 
     let (tx, _rx) = tokio::sync::mpsc::channel::<AgentEvent>(256);
     let (_prompt_tx, mut prompt_rx) = tokio::sync::mpsc::channel::<String>(16);
-    assert!(
-        !run_and_report(&mut ctx, &tx, &mut prompt_rx, AttemptOrigin::External).await,
+    assert_ne!(
+        run_and_report(&mut ctx, &tx, &mut prompt_rx, AttemptOrigin::External).await,
+        WakeDisposition::Terminated,
         "the round's own failure parks it"
     );
 
@@ -847,8 +848,8 @@ async fn break_wait_parks_waiting_with_armed_timer() {
 
     let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentEvent>(256);
     let (_prompt_tx, mut prompt_rx) = tokio::sync::mpsc::channel::<String>(16);
-    let terminated = run_and_report(&mut ctx, &tx, &mut prompt_rx, AttemptOrigin::System).await;
-    assert!(!terminated);
+    let disposition = run_and_report(&mut ctx, &tx, &mut prompt_rx, AttemptOrigin::System).await;
+    assert_ne!(disposition, WakeDisposition::Terminated);
 
     let mut events = Vec::new();
     while let Ok(ev) = rx.try_recv() {
@@ -889,8 +890,8 @@ async fn break_idle_parks_idle_without_timer() {
 
     let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentEvent>(256);
     let (_prompt_tx, mut prompt_rx) = tokio::sync::mpsc::channel::<String>(16);
-    let terminated = run_and_report(&mut ctx, &tx, &mut prompt_rx, AttemptOrigin::System).await;
-    assert!(!terminated);
+    let disposition = run_and_report(&mut ctx, &tx, &mut prompt_rx, AttemptOrigin::System).await;
+    assert_ne!(disposition, WakeDisposition::Terminated);
 
     let mut events = Vec::new();
     while let Ok(ev) = rx.try_recv() {
@@ -981,13 +982,17 @@ async fn bare_assistant_heartbeats_then_force_idles_at_cap() {
 
     let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentEvent>(256);
     let (_prompt_tx, mut prompt_rx) = tokio::sync::mpsc::channel::<String>(16);
-    let terminated = run_and_report(&mut ctx, &tx, &mut prompt_rx, AttemptOrigin::System).await;
+    let disposition = run_and_report(&mut ctx, &tx, &mut prompt_rx, AttemptOrigin::System).await;
 
     let mut events = Vec::new();
     while let Ok(ev) = rx.try_recv() {
         events.push(ev);
     }
-    assert!(!terminated, "a heartbeat storm must not terminate the task");
+    assert_ne!(
+        disposition,
+        WakeDisposition::Terminated,
+        "a heartbeat storm must not terminate the task"
+    );
     let busy = events
         .iter()
         .filter(|e| matches!(e, AgentEvent::Busy))
@@ -1528,9 +1533,13 @@ async fn a_stopped_compaction_ends_the_round_with_its_reason() {
 
     let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentEvent>(256);
     let (_prompt_tx, mut prompt_rx) = tokio::sync::mpsc::channel::<String>(16);
-    let terminated = run_and_report(&mut ctx, &tx, &mut prompt_rx, AttemptOrigin::System).await;
+    let disposition = run_and_report(&mut ctx, &tx, &mut prompt_rx, AttemptOrigin::System).await;
 
-    assert!(!terminated, "a fatal park is not a lifecycle termination");
+    assert_ne!(
+        disposition,
+        WakeDisposition::Terminated,
+        "a fatal park is not a lifecycle termination"
+    );
     let mut events = Vec::new();
     while let Ok(event) = rx.try_recv() {
         events.push(event);
