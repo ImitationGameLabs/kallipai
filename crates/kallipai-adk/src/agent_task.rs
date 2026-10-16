@@ -754,8 +754,12 @@ pub async fn run_and_report(
     }
     // Drain any pending profile reset before starting the round loop.
     apply_pending_profile_reset(ctx);
-    // Every entry here is from a non-Running state by construction (the outer
-    // loop parks between runs); the transition table asserts exactly that.
+    // This entry owns the lifecycle move: the wake is served from here on, so
+    // the agent is Running for its span and a refusal below parks it over the
+    // table's legal Running -> Parked edge; no other state enters Parked.
+    // The entry is reached only from a non-Running state, and the move sits
+    // after attempt_origin is set above, so the Running log line names this wake.
+    ctx.settle(LifecycleState::Running, "wake entry");
     // Wake modality gate: a restored context whose assembled content needs
     // modalities the bound set cannot serve must not start a round — the
     // model would silently never see the referenced content. Surface one
@@ -783,7 +787,6 @@ pub async fn run_and_report(
         );
         return false;
     }
-    ctx.settle(LifecycleState::Running, "wake entry");
     let mut no_progress: u32 = 0;
     loop {
         let round = RoundToken::new(&ctx.cancel);
@@ -2076,6 +2079,107 @@ mod tests {
             ),
             other => panic!("expected a FatalError park, got {other:?}"),
         }
+    }
+
+    /// A wake blocked by the modality gate parks the agent through the wake
+    /// entry's own move: the round never starts, so the state is Running when
+    /// the gate refuses it and the park rides a legal table edge. Every state
+    /// the entry can be reached from is covered — a refusal from a parked,
+    /// waiting, retrying or idle agent must not park over an edge the table
+    /// rejects.
+    #[tokio::test]
+    async fn a_wake_blocked_by_the_modality_gate_parks_from_the_wake_entry() {
+        for (from, start) in [
+            ("idle", LifecycleState::Idle),
+            (
+                "waiting",
+                LifecycleState::Waiting {
+                    until: std::time::Instant::now(),
+                },
+            ),
+            (
+                "retrying",
+                LifecycleState::Retrying {
+                    attempt: 1,
+                    max_attempts: 3,
+                    retry_at: std::time::Instant::now(),
+                },
+            ),
+            (
+                "parked",
+                LifecycleState::Parked {
+                    reason: ParkedReason::MaxRoundsExceeded,
+                    at: std::time::Instant::now(),
+                },
+            ),
+        ] {
+            assert_gate_refusal_parks_from(from, start).await;
+        }
+    }
+
+    /// Drive one gate-refused wake from `start` and assert the whole refusal:
+    /// no round runs, the park carries the gate's verdict, exactly one error
+    /// event reaches the channel, and the model is never asked.
+    async fn assert_gate_refusal_parks_from(from: &str, start: LifecycleState) {
+        let backend = crate::test_support::RecordingBackend::new();
+        let source = Arc::new(crate::test_support::MapSource(
+            std::collections::HashMap::from([(
+                "ep1".to_string(),
+                backend.clone() as Arc<dyn just_llm_client::LlmBackend>,
+            )]),
+        ));
+        // The bound set serves text only (the profile default), so a restored
+        // context holding a real image part has no profile that can serve it.
+        let mut ctx = crate::test_support::ctx_from_source(
+            vec![crate::test_support::profile("p1", "ep1", 4096)],
+            source,
+            crate::retry::RetryPolicy::default(),
+        )
+        .await;
+        ctx.record_turn(vec![crate::context::ingest_message(
+            "chart",
+            &[crate::context::IngestImage {
+                media_type: "image/png".to_owned(),
+                bytes: vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A],
+            }],
+        )])
+        .await;
+        *ctx.lifecycle.lock().unwrap_or_else(|e| e.into_inner()) = start;
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentEvent>(64);
+        let (_prompt_tx, mut prompt_rx) = tokio::sync::mpsc::channel::<String>(16);
+
+        assert!(
+            !run_and_report(&mut ctx, &tx, &mut prompt_rx, AttemptOrigin::System).await,
+            "{from}: a blocked wake parks instead of starting a round"
+        );
+        let parked = ctx
+            .lifecycle
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        match parked {
+            LifecycleState::Parked {
+                reason: ParkedReason::FatalError { message },
+                ..
+            } => assert!(
+                message.contains("cannot serve the restored context"),
+                "{from}: the park carries the gate's verdict: {message}"
+            ),
+            other => panic!("{from}: expected a FatalError park, got {other:?}"),
+        }
+        let events: Vec<AgentEvent> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        match events.as_slice() {
+            [AgentEvent::Error(text)] => assert!(
+                text.contains("cannot serve the restored context"),
+                "{from}: the wake surfaces the refusal to the caller: {text}"
+            ),
+            other => panic!("{from}: expected exactly one Error event, got {other:?}"),
+        }
+        assert!(
+            backend.take_requests().is_empty(),
+            "{from}: the blocked wake never reaches the model"
+        );
     }
 
     /// An external wake restarts the count and keeps what the last verdict left:

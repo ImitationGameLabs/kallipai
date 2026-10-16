@@ -23,9 +23,9 @@ use std::time::Instant;
 
 use kallipai_common::protocol::ParkedReason;
 
-/// Authoritative lifecycle state of one agent task. `Running` is set just
-/// before `run_and_report` is entered; the outer loop never observes it while
-/// parked on its `select!`.
+/// Authoritative lifecycle state of one agent task. `Running` is taken by the
+/// wake entry itself, as its first lifecycle move inside `run_and_report`; the
+/// outer loop never observes it while parked on its `select!`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum LifecycleState {
     /// `run_and_report` is in flight (the outer loop does not hold this).
@@ -60,8 +60,9 @@ impl LifecycleState {
     ///   (→`Idle`);
     /// * `Waiting`↔`Retrying` direct transitions are forbidden (agent-chosen
     ///   waiting and system-driven backoff are different wake families);
-    /// * `Running`→`Running` is not a transition (a prompt queued during
-    ///   `Running` re-enters `run_and_report` without a state change);
+    /// * `Running`→`Running` is not a transition (a prompt arriving during
+    ///   `Running` is drained as an interjection by the round in flight; the
+    ///   wake entry is reached only from a non-`Running` state);
     /// * restart degrade goes only to `Idle` (timers and reasons are in-memory);
     /// * self-loops are legal for `Waiting` (budget-blocked re-arm) and
     ///   `Retrying` (re-armed backoff after another FCE).
