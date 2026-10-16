@@ -609,7 +609,8 @@ fn from_transport(error: &TransportError, phase: Phase) -> FailureClass {
 /// A record is a trigger observation, not proof of a further send: a quota
 /// rejection writes its kind with `delay_secs: 0.0` and no wait, whether the
 /// chain then advances or runs out. A shape repeat adds no record of its own:
-/// the first failure of that shape already wrote one.
+/// the first failure of that shape already wrote one. A shape whose key cannot
+/// be computed has no repeat to reach; this mapping is the same either way.
 pub(crate) fn retry_kind(class: &FailureClass) -> Option<RetryKind> {
     match class {
         FailureClass::Transient(TransientKind::Transport | TransientKind::Truncated) => {

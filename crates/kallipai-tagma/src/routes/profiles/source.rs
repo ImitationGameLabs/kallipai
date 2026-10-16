@@ -148,8 +148,8 @@ pub(super) async fn switch_profile_source(
                 }
             }
             // The validating fetch: settings and live state change only
-            // after the gateway proves reachable and the token proves
-            // live. A dead token or an unreachable gateway fails here
+            // after the gateway proves reachable and the token proves live.
+            // A dead token or an unreachable or erroring gateway fails here
             // with nothing switched.
             let config = candidate.load().await.map_err(|e| {
                 let note = match request.collection.as_ref() {

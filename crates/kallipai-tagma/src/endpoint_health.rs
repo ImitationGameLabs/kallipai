@@ -174,7 +174,11 @@ impl EndpointHealth for EndpointHealthTable {
             .collect();
         // Newest first, then the rest of the key so two facts recorded in the
         // same second still render in one order: the account hint, the kind, and
-        // the endpoint the fact names. Distinct keys differ in one of them.
+        // the endpoint the fact names. Distinct keys differ in one of them, short
+        // of a hint collision: two facts of one kind in the same second, naming
+        // the same endpoint or both account-level, whose 8-hex account hints
+        // match compare equal and keep the source map's iteration order — an
+        // arbitrary per-process order, not one stable across runs.
         views.sort_by(|a, b| {
             b.recorded_at
                 .cmp(&a.recorded_at)

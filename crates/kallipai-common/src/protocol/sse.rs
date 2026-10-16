@@ -163,10 +163,10 @@ pub enum SseEvent {
         delay_secs: f64,
     },
     /// The LLM stream dropped mid-way (transport error after content started flowing) and the
-    /// runner is retrying from scratch. Downstream must abandon the partial assistant/reasoning
-    /// content accumulated since the last boundary (fold or discard it) before the retried stream
-    /// renders. Non-terminal; the agent stays busy. Fields mirror [`Retrying`](Self::Retrying)
-    /// plus the carried `error`.
+    /// runner is retrying the same request, which the kept anchor turns into a delta continuation.
+    /// Downstream must abandon the partial assistant/reasoning content accumulated since the last
+    /// boundary (fold or discard it) before the retried stream renders. Non-terminal; the agent
+    /// stays busy. Fields mirror [`Retrying`](Self::Retrying) plus the carried `error`.
     StreamReset {
         error: String,
         attempt: u32,

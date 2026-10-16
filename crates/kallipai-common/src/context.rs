@@ -3,12 +3,13 @@
 /// Cumulative token usage across all LLM calls for an agent,
 /// accumulated from exact provider-reported `Usage` values.
 ///
-/// `cache_read_tokens` carries the `#[serde(alias)]` of the pre-migration single
-/// cache counter, so legacy archives read back with the mandated mapping;
-/// `cache_write_tokens` defaults to 0 for the same reason. Missing both cache
-/// keys still fails: a partially-present object signals corruption and should
-/// error rather than silently fill zeros. The parent's field-level default
-/// already handles the case where this key is entirely absent.
+/// `cache_read_tokens` carries a `#[serde(alias)]` for the single cache counter
+/// an earlier archive schema wrote (`cache_hit_tokens`), so those archives read
+/// back with the mandated mapping; `cache_write_tokens` defaults to 0 for the
+/// same reason. Missing both cache keys still fails: a partially-present object
+/// signals corruption and should error rather than silently fill zeros. The
+/// parent's field-level default already handles the case where this key is
+/// entirely absent.
 #[derive(Clone, Copy, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CumulativeUsage {
     pub prompt_tokens: u64,

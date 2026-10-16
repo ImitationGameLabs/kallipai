@@ -525,7 +525,8 @@ pub async fn agent_task(
             // No round runs for an empty prompt, and this execution ends here: the
             // context — and the ledger with it — is dropped when the task's future
             // returns, so a stop the pre-loop parked is never taken at a gate.
-            // What the failure wrote to the history is its only trace.
+            // What outlives the execution is what was written down: a stop's history
+            // line, a retry record, an endpoint fact, or another such record.
             return;
         }
         ctx.record_turn(vec![Message::user(&p)]).await;

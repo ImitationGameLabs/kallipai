@@ -12,8 +12,8 @@
 //!   caught at use. A 401 from the face is that fatal staleness:
 //!   it propagates instead of degrading (a hard boot failure at
 //!   startup; the forward-path watcher drives poisoning).
-//! - At boot with an unreachable gateway the tagma degrades: the boot
-//!   load returns an empty config (the health block flags `degraded`)
+//! - At boot with an unreachable or erroring gateway the tagma degrades: the
+//!   boot load returns an empty config (the health block flags `degraded`)
 //!   and a background repull task retries until the gateway answers;
 //!   agents restore against the empty registry as unconfigured
 //!   placeholders. A dead enrollment token is still a hard boot error

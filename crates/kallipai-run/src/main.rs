@@ -322,7 +322,7 @@ where
                 max_attempts,
                 delay_secs,
             } => {
-                // The stream dropped mid-way and the runtime is retrying from scratch.
+                // The stream dropped mid-way and the runtime is retrying as a delta continuation.
                 // Nothing accumulated here to void (no reply buffer); just surface it.
                 end_reasoning(&mut in_reasoning);
                 if verbose {

@@ -58,10 +58,11 @@ pub enum AgentEvent {
         delay_secs: f64,
     },
     /// The LLM stream dropped mid-way (transport error after content started flowing) and the
-    /// runner is retrying from scratch. Unlike [`Retrying`](Self::Retrying) — which fires at the
-    /// prepare/send boundary, before any content — this fires *after* deltas were already emitted,
-    /// so downstream consumers must treat the partial assistant/reasoning content accumulated since
-    /// the last boundary as abandoned (fold/discard it) before rendering the retried stream afresh.
+    /// runner is retrying the same request, which the kept anchor turns into a delta continuation.
+    /// Unlike [`Retrying`](Self::Retrying) — which fires at the prepare/send boundary, before any
+    /// content — this fires *after* deltas were already emitted, so downstream consumers must
+    /// treat the partial assistant/reasoning content accumulated since the last boundary as
+    /// abandoned (fold/discard it) before rendering the retried stream afresh.
     /// Fields mirror [`Retrying`](Self::Retrying) plus the carried `error`. Non-terminal; the agent
     /// stays busy.
     StreamReset {

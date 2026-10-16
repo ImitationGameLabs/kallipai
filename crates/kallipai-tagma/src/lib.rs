@@ -164,8 +164,8 @@ pub async fn run(args: Args, operator_pin: Option<String>) -> Result<()> {
         profile_source::SourceSlot::new(profile_source),
     ));
     let profile_source = profile_slot.load_full().source();
-    // The boot-shaped load: an unreachable gateway degrades to an empty
-    // config (the health block flags degraded; the repull task retries)
+    // The boot-shaped load: an unreachable or erroring gateway degrades to an
+    // empty config (the health block flags degraded; the repull task retries)
     // instead of failing the boot; a dead enrollment token still fails.
     let cfg = profile_source
         .boot_load()
@@ -474,8 +474,8 @@ pub async fn run(args: Args, operator_pin: Option<String>) -> Result<()> {
         .with_context(|| format!("binding listen addr {}", args.listen_addr))?;
     // Resolve the advertised URL: explicit --advertise-url wins; otherwise
     // derive it from the bound socket so an ephemeral port advertises its
-    // real value instead of the historical 3000 default. Safe to publish
-    // here: agents spawn only via API handlers once the server is serving.
+    // real value instead of the default port. Safe to publish here: agents
+    // spawn only via API handlers once the server is serving.
     let bound_addr = listener
         .local_addr()
         .context("reading the bound local address")?;
