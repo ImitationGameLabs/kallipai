@@ -298,8 +298,9 @@
       scrapeDriftedTarget = lib.elemAt (lib.elemAt (lib.elemAt scrapeDrifted.config.services.kallipai.polis.scrapeConfigs 0).static_configs 0).targets 0;
       # Collision probes for the unified port check: one assertion per
       # colliding value group, the message naming every listener on the
-      # value. collideFwd pins the forwarding face's explicit list entry;
-      # gwOffCollide pins that a disabled gateway leaves the checked set.
+      # value. collideFwd pins the forwarding port against a listener's
+      # own port; gwOffCollide pins that a disabled gateway leaves the
+      # checked set.
       collide = evalHost {
         services.kallipai = {
           daemon.enable = true;
@@ -314,6 +315,7 @@
           daemon.enable = true;
           polis = {
             enable = true;
+            ports.archeion = 7100;
             model-gateway.forwardPort = 7100;
           };
         };
