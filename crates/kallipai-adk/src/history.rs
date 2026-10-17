@@ -457,7 +457,7 @@ mod tests {
         let dir = tmp_agent_dir();
         let writer = HistoryWriter::new(dir.path().to_owned());
 
-        let msgs = vec![assistant_msg("summary of turns 1-5")];
+        let msgs = vec![user_msg("summary of turns 1-5")];
         writer
             .append(
                 None,

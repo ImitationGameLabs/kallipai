@@ -16,6 +16,7 @@ use kallipai_common::timefmt;
 use tracing::{info, warn};
 
 use super::turn::{Turn, TurnKind};
+use super::{CONTEXT_SUMMARY_LABEL, summary_record};
 use crate::agent_task::AgentContext;
 use crate::context::AgenticContext;
 use crate::history::{RecordKind, SystemEvent};
@@ -119,7 +120,7 @@ pub(crate) async fn summarize_and_evict(ctx: &AgentContext) -> Result<CompactOut
             }
             let existing_summary = guard
                 .pinned_turns()
-                .find(|t| t.label() == Some("context_summary"))
+                .find(|t| t.label() == Some(CONTEXT_SUMMARY_LABEL))
                 .and_then(|t| t.messages.first())
                 .map(message_text);
 
@@ -185,7 +186,7 @@ pub(crate) async fn summarize_and_evict(ctx: &AgentContext) -> Result<CompactOut
         // Write phase: replace summary + evict turns — single lock, no await.
         {
             let mut guard = ctx.store.lock().await;
-            guard.replace_pin("context_summary", Message::assistant(&result.text))?;
+            guard.replace_pin(CONTEXT_SUMMARY_LABEL, summary_record(&result.text))?;
             guard.evict_turns(result.source_turns);
             guard.reset_context_warnings();
             info!(
@@ -196,7 +197,9 @@ pub(crate) async fn summarize_and_evict(ctx: &AgentContext) -> Result<CompactOut
         }
 
         // Record compaction event in history.
-        let summary_msg = vec![Message::assistant(&result.text)];
+        // The record reuses the pinned record's shape, so history and the
+        // context show one injection form.
+        let summary_msg = vec![summary_record(&result.text)];
         ctx.append_history(
             None,
             &summary_msg,
@@ -641,6 +644,7 @@ async fn stop_compaction(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::context::CONTEXT_SUMMARY_HEADER;
     use crate::history::{HistoryRecord, HistoryWriter};
     use crate::retry::RetryPolicy;
     use crate::retry::decision::TransientKind;
@@ -1009,6 +1013,103 @@ mod tests {
         assert!(
             !ctx.compaction.is_latched(timefmt::now_epoch()),
             "the old latch does not survive a landing summary"
+        );
+    }
+    /// Both compaction sites write the same user-role record: the pin, and the
+    /// history line that mirrors it.
+    #[tokio::test]
+    async fn compaction_pins_the_summary_as_a_user_record() {
+        let (mut ctx, _server) = summary_ctx().await;
+        let history_dir = tempfile::TempDir::new().unwrap();
+        ctx.history = Some(crate::history::HistoryWriter::new(
+            history_dir.path().to_owned(),
+        ));
+        {
+            let mut s = ctx.store.lock().await;
+            s.push_turn(vec![tool_result_msg(oversized_content(), "w0")]);
+        }
+
+        let outcome = summarize_and_evict(&ctx).await.unwrap();
+        assert!(
+            matches!(outcome, CompactOutcome::Compacted),
+            "precondition: the window must compact"
+        );
+
+        let s = ctx.store.lock().await;
+        let summary = s
+            .turns()
+            .iter()
+            .find(|t| t.is_pinned() && t.label() == Some(CONTEXT_SUMMARY_LABEL))
+            .expect("compaction pins a summary");
+        let message = &summary.messages[0];
+        assert_eq!(message.role(), "user");
+        assert!(
+            message
+                .content()
+                .unwrap_or_default()
+                .starts_with(CONTEXT_SUMMARY_HEADER)
+        );
+        let line = std::fs::read_to_string(
+            std::fs::read_dir(history_dir.path().join("history"))
+                .unwrap()
+                .next()
+                .unwrap()
+                .unwrap()
+                .path(),
+        )
+        .unwrap();
+        let record: crate::history::HistoryRecord = serde_json::from_str(line.trim()).unwrap();
+        assert_eq!(
+            record.messages[0].content(),
+            message.content(),
+            "the history line records the same injected form as the pin"
+        );
+    }
+
+    /// The carried summary reaches the compactor as our own user-role record,
+    /// fronted exactly once however many rounds it has already survived.
+    #[tokio::test]
+    async fn the_compactor_reads_the_carried_summary_as_one_user_record() {
+        let (ctx, server) = summary_ctx().await;
+        {
+            let mut s = ctx.store.lock().await;
+            // A stored summary that already carries its header: the round trip
+            // must not front it a second time.
+            let stored = summary_record("earlier work");
+            let carried = summary_record(stored.content().unwrap_or_default());
+            s.pin(CONTEXT_SUMMARY_LABEL, carried).unwrap();
+            s.push_turn(vec![tool_result_msg(oversized_content(), "w0")]);
+        }
+
+        let outcome = summarize_and_evict(&ctx).await.unwrap();
+        assert!(
+            matches!(outcome, CompactOutcome::Compacted),
+            "precondition: the window must compact"
+        );
+
+        let requests = server.received_requests().await.unwrap_or_default();
+        assert_eq!(requests.len(), 1, "one compaction pass, one request");
+        let body = String::from_utf8_lossy(&requests[0].body);
+        assert_eq!(
+            body.matches("earlier turns condensed").count(),
+            1,
+            "the carried summary is fronted exactly once: {body}"
+        );
+        let parsed: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+        let carried = parsed["messages"]
+            .as_array()
+            .expect("the request carries messages")
+            .iter()
+            .find(|m| {
+                m["content"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("earlier work")
+            })
+            .expect("the carried summary reaches the compactor");
+        assert_eq!(
+            carried["role"], "user",
+            "the carried summary is injected context, not a model turn"
         );
     }
 }

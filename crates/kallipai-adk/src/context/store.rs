@@ -12,6 +12,7 @@ use kallipai_common::retry::{RETRY_LOG_KEEP, RetryRecord};
 use super::manifest::{FORMAT_VERSION, ManifestDoc, PinRecord, PinsDoc};
 use super::tokens::estimate_message_tokens;
 use super::turn::{Turn, TurnId, TurnKind};
+use super::{CONTEXT_SUMMARY_LABEL, summary_record};
 
 /// Legacy pinned-item shape from the pre-unification format. Deserialized from old `context.json`
 /// `pinned` entries and converted to pinned [`Turn`]s by [`ContextStore::migrate_legacy_pinned`]
@@ -63,9 +64,9 @@ pub trait AgenticContext: Send + Sync {
     /// (non-pinned) turns, scanning newest-first.
     ///
     /// Pinned turns are deliberately skipped: they live at the front of the
-    /// store and include assistant-role entries (notably the compaction
-    /// `context_summary`), so a naive reverse scan would resolve `assistant`
-    /// to the summary rather than the agent's actual last reply. For the
+    /// store and carry injected records (summaries, skills, notes), not
+    /// conversation, so a naive reverse scan could resolve to one of them
+    /// instead of the agent's actual last reply. For the
     /// `assistant` role, pure tool-call dispatch messages (no preamble text,
     /// i.e. `content: None`) are also skipped: they carry nothing to pin, so
     /// the accessor resolves to the last assistant message that has text
@@ -324,9 +325,9 @@ impl AgenticContext for ContextStore {
     }
 
     fn last_conversation_message_by_role(&self, role: &str) -> Option<Message> {
-        // Skip pinned turns (front of the deque). The compaction summary is an
-        // assistant-role pinned message, so including pinned turns would make
-        // `assistant` resolve to the summary instead of the last real reply.
+        // Skip pinned turns (front of the deque): they carry injected records
+        // (summaries, skills, notes), not conversation, so including them could
+        // resolve `assistant` to one of those instead of the last real reply.
         self.turns
             .iter()
             .rev()
@@ -539,13 +540,44 @@ impl ContextStore {
     pub fn migrate_legacy_summary(&mut self) {
         if let Some(summary) = self.summary.take() {
             if !summary.is_empty() {
-                self.unpin("context_summary").ok();
-                self.pin("context_summary", Message::assistant(&summary))
+                self.unpin(CONTEXT_SUMMARY_LABEL).ok();
+                self.pin(CONTEXT_SUMMARY_LABEL, summary_record(&summary))
                     .ok();
                 tracing::info!("migrated legacy summary to pinned item");
             }
             self.summary_tokens = 0;
         }
+    }
+
+    /// Restore-time invariant: the pinned `context_summary` is a user message.
+    ///
+    /// A summary is a record of earlier turns that we inject, never something the
+    /// model said. Keeping it in the user role also keeps the outbound request
+    /// free of an assistant message without reasoning: a thinking-mode backend
+    /// rejects such a message when another assistant message (or the end of the
+    /// request) follows it, and the summary sits directly before the turn that
+    /// produced it. Idempotent.
+    pub(crate) fn enforce_summary_pin_role(&mut self) {
+        let Some(turn) = self
+            .turns
+            .iter_mut()
+            .find(|t| t.is_pinned() && t.label() == Some(CONTEXT_SUMMARY_LABEL))
+        else {
+            return;
+        };
+        for message in &mut turn.messages {
+            let Message::Assistant(assistant) = message else {
+                continue;
+            };
+            if !assistant.tool_calls.is_empty() {
+                // A message carrying tool calls is not summary text: recasting it as a
+                // user record would drop the calls and break the call/result pairing.
+                continue;
+            }
+            let text = assistant.content.take().unwrap_or_default();
+            *message = summary_record(text);
+        }
+        self.needs_full_estimate = true;
     }
 
     /// Recompute every cached token estimate (all turns) via the current estimator. Called once

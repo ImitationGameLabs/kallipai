@@ -1,4 +1,5 @@
 use super::*;
+use crate::context::CONTEXT_SUMMARY_HEADER;
 use crate::test_support::{assistant_msg, usage, usage_with_completion, user_msg};
 
 fn new_store() -> ContextStore {
@@ -497,4 +498,49 @@ fn pins_projection_strips_image_bytes_to_text_and_references() {
         "Base64 of the marker bytes must never reach pins.json"
     );
     assert!(json.contains(&format!("[image {record_id}]")));
+}
+
+/// The pinned summary is an injected record, so restore keeps it in the user
+/// role whatever the stored shape was. Idempotent: a second restore pass over
+/// an already corrected store changes nothing.
+#[test]
+fn summary_pin_is_always_a_user_record() {
+    let mut store = new_store();
+    store
+        .pin(CONTEXT_SUMMARY_LABEL, assistant_msg("stale summary"))
+        .unwrap();
+
+    store.enforce_summary_pin_role();
+
+    let summary = |s: &ContextStore| {
+        s.turns()
+            .iter()
+            .find(|t| t.is_pinned() && t.label() == Some(CONTEXT_SUMMARY_LABEL))
+            .expect("the summary pin stays")
+            .messages[0]
+            .content()
+            .unwrap_or_default()
+            .to_owned()
+    };
+    let first = summary(&store);
+    assert_eq!(store.turns()[0].messages[0].role(), "user");
+    assert!(first.starts_with(CONTEXT_SUMMARY_HEADER));
+    assert!(first.ends_with("stale summary"));
+
+    store.enforce_summary_pin_role();
+    assert_eq!(summary(&store), first, "the invariant is idempotent");
+}
+
+/// Only the summary is normalized: an assistant-role pin under another label
+/// keeps its shape, because the invariant is about the summary, not roles.
+#[test]
+fn summary_pin_invariant_leaves_other_pins_alone() {
+    let mut store = new_store();
+    store.pin("skill:demo", assistant_msg("keep me")).unwrap();
+
+    store.enforce_summary_pin_role();
+
+    let message = &store.turns()[0].messages[0];
+    assert_eq!(message.role(), "assistant");
+    assert_eq!(message.content(), Some("keep me"));
 }

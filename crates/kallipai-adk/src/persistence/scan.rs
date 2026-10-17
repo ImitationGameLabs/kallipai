@@ -213,6 +213,9 @@ pub fn restore_agent(
     // Migrate legacy summary field to a pinned turn.
     store.migrate_legacy_summary();
 
+    // Ordering: fix the role before the deferred legacy→split write, else that write persists it.
+    store.enforce_summary_pin_role();
+
     // Tool-call/result pairing is guaranteed at record time
     // (`tool_execution::synthesize_unanswered_results`); damage persisted before that
     // guarantee (or written by hand) surfaces here as degradations. Report-only:

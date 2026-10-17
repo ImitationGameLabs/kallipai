@@ -8,7 +8,7 @@ use crate::profile::GenerationClient;
 use anyhow::{Result, bail};
 use just_llm_client::types::generation::{ContentPart, Message, MessageContent};
 
-use super::turn::Turn;
+use super::{summary_body, summary_record, turn::Turn};
 
 const SUMMARIZE_PROMPT: &str = "Summarize the key facts from our conversation so far: \
     user goals, decisions made, important outcomes, and the current state of work. \
@@ -60,7 +60,10 @@ impl ContextSummarizer {
         let mut input_budget = available.saturating_sub(self.max_tokens as usize);
 
         if let Some(existing) = existing_summary {
-            let msg = Message::assistant(format!("[Previous context summary]\n{existing}"));
+            // The carried summary is our own injected record, never something
+            // the model said: it travels in the user role, in the same shape the
+            // pinned turn carries.
+            let msg = summary_record(existing);
             input_budget =
                 input_budget.saturating_sub(super::tokens::estimate_message_tokens(&msg));
             messages.push(msg);
@@ -88,11 +91,18 @@ impl ContextSummarizer {
         let response = client.generate(request).await?;
         let usage = response.usage.clone();
 
-        let text = match response.text().map(str::trim).filter(|s| !s.is_empty()) {
-            Some(s) => s.to_owned(),
-            None => bail!("summarization: LLM returned empty summary"),
+        // A summary the model hands back fronted with our header is stored as
+        // its body: the record constructor adds the header exactly once.
+        let text = match response
+            .text()
+            .map(str::trim)
+            .map(summary_body)
+            .map(str::trim)
+        {
+            Some(s) if !s.is_empty() => s.to_owned(),
+            _ => bail!("summarization: LLM returned empty summary"),
         };
-        let estimated_tokens = super::tokens::estimate_message_tokens(&Message::assistant(&text));
+        let estimated_tokens = super::tokens::estimate_message_tokens(&summary_record(&text));
 
         Ok((
             Summary {

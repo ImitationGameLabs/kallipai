@@ -141,3 +141,68 @@ fn corrupt_pins_falls_back_then_boots_empty() {
     assert!(turns.front().unwrap().label().is_none(), "no pin layer");
     assert_eq!(turns.len(), 5, "4 hydrated turns + restart notice");
 }
+
+/// The stored summary is corrected at the restore entry point, not only
+/// when a store is built in memory: a split archive whose pin still carries
+/// the assistant role comes back as a user record, and the request composed
+/// after the restart never pairs two assistant messages.
+#[tokio::test]
+async fn restore_corrects_a_stored_summary_pin_role() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let mut store = ContextStore::new();
+    store
+        .pin(
+            crate::context::CONTEXT_SUMMARY_LABEL,
+            crate::test_support::assistant_msg("earlier work"),
+        )
+        .unwrap();
+    // The reply has to reach history as well: restore rebuilds the conversation
+    // window from there, and a request carrying the pin alone would leave the
+    // pairing check below nothing to discriminate.
+    let reply = crate::test_support::assistant_msg("reply-a");
+    let (reply_id, reply_tokens) = store.push_turn(vec![reply.clone()]);
+    HistoryWriter::new(dir.path().to_owned())
+        .append(
+            Some(reply_id.0),
+            &[reply],
+            reply_tokens,
+            RecordKind::Turn,
+            None,
+            &[],
+        )
+        .unwrap();
+    persist_context(&store, dir.path()).unwrap();
+
+    let restored =
+        restore_agent(&AgentId::from("a".to_owned()), dir.path(), NO_TRUNCATION).unwrap();
+
+    let summary = restored
+        .store
+        .turns()
+        .iter()
+        .find(|t| t.is_pinned() && t.label() == Some(crate::context::CONTEXT_SUMMARY_LABEL))
+        .expect("the summary pin survives the restore");
+    assert_eq!(
+        summary.messages[0].role(),
+        "user",
+        "restore corrects the stored summary role"
+    );
+
+    // The next request must not pair two assistant messages: with the stored
+    // role uncorrected, the restored reply would sit right behind the pin.
+    let mut store = restored.store;
+    store.push_turn(vec![user_msg("next question")]);
+    let store = std::sync::Arc::new(tokio::sync::Mutex::new(store));
+    let messages = crate::context::compose_context(store).await;
+    assert!(
+        messages.iter().any(|m| m.role() == "assistant"),
+        "the restored reply comes back, so the pairing check has a subject"
+    );
+    let paired = messages
+        .windows(2)
+        .any(|pair| pair[0].role() == "assistant" && pair[1].role() == "assistant");
+    assert!(
+        !paired,
+        "the summary pin must not sit next to an assistant message"
+    );
+}

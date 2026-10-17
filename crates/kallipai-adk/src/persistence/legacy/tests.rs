@@ -213,6 +213,21 @@ fn migration_writes_split_documents_after_restore_folds() {
         pins.contains("condensed history"),
         "pins.json carries the folded summary: {pins}"
     );
+
+    // The folded summary is an injected record of earlier turns, not a
+    // model turn, so the persisted pin must carry the user role.
+    let doc: crate::context::manifest::PinsDoc = serde_json::from_str(&pins).unwrap();
+    let summary = doc
+        .pins
+        .iter()
+        .find(|p| {
+            p.message
+                .content()
+                .unwrap_or_default()
+                .contains("condensed history")
+        })
+        .expect("the folded summary is pinned");
+    assert_eq!(summary.message.role(), "user");
     assert!(
         !dir.path().join("context.json").exists(),
         "archived only after the split documents landed"
