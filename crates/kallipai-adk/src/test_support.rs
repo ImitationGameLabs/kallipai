@@ -429,6 +429,7 @@ enum CannedStream {
 /// drop, or a stream that never yields — plus an optional pre-stream error queue, so
 /// tests can assert exactly what reached the provider boundary. Never touches the network.
 pub(crate) struct RecordingBackend {
+    stateful: bool,
     requests: Mutex<Vec<GenerationRequest>>,
     failures: Mutex<VecDeque<just_llm_client::BackendError>>,
     streams: Mutex<VecDeque<CannedStream>>,
@@ -437,6 +438,18 @@ pub(crate) struct RecordingBackend {
 impl RecordingBackend {
     pub(crate) fn new() -> Arc<Self> {
         Arc::new(Self {
+            stateful: true,
+            requests: Mutex::new(Vec::new()),
+            failures: Mutex::new(VecDeque::new()),
+            streams: Mutex::new(VecDeque::new()),
+        })
+    }
+
+    /// Same recorder, but reporting a stateless backend: every request carries
+    /// the full history instead of chaining through `previous_response_id`.
+    pub(crate) fn new_stateless() -> Arc<Self> {
+        Arc::new(Self {
+            stateful: false,
             requests: Mutex::new(Vec::new()),
             failures: Mutex::new(VecDeque::new()),
             streams: Mutex::new(VecDeque::new()),
@@ -450,6 +463,26 @@ impl RecordingBackend {
             .lock()
             .unwrap()
             .push_back(CannedStream::Events(vec![
+                just_llm_client::types::generation::GenerationEvent::Text {
+                    delta: "a".to_owned(),
+                },
+                just_llm_client::types::generation::GenerationEvent::End {
+                    finish_reason: None,
+                    response_id: Some(response_id.to_owned()),
+                },
+            ]));
+    }
+
+    /// One reasoning delta, one text delta, then `End` — the wire shape of a
+    /// model that thinks before it answers.
+    pub(crate) fn queue_stream_with_reasoning(&self, response_id: &str, reasoning: &str) {
+        self.streams
+            .lock()
+            .unwrap()
+            .push_back(CannedStream::Events(vec![
+                just_llm_client::types::generation::GenerationEvent::Reasoning {
+                    delta: reasoning.to_owned(),
+                },
                 just_llm_client::types::generation::GenerationEvent::Text {
                     delta: "a".to_owned(),
                 },
@@ -498,7 +531,7 @@ impl just_llm_client::Identifiable for RecordingBackend {
 
 impl just_llm_client::CapabilityNegotiation for RecordingBackend {
     fn supports_stateful_conversation(&self) -> bool {
-        true
+        self.stateful
     }
 }
 

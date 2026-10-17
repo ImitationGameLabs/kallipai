@@ -17,8 +17,9 @@ use crate::approval::ApprovalStore;
 use crate::config::{
     AgentConfig, DEFAULT_MESSAGE_FULL_TOKENS, DEFAULT_TOOL_RESULT_TRUNCATED_TOKENS,
 };
-use crate::context::estimate_text;
-use crate::context::{CompactionLedger, ContextStore, ContextSummarizer, TurnId};
+use crate::context::{
+    CompactionLedger, ContextStore, ContextSummarizer, TurnId, assistant_message, estimate_text,
+};
 use crate::history::{HistoryWriter, RecordKind};
 use crate::policy::AuthorizedToolExecutor;
 use crate::retry::{AttemptOrigin, Episode};
@@ -890,7 +891,7 @@ pub async fn run_and_report(
                 }
                 return WakeDisposition::Ran;
             }
-            Ok(runner::RoundOutcome::BareAssistant { content }) => {
+            Ok(runner::RoundOutcome::BareAssistant { content, reasoning }) => {
                 // No `break`, no tool calls — heartbeat and continue. Reset the
                 // transient-retry counter (a real response is progress).
                 ctx.transient_fails = 0;
@@ -901,7 +902,12 @@ pub async fn run_and_report(
                     agent_tx.send(AgentEvent::Idle).await.ok();
                     return WakeDisposition::Ran;
                 }
-                ctx.record_turn(vec![Message::assistant(&content)]).await;
+                ctx.record_turn(vec![assistant_message(
+                    Some(content),
+                    Vec::new(),
+                    &reasoning,
+                )])
+                .await;
                 ctx.record_turn(vec![Message::user(HEARTBEAT_TEXT)]).await;
                 continue;
             }
@@ -2165,6 +2171,99 @@ mod tests {
             ),
             other => panic!("expected a FatalError park, got {other:?}"),
         }
+    }
+
+    /// A bare-assistant round records what the model reasoned along with what it
+    /// said: the recorded turn carries the model's own thinking, not just its text.
+    #[tokio::test]
+    async fn a_bare_assistant_round_records_the_models_reasoning() {
+        use crate::test_support::{
+            MapSource, RecordingBackend, ctx_from_source, profile, user_msg,
+        };
+        use just_llm_client::LlmBackend;
+
+        let backend = RecordingBackend::new();
+        let source = Arc::new(MapSource(std::collections::HashMap::from([(
+            "p1".to_string(),
+            backend.clone() as Arc<dyn LlmBackend>,
+        )])));
+        let mut ctx = ctx_from_source(
+            vec![profile("a", "p1", 100_000)],
+            source,
+            crate::retry::RetryPolicy::default(),
+        )
+        .await;
+        // One answer per round: the heartbeat limit force-idles the wake, so the
+        // queue never runs dry mid-test.
+        for _ in 0..=ctx.config.max_heartbeat_rounds {
+            backend.queue_stream_with_reasoning("r1", "weighing it");
+        }
+        ctx.record_turn(vec![user_msg("q1")]).await;
+        let (tx, _rx) = tokio::sync::mpsc::channel::<AgentEvent>(64);
+        let (_prompt_tx, mut prompt_rx) = tokio::sync::mpsc::channel::<String>(16);
+
+        let _ = run_and_report(&mut ctx, &tx, &mut prompt_rx, AttemptOrigin::System).await;
+
+        let store = ctx.store.lock().await;
+        let answer = store
+            .turns()
+            .iter()
+            .flat_map(|t| &t.messages)
+            .find(|m| m.role() == "assistant")
+            .expect("the round records the assistant turn");
+        assert_eq!(
+            answer.reasoning().and_then(|r| r.text.as_deref()),
+            Some("weighing it"),
+            "the recorded turn carries the model's reasoning"
+        );
+    }
+
+    /// The recorded reasoning reaches the next request itself: a stateless
+    /// backend receives the full history, so the second request must carry the
+    /// assistant turn with the reasoning the stream sent.
+    #[tokio::test]
+    async fn a_recorded_turn_carries_the_reasoning_into_the_next_request() {
+        use crate::test_support::{
+            MapSource, RecordingBackend, ctx_from_source, profile, user_msg,
+        };
+        use just_llm_client::LlmBackend;
+
+        let backend = RecordingBackend::new_stateless();
+        let source = Arc::new(MapSource(std::collections::HashMap::from([(
+            "p1".to_string(),
+            backend.clone() as Arc<dyn LlmBackend>,
+        )])));
+        let mut ctx = ctx_from_source(
+            vec![profile("a", "p1", 100_000)],
+            source,
+            crate::retry::RetryPolicy::default(),
+        )
+        .await;
+        for _ in 0..=ctx.config.max_heartbeat_rounds {
+            backend.queue_stream_with_reasoning("r1", "weighing it");
+        }
+        ctx.record_turn(vec![user_msg("q1")]).await;
+        let (tx, _rx) = tokio::sync::mpsc::channel::<AgentEvent>(64);
+        let (_prompt_tx, mut prompt_rx) = tokio::sync::mpsc::channel::<String>(16);
+
+        let _ = run_and_report(&mut ctx, &tx, &mut prompt_rx, AttemptOrigin::System).await;
+
+        let requests = backend.take_requests();
+        assert!(
+            requests.len() >= 2,
+            "the wake reaches a second round: {}",
+            requests.len()
+        );
+        let carried = requests[1]
+            .messages
+            .iter()
+            .find(|m| m.role() == "assistant")
+            .expect("the second request carries the recorded assistant turn");
+        assert_eq!(
+            carried.reasoning().and_then(|r| r.text.as_deref()),
+            Some("weighing it"),
+            "the recorded reasoning travels in the next request"
+        );
     }
 
     /// A stop the pre-loop wrapper met outside a round is the verdict the round

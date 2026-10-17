@@ -48,7 +48,9 @@ pub(crate) enum RoundOutcome {
     /// re-loops, or force-idles via the no-progress guardrail. The assistant turn
     /// is **not** recorded yet; the outer loop records it (then the heartbeat) only
     /// when it decides to continue.
-    BareAssistant { content: String },
+    /// `reasoning` is the model's own thinking for this turn: the outer loop
+    /// records it with the message so a later request can pass it back.
+    BareAssistant { content: String, reasoning: String },
     /// Park now and surface this outcome (chain exhausted / cancelled / budget / max rounds).
     /// Distinct from `Break`: these are non-deliberate park reasons, each surfacing its
     /// own event so the operator keeps the signal.
@@ -171,6 +173,7 @@ pub(crate) async fn run_agent_rounds(
             }
             return Ok(RoundOutcome::BareAssistant {
                 content: consumed.content,
+                reasoning: consumed.reasoning,
             });
         }
 

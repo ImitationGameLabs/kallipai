@@ -675,7 +675,7 @@ async fn failover_primary_down_backup_succeeds() {
     let (outcome, events) = run_rounds(&mut ctx).await;
 
     let content = match outcome {
-        Ok(RoundOutcome::BareAssistant { content }) => content,
+        Ok(RoundOutcome::BareAssistant { content, .. }) => content,
         _ => panic!("expected BareAssistant"),
     };
     assert_eq!(content, "done");
@@ -1065,7 +1065,7 @@ async fn mid_stream_drop_retries_and_emits_stream_reset() {
     let (outcome, events) = run_rounds(&mut ctx).await;
 
     let content = match outcome {
-        Ok(RoundOutcome::BareAssistant { content }) => content,
+        Ok(RoundOutcome::BareAssistant { content, .. }) => content,
         other => panic!("expected BareAssistant, got {other:?}"),
     };
     // The retried full content — not the abandoned "PARTIAL".
@@ -1611,4 +1611,46 @@ async fn attempts_are_bounded_by_the_ledger_not_the_round_count() {
         1,
         "one send charged to the stretch"
     );
+}
+
+/// Mount a 200 streaming response that first emits a reasoning delta and then
+/// `content`, so the round ends on a `BareAssistant` that had reasoning.
+async fn mount_ok_stream_with_reasoning(server: &MockServer, content: &str, reasoning: &str) {
+    let body = format!(
+        "data: {{\"id\":\"s\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{{\"index\":0,\"delta\":{{\"reasoning_content\":\"{reasoning}\"}}}}]}}\n\ndata: {{\"id\":\"s\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\"{content}\"}}}}]}}\n\ndata: [DONE]\n"
+    );
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_raw(body.into_bytes(), "text/event-stream"),
+        )
+        .mount(server)
+        .await;
+}
+
+/// A bare assistant turn keeps the model's own reasoning: the next request has
+/// to pass it back, so the round outcome must not drop it on the floor.
+#[tokio::test]
+async fn bare_assistant_carries_the_streams_reasoning() {
+    let server = MockServer::start().await;
+    mount_ok_stream_with_reasoning(&server, "done", "weighing it").await;
+
+    let map = HashMap::from([("ep1".to_string(), wiremock_backend(&server.uri()))]);
+    let profiles = vec![profile("p1", "ep1", 500_000)];
+    let mut ctx = ctx_from_source(profiles, wiremock_source(map), fast_policy()).await;
+
+    let (outcome, _events) = run_rounds(&mut ctx).await;
+
+    match outcome {
+        Ok(RoundOutcome::BareAssistant { content, reasoning }) => {
+            assert_eq!(content, "done");
+            assert_eq!(
+                reasoning, "weighing it",
+                "the model's own reasoning travels with the turn"
+            );
+        }
+        other => panic!("expected BareAssistant, got {other:?}"),
+    }
 }

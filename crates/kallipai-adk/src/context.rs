@@ -11,7 +11,7 @@
 //! Pinned persistent context (summaries, skills, notes) is stored as `TurnKind::Pinned` turns
 //! ahead of conversation turns, so one collection composes in priority order.
 
-use just_llm_client::types::generation::Message;
+use just_llm_client::types::generation::{Message, Reasoning, ToolCall};
 
 mod compact;
 mod compose;
@@ -83,6 +83,37 @@ pub(crate) fn summary_record(text: impl AsRef<str>) -> Message {
     ))
 }
 
+/// Builds the assistant message for one model response: the text it produced,
+/// the tool calls it asked for, and its own reasoning when it produced any.
+///
+/// Empty reasoning stays absent instead of becoming a stand-in: invented
+/// reasoning would put words in the model's mouth. A thinking-mode
+/// backend refuses such a message only when another assistant message
+/// follows it or when it ends the request; the agent path always builds
+/// model responses here rather than through `Message::assistant`, so the
+/// convention lives in one place.
+///
+/// A `content` of `None` covers one round shape: it dispatched tool calls
+/// and carried no text.
+///
+/// Upstream offers no text-plus-reasoning constructor, so this goes through the
+/// tool-call face, which serialises plain assistant text when the list is empty.
+pub(crate) fn assistant_message(
+    content: Option<String>,
+    tool_calls: Vec<ToolCall>,
+    reasoning: &str,
+) -> Message {
+    let reasoning = if reasoning.is_empty() {
+        None
+    } else {
+        Some(Reasoning {
+            text: Some(reasoning.to_owned()),
+            ..Reasoning::default()
+        })
+    };
+    Message::assistant_tool_calls(content, tool_calls, reasoning)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -108,6 +139,27 @@ mod tests {
             once.content(),
             twice.content(),
             "re-wrapping an already headed summary must not repeat the header"
+        );
+    }
+
+    #[test]
+    fn assistant_message_keeps_the_models_own_thinking() {
+        let message = assistant_message(Some("answer".into()), Vec::new(), "weighing the options");
+        assert_eq!(message.role(), "assistant");
+        assert_eq!(message.content(), Some("answer"));
+        assert_eq!(
+            message.reasoning().and_then(|r| r.text.as_deref()),
+            Some("weighing the options")
+        );
+    }
+
+    #[test]
+    fn assistant_message_leaves_empty_reasoning_absent() {
+        let message = assistant_message(Some("answer".into()), Vec::new(), "");
+        assert_eq!(message.role(), "assistant");
+        assert!(
+            message.reasoning().is_none(),
+            "an empty stream must not become a stand-in for thinking"
         );
     }
 }

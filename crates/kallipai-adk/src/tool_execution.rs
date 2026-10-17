@@ -14,13 +14,13 @@ use tokio_util::sync::CancellationToken;
 use crate::acquisition::StreamConsumed;
 use crate::agent_task::AgentContext;
 use crate::config::{DEFAULT_TOOL_RESULT_FULL_TOKENS, DEFAULT_TOOL_RESULT_TRUNCATED_TOKENS};
-use crate::context::estimate_text;
+use crate::context::{assistant_message, estimate_text};
 use crate::event::AgentEvent;
 use crate::policy::{ToolCallOutcome, error_result, skipped_tool_result, timed_out_tool_result};
 use crate::runner::BreakUntil;
 use crate::text_slice::converge_under_cap;
 use crate::tools::DEFAULT_BREAK_TIMEOUT_SECS;
-use just_llm_client::types::generation::{Message, Reasoning};
+use just_llm_client::types::generation::Message;
 // ---------------------------------------------------------------------------
 // Tool-call execution
 // ---------------------------------------------------------------------------
@@ -129,23 +129,13 @@ pub(crate) async fn execute_tool_calls(
     tool_timeout: Duration,
     round_cancel: &CancellationToken,
 ) -> ToolExecResult {
-    let mut turn_messages = vec![Message::assistant_tool_calls(
-        if consumed.content.is_empty() {
-            None
-        } else {
-            Some(consumed.content)
-        },
-        consumed.tool_calls.clone(),
-        // Old wire shape carried a bare `reasoning_content` string; the generation face wraps it.
-        if consumed.reasoning.is_empty() {
-            None
-        } else {
-            Some(Reasoning {
-                text: Some(consumed.reasoning),
-                ..Reasoning::default()
-            })
-        },
-    )];
+    let content = if consumed.content.is_empty() {
+        None
+    } else {
+        Some(consumed.content)
+    };
+    let assistant = assistant_message(content, consumed.tool_calls.clone(), &consumed.reasoning);
+    let mut turn_messages = vec![assistant];
 
     // Stop on the first call that does not cleanly succeed. The agent composed
     // this round's calls without seeing intermediate results (a returned cwd,
