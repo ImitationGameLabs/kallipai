@@ -166,24 +166,27 @@ never to hide a cached verdict.
 module list, message path pattern — and is hand edited: a compile
 leaves it byte for byte alone.
 
-`.meta.json`, `README.md` and the folder's `.gitignore` are tool
-products, and all three are tracked. `.meta.json` and `README.md` are
-`paraglide-js init` boilerplate; the `.gitignore` keeps `cache/` out of
-this repository. A compile leaves an existing copy alone; what it
-rewrites follows the trigger: an installed SDK newer than the version
-recorded in `.meta.json` rewrites all three; otherwise a missing
-`.gitignore` or `README.md` comes back by itself, and a missing
-`.meta.json` rewrites all three. `cache/` plays no part.
+`.meta.json` and `README.md` come from `paraglide-js init`, and both are
+tracked. The folder's `.gitignore` is tracked too, but it is hand
+written and keeps `cache/` out of this repository. A compile touches an
+existing copy when the installed SDK is newer than the version recorded
+in `.meta.json`; an equal version on its own leaves them alone.
+A missing `README.md` or `.gitignore` also brings the tool in. How much
+that save writes depends on the versions: with the installed SDK at
+least as new as the recorded version, all three are written; with the
+recorded version newer, only the missing files are filled in. A
+`.meta.json` absent or unreadable leaves no version to compare, so that
+case writes all three. `cache/` plays no part.
 
-The `.gitignore` the tool writes is its own template, which ignores
-everything but `settings.json`: new files under `messages/` become
-invisible to git, and no gate looks at that file, so a green run says
-nothing about it. So when a newer SDK rewrites the three, stage only the
-refreshed `.meta.json` — it records the migration — and restore
-`README.md` and `.gitignore` from `HEAD`: committing the template would
-hide new files under `messages/`. A rewrite that fills in a missing
-`README.md` can differ from the committed copy, because the two came
-from different tool versions.
+The `.gitignore` the tool writes is its own template, not the
+hand-written copy tracked here, and it ignores everything but
+`settings.json`: new files under `messages/` become invisible to git,
+and no gate looks at that file, so a green run says nothing about it. So
+when the SDK rewrites the three, stage only the `.meta.json` — it is the
+record the tool reads — and restore `README.md` and `.gitignore` from
+`HEAD`: committing the template would hide new files under `messages/`.
+A rewrite that fills in a missing `README.md` can differ from the
+committed copy, because the two came from different tool versions.
 
 After a compile that filled in a missing file, check the folder with
 `git status`. Take nothing from the index, which may already hold the
@@ -191,8 +194,8 @@ rewrite. Restoring from `HEAD` also brings the recorded version
 back: a rewritten `.meta.json` records the installed one. That holds
 while the rewrite is uncommitted. If it did go in, take `README.md` and
 `.gitignore` from the commit before it (`git checkout <rev> -- <paths>`).
-Otherwise, if the installed SDK is not newer than the recorded
-version, restore the three files from `HEAD` and rerun the gate:
+Otherwise, if the installed SDK is not newer than the recorded version,
+restore the three files from `HEAD` and rerun the gate:
 
 ```sh
 git checkout HEAD -- packages/kallipai-ui/i18n/project.inlang/.gitignore
