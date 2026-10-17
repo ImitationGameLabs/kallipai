@@ -139,7 +139,7 @@
     );
 
     // An offline-class channel-open failure (the KEX came back 503) means the
-    // lesche just proved the tagma unreachable: retract the stale-online
+    // keryx just proved the tagma unreachable: retract the stale-online
     // presence entry so both the dot and the auto-open driver read the
     // truth. Bound here for the same decoupling reason as the backfill.
     channelsStore.setOfflineCorrection((tagmaId) =>
