@@ -92,8 +92,6 @@ class TasksStore {
         // clamped page (forced, bounded: the clamped page is in range).
         void this.refresh(true);
         return;
-      } else if (superseded()) {
-        return;
       }
       // Keep the selection stable; fall back to the first row when it
       // disappeared from the current partition (e.g. the archive toggle).
