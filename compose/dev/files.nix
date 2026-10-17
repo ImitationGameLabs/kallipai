@@ -77,7 +77,7 @@ in
     # facts stay in the archeion, reached through the /internal ControlPlane
     # surface over the compose network. Reached by the `kallip file` CLI
     # (loopback publish) and, since the files page landed, by the
-    # browser through the edge's files.<devDomain> vhost.
+    # browser through the edge's api face at api.<devDomain>/v1/files.
     services.files = {
       service.depends_on = [
         "archeion"

@@ -324,8 +324,8 @@ in
     };
 
     # Archeion: run from the workspace via the host store; publish 7100 for
-    # host-side tooling (kallipai-admin, curl). The browser reaches it via Caddy
-    # at https://archeion.<devDomain>. dev WebAuthn / CORS / cookie values all
+    # host-side tooling (kallipai-admin, curl). The browser reaches it through the
+    # edge's api face at api.<devDomain>/v1/archeion. dev WebAuthn / CORS / cookie
     # derive from the `devDomain` nix binding. (prod-archeion is its own
     # composition: compose/prod/polis.nix, behind the operator's TLS
     # reverse proxy, no published port.)
@@ -399,8 +399,8 @@ in
     # Lesche: the data-plane relay. Owns the chat domain in its own Postgres
     # (rooms, membership, message payloads) and
     # authenticates + attests identity through the archeion's /internal surface
-    # over the compose network. Reached by the browser via Caddy at
-    # https://lesche.<devDomain> and by the tagma's relay connector via
+    # over the compose network. Reached by the browser through the edge's api
+    # face at api.<devDomain>/v1/lesche and by the tagma's relay connector via
     # compose DNS (lesche:7200).
     services.lesche = {
       # No healthcheck; unlike the archeion, lesche does not retry its DB connect.
@@ -475,19 +475,19 @@ in
     # proxying the HOST daemon's UDS socket. Both the socket dir and the
     # instance tree are host bind mounts: the KALLIPAI_ARION_INSTANCES_*
     # overrides, or unset the HOST daemon's standard dirs (the same real
-    # daemon a host-side kallipctl sees). The browser reaches it via
-    # https://instances.<devDomain>; host tooling uses the published
-    # 127.0.0.1:7300. Platform mode: the archeion's internal root + shared
-    # secret verify the SPA's sk-admin- bearer (the local-platform
-    # login key), replacing the standalone token. API-only: the SPA is
-    # served by the host vite dev server (Caddy @app -> :5173); the
-    # browser calls this service cross-origin from the app origin
+    # daemon a host-side kallipctl sees). The browser reaches it through the
+    # edge's api face at api.<devDomain>/v1/instances; host tooling uses
+    # the published 127.0.0.1:7300. Platform mode: the archeion's internal
+    # root + shared secret verify the SPA's sk-admin- bearer (the
+    # local-platform login key), replacing the standalone token. API-only:
+    # the SPA is served by the host vite dev server (Caddy @app -> :5173);
+    # the browser calls this service cross-origin from the app origin
     # (KALLIPAI_INSTANCES_CORS_ORIGINS below).
     services.instances = {
       service.useHostStore = true;
       service.command = [ "${workspace}/bin/kallipai-instances" ];
-      # Loopback-tight publish: browsers ride the edge's
-      # instances.<devDomain> vhost in both shapes; the loopback publish
+      # Loopback-tight publish: browsers ride the api face's /v1/instances
+      # segment in both shapes; the loopback publish
       # serves host-side tooling (kallipctl, curl) only.
       service.ports = [ "127.0.0.1:${instancesHostPort}:7300" ];
       service.env_file = [ ".env" ];

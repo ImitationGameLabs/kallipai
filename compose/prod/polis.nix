@@ -15,13 +15,14 @@
 # service's operational env (listen addr, blob root, internal hop URL)
 # is pinned inline and overrides env_file.
 # None of the four services is published -- all sit behind the
-# operator's TLS-terminating edge proxy, which HOST-routes archeion.<d> ->
-# archeion, lesche.<d> -> lesche, keryx.<d> -> keryx, files.<d> -> files (the
-# per-service subdomain topology). The lesche, the keryx, and the files
-# service reach the archeion's /internal ControlPlane surface over the
-# private compose network (each with its own
-# KALLIPAI_*_ARCHEION_INTERNAL_URL=http://archeion:7100); the proxy must NOT route
-# /internal publicly. See docs/en/deployment/container.md.
+# operator's TLS-terminating edge proxy, which path-routes one api.<d>
+# origin by service segment: /v1/archeion, /v1/lesche, /v1/keryx and
+# /v1/files, the prefix stripped before the service. The lesche, the keryx, and
+# the files service reach the archeion's /internal ControlPlane surface over
+# the private compose network (each with its own
+# KALLIPAI_*_ARCHEION_INTERNAL_URL=http://archeion:7100); the proxy must NOT
+# route /v1/archeion/internal/* publicly (that is the archeion's /internal
+# once the prefix is stripped). See docs/en/deployment/container.md.
 { lib, ... }:
 let
   # Resolve the workspace flake. `toString ../..` is the repo root (two levels
@@ -111,11 +112,11 @@ in
         RUST_LOG = "info";
         # KALLIPAI_ARCHEION_SESSION_COOKIE_DOMAIN comes from .env: set to the parent
         # domain (e.g. kallipai.com) so the session cookie is shared across the
-        # archeion.<d>, lesche.<d> and keryx.<d> subdomains the edge routes here.
+        # app.<d> and api.<d> faces the edge serves.
       };
       # No service.ports -- the archeion sits behind the operator's TLS-terminating
-      # edge proxy, which HOST-routes archeion.<d> -> archeion:7100 and lesche.<d> ->
-      # lesche:7200 and sets X-Forwarded-For; configure
+      # edge proxy, which path-routes /v1/archeion and /v1/lesche on the api.<d>
+      # origin (prefix stripped) and sets X-Forwarded-For; configure
       # KALLIPAI_ARCHEION_TRUSTED_PROXIES to the proxy's CIDR (prod keeps its proxy,
       # unlike dev). /internal is reached by the lesche over the private compose
       # network, never via the public edge.
@@ -125,8 +126,8 @@ in
     # and presence). Owns the chat domain in its own Postgres (rooms, membership,
     # message payloads); it authenticates requests and
     # attests identity through the archeion's /internal ControlPlane API over the
-    # private compose network. Not published -- the operator's edge host-routes
-    # lesche.<d> here.
+    # private compose network. Not published -- the operator's edge routes
+    # the api face's /v1/lesche segment here.
     services.lesche = {
       # No healthcheck; unlike the archeion, lesche does not retry its DB connect.
       service.depends_on = [
@@ -156,7 +157,7 @@ in
     # volume) + record metadata in its own Postgres; identity and enrollment
     # facts stay in the archeion, verified per request through the archeion's
     # /internal ControlPlane surface over the private compose network. Not
-    # published -- the operator's edge host-routes files.<d> here.
+    # published -- the operator's edge routes the api face's /v1/files segment here.
     services.files = {
       service.depends_on = [
         "archeion"
@@ -190,7 +191,7 @@ in
     # (no database, no postgres beside it); credentials and tagma
     # metadata resolve through the archeion's /internal surface over
     # the private compose network. Not published -- the operator's
-    # edge host-routes keryx.<d> here.
+    # edge routes the api face's /v1/keryx segment here.
     services.keryx = {
       # Soft ordering: the keryx reads the archeion-provisioned
       # internal token at boot (with retry), so the archeion starts
