@@ -101,28 +101,46 @@ it on a public host without a firewall / TLS reverse proxy in front.
 
 #### The Platform Host: `arion -f compose/prod/polis.nix up -d`
 
-Brings up the platform's services (identity control plane, relay data plane,
-files service, instances proxy) plus one postgres store per stateful service
-(`postgres:17.5`), co-located on one host. **None of the services is
-published**: all sit behind your TLS-terminating edge proxy, which
-path-routes the single `api.<your-domain>` host by service and sets
-`X-Forwarded-For`; configure `KALLIPAI_ARCHEION_TRUSTED_PROXIES` to the
-proxy's CIDR. Secret-bearing env and the postgres credentials come from
-`.env`; operational env is pinned in `service.environment`, which overrides
-`env_file`.
+Brings up the platform's services (the archeion identity control plane, the
+lesche relay data plane, the keryx tagma-link relay, and the files service),
+plus one postgres store per stateful service (`postgres:17.5`), co-located on
+one host. **None of the services is published**: all sit behind your
+TLS-terminating edge proxy, which path-routes the single `api.<your-domain>`
+host by service; `reverse_proxy` sets `X-Forwarded-For` on its own, and you
+configure `KALLIPAI_ARCHEION_TRUSTED_PROXIES` to the proxy's CIDR. The edge
+must not route `/v1/archeion/internal/*` publicly (that is the archeion's
+`/internal/*` once the prefix is stripped): the relay, the tagma-link relay
+and the files service reach it over the private compose network.
+Secret-bearing env and the postgres credentials come from `.env`;
+operational env is pinned in `service.environment`, which overrides `env_file`.
 
-The edge route table (Caddy; dev's `compose/dev/Caddyfile.dev` mirrors it on the
-loopback face; unlisted `/v1/*` prefixes are a real 404):
+The path shape follows the clients: every client base is `{origin}/v1/{service}`
+(`crates/kallipai-common/src/polis.rs`), so the edge strips the `/v1/<service>`
+segment before the service — the services themselves serve bare paths (the
+archeion's `/healthz`, `/me/*` and `/admin/*` carry no `/v1`). The `files`
+service also answers its bare root (`/v1/files`), which a
+`handle_path /v1/files/*` rule would miss, so it takes a named matcher
+on both forms and strips with `uri strip_prefix /v1/files`. The route
+table (Caddy; `compose/dev/Caddyfile.dev` carries the same shape, with
+segments of its own; an unlisted `/v1/*` prefix is a real 404):
 
 ```caddy
 api.<your-domain> {
-	handle_path /v1/archeion/*  { reverse_proxy archeion:7100 }
-	# SSE flushes by content type; the non-SSE fallback lives in the full configs
-	handle_path /v1/lesche/*    { reverse_proxy lesche:7200 }
-	handle_path /v1/keryx/*    { reverse_proxy keryx:7210 }
-	@files path /v1/files /v1/files/*
-	handle @files               { uri strip_prefix /v1/files    reverse_proxy files:7400 }
-	handle_path /v1/instances/* { reverse_proxy instances:7300 }
+  handle_path /v1/archeion/* {
+    reverse_proxy archeion:7100
+  }
+  handle_path /v1/lesche/* {
+    # SSE flushes by content type; the non-SSE fallback lives in the full configs
+    reverse_proxy lesche:7200
+  }
+  handle_path /v1/keryx/* {
+    reverse_proxy keryx:7210
+  }
+  @files path /v1/files /v1/files/*
+  handle @files {
+    uri strip_prefix /v1/files
+    reverse_proxy files:7400
+  }
 }
 ```
 

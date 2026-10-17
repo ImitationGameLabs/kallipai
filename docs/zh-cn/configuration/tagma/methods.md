@@ -8,7 +8,7 @@ order: 21
 
 ## 网页界面配置
 
-管理区的 Profiles 页是日常配置入口。它维护端点池（协议族、密钥、`base_url`，以及可选的 `model_list_base_url`），把 profile 卡片在命名 set 与暂存区之间拖拽组织，声明各 profile 的上下文窗口与模态，转移 default set 标记，并可对 set 或单个 profile 发起连通测试。
+管理区的模型配置页是日常配置入口。它维护端点池（协议族、密钥、`base_url`，以及可选的 `model_list_base_url`），把 profile 卡片在命名 set 与暂存区之间拖拽组织，声明各 profile 的上下文窗口与模态，转移 default set 标记，并可对 set 或单个 profile 发起连通测试。
 
 保存后写入实例的 `profiles.toml` 并立即生效。当配置来源是模型网关时，页面变为
 网关配置的只读镜像；顶部的标签页在两个来源之间切换（每个方向一次确认，见下文）。
@@ -27,7 +27,7 @@ order: 21
 
 ### 文件位置
 
-profiles 配置文件位于实例配置根的 `profiles.toml`：`<config home>/kallipai/tagmata/<slug>/`。配置根推导不出（无 `KALLIPAI_TAGMA_SLUG`、无 config home）时 tagma 不加载任何 profile：读取记警告并以无 profile 状态启动；无配置根的写入则报错。没有配置文件时同样以无 profile 状态启动：在 Profiles 页面（或手写文件）加入首个 profile 之前不配置任何模型。
+profiles 配置文件位于实例配置根的 `profiles.toml`：`<config home>/kallipai/tagmata/<slug>/`。配置根推导不出（无 `KALLIPAI_TAGMA_SLUG`、无 config home）时 tagma 不加载任何 profile：读取记警告并以无 profile 状态启动；无配置根的写入则报错。没有配置文件时同样以无 profile 状态启动：在模型配置页面（或手写文件）加入首个 profile 之前不配置任何模型。
 
 有配置文件时，tagma 加载多个 provider/model 组合，每个 profile 自行声明 `max_context_window`。每个 profile 还可声明 `modalities`；省略默认纯文本，set 的生效模态是其成员的交集。
 
@@ -47,7 +47,7 @@ mode = "local"  # 或 "model-gateway"
 第一个完成注册的条目），令牌来自中继注册（随条目凭据一起保存）。拉取的内容是
 本 tagma 选定的 collection，一次读取取齐；尚未选定集合的 tagma 拉取到的是空配置。拉取的
 配置只保存在内存中，`profiles.toml` 不再更新，网关不可达时的冷启动会失败
-并指回此设置。Profiles 页面的「网关/本地」标签页可以在运行期切换该设
+并指回此设置。模型配置页面的「网关/本地」标签页可以在运行期切换该设
 置；只有中继条目带有注册令牌时，网关一侧才会出现。
 
 `profiles.toml` 示例：

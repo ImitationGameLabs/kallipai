@@ -21,8 +21,8 @@ services.caddy.virtualHosts."api.kallipai.lan".extraConfig = ''
 '';
 ```
 
-Repeat for the other host (`app.`)
-if both names are to serve https. The internal CA's
+Repeat for the remaining hosts (`app.` and `model-gw.`)
+if all three names are to serve https. The internal CA's
 root certificate appears after Caddy's first start at
 `/var/lib/caddy/.local/share/caddy/pki/authorities/local/root.crt`
 (confirm it with `ls` on the target host). Distribute trust from there:

@@ -12,7 +12,7 @@ files 服务存储内容：内容寻址的 blob 存储，记录元数据放在�
 | `KALLIPAI_FILES_BLOB_ROOT`       | 是（服务） | _（未设）_       | 内容寻址 blob 存储的根目录；按需创建。                                                                                  |
 | `KALLIPAI_FILES_DATABASE_URL`    | 是（服务） | _（未设）_       | 元数据存储的 Postgres URL；缺失则启动时快速失败。                                                                       |
 | `KALLIPAI_FILES_MAX_BODY_SIZE_MB` | 否        | `100`            | 接受的最大上传体积（兆字节）；更大的流以 413 截断。                                                                     |
-| `KALLIPAI_FILES_DEGRADE`         | 否         | `closed`         | archeion 降级姿态：`closed` 在注册表无法应答时以 503 使授权失败；`soft` 降级为拒绝（403）。两种姿态都不削弱凭据核验。    |
+| `KALLIPAI_FILES_DEGRADE`         | 否         | `closed`         | archeion 降级姿态：`closed` 在注册表无法到达或应答不合规时以 503 使授权失败；`soft` 把注册表查表降级为空事实集，tagma 判定转 403 而非 503。两种姿态都不削弱凭据核验。    |
 | `KALLIPAI_FILES_GC_INTERVAL_SECS` | 否        | `60`             | GC 轮次（清扫 + 对账）之间的间隔，秒。                                                                                  |
 | `KALLIPAI_FILES_GC_GRACE_SECS`   | 否         | `60`             | 零引用计数行被释放多久后 GC 才可回收。                                                                                  |
 | `KALLIPAI_FILES_GC_BATCH`        | 否         | `128`            | 每次 GC 回收的编目行上限。                                                                                              |

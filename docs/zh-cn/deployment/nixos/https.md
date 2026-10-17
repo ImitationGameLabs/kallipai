@@ -15,7 +15,7 @@ services.caddy.virtualHosts."api.kallipai.lan".extraConfig = ''
 '';
 ```
 
-若两个域名都要走 https，对另一站点（`app.`）重复同样操作。Caddy 首次启动后，内部 CA 的根证书出现在 `/var/lib/caddy/.local/share/caddy/pki/authorities/local/root.crt`（可在目标主机上用 `ls` 确认）。从这里分发信任：
+若三个域名都要走 https，对其余两个站点（`app.`、`model-gw.`）重复同样操作。Caddy 首次启动后，内部 CA 的根证书出现在 `/var/lib/caddy/.local/share/caddy/pki/authorities/local/root.crt`（可在目标主机上用 `ls` 确认）。从这里分发信任：
 
 - Firefox 维护自己的信任库，独立于系统 bundle；把该文件作为权威机构手动导入（Privacy & Security → Certificates → View Certificates → Authorities → Import），不要指望操作系统级信任能传导到它。
 - 命令行工具（curl、git）则把根证书复制进你的配置树，加入系统信任：

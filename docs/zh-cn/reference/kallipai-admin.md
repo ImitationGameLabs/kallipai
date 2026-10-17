@@ -26,7 +26,7 @@ shell 的脚本同时保留在 `share/kallipai/completions/kallipai-admin/` 下�
 
 ```bash
 mkdir -p ~/.zfunc && kallipai-admin generate zsh > ~/.zfunc/_kallipai-admin
-# 在 ~/.zshrc 的 compinit 之前：
+# in ~/.zshrc, before compinit:
 fpath=(~/.zfunc $fpath)
 autoload -Uz compinit && compinit
 ```
