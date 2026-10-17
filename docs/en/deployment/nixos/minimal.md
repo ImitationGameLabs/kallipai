@@ -60,6 +60,11 @@ in
 
       # The platform's single API face: path-routed per service.
       "http://api.${domain}".extraConfig = ''
+        # The archeion's internal surface stays off the public face.
+        @internal path /v1/archeion/internal /v1/archeion/internal/*
+        handle @internal {
+          respond 404
+        }
         handle_path /v1/archeion/* {
           reverse_proxy 127.0.0.1:${toString ports.archeion}
         }

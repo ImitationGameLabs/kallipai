@@ -108,9 +108,10 @@ one host. **None of the services is published**: all sit behind your
 TLS-terminating edge proxy, which path-routes the single `api.<your-domain>`
 host by service; `reverse_proxy` sets `X-Forwarded-For` on its own, and you
 configure `KALLIPAI_ARCHEION_TRUSTED_PROXIES` to the proxy's CIDR. The edge
-must not route `/v1/archeion/internal/*` publicly (that is the archeion's
-`/internal/*` once the prefix is stripped): the relay, the tagma-link relay
-and the files service reach it over the private compose network.
+must not route `/v1/archeion/internal` or anything under it publicly (that
+is the archeion's `/internal` and `/internal/*` once the prefix is
+stripped): the relay, the tagma-link relay and the files service reach it
+over the private compose network.
 Secret-bearing env and the postgres credentials come from `.env`;
 operational env is pinned in `service.environment`, which overrides `env_file`.
 
@@ -126,6 +127,10 @@ segments of its own; an unlisted `/v1/*` prefix is a real 404):
 
 ```caddy
 api.<your-domain> {
+  @internal path /v1/archeion/internal /v1/archeion/internal/*
+  handle @internal {
+    respond 404
+  }
   handle_path /v1/archeion/* {
     reverse_proxy archeion:7100
   }
@@ -141,6 +146,8 @@ api.<your-domain> {
     uri strip_prefix /v1/files
     reverse_proxy files:7400
   }
+  # An unlisted /v1/* prefix is a real 404.
+  respond 404
 }
 ```
 
