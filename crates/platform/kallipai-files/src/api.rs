@@ -60,7 +60,8 @@ pub(crate) fn parse_record_path(space_path: &str) -> Result<SpacePath, ApiError>
 /// - lookup returns `None` (unknown / pending / revoked / owner-disabled --
 ///   e.g. a revocation that raced the just-passed authentication) ->
 ///   empty facts, which deny every decision;
-/// - lookup fails (registry unreachable): fail-closed (the default) -> 503;
+/// - lookup fails (unreachable, an off-contract answer, or a body that does
+///   not decode): fail-closed (the default) -> 503;
 ///   fail-soft (`degrade_fail_soft`) -> empty facts, so tagma decisions
 ///   deny with 403 instead of erroring. Verification is never degraded
 ///   either way.

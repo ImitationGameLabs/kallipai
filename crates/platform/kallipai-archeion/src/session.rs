@@ -33,12 +33,11 @@ pub struct SessionCfg {
     pub ttl: Duration,
     /// Whether to emit `Secure` on the cookie. False only for local HTTP dev.
     pub cookie_secure: bool,
-    /// Cookie `Domain` attribute. Set to the parent domain in a per-subdomain
-    /// deploy so the session cookie is shared across `archeion.<d>` /
-    /// `lesche.<d>` / `keryx.<d>` (e.g. `kallipai.com` prod, `localhost` dev).
-    /// `None` = no
-    /// `Domain` attribute, i.e. a host-only cookie (single-origin deploy). The
-    /// clear path MUST apply the same value or logout leaves the cookie behind.
+    /// Cookie `Domain` attribute. Set to the parent domain so the session
+    /// cookie is shared across the `app.<d>` and `api.<d>` faces the edge
+    /// serves (e.g. `kallipai.com` prod, `localhost` dev). `None` = no
+    /// `Domain` attribute, i.e. a host-only cookie (both faces on one origin).
+    /// The clear path MUST apply the same value or logout leaves the cookie behind.
     pub cookie_domain: Option<String>,
 }
 
@@ -113,7 +112,7 @@ mod tests {
     }
 
     /// With a `Domain` configured, both the set and clear headers carry it, so
-    /// the cookie is shared across `archeion.<d>` / `lesche.<d>` / `keryx.<d>` and logout deletes
+    /// the cookie is shared across the `app.<d>` and `api.<d>` faces, and logout deletes
     /// the same (parent-domain) cookie. Asserted structurally via `Cookie::parse`
     /// (not a substring match) so an attribute emitted in the wrong position or
     /// duplicated still fails.

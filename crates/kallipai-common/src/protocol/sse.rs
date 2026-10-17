@@ -163,7 +163,8 @@ pub enum SseEvent {
         delay_secs: f64,
     },
     /// The LLM stream dropped mid-way (transport error after content started flowing) and the
-    /// runner is retrying the same request, which the kept anchor turns into a delta continuation.
+    /// runner is retrying the same request: a delta continuation when an anchor arrived, the
+    /// full context when the drop came first.
     /// Downstream must abandon the partial assistant/reasoning content accumulated since the last
     /// boundary (fold or discard it) before the retried stream renders. Non-terminal; the agent
     /// stays busy. Fields mirror [`Retrying`](Self::Retrying) plus the carried `error`.

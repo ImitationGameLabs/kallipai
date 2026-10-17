@@ -81,11 +81,10 @@ pub struct Args {
     /// plain-HTTP dev where TLS is terminated elsewhere / absent).
     #[arg(long, env = "KALLIPAI_ARCHEION_COOKIE_SECURE", default_value_t = true)]
     pub cookie_secure: bool,
-    /// Cookie `Domain` attribute. Set to the parent domain in a per-subdomain
-    /// deploy so the session cookie is shared across `archeion.<d>` /
-    /// `lesche.<d>` / `keryx.<d>` (e.g. `kallipai.com` prod, `localhost` dev).
-    /// Unset =
-    /// host-only (single-origin deploy).
+    /// Cookie `Domain` attribute. Set to the parent domain so the session
+    /// cookie is shared across the `app.<d>` and `api.<d>` faces the edge
+    /// serves (e.g. `kallipai.com` prod, `localhost` dev). Unset = host-only
+    /// (both faces on one origin).
     #[arg(long, env = "KALLIPAI_ARCHEION_SESSION_COOKIE_DOMAIN")]
     pub cookie_domain: Option<String>,
     /// Capacity of the per-IP token bucket guarding `/auth/*` (max burst).

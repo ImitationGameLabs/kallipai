@@ -58,7 +58,8 @@ pub enum AgentEvent {
         delay_secs: f64,
     },
     /// The LLM stream dropped mid-way (transport error after content started flowing) and the
-    /// runner is retrying the same request, which the kept anchor turns into a delta continuation.
+    /// runner is retrying the same request: a delta continuation when an anchor arrived, the
+    /// full context when the drop came first.
     /// Unlike [`Retrying`](Self::Retrying) — which fires at the prepare/send boundary, before any
     /// content — this fires *after* deltas were already emitted, so downstream consumers must
     /// treat the partial assistant/reasoning content accumulated since the last boundary as

@@ -112,9 +112,9 @@ pub fn router(state: AppState) -> Router {
         .layer(cors)
 }
 
-/// The CORS gate for browser callers: the web app lives on a different
-/// origin than this service (e.g. `files.<domain>` vs `app.<domain>`), so
-/// uploads/downloads from the browser are cross-origin and preflighted.
+/// The CORS gate for browser callers: the browser face `app.<domain>` calls
+/// this service on the api face (`api.<domain>/v1/files`), so uploads and
+/// downloads from the browser are cross-origin and preflighted.
 /// The shared builder carries the parse and the header set; the verb
 /// list is this service's own.
 fn cors_layer(origins: &str) -> CorsLayer {
