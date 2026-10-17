@@ -9,16 +9,17 @@
 //! `POST /conversations/{id}/key-exchange/init`, whose response body carries
 //! the tagma's signed key-exchange response directly.
 //!
-//! The presence variants (`TagmaOnline`, `TagmaOffline`) are emitted by the
-//! data-plane relay (`kallipai-lesche`) on the app event stream when a
-//! tagma tunnel connects/disconnects (and as a snapshot when the stream
-//! opens). `TagmaStatus` carries a tagma's live aggregate runtime state
-//! (agent counts + token budget); like presence it is plaintext and
-//! user-scoped, pushed by the tagma on a periodic snapshot and rebroadcast
-//! by the keryx. `TagmaSystem` carries a tagma's per-event runtime signal
-//! (busy/idle presence, turn terminals, errors) — plaintext like the others,
-//! because these are operator metadata, not conversation content (authored
-//! content rides the encrypted envelope as a `TagmaReply::Event`).
+//! The presence variants (`TagmaOnline`, `TagmaOffline`) are
+//! emitted by the keryx on the app event stream when a tagma tunnel
+//! connects/disconnects (and as a snapshot when the stream opens).
+//! `TagmaStatus` carries a tagma's live aggregate runtime state
+//! (agent counts + token budget); like presence it is plaintext
+//! and user-scoped, pushed by the tagma on a periodic snapshot and
+//! rebroadcast by the keryx. `TagmaSystem` carries a tagma's per-event
+//! runtime signal (busy/idle presence, turn terminals, errors) —
+//! plaintext like the others, because these are operator metadata, not
+//! conversation content (authored content rides the encrypted envelope
+//! as a `TagmaReply::Event`).
 //!
 //! [`AuthoredEvent`] and [`SignalEvent`] are the *public, agent-free* event
 //! vocabulary the tagma produces (by projecting its internal `SseEvent` stream)

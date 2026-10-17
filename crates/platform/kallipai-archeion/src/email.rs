@@ -111,7 +111,7 @@ mod tests {
 
     #[test]
     fn rejects_too_long() {
-        // RFC 5321 caps an address at 254 octets.
+        // The local part is capped at 64 octets, so a 300-octet one is rejected.
         let local = "a".repeat(300);
         assert!(normalize(&format!("{local}@x.com")).is_err());
     }

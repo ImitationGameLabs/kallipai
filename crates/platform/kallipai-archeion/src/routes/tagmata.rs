@@ -61,7 +61,7 @@ pub fn enroll_router() -> Router<SharedState> {
 }
 
 /// The authenticated tagma surface: mint a pending tagma, list the owner's
-/// tagmata (with live presence), read/rename/revoke one. Cookie/bearer-authed
+/// tagmata, read/rename/revoke one. Cookie/bearer-authed
 /// and not rate-limited (must not share the unauth bucket, same reasoning as
 /// `/me`).
 pub fn protected_router() -> Router<SharedState> {
@@ -277,7 +277,7 @@ async fn mint(
 
 /// One row of the owner's tagma list. Liveness ("is a tagma tunnel currently
 /// open for this tagma") is NOT part of the registry's view: it is a data-plane
-/// concern, delivered to the app via the relay's `GET /me/events` stream as
+/// concern, delivered to the app by the keryx on its `GET /me/events` stream as
 /// `TagmaOnline`/`TagmaOffline`. Note `tagmata.last_tunnel_proof_ts` is a replay
 /// guard, not a liveness signal, and is intentionally not surfaced.
 #[derive(Serialize)]
@@ -308,7 +308,7 @@ enum TagmaState {
 }
 
 /// List the caller's tagmata (pending + enrolled, not revoked), newest first.
-/// Liveness is not included; the app learns it from the relay's event stream.
+/// Liveness is not included; the app learns it from the keryx `/me/events` stream.
 async fn list_tagmata(
     State(state): State<SharedState>,
     AuthPrincipal(principal): AuthPrincipal,
@@ -537,8 +537,8 @@ mod tests {
     }
 
     /// An enrolled tagma appears as enrolled in the list, with the pending-phase
-    /// fields omitted. (Live presence is no longer part of the list view; the
-    /// app learns it from the relay's event stream.)
+    /// fields omitted. (Live presence is not part of the list view; the
+    /// app learns it from the keryx `/me/events` stream.)
     #[tokio::test]
     async fn enrolled_tagma_lists_as_enrolled() {
         let state = make_state().await;

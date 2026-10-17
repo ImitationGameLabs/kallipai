@@ -111,7 +111,7 @@ pub struct RoomMembership {
 ///   the room and join without an invite.
 ///
 /// Serialized snake_case over the wire. The DB stores [`Visibility::as_str`].
-/// `Default` is [`Visibility::Private`] (the pre-existing behavior), so a
+/// `Default` is [`Visibility::Private`], so a
 /// request body that omits the field creates a private room.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
