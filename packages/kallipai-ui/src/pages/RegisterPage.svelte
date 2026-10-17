@@ -27,8 +27,8 @@
   } from "../paraglide/messages.js";
 
   // display_name length cap enforced on the trimmed value by the archeion
-  // (auth.rs:179). HTML maxlength counts untrimmed length, so this is a UX
-  // hint only -- the server remains the authority.
+  // register face (MAX_DISPLAY_NAME_LEN). HTML maxlength counts the untrimmed
+  // length, so this is a UX hint only -- the server remains the authority.
   const DISPLAY_NAME_MAX = 64;
   let username = $state("");
   let displayName = $state("");

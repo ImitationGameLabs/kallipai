@@ -52,12 +52,12 @@
   // `navigator.credentials.get()` calls deadlock some browsers (notably
   // Firefox), so the pending discoverable autofill MUST be killed first.
   let discoverableCtl: AbortController | null = null;
-  // Operator-key (offline-branch) login state. The branch itself is
-  // deployment-driven: the app shell passes offlineLogin from its build-time
-  // injection, so a cloud build never renders it (two-way information
-  // hiding). "offline" here names the LOGIN branch only -- the session it
-  // produces is the standard online form;
-  // it is unrelated to the AppMode offline of the legacy /local family.
+  // Operator-key (offline-branch) login state. `offlineLogin` decides whether
+  // the branch renders: the app shell injects it at the login route, the web
+  // shell reads it from config.js, where an absent key shows the branch (a
+  // cloud deployment sets it false). "offline" names this LOGIN branch only
+  // -- the session it opens is the standard online form, unrelated to the
+  // AppMode offline the /local pages run on.
   let mode = $state<"online" | "offline">("online");
   let adminKey = $state("");
   let offlineBusy = $state(false);
