@@ -56,6 +56,13 @@ serde = { workspace = true }
 
 ## Verification Checklist
 
+The canonical gate recipe — working directory, build directory,
+freshness, and the archive format — lives in
+[docs/en/development/gates.md](docs/en/development/gates.md). That page
+carries the full command table and the rules for recording a run; the
+list below is the quick form for the usual edits, and a result only
+counts as evidence when recorded the way the page describes.
+
 After modifying Nix files:
 
 - `nixfmt <nix file>` - Format single file
@@ -69,11 +76,12 @@ After modifying TOML files:
 After modifying Markdown files:
 
 - `deno task fmt:md <markdown file>` - Format with rumdl (run individually for each modified file). Markdown uses rumdl, not prettier -- rumdl does not align table columns, so a one-row edit never reflows the rest of the table.
+- `deno task fmt:md:check` - Check every markdown file without writing (the read-only form of fmt:md)
 
 After modifying Rust code:
 
-- `cargo fmt` - Format check
+- `cargo fmt --all --check` - Format check
 - `cargo clippy --workspace --all-targets --all-features` - Lint check
-- `cargo test --workspace --all-targets --all-features` - Run tests
-- `cargo doc --workspace --all-features --no-deps` - Build docs
-- `cargo check`, clippy, test, and doc deny warnings via `.cargo/config.toml` (build.warnings = deny). To relax for one invocation, prefix with `CARGO_BUILD_WARNINGS=allow`.
+- `cargo test --workspace --all-targets --all-features --no-fail-fast` - Run tests
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps` - Build docs
+- `cargo check`, clippy, test, and doc deny warnings via `.cargo/config.toml` (build.warnings = deny); the doc command repeats the flag on its command line. `CARGO_BUILD_WARNINGS=allow` is for local debugging only and never for a run recorded as a gate.

@@ -19,6 +19,7 @@
     "fmt": "prettier --write . && rumdl fmt .",
     "fmt:file": "prettier --write",
     "fmt:md": "rumdl fmt",
+    "fmt:md:check": "rumdl fmt --check .",
     "fmt:check": "prettier --check . && rumdl fmt --check .",
     "lint": "deno lint"
   },

@@ -53,6 +53,7 @@ assume it.
 | `deno task fmt`             | Prettier (TS/Svelte/CSS/JSON) + rumdl (Markdown) across the repo       |
 | `deno task fmt:file <path>` | Prettier `--write` a single non-md file (format just what you touched) |
 | `deno task fmt:md <path>`   | rumdl `fmt` a single Markdown file                                     |
+| `deno task fmt:md:check`    | Every Markdown file, read-only (the `--check` half of `fmt:md`)        |
 | `deno task fmt:check`       | Prettier `--check .` + rumdl `fmt --check .` (CI-style, no writes)     |
 | `deno task lint`            | `deno lint`                                                            |
 
