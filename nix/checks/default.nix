@@ -32,8 +32,8 @@ in
       inherit cargoArtifacts;
       # crane cargoDoc already runs --locked --no-deps by default;
       # no override needed. Warning denial comes from the repo-root
-      # .cargo/config.toml (build.warnings), which the crane filter
-      # passes into the source.
+      # .cargo/config.toml (build.warnings), which the crane filter keeps
+      # through its .toml suffix match.
     }
   );
 
@@ -50,7 +50,8 @@ in
       # ("--locked"), so it must be re-stated here. --locked asserts Cargo.lock
       # is current (fails instead of silently updating it) for hermetic builds.
       # Warning denial comes from the repo-root .cargo/config.toml
-      # (build.warnings), which the crane filter passes into the source.
+      # (build.warnings), which the crane filter keeps through its .toml
+      # suffix match.
       cargoExtraArgs = "--locked --all-features";
     }
   );
