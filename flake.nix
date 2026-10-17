@@ -244,9 +244,8 @@
             # The kallipai-web static site (SPA bundle for a static file
             # server to serve; the NixOS module derives the site root,
             # services.kallipai.web.distWithRuntimeConfig, from it).
-            # Linux-only:
-            # the node_modules
-            # dependency tree carries platform binaries.
+            # Linux-only: the node_modules dependency tree carries platform
+            # binaries.
             kallipai-web-dist = import ./nix/packages/kallipai-web.nix {
               inherit pkgs;
               src = self;

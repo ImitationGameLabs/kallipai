@@ -51,7 +51,7 @@ export KALLIPAI_PACKAGE_PATH=./result/kallipai-*-linux-x86_64.tar.gz
 | `kallipai-tagma` | HTTP server hosting agent instances           |
 | `kallipai-run`   | One-shot runner for scripting/benchmarking    |
 
-**`aifed-tarball`** (opt-in via `AIFED_PACKAGE_PATH`; aifed is kallipai's intended file-editing dependency — runtime adoption pending — `x86_64-linux` only):
+**`aifed-tarball`** (opt-in via `AIFED_PACKAGE_PATH`; aifed is kallipai's file-editing tool, installed only when that variable is set — `x86_64-linux` only):
 
 | Binary         | Purpose                                          |
 | -------------- | ------------------------------------------------ |

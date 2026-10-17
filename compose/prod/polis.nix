@@ -21,8 +21,9 @@
 # the files service reach the archeion's /internal ControlPlane surface over
 # the private compose network (each with its own
 # KALLIPAI_*_ARCHEION_INTERNAL_URL=http://archeion:7100); the proxy must NOT
-# route /v1/archeion/internal/* publicly (that is the archeion's /internal
-# once the prefix is stripped). See docs/en/deployment/container.md.
+# route /v1/archeion/internal or anything under it publicly (that is the
+# archeion's /internal once the prefix is stripped). See
+# docs/en/deployment/container.md.
 { lib, ... }:
 let
   # Resolve the workspace flake. `toString ../..` is the repo root (two levels

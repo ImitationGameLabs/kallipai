@@ -44,8 +44,8 @@ let
     ln -s ${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt $out/etc/pki/tls/certs/ca-bundle.crt
   '';
 
-  # aifed: the tagma's intended process-level shell-out dep (runtime adoption
-  # pending). Put on PATH so the tagma resolves it by name, like bash/pgrep.
+  # aifed: the file-editing tool agents use. On PATH so an agent's shell
+  # resolves it by name, like bash/pgrep.
   inherit (pkgs) aifed;
 
   # The full container PATH, built once so prod and dev cannot drift.
