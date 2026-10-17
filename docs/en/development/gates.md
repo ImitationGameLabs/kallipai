@@ -170,10 +170,10 @@ leaves it byte for byte alone.
 products, and all three are tracked. `.meta.json` and `README.md` are
 `paraglide-js init` boilerplate; the `.gitignore` keeps `cache/` out of
 this repository. A compile leaves an existing copy alone; what it
-rewrites follows the trigger: an installed SDK newer than the recorded
-version rewrites all three; otherwise a missing `.gitignore` or
-`README.md` comes back by itself, and a missing `.meta.json` rewrites
-all three. `cache/` plays no part.
+rewrites follows the trigger: an installed SDK newer than the version
+recorded in `.meta.json` rewrites all three; otherwise a missing
+`.gitignore` or `README.md` comes back by itself, and a missing
+`.meta.json` rewrites all three. `cache/` plays no part.
 
 The `.gitignore` the tool writes is its own template, which ignores
 everything but `settings.json`: new files under `messages/` become
@@ -187,11 +187,11 @@ from different tool versions.
 
 After a compile that filled in a missing file, check the folder with
 `git status`. Take nothing from the index, which may already hold the
-rewrite. Restoring from `HEAD` also brings the tracked SDK version
+rewrite. Restoring from `HEAD` also brings the recorded version
 back: a rewritten `.meta.json` records the installed one. That holds
 while the rewrite is uncommitted. If it did go in, take `README.md` and
 `.gitignore` from the commit before it (`git checkout <rev> -- <paths>`).
-Otherwise, if the installed SDK is not newer than the tracked SDK
+Otherwise, if the installed SDK is not newer than the recorded
 version, restore the three files from `HEAD` and rerun the gate:
 
 ```sh
