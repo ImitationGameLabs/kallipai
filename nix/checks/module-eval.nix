@@ -81,6 +81,58 @@
         };
       };
       failedAssertions = attrs: builtins.filter (a: !a.assertion) attrs.config.assertions;
+      # The app face origin as the platform documents it, recomposed from
+      # the public knobs: the checks below compare the derived options and
+      # the rendered unit env against this, never against a literal.
+      schemeFor = cfg: if cfg.config.services.kallipai.tls then "https" else "http";
+      appOriginFor = cfg: "${schemeFor cfg}://app.${cfg.config.services.kallipai.domain}";
+      # The gateway admin face's public base, composed from the same knobs.
+      gatewayBaseFor = cfg: "${schemeFor cfg}://model-gw.${cfg.config.services.kallipai.domain}/v1";
+      # The api edge's origin, composed from the same knobs: the default
+      # arm of the gateway admin URL rides it.
+      apiEdgeFor = cfg: "${schemeFor cfg}://api.${cfg.config.services.kallipai.domain}";
+      # The six polis port defaults in the module's own order (archeion,
+      # lesche, keryx, files, instances, model-gateway), plus the
+      # forwarding face's port, which is a separate binding. Each pin pair
+      # compares one space-separated string of numbers: the evaluated
+      # options against it, then the module file's binding as written, so
+      # a default change lands here instead of drifting silently past the
+      # crates, the images and the compose files. Operators meet these
+      # numbers across docs/en/deployment/container.md,
+      # docs/en/deployment/nixos/minimal.md and
+      # docs/en/development/setup.md, except the instances port, which
+      # sits in no page under docs/. This pin reads the module, not those
+      # documents, so a port change has to reach them by hand.
+      portNames = [
+        "archeion"
+        "lesche"
+        "keryx"
+        "files"
+        "instances"
+        "model-gateway"
+      ];
+      portsLine = ports: lib.concatStringsSep " " (map (n: toString ports.${n}) portNames);
+      pinnedPorts = "7100 7200 7210 7400 7300 7500";
+      pinnedForwardPort = "7501";
+      # nix/nixos-modules.nix binds these defaults once (defaultPolisPorts
+      # for the six, defaultForwardPort for the forwarding face); the pin
+      # reads those lines back instead of repeating the numbers again.
+      moduleBinding =
+        name:
+        let
+          lines = lib.splitString "\n" (builtins.readFile ../nixos-modules.nix);
+          hits = builtins.filter (m: m != null) (
+            map (l: builtins.match "[[:space:]]*${name} = ([0-9]+);" l) lines
+          );
+        in
+        if builtins.length hits == 0 then
+          throw "module binding ${name}: no candidate line in nix/nixos-modules.nix"
+        else if builtins.length hits > 1 then
+          throw "module binding ${name}: ${toString (builtins.length hits)} lines in nix/nixos-modules.nix, want exactly one"
+        else
+          builtins.head (builtins.head hits);
+      boundPortsLine = lib.concatStringsSep " " (map moduleBinding portNames);
+      boundForwardPortLine = moduleBinding "defaultForwardPort";
       # The daemon block installs the whole workspace build on PATH.
       workspaceOnPath =
         builtins.elem stubPackages.${pkgs.stdenv.hostPlatform.system}.workspace
@@ -234,6 +286,7 @@
           model-gateway.enable = false;
         };
       };
+      gatewayDbName = "kallipai-model-gateway";
       scrapeJob = lib.elemAt aligned.config.services.kallipai.polis.scrapeConfigs 0;
       scrapeTarget = lib.elemAt (lib.elemAt scrapeJob.static_configs 0).targets 0;
       scrapeDrifted = evalHost {
@@ -296,20 +349,23 @@
 
       # The baking helper, called directly (no module), writes exactly
       # the payload it is given.
+      directPayload = {
+        offlineLogin = false;
+      };
       directBake = bakeRuntimeConfig {
         inherit pkgs;
         package = stubDist;
-        runtimeConfig = {
-          offlineLogin = false;
-        };
+        runtimeConfig = directPayload;
       };
     in
     pkgs.runCommand "${project}-nixos-module-eval" { } ''
       # Forcing leaf options typechecks the module; assertions are
       # checked explicitly (they only throw in the toplevel activation).
-      test "${toString aligned.config.services.kallipai.polis.ports.archeion}" = "7100"
-      test "${toString aligned.config.services.kallipai.polis.ports.lesche}" = "7200"
-      test "${toString aligned.config.services.kallipai.polis.ports.keryx}" = "7210"
+      # The port pins: see pinnedPorts and pinnedForwardPort above.
+      test "${portsLine aligned.config.services.kallipai.polis.ports}" = "${pinnedPorts}"
+      test "${boundPortsLine}" = "${pinnedPorts}"
+      test "${toString aligned.config.services.kallipai.polis.model-gateway.forwardPort}" = "${pinnedForwardPort}"
+      test "${boundForwardPortLine}" = "${pinnedForwardPort}"
       test "${toString (builtins.length (failedAssertions aligned))}" = "0"
       test "${toString (builtins.length aligned.config.warnings)}" = "0"
       test "${toString workspaceOnPath}" = "1"
@@ -319,12 +375,18 @@
       # helper resolution depends on it (see daemonUnitFile).
       grep -q "${aligned.config.system.path}/bin" "${daemonUnitFile}"
 
-      # The daemon socket literal lives in two places: the module
-      # binding (unit env) and the client constant (the probe chain's
-      # last leg). Pin both definition lines: editing either side
-      # alone turns this check red.
-      grep -q 'daemonSocket = "/run/kallipai/daemon.sock";' "${../nixos-modules.nix}"
-      grep -q 'SYSTEM_DAEMON_SOCKET: &str = "/run/kallipai/daemon.sock";' "${../../crates/daemon/kallipai-daemon-common/src/socket.rs}"
+      # The daemon socket lives in two places: the module binding (unit
+      # env) and the client constant (the probe chain's last leg). Read
+      # both sides and compare: moving the path on one side alone turns
+      # this check red. Moving both at once would not: the path is also
+      # published for operators in docs/en/deployment/nixos/minimal.md
+      # and docs/zh-cn/deployment/nixos/minimal.md, and this check reads
+      # neither.
+      daemonSock=$(grep -o 'KALLIPAI_DAEMON_SOCKET=[^ "]*' '${daemonUnitFile}' | cut -d= -f2)
+      clientSock=$(grep -o 'SYSTEM_DAEMON_SOCKET: &str = "[^"]*"' '${../../crates/daemon/kallipai-daemon-common/src/socket.rs}' | cut -d '"' -f2)
+      test -n "$clientSock"
+      test -n "$daemonSock"
+      test "$daemonSock" = "$clientSock"
 
       # A drifted polis-only host stays warning-free: no drift warning
       # exists since the subdomain shape hides ports behind the edge.
@@ -355,8 +417,8 @@
       # Custom runtime keys bake over the shell, user keys only; the
       # page sentinel still comes through.
       custom="${webCustom.config.services.kallipai.web.distWithRuntimeConfig}"
-      grep -q '"offlineLogin":false' "$custom/config.js"
-      grep -q '"domain":"kallipai.lan"' "$custom/config.js"
+      grep -q "\"offlineLogin\":${builtins.toJSON webCustom.config.services.kallipai.web.runtimeConfig.offlineLogin}" "$custom/config.js"
+      grep -q "\"domain\":\"${webCustom.config.services.kallipai.web.runtimeConfig.domain}\"" "$custom/config.js"
       grep -q bundle-page "$custom/index.html"
 
       # An unknown runtimeConfig key failed the evaluation itself.
@@ -364,20 +426,25 @@
 
       # The domain knob drives the derived defaults; tls off flips the
       # scheme and the cookie; an explicit option beats the derivation.
-      test "${webDerived.config.services.kallipai.polis.archeion.corsOrigins}" = "https://app.kallipai.com"
-      test "${lib.boolToString webTlsOff.config.services.kallipai.polis.archeion.cookieSecure}" = "false"
-      test "${webTlsOff.config.services.kallipai.polis.archeion.corsOrigins}" = "http://app.kallipai.com"
-      test "${webTlsOff.config.services.kallipai.polis.archeion.webauthnRpId}" = "kallipai.com"
+      test "${webDerived.config.services.kallipai.polis.archeion.corsOrigins}" = "${appOriginFor webDerived}"
+      test "${lib.boolToString webTlsOff.config.services.kallipai.polis.archeion.cookieSecure}" = "${lib.boolToString webTlsOff.config.services.kallipai.tls}"
+      test "${webTlsOff.config.services.kallipai.polis.archeion.corsOrigins}" = "${appOriginFor webTlsOff}"
+      test "${webTlsOff.config.services.kallipai.polis.archeion.webauthnRpId}" = "${webTlsOff.config.services.kallipai.domain}"
+      test "${webDerived.config.services.kallipai.polis.archeion.webauthnRpOrigin}" = "${appOriginFor webDerived}"
+      test "${webDerived.config.services.kallipai.polis.archeion.oauthRedirectBase}" = "${appOriginFor webDerived}"
       test "${webOverride.config.services.kallipai.polis.archeion.corsOrigins}" = "https://custom.example"
+      # A second domain proves the derivation reads the knob rather than
+      # a built-in name: webCustom carries platform.example.
+      test "${webCustom.config.services.kallipai.polis.archeion.corsOrigins}" = "${appOriginFor webCustom}"
 
       # The derived defaults must reach the process env: the rp origin
       # names the web page (the passkey ceremony runs there and the
       # archeion admits exactly that origin), tls-on leaves the cookie
       # flag to the code default, and tls-off forces it non-Secure.
-      grep -q 'KALLIPAI_ARCHEION_WEBAUTHN_RP_ORIGIN=https://app.kallipai.com' '${webDerivedUnit}'
-      grep -q 'KALLIPAI_ARCHEION_OAUTH_REDIRECT_BASE=https://app.kallipai.com' '${webDerivedUnit}'
+      grep -q "KALLIPAI_ARCHEION_WEBAUTHN_RP_ORIGIN=${webDerived.config.services.kallipai.polis.archeion.webauthnRpOrigin}" '${webDerivedUnit}'
+      grep -q "KALLIPAI_ARCHEION_OAUTH_REDIRECT_BASE=${webDerived.config.services.kallipai.polis.archeion.oauthRedirectBase}" '${webDerivedUnit}'
       test -z "$(grep KALLIPAI_ARCHEION_COOKIE_SECURE '${webDerivedUnit}')"
-      grep -q 'KALLIPAI_ARCHEION_COOKIE_SECURE=false' '${webTlsOffUnit}'
+      grep -q "KALLIPAI_ARCHEION_COOKIE_SECURE=${lib.boolToString webTlsOff.config.services.kallipai.polis.archeion.cookieSecure}" '${webTlsOffUnit}'
       test "${lib.boolToString webOverride.config.services.kallipai.polis.archeion.cookieSecure}" = "false"
 
       # The polis gate is the primary group everywhere it matters:
@@ -407,7 +474,7 @@
       # Every edge service's unit env carries the derived CORS allowlist;
       # one roster drives the six greps, so a new service needs one line.
       ${lib.concatMapStringsSep "\n      " (
-        p: "grep -q '${p.env}=https://app.kallipai.com' '${toString p.unit}'"
+        p: "grep -q '${p.env}=${appOriginFor webDerived}' '${toString p.unit}'"
       ) corsEnvUnits}
       # The keryx unit: the relay binary on ExecStart and the
       # no-database contract (all state is in-memory, so the unit env
@@ -415,11 +482,13 @@
       grep -q 'ExecStart=.*/bin/kallipai-keryx' '${polisKeryxUnit}'
       test -z "$(grep DATABASE_URL '${polisKeryxUnit}')"
       derived="${webDerived.config.services.kallipai.web.distWithRuntimeConfig}"
-      grep -q '"domain":"kallipai.com"' "$derived/config.js"
-      grep -q '"gatewayAdminUrl":"https://api.kallipai.com/v1/model-gateway"' "$derived/config.js"
+      # The baked domain comes from the platform knob through the module's
+      # mkDefault, so a derivation that hardcodes it turns this red.
+      grep -q "\"domain\":\"${webDerived.config.services.kallipai.domain}\"" "$derived/config.js"
+      grep -q "\"gatewayAdminUrl\":\"${webDerived.config.services.kallipai.web.runtimeConfig.gatewayAdminUrl}\"" "$derived/config.js"
       # The baking helper, called directly, writes exactly the payload.
       direct="${directBake}"
-      grep -q '"offlineLogin":false' "$direct/config.js"
+      grep -q "\"offlineLogin\":${builtins.toJSON directPayload.offlineLogin}" "$direct/config.js"
       test -z "$(grep bundle-shell "$direct/config.js")"
       grep -q bundle-page "$direct/index.html"
 
@@ -431,11 +500,21 @@
       # ensure entries merge into the shared postgresql config beside
       # the polis ones (3 + 1 users).
       test "${toString (builtins.length (failedAssertions webDerived))}" = "0"
-      grep -q 'KALLIPAI_MODEL_GATEWAY_ADDR=127.0.0.1:7501' '${gatewayUnit}'
-      grep -q 'KALLIPAI_MODEL_GATEWAY_MANAGEMENT_ADDR=127.0.0.1:7500' '${gatewayUnit}'
-      grep -q 'KALLIPAI_MODEL_GATEWAY_DATABASE_URL=postgresql:///kallipai-model-gateway?host=/run/postgresql' '${gatewayUnit}'
-      grep -q 'KALLIPAI_MODEL_GATEWAY_PUBLIC_BASE_URL=https://model-gw.kallipai.com/v1' '${gatewayUnit}'
-      grep -q 'KALLIPAI_MODEL_GATEWAY_LOG_DIR=/var/log/kallipai/model-gateway' '${gatewayUnit}'
+      grep -q "KALLIPAI_MODEL_GATEWAY_ADDR=127.0.0.1:${toString webDerived.config.services.kallipai.polis.model-gateway.forwardPort}" '${gatewayUnit}'
+      grep -q "KALLIPAI_MODEL_GATEWAY_MANAGEMENT_ADDR=127.0.0.1:${toString webDerived.config.services.kallipai.polis.ports.model-gateway}" '${gatewayUnit}'
+      gatewayDb=$(grep -o 'KALLIPAI_MODEL_GATEWAY_DATABASE_URL=[^ "]*' '${gatewayUnit}' | cut -d= -f2-)
+      test -n "$gatewayDb"
+      # The gateway carries its own database name on the archeion socket
+      # query string: read that query once, then compare the two legs.
+      archeionDbQuery=$(grep -o 'KALLIPAI_ARCHEION_DATABASE_URL=[^ "]*' '${webDerivedUnit}' | cut -d= -f2- | cut -d'?' -f2)
+      test -n "$archeionDbQuery"
+      test "$gatewayDb" = "postgresql:///${gatewayDbName}?$archeionDbQuery"
+      test "${webDerived.config.services.kallipai.polis.model-gateway.publicBaseUrl}" = "${gatewayBaseFor webDerived}"
+      grep -q "KALLIPAI_MODEL_GATEWAY_PUBLIC_BASE_URL=${webDerived.config.services.kallipai.polis.model-gateway.publicBaseUrl}" '${gatewayUnit}'
+      polisLogDir=$(grep -o 'KALLIPAI_ARCHEION_LOG_DIR=[^ "]*' '${webDerivedUnit}' | cut -d= -f2)
+      test -n "$polisLogDir"
+      polisLogRoot=$(dirname "$polisLogDir")
+      grep -q "KALLIPAI_MODEL_GATEWAY_LOG_DIR=$polisLogRoot/model-gateway" '${gatewayUnit}'
       grep -q 'ExecStart=.*/bin/kallipai-model-gateway' '${gatewayUnit}'
       test -z "$(grep StateDirectory '${gatewayUnit}')"
       test -z "$(grep EnvironmentFile '${gatewayUnit}')"
@@ -443,16 +522,23 @@
       test "${toString (builtins.length webDerived.config.services.postgresql.ensureUsers)}" = "4"
       # The admin face authenticates against the archeion: the internal
       # URL and the shared internal token file ride the unit env.
-      grep -q 'KALLIPAI_MODEL_GATEWAY_ARCHEION_URL=http://127.0.0.1:7100' '${gatewayUnit}'
-      grep -q 'KALLIPAI_MODEL_GATEWAY_INTERNAL_TOKEN_FILE=/var/lib/kallipai/archeion/internal-token' '${gatewayUnit}'
+      archeionAddr=$(grep -o 'KALLIPAI_ARCHEION_ADDR=[^ "]*' '${webDerivedUnit}' | cut -d= -f2)
+      test -n "$archeionAddr"
+      grep -q "KALLIPAI_MODEL_GATEWAY_ARCHEION_URL=http://$archeionAddr" '${gatewayUnit}'
+      archeionToken=$(grep -o 'KALLIPAI_ARCHEION_INTERNAL_TOKEN_FILE=[^ "]*' '${webDerivedUnit}' | cut -d= -f2)
+      test -n "$archeionToken"
+      grep -q "KALLIPAI_MODEL_GATEWAY_INTERNAL_TOKEN_FILE=$archeionToken" '${gatewayUnit}'
       # The gateway user's primary group is the platform gate: the
       # 0640 internal-token file is group-readable through it.
       test "${webDerived.config.users.users.kallipai-model-gateway.group}" = "kallipai-polis"
       # The domain derivation feeds the admin page CORS allowlist too.
-      test "${webDerived.config.services.kallipai.polis.model-gateway.corsOrigins}" = "https://app.kallipai.com"
+      test "${webDerived.config.services.kallipai.polis.model-gateway.corsOrigins}" = "${appOriginFor webDerived}"
       # The gateway admin URL follows apiBase when the platform edge
       # moves (the default arm asserted beside the baked config.js).
-      test "${webApiBase.config.services.kallipai.web.runtimeConfig.gatewayAdminUrl}" = "https://edge.example.com/v1/model-gateway"
+      test "${webApiBase.config.services.kallipai.web.runtimeConfig.gatewayAdminUrl}" = "${webApiBase.config.services.kallipai.web.runtimeConfig.apiBase}/v1/model-gateway"
+      # The default arm: with no apiBase override the admin URL rides the
+      # platform domain's api edge.
+      test "${webDerived.config.services.kallipai.web.runtimeConfig.gatewayAdminUrl}" = "${apiEdgeFor webDerived}/v1/model-gateway"
 
       # The polis scrape export: no polis or gateway leaves the
       # list empty; a polis host gets one loopback job per
@@ -465,11 +551,14 @@
       test "${toString (builtins.length scrapeGwOff.config.services.kallipai.polis.scrapeConfigs)}" = "0"
       test "${lib.boolToString webDerived.config.services.prometheus.enable}" = "false"
       test "${toString (builtins.length aligned.config.services.kallipai.polis.scrapeConfigs)}" = "1"
+      # The job name is a dashboard-side label (Grafana panels select on
+      # it), so it is pinned by value beside the unit-existence check.
       test "${scrapeJob.job_name}" = "kallipai-model-gateway"
+      test "${toString (builtins.hasAttr "${scrapeJob.job_name}.service" webDerived.config.systemd.units)}" = "1"
       test "${scrapeJob.scrape_interval}" = "30s"
-      test "${scrapeTarget}" = "127.0.0.1:7500"
-      test "${scrapeDriftedTarget}" = "127.0.0.1:7510"
-      test "${wiredTarget}" = "127.0.0.1:7500"
+      test "${scrapeTarget}" = "127.0.0.1:${toString aligned.config.services.kallipai.polis.ports.model-gateway}"
+      test "${scrapeDriftedTarget}" = "127.0.0.1:${toString scrapeDrifted.config.services.kallipai.polis.ports.model-gateway}"
+      test "${wiredTarget}" = "127.0.0.1:${toString scrapeWired.config.services.kallipai.polis.ports.model-gateway}"
       test "${toString (builtins.length (failedAssertions scrapeWired))}" = "0"
       test "${toString (builtins.length scrapeWired.config.warnings)}" = "0"
       printf %s ok > "$out"
