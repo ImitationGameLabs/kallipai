@@ -3,6 +3,7 @@ import {
   initConfigStorage,
   loadConfig,
   type PersistedConfig,
+  saveConfig,
 } from "./config.ts";
 import type { ConfigStorage } from "./storage.ts";
 
@@ -41,7 +42,6 @@ function fakeStorage(initial: string | null): {
 }
 
 const validOffline: PersistedConfig = {
-  activeMode: "offline",
   offline: { tagmaUrl: "http://host:3000", authToken: "t" },
 };
 
@@ -59,19 +59,60 @@ Deno.test(
 );
 
 Deno.test(
-  "loadConfig wipes a legacy backend-tagged shape (no activeMode)",
+  "loadConfig keeps an older blob's creds and drops its retired fields",
   async () => {
     const fake = fakeStorage(
       JSON.stringify({
-        backend: "offline",
-        tagmaUrl: "http://host:3000",
-        authToken: "t",
+        activeMode: "offline",
+        offline: { tagmaUrl: "http://host:3000", authToken: "t" },
       }),
     );
     initConfigStorage(fake.storage);
 
-    assertEquals(await loadConfig(), null);
-    assertEquals(fake.cleared, 1);
+    const loaded = await loadConfig();
+    assertEquals(loaded?.offline, validOffline.offline);
+    // An older blob loads as it stands: no rewrite and no wipe.
+    assertEquals(fake.saved.length, 0);
+    assertEquals(fake.cleared, 0);
+
+    // The retired key is not part of the loaded value, so the next write
+    // -- the store spreads the current value into every save -- leaves it out.
+    await saveConfig({ ...loaded, notificationsEnabled: true });
+    assertEquals(fake.saved.length, 1);
+    assertEquals(JSON.parse(fake.saved[0]!), {
+      offline: validOffline.offline,
+      notificationsEnabled: true,
+    });
+  },
+);
+
+Deno.test(
+  "loadConfig drops an unknown key inside the offline creds",
+  async () => {
+    const fake = fakeStorage(
+      JSON.stringify({
+        offline: {
+          tagmaUrl: "http://host:3000",
+          authToken: "t",
+          extra: "not a field this build persists",
+        },
+      }),
+    );
+    initConfigStorage(fake.storage);
+
+    const loaded = await loadConfig();
+    assertEquals(loaded?.offline, validOffline.offline);
+    // An unknown subkey is not a reason to wipe the blob.
+    assertEquals(fake.cleared, 0);
+    assertEquals(fake.saved.length, 0);
+
+    // The next write keeps only the two known credential fields.
+    await saveConfig({ ...loaded, notificationsEnabled: true });
+    assertEquals(fake.saved.length, 1);
+    assertEquals(JSON.parse(fake.saved[0]!), {
+      offline: validOffline.offline,
+      notificationsEnabled: true,
+    });
   },
 );
 
@@ -95,22 +136,13 @@ Deno.test(
   },
 );
 
-Deno.test("loadConfig wipes a value with an unknown activeMode", async () => {
-  const fake = fakeStorage(JSON.stringify({ activeMode: "spaceship" }));
-  initConfigStorage(fake.storage);
-
-  assertEquals(await loadConfig(), null);
-  assertEquals(fake.cleared, 1);
-});
-
 Deno.test(
-  "loadConfig wipes a stale offline shape (pre-rename daemonUrl field)",
+  "loadConfig wipes a stale offline shape (daemonUrl instead of tagmaUrl)",
   async () => {
-    // A pre-rename blob carries `daemonUrl` instead of `tagmaUrl`; it must be
+    // A stale blob carries `daemonUrl` instead of `tagmaUrl`; it must be
     // wiped (not loaded with an undefined URL) per the no-legacy-shapes rule.
     const fake = fakeStorage(
       JSON.stringify({
-        activeMode: "offline",
         offline: { daemonUrl: "http://host:3000", authToken: "t" },
       }),
     );
@@ -124,9 +156,7 @@ Deno.test(
 Deno.test(
   "loadConfig wipes an offline shape missing required string fields",
   async () => {
-    const fake = fakeStorage(
-      JSON.stringify({ activeMode: "offline", offline: { tagmaUrl: 3000 } }),
-    );
+    const fake = fakeStorage(JSON.stringify({ offline: { tagmaUrl: 3000 } }));
     initConfigStorage(fake.storage);
 
     assertEquals(await loadConfig(), null);
@@ -137,13 +167,10 @@ Deno.test(
 Deno.test(
   "loadConfig keeps a config carrying the notifications switch unchanged",
   async () => {
-    const fake = fakeStorage(
-      JSON.stringify({ activeMode: "online", notificationsEnabled: true }),
-    );
+    const fake = fakeStorage(JSON.stringify({ notificationsEnabled: true }));
     initConfigStorage(fake.storage);
 
     assertEquals(await loadConfig(), {
-      activeMode: "online",
       notificationsEnabled: true,
     });
     // A recognized blob is neither rewritten nor cleared.
@@ -157,9 +184,7 @@ Deno.test(
   async () => {
     // A string where the boolean belongs fails the structural guard and is
     // wiped with the rest of the blob (the no-legacy-shapes rule).
-    const fake = fakeStorage(
-      JSON.stringify({ activeMode: "online", notificationsEnabled: "yes" }),
-    );
+    const fake = fakeStorage(JSON.stringify({ notificationsEnabled: "yes" }));
     initConfigStorage(fake.storage);
 
     assertEquals(await loadConfig(), null);

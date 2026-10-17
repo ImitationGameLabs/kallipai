@@ -64,7 +64,7 @@ Deno.test("notify stays silent while the window is visible", async () => {
   const fake = fakeBackend("granted");
   initNotificationBackend(fake.backend);
   setHiddenProbe(() => false); // foreground: the transcript IS the delivery
-  configStore.value = { activeMode: "online", notificationsEnabled: true };
+  configStore.value = { notificationsEnabled: true };
 
   await notify({ tag: "tagma:t1", title: "T", body: "B" });
 
@@ -86,7 +86,7 @@ Deno.test(
     await notify({ tag: "tagma:t1", title: "T", body: "B" });
     assertEquals(fake.shown.length, 0);
 
-    configStore.value = { activeMode: "online", notificationsEnabled: false };
+    configStore.value = { notificationsEnabled: false };
     await notify({ tag: "tagma:t1", title: "T", body: "B" });
     assertEquals(fake.shown.length, 0);
     resetSeams();
@@ -95,7 +95,7 @@ Deno.test(
 
 Deno.test("notify stays silent unless permission is granted", async () => {
   setHiddenProbe(() => true);
-  configStore.value = { activeMode: "online", notificationsEnabled: true };
+  configStore.value = { notificationsEnabled: true };
 
   for (const state of ["denied", "default"] as const) {
     const fake = fakeBackend(state);
@@ -111,7 +111,7 @@ Deno.test("notify routes one show through the injected backend", async () => {
   const fake = fakeBackend("granted");
   initNotificationBackend(fake.backend);
   setHiddenProbe(() => true);
-  configStore.value = { activeMode: "online", notificationsEnabled: true };
+  configStore.value = { notificationsEnabled: true };
 
   await notify({ tag: "room:r1", title: "room", body: "hello" });
 
@@ -125,7 +125,7 @@ Deno.test(
     // No injection: the web default. Deno has no `Notification`, which is the
     // browser shape the old maybeNotifyBackground guarded with typeof.
     setHiddenProbe(() => true);
-    configStore.value = { activeMode: "online", notificationsEnabled: true };
+    configStore.value = { notificationsEnabled: true };
 
     await notify({ tag: "tagma:t1", title: "T", body: "B" }); // must not throw
     assertEquals(await notificationPermission(), "default");
@@ -140,7 +140,7 @@ Deno.test("the slot is single: re-injection replaces the route", async () => {
   const second = fakeBackend("granted");
   initNotificationBackend(first.backend);
   setHiddenProbe(() => true);
-  configStore.value = { activeMode: "online", notificationsEnabled: true };
+  configStore.value = { notificationsEnabled: true };
 
   await notify({ tag: "tagma:t1", title: "T", body: "one" });
   initNotificationBackend(second.backend);

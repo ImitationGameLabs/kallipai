@@ -107,10 +107,8 @@ export class ChannelsStore {
 
   /** Teardown generation, bumped by `tearDownAll` (and thus by `reset`, which
    *  calls it). `openRelay` captures this before its awaits and bails if it has
-   *  advanced when they resolve -- a logout or mode switch during the KEX/cache
-   *  hydrate must not resurrect a conversation into the already-cleared map.
-   *  Mirrors `attachLocal`'s post-await `activeMode` re-check, but covers logout
-   *  too (logout tears the store down without flipping the mode). */
+   *  advanced when they resolve -- a logout during the KEX/cache hydrate
+   *  must not resurrect a conversation into the already-cleared map. */
   private generation = 0;
 
   /** Injected read-only backfill for the cached realtime status snapshot, used
@@ -246,8 +244,8 @@ export class ChannelsStore {
    *
    *  Async because the cache hydrate must complete BEFORE the SSE drain starts
    *  (a live frame racing ahead of the hydrate would double-render). Re-checks
-   *  `activeMode` after the hydrate so a mode flip during the await closes the
-   *  stray transport instead of attaching it. */
+   *  that the creds are still stored after the hydrate, so a forget during
+   *  the await closes the stray transport instead of attaching it. */
   async attachLocal(
     transport: DirectTransport,
     conversationId: string | null,
@@ -274,9 +272,9 @@ export class ChannelsStore {
       // IndexedDB unavailable (e.g. private mode): proceed with an empty
       // transcript; live delivery still works.
     }
-    // Race guard: a flip back to online during the hydrate must not leave a
-    // held tagma transport attached as "local".
-    if (configStore.value?.activeMode !== "offline") {
+    // Race guard: creds cleared during the hydrate must not leave a held
+    // tagma transport attached as "local".
+    if (configStore.value?.offline === undefined) {
       transport.close();
       this.dropConv("local");
       return;

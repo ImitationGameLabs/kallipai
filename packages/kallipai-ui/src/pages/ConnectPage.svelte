@@ -68,9 +68,9 @@
 
   // On success the gate (offline + /connect + connected) redirects to "/" -- so
   // this page does NOT navigate. Single owner of the post-connect route.
-  // Entering offline mode no longer touches the online (archeion) session: its
-  // cookie survives so a later switch back is re-auth-free. The retained offline
-  // creds are persisted via setOffline, then the active mode flips to offline.
+  // Connecting never touches the online (archeion) session: its cookie
+  // survives so a later switch back is re-auth-free. The creds are persisted
+  // via setOffline, then the local conversation attaches.
   async function submit(e: Event) {
     e.preventDefault();
     error = null;
@@ -87,7 +87,6 @@
     try {
       const { transport, conversationId } = await connectDirect(config);
       await configStore.setOffline(config);
-      await configStore.setActiveMode("offline");
       await channelsStore.attachLocal(transport, conversationId);
     } catch (e) {
       // Full error (with cause chain) to the console; the inline FormError
