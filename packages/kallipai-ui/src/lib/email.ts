@@ -5,9 +5,10 @@
 // runs RFC 5321 validation via the `email_address` crate and produces the
 // canonical form `{local-part verbatim}@{domain lowercased}`. The local part
 // is case-sensitive (RFC 5321 sec 2.4 -- `John@x.com` and `john@x.com` are
-// DISTINCT accounts, `email.rs:83-91`), so this helper MUST NOT lowercase,
-// trim the domain, or otherwise mutate the address -- a user must be able to
-// type exactly the address they registered. We only return a boolean.
+// DISTINCT accounts, `email.rs::tests::local_part_case_is_significant`), so
+// this helper MUST NOT lowercase, trim the domain, or otherwise mutate the
+// address -- a user must be able to type exactly the address they registered.
+// We only return a boolean.
 
 /**
  * Permissive addr-spec shape. Intentionally MORE permissive than
@@ -16,7 +17,14 @@
  */
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-/** RFC 5321 cap on total address length (octets). Mirrors `email.rs:110-114`. */
+/**
+ * Total-length cap this helper applies on its own. The per-part limits come
+ * from the `email_address` crate that the archeion delegates to (local part
+ * at most 64, domain at most 254) and the archeion adds no total-length
+ * check of its own -- `email.rs`'s `rejects_too_long` is an over-long local
+ * part, not a whole-address cap. An address this cap rejects can therefore
+ * be one the server accepts.
+ */
 const EMAIL_MAX_LEN = 254;
 
 /**
