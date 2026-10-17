@@ -10,7 +10,7 @@
   "manage_gateway_collection_publish": "发布",
   "manage_gateway_collection_reach": "触达",
   "manage_gateway_collection_sets_count": "{count} 个配置集",
-  "manage_gateway_collection_unpublish": "撤回发布",
+  "manage_gateway_collection_unpublish": "取消发布",
   "manage_gateway_collections": "合集",
   "manage_gateway_group_actions_aria": "分组操作",
   "manage_gateway_group_add": "新建分组",
