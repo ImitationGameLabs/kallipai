@@ -18,7 +18,6 @@
   "manage_instances_spawn_slug_label": "Process name",
   "manage_instances_spawn_slug_placeholder": "e.g. work-laptop",
   "manage_instances_spawn_workspace_label": "Workspace path",
-  "manage_instances_spawn_workspace_placeholder": "e.g. /home/me/kallipai",
   "manage_instances_spawn_polis_label": "Polis URL (optional)",
   "manage_instances_spawn_enrollment_label": "Enrollment code (optional)",
   "manage_instances_spawn_token_label": "Process token (optional)",

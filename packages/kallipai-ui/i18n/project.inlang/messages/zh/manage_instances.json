@@ -18,7 +18,6 @@
   "manage_instances_spawn_slug_label": "进程名",
   "manage_instances_spawn_slug_placeholder": "如 work-laptop",
   "manage_instances_spawn_workspace_label": "工作区路径",
-  "manage_instances_spawn_workspace_placeholder": "如 /home/me/kallipai",
   "manage_instances_spawn_polis_label": "Polis URL（可选）",
   "manage_instances_spawn_enrollment_label": "注册码（可选）",
   "manage_instances_spawn_token_label": "进程令牌（可选）",
