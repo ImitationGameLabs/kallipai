@@ -63,9 +63,9 @@ pub struct Args {
     /// keryx's `KALLIPAI_KERYX_INTERNAL_TOKEN`.
     #[arg(long, env = "KALLIPAI_FILES_NOTIFY_TOKEN", default_value = "")]
     pub notify_token: String,
-    /// Archeion degrade posture (seventh approved default). `closed` (the
-    /// default) fails every authorization decision with 503 when the
-    /// registry cannot answer; `soft` degrades the enrollment lookup to an
+    /// Archeion degrade posture. `closed` (the default) fails every
+    /// authorization decision with 503 when the registry cannot be reached
+    /// or answers off-contract; `soft` degrades the enrollment lookup to an
     /// empty fact set, so tagma decisions deny with 403 instead of 503.
     /// Neither posture weakens credential verification.
     #[arg(long, env = "KALLIPAI_FILES_DEGRADE", value_parser = ["closed", "soft"], default_value = "closed")]

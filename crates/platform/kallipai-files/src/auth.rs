@@ -6,11 +6,14 @@
 //! with no cache (the deliberate control-plane design): revocation latency
 //! is one round trip, not a TTL.
 //!
-//! Failure mapping: a control-plane transport/backend failure means the
-//! registry cannot answer, and an unanswered registry must never open the
-//! door -- it maps to 503 (fail-closed, the degrade default; the
-//! `KALLIPAI_FILES_DEGRADE=soft` switch narrows which decisions degrade, see
-//! `crate::acl`, it does not weaken verification).
+//! Failure mapping: every `ControlPlaneError::Backend` covers the same
+//! family -- the registry could not be reached, answered a status this
+//! client does not read as part of the contract, or sent a body that
+//! will not decode -- and a registry that gives no usable answer must
+//! never open the door: it maps to 503. That is fail-closed, the degrade
+//! default; the `KALLIPAI_FILES_DEGRADE=soft` switch narrows which
+//! decisions degrade (`crate::api::tagma_facts` and `crate::api::send`
+//! carry the branch) and does not weaken verification.
 
 use std::time::Duration;
 

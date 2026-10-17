@@ -21,9 +21,10 @@ pub(super) enum StreamOutcome {
     /// The stream completed normally.
     Completed(StreamConsumed),
     /// The stream dropped mid-way with a transport error. The partial content accumulated so far
-    /// is abandoned (already-emitted deltas are void); the caller re-sends the same request,
-    /// which the kept anchor turns into a delta continuation. Carries the error so the caller
-    /// can drive retry/failover and surface a diagnostic.
+    /// is abandoned (already-emitted deltas are void); the caller re-sends the same request:
+    /// with an anchor kept, that resend is a delta continuation, and a send that dropped before
+    /// any anchor arrived is the full context again. Carries the error so the caller can drive
+    /// retry/failover and surface a diagnostic.
     Transient(just_llm_client::TransportError),
 }
 

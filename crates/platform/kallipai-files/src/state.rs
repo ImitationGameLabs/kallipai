@@ -27,11 +27,11 @@ pub struct FilesConfig {
     /// cross-origin allowed (the allowlist is `AllowOrigin::list`, never
     /// `Any`); see `Args::cors_origins`.
     pub cors_origins: String,
-    /// Archeion degrade posture (seventh approved default). `false` (default)
-    /// is fail-closed: a registry that cannot answer produces 503 and no
-    /// decision. `true` is fail-soft: the enrollment lookup degrading to an
-    /// empty fact set turns tagma decisions into denials (403) instead of
-    /// 503s. It never weakens verification -- with the registry down, no
+    /// Archeion degrade posture. `false` (default) is fail-closed: a registry
+    /// that cannot be reached, or that answers off-contract, produces 503
+    /// and no decision. `true` is fail-soft: the enrollment lookup degrading
+    /// to an empty fact set turns tagma decisions into denials (403) instead
+    /// of 503s. It never weakens verification -- with the registry down, no
     /// request authenticates either way.
     pub degrade_fail_soft: bool,
     /// Garbage collection cadence (sweep + reconcile per tick; the first

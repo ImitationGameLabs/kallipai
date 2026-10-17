@@ -64,7 +64,7 @@ use crate::state::AppState;
 
 /// What the admin face needs from the platform identity service: verify
 /// one bearer token or one session cookie. `Err` = the backend could not
-/// be reached or answered outside the contract (the face fails closed on
+/// be reached or answered off-contract (the face fails closed on
 /// this); `Ok(None)` = the credential is simply not valid.
 #[async_trait::async_trait]
 pub trait AuthVerifier: Send + Sync {
@@ -80,7 +80,9 @@ pub trait AuthVerifier: Send + Sync {
     /// normally included). `None` = the archeion cannot address the
     /// tagma (unknown, pending, revoked, owner-disabled -- one
     /// collapsed answer, no oracle); `Err` = the backend could not be
-    /// reached or answered outside the contract (the caller fails closed).
+    /// reached or answered off-contract. An implementation that keeps
+    /// the last answer serves that answer instead, so `Err` reaches a
+    /// caller only when no cached answer exists (see below).
     async fn enrollment_lookup(
         &self,
         tagma_id: &str,
@@ -198,8 +200,9 @@ impl EnrollmentCache {
 /// tagma, read at call time. An unconfigured management face has no
 /// authority to ask, which reads as `None` (nothing resolves or
 /// mints -- the same closed posture as the face's own routes). `Err`
-/// = the backend could not be reached or answered outside the contract
-/// (the caller fails closed).
+/// = the backend could not be reached or answered off-contract (the
+/// caller fails closed); an implementation that keeps the last answer
+/// returns that one instead.
 pub(crate) async fn enrollment_lookup(
     state: &AppState,
     tagma_id: &str,

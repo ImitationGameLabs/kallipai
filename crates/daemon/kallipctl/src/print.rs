@@ -1,4 +1,5 @@
-//! Output shapes: the scripting vocabulary and the machine-readable printer.
+//! Output shapes: the scripting vocabulary, the machine-readable printer, and
+//! the log text passthrough with its `(no logs)` placeholder.
 
 use anyhow::Result;
 use kallipai_daemon_common::wire::{ErrorCode, InstanceState, OkPayload, Response, ResponseBody};

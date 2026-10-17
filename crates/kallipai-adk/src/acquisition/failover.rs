@@ -202,7 +202,7 @@ pub(super) async fn step_failover(
 /// (the arm) — keeping this function free of channel side effects so it is unit-testable without
 /// an mpsc sender. `summarize_and_evict` has no internal cancel select, so a cancel fired *during*
 /// compaction completes it and returns `Advanced` (the cancel is observed on the next loop
-/// iteration); this is pre-existing behavior, inherited from the inline arm.
+/// iteration).
 pub(crate) async fn advance_failover(
     ctx: &mut AgentContext,
     prior_messages: Vec<Message>,

@@ -9,7 +9,7 @@
 //! exists only as server-side delivery (`api::send`), which writes as the
 //! service and never passes through these rules.
 //!
-//! The matrix (nine rows as approved):
+//! The matrix:
 //!
 //! | # | principal | target | right |
 //! |---|---|---|---|

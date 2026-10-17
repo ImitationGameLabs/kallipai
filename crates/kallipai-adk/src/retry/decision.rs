@@ -135,7 +135,8 @@ pub(crate) enum Phase {
 }
 
 /// Where an attempt came from: the system (a retry, a re-run, a scheduled wake)
-/// or an external wake — a user message or a task delivery.
+/// or an external wake — a user message, a task delivery, or an approval
+/// notification.
 ///
 /// Only the first attempt of a wake-triggered execution is `External`: a user
 /// asking is served even when the shared table says the endpoint is done. Every

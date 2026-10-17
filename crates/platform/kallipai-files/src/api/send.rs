@@ -6,9 +6,9 @@
 //!
 //! The four principal x target combinations (all pinned in tests):
 //! - U -> U: lands in `/users/{U2}/inbox/` (matrix row 9's delivery face)
-//! - U -> T: lands in `/users/{U}/tagmas/{T2}/inbox/` (eighth default)
+//! - U -> T: lands in `/users/{U}/tagmas/{T2}/inbox/`
 //! - T -> T: same space only; lands in the target's private `inbox/`
-//! - T -> U: refused -- the shared region is the channel (ninth default)
+//! - T -> U: refused -- the shared region is the channel
 //!
 //! The write is one transaction: new record (same blob, refcount + 1,
 //! zero data copy), provenance stamped, and the delivery event appended
@@ -197,8 +197,8 @@ async fn resolve_landing(
         }
         (Principal::User(user), Target::Tagma(to_tagma)) => {
             // The target must be enrolled in the caller's own space: the
-            // user delivers into their own space's tagma region (eighth
-            // default), so the target's lookup must name that space.
+            // user delivers into their own space's tagma region, so the
+            // target's lookup must name that space.
             let target_facts = super::tagma_facts(state, &parse_tagma(to_tagma)?).await?;
             if !acl::can_receive_delivery(&target_facts, user.as_ref(), to_tagma.as_str()) {
                 return Err(ApiError::forbidden(
@@ -237,7 +237,7 @@ async fn resolve_landing(
             })
         }
         (Principal::Tagma(_), Target::User(_)) => {
-            // Ninth default: no T -> U send. The shared region already
+            // No tagma -> user send. The shared region already
             // reaches the user (matrix row 3); a second channel would be a
             // model extension for nothing.
             Err(ApiError::forbidden(

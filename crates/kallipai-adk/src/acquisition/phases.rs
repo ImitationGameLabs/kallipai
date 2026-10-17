@@ -190,8 +190,9 @@ pub(crate) async fn acquire_stream(
 
         // Consume the acquired stream. A mid-stream transport drop is retryable in-place:
         // the partial content is abandoned (already-emitted deltas are voided downstream by
-        // a `StreamReset` event) and the same request is re-sent; the kept anchor turns the
-        // retry into a delta continuation.
+        // a `StreamReset` event) and the same request is re-sent; a kept anchor turns the
+        // retry into a delta continuation, while a drop with no anchor kept — a first send
+        // that never reached one — resends the full context.
         match consume_stream(stream, tx, round_cancel).await {
             StreamOutcome::Completed(mut c) => {
                 flush_retry_records(ctx, &mut retry_records).await;

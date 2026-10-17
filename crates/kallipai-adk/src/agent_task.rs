@@ -522,11 +522,13 @@ pub async fn agent_task(
 
     if let Some(p) = initial_prompt {
         if p.is_empty() {
-            // No round runs for an empty prompt, and this execution ends here: the
-            // context — and the ledger with it — is dropped when the task's future
-            // returns, so a stop the pre-loop parked is never taken at a gate.
-            // What outlives the execution is what was written down: a stop's history
-            // line, a retry record, an endpoint fact, or another such record.
+            // No round runs for an empty prompt, and this execution ends here: its
+            // context goes with the task's future, and this execution's ledger goes
+            // with the context — the only holder of a stop the pre-loop parked — so
+            // no gate ever takes that stop. What the pre-loop's failure wrote down
+            // outlives the execution because its holders do, whichever of them the
+            // verdict filled: the shared context store (retry records), the
+            // endpoint-health table, and the agent's own history (a stop's line).
             return;
         }
         ctx.record_turn(vec![Message::user(&p)]).await;

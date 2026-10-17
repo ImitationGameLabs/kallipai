@@ -25,8 +25,6 @@ mod harvest;
 mod identity;
 mod launch;
 
-// Test-only names: the `adopt.rs` suite reads both through this path,
-// since its tests sit outside this subtree and the submodules keep the items private.
 #[cfg(test)]
 pub use error::OverlapRival;
 #[cfg(test)]
