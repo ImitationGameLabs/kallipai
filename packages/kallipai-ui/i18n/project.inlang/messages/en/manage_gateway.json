@@ -59,7 +59,6 @@
   "manage_gateway_remove_set_body": "Delete the profile set {name} from the platform catalog? This cannot be undone.\nThe profiles stay in the catalog.",
   "manage_gateway_set_add": "New profile set",
   "manage_gateway_set_desc": "A profile set lists model profiles in failover order.",
-  "manage_gateway_set_empty": "No profile sets yet",
   "manage_gateway_sets": "Profile sets",
   "manage_gateway_subtitle": "Platform catalog · distinct from each tagma's local configuration",
   "manage_gateway_title": "KallipAI · model gateway admin"

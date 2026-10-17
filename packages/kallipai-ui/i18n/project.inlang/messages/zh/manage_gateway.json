@@ -59,7 +59,6 @@
   "manage_gateway_remove_set_body": "从平台目录删除配置集 {name}？此操作无法撤销。\n配置仍保留在平台目录中。",
   "manage_gateway_set_add": "新建配置集",
   "manage_gateway_set_desc": "配置集是模型配置的轮换组，成员按顺序故障转移。",
-  "manage_gateway_set_empty": "暂无配置集",
   "manage_gateway_sets": "配置集",
   "manage_gateway_subtitle": "平台目录 · 区别于各 tagma 的本地配置",
   "manage_gateway_title": "KallipAI · 模型网关管理"

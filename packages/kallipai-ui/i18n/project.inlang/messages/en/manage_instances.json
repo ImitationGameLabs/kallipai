@@ -1,6 +1,5 @@
 {
   "$schema": "https://inlang.com/schema/message-format",
-  "manage_instances_heading": "Tagmata",
   "manage_instances_running": "Running",
   "manage_instances_stopped": "Stopped",
   "manage_instances_empty": "No tagmas yet.",

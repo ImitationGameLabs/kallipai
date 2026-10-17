@@ -2,7 +2,6 @@
   "$schema": "https://inlang.com/schema/message-format",
   "tagmata_title": "KallipAI · 智能体编队",
   "tagmata_new": "新建智能体编队",
-  "tagmata_new_action": "+ 新建智能体编队",
   "tagmata_minting": "生成中…",
   "tagmata_new_hint": "生成一个注册码，注册你的第一台设备或身份。",
   "tagmata_load_failed": "智能体编队加载失败。",

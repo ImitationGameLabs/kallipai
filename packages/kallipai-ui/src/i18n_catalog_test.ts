@@ -6,11 +6,12 @@
 // plural-pair integrity, and the same-value synonym allowlist. The file list
 // is pinned against settings.json's pathPattern so a catalog file added to
 // the build but not this guard (or vice versa) fails loudly.
+// A final sweep holds every catalog key to at least one mention in source.
 //
 // The loader table uses string-literal dynamic imports on purpose: literals
 // join the test runner's module graph at load time, while interpolated
 // imports would hit the runtime read-permission wall.
-import { assertEquals } from "@std/assert";
+import { assert, assertEquals, assertFalse } from "@std/assert";
 
 const FILES = [
   "common",
@@ -534,7 +535,6 @@ const SYNONYMS: string[][] = [
   ["nav_profiles", "manage_profiles_heading", "user_gateway_profiles"],
   ["nav_schedules", "manage_schedules_heading"],
   ["nav_tasks", "manage_tasks_heading"],
-  ["nav_tagmata", "manage_instances_heading"],
   ["manage_instances_token_apply", "manage_profiles_apply"],
   ["tagma_presence_online", "room_member_online_aria"],
   ["tagma_presence_offline", "room_member_offline_aria", "shell_offline"],
@@ -644,4 +644,186 @@ Deno.test("catalog: same-value keys are all deliberate synonyms", () => {
       );
     }
   }
+});
+
+// A catalog key nothing references is dead weight: it survives refactors,
+// keeps a stale translation alive in both locales, and no other test notices.
+// This sweep collects the identifiers mentioned across the package sources and
+// holds every catalog key to at least one of them. It reads source text rather
+// than importing modules, so the check stays structural -- no render, no
+// locale setup.
+//
+// Only `<!-- ... -->` spans are blanked out, in any file: markup's one comment
+// form, and the one that would otherwise let a commented-out key vouch for
+// itself. Separating JS comments from code would take a lexer, whose failure
+// modes -- an apostrophe in body prose, a quote inside a regex literal, a
+// comment inside a `{...}` expression, a closing tag inside a string -- cost
+// more than the mentions it would catch. A key mentioned only in a JS comment
+// therefore counts as referenced and stays.
+//
+// This test's own file is skipped because SYNONYMS lists keys as data, so a
+// key parked there would otherwise vouch for itself, and the generated
+// paraglide modules are skipped because they hold every key by construction.
+//
+// SOURCE_ROOTS names the packages that consume this catalog: a new consumer
+// has to be added here, or its keys read as unreferenced. There is no
+// exemption list -- a key reported here is either used or deleted; if an
+// exemption is ever needed, say why in the same change.
+const PACKAGE_ROOT = new URL("../", import.meta.url);
+const GUARD_FILE = new URL("./i18n_catalog_test.ts", import.meta.url);
+const SOURCE_ROOTS = [
+  "./src",
+  "../kallipai-app/src",
+  "../kallipai-direct/src",
+  "../kallipai-web/src",
+].map((p) => new URL(`${p}/`, PACKAGE_ROOT));
+const SOURCE_EXTS = [".ts", ".svelte", ".js"];
+const SKIP_DIRS = ["build", "coverage", "dist", "node_modules", "paraglide"];
+const IDENT = /[A-Za-z_$][A-Za-z0-9_$]*/g;
+
+/**
+ * Blank out every `<!-- ... -->` span, in any file -- markup's one comment
+ * form, and no file gets a rule of its own. Every other byte stays as written,
+ * a script string included. An unclosed span runs to the end of the file, so a
+ * key after it reads as unreferenced.
+ */
+function stripMarkupComments(text: string): string {
+  let out = "";
+  let i = 0;
+  while (i < text.length) {
+    if (text.startsWith("<!--", i)) {
+      const end = text.indexOf("-->", i + 4);
+      i = end === -1 ? text.length : end + 3;
+      out += " ";
+      continue;
+    }
+    out += text.charAt(i);
+    i += 1;
+  }
+  return out;
+}
+
+/** Collect the identifiers one source file mentions. */
+function mentionsIn(text: string, into: Set<string>): void {
+  for (const m of stripMarkupComments(text).matchAll(IDENT)) into.add(m[0]!);
+}
+
+async function collectMentions(dir: URL, into: Set<string>): Promise<void> {
+  for await (const entry of Deno.readDir(dir)) {
+    if (
+      entry.isSymlink ||
+      entry.name.startsWith(".") ||
+      SKIP_DIRS.includes(entry.name)
+    ) {
+      continue;
+    }
+    const child = new URL(`${entry.name}${entry.isDirectory ? "/" : ""}`, dir);
+    if (entry.isDirectory) {
+      await collectMentions(child, into);
+      continue;
+    }
+    if (child.href === GUARD_FILE.href) continue;
+    if (!SOURCE_EXTS.some((ext) => entry.name.endsWith(ext))) continue;
+    const text = new TextDecoder().decode(Deno.readFileSync(child));
+    mentionsIn(text, into);
+  }
+}
+
+Deno.test(
+  "catalog: every key is mentioned by package source",
+  { permissions: { read: SOURCE_ROOTS } },
+  async () => {
+    const mentioned = new Set<string>();
+    for (const root of SOURCE_ROOTS) await collectMentions(root, mentioned);
+    const unreferenced = Object.keys(en)
+      .filter((key) => !mentioned.has(key))
+      .sort();
+    assertEquals(
+      unreferenced,
+      [],
+      "unreferenced catalog keys: use them, or delete them from both locales",
+    );
+  },
+);
+
+Deno.test("catalog: a markup comment cannot vouch for a key", () => {
+  // Prose apostrophes, an apostrophe inside a script string and an unquoted
+  // url attribute all sit in one file: none of them needs special reading, and
+  // the markup comment still cannot vouch for a key.
+  const svelte = [
+    "<script>",
+    '  const note = "Don\'t";',
+    "  const liveMention = 1;",
+    "</script>",
+    "<p>Don't take what you can't use</p>",
+    "<a href=https://example.test/x>linkMention</a>",
+    "<p>manage_<!-- dead -->gateway</p>",
+    "<!-- deadMarkupKey -->",
+    "<p>{liveMention}</p>",
+  ].join("\n");
+  const ids = new Set<string>();
+  mentionsIn(svelte, ids);
+  assert(ids.has("liveMention"));
+  assert(ids.has("linkMention"));
+  assertFalse(ids.has("deadMarkupKey"));
+  assertFalse(ids.has("manage_gateway"));
+});
+
+Deno.test(
+  "catalog: a name in a markup expression or a script string counts",
+  () => {
+    const svelte = [
+      "<script>",
+      '  const fromString = "stringMention";',
+      "</script>",
+      "<p>{exprMention}</p>",
+    ].join("\n");
+    const ids = new Set<string>();
+    mentionsIn(svelte, ids);
+    assert(ids.has("stringMention"));
+    assert(ids.has("exprMention"));
+  },
+);
+
+Deno.test("catalog: an unclosed markup comment hides the text after it", () => {
+  const svelte = [
+    "<script>",
+    "  const liveMention = 1;",
+    "</script>",
+    "<p>{liveMention}</p>",
+    "<!-- unclosed",
+    "<p>{afterUnclosed}</p>",
+  ].join("\n");
+  const ids = new Set<string>();
+  mentionsIn(svelte, ids);
+  assert(ids.has("liveMention"));
+  assertFalse(ids.has("afterUnclosed"));
+});
+
+Deno.test(
+  "catalog: a comment is blanked without a script body around it",
+  () => {
+    const text = "<p>{beforeMention}</p><!-- deadKey --><p>{afterMention}</p>";
+    const ids = new Set<string>();
+    mentionsIn(text, ids);
+    assert(ids.has("beforeMention"));
+    assert(ids.has("afterMention"));
+    assertFalse(ids.has("deadKey"));
+  },
+);
+
+Deno.test("catalog: a name in a js comment counts too", () => {
+  // The named price of blanking only `<!-- ... -->`: a key mentioned only in
+  // a comment keeps its catalog entry.
+  const ts = [
+    "// lineCommentMention",
+    "/* blockCommentMention */",
+    "const used = 1; // trailingCommentMention",
+  ].join("\n");
+  const ids = new Set<string>();
+  mentionsIn(ts, ids);
+  assert(ids.has("lineCommentMention"));
+  assert(ids.has("blockCommentMention"));
+  assert(ids.has("trailingCommentMention"));
+  assert(ids.has("used"));
 });

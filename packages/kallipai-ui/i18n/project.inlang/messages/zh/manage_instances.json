@@ -1,6 +1,5 @@
 {
   "$schema": "https://inlang.com/schema/message-format",
-  "manage_instances_heading": "智能体编队",
   "manage_instances_running": "运行中",
   "manage_instances_stopped": "已停止",
   "manage_instances_empty": "还没有 tagma。",

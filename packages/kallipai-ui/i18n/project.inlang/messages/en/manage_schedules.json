@@ -7,7 +7,6 @@
   "manage_schedules_status_paused": "paused",
   "manage_schedules_status_inside": "On duty · until {time}",
   "manage_schedules_status_outside": "Off duty · next shift {time}",
-  "manage_schedules_next_start": "Next start: {time}",
   "manage_schedules_mode_weekly": "Weekly",
   "manage_schedules_mode_monthly": "Monthly",
   "manage_schedules_mode_interval": "Every N hours",

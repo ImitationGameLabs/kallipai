@@ -7,7 +7,6 @@
   "manage_schedules_status_paused": "已暂停",
   "manage_schedules_status_inside": "在班 · {time} 下班",
   "manage_schedules_status_outside": "休班 · {time} 开工",
-  "manage_schedules_next_start": "下次开工：{time}",
   "manage_schedules_mode_weekly": "每周",
   "manage_schedules_mode_monthly": "每月",
   "manage_schedules_mode_interval": "每 N 小时",
