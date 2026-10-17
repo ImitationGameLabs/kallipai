@@ -574,11 +574,8 @@ const SYNONYMS: string[][] = [
     "manage_profiles_set_dialog_max_context_label",
   ],
   ["manage_profiles_set_dialog_description_label", "rooms_description_label"],
-  [
-    "manage_agent_set",
-    "manage_budget_set",
-    "manage_gateway_placement_set_label",
-  ],
+  ["manage_agent_set", "manage_gateway_placement_set_label"],
+  ["manage_profiles_set_dialog_edit_title", "user_gateway_set_edit_title"],
   ["manage_instances_dialog_title", "manage_instances_new"],
   ["rooms_name_label", "user_gateway_set_name"],
   ["tagma_drawer_title", "nav_breadcrumb_agents"],
