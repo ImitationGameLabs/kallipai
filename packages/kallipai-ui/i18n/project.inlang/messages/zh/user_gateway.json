@@ -47,7 +47,7 @@
   "user_gateway_collections": "集合",
   "user_gateway_collection_add": "新建集合",
   "user_gateway_collection_edit_title": "编辑集合",
-  "user_gateway_collection_sets": "集合成员(每行一个)",
+  "user_gateway_collection_sets": "配置集(每行一个)",
   "user_gateway_remove_collection_body": "删除集合 {name}?",
   "user_gateway_publish": "发布",
   "user_gateway_unpublish": "取消发布",
