@@ -69,7 +69,7 @@ The output directory (default `mutants.out/`) holds `outcomes.json` plus
 `caught.txt`, `missed.txt`, `unviable.txt`, `timeout.txt`, and per-mutant logs
 and diffs under `log/` and `diff/`. The four outcomes mean different things:
 
-- `caught` -- the suite failed on the mutant: that behavior is covered.
+- `caught` -- the suite failed on the mutant, so the behavior is covered.
 - `unviable` -- the mutant does not compile, so it carries no coverage signal. A
   high count is usually the warning-denied case above; confirm by looking for
   `warnings are denied` in the mutant's log.

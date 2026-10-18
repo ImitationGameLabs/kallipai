@@ -122,8 +122,10 @@ archeion's `/healthz`, `/me/*` and `/admin/*` carry no `/v1`). The `files`
 service also answers its bare root (`/v1/files`), which a
 `handle_path /v1/files/*` rule would miss, so it takes a named matcher
 on both forms and strips with `uri strip_prefix /v1/files`. The route
-table (Caddy; `compose/dev/Caddyfile.dev` carries the same shape, with
-segments of its own; an unlisted `/v1/*` prefix is a real 404):
+table (Caddy; `compose/dev/Caddyfile.dev` adds instances and
+model-gateway segments to these, which the prod compose stack does not
+run but a NixOS deployment does; an unlisted `/v1/*` prefix is a real
+404):
 
 ```caddy
 api.<your-domain> {

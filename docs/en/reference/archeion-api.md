@@ -130,9 +130,9 @@ the fixed local-admin account's session (`local_admin`). A request with
 no session cookie is 401 with code `unauthorized`; another user's
 session is 403 with code `forbidden`; a session the archeion cannot
 resolve -- absent, expired, or otherwise unusable -- is 401 with code
-`admin_session_required`. Both channels fail closed when the archeion
-is unreachable or answers off-contract: 503 with code
-`auth_backend_unavailable`.
+`admin_session_required`. Both channels fail closed when the archeion is
+unreachable, answers off-contract, or sends a body that will not decode:
+503 with code `auth_backend_unavailable`.
 Cookie-bearing state-changing requests carry the same two-pillar CSRF
 defense as the archeion/lesche/keryx (`SameSite=Strict` + the mandatory
 `X-Requested-With: kallipai` marker on non-GETs; bearer requests are

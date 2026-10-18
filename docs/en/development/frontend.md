@@ -208,21 +208,33 @@ resolved version from its output or `deno.lock`. Do not use `npm view` /
 2. From the repo root, run `deno install` to update `deno.lock` and
    `node_modules`.
 
-`deno add npm:<pkg>` does both steps at once -- the `npm:` prefix is mandatory
+`deno add npm:<pkg>` does both steps at once. The `npm:` prefix is mandatory
 (without it Deno resolves JSR and writes to `deno.json`); add `-D` for
 devDependencies. Do not use `npm install` / `npm i`.
 
 ### Styling Presets
 
 Interactive elements use outlined-at-rest presets with a filled hover
-(`preset-outlined-{color}-500 hover:preset-filled-{color}-500`). Two blessed
-exceptions keep tonal at rest with a filled hover: the shared icon-button
-family (`TONAL_ICON_*` in `packages/kallipai-ui/src/lib/classes.ts`) and
-inactive nav items (`NavLink`, `MobileShell`). Segmented toggles and tabs
+(`preset-outlined-{color}-500 hover:preset-filled-{color}-500`). The shared
+icon-button family (`TONAL_ICON_*` in
+`packages/kallipai-ui/src/lib/classes.ts`) and inactive nav items
+(`NavLink`, `MobileShell`) are blessed exceptions that keep tonal at rest
+with a filled hover. Segmented toggles and tabs
 mark the selected state with a filled preset (`preset-filled-primary-200-800`
 or `-500`) and leave the unselected state `preset-tonal-surface`. Elsewhere
 `preset-tonal-*` is for static surfaces only (cards, badges, menu and dialog
-containers, chat bubbles) -- never a bare button.
+containers, chat bubbles) -- never a bare button in new work.
+
+A handful of interactive sites outside those families keep tonal at rest
+and fill on hover, pairing `preset-tonal-*` with `hover:preset-filled-*`
+instead of the outlined/filled pair above: the `AccountMenu` trigger, the
+dashed empty-state buttons in `ParkingSection`, `ProvidersSection` and
+`SetsSection`, the tonal create card in the `RoomsDashboard` room list,
+the budget and agents cards in `OverviewPage`, and the members toggle in
+`RoomConversationPage`. That list locates the sites; it is not a
+registry, so judge a site by its hover feedback rather than by the
+outlined default, leave existing ones in place, and reach for the
+presets above in new work.
 
 ### If a Workflow Isn't Covered
 
