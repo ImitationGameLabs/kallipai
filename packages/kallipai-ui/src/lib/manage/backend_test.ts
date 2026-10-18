@@ -665,6 +665,8 @@ Deno.test(
 
 const PROBE_BODY = { endpoints: [], sets: [] };
 
+const DELETE_DONE = { removed: 1, interrupted: [] };
+
 Deno.test(
   "the provider probe rides the envelope on a probe-sized deadline",
   async () => {
@@ -701,6 +703,30 @@ Deno.test(
     // The backend adds no layer of its own: the channel's reason reaches
     // the store intact.
     assertEquals(caught === timedOut, true);
+  },
+);
+
+Deno.test(
+  "deleting a set rides the envelope with the force flag on the path",
+  async () => {
+    const rec = envelopeRecording({ status: 200, body: DELETE_DONE });
+    const backend = new OnlineBackend(
+      restWith(),
+      "t-a",
+      undefined,
+      rec.channel,
+    );
+    await backend.deleteProfileSet("main", true);
+    await backend.deleteProfileSet("alt set", false);
+    // restWith() rejects any plaintext manage, so these paths can only
+    // have travelled the envelope; the force flag rides the query.
+    assertEquals(
+      rec.calls.map((c) => [c.method, c.path]),
+      [
+        ["DELETE", "/profiles/sets/main?force=true"],
+        ["DELETE", "/profiles/sets/alt%20set?force=false"],
+      ],
+    );
   },
 );
 

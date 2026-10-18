@@ -138,17 +138,22 @@ impl RelayHandle {
 }
 
 /// The frame-surface allowlist: the exact manage_router routes that may
-/// ride a ManageRest frame, enumerated one by one. This is the enforcement
-/// point for the encryption-scope decision: prompt-bearing routes
-/// (/profiles/sets/{name}), the provider probe, session content (the lesche
-/// message posts) and destructive deletes stay OFF the plaintext frame.
-/// Anything not listed here is a 404, even though the underlying
-/// manage_router would happily serve it -- fail-closed by construction.
+/// ride a ManageRest frame, enumerated one by one. The criterion is
+/// confidentiality: routes whose request carries provider API keys (the
+/// probe), prompt content (/profiles/sets/{name}) or session content (the
+/// lesche message posts) stay off the plaintext frame. Anything not listed
+/// here is a 404, even though the underlying manage_router would happily
+/// serve it -- fail-closed by construction.
 fn frame_allowed(method: &str, path: &str) -> bool {
     let p = path.trim_end_matches('/');
     let sub = p
         .strip_prefix("/agents/")
         .and_then(|rest| rest.split_once('/'));
+    // A bare /agents/{id} answers with an empty status and requests nothing
+    // confidential, so removal may ride the plaintext frame.
+    let agent_detail = p
+        .strip_prefix("/agents/")
+        .filter(|rest| !rest.is_empty() && !rest.contains('/'));
     let task_detail = p
         .strip_prefix("/tasks/")
         .filter(|rest| !rest.is_empty() && !rest.contains('/'));
@@ -174,7 +179,8 @@ fn frame_allowed(method: &str, path: &str) -> bool {
                 ("GET", Some((_, "status")))
                     | ("POST", Some((_, "interrupt")))
                     | ("PUT", Some((_, "duty" | "metadata" | "profile-set")))
-            ) || matches!((method, task_detail), ("GET", Some(_)))
+            ) || matches!((method, agent_detail), ("DELETE", Some(_)))
+                || matches!((method, task_detail), ("GET", Some(_)))
         }
     }
 }
@@ -260,6 +266,7 @@ mod manage_rest_tests {
             ("PUT", "/agents/x/duty"),
             ("PUT", "/agents/x/metadata"),
             ("PUT", "/agents/x/profile-set"),
+            ("DELETE", "/agents/x"),
         ] {
             assert!(frame_allowed(method, path), "{method} {path}");
         }
@@ -281,7 +288,6 @@ mod manage_rest_tests {
             ("GET", "/agents/x/lesche/direct-sessions/p/messages"), // history read
             ("DELETE", "/profiles/sets/main"),
             ("GET", "/messages"),
-            ("DELETE", "/agents/x"),
             ("GET", "/completely/unknown"),
             // Task write verbs and DELETE stay off the frame: the POSTs
             // are three-segment subroutes the read-only arm never
@@ -391,6 +397,26 @@ mod manage_frame_tests {
         assert_eq!(
             replies[0]["status"], 409,
             "refresh must clear the frame allowlist"
+        );
+    }
+
+    /// Removing an agent rides the plaintext frame. The registry has no such
+    /// agent, so the router answers with its own 404 -- reaching that answer
+    /// (rather than the frame-surface refusal) is the pass-through proof.
+    #[tokio::test]
+    async fn remove_agent_frame_reaches_router() {
+        let replies = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let (handle, state) = setup(replies.clone()).await;
+        let _keep_state = &state;
+        let trace = kallipai_archeion_common::ids::TraceId::random();
+        handle
+            .handle_manage_rest(1, "/agents/ghost", "DELETE", &trace, serde_json::json!({}))
+            .await;
+        let replies = replies.lock().await;
+        assert_eq!(replies.len(), 1);
+        assert_eq!(
+            replies[0]["body"]["error"]["message"], "agent not found",
+            "the DELETE must clear the frame allowlist"
         );
     }
 }

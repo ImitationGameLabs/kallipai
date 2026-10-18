@@ -480,11 +480,17 @@ export class OnlineBackend implements ManagementBackend {
     return result.body as ProfileProbeResponse;
   }
 
-  deleteProfileSet(name: string, force: boolean) {
-    return this.req<DeleteSetResponse>(
-      "DELETE",
-      `/profiles/sets/${encodeURIComponent(name)}?force=${force}`,
-    );
+  async deleteProfileSet(name: string, force: boolean) {
+    // Rides the envelope like the probe: the plaintext frame fails the
+    // profile-set routes closed. The query travels on the path; the
+    // channel's shared deadline covers this snappy route.
+    if (!this.envelope) {
+      throw new Error("profiles set delete requires an E2E envelope channel");
+    }
+    const path = `/profiles/sets/${encodeURIComponent(name)}?force=${force}`;
+    const result = await this.envelope.manage("DELETE", path);
+    if (result.status >= 400) throw parseError(result.status, result.body);
+    return result.body as DeleteSetResponse;
   }
   getWorkSchedule() {
     return this.req<WorkSchedule>("GET", "/work-schedule");
