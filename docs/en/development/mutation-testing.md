@@ -8,8 +8,8 @@ internal: true
 Mutation testing asks a different question from the test suite: not "do the
 tests pass" but "do the tests fail when the behavior changes". `cargo-mutants`
 edits one expression at a time (a mutation), runs the tests, and reports whether
-the suite noticed. It is an on-demand review tool -- not part of the gate suite
-and not wired into CI -- because a run costs minutes and its output is a list of
+the suite noticed. It is an on-demand review tool — not part of the gate suite
+and not wired into CI — because a run costs minutes and its output is a list of
 questions for a human, not a pass/fail verdict.
 
 ## Invocation
@@ -39,8 +39,8 @@ Each flag carries a decision:
   `.cargo/config.toml` sets `[build] warnings = "deny"`. Under that setting a
   mutant that trips an unused-variable lint fails to build and cargo-mutants
   reports it as `unviable` instead of testing it. `--cap-lints true` does not
-  override this -- it caps rustc's lints, not cargo's `build.warnings`
-  configuration -- so the environment variable is the working form.
+  override this — it caps rustc's lints, not cargo's `build.warnings`
+  configuration — so the environment variable is the working form.
 
 While a run is in progress the working-tree file is being rewritten. Do not run
 git commands against that file until the run finishes, and check afterwards that
@@ -69,15 +69,15 @@ The output directory (default `mutants.out/`) holds `outcomes.json` plus
 `caught.txt`, `missed.txt`, `unviable.txt`, `timeout.txt`, and per-mutant logs
 and diffs under `log/` and `diff/`. The four outcomes mean different things:
 
-- `caught` -- the suite failed on the mutant, so the behavior is covered.
-- `unviable` -- the mutant does not compile, so it carries no coverage signal. A
+- `caught` — the suite failed on the mutant, so the behavior is covered.
+- `unviable` — the mutant does not compile, so it carries no coverage signal. A
   high count is usually the warning-denied case above; confirm by looking for
   `warnings are denied` in the mutant's log.
-- `missed` -- the suite passed on the mutant. This is a survivor, and each one
+- `missed` — the suite passed on the mutant. This is a survivor, and each one
   needs a written reason: either the mutated behavior is reachable but
   unasserted (a test gap), or the mutation does not change behavior (an
   equivalent mutant). A survivor with neither explanation is an open finding.
-- `timeout` -- the suite hung on the mutant.
+- `timeout` — the suite hung on the mutant.
 
 ## Worked example
 

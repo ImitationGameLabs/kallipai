@@ -223,7 +223,7 @@ with a filled hover. Segmented toggles and tabs
 mark the selected state with a filled preset (`preset-filled-primary-200-800`
 or `-500`) and leave the unselected state `preset-tonal-surface`. Elsewhere
 `preset-tonal-*` is for static surfaces only (cards, badges, menu and dialog
-containers, chat bubbles) -- never a bare button in new work.
+containers, chat bubbles) — never a bare button in new work.
 
 A handful of interactive sites outside those families keep tonal at rest
 and fill on hover, pairing `preset-tonal-*` with `hover:preset-filled-*`

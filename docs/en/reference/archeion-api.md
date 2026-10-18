@@ -108,7 +108,7 @@ mint/enroll) works unchanged; the true admin principal keeps
 `verify-session` reports `local_admin: true` for the marker account,
 and the instances service's platform mode admits that session on its
 cookie channel (next section), so the admin login IS the instances
-credential -- no separate token to configure or paste.
+credential — no separate token to configure or paste.
 
 Security boundary, three sentences: only the admin principal may enter
 (any other credential is a plain 401); the route is not mounted unless
@@ -116,7 +116,7 @@ Security boundary, three sentences: only the admin principal may enter
 default has no such surface at all; and when it is set, an operator-chosen
 admin token shorter than 32 chars refuses to boot (the generated 256-bit
 token is exempt). Deleting the marker row together with its user row
-resets the account -- the next admin-login recreates both. Mounting the
+resets the account — the next admin-login recreates both. Mounting the
 route is an explicit operator act that pre-provisions an operator
 account, so `KALLIPAI_ARCHEION_SIGNUP_ENABLED` does not gate it.
 
@@ -124,12 +124,12 @@ account, so `KALLIPAI_ARCHEION_SIGNUP_ENABLED` does not gate it.
 
 The instances service mirrors the lesche's dual-channel auth: a bearer
 token verifies via `/internal/verify-bearer` (only `Principal::Admin`
-passes -- the app and CLI channel), and, absent a bearer, the archeion
+passes — the app and CLI channel), and, absent a bearer, the archeion
 session cookie verifies via `/internal/verify-session`, passing only for
 the fixed local-admin account's session (`local_admin`). A request with
 no session cookie is 401 with code `unauthorized`; another user's
 session is 403 with code `forbidden`; a session the archeion cannot
-resolve -- absent, expired, or otherwise unusable -- is 401 with code
+resolve — absent, expired, or otherwise unusable — is 401 with code
 `admin_session_required`. Both channels fail closed when the archeion is
 unreachable, answers off-contract, or sends a body that will not decode:
 503 with code `auth_backend_unavailable`.
@@ -142,14 +142,14 @@ exempt).
 
 `GET /v1/archeion/auth/username-availability?username=<handle>` tells a signup
 form whether a handle may be attempted, before any credential exists.
-It is an explicit, full username-enumeration oracle -- accepted
-pre-release for the closed beta -- mounted with the same per-IP
+It is an explicit, full username-enumeration oracle — accepted
+pre-release for the closed beta — mounted with the same per-IP
 rate-limit family as the other unauthenticated reads (mirroring
 `GET /v1/users/{username}`'s posture). The probe is always a 200: the
 form's debounce loop is a read protocol, so every outcome is a body
 status, never an HTTP error path. The body carries the canonical
 (normalized) handle and one of four statuses, decided in a fixed
 refusal order: `invalid` (shape/length/charset, or a missing param),
-`reserved` (the static reserved list -- beats the lookup, so a legacy
+`reserved` (the static reserved list — beats the lookup, so a legacy
 row holding the name still reports `reserved`), `taken` (a live or
 disabled user row), `available`.

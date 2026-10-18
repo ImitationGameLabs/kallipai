@@ -1062,8 +1062,8 @@ standalone `force_*` events of the other gated verbs.
 
 Every `TaskExport` also carries `usage` when the task's trail holds token
 accounting snapshots. `total_tokens` is summed over the task's **active
-windows** -- the `start` | `resume` | `reopen` to `pause` | `close`
-intervals -- with one entry in `segments` for each window it could sum,
+windows** — the `start` | `resume` | `reopen` to `pause` | `close`
+intervals — with one entry in `segments` for each window it could sum,
 and per-agent rows inside each; a window that never closed, or whose
 edges are incomplete, contributes none. `open` plus `open_since` mark a
 window that has not closed yet (its spend is not in the total); `partial`
@@ -1084,7 +1084,7 @@ trail holds no snapshot at all omits the field rather than reporting zero.
 These are the **internal** event stream's variants (`GET /agents/{id}/events`),
 consumed by `kallip` and `kallipai-run`. The
 [external chat-room stream](#external-chat-room-api) is a separate surface that
-does not use this vocabulary -- it discriminates frames by the SSE `event:`
+does not use this vocabulary — it discriminates frames by the SSE `event:`
 field (`authored` / `signal` / `status`) and carries only complete authored
 messages + runtime signals.
 

@@ -159,7 +159,7 @@ read none of them: they derive at runtime from the browser location
 
 The stack comes up in two phases because the tagma's relay connector cannot
 enroll with the archeion until a real user signs up in the web UI and mints an
-enrollment code -- starting it with `KALLIPAI_POLIS_URL` set but no code
+enrollment code — starting it with `KALLIPAI_POLIS_URL` set but no code
 degrades the tagma to local-only (it logs an error and keeps serving local
 agents; the lesche message route returns 503).
 
@@ -206,13 +206,13 @@ environment at boot.
 
 Signup is open (no invite code): a fresh database just needs someone to sign
 up. The `archeion_pgdata` volume persists across `arion down` / `up`, so this
-sub-flow runs **once per volume** -- check before doing it:
+sub-flow runs **once per volume** — check before doing it:
 
 ```sh
 KALLIPAI_ARCHEION_ADMIN_TOKEN=sk-admin-dev-0123456789abcdef0123456789abcdef cargo run -q -p kallipai-admin -- --archeion-url http://localhost:7100 users list
 ```
 
-If `users list` already shows a row, a test account exists -- skip to minting
+If `users list` already shows a row, a test account exists — skip to minting
 the enrollment code below. If the table is empty (fresh volume, or after a
 `down -v` reset), sign up at the web app:
 
@@ -221,7 +221,7 @@ passkey (or "Continue with GitHub/Google" once OAuth is configured). Once signed
 in, mint a `sk-enroll-...` enrollment code in the web UI and paste it into
 `.env` as `KALLIPAI_TAGMA_RELAY_ENROLLMENT_CODE`, and set `KALLIPAI_AUTH_TOKEN` to
 the tagma's operator token. (The tagma's platform edge origin is wired by arion
-to the loopback edge -- `http://127.0.0.1:7443` -- so it
+to the loopback edge — `http://127.0.0.1:7443` — so it
 needs no `.env` override.)
 
 Faster alternative without touching a browser: the dev stack enables the
@@ -252,7 +252,7 @@ KALLIPAI_ARCHEION_ADMIN_TOKEN=sk-admin-dev-0123456789abcdef0123456789abcdef
 then run `arion up -d`. The dev compose pins this same fixture in the archeion
 service's environment (a local-platform login is enabled there, and that
 route refuses to boot with an operator-set token shorter than 32 chars),
-so `kallipai-admin` authenticates with it -- no log scraping.
+so `kallipai-admin` authenticates with it — no log scraping.
 
 The dev compose pins the fixture itself (the `environment` block in
 `polis.nix` overrides any legacy `.env` value), so a stack booted from
@@ -293,7 +293,7 @@ url = "https://relay2.example.com"
 
 Rules: a `polis.toml` entry and the env-configured single relay
 (`KALLIPAI_POLIS_URL`, optionally with `KALLIPAI_TAGMA_RELAY_ENROLLMENT_CODE`)
-are mutually exclusive -- unset the env vars or delete the file (the env
+are mutually exclusive — unset the env vars or delete the file (the env
 vars keep working as one implicit `default` entry when the file is
 absent). Each entry enrolls with its own edge identity
 (`credentials/<name>/tagma.id` + `tagma.token`); the Ed25519 `device.key`
@@ -383,7 +383,7 @@ enrollment never completed still replays the code, so a restart can retry.
 A daemon-managed tagma instance logs into the state tree:
 `~/.local/state/kallipai/tagmata/<slug>/logs/` (created 0700): daily-rolling
 files, the last 7 kept. Set `KALLIPAI_TAGMA_LOG_TO_STDERR=1`
-(or `true`) to log to the terminal's stderr instead -- handy when manually
+(or `true`) to log to the terminal's stderr instead — handy when manually
 debugging a managed data dir; any other value keeps the file default, and
 a log directory that cannot be resolved or created falls back to stderr.
 The web management face lives in `crates/platform/kallipai-instances`: a
@@ -409,7 +409,7 @@ empty string, or a key spelled differently, still keeps the full page.
 Decide by what the deployment serves, not by what the page shows: if
 `/v1/instances` answers from this deployment's own edge and a local
 daemon hosts the processes, keep the default. If neither is in place,
-set `instancesServiceEnabled = false` in the runtime config -- on NixOS
+set `instancesServiceEnabled = false` in the runtime config — on NixOS
 `runtimeConfig.instancesServiceEnabled = false`. The page then neither
 probes the service nor renders its process half; the registry half
 (enrollment codes, identities) is unaffected.
@@ -429,7 +429,7 @@ opting out there is a hand-written key, not a module default.
 ### Iterating
 
 `arion up` re-evaluates the flake each time, so Rust changes are picked up just
-by running it again -- arion builds the workspace transitively (via the image
+by running it again — arion builds the workspace transitively (via the image
 contents) and `useHostStore` shares that `/nix/store` into the containers:
 
 ```sh
@@ -453,7 +453,7 @@ bind-mount them on the host instead:
 | `KALLIPAI_ARION_WORKSPACE_PATH` | `/workspace`                            | make the agent's files host-visible |
 | `KALLIPAI_ARION_SKILLS_PATH`    | `/var/lib/kallipai/tagmata/main/skills` | curate shared skills on the host    |
 
-Leave `KALLIPAI_SKILLS_ROOT` unset when using `KALLIPAI_ARION_SKILLS_PATH` -- the
+Leave `KALLIPAI_SKILLS_ROOT` unset when using `KALLIPAI_ARION_SKILLS_PATH` — the
 former redirects `skill_dir()` away from the bind-mount target.
 
 ### Integration Tests
@@ -480,7 +480,7 @@ When the backend changes in a way that invalidates existing data (a schema
 reset, an incompatible wire format, or you simply want to start over), tear down
 **including volumes** and re-run bring-up from the archeion side. `down -v` wipes
 `archeion_pgdata` and `lesche_pgdata` plus the tagma `data` / `workspace` volumes,
-so the test user, the enrollment code, and all tagma state are gone -- the
+so the test user, the enrollment code, and all tagma state are gone — the
 sign-up sub-flow is needed again:
 
 ```sh
