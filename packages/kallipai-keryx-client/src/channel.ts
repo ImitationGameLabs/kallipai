@@ -38,6 +38,28 @@ import type {
   TagmaRequest,
 } from "./types.ts";
 
+/** Default per-call reply deadline for `manage`. A caller that awaits a
+ * slow server operation passes a larger one. */
+const DEFAULT_MANAGE_TIMEOUT_MS = 15_000;
+
+/** Why a manage call produced no reply: the per-call deadline expired,
+ * or the channel closed under the pending request. */
+export type ManageChannelFailureReason = "timeout" | "closed";
+
+/** A manage call the channel itself gave up on. The reason travels as a
+ * typed field so callers classify on the shape rather than on wording. */
+export class ManageChannelError extends Error {
+  readonly reason: ManageChannelFailureReason;
+
+  constructor(reason: ManageChannelFailureReason, detail?: string) {
+    super(
+      reason === "timeout" ? `manage timeout: ${detail}` : "channel closed",
+    );
+    this.name = "ManageChannelError";
+    this.reason = reason;
+  }
+}
+
 /**
  * Open an E2EE channel to `tagmaId` for `userId`: resolve the conversation + run
  * the 1-RTT key exchange on the keryx, verify the responder's signature
@@ -240,18 +262,25 @@ export class RelayChannel {
     return this.sendControl(ctrl).then(() => req_id);
   }
 
+  /** Dispatch one manage request over the encrypted envelope and await the reply.
+   * `timeoutMs` bounds the wait per call; the default suits the snappy routes. */
   manage(
     method: string,
     path: string,
     body: unknown = null,
+    opts: { timeoutMs?: number } = {},
   ): Promise<{ status: number; body: unknown }> {
+    if (this.closed) {
+      return Promise.reject(new ManageChannelError("closed"));
+    }
     const req_id = this.nextReqId++;
     const ctrl: TagmaControl = { op: "manage", req_id, method, path, body };
+    const timeoutMs = opts.timeoutMs ?? DEFAULT_MANAGE_TIMEOUT_MS;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pendingManage.delete(req_id);
-        reject(new Error(`manage timeout: ${method} ${path}`));
-      }, 15_000);
+        reject(new ManageChannelError("timeout", `${method} ${path}`));
+      }, timeoutMs);
       this.pendingManage.set(req_id, {
         resolve: (v) => {
           clearTimeout(timer);
@@ -275,7 +304,7 @@ export class RelayChannel {
   close(): void {
     this.closed = true;
     for (const { reject } of this.pendingManage.values()) {
-      reject(new Error("channel closed"));
+      reject(new ManageChannelError("closed"));
     }
     this.pendingManage.clear();
     this.resolveDrain?.();

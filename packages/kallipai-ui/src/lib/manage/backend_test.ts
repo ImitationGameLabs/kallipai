@@ -8,6 +8,7 @@ import { assertEquals, assertRejects } from "@std/assert";
 import { KallipaiError } from "@kallipai/kallipai-common";
 import {
   type ManageRestClient,
+  ManageChannelError,
   ProjectionClient,
 } from "@kallipai/kallipai-keryx-client";
 import { OnlineBackend, type ProfilesEnvelopeChannel } from "./backend.ts";
@@ -44,6 +45,31 @@ function envelopeWith(body: unknown): ProfilesEnvelopeChannel {
       }
       return Promise.resolve({ status: 409, body });
     },
+  };
+}
+
+type EnvelopeCall = {
+  method: string;
+  path: string;
+  body?: unknown;
+  opts?: { timeoutMs?: number };
+};
+
+/** An envelope stub that records every call, so a test can pin the exact
+ * method, path (query included), body and per-call deadline sent. */
+function envelopeRecording(response: { status: number; body: unknown }): {
+  channel: ProfilesEnvelopeChannel;
+  calls: EnvelopeCall[];
+} {
+  const calls: EnvelopeCall[] = [];
+  return {
+    channel: {
+      manage: (method, path, body, opts) => {
+        calls.push({ method, path, body, opts });
+        return Promise.resolve(response);
+      },
+    },
+    calls,
   };
 }
 
@@ -636,3 +662,75 @@ Deno.test(
     );
   },
 );
+
+const PROBE_BODY = { endpoints: [], sets: [] };
+
+Deno.test(
+  "the provider probe rides the envelope on a probe-sized deadline",
+  async () => {
+    const rec = envelopeRecording({ status: 200, body: PROBE_BODY });
+    const backend = new OnlineBackend(
+      restWith(),
+      "t-a",
+      undefined,
+      rec.channel,
+    );
+    await backend.probeProfiles(PROBE_BODY);
+    // restWith() rejects any plaintext manage, so reaching here at all
+    // means the probe skipped the manage frame.
+    assertEquals(rec.calls, [
+      {
+        method: "POST",
+        path: "/profiles/probe",
+        body: PROBE_BODY,
+        opts: { timeoutMs: 90_000 },
+      },
+    ]);
+  },
+);
+
+Deno.test(
+  "the probe hands the channel's typed failure to the caller",
+  async () => {
+    const timedOut = new ManageChannelError("timeout", "POST /profiles/probe");
+    const stale: ProfilesEnvelopeChannel = {
+      manage: () => Promise.reject(timedOut),
+    };
+    const backend = new OnlineBackend(restWith(), "t-a", undefined, stale);
+    const caught = await backend.probeProfiles(PROBE_BODY).catch((e) => e);
+    // The backend adds no layer of its own: the channel's reason reaches
+    // the store intact.
+    assertEquals(caught === timedOut, true);
+  },
+);
+
+Deno.test(
+  "a probe rejection that is not a channel failure passes through",
+  async () => {
+    const broken: ProfilesEnvelopeChannel = {
+      manage: () => Promise.reject(new Error("payload encode failed")),
+    };
+    const backend = new OnlineBackend(restWith(), "t-a", undefined, broken);
+    const caught = await backend.probeProfiles(PROBE_BODY).catch((e) => e);
+    assertEquals(caught instanceof Error, true);
+    assertEquals((caught as Error).message, "payload encode failed");
+  },
+);
+
+Deno.test("a refused probe surfaces the tagma's own error", async () => {
+  const refusing = envelopeRecording({
+    status: 409,
+    body: { error: { message: "probe budget exhausted" } },
+  });
+  const backend = new OnlineBackend(
+    restWith(),
+    "t-a",
+    undefined,
+    refusing.channel,
+  );
+  const caught = await assertRejects(
+    () => backend.probeProfiles(PROBE_BODY),
+    KallipaiError,
+  );
+  assertEquals(caught.message, "probe budget exhausted");
+});

@@ -125,6 +125,8 @@
   "manage_profiles_save_failed": "无法保存模型配置。",
   "manage_profiles_apply_failed": "无法应用模型配置。",
   "manage_profiles_probe_failed": "测试请求失败。",
+  "manage_profiles_probe_timeout": "测试未在时限内完成。可重试，或一次只测一个 provider。",
+  "manage_profiles_probe_disconnected": "测试期间与 tagma 的连接已断开。请重新连接后重试。",
   "manage_profiles_source_proxy_banner": "配置来源：模型网关。本地快照只是缓存，请到网关管理页管理配置集。",
   "manage_profiles_source_local": "配置来源：本地 profiles.toml",
   "manage_profiles_open_gateway_admin": "打开网关管理页",

@@ -209,18 +209,25 @@ export class OfflineBackend implements ManagementBackend {
 
 // --- OnlineBackend (wraps ManageRestClient over the keryx proxy) ---
 /**
- * The encrypted envelope face of a relay channel, narrowed to what
- * profiles writes need. Provider API keys never ride the plaintext
- * manage frame (the frame allowlist fails those routes closed), so
- * key-bearing writes go through this E2E-encrypted channel instead.
- */
+ * The encrypted envelope face of a relay channel, narrowed to what the
+ * profile plane needs. Provider API keys never ride the plaintext manage
+ * frame (the frame allowlist fails those routes closed), so key-bearing
+ * requests -- the save and the provider probe -- go through this
+ * E2E-encrypted channel instead. */
 export interface ProfilesEnvelopeChannel {
   manage(
     method: string,
     path: string,
     body?: unknown,
+    opts?: { timeoutMs?: number },
   ): Promise<{ status: number; body: unknown }>;
 }
+
+/** Per-call envelope deadline for the provider probe. The tagma runs each
+ * stage's endpoints concurrently and caps metadata at 10s and inference at
+ * 60s, so a healthy worst case lands near 70-80s: the 15s default would cut
+ * a healthy probe short. */
+const PROBE_ENVELOPE_TIMEOUT_MS = 90_000;
 
 /**
  * Reconstruct a KallipaiError from a manage_result when status >= 400. The
@@ -462,8 +469,15 @@ export class OnlineBackend implements ManagementBackend {
     return this.req<ProfileConfig>("POST", "/profiles/refresh");
   }
 
-  probeProfiles(body: ProfileProbeRequest) {
-    return this.req<ProfileProbeResponse>("POST", "/profiles/probe", body);
+  async probeProfiles(body: ProfileProbeRequest) {
+    if (!this.envelope) {
+      throw new Error("profiles probe requires an E2E envelope channel");
+    }
+    const result = await this.envelope.manage("POST", "/profiles/probe", body, {
+      timeoutMs: PROBE_ENVELOPE_TIMEOUT_MS,
+    });
+    if (result.status >= 400) throw parseError(result.status, result.body);
+    return result.body as ProfileProbeResponse;
   }
 
   deleteProfileSet(name: string, force: boolean) {

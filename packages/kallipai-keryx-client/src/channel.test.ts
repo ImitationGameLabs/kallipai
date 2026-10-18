@@ -16,7 +16,11 @@ import {
   HKDF_INFO,
   kexTranscript,
 } from "./crypto.ts";
-import { openRelayChannel, type RelayChannel } from "./channel.ts";
+import {
+  ManageChannelError,
+  openRelayChannel,
+  type RelayChannel,
+} from "./channel.ts";
 import { DataPlaneApiError } from "./types.ts";
 import type { Participant } from "./types.ts";
 import { decodeB64, encodeB64 } from "@kallipai/kallipai-common";
@@ -403,11 +407,78 @@ Deno.test("close() rejects pending manage() promises", async () => {
   } catch (e) {
     caught = e;
   }
-  if (!(caught instanceof Error) || caught.message !== "channel closed") {
+  if (!(caught instanceof ManageChannelError) || caught.reason !== "closed") {
     throw new Error(
-      `expected "channel closed" rejection, got ${JSON.stringify(caught)}`,
+      `expected a closed-channel rejection, got ${JSON.stringify(caught)}`,
     );
   }
+  assertEquals(caught.message, "channel closed");
+});
+
+Deno.test("manage() honours a per-call timeoutMs", async () => {
+  const { keryx, pinnedKeyB64, setChannel } = makeMock(
+    ed25519.utils.randomSecretKey(),
+    "tagma-t2",
+    "conv-t2",
+  );
+  const channel = await openRelayChannel(
+    keryx as unknown as KeryxClient,
+    "tagma-t2",
+    "u",
+    "Alice",
+    pinnedKeyB64,
+  );
+  setChannel(channel);
+
+  // Nobody answers: only the caller's deadline can end the wait, so the
+  // 15s default would leave this test hanging.
+  const started = Date.now();
+  let caught: unknown;
+  try {
+    await channel.manage("POST", "/profiles/probe", null, {
+      timeoutMs: 20,
+    });
+  } catch (e) {
+    caught = e;
+  }
+  const elapsed = Date.now() - started;
+  channel.close();
+  if (!(caught instanceof ManageChannelError) || caught.reason !== "timeout") {
+    throw new Error(
+      `expected a manage timeout rejection, got ${JSON.stringify(caught)}`,
+    );
+  }
+  assertEquals(caught.message, "manage timeout: POST /profiles/probe");
+  assertEquals(
+    elapsed < 5_000,
+    true,
+    "the per-call deadline ended the wait, not the 15s default",
+  );
+});
+
+Deno.test("manage() on a closed channel rejects without waiting", async () => {
+  const { keryx, pinnedKeyB64, setChannel } = makeMock(
+    ed25519.utils.randomSecretKey(),
+    "tagma-c3",
+    "conv-c3",
+  );
+  const channel = await openRelayChannel(
+    keryx as unknown as KeryxClient,
+    "tagma-c3",
+    "u",
+    "Alice",
+    pinnedKeyB64,
+  );
+  setChannel(channel);
+  channel.close();
+
+  // A closed channel rejects at once: registering the request would park
+  // it until the caller's deadline, which is 90s for the probe.
+  const started = Date.now();
+  const caught = await channel.manage("GET", "/agents").catch((e) => e);
+  assertEquals(Date.now() - started < 1_000, true);
+  assertEquals(caught instanceof ManageChannelError, true);
+  assertEquals((caught as ManageChannelError).reason, "closed");
 });
 
 Deno.test("send carries the attachment on the send_message op", async () => {

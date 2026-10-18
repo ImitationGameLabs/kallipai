@@ -125,6 +125,8 @@
   "manage_profiles_save_failed": "Could not save profiles.",
   "manage_profiles_apply_failed": "Could not apply profiles.",
   "manage_profiles_probe_failed": "The test request failed.",
+  "manage_profiles_probe_timeout": "The test did not finish before the deadline. Retry, or test one provider at a time.",
+  "manage_profiles_probe_disconnected": "The connection to the tagma dropped during the test. Reconnect, then retry.",
   "manage_profiles_source_proxy_banner": "Profile source: the model gateway. The local snapshot is a cache; manage profile sets on the gateway admin page.",
   "manage_profiles_source_local": "Profile source: local profiles.toml",
   "manage_profiles_open_gateway_admin": "Open the gateway admin page",

@@ -552,6 +552,15 @@ The list does not gate the call: every set profile that resolves and
 builds is probed with a real call, even when its provider's list check
 failed — the per-request profile cap bounds that spend.
 
+> A relay client (the web app talking to the tagma through lesche) sends
+> this route over the E2E envelope channel rather than the plaintext
+> manage frame: the request carries provider API keys, so the frame
+> allowlist fails it closed with `404 not on the manage frame surface`.
+> The envelope also takes a per-call deadline, which this route needs —
+> the probe fans out to upstream inference peers and outlasts the
+> client's default. Clients reaching the tagma directly (the CLI, a local
+> tagma, the Rust client) are unaffected: they speak plain HTTP.
+
 ### External Chat-Room API
 
 The external chat-room API is the frontend's conversation surface. The tagma's

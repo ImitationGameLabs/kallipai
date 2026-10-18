@@ -28,6 +28,12 @@ const { assertEquals, assertRejects } = await import("@std/assert");
 const mod = await import("./profiles.svelte.ts");
 import { OfflineBackend } from "./backend.ts";
 import { type ProfileConfig, TagmaClient } from "@kallipai/kallipai-client";
+import { type ManagementBackend } from "./client.ts";
+import { KallipaiError } from "@kallipai/kallipai-common";
+import {
+  DataPlaneApiError,
+  ManageChannelError,
+} from "@kallipai/kallipai-keryx-client";
 
 // A store pointed at a throwaway backend: the faked fetch answers every
 // request, so the client only needs any well-formed base URL.
@@ -363,3 +369,44 @@ Deno.test("refetchSource failure keeps the committed state", async () => {
     globalThis.fetch = realFetch;
   }
 });
+
+// A store whose probe always fails the same way: the failure classification
+// lives in the store, so this pins what the operator reads.
+function probingStore(
+  failure: unknown,
+): InstanceType<typeof mod.ProfilesStore> {
+  const store = new mod.ProfilesStore();
+  store.switchBackend({
+    probeProfiles: () => Promise.reject(failure),
+  } as unknown as ManagementBackend);
+  return store;
+}
+
+Deno.test(
+  "a probe failure reads as its cause, not as a generic failure",
+  async () => {
+    const messages = await import("../../paraglide/messages.js");
+    const body = { endpoints: [], sets: [] };
+
+    const slow = probingStore(
+      new ManageChannelError("timeout", "POST /profiles/probe"),
+    );
+    await slow.probeRaw(body);
+    assertEquals(slow.probeError, messages.manage_profiles_probe_timeout());
+
+    // The tagma is down before the envelope leaves: that is a dropped link,
+    // not a failed test request.
+    const offline = probingStore(new DataPlaneApiError(503, "tagma offline"));
+    await offline.probeRaw(body);
+    assertEquals(
+      offline.probeError,
+      messages.manage_profiles_probe_disconnected(),
+    );
+
+    const refused = probingStore(
+      new KallipaiError({ status: 409, message: "stale sequence_n" }),
+    );
+    await refused.probeRaw(body);
+    assertEquals(refused.probeError, "stale sequence_n");
+  },
+);

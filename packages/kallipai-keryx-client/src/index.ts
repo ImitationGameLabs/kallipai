@@ -15,7 +15,12 @@
 export const PACKAGE_NAME = "@kallipai/kallipai-keryx-client";
 
 export { KeryxClient } from "./http.ts";
-export { openRelayChannel, RelayChannel } from "./channel.ts";
+export {
+  ManageChannelError,
+  type ManageChannelFailureReason,
+  openRelayChannel,
+  RelayChannel,
+} from "./channel.ts";
 export { ManageRestClient } from "./manageRest.ts";
 export { LinearBackoff, ProjectionClient } from "./projection.ts";
 export {
