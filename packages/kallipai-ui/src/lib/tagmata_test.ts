@@ -1,7 +1,12 @@
 import { assertEquals } from "@std/assert";
 import { joinDeviceRows } from "./tagmata.svelte.ts";
-import type { TagmaProcessLike } from "./tagmata.svelte.ts";
-import { formatRemaining, formatTagmaStatusLine } from "./tagmata.svelte.ts";
+import type { TagmaProcessLike, TagmaStatusSummary } from "./tagmata.svelte.ts";
+import {
+  activeAgents,
+  formatRemaining,
+  formatTagmaStatusLine,
+  totalAgents,
+} from "./tagmata.svelte.ts";
 
 Deno.test("formatRemaining: zero or negative -> expired", () => {
   assertEquals(formatRemaining(0), "expired");
@@ -47,6 +52,50 @@ Deno.test(
     );
   },
 );
+
+// Every status surface renders this one aggregation: the root holds a slot
+// in the roster whether or not it is busy, and counts toward the active
+// numerator only while it runs.
+function snap(over: Partial<TagmaStatusSummary>): TagmaStatusSummary {
+  return {
+    rootState: "idle",
+    subagentsTotal: 0,
+    subagentsActive: 0,
+    tokenBudget: 0,
+    tokenConsumed: 0,
+    tokenBudgetUnlimited: false,
+    ...over,
+  };
+}
+
+Deno.test("activeAgents: a busy root joins the numerator and the total", () => {
+  const s = snap({ rootState: "busy", subagentsTotal: 3, subagentsActive: 1 });
+  assertEquals(activeAgents(s), 2);
+  assertEquals(totalAgents(s), 4);
+});
+
+Deno.test(
+  "activeAgents: an idle root holds a slot but adds no activity",
+  () => {
+    const s = snap({
+      rootState: "idle",
+      subagentsTotal: 3,
+      subagentsActive: 1,
+    });
+    assertEquals(activeAgents(s), 1);
+    assertEquals(totalAgents(s), 4);
+  },
+);
+
+Deno.test("activeAgents: a faulted root still holds its slot", () => {
+  const s = snap({
+    rootState: "faulted",
+    subagentsTotal: 3,
+    subagentsActive: 3,
+  });
+  assertEquals(activeAgents(s), 3);
+  assertEquals(totalAgents(s), 4);
+});
 
 Deno.test("formatRemaining: drops leading zero units", () => {
   // 3 minutes exactly.

@@ -18,9 +18,10 @@
   //
   // Pure/presentational: takes the snapshot as a prop, so it is
   // transport-agnostic (the conversation owns the snapshot). Sits above
-  // the transcript's scroll container, so it never scrolls away. Without
-  // a snapshot (freshly connected, or an offline tagma) a slim waiting
-  // row keeps the bar's height stable until the first tick.
+  // the transcript's scroll container, so it never scrolls away. The bar
+  // renders from the snapshot or from attached agent rows, whichever the
+  // page holds; only when it has neither does a slim waiting row keep the
+  // bar's height stable.
   //
   // `sideLayout` renders the same status area as a right sidebar (aside)
   // beside the transcript instead of the top bar, gated to lg+ by the
@@ -34,17 +35,19 @@
   // tone. The top bar renders no standing rows section: the
   // pill labels and the transient panel carry per-agent state.
   import {
+    activeAgents,
     formatTokenCount,
+    totalAgents,
     type TagmaStatusSummary,
   } from "../lib/tagmata.svelte.ts";
   import { PanelRight, PanelTop } from "@lucide/svelte";
   import { Dialog, Portal } from "@skeletonlabs/skeleton-svelte";
   import {
-    tagma_status_active_total,
+    tagma_status_active_agents,
+    tagma_status_active_agents_hint,
     tagma_status_aria,
     tagma_status_budget,
     tagma_status_layout_toggle,
-    tagma_status_subagents,
     tagma_status_unlimited,
     tagma_status_waiting,
   } from "../paraglide/messages.js";
@@ -101,22 +104,26 @@
   );
 </script>
 
-{#snippet subagentsSegment(s: TagmaStatusSummary)}
-  <!-- Sidebar summary segment: subagents, always shown (even 0/0). -->
+{#snippet activeAgentsSegment(s: TagmaStatusSummary)}
+  <!-- The roster count, one aggregation for every surface (sidebar summary,
+       transient panel, top bar): the root holds a slot and counts as active
+       while it runs. -->
   <div
-    class="flex items-center gap-1.5"
-    title={tagma_status_subagents() + " - " + tagma_status_active_total()}
+    class="flex items-center gap-1.5 shrink-0"
+    title={tagma_status_active_agents_hint()}
   >
-    <span class="text-base opacity-60">{tagma_status_subagents()}</span>
     <span
-      class="size-2 rounded-full {s.subagentsActive > 0
+      class="size-2 rounded-full {activeAgents(s) > 0
         ? 'bg-success-500'
         : 'bg-surface-400-600'}"
       aria-hidden="true"
     ></span>
-    <span class="font-medium">{s.subagentsActive}</span>
-    <span>/</span>
-    <span>{s.subagentsTotal}</span>
+    <span class="tabular-nums whitespace-nowrap"
+      >{tagma_status_active_agents({
+        count: activeAgents(s),
+        total: totalAgents(s),
+      })}</span
+    >
   </div>
 {/snippet}
 
@@ -172,7 +179,7 @@
     <div class="px-4 py-3 flex flex-col gap-2.5 text-lg">
       {#if status}
         <div class="flex items-center justify-between gap-2">
-          {@render subagentsSegment(status)}
+          {@render activeAgentsSegment(status)}
           {@render layoutToggle()}
         </div>
         <div class="flex flex-col gap-1.5">
@@ -210,29 +217,28 @@
            toggle on the bar's right edge. -->
     <div class="relative w-full">
       <div class="mx-auto w-full max-w-[56rem] px-4 py-3 min-h-14 text-lg">
-        {#if agentRows && (agentRows.rootRow || agentRows.subRows.length > 0)}
-          <AgentPills
-            rootRow={agentRows.rootRow}
-            subRows={agentRows.subRows}
-            budget={status}
-            onOverflow={() => (overflowOpen = true)}
-          />
-        {:else if status}
-          <!-- Rows not attached (or empty): keep the aggregate line so
-                 the bar still says something real. -->
-          <div class="flex items-center gap-1.5">
-            <span
-              class="size-2 rounded-full {status.subagentsActive > 0
-                ? 'bg-success-500'
-                : 'bg-surface-400-600'}"
-              aria-hidden="true"
-            ></span>
-            <span class="tabular-nums whitespace-nowrap"
-              >{status.subagentsActive}/{status.subagentsTotal}</span
-            >
+        {#if status || (agentRows && (agentRows.rootRow || agentRows.subRows.length > 0))}
+          <!-- The roster count leads the row: it is the bar's one glanceable
+               number, and it stays put whether or not the agent rows are
+               attached. -->
+          <div class="flex items-center gap-3 min-w-0">
+            {#if status}
+              {@render activeAgentsSegment(status)}
+            {/if}
+            {#if agentRows && (agentRows.rootRow || agentRows.subRows.length > 0)}
+              <div class="flex-1 min-w-0">
+                <AgentPills
+                  rootRow={agentRows.rootRow}
+                  subRows={agentRows.subRows}
+                  budget={status}
+                  onOverflow={() => (overflowOpen = true)}
+                />
+              </div>
+            {/if}
           </div>
         {:else}
-          <!-- No snapshot yet: keep the bar's height with a muted placeholder. -->
+          <!-- No snapshot and no rows: keep the bar's height with a muted
+               placeholder. -->
           <div class="flex items-center gap-1.5 text-base opacity-50">
             <span
               class="size-2 rounded-full bg-surface-400-600 animate-pulse"
@@ -275,7 +281,7 @@
         <div class="px-4 py-3 flex flex-col gap-2.5 text-lg">
           {#if status}
             <div class="flex items-center justify-between gap-2">
-              {@render subagentsSegment(status)}
+              {@render activeAgentsSegment(status)}
             </div>
             <div class="flex flex-col gap-1.5">
               <div class="flex items-center gap-2">

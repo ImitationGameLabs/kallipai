@@ -7,8 +7,10 @@
   import AgentStateIcon from "./AgentStateIcon.svelte";
   import { parkedReasonText } from "../lib/session/parkedReason.ts";
   import {
+    activeAgents,
     contextOccupancy,
     formatTokenCount,
+    totalAgents,
     type TagmaStatusSummary,
   } from "../lib/tagmata.svelte.ts";
   import type { StatusCardRow } from "../lib/session/statusCard.svelte.ts";
@@ -34,12 +36,10 @@
 
   // Root anchors the list; subs follow in the store's attention order.
   const rows = $derived(rootRow ? [rootRow, ...subRows] : [...subRows]);
-  // Same aggregation the status line uses: root busy counts toward the
-  // active numerator, and the root always holds one total slot.
-  const active = $derived(
-    budget ? (budget.rootState === "busy" ? 1 : 0) + budget.subagentsActive : 0,
-  );
-  const total = $derived(budget ? 1 + budget.subagentsTotal : 0);
+  // The shared roster aggregation: the root holds a slot and counts as active
+  // while it runs, exactly as the status line and the header render it.
+  const active = $derived(budget ? activeAgents(budget) : 0);
+  const total = $derived(budget ? totalAgents(budget) : 0);
   const budgetPct = $derived(
     budget && budget.tokenBudget > 0
       ? Math.min(100, (budget.tokenConsumed / budget.tokenBudget) * 100)

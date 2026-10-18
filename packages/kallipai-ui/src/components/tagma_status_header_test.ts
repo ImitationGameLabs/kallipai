@@ -97,3 +97,28 @@ Deno.test(
     assert(facts.includes("factLines(facts,"));
   },
 );
+
+Deno.test(
+  "the top bar renders the active-agents count segment",
+  { permissions: { read: [HEADER] } },
+  () => {
+    const src = source(HEADER);
+    // The count segment leads the pill row; pin its presence in the top bar.
+    const mounts =
+      src.split("{@render activeAgentsSegment(status)}").length - 1;
+    assert(
+      mounts === 3,
+      `expected the count segment in all three fleet containers, found ${mounts}`,
+    );
+    const anchor = src.indexOf('<div class="relative w-full">');
+    assert(anchor >= 0, "the top bar container is present");
+    const bar = src.slice(anchor);
+    assert(
+      bar.includes("{@render activeAgentsSegment(status)}"),
+      "the count segment is rendered in the top bar",
+    );
+    const segment = bar.indexOf("{@render activeAgentsSegment(status)}");
+    const pills = bar.indexOf("<AgentPills");
+    assert(pills > 0 && segment < pills, "the count segment leads the pills");
+  },
+);

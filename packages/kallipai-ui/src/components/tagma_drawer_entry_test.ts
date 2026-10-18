@@ -24,7 +24,7 @@ Deno.test(
     assert(src.includes("<button"));
     assert(src.includes("aria-label={rowLabel}"));
     assert(src.includes("const rowLabel = $derived("));
-    assert(src.includes("${status.subagentsActive}/${status.subagentsTotal}"));
+    assert(src.includes("${activeAgents(status)}/${totalAgents(status)}"));
     assert(src.includes('aria-haspopup="dialog"'));
     assert(src.includes("aria-expanded={expanded"));
     // Press feedback without button chrome: no border, no filled preset.

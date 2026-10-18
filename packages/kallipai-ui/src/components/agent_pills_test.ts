@@ -89,8 +89,10 @@ Deno.test(
     // the full state word as the accessible name.
     assert(src.includes("tagma_status_root()"));
     assert(src.includes("<AgentStateIcon state={row.state} />"));
-    // The summary line mirrors the status line aggregation.
-    assert(src.includes('budget.rootState === "busy"'));
+    // The summary line renders the shared roster aggregation (root included),
+    // never a per-surface re-derivation of it.
+    assert(src.includes("activeAgents(budget)"));
+    assert(src.includes("totalAgents(budget)"));
     assert(src.includes("tagma_status_waiting()"));
     // Unlimited budget: the fill track is gated off and the denominator
     // renders the localized label (BudgetBar unlimited precedent).

@@ -228,16 +228,28 @@ export function contextOccupancy(
   return `${formatTokenCount(used)} / ${formatTokenCount(max)}`;
 }
 
+/** The active numerator every status surface renders: the root counts as
+ * activity only while it is busy, plus the busy subagents. */
+export function activeAgents(s: TagmaStatusSummary): number {
+  return (s.rootState === "busy" ? 1 : 0) + s.subagentsActive;
+}
+
+/** The denominator every status surface renders: the root always holds one
+ * slot in the roster, faulted included. */
+export function totalAgents(s: TagmaStatusSummary): number {
+  return 1 + s.subagentsTotal;
+}
+
 /** One-line status summary for a tagma card: `2/4 agents · 12k/50k tokens`.
  * Aggregate (root + subagents) — the dashboard card stays a glanceable summary;
  * the channel-chat header is where root/sub are shown separately. The root
  * always counts toward the total (1) even when `rootState === "faulted"`.
  * Caller checks for `undefined` before calling (no status yet -> hidden). */
 export function formatTagmaStatusLine(s: TagmaStatusSummary): string {
-  // Root counts as 1 slot (present even when faulted); active adds root only
-  // when it is busy.
-  const total = 1 + s.subagentsTotal;
-  const active = (s.rootState === "busy" ? 1 : 0) + s.subagentsActive;
+  // The roster aggregation is shared with every status surface, so the card
+  // and the panes cannot split on whether the root counts.
+  const total = totalAgents(s);
+  const active = activeAgents(s);
   const agents =
     total === 1
       ? shell_status_agents_one({ count: active, total })

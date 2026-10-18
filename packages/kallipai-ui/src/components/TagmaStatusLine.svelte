@@ -10,7 +10,11 @@
     tagma_drawer_open,
     tagma_status_waiting,
   } from "../paraglide/messages.js";
-  import type { TagmaStatusSummary } from "../lib/tagmata.svelte.ts";
+  import {
+    activeAgents,
+    totalAgents,
+    type TagmaStatusSummary,
+  } from "../lib/tagmata.svelte.ts";
 
   let {
     status,
@@ -27,7 +31,7 @@
   // otherwise the waiting placeholder stands alone.
   const rowLabel = $derived(
     status
-      ? `${tagma_drawer_open()} ${status.subagentsActive}/${status.subagentsTotal}`
+      ? `${tagma_drawer_open()} ${activeAgents(status)}/${totalAgents(status)}`
       : tagma_drawer_open(),
   );
 </script>
@@ -42,13 +46,13 @@
 >
   {#if status}
     <span
-      class="size-2 rounded-full shrink-0 {status.subagentsActive > 0
+      class="size-2 rounded-full shrink-0 {activeAgents(status) > 0
         ? 'bg-success-500'
         : 'bg-surface-400-600'}"
       aria-hidden="true"
     ></span>
     <span class="tabular-nums whitespace-nowrap"
-      >{status.subagentsActive}/{status.subagentsTotal}</span
+      >{activeAgents(status)}/{totalAgents(status)}</span
     >
   {:else}
     <span
