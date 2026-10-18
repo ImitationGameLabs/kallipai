@@ -558,8 +558,9 @@ failed — the per-request profile cap bounds that spend.
 > allowlist fails it closed with `404 not on the manage frame surface`.
 > The envelope also takes a per-call deadline, which this route needs —
 > the probe fans out to upstream inference peers and outlasts the
-> client's default. Clients reaching the tagma directly (the CLI, a local
-> tagma, the Rust client) are unaffected: they speak plain HTTP.
+> client's default. Clients reaching the tagma directly (the CLI, a client
+> on the tagma's own host, the Rust client) are unaffected: they speak
+> plain HTTP.
 
 ### External Chat-Room API
 

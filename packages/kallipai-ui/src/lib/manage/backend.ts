@@ -225,8 +225,8 @@ export interface ProfilesEnvelopeChannel {
 
 /** Per-call envelope deadline for the provider probe. The tagma runs each
  * stage's endpoints concurrently and caps metadata at 10s and inference at
- * 60s, so a healthy worst case lands near 70-80s: the 15s default would cut
- * a healthy probe short. */
+ * 60s, so a healthy worst case lands near 70-80s: the shared default
+ * would cut a healthy probe short. */
 const PROBE_ENVELOPE_TIMEOUT_MS = 90_000;
 
 /**

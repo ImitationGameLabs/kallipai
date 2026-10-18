@@ -29,11 +29,8 @@ const mod = await import("./profiles.svelte.ts");
 import { OfflineBackend } from "./backend.ts";
 import { type ProfileConfig, TagmaClient } from "@kallipai/kallipai-client";
 import { type ManagementBackend } from "./client.ts";
-import { KallipaiError } from "@kallipai/kallipai-common";
-import {
-  DataPlaneApiError,
-  ManageChannelError,
-} from "@kallipai/kallipai-keryx-client";
+import { DataPlaneApiError, KallipaiError } from "@kallipai/kallipai-common";
+import { ManageChannelError } from "@kallipai/kallipai-keryx-client";
 
 // A store pointed at a throwaway backend: the faked fetch answers every
 // request, so the client only needs any well-formed base URL.
@@ -402,6 +399,36 @@ Deno.test(
       offline.probeError,
       messages.manage_profiles_probe_disconnected(),
     );
+
+    // The channel closed under the request: nothing left the client, so
+    // the reading is the same dropped link.
+    const closed = probingStore(new ManageChannelError("closed"));
+    await closed.probeRaw(body);
+    assertEquals(
+      closed.probeError,
+      messages.manage_profiles_probe_disconnected(),
+    );
+
+    // A fetch that never got a reply is the same reading.
+    const deadFetch = probingStore(new TypeError("failed to fetch"));
+    await deadFetch.probeRaw(body);
+    assertEquals(
+      deadFetch.probeError,
+      messages.manage_profiles_probe_disconnected(),
+    );
+
+    // The fetch's own deadline rejects outside the channel's typed error.
+    const stalled = probingStore(new DOMException("timed out", "TimeoutError"));
+    await stalled.probeRaw(body);
+    assertEquals(
+      stalled.probeError,
+      messages.manage_profiles_probe_disconnected(),
+    );
+
+    // Anything else is a defect, not a drop: the generic text stands.
+    const defect = probingStore(new Error("unexpected shape"));
+    await defect.probeRaw(body);
+    assertEquals(defect.probeError, messages.manage_profiles_probe_failed());
 
     const refused = probingStore(
       new KallipaiError({ status: 409, message: "stale sequence_n" }),

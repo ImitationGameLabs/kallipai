@@ -22,11 +22,8 @@ import {
 } from "./compute.ts";
 import { type ManagementBackend, managementBackend } from "./client.ts";
 import { classifySaveFailure, type PendingDangling } from "./profiles-view.ts";
-import { KallipaiError } from "@kallipai/kallipai-common";
-import {
-  DataPlaneApiError,
-  ManageChannelError,
-} from "@kallipai/kallipai-keryx-client";
+import { DataPlaneApiError, KallipaiError } from "@kallipai/kallipai-common";
+import { ManageChannelError } from "@kallipai/kallipai-keryx-client";
 import { displayError } from "./errors.ts";
 import {
   manage_profiles_apply_failed,
@@ -39,6 +36,10 @@ import {
   manage_profiles_save_stale_backend,
   manage_profiles_switch_failed,
 } from "../../paraglide/messages.js";
+
+/** Diagnostic scope for probe failures: the log prefix and the parked
+ * fallback text both carry it. */
+const PROBE_SCOPE = "probe";
 
 export class ProfilesStore {
   private _backend: ManagementBackend | null = null;
@@ -326,27 +327,32 @@ export class ProfilesStore {
   /** The probe's failure text. The channel names its own shapes, and a
    * request that never left (a 5xx from keryx while the tagma is offline,
    * or a dead fetch) reads the same to the operator: the link is down.
-   * A bare `TypeError` is the wide edge of that rule -- the fetch layer's
-   * transport failure is the shape that matters, but a defect that throws
-   * TypeError on this path would be read as a drop too. Every classified
-   * branch logs the original error, so a wrong guess stays visible.
-   * Anything else keeps the generic fallback: a defect is not dressed as a
-   * drop. */
+   * The fetch's own deadline lands there too: `AbortSignal.timeout`
+   * rejects with a `DOMException` named `TimeoutError`, and an aborted
+   * fetch with `AbortError` -- neither arrives as the channel's typed
+   * error. A bare `TypeError` is the wide edge of the rule -- the fetch
+   * layer's transport failure is the shape that matters, but a defect
+   * that throws TypeError on this path would be read as a drop too.
+   * Every classified branch logs the original error, so a wrong guess
+   * stays visible. Anything else keeps the generic fallback: a defect
+   * is not dressed as a drop. */
   private probeFailure(e: unknown): string {
     if (e instanceof ManageChannelError) {
-      console.error("[probe] channel failure:", e);
+      console.error(`[${PROBE_SCOPE}] channel failure:`, e);
       return e.reason === "timeout"
         ? manage_profiles_probe_timeout()
         : manage_profiles_probe_disconnected();
     }
     if (
       (e instanceof DataPlaneApiError && e.status >= 500) ||
-      e instanceof TypeError
+      e instanceof TypeError ||
+      (e instanceof DOMException &&
+        (e.name === "TimeoutError" || e.name === "AbortError"))
     ) {
-      console.error("[probe] link down:", e);
+      console.error(`[${PROBE_SCOPE}] link down:`, e);
       return manage_profiles_probe_disconnected();
     }
-    return displayError("probe", e, manage_profiles_probe_failed());
+    return displayError(PROBE_SCOPE, e, manage_profiles_probe_failed());
   }
 
   /** Probe every provider in the draft. */

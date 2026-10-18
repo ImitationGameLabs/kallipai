@@ -44,14 +44,16 @@ const DEFAULT_MANAGE_TIMEOUT_MS = 15_000;
 
 /** Why a manage call produced no reply: the per-call deadline expired,
  * or the channel closed under the pending request. */
-export type ManageChannelFailureReason = "timeout" | "closed";
+export type ManageChannelErrorReason = "timeout" | "closed";
 
 /** A manage call the channel itself gave up on. The reason travels as a
  * typed field so callers classify on the shape rather than on wording. */
 export class ManageChannelError extends Error {
-  readonly reason: ManageChannelFailureReason;
+  readonly reason: ManageChannelErrorReason;
 
-  constructor(reason: ManageChannelFailureReason, detail?: string) {
+  constructor(reason: "timeout", detail: string);
+  constructor(reason: "closed");
+  constructor(reason: ManageChannelErrorReason, detail?: string) {
     super(
       reason === "timeout" ? `manage timeout: ${detail}` : "channel closed",
     );
