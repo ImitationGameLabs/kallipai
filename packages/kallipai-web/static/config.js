@@ -12,6 +12,10 @@
 window.KALLIPAI_CONFIG = {
   // domain: "example.com", // deployment domain; the API face is api.<domain>
   offlineLogin: true, // true = show the operator-key login branch
+  // instancesServiceEnabled: true, // true = this deployment runs an instance host (the
+  // /tagmata page then probes the instances service and shows its process
+  // half). Unset means true; declare false on a deployment that runs no
+  // instance host, and the page renders the registry half only.
   // apiBase: "https://api.example.com", // platform edge origin; every service base becomes <apiBase>/v1/<service>
   // An empty string counts as unset (the api.<domain> derivation applies).
 };

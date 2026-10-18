@@ -17,7 +17,10 @@ declare global {
      * platform edge origin the service bases derive onto; domain
      * overrides the deployment domain used in that derivation;
      * offlineLogin defaults to true when unset (the factory file
-     * ships it as true).
+     * ships it as true); instancesServiceEnabled defaults to true when unset
+     * too: a deployment declares false only when it runs no instance
+     * host, and the /tagmata page then neither probes the service nor
+     * renders its process half.
      */
     KALLIPAI_CONFIG?: {
       /** Deployment domain (taken verbatim, `app.` prefix included). */
@@ -28,6 +31,11 @@ declare global {
       apiBase?: string;
       /** The model gateway admin base URL (the /admin face); empty string counts as unset. */
       gatewayAdminUrl?: string;
+      /** False = this deployment runs no instance host (no instances
+       * service backed by a process daemon on its machine); unset means
+       * it does, and every value but the literal false counts as
+       * present, an empty string included. */
+      instancesServiceEnabled?: boolean;
     };
   }
 }

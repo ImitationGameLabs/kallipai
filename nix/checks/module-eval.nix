@@ -273,6 +273,32 @@
           };
         };
       };
+      # The instance-host declaration the module writes: a polis-only
+      # deployment runs the instances API but no process half, so it
+      # declares false; an explicit value beats the derivation. The
+      # mirror case: a daemon-only deployment serves no instances API
+      # either, so the derivation writes false the same way.
+      webNoBackend = evalHost {
+        services.kallipai = {
+          polis.enable = true;
+          web.enable = true;
+        };
+      };
+      webHostOverride = evalHost {
+        services.kallipai = {
+          polis.enable = true;
+          web = {
+            enable = true;
+            runtimeConfig.instancesServiceEnabled = true;
+          };
+        };
+      };
+      webDaemonOnly = evalHost {
+        services.kallipai = {
+          daemon.enable = true;
+          web.enable = true;
+        };
+      };
       # The polis scrape export: empty with polis or gateway off; one
       # job per enabled metrics-capable service (the gateway today)
       # with the port following the service's own option, a drifted
@@ -423,6 +449,28 @@
       grep -q "\"domain\":\"${webCustom.config.services.kallipai.web.runtimeConfig.domain}\"" "$custom/config.js"
       grep -q bundle-page "$custom/index.html"
 
+      # The instance-host declaration the module derives: a polis-only
+      # deployment runs the instances API but no process half, so it
+      # declares false; an explicit value beats the derivation. The
+      # no-key arm above stays straight-through either way: a deployment
+      # that runs neither polis nor the daemon is told nothing (shipped
+      # default).
+      test '${builtins.toJSON webNoBackend.config.services.kallipai.web.runtimeConfig.instancesServiceEnabled}' = 'false'
+      test '${builtins.toJSON webHostOverride.config.services.kallipai.web.runtimeConfig.instancesServiceEnabled}' = 'true'
+      noBackend=${webNoBackend.config.services.kallipai.web.distWithRuntimeConfig}
+      grep -q '"instancesServiceEnabled":false' "$noBackend/config.js"
+      hostOverride=${webHostOverride.config.services.kallipai.web.distWithRuntimeConfig}
+      grep -q '"instancesServiceEnabled":true' "$hostOverride/config.js"
+      daemonOnly=${webDaemonOnly.config.services.kallipai.web.distWithRuntimeConfig}
+      test '${builtins.toJSON webDaemonOnly.config.services.kallipai.web.runtimeConfig.instancesServiceEnabled}' = 'false'
+      grep -q '"instancesServiceEnabled":false' "$daemonOnly/config.js"
+      test '${toString (builtins.length (failedAssertions webNoBackend))}' = '0'
+      test '${toString (builtins.length webNoBackend.config.warnings)}' = '0'
+      test '${toString (builtins.length (failedAssertions webDaemonOnly))}' = '0'
+      test '${toString (builtins.length webDaemonOnly.config.warnings)}' = '0'
+      test '${toString (builtins.length (failedAssertions webHostOverride))}' = '0'
+      test '${toString (builtins.length webHostOverride.config.warnings)}' = '0'
+
       # An unknown runtimeConfig key failed the evaluation itself.
       test "${toString bogusRejected}" = "1"
 
@@ -488,6 +536,7 @@
       # mkDefault, so a derivation that hardcodes it turns this red.
       grep -q "\"domain\":\"${webDerived.config.services.kallipai.domain}\"" "$derived/config.js"
       grep -q "\"gatewayAdminUrl\":\"${webDerived.config.services.kallipai.web.runtimeConfig.gatewayAdminUrl}\"" "$derived/config.js"
+      grep -q '"instancesServiceEnabled":true' "$derived/config.js"
       # The baking helper, called directly, writes exactly the payload.
       direct="${directBake}"
       grep -q "\"offlineLogin\":${builtins.toJSON directPayload.offlineLogin}" "$direct/config.js"

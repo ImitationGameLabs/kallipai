@@ -232,6 +232,8 @@
     // create card reads it -- hidden while the service is unreachable.
     // Offline-only shells skip it: no route there consumes capabilities, and
     // the instances service is not part of that shell's world.
+    // The store owns the network gate: a deployment that declares no
+    // instance host returns from the probe before it touches the wire.
     if (!isOfflineOnlyShell()) void instancesStore.fetchCapabilities();
   });
 

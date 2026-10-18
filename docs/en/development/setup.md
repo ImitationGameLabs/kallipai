@@ -399,6 +399,33 @@ setting `services.kallipai.web.runtimeConfig.offlineLogin = false`
 (baked into the served site root), or by editing the file directly on a
 non-NixOS deployment.
 
+The `/tagmata` page's process half rides the same file:
+`instancesServiceEnabled` declares whether this deployment runs an
+instance host (an instances service backed by a process daemon on its
+machine). Unset means it does, and that is the shipped default. So does
+any value other than the literal `false`: a template that renders an
+empty string, or a key spelled differently, still keeps the full page.
+
+Decide by what the deployment serves, not by what the page shows: if
+`/v1/instances` answers from this deployment's own edge and a local
+daemon hosts the processes, keep the default. If neither is in place,
+set `instancesServiceEnabled = false` in the runtime config -- on NixOS
+`runtimeConfig.instancesServiceEnabled = false`. The page then neither
+probes the service nor renders its process half; the registry half
+(enrollment codes, identities) is unaffected.
+
+That switch also silences the one line that would otherwise report the
+missing service, so a deployment meant to run a daemon has to be
+diagnosed where it is configured. And the key speaks only for the
+deployment its config is baked on: a deployment whose browser reaches
+an instances API elsewhere keeps its own answer.
+
+On NixOS the module derives the value from the deployment's own
+switches unless the deployment sets the key itself: true only where
+polis and the daemon both run, false where only one of the two runs. A
+deployment that runs neither gets no key and keeps the default, so
+opting out there is a hand-written key, not a module default.
+
 ### Iterating
 
 `arion up` re-evaluates the flake each time, so Rust changes are picked up just

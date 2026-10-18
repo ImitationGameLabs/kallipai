@@ -233,15 +233,41 @@ async function faultBody(
   }
 }
 
-// The service's base URL is injected via initInstances() at app bootstrap --
-// the package does not read import.meta.env (SvelteKit-only typing). The
-// value is the FULL service base (origin + /v1/instances, as served by
-// the api.<domain> edge): the service nests its routes there.
-let instancesClient: InstancesClient | null = null;
+// InstancesOptions carries the deployment's own declaration (the web
+// runtime config's instancesServiceEnabled): whether this deployment runs an
+// instance host -- an instances service backed by a process daemon on
+// its machine. Unset means present, so a shell that declares nothing
+// keeps the full page. Only a literal false turns the service off: a
+// template that renders an empty string, or a misspelled key, still
+// gets the full page. A deployment that declares false is never asked
+// for the service by the store's read paths: no poll, and the page
+// renders the registry half only. The spawn/stop/start mutations
+// are not gated: their surfaces live in the process half such a
+// deployment does not render.
+export interface InstancesOptions {
+  instancesServiceEnabled?: boolean;
+}
 
-/** Inject the service base URL and construct the client. Called once at bootstrap. */
-export function initInstances(url: string): void {
+let instancesClient: InstancesClient | null = null;
+let instancesServiceEnabledDeclared = true;
+
+/** Inject the service base URL and the deployment's instancesServiceEnabled
+ * declaration, and construct the client. The URL is the FULL service base
+ * (origin + /v1/instances, as served by the api.<domain> edge): the service
+ * nests its routes there, and the value is injected because the package
+ * does not read import.meta.env (SvelteKit-only typing). Called once at
+ * bootstrap. */
+export function initInstances(url: string, options?: InstancesOptions): void {
   instancesClient = new InstancesClient(url);
+  instancesServiceEnabledDeclared = options?.instancesServiceEnabled !== false;
+}
+
+/** Whether this deployment declares the instances service enabled (an
+ * unset declaration means it does). Every probe and every read path keys
+ * on this, so a deployment that declares it off costs no requests and no
+ * error line. */
+export function hasInstancesServiceEnabled(): boolean {
+  return instancesServiceEnabledDeclared;
 }
 
 export function instancesClientOrFail(): InstancesClient {

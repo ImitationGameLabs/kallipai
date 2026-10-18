@@ -47,7 +47,12 @@
     serviceUrl("keryx", config, location),
   );
   initFiles(serviceUrl("files", config, location));
-  initInstances(serviceUrl("instances", config, location));
+  // The instances declaration rides the same file: a deployment that
+  // declares no instance host is not asked for the service (an unset key
+  // means it has one).
+  initInstances(serviceUrl("instances", config, location), {
+    instancesServiceEnabled: config.instancesServiceEnabled,
+  });
   initConfigStorage(localStorageConfigStorage);
 
   const icons: NavIcons = {

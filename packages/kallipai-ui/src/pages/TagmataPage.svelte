@@ -21,6 +21,7 @@
   import { realtimeStore } from "../lib/session/realtime.svelte.ts";
   import { instancesStore } from "../lib/instances/instances.svelte.ts";
   import {
+    hasInstancesServiceEnabled,
     CONNECT_TOKEN_KEY,
     INSTANCES_TOKEN_KEY,
     InstancesError,
@@ -294,12 +295,18 @@
 
   const pending = $derived(archeionSession.pending);
 
-  // Both halves must settle before the empty state may fire (the process
-  // list loaded or failed; the registry loaded or failed for the signed-in
-  // user) -- else a "no tagmas" hero flashes over an in-flight fetch. A
-  // daemon error keeps the banner up instead of the hero.
+  // The declaration is presentation state here: the store owns the
+  // network gate, so the page only answers what it renders. Both halves
+  // must settle before the empty state may fire (the process list loaded
+  // or failed; the registry loaded or failed for the signed-in user),
+  // else a no-tagmas hero flashes over an in-flight fetch. A hostless
+  // deployment has nothing pending on that half and shows no loading
+  // line for it.
+  const hasProcessHalf = hasInstancesServiceEnabled();
   const settled = $derived(
-    (instancesStore.loaded || instancesStore.errorKind !== null) &&
+    (!hasProcessHalf ||
+      instancesStore.loaded ||
+      instancesStore.errorKind !== null) &&
       (archeionSession.user == null ||
         archeionSession.tagmataLoaded ||
         archeionSession.tagmataError !== null),
@@ -350,7 +357,10 @@
     {/if}
 
     <!-- The process-host banner is non-blocking: the registry cards do not
-         depend on it, so its failure costs the process rows only. -->
+         depend on it, so its failure costs the process rows only. It is
+         ungated by the declaration on purpose: the store classifies
+         nothing when no host is declared, and any error it does raise
+         is worth one line. -->
     {#if instancesStore.errorKind}
       {#if instancesStore.errorKind === "unauthorized" && instancesStore.errorCode === "admin_session_required"}
         <!-- Platform mode, cookie channel: no token to paste -- the
@@ -404,7 +414,7 @@
         {startError}
       </p>
     {/if}
-    {#if instancesStore.errorKind === null && !instancesStore.loaded}
+    {#if hasProcessHalf && instancesStore.errorKind === null && !instancesStore.loaded}
       <p class="text-sm opacity-70">{manage_instances_loading()}</p>
     {:else if archeionSession.user != null && !archeionSession.tagmataLoaded && !archeionSession.tagmataError}
       <p class="text-sm opacity-70">{manage_instances_loading()}</p>

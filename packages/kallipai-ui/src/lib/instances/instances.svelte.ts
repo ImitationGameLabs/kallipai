@@ -2,8 +2,12 @@
 // local instances service for the daemon's liveness and its instance list;
 // spawn/stop mutations rethrow their classified errors for the calling
 // surface (form, confirm dialog) to render; the list refreshes on success.
+// The deployment's declaration decides whether that service is asked for
+// at all: without an instance host every read path here returns before
+// it touches the network, so the page renders the registry half only.
 
 import {
+  hasInstancesServiceEnabled,
   type InstanceHealth,
   type InstanceInfo,
   instancesClientOrFail,
@@ -46,6 +50,7 @@ class InstancesStore {
 
   /** Fetch both faces once; a classified error lands in error/errorKind. */
   async refresh(): Promise<void> {
+    if (!hasInstancesServiceEnabled()) return;
     this.isLoading = true;
     try {
       const [health, instances] = await Promise.all([
@@ -77,6 +82,7 @@ class InstancesStore {
    * before the instances page is ever visited).
    */
   async fetchCapabilities(): Promise<void> {
+    if (!hasInstancesServiceEnabled()) return;
     try {
       this.capabilities = await this.client.capabilities();
     } catch {
@@ -111,6 +117,7 @@ class InstancesStore {
   }
 
   startPolling(intervalMs = 5000): void {
+    if (!hasInstancesServiceEnabled()) return;
     this.stopPolling();
     this.refresh();
     this.pollStop = startVisibleInterval(() => {

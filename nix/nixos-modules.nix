@@ -647,6 +647,24 @@ in
                 counts as unset and the page asks the operator for the URL.
               '';
             };
+            instancesServiceEnabled = lib.mkOption {
+              type = lib.types.nullOr lib.types.bool;
+              default = null;
+              description = ''
+                False = this deployment runs no instance host (no
+                instances service backed by a process daemon on its
+                machine): the /tagmata page then neither probes the
+                service nor renders its process half. Unset means it
+                does. The module derives the value from the
+                deployment's own switches unless the deployment sets
+                the key itself: true only where polis and the daemon
+                both run, false where only one of the two runs, and
+                left unset where neither does (the shipped default). A
+                deployment that runs neither and whose browser reaches
+                no instances API therefore sets the key to false
+                itself.
+              '';
+            };
           };
         };
         default = { };
@@ -654,18 +672,20 @@ in
           Values for the web app's runtime config (/config.js), baked
           into the site root as a window.KALLIPAI_CONFIG assignment. Keys
           mirror the app's Window.KALLIPAI_CONFIG type: domain,
-          gatewayAdminUrl, offlineLogin, apiBase; an unknown key fails
-          evaluation. The
+          gatewayAdminUrl, offlineLogin, apiBase,
+          instancesServiceEnabled; an unknown key fails evaluation. The
           empty default keeps the shipped config.js defaults. Set
           offlineLogin = false to hide the operator-key login branch (a
           cloud-facing deployment), or add domain/apiBase to pin values
           the app would otherwise derive from the browser location;
-          domain already defaults to services.kallipai.domain. The file
-          is baked into the site root and served publicly, so anything
-          placed here is readable by anyone who can reach the site —
-          keep it to values the browser is meant to see; secrets belong
-          in environment files or credential stores, never in this
-          option.
+          domain already defaults to services.kallipai.domain;
+          instancesServiceEnabled already follows the deployment's own
+          switches (see its option), so setting it by hand is for what
+          the module cannot see. The file is baked into the site root
+          and served publicly, so anything placed here is readable by
+          anyone who can reach the site — keep it to values the browser
+          is meant to see; secrets belong in environment files or
+          credential stores, never in this option.
         '';
       };
 
@@ -1234,6 +1254,18 @@ in
             inherit (webCfg) package;
             runtimeConfig = userKeys;
           }
+      );
+    })
+    # The instance-host declaration: written only where the deployment
+    # runs part of the stack, where the answer is known -- polis serves
+    # the instances API, and the daemon hosts the processes it manages,
+    # so that pair is exactly the capability the browser is told about.
+    # A deployment running neither writes nothing: the shipped default
+    # (true) stands, and the page keeps its process half. The value is
+    # written as a mkDefault, so an operator's own setting wins over it.
+    (lib.mkIf (webCfg.enable && (polisCfg.enable || cfg.enable)) {
+      services.kallipai.web.runtimeConfig.instancesServiceEnabled = lib.mkDefault (
+        polisCfg.enable && cfg.enable
       );
     })
     # Platform-derived service defaults: every value embeds the domain,

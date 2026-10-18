@@ -209,6 +209,21 @@ Unset keys fall back to the app-side derivation; the bundle itself is
 deployment-independent. The dev form of the same site is the host vite
 server behind the dev Caddyfile.
 
+A deployment that serves the web app but runs no instance host (no
+polis instances service backed by a local daemon) declares that in the
+same payload, unless its browser reaches an instances API elsewhere:
+`runtimeConfig.instancesServiceEnabled = false`. The `/tagmata` page
+then neither probes the service nor renders its process half, instead
+of reporting a service the deployment does not serve. The NixOS module
+derives the value from the deployment's own switches unless the
+deployment sets the key itself: it is true only where polis and the
+daemon both run, false where only one of the two runs, and left unset
+where neither does. A deployment that runs neither and whose browser
+reaches no instances API sets the key to false itself. A deployment
+outside NixOS takes the other route and hand-edits `config.js`, setting
+`instancesServiceEnabled: false` on the same `window.KALLIPAI_CONFIG`
+object it already edits.
+
 ### Relay Bootstrap
 
 The tagma enrolls with the platform on its **first** boot, using a

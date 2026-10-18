@@ -1,8 +1,14 @@
-// Locks the tagma->instance slug convention: the one-click spawn names the
-// instance and the devices-list join looks it up, so a silent change to the
-// prefix shape would break the join with no signal. These cases pin the
-// mapping (and its deliberate first-8-chars collision semantics).
-import { InstancesClient, instanceSlugFor } from "./client.ts";
+// Locks two mappings. The tagma->instance slug: the one-click spawn names
+// the instance and the devices-list join looks it up, so a silent change
+// to the prefix shape would break the join with no signal (the deliberate
+// first-8-chars collision semantics included). The instance-host
+// declaration: read once at bootstrap, unset meaning the host is present.
+import {
+  hasInstancesServiceEnabled,
+  initInstances,
+  InstancesClient,
+  instanceSlugFor,
+} from "./client.ts";
 import { assertEquals } from "@std/assert";
 
 Deno.test("instanceSlugFor derives the one-click spawn slug", () => {
@@ -93,3 +99,27 @@ Deno.test(
     }
   },
 );
+
+// The deployment's own declaration is read once at bootstrap: unset means
+// the instance host is present (the shipped default), and only an
+// explicit false takes the instances surfaces out of the page.
+Deno.test("initInstances defaults the instance host to present", () => {
+  initInstances("http://instances.test");
+  assertEquals(hasInstancesServiceEnabled(), true);
+});
+
+Deno.test("initInstances carries a false instance-host declaration", () => {
+  initInstances("http://instances.test", { instancesServiceEnabled: false });
+  assertEquals(hasInstancesServiceEnabled(), false);
+  initInstances("http://instances.test");
+});
+
+// The declaration arrives from a hand-edited config.js or a template, so a
+// value that is not a boolean can reach initInstances: only a literal
+// false means this deployment runs no instance host.
+Deno.test("initInstances treats only a literal false as no host", () => {
+  initInstances("http://instances.test", {
+    instancesServiceEnabled: "" as unknown as boolean,
+  });
+  assertEquals(hasInstancesServiceEnabled(), true);
+});
