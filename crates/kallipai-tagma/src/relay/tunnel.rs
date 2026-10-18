@@ -137,27 +137,57 @@ impl RelayHandle {
     }
 }
 
+/// The `{name}` segment of `{prefix}/{name}`: a one-segment tail with
+/// no further path. The bare prefix and any trailing slash are rejected
+/// here, matching the manage router this frame dispatches to: the
+/// router normalizes nothing, so a path has to arrive exact.
+fn one_segment<'a>(path: &'a str, prefix: &str) -> Option<&'a str> {
+    path.strip_prefix(prefix)
+        .filter(|rest| !rest.is_empty() && !rest.contains('/'))
+}
+
 /// The frame-surface allowlist: the exact manage_router routes that may
-/// ride a ManageRest frame, enumerated one by one. The criterion is
-/// confidentiality: routes whose request carries provider API keys (the
-/// probe), prompt content (/profiles/sets/{name}) or session content (the
-/// lesche message posts) stay off the plaintext frame. Anything not listed
-/// here is a 404, even though the underlying manage_router would happily
-/// serve it -- fail-closed by construction.
+/// ride a ManageRest frame, enumerated one by one. The split is per
+/// call, not per family.
+///
+/// Confidentiality decides most of it: a route rides only when neither
+/// its request nor its reply carries provider API keys or lesche
+/// message content. The key-bearing save (`PUT /profiles`) and probe
+/// (`POST /profiles/probe`) take the envelope; the masked read
+/// (`GET /profiles`) and the config writes that carry no key
+/// (`apply`, `refresh`, `PUT /profiles/default`) ride here.
+///
+/// The frame contract decides the rest: the frame carries no query
+/// string, so a parameter the body cannot carry keeps a route off it.
+/// The set delete is that case -- its `?force=` has nowhere to go, so
+/// the call takes the envelope.
+///
+/// No route under the `/profiles/sets/` prefix is enumerated here, the
+/// delete included -- today it is the only route there, and a route
+/// added later has to be granted an allow entry of its own before it
+/// can land on the plaintext frame.
+///
+/// The task family has no delete verb at all -- tasks close and
+/// archive, so the router serves no `DELETE /tasks/{id}` for the frame
+/// to admit.
+///
+/// Anything not listed is a 404, even though the underlying
+/// manage_router would happily serve it -- fail-closed by construction.
 fn frame_allowed(method: &str, path: &str) -> bool {
-    let p = path.trim_end_matches('/');
-    let sub = p
+    // The frame admits exact shapes: an empty id is not an id, so
+    // `/agents//duty` -- which splits into ("", "duty") -- stays off the
+    // `duty` arm below.
+    let sub = path
         .strip_prefix("/agents/")
-        .and_then(|rest| rest.split_once('/'));
-    // A bare /agents/{id} answers with an empty status and requests nothing
-    // confidential, so removal may ride the plaintext frame.
-    let agent_detail = p
-        .strip_prefix("/agents/")
-        .filter(|rest| !rest.is_empty() && !rest.contains('/'));
-    let task_detail = p
-        .strip_prefix("/tasks/")
-        .filter(|rest| !rest.is_empty() && !rest.contains('/'));
-    match (method, p) {
+        .and_then(|rest| rest.split_once('/'))
+        .filter(|(id, _)| !id.is_empty());
+    // A destructive verb is no bar by itself: the manage frame carries
+    // the operator identity for every request it dispatches, and a bare
+    // /agents/{id} takes no parameter and carries no secret -- a 204
+    // with an empty body -- so removal rides the reads' criterion.
+    let agent_detail = one_segment(path, "/agents/");
+    let task_detail = one_segment(path, "/tasks/");
+    match (method, path) {
         ("GET", "/agents")
         | ("GET", "/budget")
         | ("POST", "/budget")
@@ -247,7 +277,7 @@ mod manage_rest_tests {
     use super::frame_allowed;
 
     #[test]
-    fn allowlist_admits_low_and_medium_sensitive_routes() {
+    fn allowlist_admits_the_listed_routes() {
         for (method, path) in [
             ("GET", "/agents"),
             ("GET", "/agents/x/status"),
@@ -273,12 +303,13 @@ mod manage_rest_tests {
     }
 
     #[test]
-    fn allowlist_denies_prompt_and_unlisted_routes() {
-        // Prompt-bearing bodies must never ride the frame surface.
+    fn allowlist_denies_confidential_and_unlisted_routes() {
+        // Key-bearing bodies and session content never ride the frame.
         for (method, path) in [
             ("GET", "/profiles/sets/main"),
             ("PUT", "/profiles/sets/main"),
             ("POST", "/profiles/probe"),
+            ("PUT", "/profiles"), // the key-bearing save
             // Session CONTENT riding the manage router: denied.
             ("POST", "/agents/x/lesche/messages"),
             ("POST", "/agents/x/lesche/rooms/r/messages"),
@@ -289,9 +320,28 @@ mod manage_rest_tests {
             ("DELETE", "/profiles/sets/main"),
             ("GET", "/messages"),
             ("GET", "/completely/unknown"),
-            // Task write verbs and DELETE stay off the frame: the POSTs
-            // are three-segment subroutes the read-only arm never
-            // admits, and the DELETE fails on method alone.
+            // The single-segment filter is the removal arm's safety
+            // basis: a read on that path, a multi-segment tail, an empty
+            // id and a lower-case method all stay off. A trailing slash
+            // stays off this frame, and the router it dispatches to
+            // matches exact shapes too: relay::manage's
+            // `manage_router_trailing_slash_is_404` pins the router's own
+            // refusal of that spelling. The same shape rule denies the
+            // empty-id spelling of an admitted subroute.
+            ("PUT", "/agents//duty"),
+            ("POST", "/agents//interrupt"),
+            ("GET", "/agents/x"),
+            ("DELETE", "/agents/x/duty"),
+            ("DELETE", "/agents/x/sub"),
+            ("DELETE", "/agents/"),
+            ("DELETE", "/agents//x"),
+            ("delete", "/agents/x"),
+            ("DELETE", "/agents/x/"),
+            ("GET", "/agents/"),
+            // Task writes stay off the frame: the POSTs are
+            // three-segment subroutes the read-only arm never admits,
+            // and the family has no delete verb to admit -- tasks
+            // close and archive, so the router serves no DELETE at all.
             ("POST", "/tasks/7/start"),
             ("POST", "/tasks/7/close"),
             ("DELETE", "/tasks/7"),
@@ -414,6 +464,9 @@ mod manage_frame_tests {
             .await;
         let replies = replies.lock().await;
         assert_eq!(replies.len(), 1);
+        // 404 alone would not discriminate -- a frame refusal replies 404
+        // too -- so the body is the proof: this is the router's own answer.
+        assert_eq!(replies[0]["status"], 404);
         assert_eq!(
             replies[0]["body"]["error"]["message"], "agent not found",
             "the DELETE must clear the frame allowlist"

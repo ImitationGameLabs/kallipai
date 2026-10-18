@@ -27,8 +27,10 @@ pub enum TunnelInbound {
     /// manage metadata is deliberately visible to the relay (TLS transport +
     /// device-proof tunnel auth is the trust base; message content stays on
     /// the envelope path). The tagma enforces a frame-surface allowlist
-    /// (low/medium-sensitivity routes only; anything unlisted is a 404) so
-    /// prompt-bearing routes never traverse this frame in plaintext.
+    /// that lists every route by hand, on two criteria: a route rides only
+    /// when neither its request nor its reply carries keys, prompt or
+    /// session content, and only when it needs no query string (the frame
+    /// carries none). Anything unlisted is a 404.
     ManageRest {
         /// Distributed-trace id minted by the keryx reverse proxy per
         /// proxied request -- a fresh UUID, so traces stay collision-free

@@ -26,6 +26,7 @@ import {
   probeStatusLabel,
   profileKey,
   providerIdsOf,
+  reportAfterProbe,
 } from "./profiles-view.ts";
 
 // --- fixtures ---
@@ -360,4 +361,44 @@ Deno.test("parkedLiveSnapshot: no intersection yields null", () => {
   assertEquals(parkedLiveSnapshot(["p1"], [settled("other")]), null);
   assertEquals(parkedLiveSnapshot(["p1"], [rejected]), null);
   assertEquals(parkedLiveSnapshot([], [settled("p1")]), null);
+});
+
+// --- reportAfterProbe: what a dialog keeps after one probe call ---
+
+Deno.test("reportAfterProbe: only a failure clears the dialog's report", () => {
+  const current = { status: "ok" as const, detail: null };
+  // An abandoned call belongs to a dialog that moved on: whatever is on
+  // screen (a newer probe's report) stays.
+  assertEquals(reportAfterProbe({ status: "abandoned" }, current), current);
+  assertEquals(reportAfterProbe({ status: "failed" }, current), null);
+  const resp = {
+    sets: [
+      {
+        name: "s",
+        profiles: [
+          {
+            profile_id: "p",
+            status: "unauthorized",
+            detail: "401",
+            models_hint: "not_listed",
+          },
+        ],
+      },
+    ],
+    results: [],
+  } as unknown as ProfileProbeResponse;
+  assertEquals(
+    reportAfterProbe({ status: "landed", response: resp }, current),
+    {
+      status: "unauthorized",
+      detail: "401",
+      modelsHint: "not_listed",
+    },
+  );
+  // A reply that names no profile leaves nothing to render.
+  const empty = { sets: [], results: [] } as unknown as ProfileProbeResponse;
+  assertEquals(
+    reportAfterProbe({ status: "landed", response: empty }, current),
+    null,
+  );
 });

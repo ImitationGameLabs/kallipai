@@ -47,7 +47,11 @@ const DEFAULT_MANAGE_TIMEOUT_MS = 15_000;
 export type ManageChannelErrorReason = "timeout" | "closed";
 
 /** A manage call the channel itself gave up on. The reason travels as a
- * typed field so callers classify on the shape rather than on wording. */
+ * typed field so callers classify on the shape rather than on wording.
+ * The optional `detail` names the call the caller was waiting on (for
+ * example `POST /profiles/probe`) and rides the timeout message. The
+ * overloads require it on a timeout, but a JS caller can skip it, so the
+ * message falls back to an empty detail rather than undefined. */
 export class ManageChannelError extends Error {
   readonly reason: ManageChannelErrorReason;
 
@@ -55,7 +59,9 @@ export class ManageChannelError extends Error {
   constructor(reason: "closed");
   constructor(reason: ManageChannelErrorReason, detail?: string) {
     super(
-      reason === "timeout" ? `manage timeout: ${detail}` : "channel closed",
+      reason === "timeout"
+        ? `manage timeout: ${detail ?? ""}`
+        : "channel closed",
     );
     this.name = "ManageChannelError";
     this.reason = reason;

@@ -388,7 +388,8 @@ Deno.test(
     const slow = probingStore(
       new ManageChannelError("timeout", "POST /profiles/probe"),
     );
-    await slow.probeRaw(body);
+    const slowOutcome = await slow.probeRaw(body);
+    assertEquals(slowOutcome, { status: "failed" });
     assertEquals(slow.probeError, messages.manage_profiles_probe_timeout());
 
     // The tagma is down before the envelope leaves: that is a dropped link,
@@ -424,6 +425,26 @@ Deno.test(
       stalled.probeError,
       messages.manage_profiles_probe_disconnected(),
     );
+    // An aborted fetch (a caller's signal, not the deadline) is the same
+    // shape and reads the same.
+    const aborted = probingStore(new DOMException("aborted", "AbortError"));
+    await aborted.probeRaw(body);
+    assertEquals(
+      aborted.probeError,
+      messages.manage_profiles_probe_disconnected(),
+    );
+
+    // A data-plane refusal below 500 is the server answering, not the
+    // link dropping: it keeps the generic text (the 5xx arm above is
+    // the one that reads as a drop).
+    const refusedAt404 = probingStore(
+      new DataPlaneApiError(404, "not on the manage frame surface"),
+    );
+    await refusedAt404.probeRaw(body);
+    assertEquals(
+      refusedAt404.probeError,
+      messages.manage_profiles_probe_failed(),
+    );
 
     // Anything else is a defect, not a drop: the generic text stands.
     const defect = probingStore(new Error("unexpected shape"));
@@ -437,3 +458,113 @@ Deno.test(
     assertEquals(refused.probeError, "stale sequence_n");
   },
 );
+
+// A probe whose reply arrives after its dialog is gone must not write.
+Deno.test(
+  "a probe that lands after its dialog closed writes nothing",
+  async () => {
+    const body = { endpoints: [], sets: [] };
+    let settle: (value: unknown) => void = () => {};
+    const inFlight = new Promise((resolve) => {
+      settle = resolve;
+    });
+    const store = new mod.ProfilesStore();
+    store.switchBackend({
+      probeProfiles: () => inFlight,
+    } as unknown as ManagementBackend);
+
+    const landing = store.probeRaw(body);
+    // The operator opens another dialog while this probe is in flight.
+    store.resetProbe();
+    settle({ sets: [] });
+
+    assertEquals(await landing, { status: "abandoned" });
+    assertEquals(store.probeError, null);
+    assertEquals(store.isProbing, false);
+  },
+);
+
+// A reply that lands under a newer generation is abandoned: it writes
+// nothing, so a dialog that moved on keeps what the newer probe left
+// standing.
+Deno.test("a superseded reply lands as abandoned, not written", async () => {
+  const body = { endpoints: [], sets: [] };
+  const settle: ((value: unknown) => void)[] = [];
+  const store = new mod.ProfilesStore();
+  store.switchBackend({
+    probeProfiles: () =>
+      new Promise((resolve) => {
+        settle.push(resolve);
+      }),
+  } as unknown as ManagementBackend);
+
+  const older = store.probeRaw(body);
+  const newer = store.probeRaw(body);
+  assertEquals(store.isProbing, true);
+
+  const fresh = { sets: [], results: [] };
+  settle[1](fresh);
+  assertEquals(await newer, { status: "landed", response: fresh });
+  // The older reply is still in flight: the busy state counts it.
+  assertEquals(store.isProbing, true);
+
+  const stale = { sets: [], results: [] };
+  settle[0](stale);
+  assertEquals(await older, { status: "abandoned" });
+  // The newer reply stands: an abandoned call writes nothing.
+  assertEquals(store.probeError, null);
+  assertEquals(store.isProbing, false);
+});
+
+// The other edge: a failure that arrives after the dialog closed writes no
+// text, and dropping the dialog does not drop the busy state -- the probe
+// is still in flight until its own reply settles.
+Deno.test("a failure after reset writes no text", async () => {
+  const body = { endpoints: [], sets: [] };
+  let fail: (e: unknown) => void = () => {};
+  const store = new mod.ProfilesStore();
+  store.switchBackend({
+    probeProfiles: () =>
+      new Promise((_resolve, reject) => {
+        fail = reject;
+      }),
+  } as unknown as ManagementBackend);
+
+  const probe = store.probeRaw(body);
+  store.resetProbe();
+  assertEquals(store.isProbing, true);
+  fail(new ManageChannelError("timeout", "POST /profiles/probe"));
+
+  assertEquals(await probe, { status: "abandoned" });
+  assertEquals(store.probeError, null);
+  assertEquals(store.isProbing, false);
+});
+
+// The mirror order of the superseded-reply case: the older reply lands
+// first and is dropped, then the newer one lands and writes.
+Deno.test("an older reply landing first is dropped", async () => {
+  const body = { endpoints: [], sets: [] };
+  const settle: ((value: unknown) => void)[] = [];
+  const store = new mod.ProfilesStore();
+  store.switchBackend({
+    probeProfiles: () =>
+      new Promise((resolve) => {
+        settle.push(resolve);
+      }),
+  } as unknown as ManagementBackend);
+
+  const older = store.probeRaw(body);
+  const newer = store.probeRaw(body);
+
+  const stale = { sets: [], results: [] };
+  settle[0](stale);
+  assertEquals(await older, { status: "abandoned" });
+  // The newer request is still in flight: the busy state counts it.
+  assertEquals(store.isProbing, true);
+
+  const fresh = { sets: [], results: [] };
+  settle[1](fresh);
+  assertEquals(await newer, { status: "landed", response: fresh });
+  assertEquals(store.probeError, null);
+  assertEquals(store.isProbing, false);
+});

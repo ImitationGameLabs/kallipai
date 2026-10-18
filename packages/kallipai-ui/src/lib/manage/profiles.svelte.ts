@@ -4,7 +4,6 @@
 import type {
   ProfileConfig,
   ProfileProbeRequest,
-  ProfileProbeResponse,
   ProfileSourceMode,
   ProfileSourceSelection,
 } from "@kallipai/kallipai-client";
@@ -21,7 +20,11 @@ import {
   singleProviderProbeRequest as singleProviderProbeRequestFn,
 } from "./compute.ts";
 import { type ManagementBackend, managementBackend } from "./client.ts";
-import { classifySaveFailure, type PendingDangling } from "./profiles-view.ts";
+import {
+  classifySaveFailure,
+  type PendingDangling,
+  type ProbeOutcome,
+} from "./profiles-view.ts";
 import { DataPlaneApiError, KallipaiError } from "@kallipai/kallipai-common";
 import { ManageChannelError } from "@kallipai/kallipai-keryx-client";
 import { displayError } from "./errors.ts";
@@ -36,10 +39,6 @@ import {
   manage_profiles_save_stale_backend,
   manage_profiles_switch_failed,
 } from "../../paraglide/messages.js";
-
-/** Diagnostic scope for probe failures: the log prefix and the parked
- * fallback text both carry it. */
-const PROBE_SCOPE = "probe";
 
 export class ProfilesStore {
   private _backend: ManagementBackend | null = null;
@@ -62,13 +61,28 @@ export class ProfilesStore {
    * structured list): the confirm re-send is blocked until reload. */
   saveBlocked = $state(false);
   error = $state<string | null>(null);
-  isProbing = $state(false);
   isRefetching = $state(false);
 
-  /** Latest probe outcome (POST /profiles/probe), or null. */
-  probe = $state<ProfileProbeResponse | null>(null);
-  /** Error from the last probe request (HTTP/network level), or null. */
+  /** Probe requests in flight. `isProbing` derives from this count, so a
+   * reply abandoned by a newer probe still holds the busy state until it
+   * settles. */
+  private probeInFlight = $state(0);
+  /** True while any probe request is in flight. */
+  get isProbing(): boolean {
+    return this.probeInFlight > 0;
+  }
+
+  /** Error from the last probe request (HTTP/network level), or null.
+   * Both profile dialogs and the toolbar read this field and share it.
+   * A probe clears it when it starts, and writes a text only when its
+   * reply lands on the current generation. resetProbe holds the clear
+   * outside a probe: every opener of a profile dialog drops the toolbar
+   * line with it, so the two faces read one text. */
   probeError = $state<string | null>(null);
+  /** Probe generation: a probe takes a number when it starts, and
+   * resetProbe or a newer probe makes that number stale. A stale probe
+   * drops its result instead of writing it. */
+  private probeGeneration = 0;
   /** True when draft diverges from the committed config. */
   get isDirty(): boolean {
     if (!this.config || !this.draft) return false;
@@ -310,19 +324,33 @@ export class ProfilesStore {
     return buildProbeRequestFn(this.config, this.draft, setName);
   }
 
-  private async runProbe(setName?: string): Promise<void> {
-    const body = this.buildProbeRequest(setName);
-    if (!body) return;
-    this.isProbing = true;
+  /** The one probe request path: every entry point below comes here, so
+   * the generation, the in-flight count, and the failure text stay in
+   * one place. A reply is written only when it lands on the current
+   * generation; a stale one writes nothing and says so. */
+  private async sendProbe(body: ProfileProbeRequest): Promise<ProbeOutcome> {
+    const generation = ++this.probeGeneration;
+    this.probeInFlight += 1;
     this.probeError = null;
     try {
-      this.probe = await this.backend.probeProfiles(body);
+      const response = await this.backend.probeProfiles(body);
+      if (generation !== this.probeGeneration) return { status: "abandoned" };
+      return { status: "landed", response };
     } catch (e) {
+      if (generation !== this.probeGeneration) return { status: "abandoned" };
       this.probeError = this.probeFailure(e);
-      this.probe = null;
+      return { status: "failed" };
     } finally {
-      this.isProbing = false;
+      this.probeInFlight -= 1;
     }
+  }
+
+  /** Probe the draft, or one set of it. A draft that yields no request
+   * probes nothing, which the caller reads as an abandoned call. */
+  private async runProbe(setName?: string): Promise<ProbeOutcome> {
+    const body = this.buildProbeRequest(setName);
+    if (!body) return { status: "abandoned" };
+    return await this.sendProbe(body);
   }
   /** The probe's failure text. The channel names its own shapes, and a
    * request that never left (a 5xx from keryx while the tagma is offline,
@@ -338,7 +366,7 @@ export class ProfilesStore {
    * is not dressed as a drop. */
   private probeFailure(e: unknown): string {
     if (e instanceof ManageChannelError) {
-      console.error(`[${PROBE_SCOPE}] channel failure:`, e);
+      console.error(`[probe] channel failure:`, e);
       return e.reason === "timeout"
         ? manage_profiles_probe_timeout()
         : manage_profiles_probe_disconnected();
@@ -349,59 +377,45 @@ export class ProfilesStore {
       (e instanceof DOMException &&
         (e.name === "TimeoutError" || e.name === "AbortError"))
     ) {
-      console.error(`[${PROBE_SCOPE}] link down:`, e);
+      console.error(`[probe] link down:`, e);
       return manage_profiles_probe_disconnected();
     }
-    return displayError(PROBE_SCOPE, e, manage_profiles_probe_failed());
+    return displayError("probe", e, manage_profiles_probe_failed());
   }
 
   /** Probe every provider in the draft. */
-  probeAll(): Promise<void> {
+  probeAll(): Promise<ProbeOutcome> {
     return this.runProbe();
   }
 
   /** Probe the endpoints referenced by one set. */
-  probeSet(setName: string): Promise<void> {
+  probeSet(setName: string): Promise<ProbeOutcome> {
     return this.runProbe(setName);
   }
 
   /** Probe a single provider (no set checks). */
-  async probeProvider(id: string): Promise<void> {
-    if (!this.draft) return;
+  async probeProvider(id: string): Promise<ProbeOutcome> {
+    if (!this.draft) return { status: "abandoned" };
     const body = singleProviderProbeRequestFn(this.config, this.draft, id);
-    if (!body) return;
-    this.isProbing = true;
-    this.probeError = null;
-    try {
-      this.probe = await this.backend.probeProfiles(body);
-    } catch (e) {
-      this.probeError = this.probeFailure(e);
-      this.probe = null;
-    } finally {
-      this.isProbing = false;
-    }
+    if (!body) return { status: "abandoned" };
+    return await this.sendProbe(body);
   }
 
-  /**
-   * Run an arbitrary probe request (single-profile Test) and return the
-   * raw response; the page routes the reports inline. Null on failure
-   * (probeError then carries the reason).
-   */
-  async probeRaw(
-    body: ProfileProbeRequest,
-  ): Promise<ProfileProbeResponse | null> {
-    this.isProbing = true;
+  /** Run an arbitrary probe request (single-profile Test): the caller
+   * gets the outcome and renders a landed reply inline, while a failure
+   * has already been turned into probeError. */
+  probeRaw(body: ProfileProbeRequest): Promise<ProbeOutcome> {
+    return this.sendProbe(body);
+  }
+
+  /** Abandon any probe still in flight and clear its text. Every opener
+   * of a profile dialog calls this, so a probe that lands later cannot
+   * write into the dialog the operator opened next. The in-flight count
+   * stays as it is: the abandoned request still has to settle, and the
+   * busy state follows it. */
+  resetProbe(): void {
+    this.probeGeneration += 1;
     this.probeError = null;
-    try {
-      this.probe = await this.backend.probeProfiles(body);
-      return this.probe;
-    } catch (e) {
-      this.probeError = this.probeFailure(e);
-      this.probe = null;
-      return null;
-    } finally {
-      this.isProbing = false;
-    }
   }
   /** Discard local changes and revert to the last committed config. */
   reset(): void {

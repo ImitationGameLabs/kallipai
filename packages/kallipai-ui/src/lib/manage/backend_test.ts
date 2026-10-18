@@ -55,9 +55,15 @@ type EnvelopeCall = {
   opts?: { timeoutMs?: number };
 };
 
+/** The reply a stubbed envelope answers with: a fixed one, or one
+ * derived from the request path (a handler that echoes a path name). */
+type EnvelopeReply =
+  | { status: number; body: unknown }
+  | { status: number; body: (path: string) => unknown };
+
 /** An envelope stub that records every call, so a test can pin the exact
  * method, path (query included), body and per-call deadline sent. */
-function envelopeRecording(response: { status: number; body: unknown }): {
+function envelopeRecording(response: EnvelopeReply): {
   channel: ProfilesEnvelopeChannel;
   calls: EnvelopeCall[];
 } {
@@ -66,7 +72,11 @@ function envelopeRecording(response: { status: number; body: unknown }): {
     channel: {
       manage: (method, path, body, opts) => {
         calls.push({ method, path, body, opts });
-        return Promise.resolve(response);
+        const reply =
+          typeof response.body === "function"
+            ? { status: response.status, body: response.body(path) }
+            : response;
+        return Promise.resolve(reply);
       },
     },
     calls,
@@ -665,8 +675,6 @@ Deno.test(
 
 const PROBE_BODY = { endpoints: [], sets: [] };
 
-const DELETE_DONE = { removed: 1, interrupted: [] };
-
 Deno.test(
   "the provider probe rides the envelope on a probe-sized deadline",
   async () => {
@@ -709,15 +717,29 @@ Deno.test(
 Deno.test(
   "deleting a set rides the envelope with the force flag on the path",
   async () => {
-    const rec = envelopeRecording({ status: 200, body: DELETE_DONE });
+    // The set-delete reply echoes the name the server removed, so
+    // the fake reads it off the request path instead of answering one
+    // fixed name: `DELETE /profiles/sets/{name}?force=…`.
+    const setNameOf = (path: string): string => {
+      const [pathOnly] = path.split("?");
+      const segments = pathOnly.split("/");
+      return decodeURIComponent(segments[segments.length - 1]);
+    };
+    const rec = envelopeRecording({
+      status: 200,
+      body: (path: string) => ({
+        removed: setNameOf(path),
+        interrupted: [],
+      }),
+    });
     const backend = new OnlineBackend(
       restWith(),
       "t-a",
       undefined,
       rec.channel,
     );
-    await backend.deleteProfileSet("main", true);
-    await backend.deleteProfileSet("alt set", false);
+    const first = await backend.deleteProfileSet("main", true);
+    const second = await backend.deleteProfileSet("alt set", false);
     // restWith() rejects any plaintext manage, so these paths can only
     // have travelled the envelope; the force flag rides the query.
     assertEquals(
@@ -727,6 +749,10 @@ Deno.test(
         ["DELETE", "/profiles/sets/alt%20set?force=false"],
       ],
     );
+    // The reply body maps through untouched, so each caller reads the
+    // name the server removed.
+    assertEquals(first.removed, "main");
+    assertEquals(second.removed, "alt set");
   },
 );
 

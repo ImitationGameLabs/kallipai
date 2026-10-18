@@ -93,7 +93,10 @@
   </p>
 {/if}
 {#if store.probeError}
-  <p class="text-error-500 dark:text-error-400 text-sm font-mono break-all">
+  <p
+    role="alert"
+    class="text-error-500 dark:text-error-400 text-sm font-mono break-all"
+  >
     {store.probeError}
   </p>
 {/if}

@@ -12,7 +12,6 @@
   import type {
     Modality,
     ProfileModel,
-    ProfileProbeStatus,
     ReasoningEffort,
   } from "@kallipai/kallipai-client";
 
@@ -47,6 +46,7 @@
     probeStatusColor,
     probeStatusLabel,
   } from "../../lib/manage/profiles-view.ts";
+  import type { InlineProbeReport } from "../../lib/manage/profiles-view.ts";
   import {
     common_cancel,
     common_save,
@@ -74,6 +74,7 @@
     providerIds = [],
     occupiedIds = [],
     probeReport = null,
+    probeError = null,
     onSave,
     onCancel,
     onTest = null,
@@ -91,11 +92,11 @@
      * new-mode duplicate check — advisory; PUT stays authoritative). */
     occupiedIds?: string[];
     /** Latest probe report for the in-form Test (rendered inline). */
-    probeReport?: {
-      status: ProfileProbeStatus;
-      detail: string | null;
-      modelsHint?: "not_listed" | null;
-    } | null;
+    probeReport?: InlineProbeReport | null;
+    /** The probe's own failure text (a dead link or a deadline), shown
+     * in place of a report. The page's toolbar carries the same text,
+     * but the modal covers it -- so the dialog speaks for itself. */
+    probeError?: string | null;
     onSave: (result: ProfileDialogResult) => void;
     onCancel: () => void;
     /** Probe the current form values without touching the draft. */
@@ -308,6 +309,17 @@
                   {manage_profiles_probe_models_hint()}
                 </div>
               {/if}
+            </div>
+          {/if}
+
+          {#if probeError}
+            <div class="border-t border-surface-300 pt-2 text-xs">
+              <p
+                role="alert"
+                class="font-mono break-all text-error-500 dark:text-error-400"
+              >
+                {probeError}
+              </p>
             </div>
           {/if}
 

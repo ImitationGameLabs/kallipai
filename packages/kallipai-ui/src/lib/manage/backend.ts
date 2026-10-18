@@ -210,10 +210,16 @@ export class OfflineBackend implements ManagementBackend {
 // --- OnlineBackend (wraps ManageRestClient over the keryx proxy) ---
 /**
  * The encrypted envelope face of a relay channel, narrowed to what the
- * profile plane needs. Provider API keys never ride the plaintext manage
- * frame (the frame allowlist fails those routes closed), so key-bearing
- * requests -- the save and the provider probe -- go through this
- * E2E-encrypted channel instead. */
+ * profile plane needs. The plaintext manage frame admits only traffic
+ * that carries no provider keys and no session content and takes no
+ * query string, and the choice is per call: the key-bearing save
+ * (`PUT /profiles`) and the provider probe (`POST /profiles/probe`)
+ * ride this channel, and so does the set delete, whose force flag needs
+ * a query string the frame cannot carry. The frame enumerates its routes
+ * one by one and lists none under `/profiles/sets/` -- today the delete
+ * is the only route there -- so a route added later has to be granted
+ * an allow entry of its own. The masked read and the key-free config
+ * writes go over the frame. */
 export interface ProfilesEnvelopeChannel {
   manage(
     method: string,

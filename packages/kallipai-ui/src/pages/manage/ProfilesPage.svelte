@@ -7,8 +7,8 @@
   // draft).
   //
   // Probe results route inline to the card that triggered them: the page
-  // accumulates providerReports/profileReports maps keyed by id, because the
-  // store's single `probe` field is replaced wholesale on every call.
+  // accumulates providerReports/profileReports maps keyed by id, because a
+  // probe reply is a return value the call site owns, not shared state.
   import { profilesStore } from "../../lib/manage/profiles.svelte.ts";
   import { managementBackend } from "../../lib/manage/client.ts";
   import {
@@ -61,9 +61,10 @@
     mergeProviderScope,
     occupiedIdsOf,
     providerIdsOf,
+    reportAfterProbe,
   } from "../../lib/manage/profiles-view.ts";
+  import type { InlineProbeReport } from "../../lib/manage/profiles-view.ts";
   import type {
-    ProfileProbeStatus,
     ProfileProvider,
     Modality,
     ProfileProviderProbeReport,
@@ -199,16 +200,16 @@
   const profileReports = new SvelteMap<string, ProfileModelProbeReport>();
 
   async function onTestProvider(id: string) {
-    await profilesStore.probeProvider(id);
-    if (profilesStore.probe) {
-      mergeProviderScope(providerReports, profilesStore.probe);
+    const outcome = await profilesStore.probeProvider(id);
+    if (outcome.status === "landed") {
+      mergeProviderScope(providerReports, outcome.response);
     }
   }
 
   async function onTestSet(setName: string) {
-    await profilesStore.probeSet(setName);
-    if (profilesStore.probe) {
-      mergeProfileScope(setName, profileReports, profilesStore.probe);
+    const outcome = await profilesStore.probeSet(setName);
+    if (outcome.status === "landed") {
+      mergeProfileScope(setName, profileReports, outcome.response);
     }
   }
 
@@ -222,17 +223,17 @@
       profileIdx,
     );
     if (!body) return;
-    const resp = await profilesStore.probeRaw(body);
-    if (!resp) return;
-    mergeProviderScope(providerReports, resp);
-    mergeProfileScope(setName, profileReports, resp);
+    const outcome = await profilesStore.probeRaw(body);
+    if (outcome.status !== "landed") return;
+    mergeProviderScope(providerReports, outcome.response);
+    mergeProfileScope(setName, profileReports, outcome.response);
   }
 
   async function onTestAll() {
-    await profilesStore.probeAll();
-    if (!profilesStore.probe) return;
-    mergeProviderScope(providerReports, profilesStore.probe);
-    mergeProfileScopeAll(profileReports, profilesStore.probe);
+    const outcome = await profilesStore.probeAll();
+    if (outcome.status !== "landed") return;
+    mergeProviderScope(providerReports, outcome.response);
+    mergeProfileScopeAll(profileReports, outcome.response);
   }
 
   function onDiscard() {
@@ -465,14 +466,11 @@
     setName: string;
     idx: number;
   }>({ open: false, setName: "", idx: 0 });
-  let profileProbeReport = $state<{
-    status: ProfileProbeStatus;
-    detail: string | null;
-    modelsHint?: "not_listed" | null;
-  } | null>(null);
+  let profileProbeReport = $state<InlineProbeReport | null>(null);
 
   function openProfileEdit(setName: string, idx: number) {
     profileProbeReport = null;
+    profilesStore.resetProbe();
     profileDialog = { open: true, setName, idx };
   }
 
@@ -523,17 +521,13 @@
       profileDialog.idx,
     );
     if (!body) return;
-    const resp = await profilesStore.probeRaw(body);
-    if (!resp) return;
-    mergeProviderScope(providerReports, resp);
-    const p = resp.sets[0]?.profiles[0];
-    if (p) {
-      profileProbeReport = {
-        status: p.status,
-        detail: p.detail ?? null,
-        modelsHint: p.models_hint ?? null,
-      };
+    const outcome = await profilesStore.probeRaw(body);
+    if (outcome.status === "landed") {
+      mergeProviderScope(providerReports, outcome.response);
     }
+    // Only a failure clears the report: an abandoned call belongs to a
+    // dialog a newer probe already owns.
+    profileProbeReport = reportAfterProbe(outcome, profileProbeReport);
   }
 
   // Parking dialog: single-profile form (see ProfileDialog). idx indexes
@@ -544,19 +538,17 @@
     idx: number;
   }>({ open: false, mode: "new", idx: 0 });
   // Latest in-form probe result, rendered inside the dialog.
-  let parkingProbeReport = $state<{
-    status: ProfileProbeStatus;
-    detail: string | null;
-    modelsHint?: "not_listed" | null;
-  } | null>(null);
+  let parkingProbeReport = $state<InlineProbeReport | null>(null);
 
   function openParkingNew() {
     parkingProbeReport = null;
+    profilesStore.resetProbe();
     parkingDialog = { open: true, mode: "new", idx: 0 };
   }
 
   function openParkingEdit(idx: number) {
     parkingProbeReport = null;
+    profilesStore.resetProbe();
     parkingDialog = { open: true, mode: "edit", idx };
   }
 
@@ -636,16 +628,13 @@
       (staged.parking?.length ?? 1) - 1,
     );
     if (!body) return;
-    const resp = await profilesStore.probeRaw(body);
-    if (!resp) return;
-    mergeProviderScope(providerReports, resp);
-    const p = resp.sets[0]?.profiles[0];
-    if (p)
-      parkingProbeReport = {
-        status: p.status,
-        detail: p.detail ?? null,
-        modelsHint: p.models_hint ?? null,
-      };
+    const outcome = await profilesStore.probeRaw(body);
+    if (outcome.status === "landed") {
+      mergeProviderScope(providerReports, outcome.response);
+    }
+    // Only a failure clears the report: an abandoned call belongs to a
+    // dialog a newer probe already owns.
+    parkingProbeReport = reportAfterProbe(outcome, parkingProbeReport);
   }
 
   /** Kebab Test on a parked card: same request shape, from the draft. */
@@ -658,8 +647,9 @@
       idx,
     );
     if (!body) return;
-    const resp = await profilesStore.probeRaw(body);
-    if (!resp) return;
+    const outcome = await profilesStore.probeRaw(body);
+    if (outcome.status !== "landed") return;
+    const resp = outcome.response;
     mergeProviderScope(providerReports, resp);
     const p = resp.sets[0]?.profiles[0];
     if (p) {
@@ -1315,6 +1305,7 @@
   {providerIds}
   {occupiedIds}
   probeReport={parkingProbeReport}
+  probeError={profilesStore.probeError}
   onSave={onParkingSave}
   onCancel={() => (parkingDialog.open = false)}
   onTest={onParkingTest}
@@ -1331,6 +1322,7 @@
   {providerIds}
   {occupiedIds}
   probeReport={profileProbeReport}
+  probeError={profilesStore.probeError}
   onSave={onProfileSave}
   onCancel={() => (profileDialog.open = false)}
   onTest={onProfileTest}

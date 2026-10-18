@@ -482,6 +482,36 @@ mod tests {
         }
     }
 
+    /// Trailing-slash nail on the router side of the frame criteria: the
+    /// manage router matches exact shapes, so the spelling the allowlist
+    /// denies is a 404 here as well, and the two layers agree by
+    /// construction. Status alone cannot separate the two 404 worlds -- the
+    /// handler's own not-found is one of them -- so each spelling is pinned
+    /// by its body: the registered shape reaches `remove_agent`, the
+    /// trailing-slash spelling never leaves the router.
+    #[tokio::test]
+    async fn manage_router_trailing_slash_is_404() {
+        let state = make_state();
+        // Registered shape, unknown id: the request reaches the handler,
+        // whose own not-found is a 404 too.
+        let response = manage_call(&state, "DELETE", "/agents/a-1").await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let bytes = to_bytes(response.into_body(), MAX_RESPONSE_BYTES)
+            .await
+            .expect("small body");
+        let body: serde_json::Value = serde_json::from_slice(&bytes).expect("json body");
+        assert_eq!(body["error"]["message"], "agent not found");
+        // The same id with a trailing slash matches no route: the router's
+        // own fallback answers.
+        let response = manage_call(&state, "DELETE", "/agents/a-1/").await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let bytes = to_bytes(response.into_body(), MAX_RESPONSE_BYTES)
+            .await
+            .expect("small body");
+        let body: serde_json::Value = serde_json::from_slice(&bytes).expect("json body");
+        assert_eq!(body["error"]["message"], "unknown management route");
+    }
+
     #[tokio::test]
     async fn manage_router_query_is_lenient() {
         // The manage plane's historical query semantics: missing, empty, or

@@ -85,6 +85,46 @@ export function clearProfileResult(
   reports.delete(profileKey(setName, profileId));
 }
 
+/** What a probe call leaves its caller: a reply to render, a failure the
+ * store already turned into probeError, or nothing at all -- a newer probe
+ * or a dialog opener superseded this call, or the draft offered no request
+ * to send. */
+export type ProbeOutcome =
+  | { status: "landed"; response: ProfileProbeResponse }
+  | { status: "failed" }
+  | { status: "abandoned" };
+
+/** The inline report a profile dialog renders under its form. */
+export type InlineProbeReport = {
+  status: ProfileProbeStatus;
+  detail: string | null;
+  modelsHint?: "not_listed" | null;
+};
+
+/** What a dialog keeps after one probe call: a landed reply replaces
+ * the report, a failure clears it, and an abandoned call leaves the
+ * report alone -- that dialog may already show a newer verdict. */
+export function reportAfterProbe(
+  outcome: ProbeOutcome,
+  current: InlineProbeReport | null,
+): InlineProbeReport | null {
+  switch (outcome.status) {
+    case "landed": {
+      const p = outcome.response.sets[0]?.profiles[0];
+      if (!p) return null;
+      return {
+        status: p.status,
+        detail: p.detail ?? null,
+        modelsHint: p.models_hint ?? null,
+      };
+    }
+    case "failed":
+      return null;
+    case "abandoned":
+      return current;
+  }
+}
+
 /** Endpoint (provider) ids of the draft config. */
 export function providerIdsOf(
   draft: ProfileConfig | null | undefined,

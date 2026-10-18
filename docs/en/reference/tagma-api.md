@@ -434,6 +434,19 @@ write the sweep re-scans the registry; a spawn that landed inside the
 interrupt-to-persist window fails the whole delete with `409` (retry the
 same command; nothing was removed).
 
+> A relay client (the web app talking to the tagma through lesche) picks
+> a channel per call: the plaintext manage frame admits only traffic that
+> carries no provider keys, no session content and no query string. The
+> key-bearing save (`PUT /profiles`) and probe (`POST /profiles/probe`)
+> take the E2E envelope channel, and so does this delete: the `force` flag
+> needs a query string the frame cannot carry. The frame enumerates
+> its routes one by one and lists none under `/profiles/sets/`: this
+> delete is the only route there, and a route added later has to be
+> granted an allow entry of its own. The masked
+> read (`GET /profiles`) and the key-free config writes (`apply`,
+> `refresh`, `default`) take the frame. Clients reaching the tagma
+> directly are unaffected: they speak plain HTTP.
+
 #### `GET /profiles`: Read the Profile Config
 
 Operator only (the config carries API keys). Returns the current config
