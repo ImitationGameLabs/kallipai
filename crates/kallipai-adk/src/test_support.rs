@@ -409,8 +409,9 @@ pub(crate) fn usage_with_completion(prompt_tokens: u32, completion_tokens: u32) 
     }
 }
 
-/// One queued stream answer: plain events, events followed by a mid-stream drop, or a
-/// stream that never yields (for cancel tests).
+/// One queued stream answer: plain events, events followed by a mid-stream drop,
+/// a stream that never yields (for cancel tests), or events followed by a counted
+/// end of the stream (for drain tests).
 enum CannedStream {
     Events(Vec<just_llm_client::types::generation::GenerationEvent>),
     /// The wire shape of a stream that dies mid-way: some events, then the transport
@@ -421,6 +422,43 @@ enum CannedStream {
     },
     /// Never yields an item — the stream hangs until the caller gives up.
     Pending,
+    /// Plain events, then the end of the stream; every poll served at or past
+    /// that end is counted (see [`CountingStream`]).
+    Exhausted {
+        events: Vec<just_llm_client::types::generation::GenerationEvent>,
+        polls_past_last_event: Arc<std::sync::atomic::AtomicUsize>,
+    },
+}
+
+/// One event item as the streaming path yields it.
+type CannedItem =
+    Result<just_llm_client::types::generation::GenerationEvent, just_llm_client::TransportError>;
+
+/// Canned events followed by the end of the stream, counting every poll served
+/// at or past that end: the observable a test uses to pin that a consumer read the
+/// stream to its end instead of stopping at the terminal `End` event and dropping
+/// it.
+struct CountingStream {
+    events: std::vec::IntoIter<CannedItem>,
+    polls_past_last_event: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl futures_util::Stream for CountingStream {
+    type Item = CannedItem;
+
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        match self.events.next() {
+            Some(event) => std::task::Poll::Ready(Some(event)),
+            None => {
+                self.polls_past_last_event
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                std::task::Poll::Ready(None)
+            }
+        }
+    }
 }
 
 /// Minimal stateful backend modeled on the upstream conversation test mock: it records
@@ -518,6 +556,24 @@ impl RecordingBackend {
             .push_back(CannedStream::Pending);
     }
 
+    /// Queue `events` followed by the end of the stream, and return the counter of
+    /// polls served at or past that end: a test asserts on it to pin that the
+    /// consumer read the stream to its end rather than dropping it at `End`.
+    pub(crate) fn queue_exhausting_stream(
+        &self,
+        events: Vec<just_llm_client::types::generation::GenerationEvent>,
+    ) -> Arc<std::sync::atomic::AtomicUsize> {
+        let polls_past_last_event = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        self.streams
+            .lock()
+            .unwrap()
+            .push_back(CannedStream::Exhausted {
+                events,
+                polls_past_last_event: Arc::clone(&polls_past_last_event),
+            });
+        polls_past_last_event
+    }
+
     pub(crate) fn take_requests(&self) -> Vec<GenerationRequest> {
         std::mem::take(&mut *self.requests.lock().unwrap())
     }
@@ -609,6 +665,17 @@ impl LlmBackend for RecordingBackend {
                     .map(Ok::<_, just_llm_client::TransportError>)
                     .chain(std::iter::once(Err(error))),
             )),
+            CannedStream::Exhausted {
+                events,
+                polls_past_last_event,
+            } => Box::pin(CountingStream {
+                events: events
+                    .into_iter()
+                    .map(Ok::<_, just_llm_client::TransportError>)
+                    .collect::<Vec<CannedItem>>()
+                    .into_iter(),
+                polls_past_last_event,
+            }),
             CannedStream::Pending => Box::pin(futures_util::stream::pending::<
                 Result<
                     just_llm_client::types::generation::GenerationEvent,

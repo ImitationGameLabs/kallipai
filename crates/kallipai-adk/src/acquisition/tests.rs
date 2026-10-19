@@ -424,6 +424,56 @@ fn fatal_provider_status_filters_non_request_level_statuses() {
     assert_eq!(fatal_provider_status(&anyhow::anyhow!("boom")), None);
 }
 
+/// The SSE transport keeps reading the body for a bounded window after the
+/// terminal event, so a consumer that stops at `End` and drops the stream leaves
+/// the connection closed instead of reused. The consumer's only lever is to read
+/// on until the stream ends: pin that it does, and that the assembled content
+/// still reaches the caller.
+#[tokio::test]
+async fn acquire_stream_polls_past_the_terminal_event_to_the_stream_end() {
+    let backend = RecordingBackend::new();
+    let polls_past_last_event = backend.queue_exhausting_stream(vec![
+        GenerationEvent::Text {
+            delta: "answer".to_owned(),
+        },
+        GenerationEvent::End {
+            finish_reason: None,
+            response_id: Some("resp-1".to_owned()),
+        },
+    ]);
+    let source = Arc::new(MapSource(HashMap::from([(
+        "p1".to_string(),
+        backend.clone() as Arc<dyn LlmBackend>,
+    )])));
+    let mut ctx = ctx_from_source(
+        vec![profile("a", "p1", 100_000)],
+        source,
+        RetryPolicy::default(),
+    )
+    .await;
+
+    let outcome = acquire_stream(
+        &mut ctx,
+        vec![user_msg("q1")],
+        Vec::new(),
+        &tokio::sync::mpsc::channel(16).0,
+        &CancellationToken::new(),
+        0,
+    )
+    .await;
+
+    let consumed = match outcome {
+        AcquireResult::Consumed(consumed) => consumed,
+        _ => panic!("a stream that ends completes the acquisition"),
+    };
+    assert_eq!(consumed.content, "answer");
+    assert_eq!(
+        polls_past_last_event.load(Ordering::SeqCst),
+        1,
+        "reading past the last event is what tells the transport to reuse it"
+    );
+}
+
 /// End to end: a mid-stream drop keeps the anchor, so the in-place retry re-sends
 /// the same delta, and the next turn continues from the retry's response — a failed
 /// turn never pollutes the chain.

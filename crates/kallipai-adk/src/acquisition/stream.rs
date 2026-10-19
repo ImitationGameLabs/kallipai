@@ -101,8 +101,12 @@ pub(super) async fn consume_stream(
         }
     }
 
-    // The stream was consumed through its terminal `End` event: take the assembled
-    // response for the caller to adopt. `None` = stateless backend or no id — nothing to adopt.
+    // The stream ran to its end: the loop above reads on past `End` until the
+    // stream reports `None`. Stopping at `End` and dropping the stream there
+    // would leave the response body unread, so the connection closes instead of
+    // being reused. Take the assembled response for the caller to adopt: `None`
+    // = no `End` carrying an id — a stateless backend, or a stream that ended
+    // without one — so there is nothing to adopt.
     let response = stream.into_response().map(Box::new);
     StreamOutcome::Completed(StreamConsumed {
         content,
