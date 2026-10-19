@@ -415,7 +415,7 @@ fn check_overlaps(
 /// shared enrollment predicate
 /// (`kallipai_daemon_common::credentials::read_enrolled_id`): both
 /// `tagma.id` and `tagma.token` readable and non-blank. The same predicate
-/// as the scan's `read_tagma_id`, so the probe and the scan never disagree
+/// as the scan's credentials read, so the probe and the scan never disagree
 /// about what enrolled means. Deliberately read, not `exists`: an
 /// unreadable file counts as absent, and a blank one is not an enrollment.
 fn stored_credentials_in_any_entry(data_dir: &Path) -> bool {
@@ -829,7 +829,7 @@ mod tests {
             pid: None,
             port: None,
             owner: None,
-            tagma_id: None,
+            identities: Vec::new(),
             anchored: None,
             data_dir: data_dir.to_path_buf(),
         }

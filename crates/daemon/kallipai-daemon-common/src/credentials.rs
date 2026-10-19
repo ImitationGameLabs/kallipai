@@ -13,9 +13,11 @@
 //! The predicate, in one place: enrolled means both files are readable and
 //! non-blank after trimming. [`read_entry`] hands the tagma loader the pair
 //! it authenticates with; [`read_enrolled_id`] answers the same question
-//! with a narrower answer: the id alone. That accessor is the daemon's —
-//! it opens `tagma.token` only to decide blank-or-not and never returns
-//! it (`InstanceInfo.tagma_id` carries the id alone; see `wire.rs`).
+//! with a narrower answer: the id alone. [`read_enrolled_identities`]
+//! pairs each enrolled entry's id with the polis it belongs to. The
+//! narrower two open `tagma.token` only to decide blank-or-not and never
+//! return it (`InstanceInfo.identities` carries the id, not the token;
+//! see `wire.rs`).
 //!
 //! Holding the on-disk layout here is deliberate, and `socket.rs` is the
 //! precedent: this crate exists so the daemon and its clients agree on the
@@ -25,11 +27,16 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::wire::InstanceIdentity;
+
 /// File name of the archeion-issued identity inside an entry directory.
 pub const TAGMA_ID_FILE: &str = "tagma.id";
 
 /// File name of the archeion-issued secret inside an entry directory.
 pub const TAGMA_TOKEN_FILE: &str = "tagma.token";
+
+/// File name of the polis origin inside an entry directory.
+pub const ARCHEION_URL_FILE: &str = "archeion.url";
 
 /// Directory under the instance data root holding one subdirectory per relay
 /// entry.
@@ -76,6 +83,29 @@ pub fn read_enrolled_id(entry_dir: &Path) -> Option<String> {
     read_entry(entry_dir).map(|stored| stored.id)
 }
 
+/// The enrolled identities under `data_dir`, one per enrolled entry.
+///
+/// [`entry_dirs`] order decides: the list follows the credentials listing
+/// (file name order), the order both of its callers see — the probe asking
+/// whether any entry is enrolled at all, and this enumeration.
+/// An enrolled entry whose `archeion.url` is missing, unreadable or blank
+/// is left out: there is no polis to attribute it to. That is self-healing
+/// rather than permanent — the tagma writes the file beside the pair, so
+/// the entry joins the list once the instance next starts.
+///
+/// The secret is not part of the answer: `tagma.token` is opened to decide
+/// blank-or-not and is never returned.
+pub fn read_enrolled_identities(data_dir: &Path) -> Vec<InstanceIdentity> {
+    entry_dirs(data_dir)
+        .into_iter()
+        .filter_map(|dir| {
+            let tagma_id = read_enrolled_id(&dir)?;
+            let polis = read_non_blank(&dir.join(ARCHEION_URL_FILE))?;
+            Some(InstanceIdentity { polis, tagma_id })
+        })
+        .collect()
+}
+
 /// The root of the credential layout under `data_dir`: one directory per
 /// relay entry, beside the shared `device.key` and `operator-token.env`.
 pub fn credentials_root(data_dir: &Path) -> PathBuf {
@@ -90,7 +120,7 @@ pub fn entry_dir(data_dir: &Path, name: &str) -> PathBuf {
 /// The credential entry directories under `data_dir`, sorted by file name.
 ///
 /// Sorted because every caller wants a stable pick when several entries
-/// exist: the scan takes the first enrolled entry, and the adopt probe
+/// exist: the scan reports them in this order, and the adopt probe
 /// asks whether any is. An entry counts when its path resolves to a
 /// directory, so a symlinked entry directory is listed too — the readers
 /// above open the files inside and follow symlinks exactly the same way,
@@ -268,5 +298,103 @@ mod tests {
         assert!(shown.contains("tid-1"), "{shown}");
         assert!(shown.contains("[REDACTED]"), "{shown}");
         assert!(!shown.contains("sk-secret"), "{shown}");
+    }
+
+    /// One entry carrying all three files; `None` leaves that file out.
+    fn entry_with_url(dir: &Path, id: Option<&str>, token: Option<&str>, url: Option<&str>) {
+        entry(dir, id, token);
+        if let Some(url) = url {
+            fs::write(dir.join(ARCHEION_URL_FILE), url).expect("write url");
+        }
+    }
+
+    fn identities(pairs: &[(&str, &str)]) -> Vec<InstanceIdentity> {
+        pairs
+            .iter()
+            .map(|(polis, id)| InstanceIdentity {
+                polis: (*polis).to_owned(),
+                tagma_id: (*id).to_owned(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn enrolled_identities_pair_each_entry_with_its_polis_in_name_order() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let credentials = root.path().join("credentials");
+        entry_with_url(
+            &credentials.join("b"),
+            Some("tid-b"),
+            Some("sk-b"),
+            Some("https://api.kallipai.lan"),
+        );
+        entry_with_url(
+            &credentials.join("a"),
+            Some("  tid-a\n"),
+            Some("sk-a"),
+            Some("  https://api.kallipai.com\n"),
+        );
+        assert_eq!(
+            read_enrolled_identities(root.path()),
+            identities(&[
+                ("https://api.kallipai.com", "tid-a"),
+                ("https://api.kallipai.lan", "tid-b"),
+            ])
+        );
+    }
+
+    #[test]
+    fn an_entry_without_a_polis_origin_is_not_an_identity() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let credentials = root.path().join("credentials");
+        // Enrolled, but with no origin recorded: no polis to attribute it
+        // to, so it is not reported. The tagma writes one on its next
+        // start, and the entry joins the list then.
+        entry_with_url(
+            &credentials.join("old"),
+            Some("tid-old"),
+            Some("sk-old"),
+            None,
+        );
+        // A blank origin is an absent one (what an interrupted write leaves).
+        entry_with_url(
+            &credentials.join("blank"),
+            Some("tid-blank"),
+            Some("sk-blank"),
+            Some("  \n"),
+        );
+        entry_with_url(
+            &credentials.join("new"),
+            Some("tid-new"),
+            Some("sk-new"),
+            Some("https://api.kallipai.com"),
+        );
+        assert_eq!(
+            read_enrolled_identities(root.path()),
+            identities(&[("https://api.kallipai.com", "tid-new")])
+        );
+    }
+
+    #[test]
+    fn an_unenrolled_entry_contributes_no_identity() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let credentials = root.path().join("credentials");
+        // An origin without the id/token pair is not an enrollment.
+        entry_with_url(
+            &credentials.join("half"),
+            None,
+            None,
+            Some("https://api.kallipai.com"),
+        );
+        assert!(read_enrolled_identities(root.path()).is_empty());
+    }
+
+    #[test]
+    fn enrolled_identities_degrade_to_empty_on_unreadable_credentials() {
+        let missing = tempfile::tempdir().expect("tempdir");
+        assert!(read_enrolled_identities(missing.path()).is_empty());
+        let not_a_dir = tempfile::tempdir().expect("tempdir");
+        fs::write(not_a_dir.path().join("credentials"), "not a dir").expect("loose file");
+        assert!(read_enrolled_identities(not_a_dir.path()).is_empty());
     }
 }

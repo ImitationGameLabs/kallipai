@@ -12,7 +12,7 @@
 
 use std::path::{Path, PathBuf};
 
-use kallipai_daemon_common::wire::{HealthReport, InstanceInfo, InstanceState};
+use kallipai_daemon_common::wire::{HealthReport, InstanceIdentity, InstanceInfo, InstanceState};
 
 use crate::records::InstanceRecord;
 
@@ -31,9 +31,10 @@ pub struct ScannedInstance {
     pub port: Option<u16>,
     /// The spawn-time uid of the requesting peer, from the record.
     pub owner: Option<u32>,
-    /// The enrolled tagma identity (archeion-issued id) if the instance's
-    /// own credentials tree carries one; see `read_tagma_id`.
-    pub tagma_id: Option<String>,
+    /// The enrolled identities the instance's own credentials tree carries:
+    /// the archeion-issued id plus the polis each entry belongs to, in
+    /// credentials-listing order. Empty when it carries none.
+    pub identities: Vec<InstanceIdentity>,
     /// The launch-time identity anchor from the record (the
     /// `identity` key): the kernel incarnation this instance was
     /// claimed as. `None` when the claim point could not pin one —
@@ -74,7 +75,7 @@ impl ScannedInstance {
             // else would leak a stale, dead endpoint.
             port: live.then_some(self.port).flatten(),
             owner: self.owner,
-            tagma_id: self.tagma_id.clone(),
+            identities: self.identities.clone(),
         }
     }
 
@@ -367,7 +368,9 @@ pub fn scan_instances(record_root: &Path) -> Vec<ScannedInstance> {
             pid: runtime.as_ref().map(|r| r.pid),
             port: runtime.as_ref().map(|r| r.port),
             owner: Some(record.owner_uid),
-            tagma_id: read_tagma_id(&record.data_dir),
+            identities: kallipai_daemon_common::credentials::read_enrolled_identities(
+                &record.data_dir,
+            ),
             anchored: record.identity,
             data_dir: record.data_dir,
         });
@@ -378,18 +381,6 @@ pub fn scan_instances(record_root: &Path) -> Vec<ScannedInstance> {
 pub(crate) fn read_runtime(dir: &Path) -> Option<RuntimeFile> {
     let text = std::fs::read_to_string(dir.join("runtime.json")).ok()?;
     serde_json::from_str(&text).ok()
-}
-/// The enrolled tagma identity: the first entry in name order under the
-/// data directory's `credentials/` that passes the shared enrollment
-/// predicate (`kallipai_daemon_common::credentials::read_enrolled_id`:
-/// `tagma.id` and `tagma.token` both readable and non-blank).
-///
-/// The token is opened only to decide blank-or-not; it is never returned,
-/// logged or serialized, and `InstanceInfo` carries the id alone.
-fn read_tagma_id(data_dir: &Path) -> Option<String> {
-    kallipai_daemon_common::credentials::entry_dirs(data_dir)
-        .into_iter()
-        .find_map(|dir| kallipai_daemon_common::credentials::read_enrolled_id(&dir))
 }
 
 #[cfg(test)]
@@ -591,45 +582,99 @@ mod tests {
     }
 
     #[test]
-    fn tagma_id_reads_the_first_enrolled_entry() {
-        let root = tempfile_dir("tagma-id");
+    fn identities_report_every_enrolled_entry_with_its_polis() {
+        let root = tempfile_dir("identities");
         instance(&root, "team", "id-1", 1000);
-        // Two entries: the first truly enrolled one wins as the conservative
-        // primary.
-        write(&root.join("data/team/credentials/b/tagma.id"), "tid-b\n");
-        write(&root.join("data/team/credentials/a/tagma.id"), "tid-a\n");
-        // The 0o600 secret sits next to the id; it must never surface.
-        write(
-            &root.join("data/team/credentials/a/tagma.token"),
-            "sk-secret-token",
-        );
-        let info = scan_instances(&root)[0].info();
-        assert_eq!(info.tagma_id.as_deref(), Some("tid-a"));
-        let wire = serde_json::to_string(&info).expect("serialize InstanceInfo");
-        assert!(!wire.contains("sk-secret-token"));
-    }
-
-    #[test]
-    fn an_entry_with_an_id_but_no_token_is_not_enrolled() {
-        let root = tempfile_dir("tagma-id-half");
-        instance(&root, "team", "id-1", 1000);
-        // Name order alone does not win: the first entry carries an id but no
-        // token, so it is not enrolled and the scan keeps looking.
-        write(&root.join("data/team/credentials/a/tagma.id"), "tid-half\n");
+        // Two entries under two polis origins, written out of name order: the
+        // report follows the credentials listing, not the creation order.
         write(&root.join("data/team/credentials/b/tagma.id"), "tid-b\n");
         write(
             &root.join("data/team/credentials/b/tagma.token"),
-            "sk-secret-token",
+            "sk-secret-b",
+        );
+        write(
+            &root.join("data/team/credentials/b/archeion.url"),
+            "https://api.kallipai.lan\n",
+        );
+        write(&root.join("data/team/credentials/a/tagma.id"), "tid-a\n");
+        write(
+            &root.join("data/team/credentials/a/tagma.token"),
+            "sk-secret-a",
+        );
+        write(
+            &root.join("data/team/credentials/a/archeion.url"),
+            "https://api.kallipai.com\n",
         );
         let info = scan_instances(&root)[0].info();
-        assert_eq!(info.tagma_id.as_deref(), Some("tid-b"));
+        let pairs: Vec<(&str, &str)> = info
+            .identities
+            .iter()
+            .map(|identity| (identity.polis.as_str(), identity.tagma_id.as_str()))
+            .collect();
+        assert_eq!(
+            pairs,
+            [
+                ("https://api.kallipai.com", "tid-a"),
+                ("https://api.kallipai.lan", "tid-b"),
+            ]
+        );
+        // The 0o600 secrets sit next to the ids; they must never surface.
         let wire = serde_json::to_string(&info).expect("serialize InstanceInfo");
-        assert!(!wire.contains("sk-secret-token"));
+        assert!(!wire.contains("sk-secret-a"));
+        assert!(!wire.contains("sk-secret-b"));
+        // The client mirrors this shape: a rename or a dropped field on
+        // either side leaves the panel joining nothing.
+        let identities = serde_json::json!([
+            {"polis": "https://api.kallipai.com", "tagma_id": "tid-a"},
+            {"polis": "https://api.kallipai.lan", "tagma_id": "tid-b"},
+        ]);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&wire).expect("parse the wire")["identities"],
+            identities
+        );
     }
 
     #[test]
-    fn tagma_id_none_when_unenrolled_or_blank() {
-        let root = tempfile_dir("tagma-id-none");
+    fn an_entry_without_a_polis_origin_is_not_reported() {
+        let root = tempfile_dir("identities-no-url");
+        instance(&root, "team", "id-1", 1000);
+        // Enrolled (id + token), but with no origin recorded: no polis to
+        // attribute it to, so the scan leaves it out. The tagma writes one
+        // on its next start, and the entry joins the list then.
+        write(
+            &root.join("data/team/credentials/old/tagma.id"),
+            "tid-old\n",
+        );
+        write(
+            &root.join("data/team/credentials/old/tagma.token"),
+            "sk-secret-old",
+        );
+        write(
+            &root.join("data/team/credentials/new/tagma.id"),
+            "tid-new\n",
+        );
+        write(
+            &root.join("data/team/credentials/new/tagma.token"),
+            "sk-secret-new",
+        );
+        write(
+            &root.join("data/team/credentials/new/archeion.url"),
+            "https://api.kallipai.com\n",
+        );
+        let info = scan_instances(&root)[0].info();
+        let ids: Vec<&str> = info
+            .identities
+            .iter()
+            .map(|identity| identity.tagma_id.as_str())
+            .collect();
+        assert_eq!(ids, ["tid-new"], "the entry without a polis is absent");
+        let wire = serde_json::to_string(&info).expect("serialize InstanceInfo");
+        assert!(!wire.contains("sk-secret-old"));
+    }
+
+    #[test]
+    fn identities_are_empty_when_unenrolled_or_blank() {
+        let root = tempfile_dir("identities-none");
         instance(&root, "local", "id-2", 1000); // never enrolled: no credentials tree
         instance(&root, "blank", "id-3", 1000);
         write(
@@ -637,13 +682,13 @@ mod tests {
             "  \n",
         );
         for scanned in scan_instances(&root) {
-            assert_eq!(scanned.tagma_id, None);
+            assert!(scanned.identities.is_empty());
         }
     }
 
     #[test]
-    fn tagma_id_degrades_to_none_on_unreadable_credentials() {
-        let root = tempfile_dir("tagma-id-unreadable");
+    fn identities_degrade_to_empty_on_unreadable_credentials() {
+        let root = tempfile_dir("identities-unreadable");
         instance(&root, "u1", "id-4", 1000);
         // `tagma.id` as a directory: the read fails and the entry is skipped.
         std::fs::create_dir_all(root.join("data/u1/credentials/default/tagma.id"))
@@ -652,7 +697,7 @@ mod tests {
         // `credentials` itself not a directory: the listing fails outright.
         write(&root.join("data/u2/credentials"), "not a dir");
         for scanned in scan_instances(&root) {
-            assert_eq!(scanned.tagma_id, None);
+            assert!(scanned.identities.is_empty());
         }
     }
 

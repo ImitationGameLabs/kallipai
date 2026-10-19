@@ -274,14 +274,20 @@
   } as const;
 
   // --- the card list -------------------------------------------------------
-  // Join identities with hosted processes: the process-reported tagma_id
-  // first (the daemon scan reads the tagma's own persisted id), the one-click
-  // slug convention as fallback (see joinDeviceRows for the key order).
+  // Join identities with hosted processes: the identity the process reports
+  // for the polis this page is served by comes first (the daemon scan reads
+  // the tagma's own persisted ids), the one-click slug convention as
+  // fallback (see joinDeviceRows for the key order). The offline shell
+  // serves no polis, so it passes the empty origin and joins by slug.
+  const polisOrigin = $derived(
+    shellMode() === "online" ? archeionPolisOriginOrFail() : "",
+  );
   const devices = $derived(
     joinDeviceRows(
       archeionSession.enrolledCards,
       instancesStore.instances,
       instancesStore.spawnedPorts,
+      polisOrigin,
       instanceSlugFor,
       (id) =>
         realtimeStore.resolved

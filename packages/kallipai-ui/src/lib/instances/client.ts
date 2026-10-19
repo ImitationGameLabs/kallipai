@@ -14,6 +14,14 @@ export const INSTANCES_TOKEN_KEY = "kallipai:instances-token";
  */
 export const CONNECT_TOKEN_KEY = "kallipai:connect-token";
 
+/** One enrolled identity of a managed instance (wire mirror): the
+ * archeion-issued tagma id, and the polis origin it was enrolled against
+ * (the entry's non-secret `archeion.url`). */
+export interface InstanceIdentity {
+  readonly polis: string;
+  readonly tagma_id: string;
+}
+
 /** One managed instance as the instances service reports it (wire mirror).
  */
 export interface InstanceInfo {
@@ -30,11 +38,11 @@ export interface InstanceInfo {
    * when running; null/absent when stopped or the daemon predates it. */
   port?: number | null;
   owner: number | null;
-  /** The enrolled tagma identity (archeion-issued), read by the daemon scan
-   * from the instance's own `credentials/<entry>/tagma.id`. Absent when the
+  /** Every enrolled identity the daemon scan read from the instance's own
+   * `credentials/<entry>/`, in credentials-listing order. Absent when the
    * instance never enrolled, the read failed, or the daemon predates the
    * field — the panel join then falls back to the slug convention. */
-  tagma_id?: string | null;
+  identities?: readonly InstanceIdentity[];
 }
 
 /** Liveness report: the daemon itself, or one instance by slug.

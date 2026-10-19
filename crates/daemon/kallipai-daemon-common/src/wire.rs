@@ -283,6 +283,17 @@ impl InstanceState {
     }
 }
 
+/// One enrolled identity of a managed instance: the archeion-issued tagma
+/// id, and the polis origin it was enrolled against (the entry's
+/// non-secret `archeion.url`). Carried so a client can pick the identity
+/// belonging to the polis it is serving, rather than guess from an id it
+/// cannot place.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstanceIdentity {
+    pub polis: String,
+    pub tagma_id: String,
+}
+
 /// One managed instance as seen by a directory scan.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InstanceInfo {
@@ -296,10 +307,15 @@ pub struct InstanceInfo {
     pub state: InstanceState,
     /// Owning uid recorded at spawn (SO_PEERCRED of the requesting peer).
     pub owner: Option<u32>,
-    /// The enrolled tagma identity, read by the scan from the instance's own
-    /// `credentials/<entry>/tagma.id`. None when the instance never enrolled
-    /// (local-only) or the read failed — the panel join then degrades to the
-    /// slug convention. `#[serde(default)]` keeps pre-field wire JSON parsing.
+    /// Every enrolled identity the instance's own credentials tree carries,
+    /// read by the scan from each `credentials/<entry>/`: the entry's
+    /// `tagma.id`, paired with the polis its `archeion.url` names. In
+    /// credentials-listing order (entry name); an entry whose `archeion.url`
+    /// is missing, blank or unreadable is absent — the tagma writes that
+    /// file on its next start, so the entry joins the list then. Empty when
+    /// the instance never enrolled (local-only) or the read failed: the
+    /// panel join then degrades to the slug convention. `#[serde(default)]`
+    /// keeps pre-field wire JSON parsing.
     /// Discipline: the only credential actually handed out is `tagma.id`;
     /// `tagma.token` (0o600) is opened to decide whether the enrollment is
     /// blank and never carried out of the scan — not stored, not logged, not
@@ -307,7 +323,7 @@ pub struct InstanceInfo {
     /// touch-as-little-as-possible tradeoff rather than a permission rule:
     /// the leaf directory is already 0o700.
     #[serde(default)]
-    pub tagma_id: Option<String>,
+    pub identities: Vec<InstanceIdentity>,
     /// The instance's live listen port; None unless the instance is
     /// currently live, Running (a surviving runtime.json from a stopped
     /// or dead instance never surfaces its stale port). Surfaced so

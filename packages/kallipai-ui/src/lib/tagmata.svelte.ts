@@ -99,8 +99,13 @@ export interface TagmaProcessLike {
   readonly running: boolean;
   /** The daemon-scan-read listen port, when the instance is running. */
   readonly port?: number | null;
-  /** The daemon-scan-read enrolled tagma identity, when present. */
-  readonly tagma_id?: string | null;
+  /** The identities the daemon scan read from the instance's own
+   * credentials entries, in listing order, each with the polis it was
+   * enrolled against. */
+  readonly identities?: readonly {
+    readonly polis: string;
+    readonly tagma_id: string;
+  }[];
 }
 
 /** One row of the tagmata panel: an enrolled identity half, a hosted process
@@ -116,11 +121,30 @@ export interface TagmaDeviceRow {
   };
 }
 
-/** Join enrolled identities (archeion `/v1/lesche/tagmata`) with hosted processes
- * (instances list) into panel rows. Key preference: the process-reported
- * `tagma_id` (the daemon scan reads the tagma's own persisted id — manual
- * slugs and enroll-after-spawn join here), falling back to the one-click
- * slug convention via `slugFor` so legacy one-click instances keep merging.
+/** Origins compare through one normalizer: a parseable value yields its
+ * `URL.origin`, which folds host case and a default port and drops any
+ * path — the reading the tagma's enrollment side applies
+ * (`url::Url::origin`). A value that does not parse keeps the
+ * trailing-slash drop instead, so it equals only another value that
+ * normalizes to the same text: stricter than the tagma on purpose,
+ * since a wrong merge here shows the wrong identity while a missed one
+ * only falls back to the slug convention. */
+const normalizeOrigin = (value: string): string => {
+  const trimmed = value.trim();
+  if (!trimmed) return "";
+  try {
+    return new URL(trimmed).origin;
+  } catch {
+    return trimmed.replace(/\/+$/, "");
+  }
+};
+
+/** Join enrolled identities (archeion `/v1/lesche/tagmata`) with hosted
+ * processes (instances list) into panel rows. Key preference: an identity
+ * the process reports for the polis this page is served by (`polisOrigin`)
+ * — the daemon scan reads the tagma's own persisted ids, so manual slugs
+ * and enroll-after-spawn join here — falling back to the one-click slug
+ * convention via `slugFor` so legacy one-click instances keep merging.
  * Unmatched halves keep their own card; a process claimed once cannot be
  * claimed again (a colliding identity renders identity-only). Pure:
  * presence/status/slug lookups come in as callbacks. */
@@ -128,16 +152,26 @@ export function joinDeviceRows(
   enrolled: readonly Omit<TagmaCardProps, "presence">[],
   processes: readonly TagmaProcessLike[],
   spawnedPorts: Readonly<Record<string, number>>,
+  polisOrigin: string,
   slugFor: (tagmaId: string) => string,
   presenceFor: (tagmaId: string) => TagmaPresence,
   statusFor: (tagmaId: string) => TagmaStatusSummary | undefined,
 ): TagmaDeviceRow[] {
+  const origin = normalizeOrigin(polisOrigin);
   const byTagmaId = new Map<string, TagmaProcessLike>();
   const bySlug = new Map<string, TagmaProcessLike>();
   for (const inst of processes) {
     bySlug.set(inst.slug, inst);
-    const id = inst.tagma_id?.trim();
-    if (id) byTagmaId.set(id, inst);
+    // A process enrolled against another polis is not this page's to join,
+    // and one whose identity carries no origin is not either: the guard
+    // below claims nothing when this page serves no polis, so the slug
+    // convention takes over.
+    if (!origin) continue;
+    for (const identity of inst.identities ?? []) {
+      if (normalizeOrigin(identity.polis) !== origin) continue;
+      const id = identity.tagma_id.trim();
+      if (id) byTagmaId.set(id, inst);
+    }
   }
   const claimed = new Set<string>();
   const processOf = (inst: TagmaProcessLike) => ({

@@ -115,13 +115,16 @@ Deno.test("formatRemaining: days and minutes with zero hours", () => {
   assertEquals(formatRemaining(ms), "1d 3min");
 });
 
-// The panel join is a pure projection; these tests pin the key preference
-// (process-reported tagma_id first, one-click slug convention as fallback)
-// and the unmatched-halves shapes the card list renders.
+// The panel join is a pure projection; these tests pin the key preference (an
+// identity entry the process reports for this page's polis first, the one-click
+// slug convention as fallback) and the unmatched-halves shapes the card list
+// renders.
 const presence = () => "checking" as const;
 const status = () => undefined;
 const ports = {};
 const slugFor = (id: string) => `tagma-${id.slice(0, 8)}`;
+const origin = "https://api.kallipai.com";
+const otherOrigin = "https://api.kallipai.lan";
 
 function proc(
   p: Partial<TagmaProcessLike> & { slug: string },
@@ -129,25 +132,124 @@ function proc(
   return { workspace: "/w", running: true, ...p };
 }
 
-Deno.test("joinDeviceRows merges on the process-reported tagma_id", () => {
+Deno.test(
+  "joinDeviceRows merges on the identity reported for this polis",
+  () => {
+    const rows = joinDeviceRows(
+      [
+        {
+          tagmaId: "tid-full-uuid",
+          label: null,
+          createdAt: "2026-08-26T00:00:00Z",
+        },
+      ],
+      [
+        proc({
+          slug: "team",
+          identities: [{ polis: origin, tagma_id: "tid-full-uuid" }],
+        }),
+      ],
+      ports,
+      origin,
+      slugFor,
+      presence,
+      status,
+    );
+    assertEquals(rows.length, 1);
+    assertEquals(rows[0].tagma?.tagmaId, "tid-full-uuid");
+    assertEquals(rows[0].process?.slug, "team");
+  },
+);
+
+Deno.test(
+  "joinDeviceRows ignores identities reported for another polis",
+  () => {
+    // The process is enrolled, just not here: it keeps its own hosted-process
+    // card and the identity card stays unmerged.
+    const rows = joinDeviceRows(
+      [
+        {
+          tagmaId: "tid-remote",
+          label: null,
+          createdAt: "2026-08-26T00:00:00Z",
+        },
+      ],
+      [
+        proc({
+          slug: "team",
+          identities: [{ polis: otherOrigin, tagma_id: "tid-remote" }],
+        }),
+      ],
+      ports,
+      origin,
+      slugFor,
+      presence,
+      status,
+    );
+    assertEquals(rows.length, 2);
+    assertEquals(rows[0].tagma?.tagmaId, "tid-remote");
+    assertEquals(rows[0].process, undefined);
+    assertEquals(rows[1].key, "team");
+    assertEquals(rows[1].process?.slug, "team");
+  },
+);
+
+Deno.test("joinDeviceRows picks this polis' entry among several", () => {
   const rows = joinDeviceRows(
     [
       {
-        tagmaId: "tid-full-uuid",
+        tagmaId: "tid-mine",
         label: null,
         createdAt: "2026-08-26T00:00:00Z",
       },
     ],
-    [proc({ slug: "team", tagma_id: "tid-full-uuid" })],
+    [
+      proc({
+        slug: "team",
+        identities: [
+          { polis: otherOrigin, tagma_id: "tid-theirs" },
+          { polis: origin, tagma_id: "tid-mine" },
+        ],
+      }),
+    ],
     ports,
+    origin,
     slugFor,
     presence,
     status,
   );
   assertEquals(rows.length, 1);
-  assertEquals(rows[0].tagma?.tagmaId, "tid-full-uuid");
+  assertEquals(rows[0].tagma?.tagmaId, "tid-mine");
   assertEquals(rows[0].process?.slug, "team");
 });
+
+Deno.test(
+  "joinDeviceRows matches polis origins modulo trailing slashes",
+  () => {
+    const rows = joinDeviceRows(
+      [
+        {
+          tagmaId: "tid-slash",
+          label: null,
+          createdAt: "2026-08-26T00:00:00Z",
+        },
+      ],
+      [
+        proc({
+          slug: "team",
+          identities: [{ polis: `${origin}/`, tagma_id: "tid-slash" }],
+        }),
+      ],
+      ports,
+      `${origin}/`,
+      slugFor,
+      presence,
+      status,
+    );
+    assertEquals(rows.length, 1);
+    assertEquals(rows[0].process?.slug, "team");
+  },
+);
 
 Deno.test("joinDeviceRows falls back to the slug convention", () => {
   // A one-click-era process (pre-field daemon) whose slug encodes the id.
@@ -161,6 +263,7 @@ Deno.test("joinDeviceRows falls back to the slug convention", () => {
     ],
     [proc({ slug: "tagma-abcdefgh" })],
     ports,
+    origin,
     slugFor,
     presence,
     status,
@@ -168,6 +271,36 @@ Deno.test("joinDeviceRows falls back to the slug convention", () => {
   assertEquals(rows.length, 1);
   assertEquals(rows[0].process?.slug, "tagma-abcdefgh");
 });
+
+Deno.test(
+  "joinDeviceRows without a polis origin keeps to the slug convention",
+  () => {
+    // The offline shell has no polis: reported identities never match, so the
+    // page behaves exactly as it does without them.
+    const rows = joinDeviceRows(
+      [
+        {
+          tagmaId: "abcdefgh-1234",
+          label: null,
+          createdAt: "2026-08-26T00:00:00Z",
+        },
+      ],
+      [
+        proc({
+          slug: "tagma-abcdefgh",
+          identities: [{ polis: origin, tagma_id: "abcdefgh-1234" }],
+        }),
+      ],
+      ports,
+      "",
+      slugFor,
+      presence,
+      status,
+    );
+    assertEquals(rows.length, 1);
+    assertEquals(rows[0].process?.slug, "tagma-abcdefgh");
+  },
+);
 
 Deno.test("joinDeviceRows keeps unmatched halves as their own rows", () => {
   const rows = joinDeviceRows(
@@ -180,6 +313,7 @@ Deno.test("joinDeviceRows keeps unmatched halves as their own rows", () => {
     ],
     [proc({ slug: "local-only" })],
     ports,
+    origin,
     slugFor,
     presence,
     status,
@@ -199,8 +333,14 @@ Deno.test(
         { tagmaId: "tid-a", label: null, createdAt: "2026-08-26T00:00:00Z" },
         { tagmaId: "tid-b", label: null, createdAt: "2026-08-26T00:00:00Z" },
       ],
-      [proc({ slug: "tagma-tid-b", tagma_id: "tid-a" })],
+      [
+        proc({
+          slug: "tagma-tid-b",
+          identities: [{ polis: origin, tagma_id: "tid-a" }],
+        }),
+      ],
       ports,
+      origin,
       slugFor,
       presence,
       status,
@@ -218,8 +358,15 @@ Deno.test(
 Deno.test("joinDeviceRows takes the wire port over session memory", () => {
   const rows = joinDeviceRows(
     [{ tagmaId: "tid-x", label: null, createdAt: "2026-08-26T00:00:00Z" }],
-    [proc({ slug: "team", tagma_id: "tid-x", port: 7301 })],
+    [
+      proc({
+        slug: "team",
+        identities: [{ polis: origin, tagma_id: "tid-x" }],
+        port: 7301,
+      }),
+    ],
     { team: 9999 },
+    origin,
     slugFor,
     presence,
     status,
@@ -232,8 +379,15 @@ Deno.test(
   () => {
     const rows = joinDeviceRows(
       [{ tagmaId: "tid-y", label: null, createdAt: "2026-08-26T00:00:00Z" }],
-      [proc({ slug: "fresh", tagma_id: "tid-y", port: null })],
+      [
+        proc({
+          slug: "fresh",
+          identities: [{ polis: origin, tagma_id: "tid-y" }],
+          port: null,
+        }),
+      ],
       { fresh: 4242 },
+      origin,
       slugFor,
       presence,
       status,
@@ -241,3 +395,135 @@ Deno.test(
     assertEquals(rows[0].process?.port, 4242);
   },
 );
+
+Deno.test(
+  "joinDeviceRows without an origin claims nothing even for a blank polis",
+  () => {
+    // A blank origin must not match a blank polis: nothing is claimed, so the
+    // process keeps its slug-convention card instead of merging by id.
+    const rows = joinDeviceRows(
+      [
+        {
+          tagmaId: "tid-blank",
+          label: null,
+          createdAt: "2026-08-26T00:00:00Z",
+        },
+      ],
+      [
+        proc({
+          slug: "team",
+          identities: [{ polis: "  ", tagma_id: "tid-blank" }],
+        }),
+      ],
+      ports,
+      "",
+      slugFor,
+      presence,
+      status,
+    );
+    assertEquals(rows.length, 2);
+    assertEquals(rows[0].process, undefined);
+  },
+);
+
+Deno.test("joinDeviceRows reads identities in the wire shape", () => {
+  // The daemon serializes InstanceIdentity as {"polis","tagma_id"}: a rename
+  // on either side leaves this joining nothing.
+  const instance = JSON.parse(
+    '{"slug":"team","workspace":"/w","running":true,' +
+      '"identities":[{"polis":"https://api.kallipai.com","tagma_id":"tid-wire"}]}',
+  );
+  const rows = joinDeviceRows(
+    [{ tagmaId: "tid-wire", label: null, createdAt: "2026-08-26T00:00:00Z" }],
+    [instance],
+    ports,
+    origin,
+    slugFor,
+    presence,
+    status,
+  );
+  assertEquals(rows.length, 1);
+  assertEquals(rows[0].process?.slug, "team");
+});
+
+Deno.test(
+  "joinDeviceRows folds host case, default ports and paths like the tagma",
+  () => {
+    // The enrollment side compares `url::Url::origin` values, so these three
+    // spellings all name this page's polis and must merge.
+    for (const polis of [
+      "https://API.Kallipai.com",
+      "https://api.kallipai.com:443",
+      "https://api.kallipai.com/some/path",
+    ]) {
+      const rows = joinDeviceRows(
+        [
+          {
+            tagmaId: "tid-same",
+            label: null,
+            createdAt: "2026-08-26T00:00:00Z",
+          },
+        ],
+        [proc({ slug: "team", identities: [{ polis, tagma_id: "tid-same" }] })],
+        ports,
+        origin,
+        slugFor,
+        presence,
+        status,
+      );
+      assertEquals(rows.length, 1, polis);
+      assertEquals(rows[0].process?.slug, "team", polis);
+    }
+  },
+);
+
+Deno.test("joinDeviceRows does not merge an origin that does not parse", () => {
+  // A malformed value cannot be compared, and a wrong merge would show the
+  // wrong identity: the process keeps its own card.
+  const rows = joinDeviceRows(
+    [{ tagmaId: "tid-bad", label: null, createdAt: "2026-08-26T00:00:00Z" }],
+    [
+      proc({
+        slug: "team",
+        identities: [{ polis: "not a url", tagma_id: "tid-bad" }],
+      }),
+    ],
+    ports,
+    origin,
+    slugFor,
+    presence,
+    status,
+  );
+  assertEquals(rows.length, 2);
+  assertEquals(rows[0].process, undefined);
+});
+
+Deno.test("joinDeviceRows compares a value it cannot parse as text", () => {
+  // The fallback keeps the pre-parse reading: an unparseable page origin and
+  // an identity that normalizes to the same text still merge, so a fallback
+  // that returns nothing (or an empty value) instead of the value would leave
+  // that identity on its own card.
+  const rows = joinDeviceRows(
+    [
+      {
+        tagmaId: "tid-fallback",
+        label: null,
+        createdAt: "2026-08-26T00:00:00Z",
+      },
+    ],
+    [
+      proc({
+        slug: "team",
+        identities: [{ polis: "not a url/", tagma_id: "tid-fallback" }],
+      }),
+    ],
+    ports,
+    "not a url",
+    slugFor,
+    presence,
+    status,
+  );
+  assertEquals(rows.length, 1);
+  assertEquals(rows[0].tagma?.tagmaId, "tid-fallback");
+  assertEquals(rows[0].process?.slug, "team");
+});
