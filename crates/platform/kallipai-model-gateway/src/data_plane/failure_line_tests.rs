@@ -17,9 +17,9 @@ use crate::secret::{AuthStyle, ProviderCredential};
 
 use tracing_subscriber::prelude::*;
 
-/// The level split: every gate rejection warns (the caller's request was
-/// refused), while the two forwarding failures are the gateway's own
-/// trouble and record as errors.
+/// The level split: the gateway's own forwarding failures -- a dial, an
+/// upstream-side break, a gateway-side internal failure -- record as
+/// errors, while every other outcome warns, the downstream side's included.
 #[test]
 fn failure_levels_split_the_gates_from_the_forward_failures() {
     for outcome in [
@@ -32,6 +32,7 @@ fn failure_levels_split_the_gates_from_the_forward_failures() {
         ForwardOutcome::Upstream4xx,
         ForwardOutcome::Upstream5xx,
         ForwardOutcome::UpstreamOther,
+        ForwardOutcome::DownstreamError,
     ] {
         assert_eq!(
             failure_level(outcome),
@@ -125,9 +126,9 @@ fn the_failure_line_omits_the_fields_a_gate_never_staged() {
     }
 }
 
-/// The warrant: an error warrants the line whatever the outcome, the
-/// gates warrant it without one, and the upstream answers -- the
-/// request's normal terminations -- do not.
+/// The warrant: an error warrants the line whatever the outcome -- the
+/// downstream side's failure included -- the gates warrant it without
+/// one, and the upstream answers, the normal terminations, do not.
 #[test]
 fn the_failure_line_warrants_on_errors_and_gates_only() {
     for outcome in [
@@ -161,6 +162,7 @@ fn the_failure_line_warrants_on_errors_and_gates_only() {
         ForwardOutcome::ConnectError,
         ForwardOutcome::UpstreamError,
         ForwardOutcome::InternalError,
+        ForwardOutcome::DownstreamError,
     ] {
         assert!(
             warrants_failure_line(outcome, true),

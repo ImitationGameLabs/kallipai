@@ -448,7 +448,7 @@ impl ProxyHttp for GatewayProxy {
         };
         let outcome = terminal_outcome(
             ctx.pending_outcome.take(),
-            e.is_some(),
+            e,
             ctx.connected,
             ctx.upstream_status,
         );
@@ -479,20 +479,23 @@ impl ProxyHttp for GatewayProxy {
 
 /// The terminal forward outcome, decided once at the logging phase
 /// from the staged facts: a gate's pending outcome outranks every
-/// derived fact, an error after upstream contact is an upstream error
+/// derived fact, a failure the downstream side raised outranks the
+/// contact facts, an error after upstream contact is an upstream error
 /// while one without contact never got past the dial, a clean answer
-/// derives from the upstream status, and the residual bucket keeps
-/// the outcome sums closed.
+/// derives from the upstream status, and the residual bucket keeps the
+/// outcome sums closed.
 fn terminal_outcome(
     pending: Option<ForwardOutcome>,
-    errored: bool,
+    error: Option<&pingora::Error>,
     connected: bool,
     upstream_status: Option<u16>,
 ) -> ForwardOutcome {
     if let Some(pending) = pending {
         pending
-    } else if errored {
-        if connected || upstream_status.is_some() {
+    } else if let Some(error) = error {
+        if ended_downstream(error) {
+            ForwardOutcome::DownstreamError
+        } else if connected || upstream_status.is_some() {
             ForwardOutcome::UpstreamError
         } else {
             ForwardOutcome::ConnectError
@@ -505,6 +508,14 @@ fn terminal_outcome(
         // bucket keeps the outcome sums closed.
         ForwardOutcome::UpstreamOther
     }
+}
+/// Whether the error that ended the forward was raised by the downstream
+/// side: pingora marks a client request-read or response-write failure --
+/// and a request its own sanitize step refused -- with
+/// [`pingora::ErrorSource::Downstream`], the same field its `fail_to_proxy`
+/// splits on. An unmarked error is not claimed as the caller's failure.
+fn ended_downstream(error: &pingora::Error) -> bool {
+    *error.esource() == pingora::ErrorSource::Downstream
 }
 
 /// One failure line at the severity the outcome deserves: the field set
@@ -520,10 +531,11 @@ macro_rules! failure_line {
 }
 
 /// The severity a failed forward records at: the gateway's own
-/// forwarding trouble -- a dial failure, a mid-stream break, or a
-/// gateway-side internal failure -- is an ERROR, while a gate rejection
-/// and the upstream's own terminations are a WARN (the caller's request
-/// was refused or answered, not the platform's health dented). Every
+/// forwarding trouble -- a dial failure, an upstream-side mid-stream
+/// break, or a gateway-side internal failure -- is an ERROR, while a
+/// gate rejection, the upstream's own terminations, and a downstream
+/// side's failure are a WARN (the request was refused, answered, or
+/// ended on the caller's side, not the platform's health dented). Every
 /// variant is spelled out: a new outcome cannot land on a severity by
 /// falling into a catch-all.
 fn failure_level(outcome: ForwardOutcome) -> tracing::Level {
@@ -540,6 +552,7 @@ fn failure_level(outcome: ForwardOutcome) -> tracing::Level {
         | ForwardOutcome::Upstream4xx
         | ForwardOutcome::Upstream5xx
         | ForwardOutcome::UpstreamOther => tracing::Level::WARN,
+        ForwardOutcome::DownstreamError => tracing::Level::WARN,
     }
 }
 
@@ -652,26 +665,37 @@ mod connect_class_tests {
 }
 
 /// The terminal-outcome table, pinned cell by cell: the pending gate
-/// answer outranks the facts, the error arm splits on contact, the
-/// clean arm derives from the status, and the residual stays closed.
+/// answer outranks the facts, a downstream failure outranks the contact
+/// facts, the error arm splits on contact, the clean arm derives from
+/// the status, and the residual stays closed.
 #[cfg(test)]
 mod terminal_outcome_tests {
-    use super::terminal_outcome;
+    use super::{ended_downstream, terminal_outcome};
     use crate::metrics::ForwardOutcome;
+    use pingora::ErrorType;
+
+    fn up_error() -> Box<pingora::Error> {
+        pingora::Error::new_up(ErrorType::ConnectionClosed)
+    }
+
+    fn down_error() -> Box<pingora::Error> {
+        pingora::Error::new_down(ErrorType::ConnectionClosed)
+    }
 
     #[test]
     fn a_pending_gate_answer_outranks_every_derived_fact() {
-        for (errored, connected, status) in [
-            (false, false, None),
-            (true, false, None),
-            (true, true, None),
-            (true, true, Some(502)),
-            (false, true, Some(200)),
+        for (error, connected, status) in [
+            (None, false, None),
+            (Some(up_error()), false, None),
+            (Some(up_error()), true, None),
+            (Some(up_error()), true, Some(502)),
+            (Some(down_error()), true, Some(200)),
+            (None, true, Some(200)),
         ] {
             assert_eq!(
                 terminal_outcome(
                     Some(ForwardOutcome::GatedVisibility),
-                    errored,
+                    error.as_deref(),
                     connected,
                     status
                 ),
@@ -683,12 +707,12 @@ mod terminal_outcome_tests {
     #[test]
     fn an_error_splits_on_upstream_contact() {
         assert_eq!(
-            terminal_outcome(None, true, false, None),
+            terminal_outcome(None, Some(&up_error()), false, None),
             ForwardOutcome::ConnectError
         );
         for (connected, status) in [(true, None), (true, Some(500)), (false, Some(500))] {
             assert_eq!(
-                terminal_outcome(None, true, connected, status),
+                terminal_outcome(None, Some(&up_error()), connected, status),
                 ForwardOutcome::UpstreamError,
                 "connected={connected}, status={status:?}"
             );
@@ -698,15 +722,15 @@ mod terminal_outcome_tests {
     #[test]
     fn a_clean_answer_derives_from_the_upstream_status() {
         assert_eq!(
-            terminal_outcome(None, false, true, Some(200)),
+            terminal_outcome(None, None, true, Some(200)),
             ForwardOutcome::Upstream2xx
         );
         assert_eq!(
-            terminal_outcome(None, false, true, Some(404)),
+            terminal_outcome(None, None, true, Some(404)),
             ForwardOutcome::Upstream4xx
         );
         assert_eq!(
-            terminal_outcome(None, false, true, Some(503)),
+            terminal_outcome(None, None, true, Some(503)),
             ForwardOutcome::Upstream5xx
         );
     }
@@ -714,8 +738,39 @@ mod terminal_outcome_tests {
     #[test]
     fn the_residual_bucket_stays_closed() {
         assert_eq!(
-            terminal_outcome(None, false, false, None),
+            terminal_outcome(None, None, false, None),
             ForwardOutcome::UpstreamOther
         );
+    }
+
+    #[test]
+    fn a_downstream_failure_is_the_callers_not_the_upstreams() {
+        // A downstream failure outranks the contact facts: it ended the
+        // exchange, whether or not an upstream answered first.
+        for (connected, status) in [(true, None), (true, Some(200)), (false, None)] {
+            assert_eq!(
+                terminal_outcome(None, Some(&down_error()), connected, status),
+                ForwardOutcome::DownstreamError,
+                "connected={connected}, status={status:?}"
+            );
+        }
+        // A gate still outranks it: the gate never reached the wire.
+        assert_eq!(
+            terminal_outcome(
+                Some(ForwardOutcome::GatedRoute),
+                Some(&down_error()),
+                true,
+                Some(200)
+            ),
+            ForwardOutcome::GatedRoute
+        );
+    }
+
+    #[test]
+    fn the_downstream_mark_comes_from_the_error_itself() {
+        assert!(ended_downstream(&down_error()));
+        assert!(!ended_downstream(&up_error()));
+        let unmarked = pingora::Error::new(ErrorType::WriteError);
+        assert!(!ended_downstream(&unmarked));
     }
 }

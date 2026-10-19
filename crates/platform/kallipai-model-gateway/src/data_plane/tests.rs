@@ -246,6 +246,167 @@ async fn spawn_mock_upstream_answering(path: &'static str, canned: serde_json::V
     format!("http://{addr}")
 }
 
+/// A raw mock upstream answering one chat-completions request with a chunked
+/// stream of `frames` SSE frames paced by `interval`, then abandoning the
+/// body. A caller that reads the first frame and walks away, and one that
+/// reads through the upstream's own break, both leave the gateway mid-relay;
+/// the two differ only in who ended the exchange.
+///
+/// The socket is raw rather than an axum route because the framing is cut by
+/// hand here: the upstream-side case abandons the body without the
+/// terminating chunk, which a well-formed axum body cannot express, and the
+/// caller-side case needs the frames paced out slowly enough to walk away
+/// from the first one.
+async fn spawn_mock_streaming_upstream(frames: u32, interval: Duration) -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind streaming upstream");
+    let addr = listener.local_addr().expect("local addr");
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            tokio::spawn(async move {
+                let mut buf: Vec<u8> = Vec::new();
+                let mut chunk = [0u8; 1024];
+                let head_end = loop {
+                    let n = match socket.read(&mut chunk).await {
+                        Ok(n) => n,
+                        Err(_) => return,
+                    };
+                    if n == 0 {
+                        return;
+                    }
+                    buf.extend_from_slice(&chunk[..n]);
+                    if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                        break pos + 4;
+                    }
+                };
+                let head = String::from_utf8_lossy(&buf[..head_end]).to_string();
+                let declared: usize = head
+                    .lines()
+                    .find_map(|line| {
+                        line.to_ascii_lowercase()
+                            .strip_prefix("content-length:")
+                            .map(|value| value.trim().parse().unwrap_or(0))
+                    })
+                    .unwrap_or(0);
+                while buf.len() < head_end + declared {
+                    let n = match socket.read(&mut chunk).await {
+                        Ok(n) => n,
+                        Err(_) => return,
+                    };
+                    if n == 0 {
+                        return;
+                    }
+                    buf.extend_from_slice(&chunk[..n]);
+                }
+                if socket
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n",
+                    )
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+                for i in 0..frames {
+                    let data = format!("data: {{\"i\":{i}}}\n\n");
+                    let frame = format!("{:x}\r\n{data}\r\n", data.len());
+                    if socket.write_all(frame.as_bytes()).await.is_err() {
+                        return;
+                    }
+                    if socket.flush().await.is_err() {
+                        return;
+                    }
+                    tokio::time::sleep(interval).await;
+                }
+            });
+        }
+    });
+    format!("http://{addr}")
+}
+
+/// The caller's own break: the client walks away mid-stream, so the
+/// forward ends on the downstream side, not as an upstream failure.
+#[tokio::test]
+async fn a_client_that_walks_away_mid_stream_is_not_an_upstream_error() {
+    let db = migrated_test_db().await;
+    let upstream_base = spawn_mock_streaming_upstream(40, Duration::from_millis(100)).await;
+    crate::test_support::seed_registry(&db, &upstream_base).await;
+    let (base, metrics) = spawn_plane_with_metrics(db).await;
+    let addr = base.strip_prefix("http://").expect("base carries a host");
+
+    let mut client = tokio::net::TcpStream::connect(addr)
+        .await
+        .expect("connect the gateway");
+    let body = "{}";
+    let request = format!(
+        "POST /chat/completions HTTP/1.1\r\nhost: {addr}\r\nauthorization: Bearer {TEST_TAGMA_BEARER}\r\n{}: p1\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{body}",
+        crate::forward::PROFILE_HEADER,
+        body.len()
+    );
+    client
+        .write_all(request.as_bytes())
+        .await
+        .expect("write the request");
+
+    // Read until the first chunked frame of the streamed body is in, then drop
+    // the socket: the gateway's next write to this client is the one under test.
+    let mut seen: Vec<u8> = Vec::new();
+    let mut chunk = [0u8; 512];
+    while !seen.windows(7).any(|w| w == b"data: {") {
+        let n = tokio::time::timeout(Duration::from_secs(5), client.read(&mut chunk))
+            .await
+            .expect("the upstream stream reaches the client")
+            .expect("read the response");
+        assert!(
+            n > 0,
+            "the stream must stay open; saw: {}",
+            String::from_utf8_lossy(&seen)
+        );
+        seen.extend_from_slice(&chunk[..n]);
+    }
+    drop(client);
+
+    await_forward_count(&metrics, crate::metrics::ForwardOutcome::DownstreamError, 1).await;
+    let rendered = metrics.render();
+    assert!(
+        !rendered.contains("outcome=\"upstream_error\""),
+        "no upstream failure happened: {rendered}"
+    );
+}
+
+/// The other half of the split: a break the upstream caused stays an upstream
+/// error, so the split cannot swallow real upstream trouble.
+#[tokio::test]
+async fn an_upstream_that_breaks_mid_stream_stays_an_upstream_error() {
+    let db = migrated_test_db().await;
+    let upstream_base = spawn_mock_streaming_upstream(1, Duration::ZERO).await;
+    crate::test_support::seed_registry(&db, &upstream_base).await;
+    let (base, metrics) = spawn_plane_with_metrics(db).await;
+
+    let response = post_generation(
+        &base,
+        "/chat/completions",
+        TEST_TAGMA_BEARER,
+        Some("p1"),
+        "{}",
+        &[],
+    )
+    .await;
+    // Read to the break: the client stays until the gateway ends the exchange.
+    let _ = response.bytes().await;
+
+    await_forward_count(&metrics, crate::metrics::ForwardOutcome::UpstreamError, 1).await;
+    let rendered = metrics.render();
+    assert!(
+        !rendered.contains("outcome=\"downstream_error\""),
+        "the break was the upstream's: {rendered}"
+    );
+}
+
 /// The forwarding path end to end against the mock upstream: override
 /// selection, Authorization injection (the caller's bearer must NOT
 /// travel), and response passthrough.

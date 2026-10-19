@@ -81,8 +81,13 @@ pub(crate) enum ForwardOutcome {
     ConnectError,
     /// The forward failed after an upstream was reached: the upstream
     /// accepted the request and the exchange broke before the answer
-    /// landed (a mid-stream break included).
+    /// landed (an upstream-side mid-stream break included).
     UpstreamError,
+    /// The downstream side ended the exchange: the caller walked away
+    /// mid-stream, the request could not be read to the end, or the
+    /// response could not be written back. The failure
+    /// sits on the caller's side of the wire, not the upstream's.
+    DownstreamError,
     /// The forward failed on the gateway side, before any upstream was
     /// reached: a store error behind the selection, a missing provider
     /// credential, or an unparseable endpoint prefix.
@@ -103,6 +108,7 @@ impl ForwardOutcome {
             Self::UpstreamOther => "upstream_other",
             Self::ConnectError => "connect_error",
             Self::UpstreamError => "upstream_error",
+            Self::DownstreamError => "downstream_error",
             Self::InternalError => "internal_error",
         }
     }
@@ -317,7 +323,7 @@ impl Metrics {
         let upstream_responses = IntCounterVec::new(
             Opts::new(
                 "kallipai_model_gateway_upstream_responses_total",
-                "Upstream response status classes by upstream address and API family, one count per response at the first upstream header; mid-stream breaks after a healthy header land in the forward table's upstream_error, so the two tables do not sum equal.",
+                "Upstream response status classes by upstream address and API family, one count per response at the first upstream header; a break after a healthy header lands in the forward table's terminal outcome -- upstream_error when the upstream side broke it, downstream_error when the downstream side did -- so the two tables do not sum equal.",
             ),
             &["upstream", "api_family", "status_class"],
         )
@@ -433,8 +439,10 @@ impl Metrics {
     /// the first upstream header (the status line is in). Mid-stream
     /// breaks after a healthy header still count here under the status
     /// class the header carried; the forward table's terminal outcome
-    /// records the break as `upstream_error`, so the two tables do not sum
-    /// equal (their difference is the mid-stream death count).
+    /// records the break as `upstream_error` when the upstream side
+    /// broke it and as `downstream_error` when the downstream side
+    /// did, so the two tables do not sum equal (their difference is
+    /// the mid-stream death count).
     pub(crate) fn record_upstream_response(
         &self,
         upstream: &str,
@@ -594,6 +602,7 @@ mod tests {
             ForwardOutcome::UpstreamOther,
             ForwardOutcome::ConnectError,
             ForwardOutcome::UpstreamError,
+            ForwardOutcome::DownstreamError,
             ForwardOutcome::InternalError,
         ];
         let rendered: Vec<&str> = all.iter().map(|o| o.as_str()).collect();
@@ -611,6 +620,7 @@ mod tests {
                 "upstream_other",
                 "connect_error",
                 "upstream_error",
+                "downstream_error",
                 "internal_error",
             ]
         );
