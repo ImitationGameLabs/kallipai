@@ -349,8 +349,8 @@ export class ChannelsStore {
     // Rehydrate the unread watermark before the drain starts: the store's
     // per-observe persists only help if the baseline landed first, and the
     // cache read above is already openRelay's serialization point. A fresh
-    // device (null) arms the store's seed-pending (first observed line
-    // becomes the watermark instead of counting the backlog).
+    // device (null) arms the store's seed-pending: the whole adopted window
+    // is then read as already read, and its tail becomes the watermark.
     unreadStore.hydrateTagma(
       tagma.tagma_id,
       await getReadWatermark(tagma.tagma_id),
@@ -377,11 +377,10 @@ export class ChannelsStore {
       conv.setStatusSnapshot(this.statusBackfill(tagma.tagma_id));
     }
     this.setRelayConv(channel.conversationId, conv);
-    // Catch up from the hydrated high-water to the newest server row
-    // (a fresh device gets one recent batch). Fire-and-forget, mirroring
-    // attachLocal: the drain runs concurrently, the UI is interactive
-    // meanwhile, and RelayConversation.catchUp owns the pull loop +
-    // per-batch timeouts + the notification floor.
+    // Adopt the newest window (one batch; older rows page on scroll-up).
+    // Fire-and-forget, mirroring attachLocal: the drain runs concurrently,
+    // the UI is interactive meanwhile, and RelayConversation.catchUp owns the
+    // pull, the batch timeout, the fold, and the notification floor.
     void conv.run();
     void conv.catchUp();
     // Flush the durable unsent lines (offline/failed sends) once the

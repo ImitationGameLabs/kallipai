@@ -1,5 +1,5 @@
-// Tests for the relay leaf's lazy-window machinery: the catch-up pull loop
-// (after-pages until the cursor stops advancing), the before-page reroute
+// Tests for the relay leaf's lazy-window machinery: the newest-window
+// pull (one page per open), the before-page reroute
 // (replay rows buffer instead of being dedup-dropped, then fold through
 // applyPulledRows), the per-batch marker timeout (the server deliberately
 // omits the marker on partial delivery), and the id-floor background-
@@ -30,6 +30,8 @@ declare global {
 const { assertEquals } = await import("@std/assert");
 const { shouldNotify, WINDOW_PAGE, RelayConversation } =
   await import("./conversation.svelte.ts");
+const { unreadStore, tagmaKey, badgeLabel } =
+  await import("./unread.svelte.ts");
 type ConversationStoreLike = {
   get(id: string): unknown;
 };
@@ -63,6 +65,16 @@ class FakeChannel {
   readonly conversationId = "conv-1";
   readonly localParticipant = USER;
   script: ScriptedPull[];
+  /** Every history() call this channel received, in order. */
+  readonly calls: {
+    after: number | null;
+    before: number | null;
+    limit: number | undefined;
+  }[] = [];
+  /** Deliver the scripted rows synchronously inside history() and only the
+   *  marker on a macrotask: pins what the badge reads while a batch is still
+   *  arriving (its rows landed, its marker has not). */
+  syncRows = false;
   private reqSeq = 0;
   private deliver:
     | ((f: { sender: Participant; reply: TagmaReply }) => void)
@@ -78,26 +90,40 @@ class FakeChannel {
     limit?: number;
   }): Promise<number> {
     const req_id = ++this.reqSeq;
+    this.calls.push({
+      after: opts.after ?? null,
+      before: opts.before ?? null,
+      limit: opts.limit,
+    });
     const scripted = this.script.shift() ?? { rows: [] };
     scripted.after = opts.after ?? null;
     scripted.before = opts.before ?? null;
-    setTimeout(() => this.flush(scripted, req_id), 0);
+    if (this.syncRows) {
+      for (const r of scripted.rows) this.deliver?.(r);
+      if (!scripted.noMarker) {
+        setTimeout(() => this.deliverMarker(scripted, req_id), 0);
+      }
+    } else {
+      setTimeout(() => this.flush(scripted, req_id), 0);
+    }
     return Promise.resolve(req_id);
   }
 
   private flush(s: ScriptedPull, req_id: number): void {
     for (const r of s.rows) this.deliver?.(r);
-    if (!s.noMarker) {
-      this.deliver?.({
-        sender: AGENT,
-        reply: {
-          kind: "history_batch_end",
-          req_id,
-          count: s.rows.length,
-          more: s.more ?? false,
-        },
-      });
-    }
+    if (!s.noMarker) this.deliverMarker(s, req_id);
+  }
+
+  private deliverMarker(s: ScriptedPull, req_id: number): void {
+    this.deliver?.({
+      sender: AGENT,
+      reply: {
+        kind: "history_batch_end",
+        req_id,
+        count: s.rows.length,
+        more: s.more ?? false,
+      },
+    });
   }
 }
 
@@ -143,6 +169,24 @@ function makeConv(channel: FakeChannel): RelayConv {
   return conv;
 }
 
+/** Record the line-count growth of every transcript assignment: a batched
+ *  window grows the transcript once (by the page size), a row-by-row replay
+ *  grows it once per row. */
+function countTranscriptGrowth(conv: RelayConv): () => number[] {
+  const growth: number[] = [];
+  let current = conv.transcript;
+  Object.defineProperty(conv, "transcript", {
+    configurable: true,
+    get: () => current,
+    set: (v) => {
+      const before = current.lines.length;
+      if (v.lines.length > before) growth.push(v.lines.length - before);
+      current = v;
+    },
+  });
+  return () => growth;
+}
+
 function eventRow(id: number, text = `msg ${id}`): HistoryEntry {
   return {
     sender: AGENT,
@@ -170,20 +214,6 @@ function lineOf(id: number) {
     sender: { kind: "agent" as const, id: "tagma-1", handle: "Tagma" },
   };
 }
-
-Deno.test("catchUp pages after-batches until more goes false", async () => {
-  const channel = new FakeChannel([
-    { rows: [eventRow(11), eventRow(12)], more: true },
-    { rows: [eventRow(13)], more: false },
-  ]);
-  const conv = makeConv(channel);
-  conv.maxRendered = 10;
-  await conv.catchUp();
-  assertEquals(channel.script.length, 0); // script consumed: two pages
-  assertEquals(conv.transcript.lines.length, 3);
-  assertEquals(conv.maxRendered, 13);
-  assertEquals(conv.minRendered, 11);
-});
 
 Deno.test("catchUp on an empty window takes one recent batch", async () => {
   const channel = new FakeChannel([
@@ -367,3 +397,218 @@ Deno.test("a dead transport folds pulls and drops deliveries", async () => {
   assertEquals(enqueues, 0);
   assertEquals(signals, 0);
 });
+
+Deno.test(
+  "catchUp takes one newest window instead of a gap replay",
+  async () => {
+    // A returning device with rows above its watermark: the window is the unit.
+    // A page-by-page gap replay is what dripped the badge and the transcript.
+    const channel = new FakeChannel([
+      { rows: [eventRow(11), eventRow(12)], more: true },
+      { rows: [eventRow(13)], more: true },
+    ]);
+    const conv = makeConv(channel);
+    conv.maxRendered = 10;
+    await conv.catchUp();
+    assertEquals(channel.calls.length, 1);
+    assertEquals(channel.calls[0], {
+      after: null,
+      before: null,
+      limit: WINDOW_PAGE,
+    });
+    assertEquals(
+      conv.transcript.lines.map((l) => l.historyId),
+      [11, 12],
+    );
+    assertEquals(conv.minRendered, 11);
+    assertEquals(conv.maxRendered, 12);
+  },
+);
+
+Deno.test("the adopted window folds in one transcript update", async () => {
+  const run = async (ids: number[]) => {
+    const channel = new FakeChannel([{ rows: ids.map((id) => eventRow(id)) }]);
+    const conv = makeConv(channel);
+    const growth = countTranscriptGrowth(conv);
+    await conv.catchUp();
+    assertEquals(conv.transcript.lines.length, ids.length);
+    return growth();
+  };
+  assertEquals(await run([1, 2, 3]), [3]); // one update for the page
+  assertEquals(await run([1]), [1]);
+});
+
+Deno.test("a fresh device badges nothing for the replayed window", async () => {
+  unreadStore.reset();
+  unreadStore.hydrateTagma("tagma-1", null); // no stored watermark
+  const channel = new FakeChannel([
+    { rows: [1, 2, 3, 4, 5].map((id) => eventRow(id)) },
+  ]);
+  const conv = makeConv(channel);
+  await conv.catchUp();
+  assertEquals(conv.transcript.lines.length, 5);
+  assertEquals(unreadStore.countOf(tagmaKey("tagma-1")), 0);
+});
+
+Deno.test("the badge moves once, at the batch's end", async () => {
+  unreadStore.reset();
+  unreadStore.hydrateTagma("tagma-1", 0);
+  const channel = new FakeChannel([
+    { rows: [eventRow(1), eventRow(2), eventRow(3)] },
+  ]);
+  // Rows land inside the request; the marker has not. The badge must still
+  // read 0 here and take the batch's value in one assignment.
+  channel.syncRows = true;
+  const conv = makeConv(channel);
+  const done = conv.catchUp();
+  assertEquals(unreadStore.countOf(tagmaKey("tagma-1")), 0);
+  await done;
+  assertEquals(unreadStore.countOf(tagmaKey("tagma-1")), 3);
+});
+
+Deno.test("a window that reaches the watermark counts exactly", async () => {
+  unreadStore.reset();
+  unreadStore.hydrateTagma("tagma-1", 44);
+  const channel = new FakeChannel([
+    {
+      rows: [
+        userRow(40),
+        eventRow(41),
+        eventRow(42),
+        eventRow(43),
+        eventRow(45),
+        eventRow(46),
+        eventRow(47),
+      ],
+    },
+  ]);
+  const conv = makeConv(channel);
+  await conv.catchUp();
+  // 41..43 sit at or below the watermark (already read); only 45..47 are new,
+  // and none of my own rows count.
+  assertEquals(unreadStore.countOf(tagmaKey("tagma-1")), 3);
+});
+
+Deno.test("a contentless event counts on the window path too", async () => {
+  unreadStore.reset();
+  unreadStore.hydrateTagma("tagma-1", 0);
+  const channel = new FakeChannel([{ rows: [eventRow(1), eventRow(2, "")] }]);
+  const conv = makeConv(channel);
+  await conv.catchUp();
+  // countsAsUnread is the single predicate behind both entrances: an event
+  // line with a durable id badges even when its content renders nothing, the
+  // same set the live hook counts.
+  assertEquals(unreadStore.countOf(tagmaKey("tagma-1")), 2);
+});
+
+Deno.test("a full window short of the watermark reads as the cap", async () => {
+  unreadStore.reset();
+  unreadStore.hydrateTagma("tagma-1", 10);
+  const rows = Array.from({ length: WINDOW_PAGE }, (_, i) => eventRow(500 + i));
+  const channel = new FakeChannel([{ rows, more: false }]);
+  const conv = makeConv(channel);
+  await conv.catchUp();
+  // Rows between the watermark and the window head were never pulled, so the
+  // number is a floor, not a count: it must read as the cap, never as a
+  // silently short "50".
+  assertEquals(badgeLabel(unreadStore.countOf(tagmaKey("tagma-1"))), "99+");
+});
+
+Deno.test(
+  "a window adopted over a gap leaves no stale segment rendered",
+  async () => {
+    const channel = new FakeChannel([
+      { rows: [eventRow(500), eventRow(501), eventRow(502)], more: false },
+    ]);
+    const conv = makeConv(channel);
+    conv.transcript = { lines: [100, 101, 102].map(lineOf), status: "idle" };
+    conv.minRendered = 100;
+    conv.maxRendered = 102;
+    await conv.catchUp();
+    // Keeping the old cache tail beside the new window would render an unknown
+    // gap between them that no page can fill; the window becomes the window.
+    assertEquals(
+      conv.transcript.lines.map((l) => l.historyId),
+      [500, 501, 502],
+    );
+    assertEquals(conv.minRendered, 500);
+    assertEquals(conv.maxRendered, 502);
+    // Scroll-up continues from the adopted head (the dropped tail is not a
+    // paging cursor any more), and the server page is the contiguous source.
+    channel.script.push({ rows: [eventRow(490)], more: true });
+    conv.hasMoreOlder = true; // the scripted window is short; force the sentinel
+    await conv.loadOlder();
+    assertEquals(channel.calls[1]?.before, 500);
+    assertEquals(
+      conv.transcript.lines.map((l) => l.historyId),
+      [490, 500, 501, 502],
+    );
+  },
+);
+
+/** A cached page of durable rows (the shape readTailBefore returns). */
+function cachedRows(ids: number[]) {
+  return ids.map((id) => ({
+    conversationId: "conv-1",
+    historyId: id,
+    role: "assistant",
+    text: `msg ${id}`,
+    sender: { kind: "agent" as const, id: "tagma-1", handle: "Tagma" },
+  }));
+}
+
+/** Replace the leaf's cache read (IndexedDB is absent under deno test). */
+function stubCachedPage(conv: RelayConv, rows: unknown[]): void {
+  (
+    conv as unknown as { readCachedPage: (k: number) => Promise<unknown[]> }
+  ).readCachedPage = () => Promise.resolve(rows);
+}
+
+Deno.test(
+  "a cached page that does not touch the window is skipped for the server page",
+  async () => {
+    // The cache holds an old segment (100..101) the window (500..502) does not
+    // reach; splicing it in would render a hole paging can never fill.
+    const channel = new FakeChannel([
+      { rows: [eventRow(490), eventRow(491)], more: true },
+    ]);
+    const conv = makeConv(channel);
+    conv.transcript = { lines: [500, 501, 502].map(lineOf), status: "idle" };
+    conv.minRendered = 500;
+    conv.maxRendered = 502;
+    stubCachedPage(conv, cachedRows([100, 101]));
+    await conv.loadOlder();
+    assertEquals(channel.calls[0], {
+      after: null,
+      before: 500,
+      limit: WINDOW_PAGE,
+    });
+    assertEquals(
+      conv.transcript.lines.map((l) => l.historyId),
+      [490, 491, 500, 501, 502],
+    );
+    assertEquals(conv.minRendered, 490);
+  },
+);
+
+Deno.test(
+  "an adjacent cached page is used and paging continues below it",
+  async () => {
+    const channel = new FakeChannel([{ rows: [], more: false }]);
+    const conv = makeConv(channel);
+    conv.transcript = { lines: [500, 501, 502].map(lineOf), status: "idle" };
+    conv.minRendered = 500;
+    conv.maxRendered = 502;
+    // 499 abuts the head: a continuous segment, safe to render.
+    stubCachedPage(conv, cachedRows([497, 498, 499]));
+    await conv.loadOlder();
+    assertEquals(
+      conv.transcript.lines.map((l) => l.historyId),
+      [497, 498, 499, 500, 501, 502],
+    );
+    assertEquals(conv.minRendered, 497);
+    // The server page continues BELOW the merged rows: re-fetching 497..499
+    // would fold to nothing and disarm the sentinel with history still below.
+    assertEquals(channel.calls[0]?.before, 497);
+  },
+);

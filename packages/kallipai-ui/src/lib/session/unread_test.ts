@@ -24,6 +24,7 @@ const { unreadStore, badgeLabel, roomKey, tagmaKey, CATCHUP_PAGE } =
 
 let armed: (() => void)[] = [];
 let puts: [string, number][] = [];
+let wmPuts: [string, number][] = [];
 let selfId: string | null = "me";
 let pages: Map<string, { seq: number; senderId: string }[]>;
 
@@ -34,6 +35,10 @@ function installSeams(): void {
   });
   unreadStore.setReadCursorPutter((roomId, seq) => {
     puts.push([roomId, seq]);
+    return Promise.resolve();
+  });
+  unreadStore.setWatermarkPutter((tagmaId, historyId) => {
+    wmPuts.push([tagmaId, historyId]);
     return Promise.resolve();
   });
   unreadStore.setSelfId(() => selfId);
@@ -51,6 +56,7 @@ const flush = () => new Promise<void>((r) => setTimeout(r, 0));
 function baseline(): void {
   armed = [];
   puts = [];
+  wmPuts = [];
   selfId = "me";
   pages = new Map();
   installSeams();
@@ -245,5 +251,97 @@ Deno.test(
       ["r1", 3],
       ["r1", 9],
     ]);
+  },
+);
+
+Deno.test(
+  "window adoption: the seed suppresses the whole window, live lines accrue",
+  () => {
+    baseline();
+    unreadStore.hydrateTagma("t1", null); // never stored a watermark
+    unreadStore.applyTagmaWindow("t1", {
+      headId: 10,
+      tailId: 14,
+      peerIds: [10, 11, 12, 13, 14],
+      full: false,
+    });
+    assertEquals(unreadStore.countOf(tagmaKey("t1")), 0);
+    // A line that lands AFTER the window is genuinely new.
+    unreadStore.observeTagmaLine("t1", 15);
+    assertEquals(unreadStore.countOf(tagmaKey("t1")), 1);
+    // The next window counts the rows above the adopted tail.
+    unreadStore.applyTagmaWindow("t1", {
+      headId: 16,
+      tailId: 18,
+      peerIds: [16, 17, 18],
+      full: false,
+    });
+    assertEquals(unreadStore.countOf(tagmaKey("t1")), 4);
+  },
+);
+
+Deno.test("window adoption while viewing keeps the badge at zero", () => {
+  baseline();
+  unreadStore.hydrateTagma("t1", 0);
+  unreadStore.enter(tagmaKey("t1"));
+  unreadStore.applyTagmaWindow("t1", {
+    headId: 1,
+    tailId: 3,
+    peerIds: [1, 2, 3],
+    full: false,
+  });
+  assertEquals(unreadStore.countOf(tagmaKey("t1")), 0);
+});
+
+Deno.test(
+  "a full window short of the watermark caps; an adjacent one is exact",
+  () => {
+    baseline();
+    unreadStore.hydrateTagma("t1", 10); // watermark far below the window
+    const far = Array.from({ length: 50 }, (_, i) => 500 + i);
+    unreadStore.applyTagmaWindow("t1", {
+      headId: 500,
+      tailId: 549,
+      peerIds: far,
+      full: true,
+    });
+    // Rows between the watermark and the window head were never pulled: the
+    // count is a floor, so it reads as the cap instead of a short number.
+    assertEquals(badgeLabel(unreadStore.countOf(tagmaKey("t1"))), "99+");
+
+    unreadStore.hydrateTagma("t2", 40);
+    unreadStore.applyTagmaWindow("t2", {
+      headId: 41, // reaches the watermark: nothing between them
+      tailId: 45,
+      peerIds: [41, 42, 43, 45],
+      full: true,
+    });
+    assertEquals(unreadStore.countOf(tagmaKey("t2")), 4);
+  },
+);
+
+Deno.test(
+  "a stale 1:1 window never writes the persisted watermark back",
+  () => {
+    baseline();
+    unreadStore.hydrateTagma("t1", 10);
+    unreadStore.applyTagmaWindow("t1", {
+      headId: 20,
+      tailId: 30,
+      peerIds: [25],
+      full: false,
+    });
+    assertEquals(wmPuts, [["t1", 30]]);
+    assertEquals(unreadStore.countOf(tagmaKey("t1")), 1);
+    // A window from a stale instance (its catch-up resolved late) sits
+    // below the fence: it must neither count nor move the watermark back.
+    unreadStore.applyTagmaWindow("t1", {
+      headId: 5,
+      tailId: 8,
+      peerIds: [6, 7],
+      full: false,
+    });
+    assertEquals(wmPuts, [["t1", 30]]);
+    assertEquals(unreadStore.countOf(tagmaKey("t1")), 1);
   },
 );
