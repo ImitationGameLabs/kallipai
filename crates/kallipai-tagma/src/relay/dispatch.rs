@@ -180,6 +180,8 @@ impl RelayHandle {
                         req_id,
                         count: 0,
                         more: false,
+                        unread: 0,
+                        cursor: 0,
                     },
                     None,
                 )
@@ -233,6 +235,11 @@ impl RelayHandle {
             }
             count += 1;
         }
+        // The count and the cursor travel with the marker: the app sets its
+        // badge from this one number instead of counting the rows it
+        // receives, and the cursor pairs with it so a snapshot computed
+        // earlier cannot overwrite a newer one on arrival order alone.
+        let (cursor, unread) = projector.unread_snapshot(Some(peer.id.as_ref())).await;
         if let Err(e) = self
             .emit(
                 trace,
@@ -241,6 +248,8 @@ impl RelayHandle {
                     req_id,
                     count,
                     more,
+                    unread,
+                    cursor,
                 },
                 None,
             )

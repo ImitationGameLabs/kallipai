@@ -32,13 +32,14 @@ use std::time::Duration;
 use kallipai_archeion_common::ids::{ConversationId, ParticipantId, ParticipantKind, TagmaId};
 use kallipai_common::protocol::SseEvent;
 use kallipai_common::protocol::agent::FileAttachment;
+use kallipai_lesche_common::event::UnreadSnapshot;
 use kallipai_lesche_common::message::{HistoryEntry, Participant, TagmaReply};
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{Mutex, broadcast};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
-use crate::bus::{AuthoredFrame, SignalFrame};
+use crate::bus::{AuthoredFrame, SignalFrame, UnreadFrame};
 use crate::relay::MessageLimits;
 use crate::relay::RelayMessageError;
 use crate::relay::chat_history::{self, Db};
@@ -253,6 +254,86 @@ impl ExternalProjector {
         }
     }
 
+    /// The read cursor and unread count of one partition (`None` = the
+    /// operator/direct partition): the count is outbound rows above the
+    /// watermark. `(0, 0)` when this tagma has no history store — the
+    /// offline-only shape has nothing to count, and callers stay branch-free.
+    pub(crate) async fn unread_snapshot(&self, user_id: Option<&str>) -> (i64, u32) {
+        let Some(db) = self.inner.history.clone() else {
+            return (0, 0);
+        };
+        match chat_history::unread_snapshot(&db, user_id).await {
+            Ok(snapshot) => snapshot,
+            Err(e) => {
+                error!("unread snapshot failed: {e:#}");
+                (0, 0)
+            }
+        }
+    }
+
+    /// Advance a partition's read cursor (monotonic and capped at the
+    /// partition's newest row in the store) and publish the resulting
+    /// snapshot, so every device of this user — not just the one that was read
+    /// on — sees the badge drop. `None` when there is no store.
+    pub(crate) async fn put_cursor(&self, user_id: Option<&str>, cursor: i64) -> Option<()> {
+        let db = self.inner.history.clone()?;
+        if let Err(e) = chat_history::put_cursor(&db, user_id, cursor).await {
+            error!("read cursor write failed: {e:#}");
+            return None;
+        }
+        let (cursor, unread) = self.unread_snapshot(user_id).await;
+        self.publish_unread(user_id, cursor, unread);
+        Some(())
+    }
+
+    /// The wire shape of one partition's snapshot: the peer key, the watermark
+    /// the count was measured against, and the count. The bus frame and the
+    /// flusher's cold-start buffer carry exactly this.
+    fn snapshot(user_id: Option<&str>, cursor: i64, unread: u32) -> UnreadSnapshot {
+        UnreadSnapshot {
+            peer: chat_history::peer_key(user_id).to_string(),
+            cursor,
+            unread,
+        }
+    }
+
+    /// Announce a partition's unread snapshot on the bus. Live-only: the next
+    /// cursor write or outbound row re-announces it, so a dropped frame costs
+    /// staleness, never a lost count.
+    pub(crate) fn publish_unread(&self, user_id: Option<&str>, cursor: i64, unread: u32) {
+        self.publish(UnreadFrame(Self::snapshot(user_id, cursor, unread)));
+    }
+
+    /// Every partition this tagma holds history for: what the upstream
+    /// flusher's cold-start announcement walks. Empty without a store.
+    pub(crate) async fn known_peers(&self) -> Vec<Option<String>> {
+        let Some(db) = self.inner.history.clone() else {
+            return Vec::new();
+        };
+        match chat_history::peers(&db).await {
+            Ok(peers) => peers,
+            Err(e) => {
+                error!("partition enumeration failed: {e:#}");
+                Vec::new()
+            }
+        }
+    }
+
+    /// Every known partition's current snapshot, for the flusher's cold-start
+    /// warm. The flusher stashes these in its own pending buffer instead of
+    /// subscribing to one bus frame per partition: the bus drops a receiver
+    /// that falls a full ring behind, so an install with more partitions than
+    /// the unread topic's capacity would silently lose the tail before the
+    /// first drain.
+    pub(crate) async fn cold_start_unread(&self) -> Vec<UnreadSnapshot> {
+        let mut snapshots = Vec::new();
+        for peer in self.known_peers().await {
+            let (cursor, unread) = self.unread_snapshot(peer.as_deref()).await;
+            snapshots.push(Self::snapshot(peer.as_deref(), cursor, unread));
+        }
+        snapshots
+    }
+
     /// Run the outbound burst check WITHOUT persisting or publishing. The
     /// room send bypasses the bilateral projector (no `chat_history` row, no
     /// bilateral frame) but shares this one rate limit, because both paths are
@@ -411,29 +492,35 @@ impl ExternalProjector {
         (entries, more)
     }
 
-    /// Append an outbound row once and stamp its row id + `created_at` onto
-    /// `reply`. The row keys on the current turn's partition (the agent speaks
-    /// *to* the peer); the agent's own identity is not stored (reconstructed at
-    /// read). Graceful-degrade: a failure leaves `history_id` at 0 and the
-    /// caller still publishes the frame live.
+    /// Append an outbound row once, stamp its row id + `created_at` onto
+    /// `reply`, then re-announce the partition's unread snapshot: a new reply
+    /// raises the count everywhere, and with a cursor write that is the only
+    /// other point where the number moves.
+    ///
+    /// The row keys on the current turn's partition (the agent speaks *to* the
+    /// peer); the agent's own identity is not stored (reconstructed at read).
+    /// Graceful-degrade: a failure leaves `history_id` at 0 and the caller
+    /// still publishes the frame live.
     async fn stamp(&self, text: &str, reply: &mut TagmaReply) {
         let Some(db) = self.inner.history.clone() else {
             return;
         };
         let partition = self.inner.partition.lock().await.clone();
         let (user_id, username) = peer_fields(&partition);
-        if let Ok((id, created_at)) = chat_history::append(
+        match chat_history::append_outbound_snapshot(
             &db,
             user_id.as_deref(),
             username.as_deref(),
-            "outbound",
             text,
-            None,
         )
         .await
         {
-            reply.set_history_id(id);
-            reply.set_created_at(created_at);
+            Ok((id, created_at, cursor, unread)) => {
+                reply.set_history_id(id);
+                reply.set_created_at(created_at);
+                self.publish_unread(user_id.as_deref(), cursor, unread);
+            }
+            Err(e) => error!("outbound history append failed: {e:#}"),
         }
     }
 

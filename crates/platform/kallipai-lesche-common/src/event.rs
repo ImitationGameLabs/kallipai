@@ -230,6 +230,24 @@ pub enum UpstreamEvent {
     /// the variant-size spread is not worth carrying inline (clippy
     /// large_enum_variant).
     Projection(Box<crate::projection::ProjectionSnapshot>),
+    /// One peer partition's read position and the unread count derived from
+    /// it. Fans like the signal POST (owner-stream rebroadcast), but the
+    /// keryx also caches it so a connecting device is flushed the current
+    /// number (see `KeryxEvent::TagmaUnread`). Plaintext by design: the relay
+    /// learns *that* the user has read up to a row, never what the row says --
+    /// content stays on the encrypted envelope path.
+    Unread(UnreadSnapshot),
+}
+
+/// One peer partition's read position, as relayed to the owner's app stream.
+/// `peer` is the relay peer's `ParticipantId` (or the empty string for the
+/// direct/operator partition); `cursor` is the newest `chat_history` row the
+/// user has read; `unread` is the number of the agent's replies above it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnreadSnapshot {
+    pub peer: String,
+    pub cursor: i64,
+    pub unread: u32,
 }
 
 #[cfg(test)]
@@ -253,6 +271,17 @@ mod upstream_shape_tests {
         });
         let event: UpstreamEvent = serde_json::from_value(json.clone()).expect("parses");
         assert!(matches!(event, UpstreamEvent::Status(_)));
+        assert_eq!(serde_json::to_value(&event).expect("serializes"), json);
+    }
+
+    #[test]
+    fn unread_variant_adjacent_tag_shape() {
+        let json = serde_json::json!({
+            "type": "unread",
+            "event": { "peer": "p1", "cursor": 7, "unread": 2 },
+        });
+        let event: UpstreamEvent = serde_json::from_value(json.clone()).expect("parses");
+        assert!(matches!(event, UpstreamEvent::Unread(_)));
         assert_eq!(serde_json::to_value(&event).expect("serializes"), json);
     }
 

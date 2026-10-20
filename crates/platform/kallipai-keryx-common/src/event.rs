@@ -79,6 +79,20 @@ pub enum KeryxEvent {
         tagma_id: TagmaId,
         event: SignalEvent,
     },
+    /// A 1:1 conversation's read position moved (or its unread count changed
+    /// with a new reply). Plaintext and user-scoped like the status family:
+    /// the relay learns *that* the user has read up to a row, never what the
+    /// row says. Cached per tunnel and flushed to a connecting app stream, so
+    /// a cold start badges every conversation without opening any of them.
+    TagmaUnread {
+        tagma_id: TagmaId,
+        /// The peer partition (`ParticipantId`, or empty for the operator).
+        peer: String,
+        /// Newest `chat_history` row the user has read.
+        cursor: i64,
+        /// The agent's replies above the cursor.
+        unread: u32,
+    },
 }
 
 #[cfg(test)]

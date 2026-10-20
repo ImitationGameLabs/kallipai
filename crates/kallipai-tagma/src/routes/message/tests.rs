@@ -2,7 +2,8 @@ use super::*;
 use crate::auth::{AuthIdentity, Identity};
 use crate::state::{AgentId, RegistryEntry};
 use crate::test_helpers::{
-    add_faulted_root, add_root, add_sub, install_inbox_store, make_entry_with_rx, make_state,
+    add_faulted_root, add_root, add_sub, install_inbox_store, install_projector,
+    make_entry_with_rx, make_state,
 };
 use axum::Json;
 use axum::extract::{Path, State};
@@ -445,42 +446,6 @@ async fn duty_toggle_off_then_on() {
 // -- inbound recording vs refusal: a refused message must not append a
 // transcript row (the frontend re-sends refusals), an accepted one records
 // exactly one, and an accepted-but-buffered (off-duty) one still records --
-
-use crate::external::ExternalProjector;
-use crate::relay::MessageLimits;
-use kallipai_archeion_common::ids::{ConversationId, TagmaId};
-use std::sync::Arc;
-use tempfile::TempDir;
-
-/// Install an external projector with a real (tempdir) history store and
-/// subscribe to its frames. Returns the db handle, the frame receiver, and
-/// the tempdir (keep it alive for the test's duration).
-async fn install_projector(
-    state: &crate::state::SharedState,
-) -> (
-    crate::relay::chat_history::Db,
-    crate::bus::TopicReceiver<crate::bus::AuthoredFrame>,
-    TempDir,
-) {
-    let dir = TempDir::new().unwrap();
-    let db = crate::relay::chat_history::open(
-        &dir.path().join("h.sqlite"),
-        std::time::Duration::from_millis(100),
-    )
-    .await
-    .unwrap();
-    let projector = ExternalProjector::new(
-        Arc::downgrade(state),
-        Some(db.clone()),
-        Some(ConversationId::for_tagma(&TagmaId::from("t".to_string()))),
-        Some(TagmaId::from("t".to_string())),
-        Some("Tagma".into()),
-        MessageLimits::default(),
-    );
-    let rx = state.bus.subscribe::<crate::bus::AuthoredFrame>().unwrap();
-    let _ = state.external.set(projector);
-    (db, rx, dir)
-}
 
 async fn operator_rows(
     db: &crate::relay::chat_history::Db,

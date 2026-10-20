@@ -248,14 +248,15 @@ impl RelayHandle {
             req_id, trace = %trace, method, path = %frame_path,
             "manage-rest frame accepted"
         );
-        let reply: TagmaReply = AssertUnwindSafe(self.dispatch_manage(method, frame_path, body))
-            .catch_unwind()
-            .await
-            .unwrap_or_else(|_| TagmaReply::ManageResult {
-                req_id,
-                status: 502,
-                body: serde_json::json!({"error":{"message":"relay manage panicked"}}),
-            });
+        let reply: TagmaReply =
+            AssertUnwindSafe(self.dispatch_manage(method, frame_path, body, None))
+                .catch_unwind()
+                .await
+                .unwrap_or_else(|_| TagmaReply::ManageResult {
+                    req_id,
+                    status: 502,
+                    body: serde_json::json!({"error":{"message":"relay manage panicked"}}),
+                });
         let (status, body) = match &reply {
             TagmaReply::ManageResult { status, body, .. } => (*status, body.clone()),
             _ => (
@@ -332,6 +333,10 @@ mod manage_rest_tests {
             ("POST", "/agents//interrupt"),
             ("GET", "/agents/x"),
             ("DELETE", "/agents/x/duty"),
+            // The read cursor is partition-scoped and a plaintext frame
+            // carries no peer, so admitting it would write the operator
+            // partition: only the E2E envelope path may call it.
+            ("PUT", "/agents/x/external/read-cursor"),
             ("DELETE", "/agents/x/sub"),
             ("DELETE", "/agents/"),
             ("DELETE", "/agents//x"),

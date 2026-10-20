@@ -224,8 +224,15 @@ impl RelayHandle {
                 else {
                     return;
                 };
-                self.handle_manage(&trace, req_id, &method, &path, body)
-                    .await;
+                self.handle_manage(
+                    &trace,
+                    req_id,
+                    &method,
+                    &path,
+                    body,
+                    Some(sender.id.as_ref()),
+                )
+                .await;
             }
             other => warn!(req_id, op = other, "unknown op; dropping"),
         }

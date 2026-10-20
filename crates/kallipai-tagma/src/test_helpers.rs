@@ -20,11 +20,21 @@ use kallipai_common::protocol::AgentState;
 use tokio::sync::{Mutex, broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
 
+#[cfg(test)]
+use crate::bus::{AuthoredFrame, TopicReceiver};
+#[cfg(test)]
+use crate::external::ExternalProjector;
+#[cfg(test)]
+use crate::relay::{MessageLimits, chat_history};
 use crate::state::{
     Agent, AgentEntry, AgentIdentity, AgentRegistry, AppState, FaultedEntry, RegistryEntry,
     SharedState,
 };
+#[cfg(test)]
+use kallipai_archeion_common::ids::{ConversationId, TagmaId};
 use kallipai_common::authtoken::TokenHash;
+#[cfg(test)]
+use tempfile::TempDir;
 
 /// Construct a full `AgentEntry` with real channels, the default preset, and an
 /// empty exec-policy.
@@ -482,6 +492,34 @@ pub async fn install_inbox_store(state: &SharedState) {
         .set(crate::inbox::InboxStore::open_in_memory().await)
         .ok();
 }
+
+/// Install an external projector with a real (tempdir) history store and
+/// subscribe to its frames. Returns the db handle, the frame receiver, and the
+/// tempdir (keep it alive for the test's duration).
+#[cfg(test)]
+pub(crate) async fn install_projector(
+    state: &SharedState,
+) -> (chat_history::Db, TopicReceiver<AuthoredFrame>, TempDir) {
+    let dir = TempDir::new().unwrap();
+    let db = chat_history::open(
+        &dir.path().join("h.sqlite"),
+        std::time::Duration::from_millis(100),
+    )
+    .await
+    .unwrap();
+    let projector = ExternalProjector::new(
+        Arc::downgrade(state),
+        Some(db.clone()),
+        Some(ConversationId::for_tagma(&TagmaId::from("t".to_string()))),
+        Some(TagmaId::from("t".to_string())),
+        Some("Tagma".into()),
+        MessageLimits::default(),
+    );
+    let frames = state.bus.subscribe::<AuthoredFrame>().unwrap();
+    let _ = state.external.set(projector);
+    (db, frames, dir)
+}
+
 /// Process-wide pinning of `KALLIPAI_TAGMA_SLUG` + `XDG_DATA_HOME` to name a throwaway slug-derived data root for the
 /// whole test run. Idempotent: the first call allocates the tempdir and swaps
 /// the env; later calls are no-ops.

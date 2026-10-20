@@ -3,7 +3,7 @@ use super::*;
 use kallipai_archeion_common::ids::{ParticipantId, ParticipantKind, UserId};
 use kallipai_common::protocol::AgentState;
 use kallipai_common::protocol::AuthoredEvent;
-use kallipai_lesche_common::event::TagmaStatusPayload;
+use kallipai_lesche_common::event::{TagmaStatusPayload, UnreadSnapshot};
 use kallipai_lesche_common::projection::ProjectionSnapshot as ProjectionSnapshotPayload;
 use std::time::Duration;
 
@@ -54,6 +54,7 @@ async fn tagma_topics_roundtrip_preserve_payloads() {
     let mut signals = bus.subscribe::<SignalFrame>().unwrap();
     let mut statuses = bus.subscribe::<StatusSnapshot>().unwrap();
     let mut projections = bus.subscribe::<ProjectionSnapshot>().unwrap();
+    let mut unreads = bus.subscribe::<UnreadFrame>().unwrap();
     let mut tasks = bus.subscribe::<TaskChanged>().unwrap();
     bus.publish(AuthoredFrame {
         sender: user_sender(),
@@ -81,6 +82,12 @@ async fn tagma_topics_roundtrip_preserve_payloads() {
         status: status.clone(),
         push_seq: 9,
         work_schedule: None,
+    }))
+    .unwrap();
+    bus.publish(UnreadFrame(UnreadSnapshot {
+        peer: "bob".into(),
+        cursor: 12,
+        unread: 3,
     }))
     .unwrap();
     bus.publish(TaskChanged {
@@ -113,6 +120,12 @@ async fn tagma_topics_roundtrip_preserve_payloads() {
     assert_eq!(statuses.recv().await.unwrap().0, status);
     let projection = projections.recv().await.unwrap().0;
     assert_eq!(projection.push_seq, 9, "the payload survives the slot");
+    let unread = unreads.recv().await.unwrap().0;
+    assert_eq!(
+        (unread.peer.as_str(), unread.unread),
+        ("bob", 3),
+        "the unread snapshot survives the slot"
+    );
     let task = tasks.recv().await.unwrap();
     assert_eq!(
         (task.task_id, task.title.as_str(), task.status.as_str()),
@@ -143,6 +156,12 @@ async fn tagma_topics_roundtrip_preserve_payloads() {
             },
             TopicStats {
                 topic: "projection_snapshot",
+                publishes: 1,
+                lagged: 0,
+                last_gap: None
+            },
+            TopicStats {
+                topic: "unread_snapshot",
                 publishes: 1,
                 lagged: 0,
                 last_gap: None

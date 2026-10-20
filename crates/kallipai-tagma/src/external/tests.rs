@@ -273,3 +273,99 @@ async fn direct_and_relay_partitions_persist_and_filter() {
         other => panic!("expected peer UserMessage, got {other:?}"),
     }
 }
+
+/// A fresh partition's first outbound message is one unread: the store seeds
+/// the watermark BEFORE it appends, so the new row sits above it. Seeded after
+/// the append, that row would be the watermark and the badge would open at
+/// zero.
+#[tokio::test]
+async fn first_outbound_message_of_a_fresh_partition_is_unread() {
+    let state = make_state();
+    let root = AgentId::from("root".to_string());
+    {
+        let mut registry = state.registry.write().await;
+        registry
+            .register_root(
+                root.clone(),
+                RegistryEntry::Live(make_entry(None, "tok".into())),
+            )
+            .unwrap();
+    }
+    let dir = TempDir::new().unwrap();
+    let db = chat_history::open(
+        &dir.path().join("h.sqlite"),
+        std::time::Duration::from_millis(100),
+    )
+    .await
+    .unwrap();
+    let conv = ConversationId::for_tagma(&tagma_id());
+    let projector = ExternalProjector::new(
+        Arc::downgrade(&state),
+        Some(db.clone()),
+        Some(conv.clone()),
+        Some(tagma_id()),
+        Some("Tagma".into()),
+        MessageLimits::default(),
+    );
+    let mut unread_rx = state.bus.subscribe::<UnreadFrame>().unwrap();
+    let user = user_sender();
+    projector
+        .record_inbound(Some(user.clone()), "hi".into(), None)
+        .await;
+    let peer = user.id.as_ref();
+    let inbound_id = chat_history::read_last_n(&db, Some(peer), 10)
+        .await
+        .unwrap()[0]
+        .id;
+    projector.record_outbound("hello".into()).await.unwrap();
+
+    let UnreadFrame(snapshot) = unread_rx.recv().await.unwrap();
+    assert_eq!(snapshot.peer.as_str(), peer);
+    assert_eq!(
+        snapshot.cursor, inbound_id,
+        "watermark sits on the inbound row"
+    );
+    assert_eq!(snapshot.unread, 1, "the reply above it is unread");
+}
+
+/// The cold-start warm holds one snapshot per known partition, however many
+/// there are. The flusher takes that set straight into its pending buffer, so
+/// the unread topic's ring (16 slots) never bounds it -- routed through the
+/// bus, an install with more partitions would lose the tail before the first
+/// drain.
+#[tokio::test]
+async fn cold_start_covers_every_partition_beyond_the_bus_ring() {
+    let state = make_state();
+    let dir = TempDir::new().unwrap();
+    let db = chat_history::open(
+        &dir.path().join("h.sqlite"),
+        std::time::Duration::from_millis(100),
+    )
+    .await
+    .unwrap();
+    let projector = ExternalProjector::new(
+        Arc::downgrade(&state),
+        Some(db.clone()),
+        None,
+        Some(tagma_id()),
+        Some("Tagma".into()),
+        MessageLimits::default(),
+    );
+    const PARTITIONS: usize = 20;
+    for i in 0..PARTITIONS {
+        let peer = format!("peer-{i}");
+        chat_history::append(&db, Some(&peer), Some("handle"), "outbound", "hi", None)
+            .await
+            .unwrap();
+    }
+    let mut peers: Vec<String> = projector
+        .cold_start_unread()
+        .await
+        .into_iter()
+        .map(|s| s.peer)
+        .collect();
+    peers.sort();
+    let mut expected: Vec<String> = (0..PARTITIONS).map(|i| format!("peer-{i}")).collect();
+    expected.sort();
+    assert_eq!(peers, expected);
+}

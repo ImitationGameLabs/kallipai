@@ -1,11 +1,12 @@
 //! The upstream flusher: the single wire writer for the tagma's plaintext
 //! metadata uplink.
 //!
-//! One task subscribes the status, projection, and signal bus topics and
-//! serializes drained frames into batched `POST /tagmata/{id}/upstream`
-//! requests. This is where the drivers' former per-driver POST/PUT arms
-//! converged: the drivers publish typed snapshots, the flusher alone speaks
-//! `UpstreamEvent` on the wire (the enum never enters the bus).
+//! One task subscribes the status, projection, signal, and unread bus topics
+//! and serializes drained frames into batched
+//! `POST /tagmata/{id}/upstream` requests. This is where the drivers'
+//! former per-driver POST/PUT arms converged: the drivers publish typed
+//! snapshots, the flusher alone speaks `UpstreamEvent` on the wire (the
+//! enum never enters the bus).
 //!
 //! The status face carries its own subscriber gate
 //! here, at the send decision -- the only place a gate can suppress the
@@ -30,6 +31,8 @@
 //! - signal: fire-and-forget, never retained. A signal is a transient
 //!   transition the next event supersedes; retrying one after a failure
 //!   would replay a stale presence flip.
+//! - unread: keep-last PER PEER. A partition's count is latest-wins, so a
+//!   failed POST retains the newest snapshot for each peer and retries.
 //!
 //! Same-topic duplicates collapse per batch: the relay and direct status
 //! drivers both publish (their start/stop triggers are genuinely
@@ -43,11 +46,30 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
 use kallipai_lesche_client::UpstreamFaceCounts;
-use kallipai_lesche_common::event::UpstreamEvent;
+use kallipai_lesche_common::event::{UnreadSnapshot, UpstreamEvent};
 
-use crate::bus::{ProjectionSnapshot, SignalFrame, StatusSnapshot};
+use crate::bus::{ProjectionSnapshot, SignalFrame, StatusSnapshot, UnreadFrame};
 
 use super::RelayHandle;
+
+/// Stash an unread snapshot as keep-last for its peer: the batch then carries
+/// one frame per conversation partition, the newest one.
+fn stash_unread(pending: &mut Vec<UnreadSnapshot>, snapshot: UnreadSnapshot) {
+    match pending.iter_mut().find(|p| p.peer == snapshot.peer) {
+        Some(slot) => *slot = snapshot,
+        None => pending.push(snapshot),
+    }
+}
+
+/// Seed the pending keep-last buffer from the store's per-partition totals.
+/// A cold start has no bus frames to replay: the first batch is whatever the
+/// seed put here, so the unread topic's ring never bounds how many
+/// partitions an install can announce.
+fn seed_pending_unread(pending: &mut Vec<UnreadSnapshot>, snapshots: Vec<UnreadSnapshot>) {
+    for snapshot in snapshots {
+        stash_unread(pending, snapshot);
+    }
+}
 
 impl RelayHandle {
     /// Run the upstream flusher until cancelled or the bus closes. Started
@@ -57,24 +79,40 @@ impl RelayHandle {
         let Some(state) = self.inner.state.upgrade() else {
             return; // startup raced shutdown
         };
-        let (mut status_rx, mut projection_rx, mut signal_rx) = match (
+        let (mut status_rx, mut projection_rx, mut signal_rx, mut unread_rx) = match (
             state.bus.subscribe::<StatusSnapshot>(),
             state.bus.subscribe::<ProjectionSnapshot>(),
             state.bus.subscribe::<SignalFrame>(),
+            state.bus.subscribe::<UnreadFrame>(),
         ) {
-            (Ok(s), Ok(p), Ok(g)) => (s, p, g),
+            (Ok(s), Ok(p), Ok(g), Ok(u)) => (s, p, g, u),
             _ => {
                 warn!("upstream flusher: bus topic missing; not starting");
                 return;
             }
         };
+        let projector = state.external.get().cloned();
         drop(state); // the receivers keep the bus alive; drop our strong ref
-
         // Latest unsent snapshot per topic (keep-last across drain windows
         // when a POST fails). Signals are never retained.
         let mut pending_status: Option<StatusSnapshot> = None;
         let mut pending_projection: Option<ProjectionSnapshot> = None;
         let mut signals: Vec<kallipai_common::protocol::SignalEvent> = Vec::new();
+        // Unread snapshots: keep-last PER PEER (one conversation partition's
+        // number is latest-wins; different peers are different facts).
+        let mut pending_unread: Vec<UnreadSnapshot> = Vec::new();
+
+        // Cold-start warm: every known partition's current snapshot, so a
+        // client connecting between changes badges what it missed instead of
+        // nothing (the keryx keeps one unread per tunnel and starts that cache
+        // empty on a reconnect). One-shot here, never periodic: the change paths
+        // re-announce on their own. The snapshots go straight into the pending
+        // buffer rather than through the bus -- one bus frame per partition
+        // would drop the tail of an install with more partitions than the
+        // unread topic's ring holds, and the warm set is exactly that wide.
+        if let Some(projector) = projector {
+            seed_pending_unread(&mut pending_unread, projector.cold_start_unread().await);
+        }
         let mut retry: Option<std::pin::Pin<Box<tokio::time::Sleep>>> = None;
 
         loop {
@@ -120,6 +158,19 @@ impl RelayHandle {
                     }
                 }
             }
+            loop {
+                match unread_rx.try_recv() {
+                    Ok(UnreadFrame(snapshot)) => stash_unread(&mut pending_unread, snapshot),
+                    Err(tokio::sync::broadcast::error::TryRecvError::Empty) => break,
+                    Err(tokio::sync::broadcast::error::TryRecvError::Lagged(n)) => {
+                        warn!(lagged = n, "upstream flusher lagged unread frames")
+                    }
+                    Err(tokio::sync::broadcast::error::TryRecvError::Closed) => {
+                        debug!("upstream flusher: unread topic closed");
+                        return;
+                    }
+                }
+            }
 
             // Serialize the batch: retained snapshots first (retry order),
             // then fresh signals. Same-topic duplicates collapsed above.
@@ -138,6 +189,9 @@ impl RelayHandle {
             }
             if let Some(snapshot) = pending_projection.take() {
                 batch.push(UpstreamEvent::Projection(Box::new(snapshot.0)));
+            }
+            for snapshot in pending_unread.drain(..) {
+                batch.push(UpstreamEvent::Unread(snapshot));
             }
             batch.extend(signals.drain(..).map(UpstreamEvent::Signal));
 
@@ -179,6 +233,9 @@ impl RelayHandle {
                                         pending_projection = Some(ProjectionSnapshot(*snapshot));
                                     }
                                     UpstreamEvent::Signal(_) => {}
+                                    UpstreamEvent::Unread(snapshot) => {
+                                        stash_unread(&mut pending_unread, snapshot);
+                                    }
                                 }
                             }
                             let retry_ms = self
@@ -238,6 +295,16 @@ impl RelayHandle {
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                         debug!("upstream flusher: signal topic closed");
+                        return;
+                    }
+                },
+                recv = unread_rx.recv() => match recv {
+                    Ok(UnreadFrame(snapshot)) => stash_unread(&mut pending_unread, snapshot),
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        warn!(lagged = n, "upstream flusher lagged unread frames")
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        debug!("upstream flusher: unread topic closed");
                         return;
                     }
                 },
@@ -319,6 +386,77 @@ mod tests {
         Option<usize>,
         Arc<Vec<serde_json::Value>>,
     );
+
+    /// The cold-start seed lands in the flusher's own pending buffer rather
+    /// than on the bus, so an install with more partitions than the unread
+    /// topic's ring holds keeps its tail. A second seed merges keep-last: one
+    /// slot per conversation, newest count.
+    #[test]
+    fn cold_start_seeds_the_pending_buffer_without_bus_frames() {
+        let seed: Vec<UnreadSnapshot> = (0..20)
+            .map(|i| UnreadSnapshot {
+                peer: format!("peer-{i}"),
+                cursor: 1,
+                unread: 1,
+            })
+            .collect();
+        let mut pending = Vec::new();
+        seed_pending_unread(&mut pending, seed);
+        assert_eq!(
+            pending.len(),
+            20,
+            "every partition survives: none of this rides the bus ring"
+        );
+        seed_pending_unread(
+            &mut pending,
+            vec![UnreadSnapshot {
+                peer: "peer-0".into(),
+                cursor: 5,
+                unread: 5,
+            }],
+        );
+        assert_eq!(pending.len(), 20, "keep-last per partition, not a new slot");
+        assert!(pending.iter().any(|s| s.peer == "peer-0" && s.unread == 5));
+    }
+
+    /// The cold-start warm reaches the wire, not just the helper: the store's
+    /// partitions ride the first batch with nothing published on the bus -- a
+    /// bus-seeded warm would be capped by the unread topic's ring.
+    #[tokio::test]
+    async fn cold_start_announces_every_known_partition() {
+        let capture: Capture = Arc::new(Mutex::new(Vec::new()));
+        let (handle, state) = setup(capture.clone(), None).await;
+        let (db, _frames, _dir) = crate::test_helpers::install_projector(&state).await;
+        for i in 0..20 {
+            let peer = format!("peer-{i}");
+            crate::relay::chat_history::append(
+                &db,
+                Some(&peer),
+                Some(&peer),
+                "outbound",
+                "hi",
+                None,
+            )
+            .await
+            .unwrap();
+        }
+        handle.start_upstream_flusher().await;
+        let batches = wait_for_batches(&capture, 1).await;
+        handle.stop_upstream_flusher().await;
+        let announced: Vec<String> = batches
+            .iter()
+            .flatten()
+            .filter_map(|event| match event {
+                UpstreamEvent::Unread(snapshot) => Some(snapshot.peer.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(announced.len(), 20, "every partition rides the first batch");
+        assert!(
+            announced.iter().all(|peer| peer.starts_with("peer-")),
+            "the announced peers are the store's partitions"
+        );
+    }
 
     /// Spawn a mock keryx capturing `POST /upstream` batches. When `fail_nth`
     /// is `Some(n)`, the n-th attempt (0-based) answers 500 instead. Each OK

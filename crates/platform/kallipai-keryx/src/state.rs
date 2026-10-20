@@ -240,6 +240,20 @@ pub struct Registry {
     projection_unsub_lag_ms: std::sync::atomic::AtomicU64,
 }
 
+/// The unread number of a tunnel owner's own conversation partition.
+///
+/// The type is the invariant: the relay admits only the owner's peer
+/// (`link::unread::relay_unread`) and rebuilds that peer from the owner when it
+/// flushes, so there is no `peer` field here to disagree with it, and no second
+/// slot a later partition could overwrite the badge with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OwnerUnread {
+    /// The `chat_history.id` the count was measured against.
+    pub cursor: i64,
+    /// Outbound rows above `cursor`.
+    pub unread: u32,
+}
+
 /// One live tunnel: the outbound broadcast, the owning user (for presence
 /// routing), the tagma id (carried for the tagma-lifecycle event layer,
 /// which still speaks `TagmaId` -- the participant-id key is one-way derived
@@ -256,6 +270,15 @@ pub struct PresenceEntry {
     /// subscribers). Tunnel-scoped: a reconnect starts the cache empty
     /// until the next pump tick (bounded self-heal, <= one fallback tick).
     pub latest_status: Option<TagmaStatusPayload>,
+    /// Latest unread snapshot relayed over this tunnel: the newest count the
+    /// tagma reported for the owner's own conversation partition. Written
+    /// unconditionally on every unread POST and served to a connecting client,
+    /// so a cold-start badge needs no history pull. Tunnel-scoped like
+    /// `latest_status`: a reconnect starts empty and the next change refills
+    /// it. The slot carries no peer id because it can only ever hold the
+    /// owner's own number: `link::unread::relay_unread` admits no other
+    /// partition, so there is nothing here to fall out of step.
+    pub latest_unread: Option<OwnerUnread>,
     /// The last payload this tunnel's status fan actually broadcast to
     /// the owner's app stream (the meaningful-transition base). Also
     /// tunnel-scoped: a reconnect resets the throttle, and the next
@@ -583,6 +606,7 @@ impl Registry {
                 tagma_id: tagma.clone(),
                 id,
                 latest_status: None,
+                latest_unread: None,
                 last_broadcast_status: None,
             },
         );

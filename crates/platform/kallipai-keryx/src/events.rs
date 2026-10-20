@@ -2,7 +2,8 @@
 //! user carries envelope deliveries for all of their conversations plus
 //! presence transitions: `TagmaOnline`/`TagmaOffline` for the user's own
 //! tagmata. On open, the stream emits the current presence snapshot for the
-//! user's online tagmata plus each tagma's latest cached status snapshot.
+//! user's online tagmata plus each tagma's latest cached status and unread
+//! snapshots.
 //!
 //! Wire framing: the stream opens with a marker frame (`event: stream`,
 //! `data: {"epoch": <u32>, "next_seq": <u64>}`, emitted before the initial
@@ -22,6 +23,7 @@ use axum::Router;
 use axum::extract::State;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::routing::get;
+use kallipai_archeion_common::ids::ParticipantId;
 use kallipai_common::protocol::ApiError;
 use kallipai_keryx_common::event::KeryxEvent;
 use tokio_stream::StreamExt;
@@ -84,6 +86,20 @@ async fn me_events(
                         subagents_active: st.subagents_active,
                         token_budget: st.token_budget,
                         token_consumed: st.token_consumed,
+                    });
+                }
+                // Initial unread flush: same cold-start rationale as the
+                // status snapshot -- the badge is set from the tagma's own
+                // count, never from counting a history pull.
+                if let Some(u) = &entry.latest_unread {
+                    // The slot holds the owner's own partition only (the relay
+                    // drops every other peer before the write), so the peer on
+                    // the wire is the owner's, derived here.
+                    initial.push(KeryxEvent::TagmaUnread {
+                        tagma_id: entry.tagma_id.clone(),
+                        peer: ParticipantId::for_user(&entry.owner).as_ref().to_string(),
+                        cursor: u.cursor,
+                        unread: u.unread,
                     });
                 }
             }
@@ -235,6 +251,59 @@ mod tests {
         // Payload purity: the cursor rides the id field, never the data
         // bytes.
         assert!(!online.contains("\"epoch\"") && !online.contains("\"seq\""));
+    }
+
+    /// Cold-start badge leg: the connect flush also carries each online
+    /// tagma's cached unread snapshot, so a fresh device badges every
+    /// conversation without pulling any history first.
+    #[tokio::test]
+    async fn me_events_connect_flushes_latest_unread() {
+        let (state, _control) = make_state(60, std::time::Duration::from_secs(2));
+        let owner = user("owner");
+        let tagma = TagmaId::from("tagma-1".to_string());
+        let (_tunnel_tx, _id) = seed_presence(&state, &tagma, owner.clone());
+        {
+            use crate::state::OwnerUnread;
+            use kallipai_archeion_common::ids::ParticipantId;
+            let mut reg = state.write().unwrap();
+            let pid = ParticipantId::for_tagma(&tagma);
+            reg.presence.get_mut(&pid).unwrap().latest_unread = Some(OwnerUnread {
+                cursor: 42,
+                unread: 3,
+            });
+        }
+
+        let sse = me_events(
+            State(state.clone()),
+            AuthPrincipal(Principal::User(owner.clone())),
+        )
+        .await
+        .expect("owner opens the app stream");
+        let mut stream = axum::response::IntoResponse::into_response(sse)
+            .into_body()
+            .into_data_stream();
+
+        let marker = read_frame(&mut stream).await;
+        let (epoch, next_seq) = parse_marker(&marker);
+        let online = read_frame(&mut stream).await;
+        assert!(
+            online.contains("\"type\":\"tagma_online\""),
+            "first flush frame must be the online flush: {online:?}"
+        );
+        // This fixture caches no status, so the unread snapshot follows the
+        // presence frame directly.
+        let unread = read_frame(&mut stream).await;
+        assert!(
+            unread.contains("\"type\":\"tagma_unread\"")
+                && unread.contains(&format!(
+                    "\"peer\":\"{}\"",
+                    ParticipantId::for_user(&owner).as_ref()
+                ))
+                && unread.contains("\"cursor\":42")
+                && unread.contains("\"unread\":3"),
+            "second flush frame must be the cached unread snapshot: {unread:?}"
+        );
+        assert_eq!(frame_id(&unread), format!("{epoch}:{}", next_seq + 1));
     }
 
     /// Flush-ordering leg: a live event pushed into the app-stream channel

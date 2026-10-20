@@ -24,7 +24,7 @@ use std::sync::{Arc, Mutex};
 
 use futures_core::Stream;
 use kallipai_common::protocol::SignalEvent;
-use kallipai_lesche_common::event::TagmaStatusPayload;
+use kallipai_lesche_common::event::{TagmaStatusPayload, UnreadSnapshot};
 use kallipai_lesche_common::message::{Participant, TagmaReply};
 use kallipai_lesche_common::projection::ProjectionSnapshot as ProjectionSnapshotPayload;
 use tokio::sync::broadcast;
@@ -87,6 +87,18 @@ impl Event for ProjectionSnapshot {
     const TOPIC: &'static str = "projection_snapshot";
 }
 
+/// One conversation partition's unread snapshot (peer, read cursor, count):
+/// published at the two points that move the number — a cursor write and an
+/// outbound row append. Live-only like the status snapshots: the next change
+/// re-announces the value, so a lost frame costs staleness only. Consumers:
+/// the upstream flusher, which carries it to the tagma's owner.
+#[derive(Clone, Debug)]
+pub(crate) struct UnreadFrame(pub(crate) UnreadSnapshot);
+
+impl Event for UnreadFrame {
+    const TOPIC: &'static str = "unread_snapshot";
+}
+
 /// A task-ledger mutation worth waking the task's people for: published by
 /// the task routes after every write verb; consumed by the task watcher,
 /// which drops a wake hint into the prompt queue of every agent whose role
@@ -117,6 +129,7 @@ const AUTHORED_CAPACITY: usize = 64;
 const SIGNAL_CAPACITY: usize = 256;
 const STATUS_CAPACITY: usize = 16;
 const PROJECTION_CAPACITY: usize = 16;
+const UNREAD_CAPACITY: usize = 16;
 
 const TASK_CAPACITY: usize = 64;
 /// The tagma's topic registry: the single registration site —
@@ -127,6 +140,7 @@ pub(crate) fn tagma_bus() -> Result<EventBus, RegistryError> {
         .topic::<SignalFrame>(SIGNAL_CAPACITY)
         .topic::<StatusSnapshot>(STATUS_CAPACITY)
         .topic::<ProjectionSnapshot>(PROJECTION_CAPACITY)
+        .topic::<UnreadFrame>(UNREAD_CAPACITY)
         .topic::<TaskChanged>(TASK_CAPACITY)
         .build()
 }

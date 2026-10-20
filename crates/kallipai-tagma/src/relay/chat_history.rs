@@ -37,7 +37,10 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use sea_orm::entity::prelude::*;
-use sea_orm::{Database, DatabaseConnection, QueryOrder, QuerySelect, Select};
+use sea_orm::{
+    Database, DatabaseBackend, DatabaseConnection, QueryOrder, QuerySelect, Select, Statement,
+    Value,
+};
 use sea_orm_migration::MigratorTrait;
 use tracing::warn;
 
@@ -95,6 +98,203 @@ fn by_peer(select: Select<Entity>, user_id: Option<&str>) -> Select<Entity> {
         Some(id) => select.filter(Column::UserId.eq(id)),
         None => select.filter(Column::UserId.is_null()),
     }
+}
+
+/// The `chat_read_cursor` key for a partition: the relay peer's
+/// `ParticipantId`, or the empty string for the direct (operator) partition.
+/// SQLite primary keys are never `NULL`, so the direct case needs a sentinel
+/// rather than the `NULL` the history rows themselves use.
+pub(crate) fn peer_key(user_id: Option<&str>) -> &str {
+    user_id.unwrap_or("")
+}
+
+/// The raw-SQL partition predicate, the exact counterpart of [`by_peer`]
+/// (`None` = the direct/operator partition). Interpolated as a constant — the
+/// peer id itself always travels as a bound parameter.
+fn partition_sql(user_id: Option<&str>) -> &'static str {
+    match user_id {
+        Some(_) => "user_id = ?",
+        None => "user_id IS NULL",
+    }
+}
+
+/// The stored read cursor of a partition, `None` when the partition was never
+/// read (no row yet). Callers that need a number go through [`unread`], which
+/// seeds a missing row first.
+pub(crate) async fn read_cursor(db: &Db, user_id: Option<&str>) -> Result<Option<i64>> {
+    let row = db
+        .query_one(Statement::from_sql_and_values(
+            DatabaseBackend::Sqlite,
+            "SELECT read_id FROM chat_read_cursor WHERE peer_key = ?",
+            [peer_key(user_id).into()],
+        ))
+        .await
+        .context("read chat_read_cursor")?;
+    match row {
+        Some(row) => Ok(Some(
+            row.try_get("", "read_id")
+                .context("chat_read_cursor.read_id")?,
+        )),
+        None => Ok(None),
+    }
+}
+
+/// Advance a partition's read cursor to `cursor` (a `chat_history.id`) and
+/// return the value actually stored.
+///
+/// Two clamps, both in SQL so neither opens a read-modify-write window:
+/// monotonic (two devices PUT out of order, and the lower one must not
+/// un-read what the higher one already read) and capped at the partition's
+/// newest row id. The cap matters because ids come from one global
+/// AUTOINCREMENT sequence: a cursor minted in another partition sits past
+/// everything this partition will ever write, and an uncapped write would
+/// pin the badge at zero for good. A write at or below the stored value
+/// leaves both columns untouched.
+///
+/// The cap's premise: ids are never reissued (AUTOINCREMENT, and a deleted
+/// tail keeps its ids retired), so the partition's `MAX(id)` only grows and
+/// the clamp cannot regress -- `gc` trims the oldest rows (TTL by
+/// `created_at`, then `ORDER BY id ASC`), never the newest.
+pub(crate) async fn put_cursor(db: &Db, user_id: Option<&str>, cursor: i64) -> Result<i64> {
+    let now = unix_secs();
+    let partition = partition_sql(user_id);
+    let sql = format!(
+        "INSERT INTO chat_read_cursor (peer_key, read_id, updated_at) \
+         VALUES (?, MAX(0, MIN(?, COALESCE((SELECT MAX(id) FROM chat_history WHERE {partition}), 0))), ?) \
+         ON CONFLICT(peer_key) DO UPDATE SET \
+            read_id = MAX(chat_read_cursor.read_id, excluded.read_id), \
+            updated_at = CASE WHEN excluded.read_id > chat_read_cursor.read_id \
+                THEN excluded.updated_at ELSE chat_read_cursor.updated_at END \
+         RETURNING read_id"
+    );
+    // Bind order follows the statement text: peer key, the requested cursor,
+    // the partition filter inside the cap subquery (only when it binds a
+    // peer), then the timestamp.
+    let mut values: Vec<Value> = Vec::with_capacity(4);
+    values.push(peer_key(user_id).into());
+    values.push(cursor.into());
+    if user_id.is_some() {
+        values.push(peer_key(user_id).into());
+    }
+    values.push(now.into());
+    let row = db
+        .query_one(Statement::from_sql_and_values(
+            DatabaseBackend::Sqlite,
+            sql,
+            values,
+        ))
+        .await
+        .context("write chat_read_cursor")?;
+    let stored = row
+        .context("chat_read_cursor upsert returned no row")?
+        .try_get("", "read_id")
+        .context("chat_read_cursor.read_id")?;
+    Ok(stored)
+}
+
+/// Seed a partition's cursor at its current newest row when no row exists yet,
+/// so a first-ever read reports 0 unread instead of the whole backlog. Rows
+/// already on disk are pre-existing history the user could not have seen
+/// through this watermark, and a fresh install must not open with a
+/// four-digit badge. `NOT EXISTS` makes it first-writer-wins under concurrent
+/// readers.
+async fn seed_cursor(db: &Db, user_id: Option<&str>) -> Result<()> {
+    let partition = partition_sql(user_id);
+    let sql = format!(
+        "INSERT INTO chat_read_cursor (peer_key, read_id, updated_at) \
+         SELECT ?, COALESCE((SELECT MAX(id) FROM chat_history WHERE {partition}), 0), ? \
+         WHERE NOT EXISTS (SELECT 1 FROM chat_read_cursor WHERE peer_key = ?)"
+    );
+    // Bind order follows the statement text: the SELECT list first (peer
+    // key, then the partition filter inside COALESCE, then the timestamp),
+    // then the NOT EXISTS probe.
+    let now = unix_secs();
+    let mut values: Vec<Value> = vec![peer_key(user_id).into()];
+    if user_id.is_some() {
+        values.push(peer_key(user_id).into());
+    }
+    values.push(now.into());
+    values.push(peer_key(user_id).into());
+    db.execute(Statement::from_sql_and_values(
+        DatabaseBackend::Sqlite,
+        sql,
+        values,
+    ))
+    .await
+    .context("seed chat_read_cursor")?;
+    Ok(())
+}
+
+/// The partition's unread **outbound** count paired with the cursor it was
+/// measured against (the snapshot the wire carries). Inbound rows are the
+/// user's own messages and never count: the badge answers "what did the
+/// agent say that I have not read".
+/// Seeded on first call (see [`seed_cursor`]) so both halves are relative to
+/// a watermark, never to the whole partition.
+pub(crate) async fn unread_snapshot(db: &Db, user_id: Option<&str>) -> Result<(i64, u32)> {
+    seed_cursor(db, user_id).await?;
+    let cursor = read_cursor(db, user_id)
+        .await?
+        .context("chat_read_cursor missing after seed")?;
+    let partition = partition_sql(user_id);
+    let sql = format!(
+        "SELECT COUNT(*) AS n FROM chat_history \
+         WHERE {partition} AND direction = 'outbound' AND id > ?"
+    );
+    let mut values: Vec<Value> = Vec::with_capacity(2);
+    if user_id.is_some() {
+        values.push(peer_key(user_id).into());
+    }
+    values.push(cursor.into());
+    let row = db
+        .query_one(Statement::from_sql_and_values(
+            DatabaseBackend::Sqlite,
+            sql,
+            values,
+        ))
+        .await
+        .context("count unread chat_history")?
+        .context("unread count returned no row")?;
+    let n: i64 = row.try_get("", "n").context("unread count")?;
+    Ok((cursor, n.clamp(0, u32::MAX as i64) as u32))
+}
+
+/// Append one outbound row and return it with the partition's unread
+/// snapshot, taking the seed BEFORE the row lands.
+///
+/// The ordering is the point: a partition without a cursor row seeds at its
+/// current newest id (see [`seed_cursor`]), so seeding after this append
+/// would stamp the watermark at the row that just arrived and the first
+/// message of a fresh conversation would read as zero unread. Seeding first
+/// leaves that row above the watermark, which is what a new message is.
+pub(crate) async fn append_outbound_snapshot(
+    db: &Db,
+    user_id: Option<&str>,
+    username: Option<&str>,
+    text: &str,
+) -> Result<(i64, i64, i64, u32)> {
+    seed_cursor(db, user_id).await?;
+    let (id, created_at) = append(db, user_id, username, "outbound", text, None).await?;
+    let (cursor, unread) = unread_snapshot(db, user_id).await?;
+    Ok((id, created_at, cursor, unread))
+}
+
+/// Every partition this tagma holds a history row for (`None` = the direct
+/// partition): the enumeration a cold-start unread announcement walks.
+pub(crate) async fn peers(db: &Db) -> Result<Vec<Option<String>>> {
+    let rows = db
+        .query_all(Statement::from_string(
+            DatabaseBackend::Sqlite,
+            "SELECT DISTINCT user_id FROM chat_history",
+        ))
+        .await
+        .context("list chat_history partitions")?;
+    rows.into_iter()
+        .map(|row| {
+            row.try_get::<Option<String>>("", "user_id")
+                .context("chat_history.user_id")
+        })
+        .collect()
 }
 
 /// Append one frame and return `(row id, created_at)` — the id is the
@@ -308,6 +508,12 @@ mod tests {
             .0
     }
 
+    /// The unread count alone: these tests assert the number, while
+    /// production callers take the snapshot.
+    async fn unread(db: &Db, user_id: Option<&str>) -> Result<u32> {
+        Ok(unread_snapshot(db, user_id).await?.1)
+    }
+
     #[tokio::test]
     async fn open_applies_migrations_idempotently() {
         let dir = TempDir::new().unwrap();
@@ -507,5 +713,135 @@ mod tests {
             }
             other => panic!("expected user UserMessage, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn read_cursor_seeds_at_newest_and_reports_zero() {
+        let (db, _d) = open_tmp().await;
+        // Pre-existing rows: an install that already has history must not open
+        // with the whole partition counted as unread.
+        ap(&db, Some("u1"), "inbound", "old").await;
+        let newest = ap(&db, Some("u1"), "outbound", "old-reply").await;
+        assert_eq!(read_cursor(&db, Some("u1")).await.unwrap(), None);
+        assert_eq!(unread(&db, Some("u1")).await.unwrap(), 0);
+        assert_eq!(read_cursor(&db, Some("u1")).await.unwrap(), Some(newest));
+    }
+
+    #[tokio::test]
+    async fn unread_counts_only_outbound_above_the_cursor() {
+        let (db, _d) = open_tmp().await;
+        assert_eq!(unread(&db, Some("u1")).await.unwrap(), 0); // seeds at 0
+        let first = ap(&db, Some("u1"), "outbound", "a").await;
+        ap(&db, Some("u1"), "inbound", "mine").await; // the user's own: never unread
+        let newest = ap(&db, Some("u1"), "outbound", "b").await;
+        assert_eq!(unread(&db, Some("u1")).await.unwrap(), 2);
+        assert_eq!(put_cursor(&db, Some("u1"), first).await.unwrap(), first);
+        assert_eq!(unread(&db, Some("u1")).await.unwrap(), 1);
+        put_cursor(&db, Some("u1"), newest).await.unwrap();
+        assert_eq!(unread(&db, Some("u1")).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn put_cursor_is_monotonic() {
+        let (db, _d) = open_tmp().await;
+        for i in 0..12 {
+            ap(&db, Some("u1"), "outbound", &format!("m{i}")).await;
+        }
+        assert_eq!(put_cursor(&db, Some("u1"), 10).await.unwrap(), 10);
+        // An out-of-order write from a second device must not un-read.
+        assert_eq!(put_cursor(&db, Some("u1"), 4).await.unwrap(), 10);
+        assert_eq!(read_cursor(&db, Some("u1")).await.unwrap(), Some(10));
+        assert_eq!(put_cursor(&db, Some("u1"), 11).await.unwrap(), 11);
+        assert_eq!(read_cursor(&db, Some("u1")).await.unwrap(), Some(11));
+    }
+
+    #[tokio::test]
+    async fn peers_cover_every_partition_once() {
+        let (db, _d) = open_tmp().await;
+        assert!(peers(&db).await.unwrap().is_empty());
+        ap(&db, Some("u1"), "outbound", "a").await;
+        ap(&db, Some("u1"), "inbound", "b").await;
+        ap(&db, None, "outbound", "direct").await;
+        let mut seen = peers(&db).await.unwrap();
+        seen.sort();
+        assert_eq!(seen, vec![None, Some("u1".to_string())]);
+    }
+
+    #[tokio::test]
+    async fn read_cursors_of_both_partitions_are_separate() {
+        let (db, _d) = open_tmp().await;
+        let direct = ap(&db, None, "outbound", "direct-reply").await;
+        let relay = ap(&db, Some("u1"), "outbound", "relay-reply").await;
+        assert_eq!(unread(&db, None).await.unwrap(), 0);
+        assert_eq!(unread(&db, Some("u1")).await.unwrap(), 0);
+        // Direct keys on the empty string, relay on the peer id: advancing one
+        // must not move the other.
+        assert_eq!(put_cursor(&db, None, direct).await.unwrap(), direct);
+        assert_eq!(read_cursor(&db, None).await.unwrap(), Some(direct));
+        assert_eq!(read_cursor(&db, Some("u1")).await.unwrap(), Some(relay));
+    }
+
+    #[tokio::test]
+    async fn read_cursor_survives_a_migration_rerun() {
+        let (db, _d) = open_tmp().await;
+        // The cursor has to be a row this partition actually holds: the store
+        // caps a write at the partition's newest id.
+        let newest = ap(&db, Some("u1"), "outbound", "a").await;
+        assert_eq!(put_cursor(&db, Some("u1"), newest).await.unwrap(), newest);
+        migration::Migrator::up(&db, None).await.unwrap();
+        assert_eq!(read_cursor(&db, Some("u1")).await.unwrap(), Some(newest));
+    }
+
+    #[tokio::test]
+    async fn append_of_a_first_message_reports_it_unread() {
+        let (db, _d) = open_tmp().await;
+        // A fresh partition: the seed must land before the row, so the first
+        // outbound message is one unread instead of zero.
+        let (_, _, cursor, unread) = append_outbound_snapshot(&db, Some("u1"), Some("h"), "hi")
+            .await
+            .unwrap();
+        assert_eq!(cursor, 0);
+        assert_eq!(unread, 1);
+    }
+
+    #[tokio::test]
+    async fn a_cursor_past_the_partition_tail_does_not_swallow_later_rows() {
+        let (db, _d) = open_tmp().await;
+        ap(&db, Some("u1"), "inbound", "mine").await;
+        let tail = ap(&db, Some("u1"), "outbound", "a").await;
+        // Ids are one global sequence, so a cursor minted in another
+        // partition sits past every row this one will write. Capped, the
+        // stored value stays at this partition's tail and the next row
+        // still counts.
+        assert_eq!(
+            put_cursor(&db, Some("u1"), tail + 1000).await.unwrap(),
+            tail
+        );
+        ap(&db, Some("u1"), "outbound", "b").await;
+        assert_eq!(unread_snapshot(&db, Some("u1")).await.unwrap().1, 1);
+    }
+
+    #[tokio::test]
+    async fn seed_lands_at_the_newest_preexisting_row() {
+        let (db, _d) = open_tmp().await;
+        // Two beats on one partition. Existing history seeds to zero unread:
+        // rows already on disk were never readable through a watermark this
+        // install wrote (the upgrade semantics). A watermark one row back
+        // then counts exactly the row above it, which fails if the seed ever
+        // moves behind the count.
+        ap(&db, Some("u1"), "outbound", "old-a").await;
+        let newest = ap(&db, Some("u1"), "outbound", "old-b").await;
+        assert_eq!(unread_snapshot(&db, Some("u1")).await.unwrap().1, 0);
+        assert_eq!(read_cursor(&db, Some("u1")).await.unwrap(), Some(newest));
+        // Rewind by hand: put_cursor is monotonic by design, so only a direct
+        // write can move the watermark back under the row.
+        db.execute(Statement::from_sql_and_values(
+            DatabaseBackend::Sqlite,
+            "UPDATE chat_read_cursor SET read_id = ? WHERE peer_key = ?",
+            [(newest - 1).into(), "u1".into()],
+        ))
+        .await
+        .unwrap();
+        assert_eq!(unread_snapshot(&db, Some("u1")).await.unwrap().1, 1);
     }
 }

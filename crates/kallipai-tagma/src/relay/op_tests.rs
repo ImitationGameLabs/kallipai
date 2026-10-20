@@ -823,11 +823,16 @@ async fn handle_history_latest_replays_both_directions_in_order() {
                 req_id,
                 count,
                 more,
+                unread,
+                cursor: _,
             } => {
                 assert_eq!(*req_id, 7);
                 assert_eq!(*count, 3);
                 assert!(!more);
                 saw_end = true;
+                // The marker's count is the store's unread tally for this
+                // partition: no outbound row sits above the seeded cursor.
+                assert_eq!(*unread, 0);
             }
             other => panic!("unexpected reply {other:?}"),
         }
@@ -947,7 +952,9 @@ async fn handle_history_without_store_emits_empty_batch_end() {
         [TagmaReply::HistoryBatchEnd {
             req_id: 5,
             count: 0,
-            more: false
+            more: false,
+            unread: 0,
+            cursor: 0
         }]
     ));
 }

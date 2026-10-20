@@ -16,7 +16,7 @@
 
 use super::RelayHandle;
 use crate::auth::AuthIdentity;
-use crate::routes::{agent, budget, context, lesche, profile_probe, profiles};
+use crate::routes::{agent, budget, context, lesche, message, profile_probe, profiles};
 use crate::state::SharedState;
 use crate::work_schedule;
 use axum::Router;
@@ -75,6 +75,18 @@ fn manage_router() -> Router<SharedState> {
             get(lesche::read_direct_session_messages),
         )
         .route("/agents/{id}/lesche/messages", post(lesche::post_message))
+        // A read cursor is partition-scoped, and this router learns the
+        // partition from the `ReadPeer` extension, which only the relay
+        // envelope path inserts. A plaintext manage frame carries no peer
+        // identity (see `handle_manage_rest`), so a PUT arriving that way
+        // would advance the OPERATOR partition -- the wrong conversation.
+        // The frame allowlist in `relay::tunnel` therefore denies this path
+        // (pinned by `manage_rest_tests`), so the E2E envelope is the only
+        // caller that can carry a peer into this route.
+        .route(
+            "/agents/{id}/external/read-cursor",
+            put(message::external_read_cursor),
+        )
         .fallback(manage_fallback)
 }
 
@@ -193,8 +205,9 @@ impl RelayHandle {
         method: &str,
         path: &str,
         body: serde_json::Value,
+        peer: Option<&str>,
     ) {
-        let result = AssertUnwindSafe(self.dispatch_manage(method, path, body))
+        let result = AssertUnwindSafe(self.dispatch_manage(method, path, body, peer))
             .catch_unwind()
             .await;
         let reply = match result {
@@ -218,6 +231,7 @@ impl RelayHandle {
         method: &str,
         path: &str,
         body: serde_json::Value,
+        peer: Option<&str>,
     ) -> TagmaReply {
         let Some(state) = self.inner.state.upgrade() else {
             return TagmaReply::ManageResult {
@@ -252,6 +266,14 @@ impl RelayHandle {
         // trust execute_op grants deliver_message); say so through the
         // standard extractor instead of hand-passing the argument per arm.
         request.extensions_mut().insert(AuthIdentity::operator());
+        // The conversation partition the request targets, when the caller arrived
+        // on an authenticated relay envelope. The plaintext manage-frame surface
+        // carries no peer identity, so its requests stay on the operator partition.
+        if let Some(peer) = peer {
+            request
+                .extensions_mut()
+                .insert(message::ReadPeer(peer.to_string()));
+        }
         let response = match manage_router().with_state(state).oneshot(request).await {
             Ok(response) => response,
             Err(infallible) => match infallible {},
@@ -296,7 +318,12 @@ async fn extract_response(response: axum::response::Response) -> TagmaReply {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_helpers::{alt_bound_sub, make_state, make_state_two_sets};
+    use crate::bus::UnreadFrame;
+    use crate::relay::chat_history;
+    use crate::state::RegistryEntry;
+    use crate::test_helpers::{
+        alt_bound_sub, install_projector, make_entry_with_rx, make_state, make_state_two_sets,
+    };
 
     async fn manage_get(state: &SharedState, uri: &str) -> Response {
         let request = Request::builder()
@@ -311,21 +338,40 @@ mod tests {
             .await
             .unwrap_or_else(|infallible| match infallible {})
     }
-    /// Same as [`manage_get`] for an arbitrary method: the full-table
-    /// shape nail needs each route's declared verb, not just GET.
-    async fn manage_call(state: &SharedState, method: &str, uri: &str) -> Response {
+    /// Drive the management router the way the relay envelope does: operator
+    /// auth, a JSON content type, an optional body, and -- for a request that
+    /// arrived on an authenticated envelope -- the conversation peer the
+    /// router hands the handler. The full-table shape nail needs each route's
+    /// declared verb, not just GET.
+    async fn manage_send(
+        state: &SharedState,
+        method: &str,
+        uri: &str,
+        peer: Option<&str>,
+        body: Option<serde_json::Value>,
+    ) -> Response {
         let method = Method::from_str(method).expect("static method");
-        let request = Request::builder()
+        let mut builder = Request::builder()
             .method(method)
             .uri(uri)
-            .extension(AuthIdentity::operator())
-            .body(Body::empty())
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .extension(AuthIdentity::operator());
+        if let Some(peer) = peer {
+            builder = builder.extension(message::ReadPeer(peer.to_string()));
+        }
+        let request = builder
+            .body(body.map_or_else(Body::empty, |value| Body::from(value.to_string())))
             .expect("static parts");
         manage_router()
             .with_state(state.clone())
             .oneshot(request)
             .await
             .unwrap_or_else(|infallible| match infallible {})
+    }
+
+    /// [`manage_send`] for a request that carries neither a body nor a peer.
+    async fn manage_call(state: &SharedState, method: &str, uri: &str) -> Response {
+        manage_send(state, method, uri, None, None).await
     }
 
     /// Route-shape nail: every (method, path) row of the management-plane
@@ -359,15 +405,89 @@ mod tests {
             ("GET", "/agents/a-1/lesche/sessions"),
             ("GET", "/agents/a-1/lesche/direct-sessions/peer-9/messages"),
             ("POST", "/agents/a-1/lesche/messages"),
+            ("PUT", "/agents/a-1/external/read-cursor"),
         ];
         for (method, path) in rows {
-            let resp = manage_call(&state, method, path).await;
+            // The peer rides along: the read-cursor route's `ReadPeer`
+            // extension is required, and a request without one is a
+            // missing-extension 500 that says nothing about the path shape.
+            let resp = manage_send(&state, method, path, Some("peer-1"), None).await;
             assert_ne!(
                 resp.status(),
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "path-shape rejection on {method} {path}"
             );
         }
+    }
+
+    /// The positive seam the shape pin cannot reach: a cursor write through
+    /// the real router lands in the partition the envelope's peer names. The
+    /// store caps the value at that partition's own newest row id, so an id a
+    /// sibling partition minted (one global sequence) cannot pin the badge at
+    /// zero, and no other partition moves.
+    /// The write also re-announces the partition's snapshot on the bus -- the
+    /// badge drop on this user's other devices rides that frame.
+    #[tokio::test]
+    async fn external_read_cursor_writes_the_peer_partition() {
+        let state = make_state();
+        let root = AgentId::random();
+        let (entry, _rx) = make_entry_with_rx(None, "root".into());
+        state
+            .registry
+            .write()
+            .await
+            .register_root(root.clone(), RegistryEntry::Live(entry))
+            .unwrap();
+        let (db, _frames, _dir) = install_projector(&state).await;
+        let mut unread_rx = state.bus.subscribe::<UnreadFrame>().unwrap();
+        let mut alice = Vec::new();
+        for text in ["a1", "a2"] {
+            let (id, _) =
+                chat_history::append(&db, Some("alice"), Some("alice"), "outbound", text, None)
+                    .await
+                    .unwrap();
+            alice.push(id);
+        }
+        let (bob, _) = chat_history::append(&db, Some("bob"), Some("bob"), "outbound", "b1", None)
+            .await
+            .unwrap();
+        assert!(bob > *alice.last().unwrap(), "one global id sequence");
+
+        let response = manage_send(
+            &state,
+            "PUT",
+            &format!("/agents/{root}/external/read-cursor"),
+            Some("alice"),
+            Some(serde_json::json!({ "cursor": bob })),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        assert_eq!(
+            chat_history::read_cursor(&db, Some("alice")).await.unwrap(),
+            Some(*alice.last().unwrap()),
+            "capped at alice's own newest row, not the id bob minted"
+        );
+        assert_eq!(
+            chat_history::read_cursor(&db, Some("bob")).await.unwrap(),
+            None,
+            "the sibling partition is untouched"
+        );
+        assert_eq!(
+            chat_history::read_cursor(&db, None).await.unwrap(),
+            None,
+            "the operator partition is untouched"
+        );
+
+        let frame = unread_rx
+            .try_recv()
+            .expect("the write announces a snapshot");
+        assert_eq!(frame.0.peer, "alice");
+        assert_eq!(frame.0.cursor, *alice.last().unwrap());
+        assert_eq!(
+            frame.0.unread, 0,
+            "the capped cursor reads the partition clean"
+        );
     }
 
     /// The aggregate include list is a closed allowlist -- an

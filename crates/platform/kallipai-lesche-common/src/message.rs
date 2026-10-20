@@ -220,7 +220,26 @@ pub enum TagmaReply {
     /// `more` being true means the window was truncated by `limit` and more
     /// rows remain pullable. If this marker never arrives, the app treats the
     /// sync as failed and retries on the next reconnect.
-    HistoryBatchEnd { req_id: u64, count: u32, more: bool },
+    HistoryBatchEnd {
+        req_id: u64,
+        count: u32,
+        more: bool,
+        /// Unread rows in this peer's partition: the agent's own replies
+        /// (`direction = outbound`) above the stored read cursor. The tagma
+        /// computes it, so the app never derives a badge from the window it
+        /// happened to pull; a batch is stamped on every pull (cold start,
+        /// reconnect, scroll page). Absent on payloads serialized before the
+        /// field existed (`serde(default)`), where it reads as zero.
+        #[serde(default)]
+        unread: u32,
+        /// The read cursor the count was computed against. Paired with
+        /// `unread` it orders two snapshots -- a stale one carries a smaller
+        /// cursor -- which the app needs because the carriers (this marker,
+        /// the live `Unread` event, the keryx's cold-start flush) travel
+        /// different paths. Zero on payloads from a peer predating it.
+        #[serde(default)]
+        cursor: i64,
+    },
     /// The result of a `TagmaControl::Manage` op. `status` mirrors the HTTP
     /// status the tagma handler returned (200, 201, 204, 400, 404, 409, etc.);
     /// `body` is the handler JSON response body (null for empty/204 responses).
@@ -544,6 +563,8 @@ mod tests {
                 req_id: 3,
                 count: 10,
                 more: true,
+                unread: 0,
+                cursor: 0,
             })
             .unwrap(),
         ];
@@ -602,12 +623,20 @@ mod tests {
             req_id: 3,
             count: 10,
             more: true,
+            unread: 4,
+            cursor: 9,
         })
         .unwrap();
         assert_eq!(
             hbe,
-            r#"{"kind":"history_batch_end","req_id":3,"count":10,"more":true}"#
+            r#"{"kind":"history_batch_end","req_id":3,"count":10,"more":true,"unread":4,"cursor":9}"#
         );
+        // A batch marker from a tagma that predates `unread` still parses.
+        let old: TagmaReply = serde_json::from_str(
+            r#"{"kind":"history_batch_end","req_id":3,"count":10,"more":true}"#,
+        )
+        .unwrap();
+        assert!(matches!(old, TagmaReply::HistoryBatchEnd { unread: 0, .. }));
         // set_history_id stamps Event and MessageAccepted; leaves others alone.
         let mut ev = TagmaReply::Event {
             event: AuthoredEvent::AssistantContent {

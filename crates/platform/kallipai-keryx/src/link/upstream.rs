@@ -63,6 +63,10 @@ async fn post_upstream(
                 }
                 applied += 1;
             }
+            UpstreamEvent::Unread(snapshot) => {
+                super::unread::relay_unread(&state, path_tagma.clone(), snapshot).await?;
+                applied += 1;
+            }
         }
     }
     // The piggyback per-face counts are read AFTER the batch is

@@ -161,6 +161,9 @@ pub struct ExternalHistoryQuery {
 /// Root-only and projector-owned; returns decoded entries (sender + reply) and
 /// a `more` flag. The direct SSE stays live-only; history is always a
 /// frontend-initiated pull, symmetric with the relay's `TagmaControl::History`.
+/// The badge count does not ride this reply: it reaches the client on the
+/// unread frames the tagma pushes, so a history pull never doubles as a count
+/// read.
 #[derive(Debug, Serialize)]
 pub struct ExternalHistoryResponse {
     pub rows: Vec<kallipai_lesche_common::message::HistoryEntry>,
@@ -173,17 +176,7 @@ pub async fn external_history(
     Path(id): Path<AgentId>,
     Query(query): Query<ExternalHistoryQuery>,
 ) -> Result<Json<ExternalHistoryResponse>, ApiError> {
-    {
-        let registry = state.registry.read().await;
-        let is_root = registry
-            .root_agent()
-            .is_some_and(|(root_id, _)| root_id == &id);
-        if !is_root {
-            return Err(ApiError::not_found(
-                "external history is root-only; the direct conversation is the root's",
-            ));
-        }
-    }
+    require_root(&state, &id, "external history").await?;
     let projector = state
         .external
         .get()
@@ -198,6 +191,67 @@ pub async fn external_history(
         .read_history(None, query.after, query.before, limit)
         .await;
     Ok(Json(ExternalHistoryResponse { rows, more }))
+}
+
+/// The relay peer a manage-plane request targets: inserted as a request
+/// extension by the manage router, which knows the peer from the authenticated
+/// envelope. The plaintext frame surface carries no peer and is denied this
+/// route, so every call that reaches the handler has one.
+#[derive(Clone, Debug)]
+pub struct ReadPeer(pub String);
+
+/// Body for [`external_read_cursor`]: the highest `chat_history.id` the user has
+/// read in that partition.
+#[derive(Debug, Deserialize)]
+pub struct ReadCursorBody {
+    pub cursor: i64,
+}
+
+/// `PUT /agents/{id}/external/read-cursor` -- record how far the user has read
+/// in one conversation partition. Root-only like the history read. The
+/// partition is the relay peer the manage router authenticated (a request
+/// extension); the plaintext frame surface carries no peer and is denied
+/// this route.
+///
+/// Answers `204 No Content`, like the lesche read-cursor contract: the write is
+/// monotonic and capped inside the store, and the resulting count reaches every
+/// device of this user as an unread frame, so there is nothing to read back.
+pub async fn external_read_cursor(
+    State(state): State<SharedState>,
+    _auth: crate::auth::AuthIdentity,
+    Path(id): Path<AgentId>,
+    peer: axum::extract::Extension<ReadPeer>,
+    Json(body): Json<ReadCursorBody>,
+) -> Result<StatusCode, ApiError> {
+    require_root(&state, &id, "the read cursor").await?;
+    let projector = state
+        .external
+        .get()
+        .ok_or_else(|| ApiError::unavailable("external projector not initialized"))?;
+    // Envelope-authenticated: the manage router supplies the peer it
+    // authenticated, so the write is always scoped to a conversation.
+    let user_id = Some(peer.0.0.as_str());
+    projector
+        .put_cursor(user_id, body.cursor)
+        .await
+        .ok_or_else(|| ApiError::unavailable("chat history store not initialized"))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Reject any agent but the root: the direct (`/external/*`) surface belongs to
+/// the root's own conversation.
+async fn require_root(state: &SharedState, id: &AgentId, what: &str) -> Result<(), ApiError> {
+    let registry = state.registry.read().await;
+    let is_root = registry
+        .root_agent()
+        .is_some_and(|(root_id, _)| root_id == id);
+    if is_root {
+        Ok(())
+    } else {
+        Err(ApiError::not_found(format!(
+            "{what} is root-only; the direct conversation is the root's"
+        )))
+    }
 }
 
 #[cfg(test)]

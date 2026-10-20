@@ -9,7 +9,7 @@ pub(crate) mod context;
 mod inbox;
 pub(crate) mod ingest;
 pub(crate) mod lesche;
-mod message;
+pub(crate) mod message;
 pub(crate) mod profile_probe;
 pub(crate) mod profiles;
 pub(crate) mod settings;
