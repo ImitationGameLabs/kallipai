@@ -6,8 +6,9 @@ use crate::test_helpers::{
     make_entry_with_rx, make_state,
 };
 use axum::Json;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use kallipai_common::protocol::MessageRequest;
+use kallipai_lesche_common::message::{HistoryEntry, TagmaReply};
 
 // -- send_message: sender identity is attached to the delivered payload --
 
@@ -34,6 +35,7 @@ async fn operator_message_injects_full_envelope() {
             text: "do the thing".into(),
             attachment: None,
             defer: false,
+            quote: None,
         }),
     )
     .await
@@ -83,6 +85,7 @@ async fn agent_message_injects_sender_and_relation() {
             text: "results attached".into(),
             attachment: None,
             defer: false,
+            quote: None,
         }),
     )
     .await
@@ -119,6 +122,7 @@ async fn self_message_injected_in_round() {
             text: "note to self".into(),
             attachment: None,
             defer: false,
+            quote: None,
         }),
     )
     .await
@@ -148,6 +152,7 @@ async fn send_message_to_faulted_returns_conflict() {
             text: "hi".into(),
             attachment: None,
             defer: false,
+            quote: None,
         }),
     )
     .await
@@ -202,6 +207,7 @@ async fn send_message_to_parked_agent_auto_wakes_with_kick_turn() {
             text: "hi".into(),
             attachment: None,
             defer: false,
+            quote: None,
         }),
     )
     .await
@@ -260,6 +266,7 @@ async fn send_message_to_parked_agent_without_reason_buffers_with_warning() {
             text: "hi".into(),
             attachment: None,
             defer: false,
+            quote: None,
         }),
     )
     .await
@@ -311,6 +318,7 @@ async fn off_duty_message_buffers_to_inbox() {
             text: "urgent task".into(),
             attachment: None,
             defer: false,
+            quote: None,
         }),
     )
     .await
@@ -360,6 +368,7 @@ async fn on_duty_message_injected_in_round() {
             text: "hello".into(),
             attachment: None,
             defer: false,
+            quote: None,
         }),
     )
     .await
@@ -401,6 +410,7 @@ async fn duty_toggle_off_then_on() {
             text: "first".into(),
             attachment: None,
             defer: false,
+            quote: None,
         }),
     )
     .await
@@ -419,6 +429,7 @@ async fn duty_toggle_off_then_on() {
             text: "second".into(),
             attachment: None,
             defer: false,
+            quote: None,
         }),
     )
     .await
@@ -488,6 +499,7 @@ async fn parked_send_records_row_and_frame_exactly_once() {
             text: "hi".into(),
             attachment: None,
             defer: false,
+            quote: None,
         }),
     )
     .await
@@ -545,6 +557,7 @@ async fn repeated_parked_sends_each_record_one_row() {
                 text: format!("hi {i}"),
                 attachment: None,
                 defer: false,
+                quote: None,
             }),
         )
         .await
@@ -596,6 +609,7 @@ async fn off_duty_message_still_recorded() {
             text: "later".into(),
             attachment: None,
             defer: false,
+            quote: None,
         }),
     )
     .await
@@ -684,6 +698,107 @@ async fn read_sse_frame(stream: &mut axum::body::BodyDataStream) -> String {
     .expect("stream live")
     .expect("frame bytes");
     String::from_utf8(frame.to_vec()).expect("utf8 frame")
+}
+
+// -- quote: the direct send records the row id and history hands it back --
+
+/// One quote id end to end through both direct faces: a plain send first (so
+/// the quote points at a real row), then a quoted send, then the history read
+/// the frontend pulls. A non-positive id is no quote at that same boundary.
+#[tokio::test]
+async fn quote_rides_the_direct_send_and_history_read() {
+    let state = make_state();
+    install_inbox_store(&state).await;
+    let (_db, _frames, _dir) = install_projector(&state).await;
+    let root = AgentId::random();
+    let (entry, _rx) = make_entry_with_rx(None, "root".into());
+    {
+        let mut reg = state.registry.write().await;
+        reg.register_root(root.clone(), RegistryEntry::Live(entry))
+            .unwrap();
+    }
+
+    let send = |text: &str, quote: Option<i64>| {
+        let state = state.clone();
+        let root = root.clone();
+        let text = text.to_owned();
+        async move {
+            send_message(
+                State(state),
+                AuthIdentity::test_new(Identity::Operator),
+                Path(root),
+                Json(MessageRequest {
+                    text,
+                    attachment: None,
+                    defer: false,
+                    quote,
+                }),
+            )
+            .await
+            .expect("an operator send is accepted")
+        }
+    };
+
+    let (status, _body) = send("first", None).await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    let rows = direct_history(&state, &root).await;
+    assert_eq!(rows.len(), 1);
+    let target = match &rows[0].reply {
+        TagmaReply::UserMessage { history_id, .. } => *history_id,
+        other => panic!("expected UserMessage, got {other:?}"),
+    };
+
+    let (status, _body) = send("about that", Some(target)).await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    let rows = direct_history(&state, &root).await;
+    assert_eq!(rows.len(), 2);
+    match &rows[1].reply {
+        TagmaReply::UserMessage {
+            history_id,
+            text,
+            quote,
+            ..
+        } => {
+            assert_eq!(text, "about that");
+            assert_eq!(
+                *quote,
+                Some(target),
+                "the quoted id rides the stored row: {quote:?}"
+            );
+            assert_ne!(*history_id, target, "a later row, not the quoted one");
+        }
+        other => panic!("expected UserMessage, got {other:?}"),
+    }
+
+    for bad in [0, -3] {
+        let (status, _body) = send("no quote", Some(bad)).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        let rows = direct_history(&state, &root).await;
+        match &rows.last().expect("a row landed").reply {
+            TagmaReply::UserMessage { quote, .. } => assert_eq!(
+                *quote, None,
+                "a quote id of {bad} reads as no quote at the boundary"
+            ),
+            other => panic!("expected UserMessage, got {other:?}"),
+        }
+    }
+}
+
+/// The direct history window, read through the route the frontend pulls.
+async fn direct_history(state: &crate::state::SharedState, root: &AgentId) -> Vec<HistoryEntry> {
+    let Json(body) = external_history(
+        State(state.clone()),
+        AuthIdentity::test_new(Identity::Operator),
+        Path(root.clone()),
+        Query(ExternalHistoryQuery {
+            after: None,
+            before: None,
+            limit: Some(50),
+        }),
+    )
+    .await
+    .expect("the root's history read succeeds");
+    body.rows
 }
 
 // -- unreadable is not empty: the history read refuses what it cannot answer --

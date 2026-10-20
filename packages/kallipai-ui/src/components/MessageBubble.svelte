@@ -14,7 +14,11 @@
   import Markdown from "./Markdown.svelte";
   import CopyButton from "./CopyButton.svelte";
   import RawToggleButton from "./RawToggleButton.svelte";
+  import QuoteBlock from "./QuoteBlock.svelte";
+  import MentionChips from "./MentionChips.svelte";
   import type { TogglePin } from "../lib/transcript.svelte.ts";
+  import type { QuoteView } from "../lib/quote.ts";
+  import type { MentionChip } from "../lib/room-message.ts";
   import type { FileAttachment } from "@kallipai/kallipai-lesche-client";
   import {
     chat_file_download_aria,
@@ -33,6 +37,11 @@
     pin,
     attachment,
     downloadAttachment,
+    mentions,
+    quote,
+    quoteDescribedBy,
+    onQuoteClick,
+    onQuoteRetry,
   }: {
     text: string;
     /** Render the source as markdown (agent/assistant replies) with a raw-text toggle.
@@ -59,6 +68,21 @@
     /** The page-supplied download I/O (files get -> blob -> anchor). The
      *  card stays a dumb renderer; without it the card has no button. */
     downloadAttachment?: (attachment: FileAttachment) => Promise<void>;
+    /** The members this line mentions, already resolved against the room
+     *  roster by the page. Absent (a plain message, and always on the 1:1
+     *  surface, which has no mentions) -> nothing renders below the body. */
+    mentions?: readonly MentionChip[];
+    /** The quoted message this line answers, already resolved against the
+     *  transcript by the quotes controller. Absent for a plain message. */
+    quote?: QuoteView;
+    /** Id of the accessible label of the quoted row, when it is loaded: the
+     *  block then points its description there instead of repeating the
+     *  quoted text to a screen reader. */
+    quoteDescribedBy?: string;
+    /** Scroll to the quoted line (found quotes only). */
+    onQuoteClick?: () => void;
+    /** Re-attempt loading a quoted message that failed to resolve. */
+    onQuoteRetry?: () => void;
   } = $props();
 
   // Per-bubble raw-source view: ephemeral, resets when the bubble unmounts.
@@ -122,6 +146,14 @@
       </p>
     {/if}
   {/if}
+  {#if quote}
+    <QuoteBlock
+      view={quote}
+      describedBy={quoteDescribedBy}
+      onClick={onQuoteClick}
+      onRetry={onQuoteRetry}
+    />
+  {/if}
   {#if markdown}
     {#if raw}
       <div class="min-w-0 whitespace-pre-wrap break-words font-mono text-xs">
@@ -132,6 +164,9 @@
     {/if}
   {:else}
     {text}
+  {/if}
+  {#if mentions && mentions.length > 0}
+    <MentionChips chips={mentions} />
   {/if}
   {#if failureCopy}
     <p class="mt-1 text-xs text-error-500 dark:text-error-400">{failureCopy}</p>

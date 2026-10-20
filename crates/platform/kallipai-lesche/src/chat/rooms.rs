@@ -187,6 +187,11 @@ struct HistoryQuery {
     /// Return messages with `seq > after_seq` (exclusive). Default 0 = from the
     /// start.
     after_seq: Option<i64>,
+    /// Return messages with `seq < before_seq` (exclusive): the NEWEST page of
+    /// older rows, returned ascending. Mutually exclusive with `after_seq` --
+    /// one page moves in one direction. The single-row lookup behind a quote
+    /// is `before_seq = seq + 1, limit = 1`.
+    before_seq: Option<i64>,
     /// Max messages to return. Server-clamped.
     limit: Option<u64>,
 }
@@ -302,10 +307,25 @@ async fn room_history(
         return Err(ApiError::not_found("unknown room"));
     }
 
-    let limit = q.limit.unwrap_or(HISTORY_MAX_LIMIT).min(HISTORY_MAX_LIMIT);
-    let rows = store::read_since(db, room.as_ref(), q.after_seq.unwrap_or(0), limit)
-        .await
-        .map_err(|e| ApiError::internal(format_args!("store error: {e}")))?;
+    // A page holds at least one row: an empty page IS the quote path's
+    // absence verdict, so `limit=0` must not read as one.
+    let limit = q
+        .limit
+        .unwrap_or(HISTORY_MAX_LIMIT)
+        .clamp(1, HISTORY_MAX_LIMIT);
+    // One page moves in one direction: a request naming both cursors is
+    // ambiguous about which end it pages from, so reject it instead of
+    // silently preferring one.
+    if q.after_seq.is_some() && q.before_seq.is_some() {
+        return Err(ApiError::bad_request(
+            "after_seq and before_seq are mutually exclusive",
+        ));
+    }
+    let rows = match q.before_seq {
+        Some(before) => store::read_before(db, room.as_ref(), before, limit).await,
+        None => store::read_since(db, room.as_ref(), q.after_seq.unwrap_or(0), limit).await,
+    }
+    .map_err(|e| ApiError::internal(format_args!("store error: {e}")))?;
     let views = resolve_history_views(&state, db, room.as_ref(), rows).await?;
     Ok(Json(views))
 }

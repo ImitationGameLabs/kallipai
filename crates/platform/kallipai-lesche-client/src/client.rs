@@ -75,6 +75,22 @@ pub struct RoomMessageView {
     pub created_at: time::OffsetDateTime,
 }
 
+/// One room-history page request. A struct, not loose parameters:
+/// `after_seq` and `before_seq` are both `Option<i64>` and mean opposite
+/// directions, so positional calls could silently page the wrong way. The
+/// relay rejects a request naming both.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RoomHistoryQuery {
+    /// Rows with `seq > after_seq` (forward: the first page of newer rows).
+    pub after_seq: Option<i64>,
+    /// Rows with `seq < before_seq` (backward: the newest page of older
+    /// rows, returned ascending). A single-row lookup is `before_seq =
+    /// seq + 1` with `limit = 1`.
+    pub before_seq: Option<i64>,
+    /// Page size; the relay clamps it.
+    pub limit: Option<u64>,
+}
+
 /// Per-face live-subscriber counts echoed on an `/upstream` response (the
 /// piggyback reconcile channel). Both are 0/1 today (one app
 /// stream per owner; one projection channel per (user, tagma)) but stay
@@ -238,22 +254,26 @@ impl LescheClient {
         anyhow::bail!("lesche room POST exhausted retries (lesche unavailable)")
     }
 
-    /// Pull a room's message history: `GET /rooms/{room_id}/messages?
-    /// after_seq=&limit=`. Member-only on the relay; returns the stored rows
-    /// (payload = plaintext `RoomMessage` JSON). A non-member / unknown room is
-    /// a [`LescheHttpError`] with status 404. Not retried: a history pull is
-    /// a fresh read, the next call supersedes a dropped one.
+    /// Pull a room's message history: `GET /rooms/{room_id}/messages`. The
+    /// query names one direction at a time (`after_seq` forward, `before_seq`
+    /// backward). Member-only on the relay; returns the stored rows (payload =
+    /// plaintext `RoomMessage` JSON). A non-member / unknown room is a
+    /// [`LescheHttpError`] with status 404, and a request naming both cursors
+    /// is a 400. Not retried: a history pull is a fresh read, the next call
+    /// supersedes a dropped one.
     pub async fn fetch_room_messages(
         &self,
         room_id: &RoomId,
-        after_seq: Option<i64>,
-        limit: Option<u64>,
+        page: RoomHistoryQuery,
     ) -> Result<Vec<RoomMessageView>> {
         let mut query = Vec::new();
-        if let Some(a) = after_seq {
+        if let Some(a) = page.after_seq {
             query.push(("after_seq", a.to_string()));
         }
-        if let Some(l) = limit {
+        if let Some(b) = page.before_seq {
+            query.push(("before_seq", b.to_string()));
+        }
+        if let Some(l) = page.limit {
             query.push(("limit", l.to_string()));
         }
         let resp = self
@@ -929,13 +949,52 @@ mod tests {
             .mount(&server)
             .await;
         let rows = client(&server)
-            .fetch_room_messages(&room, Some(2), Some(10))
+            .fetch_room_messages(
+                &room,
+                RoomHistoryQuery {
+                    after_seq: Some(2),
+                    limit: Some(10),
+                    ..Default::default()
+                },
+            )
             .await
             .expect("history fetched");
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].seq, 3);
         assert_eq!(rows[0].epoch, 1);
         assert_eq!(rows[0].ciphertext.0.len(), 32);
+    }
+
+    #[tokio::test]
+    async fn fetch_room_messages_sends_before_seq_for_a_backward_page() {
+        let server = MockServer::start().await;
+        let room = RoomId::from("room-1".to_string());
+        Mock::given(method("GET"))
+            .and(path("/rooms/room-1/messages"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+            .mount(&server)
+            .await;
+        let rows = client(&server)
+            .fetch_room_messages(
+                &room,
+                RoomHistoryQuery {
+                    before_seq: Some(8),
+                    limit: Some(1),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("backward page fetched");
+        assert!(rows.is_empty());
+        // One page moves in one direction: the exact query string pins both
+        // the cursor and the absence of the forward one.
+        let requests = server.received_requests().await.expect("requests recorded");
+        assert_eq!(
+            requests[0].url.query(),
+            Some("before_seq=8&limit=1"),
+            "one backward page request: {}",
+            requests[0].url
+        );
     }
 
     #[tokio::test]

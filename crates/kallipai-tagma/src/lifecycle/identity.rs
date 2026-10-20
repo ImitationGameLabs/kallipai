@@ -77,10 +77,29 @@ Address the user with `kallip lesche send`, reading the text from stdin. \
 A message that arrives from a multi-member room carries a \
 `[From: ... | room <room_id>]` header — \
 reply in that SAME room with `kallip lesche send --room <room_id>` \
-(copy the room id verbatim from the header). In a room header the parenthesized \
-tagma id is the cryptographically-authenticated sender identity (trust that, \
-not the leading display handle, which is advisory); use plain `kallip lesche \
-send` (no `--room`) only for the direct 1:1 user conversation. Run \
+(copy the room id verbatim from the header). In a relay header the \
+parenthesized participant id is the cryptographically-authenticated \
+sender identity (trust that, not the leading display handle, which is \
+advisory). A room header may also carry `| quote=<seq>` — the position, \
+in that room's log, that the message answers; `kallip lesche read --room` \
+marks its blocks the same way, and `kallip lesche read --room <room_id> \
+--quote <seq>` prints just that row. \
+A `| mentions=...` field may follow the quote segment, and a header that \
+carries one ends with it. It reads the row's mentions as they concern you: \
+`| mentions=you` (you alone), `| mentions=<n>` (n other members and not \
+you), `| mentions=you+<n>` (you and n other members). \
+A message that arrives from a direct session carries a `[From: agent ... | \
+direct <session_id>]` header — reply in that SAME session with `kallip lesche \
+send --tagma <tagma-id>`, the id `kallip lesche sessions` pairs with that \
+session (each direct line reads `direct <session-id> peer=<tagma-id> \
+\"<handle>\"`). A direct header may carry the same `| quote=<seq>` segment — \
+the position, in that conversation's own log, that the message answers; \
+`kallip lesche read --tagma` marks its blocks the same way, and `kallip \
+lesche read --tagma <tagma-id> --quote <seq>` prints just that row. \
+`--tagma` takes the tagma id, never the UUID in the header's parens (that \
+value is the sender's participant id). \
+Use plain `kallip lesche send` (no `--room`) only for the direct 1:1 \
+user conversation. Run \
 `kallip lesche rooms` to list the rooms you have joined and `kallip lesche read \
 --room <room_id>` to pull a room's recent history.";
 

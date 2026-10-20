@@ -143,6 +143,10 @@ export type TagmaReply =
       /** The row's attachment, when the inbound message carried one. Absent on
        * rows persisted before the field existed (replayed as no file). */
       readonly attachment?: FileAttachment;
+      /** The 1:1 history row id this message quotes, when it is a quote.
+       *  An id only: the text stays where it lives, so a deleted target
+       *  renders as a placeholder instead of stale copy. */
+      readonly quote?: number;
     }
   | {
       readonly kind: "history_batch_end";

@@ -127,18 +127,53 @@ pub async fn read_since(
         .limit(limit)
         .all(db)
         .await?;
-    Ok(rows
-        .into_iter()
-        .map(|r| StoredMessage {
-            seq: r.seq,
-            sender_id: MemberId::from(r.sender_id),
-            sender_kind: ParticipantKind::from_label(&r.sender_kind)
-                .unwrap_or(ParticipantKind::Agent),
-            epoch: r.epoch,
-            ciphertext: r.ciphertext,
-            created_at: r.created_at,
-        })
-        .collect())
+    Ok(rows.into_iter().map(stored_of).collect())
+}
+
+/// Map one stored room-message row to the transport-neutral shape. Shared by
+/// both readers, so the two paging directions cannot drift apart.
+fn stored_of(r: room_messages::Model) -> StoredMessage {
+    StoredMessage {
+        seq: r.seq,
+        sender_id: MemberId::from(r.sender_id),
+        sender_kind: ParticipantKind::from_label(&r.sender_kind).unwrap_or(ParticipantKind::Agent),
+        epoch: r.epoch,
+        ciphertext: r.ciphertext,
+        created_at: r.created_at,
+    }
+}
+
+/// Read the newest `limit` rows with `seq < before_seq`, returned ASCENDING
+/// (the page's oldest row first), so a caller renders a page the same way in
+/// both directions. The backward pager, and the single-row lookup behind a
+/// quote: `read_before(before_seq = seq + 1, limit = 1)` is the one row a
+/// quoted seq can mean.
+///
+/// Absence is decidable on this route: the log has no gaps (see [`append`] --
+/// the sequence advances and the row inserts in one transaction, so a failed
+/// insert rolls the sequence back). A caller may therefore compare the
+/// returned seq with the wanted one and read a mismatch (or an empty page) as
+/// "this room has that row nowhere", rather than as a failed fetch. That
+/// verdict speaks for the log as it stands at this read and not forever: a
+/// seq the room reaches later starts resolving, so the absence answer must
+/// not be cached past the reply it was composed for.
+pub async fn read_before(
+    db: &Db,
+    room: &str,
+    before_seq: i64,
+    limit: u64,
+) -> Result<Vec<StoredMessage>, sea_orm::DbErr> {
+    let mut rows = room_messages::Entity::find()
+        .filter(room_messages::Column::RoomId.eq(room))
+        .filter(room_messages::Column::Seq.lt(before_seq))
+        .order_by_desc(room_messages::Column::Seq)
+        .limit(limit)
+        .all(db)
+        .await?;
+    // The SQL page is newest-first (that is what `limit` must cut); the
+    // caller renders oldest-first, like every other history read.
+    rows.reverse();
+    Ok(rows.into_iter().map(stored_of).collect())
 }
 
 /// Recover the registry-resolvable `source_id` (`user_id` / `tagma_id`) for a
@@ -557,5 +592,101 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(bob_map.get("room-a"), Some(&6));
+    }
+
+    /// The backward pager cuts the NEWEST `limit` rows below the cursor and
+    /// returns them ascending, so a page renders the same way in both
+    /// directions; `seq < before_seq` is exclusive and the directions never
+    /// overlap.
+    #[tokio::test]
+    async fn read_before_pages_backwards_from_the_cursor() {
+        let db = fresh_db().await;
+        seed_room(&db, "room-back").await;
+        let (alice, human) = user("alice");
+        for i in 1..=5 {
+            append(
+                &db,
+                "room-back",
+                &alice,
+                human,
+                1,
+                format!("ct-{i}").as_bytes(),
+            )
+            .await
+            .unwrap();
+        }
+
+        // Newest three below the end of the log, oldest row of the page first.
+        let page = read_before(&db, "room-back", 6, 3).await.unwrap();
+        let seqs: Vec<i64> = page.iter().map(|m| m.seq).collect();
+        assert_eq!(seqs, vec![3, 4, 5]);
+        assert_eq!(page[0].ciphertext, b"ct-3");
+
+        // Exclusive: before_seq = 3 stops before row 3.
+        let older = read_before(&db, "room-back", 3, 10).await.unwrap();
+        let seqs: Vec<i64> = older.iter().map(|m| m.seq).collect();
+        assert_eq!(seqs, vec![1, 2]);
+
+        // before_seq = 1 opens an empty page: no row 0 exists.
+        assert!(
+            read_before(&db, "room-back", 1, 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        // The forward pager resumes strictly after the page, ascending.
+        let forward = read_since(&db, "room-back", 3, 10).await.unwrap();
+        let seqs: Vec<i64> = forward.iter().map(|m| m.seq).collect();
+        assert_eq!(seqs, vec![4, 5]);
+    }
+
+    /// The single-row lookup a quote resolves with:
+    /// `read_before(before_seq = seq + 1, limit = 1)`. The page holds the
+    /// wanted row only when it is non-empty AND its seq equals the wanted seq;
+    /// the log has no gaps (see [`append`] -- the sequence advances and the row
+    /// inserts in one transaction, so a failed insert rolls the sequence back),
+    /// which is what makes a mismatch the "this room has that row nowhere"
+    /// verdict rather than a failed fetch.
+    #[tokio::test]
+    async fn read_before_finds_one_row_or_none() {
+        let db = fresh_db().await;
+        seed_room(&db, "room-peek").await;
+        let (alice, human) = user("alice");
+        for i in 1..=2 {
+            append(
+                &db,
+                "room-peek",
+                &alice,
+                human,
+                1,
+                format!("c{i}").as_bytes(),
+            )
+            .await
+            .unwrap();
+        }
+
+        // The wanted row exists: seq + 1 lands exactly on it.
+        let peek = read_before(&db, "room-peek", 3, 1).await.unwrap();
+        assert_eq!(peek.len(), 1);
+        assert_eq!(peek[0].seq, 2);
+        assert_eq!(peek[0].ciphertext, b"c2");
+
+        // A seq past the end: the page is still the newest row BELOW the
+        // cursor, so it comes back as a different row -- that mismatch (not an
+        // empty page, on a room that has rows) is the absence verdict.
+        let beyond = read_before(&db, "room-peek", 100, 1).await.unwrap();
+        assert_eq!(beyond.len(), 1);
+        assert_eq!(beyond[0].seq, 2, "the page falls back to the newest row");
+
+        // An empty room has nothing to fall back to: there the empty page is
+        // the absence verdict.
+        seed_room(&db, "room-empty").await;
+        assert!(
+            read_before(&db, "room-empty", 1, 1)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 }

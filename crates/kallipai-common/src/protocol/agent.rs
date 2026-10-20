@@ -576,6 +576,11 @@ pub struct MessageRequest {
     /// keep bodies without one byte-identical.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub defer: bool,
+    /// The 1:1 history row id this message quotes, when the sender answered
+    /// one. Absent from the historical wire shape; serde default + skip keep
+    /// bodies without one byte-identical.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quote: Option<i64>,
 }
 
 /// Response body for sending a message to an agent.
@@ -690,11 +695,13 @@ mod tests {
         assert!(!old.defer);
         assert_eq!(old.text, "hi");
         assert_eq!(old.attachment, None);
+        assert_eq!(old.quote, None);
         // ...and a default request serializes byte-identical to the old shape.
         let req = MessageRequest {
             text: "hi".to_owned(),
             attachment: None,
             defer: false,
+            quote: None,
         };
         assert_eq!(serde_json::to_string(&req).unwrap(), "{\"text\":\"hi\"}");
     }
@@ -705,11 +712,29 @@ mod tests {
             text: "later".to_owned(),
             attachment: None,
             defer: true,
+            quote: None,
         };
         let line = serde_json::to_string(&req).unwrap();
         assert!(line.contains("\"defer\":true"));
         let back: MessageRequest = serde_json::from_str(&line).unwrap();
         assert!(back.defer);
+    }
+
+    #[test]
+    fn message_request_quote_round_trips() {
+        // A quote rides as the plain row id; a request without one keeps
+        // the historical body shape (the skip above).
+        let req = MessageRequest {
+            text: "about that".to_owned(),
+            attachment: None,
+            defer: false,
+            quote: Some(7),
+        };
+        let value = serde_json::to_value(&req).unwrap();
+        assert_eq!(value.get("quote"), Some(&serde_json::Value::from(7)));
+        let back: MessageRequest =
+            serde_json::from_str(&serde_json::to_string(&req).unwrap()).unwrap();
+        assert_eq!(back.quote, Some(7));
     }
 
     #[test]

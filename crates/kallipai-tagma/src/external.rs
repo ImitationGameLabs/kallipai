@@ -410,16 +410,20 @@ impl ExternalProjector {
     /// No persist gate: a row is always written when the store is present (the
     /// peer partition is the key, and it is always known at ingest — `None` for
     /// the operator). The only unstamped path is a genuine append failure.
+    ///
+    /// `attachment` rides the row as a file reference; `quote` is the row id
+    /// this message answers, which only the 1:1 relay path sets.
     pub(crate) async fn record_inbound(
         &self,
         partition: Option<Participant>,
         text: String,
         attachment: Option<FileAttachment>,
+        quote: Option<i64>,
     ) {
         *self.inner.partition.lock().await = partition.clone();
         let sender = partition.clone().unwrap_or_else(operator_sender);
         let Some(db) = self.inner.history.clone() else {
-            self.publish_unstamped_inbound(sender, text, attachment);
+            self.publish_unstamped_inbound(sender, text, attachment, quote);
             return;
         };
         let (user_id, username) = peer_fields(&partition);
@@ -430,6 +434,7 @@ impl ExternalProjector {
             "inbound",
             &text,
             attachment.as_ref(),
+            quote,
         )
         .await
         {
@@ -439,6 +444,7 @@ impl ExternalProjector {
                     text,
                     created_at: None,
                     attachment: attachment.clone(),
+                    quote,
                 };
                 reply.set_history_id(id);
                 reply.set_created_at(created_at);
@@ -448,7 +454,7 @@ impl ExternalProjector {
             }
             Err(e) => {
                 error!("inbound history append failed: {e:#}");
-                self.publish_unstamped_inbound(sender, text, attachment);
+                self.publish_unstamped_inbound(sender, text, attachment, quote);
             }
         }
     }
@@ -460,6 +466,7 @@ impl ExternalProjector {
         sender: Participant,
         text: String,
         attachment: Option<FileAttachment>,
+        quote: Option<i64>,
     ) {
         if let Some(seq) = self.publish(AuthoredFrame {
             sender,
@@ -468,6 +475,7 @@ impl ExternalProjector {
                 text,
                 created_at: None,
                 attachment,
+                quote,
             },
         }) {
             debug!(site = "record_inbound", seq, "authored frame published");

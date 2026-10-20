@@ -14,6 +14,7 @@ mod status;
 mod task;
 mod team;
 pub use kallipai_common::protocol::TaskExport;
+pub use lesche::{DirectReadQuery, MessageDelivery, RoomReadQuery};
 
 struct Inner {
     base_url: String,

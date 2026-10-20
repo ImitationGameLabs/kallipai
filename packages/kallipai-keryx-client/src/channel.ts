@@ -235,8 +235,15 @@ export class RelayChannel {
   /** Send a user message. Resolves, once the keryx accepts the envelope
    * (202), to the request's `req_id`: the caller can correlate the eventual
    * `error` reply to this send (the server echoes the same `req_id`). The
-   * tagma's `message_accepted`/`error` reply flows through `replies`. */
-  send(text: string, attachment?: FileAttachment): Promise<number> {
+   * tagma's `message_accepted`/`error` reply flows through `replies`.
+   *
+   * `attachment` rides the envelope as a file reference; `quote` is the row
+   * id this message answers, which only the 1:1 relay path sets. */
+  send(
+    text: string,
+    attachment?: FileAttachment,
+    quote?: number,
+  ): Promise<number> {
     const req_id = this.nextReqId++;
     // Network-layer retries (operator-final params): the POST may fail
     // transiently (relay down, socket hiccup); retry with exponential
@@ -249,6 +256,7 @@ export class RelayChannel {
         req_id,
         text,
         ...(attachment ? { attachment } : {}),
+        ...(quote !== undefined ? { quote } : {}),
       }),
     ).then(() => req_id);
   }

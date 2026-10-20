@@ -323,16 +323,33 @@ List output is newest first.
 room with `--room`, or a peer tagma's direct session with `--tagma`:
 
 ```bash
-kallip lesche send [--room <ROOM>] [--tagma <TAGMA>]
+kallip lesche send [--room <ROOM>] [--tagma <TAGMA>] [--quote <SEQ>] [--mention <PARTICIPANT-ID>]...
 kallip lesche rooms
-kallip lesche read (--room <ROOM> | --tagma <TAGMA>) [--after-seq <N>] [--limit <N>]
+kallip lesche read (--room <ROOM> | --tagma <TAGMA>) [--after <N>] [--before <N>] [--quote <SEQ>] [--limit <N>]
 kallip lesche sessions
 ```
 
 `rooms` lists the rooms this tagma has joined; `read` replays a
-conversation's history from a sequence position; `sessions` lists every
+conversation's history -- forward from a sequence position (`--after`),
+backward from one (`--before`, rooms only), or the single row a reply names
+(`--quote`, room and direct reads). `send --quote <SEQ>` points the message
+at that row (room and direct sends). `sessions` lists every
 addressable surface (user 1:1, joined rooms, direct sessions) in one
 view. Attachments must live in a workspace the peer can read.
+`send --mention <ID>` (repeatable) names members of that room: the id alone
+crosses the wire (the roster resolves the label at render time), the flag is
+a room-send one, and a name the room does not hold is refused, not dropped.
+Membership is the tagma's judgement, made on the agent's send path against
+the room's roster; the CLI itself only refuses the flag away from a room
+send, and the browser composer checks the shape and the cap alone -- the
+lesche relays the ids on that path as given.
+The judgement has two limits, by design. The roster it judges from is the one
+the poll last fetched, so a membership change takes up to a poll period (about
+a minute) to show: a name the room has just dropped can still pass until then.
+And when the rooms listing cannot answer for the room -- the fetch fails, or
+its answer does not cover that room -- a send's mentions go out unjudged:
+the envelope POST backs off and retries on 503, the rooms GET has no such
+retry.
 The user's client renders messages as Markdown.
 
 ### `policy`: Inspect Agent Permissions

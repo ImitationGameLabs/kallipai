@@ -462,6 +462,107 @@ async fn history_resolves_sender_handles_from_registry() {
     );
 }
 
+/// A backward page (`before_seq`) returns the newest rows below the cursor,
+/// oldest of the page first. Naming both cursors is a 400, not a silent pick.
+#[tokio::test]
+async fn history_before_seq_pages_backwards_and_rejects_both_cursors() {
+    let (state, control) = db_state().await;
+    let alice = uid("alice");
+    let t1 = TagmaId::from("t1".to_string());
+    control.enroll_tagma(
+        &t1,
+        alice.clone(),
+        kallipai_archeion_common::bytes::Ed25519PublicKey(vec![1u8; 32]),
+        "tagma-token",
+    );
+    seed_room(state.db.as_ref().unwrap(), "room-1", &alice, &[], &[&t1]).await;
+
+    for _ in 0..3 {
+        let _ = post_room_envelope(
+            State(state.clone()),
+            participant("alice"),
+            opt_user("alice"),
+            Path("room-1".to_string()),
+            Json(envelope(human("alice", "alice"), "room-1")),
+        )
+        .await
+        .expect("alice send");
+    }
+
+    // seq < 3: the two rows below the cursor, ascending.
+    let Json(rows) = room_history(
+        State(state.clone()),
+        participant("alice"),
+        Path("room-1".to_string()),
+        Query(HistoryQuery {
+            after_seq: None,
+            before_seq: Some(3),
+            limit: None,
+        }),
+    )
+    .await
+    .expect("backward page");
+    let seqs: Vec<i64> = rows.iter().map(|r| r.seq).collect();
+    assert_eq!(seqs, vec![1, 2]);
+
+    // One page moves in one direction.
+    let err = room_history(
+        State(state),
+        participant("alice"),
+        Path("room-1".to_string()),
+        Query(HistoryQuery {
+            after_seq: Some(0),
+            before_seq: Some(3),
+            limit: None,
+        }),
+    )
+    .await
+    .expect_err("both cursors -> bad request");
+    assert_eq!(err.status, 400, "expected 400, got {}", err.status);
+}
+
+/// An empty page is a meaningful answer on the quote path, so a page is
+/// never zero rows: `limit=0` takes one row instead of reporting absence.
+#[tokio::test]
+async fn history_limit_zero_takes_one_row() {
+    let (state, control) = db_state().await;
+    let alice = uid("alice");
+    let t1 = TagmaId::from("t1".to_string());
+    control.enroll_tagma(
+        &t1,
+        alice.clone(),
+        kallipai_archeion_common::bytes::Ed25519PublicKey(vec![1u8; 32]),
+        "tagma-token",
+    );
+    seed_room(state.db.as_ref().unwrap(), "room-1", &alice, &[], &[&t1]).await;
+    for _ in 0..3 {
+        let _ = post_room_envelope(
+            State(state.clone()),
+            participant("alice"),
+            opt_user("alice"),
+            Path("room-1".to_string()),
+            Json(envelope(human("alice", "alice"), "room-1")),
+        )
+        .await
+        .expect("alice send");
+    }
+
+    let Json(rows) = room_history(
+        State(state),
+        participant("alice"),
+        Path("room-1".to_string()),
+        Query(HistoryQuery {
+            after_seq: None,
+            before_seq: None,
+            limit: Some(0),
+        }),
+    )
+    .await
+    .expect("a zero limit is floored to one row, not an empty page");
+    let seqs: Vec<i64> = rows.iter().map(|r| r.seq).collect();
+    assert_eq!(seqs, vec![1]);
+}
+
 /// A departed sender is gone from the live membership but retained in the
 /// `room_member_revocations` audit; history read resolves the real
 /// `@owner` handle via the audit rather than degrading to a bare prefix.

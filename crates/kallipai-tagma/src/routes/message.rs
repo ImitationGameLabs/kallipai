@@ -29,14 +29,19 @@ pub async fn send_message(
     // user, so the inbound is recorded under the operator partition (`NULL`) —
     // `deliver_message` receives `sender = None` for that. The relay path
     // passes the envelope `Participant` explicitly.
-    let attachment = req.attachment;
+    let message = crate::delivery::OutgoingMessage {
+        text: &req.text,
+        attachment: req.attachment,
+        // `<= 0` reads as no quote (see `RoomMessage::quote`), normalized
+        // here at the boundary so only a real row id reaches delivery.
+        quote: req.quote.filter(|q| *q > 0),
+    };
     let response = crate::delivery::deliver_message(
         &state,
         auth.identity().clone(),
         None,
         &id,
-        &req.text,
-        attachment,
+        message,
         req.defer,
     )
     .await?;

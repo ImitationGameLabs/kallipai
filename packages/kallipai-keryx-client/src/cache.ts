@@ -38,6 +38,11 @@ export interface CachedLine {
   /** The message's file attachment, when the sender shared one; absent on
    *  rows cached before the field existed (reads tolerate `undefined`). */
   readonly attachment?: FileAttachment;
+  /** The 1:1 history row id this message quotes, when it quotes one;
+   *  absent on rows cached before the field existed. Kept so a refresh
+   *  replays the reference instead of losing it (the row's own copy wins
+   *  on a merge, so a stale value cannot overwrite a fresher replay). */
+  readonly quote?: number;
 }
 
 const DB_NAME = "kallipai-keryx";
@@ -392,6 +397,9 @@ export interface PendingLine {
   readonly localSeq: number;
   readonly text: string;
   readonly attachment?: FileAttachment;
+  /** The row id this line quotes, when it is a quote (1:1 history id). An id
+   * only: the quoted text is resolved from history, never persisted here. */
+  readonly quote?: number;
   readonly createdAt: string;
   readonly lastError?: string;
   /** Lifecycle of the row: "queued" = never accepted by the server (the

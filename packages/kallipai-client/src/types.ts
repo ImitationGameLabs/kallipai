@@ -624,6 +624,9 @@ export interface DirectMessageRow {
   /** Reference-style attachment: the bytes stay in the files service; the
    * peer fetches `record_id` in its own authorized space. */
   readonly attachment?: FileAttachment;
+  /** The seq this row answers, in this session's own log. Absent, not null,
+   * when the row answers nothing. */
+  readonly quote?: number;
   readonly created_at: string;
 }
 

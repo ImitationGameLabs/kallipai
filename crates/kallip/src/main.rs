@@ -23,6 +23,9 @@ use args::{
 };
 use clap::{CommandFactory, Parser};
 use kallip::file::FilesClient;
+use kallipai_client::DirectReadQuery;
+use kallipai_client::MessageDelivery;
+use kallipai_client::RoomReadQuery;
 use kallipai_client::TagmaClient;
 use kallipai_client::profile::{ProfileConfig, ProfileSet};
 use kallipai_client::types::LescheSessionEntry;
@@ -39,6 +42,7 @@ pub(crate) fn agent_id_from_env() -> anyhow::Result<AgentId> {
         .map_err(|_| anyhow::anyhow!("KALLIPAI_ID env var not set"))
         .and_then(|s| s.parse::<AgentId>().map_err(Into::into))
 }
+
 /// Read the full stdin as a text payload (multiline — pipe, heredoc, or
 /// `< file`). Stdin is the only text entry point for `message`,
 /// `lesche send`, and `subagent spawn`'s initial prompt: shell argument
@@ -81,6 +85,117 @@ fn modality_shadow_suffix(set: &ProfileSet) -> &str {
 /// verbatim (not trimmed).
 fn prompt_from_stdin_text(text: String) -> Option<String> {
     (!text.trim().is_empty()).then_some(text)
+}
+
+/// Refuse a backward cursor at a target that has no such rows. `--before`
+/// names a position in a room's log and asks for the page ending below it;
+/// a direct-session read takes a forward cursor only (`after_seq` and
+/// `limit`), so the route would never see the flag and the request would
+/// quietly replay that session from its start instead of ending a page.
+///
+/// A `--quote` rides either target: it names one row, not a page edge, and
+/// a direct read reaches that row from below (`direct_read_query`).
+///
+/// Flag-vs-flag conflicts live in clap; a flag against the target lives
+/// here, because clap cannot say what a seq names.
+fn reject_backward_cursor_at_non_room(args: &args::lesche::ReadArgs) -> Result<()> {
+    if args.room.is_some() || args.before_seq.is_none() {
+        return Ok(());
+    }
+    anyhow::bail!("--before rides a room read: a seq names a row in that room's log");
+}
+
+/// The page a room read asks for. `quote` is the one-row lookup behind a
+/// `| quote=<seq>` segment, so it fixes the page to a single row and carries no
+/// page size of its own (clap refuses `--limit` beside it).
+fn room_read_query(args: &args::lesche::ReadArgs) -> Result<RoomReadQuery> {
+    if let Some(seq) = args.quote {
+        let Some(before_seq) = seq.checked_add(1) else {
+            anyhow::bail!("--quote {seq} is out of range");
+        };
+        return Ok(RoomReadQuery {
+            after_seq: None,
+            before_seq: Some(before_seq),
+            limit: Some(1),
+        });
+    }
+    Ok(RoomReadQuery {
+        after_seq: args.after_seq,
+        before_seq: args.before_seq,
+        limit: args.limit,
+    })
+}
+
+/// The page a direct-session read asks for. `quote` is the one-row lookup
+/// behind a `| quote=<seq>` segment: the direct log is read forward only, so
+/// the row at `seq` is reached from below, with a page of one. Without a
+/// quote the caller's own cursor and page size pass through.
+fn direct_read_query(args: &args::lesche::ReadArgs) -> DirectReadQuery {
+    match args.quote {
+        Some(seq) => DirectReadQuery {
+            // `--quote` is a flag clap keeps at one or above (`.range(1..)`),
+            // so this subtraction has no floor to hit.
+            after_seq: Some(seq - 1),
+            limit: Some(1),
+        },
+        None => DirectReadQuery {
+            after_seq: args.after_seq,
+            limit: args.limit,
+        },
+    }
+}
+
+/// The block a `--quote` read may print: the conversation's own render of the
+/// row at `seq`. A first block naming another position, or no block at all,
+/// means this read holds nothing to show at `seq` -- a verdict to report,
+/// never to render as silence.
+///
+/// Only the first block is this layer's business. The page size belongs to the
+/// data plane: the read asks for one row and that side clamps the page to one,
+/// so whether an answer holds a second block is not something plain text can
+/// decide -- a row's body may carry block headers of its own. What is checked
+/// here is whether the first block is the row that was asked for.
+///
+/// "Nothing to show" is not the same as "no such row": the renderer skips rows
+/// whose payload no longer parses, so the verdict stays a statement about this
+/// read.
+///
+/// The prefix carries the seq this read asked for, not a shape test on a
+/// block header: when the named row does not exist, the page lands on the
+/// row beside it, which names its own seq, and that mismatch is the verdict.
+fn expect_named_block(text: String, seq: i64) -> Result<String> {
+    let named = format!("[seq={seq} ");
+    if !text.starts_with(&named) {
+        anyhow::bail!("this read holds no readable row at seq {seq}");
+    }
+    Ok(text)
+}
+
+/// The quote position a `lesche send` may carry: a seq names a row in a
+/// conversation's own log, so the flag rides a room send or a direct-session
+/// send and points at nothing from the bilateral 1:1. A flag against the
+/// target lives here rather than in clap (see
+/// `reject_backward_cursor_at_non_room`); the tagma refuses the same send
+/// with a 400, one hop later.
+fn send_quote(args: &args::lesche::SendArgs) -> Result<Option<i64>> {
+    match args.quote {
+        Some(_) if args.room.is_none() && args.tagma.is_none() => {
+            anyhow::bail!("--quote rides a room or direct send: a seq names a row in that log")
+        }
+        quote => Ok(quote),
+    }
+}
+
+/// The members a `lesche send` names: a participant id names a member of a
+/// room, so the flags are refused at either non-room target -- the same
+/// refusal the tagma answers with 400, one hop earlier. Nothing is judged
+/// about the ids here: their shape, the cap and the roster all live where
+/// the room does, so a bad id costs nothing but the hop.
+fn send_mentions(args: &args::lesche::SendArgs) -> Result<Vec<String>> {
+    if args.room.is_none() && !args.mention.is_empty() {
+        anyhow::bail!("--mention rides a room send: a participant id names a member of that room")
+    }
+    Ok(args.mention.clone())
 }
 
 #[tokio::main]
@@ -277,9 +392,22 @@ async fn main() -> Result<()> {
                 // failed POST (relay down, burst cap, etc.) does not let local
                 // clients render a message that was never delivered.
                 let id = agent_id_from_env()?;
+                // Validate the flags before reading stdin: a wrong target, or a
+                // quote, or a mention without a room, is answerable without the message body.
+                let quote = send_quote(&args)?;
+                let mentions = send_mentions(&args)?;
                 let text = read_text_stdin()?;
                 client
-                    .post_message_delivery(&id, &text, args.room.as_deref(), args.tagma.as_deref())
+                    .post_message_delivery(
+                        &id,
+                        &text,
+                        MessageDelivery {
+                            room: args.room.as_deref(),
+                            tagma: args.tagma.as_deref(),
+                            quote,
+                            mentions: &mentions,
+                        },
+                    )
                     .await?;
                 println!("{}", kallipai_common::message::marker_line(&text));
             }
@@ -301,20 +429,30 @@ async fn main() -> Result<()> {
                 // block per message), so print it verbatim (no trailing newline
                 // added).
                 let id = agent_id_from_env()?;
+                // The target check runs for every read; each target assembles
+                // its own page.
+                reject_backward_cursor_at_non_room(&args)?;
                 let text = match (&args.room, &args.tagma) {
                     (Some(room), _) => {
                         client
-                            .read_room_messages(&id, room, args.after_seq, args.limit)
+                            .read_room_messages(&id, room, room_read_query(&args)?)
                             .await?
                     }
                     (_, Some(peer)) => {
                         client
-                            .read_direct_session_messages(&id, peer, args.after_seq, args.limit)
+                            .read_direct_session_messages(&id, peer, direct_read_query(&args))
                             .await?
                     }
                     // clap enforces exactly-one (`required_unless_present` +
                     // `conflicts_with`), so this arm is unreachable via the CLI.
                     (None, None) => anyhow::bail!("--room or --tagma is required"),
+                };
+                // A `--quote` read shows exactly the row it names: the page
+                // fields above are how the row is fetched; this is the verdict
+                // on what came back.
+                let text = match args.quote {
+                    Some(seq) => expect_named_block(text, seq)?,
+                    None => text,
                 };
                 print!("{text}");
             }
@@ -990,6 +1128,7 @@ async fn print_agent_directory(client: &TagmaClient) -> Result<()> {
     print_agent_blocks(&agents, now);
     Ok(())
 }
+
 /// Display label for an agent: its role, falling back to the id when no role
 /// is set so every row is identifiable.
 fn agent_label(a: &kallipai_common::protocol::AgentSummary) -> String {
@@ -1063,6 +1202,7 @@ async fn relocate_workspace(
     }
     Ok(())
 }
+
 /// Print an agent's role/description summary (e.g. after a metadata update).
 fn print_agent_summary(updated: &kallipai_common::protocol::AgentSummary) {
     println!(
@@ -1188,6 +1328,7 @@ mod tests {
         };
         assert!(err.to_string().contains("cannot be used with"), "{err}");
     }
+
     #[test]
     fn file_send_requires_a_target() {
         let Err(err) =
@@ -1427,5 +1568,290 @@ mod tests {
         assert_eq!(humanize_bytes(512), "512 B");
         assert_eq!(humanize_bytes(4_198), "4.1 KiB");
         assert_eq!(humanize_bytes(5 * 1024 * 1024), "5.0 MiB");
+    }
+
+    /// Parse a `lesche read` invocation, so a test exercises the flags and the
+    /// dispatch input together.
+    fn parsed_read(extra: &[&str]) -> args::lesche::ReadArgs {
+        let mut argv = vec!["kallip", "lesche", "read"];
+        argv.extend_from_slice(extra);
+        let cli = Cli::try_parse_from(argv).expect("parses");
+        match cli.command.expect("command") {
+            Commands::Lesche(LescheCommand::Read(args)) => args,
+            _ => panic!("expected lesche read"),
+        }
+    }
+
+    /// Parse a `lesche send` invocation the same way.
+    fn parsed_send(extra: &[&str]) -> args::lesche::SendArgs {
+        let mut argv = vec!["kallip", "lesche", "send"];
+        argv.extend_from_slice(extra);
+        let cli = Cli::try_parse_from(argv).expect("parses");
+        match cli.command.expect("command") {
+            Commands::Lesche(LescheCommand::Send(args)) => args,
+            _ => panic!("expected lesche send"),
+        }
+    }
+
+    #[test]
+    fn lesche_read_parses_both_new_positions() {
+        let backward = parsed_read(&["--room", "ops", "--before", "5"]);
+        assert_eq!(backward.before_seq, Some(5));
+        assert_eq!(backward.quote, None);
+        let quoted = parsed_read(&["--room", "ops", "--quote", "7"]);
+        assert_eq!(quoted.quote, Some(7));
+        assert_eq!(quoted.before_seq, None);
+        let forward = parsed_read(&["--room", "ops", "--after", "3"]);
+        assert_eq!(forward.after_seq, Some(3));
+        assert_eq!(forward.before_seq, None);
+    }
+
+    #[test]
+    fn lesche_read_rejects_paging_both_ways_at_once() {
+        for extra in [
+            ["--room", "ops", "--after", "1", "--before", "5"],
+            ["--room", "ops", "--after", "1", "--quote", "7"],
+            ["--room", "ops", "--before", "5", "--quote", "7"],
+            ["--room", "ops", "--quote", "7", "--limit", "3"],
+        ] {
+            let mut argv = vec!["kallip", "lesche", "read"];
+            argv.extend_from_slice(&extra);
+            assert!(
+                Cli::try_parse_from(argv).is_err(),
+                "two cursors accepted: {extra:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn lesche_read_rejects_a_position_below_one() {
+        for extra in [
+            ["--room", "ops", "--before", "0"],
+            ["--room", "ops", "--before", "-3"],
+            ["--room", "ops", "--quote", "0"],
+        ] {
+            let mut argv = vec!["kallip", "lesche", "read"];
+            argv.extend_from_slice(&extra);
+            assert!(
+                Cli::try_parse_from(argv).is_err(),
+                "non-positive position accepted: {extra:?}"
+            );
+        }
+    }
+
+    /// A `--before` cursor needs a page edge to name, and only a room read has
+    /// one: a direct session is read forward, a bare direct read carries no
+    /// position at all, and a `--quote` names a row rather than an edge, so it
+    /// rides either target.
+    #[test]
+    fn a_backward_cursor_is_refused_only_beside_a_direct_session() {
+        let err =
+            reject_backward_cursor_at_non_room(&parsed_read(&["--tagma", "peer", "--before", "5"]))
+                .expect_err("non-room target");
+        assert!(
+            err.to_string()
+                .contains("--before rides a room read: a seq names a row"),
+            "{err}"
+        );
+        assert!(
+            reject_backward_cursor_at_non_room(&parsed_read(&["--tagma", "peer"])).is_ok(),
+            "a plain direct read carries no position"
+        );
+        assert!(
+            reject_backward_cursor_at_non_room(&parsed_read(&["--room", "ops", "--before", "5"]))
+                .is_ok(),
+            "a room keeps its backward cursor"
+        );
+        let quoted = parsed_read(&["--tagma", "peer", "--quote", "7"]);
+        assert!(
+            reject_backward_cursor_at_non_room(&quoted).is_ok(),
+            "a quote rides a direct read: it names a row, not a page edge"
+        );
+    }
+
+    #[test]
+    fn a_quote_lookup_asks_for_the_row_above_the_position() {
+        let query = room_read_query(&parsed_read(&["--room", "ops", "--quote", "42"]))
+            .expect("quote composes");
+        assert_eq!(query.after_seq, None);
+        assert_eq!(query.before_seq, Some(43));
+        assert_eq!(query.limit, Some(1));
+    }
+
+    #[test]
+    fn a_direct_quote_lookup_asks_for_the_row_below_the_position() {
+        let quoted = parsed_read(&["--tagma", "peer", "--quote", "42"]);
+        let query = direct_read_query(&quoted);
+        assert_eq!(query.after_seq, Some(41));
+        assert_eq!(query.limit, Some(1));
+        // The first row of a session sits at the floor: `after_seq = 0` reads
+        // from the start, while a room's backward cursor treats 0 as no row.
+        let floor = parsed_read(&["--tagma", "peer", "--quote", "1"]);
+        let first = direct_read_query(&floor);
+        assert_eq!(first.after_seq, Some(0));
+        assert_eq!(first.limit, Some(1));
+        // Without a quote the caller's own cursor and page size pass through.
+        let plain = direct_read_query(&parsed_read(&[
+            "--tagma", "peer", "--after", "3", "--limit", "20",
+        ]));
+        assert_eq!(plain.after_seq, Some(3));
+        assert_eq!(plain.limit, Some(20));
+    }
+
+    #[test]
+    fn a_position_with_no_room_above_it_is_rejected() {
+        let args = args::lesche::ReadArgs {
+            room: Some("ops".to_owned()),
+            tagma: None,
+            after_seq: None,
+            before_seq: None,
+            quote: Some(i64::MAX),
+            limit: None,
+        };
+        let err = room_read_query(&args).expect_err("out of range");
+        assert!(err.to_string().contains("is out of range"), "{err}");
+    }
+
+    #[test]
+    fn a_backward_page_passes_its_cursor_through() {
+        let query = room_read_query(&parsed_read(&["--room", "ops", "--before", "9"]))
+            .expect("backward page");
+        assert_eq!(query.before_seq, Some(9));
+        assert_eq!(query.after_seq, None);
+        assert_eq!(query.limit, None);
+        // The shape a pager actually sends: the cursor plus a page size.
+        let sized = room_read_query(&parsed_read(&[
+            "--room", "ops", "--before", "9", "--limit", "20",
+        ]))
+        .expect("sized backward page");
+        assert_eq!(sized.before_seq, Some(9));
+        assert_eq!(sized.limit, Some(20));
+        let plain = room_read_query(&parsed_read(&["--room", "ops"])).expect("plain page");
+        assert_eq!(plain.after_seq, None);
+        assert_eq!(plain.before_seq, None);
+        assert_eq!(plain.limit, None);
+    }
+
+    #[test]
+    fn a_quoted_read_prints_the_named_row_and_reports_its_absence() {
+        let block = "[seq=42 from=agent:p-1 \"Alice\" at=2026-01-01 0:00:00.0 +00:00:00]\nhi\n\n";
+        assert_eq!(
+            expect_named_block(block.to_owned(), 42).expect("named row"),
+            block
+        );
+        // The leading block alone decides the row: a page whose first block
+        // names a longer seq must fail, and so must one whose body merely
+        // carries the named seq.
+        for (text, seq) in [
+            (String::new(), 42),
+            (
+                "[seq=41 from=agent:p-1 at=2026-01-01 0:00:00.0 +00:00:00]\nhi\n\n".to_owned(),
+                42,
+            ),
+            ("not a block".to_owned(), 42),
+            (
+                "[seq=42 from=agent:p-1 at=2026-01-01 0:00:00.0 +00:00:00]\nhi\n\n".to_owned(),
+                4,
+            ),
+            (
+                "[seq=41 from=agent:p-1 at=2026-01-01 0:00:00.0 +00:00:00]\nlook:\n[seq=42 from=agent:p-2 at=2026-01-01 0:00:00.0 +00:00:00]\n\n".to_owned(),
+                42,
+            ),
+        ] {
+            let err = expect_named_block(text.clone(), seq).expect_err("unnamed row");
+            assert!(
+                err.to_string()
+                    .contains(&format!("no readable row at seq {seq}")),
+                "{err}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_quoted_read_prints_a_row_whose_body_looks_like_a_block() {
+        let pasted = "[seq=99 from=agent:p-2 \"Bob\" at=2026-01-01 0:00:00.0 +00:00:00]\nhi\n\n";
+        let block = format!(
+            "[seq=42 from=agent:p-1 \"Alice\" at=2026-01-01 0:00:00.0 +00:00:00]\nlook:\n{pasted}"
+        );
+        assert_eq!(
+            expect_named_block(block.clone(), 42).expect("a body quoting a block"),
+            block
+        );
+    }
+
+    #[test]
+    fn a_quote_rides_a_room_or_direct_send() {
+        assert_eq!(
+            send_quote(&parsed_send(&["--room", "ops", "--quote", "7"])).expect("room send"),
+            Some(7)
+        );
+        assert_eq!(
+            send_quote(&parsed_send(&["--tagma", "peer", "--quote", "7"]))
+                .expect("direct-session send"),
+            Some(7)
+        );
+        assert_eq!(send_quote(&parsed_send(&[])).expect("bilateral send"), None);
+        let err = send_quote(&parsed_send(&["--quote", "7"])).expect_err("bilateral send");
+        assert!(
+            err.to_string().contains("rides a room or direct send"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn mentions_ride_a_room_send_only() {
+        let sent = send_mentions(&parsed_send(&[
+            "--room",
+            "ops",
+            "--mention",
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "--mention",
+            "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        ]))
+        .expect("room send");
+        assert_eq!(
+            sent,
+            vec![
+                "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_string(),
+                "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb".to_string(),
+            ],
+            "the flags collect in the order they were given"
+        );
+
+        assert!(
+            send_mentions(&parsed_send(&[]))
+                .expect("plain send")
+                .is_empty(),
+            "a send that names nobody names nobody"
+        );
+
+        let err = send_mentions(&parsed_send(&["--tagma", "peer", "--mention", "not-an-id"]))
+            .expect_err("a direct-session send names no room");
+        assert!(err.to_string().contains("rides a room send"), "{err}");
+    }
+
+    #[test]
+    fn a_mention_and_a_quote_travel_together() {
+        let args = parsed_send(&[
+            "--room",
+            "ops",
+            "--quote",
+            "7",
+            "--mention",
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        ]);
+        assert_eq!(send_quote(&args).expect("room send"), Some(7));
+        assert_eq!(
+            send_mentions(&args).expect("room send"),
+            vec!["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_string()]
+        );
+    }
+
+    #[test]
+    fn lesche_send_rejects_a_position_below_one() {
+        assert!(
+            Cli::try_parse_from(["kallip", "lesche", "send", "--room", "ops", "--quote", "0"])
+                .is_err()
+        );
     }
 }

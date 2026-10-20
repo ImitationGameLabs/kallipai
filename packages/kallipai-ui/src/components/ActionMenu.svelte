@@ -15,7 +15,10 @@
     placement = "bottom-end",
     disabled = false,
     compact = false,
+    triggerClass,
     contentClass = "card preset-tonal-surface p-1 min-w-[8rem]",
+    open,
+    onOpenChange,
     onSelect,
     children,
   }: {
@@ -27,16 +30,37 @@
     disabled?: boolean;
     /** The size-8 trigger for dense cards; the default is the section's size-10. */
     compact?: boolean;
+    /** Replaces the default trigger classes outright: a caller owning its own
+     *  visual (the message row's hover affordances) passes one class string
+     *  instead of stacking corrections onto the shared default. */
+    triggerClass?: string;
     /** The content's classes; widen for menus with long item labels. */
     contentClass?: string;
+    /** Controlled open state. Give both props or neither: the transcript
+     *  keeps one menu open at a time, so the flag lives with the parent. */
+    open?: boolean;
+    onOpenChange?: (open: boolean) => void;
     onSelect: (value: string) => void;
     children: Snippet;
   } = $props();
+
+  // The props the menu root takes when the caller owns the open state;
+  // nothing at all when it does not, so a plain row keeps the menu's own.
+  const controlled = $derived.by(() => {
+    const notify = onOpenChange;
+    if (open === undefined || notify === undefined) return {};
+    return { open, onOpenChange: (d: { open: boolean }) => notify(d.open) };
+  });
 </script>
 
-<Menu positioning={{ placement }} onSelect={(e) => onSelect(e.value)}>
+<Menu
+  positioning={{ placement }}
+  onSelect={(e) => onSelect(e.value)}
+  {...controlled}
+>
   <Menu.Trigger
-    class="{compact ? 'size-8' : 'size-10 shrink-0'} {TONAL_ICON_SURF}"
+    class={triggerClass ??
+      `${compact ? "size-8" : "size-10 shrink-0"} ${TONAL_ICON_SURF}`}
     aria-label={label}
     {disabled}
   >

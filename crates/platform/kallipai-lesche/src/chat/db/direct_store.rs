@@ -358,6 +358,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_one_row_window_lands_on_the_named_position() {
+        // The shape a `--quote <seq>` read asks for on the direct surface: the
+        // cursor one below the position with a page of one. Ascending order and
+        // the limit are what make that land on the row itself, so both are
+        // pinned here.
+        let db = fresh_db().await;
+        let (a, b) = pair(1);
+        seed_session(&db, "s-1", &a, &b).await;
+        append(&db, "s-1", &a, b"[one]").await.unwrap();
+        append(&db, "s-1", &b, b"[two]").await.unwrap();
+        append(&db, "s-1", &a, b"[three]").await.unwrap();
+        let second = read_since(&db, "s-1", 1, 1).await.unwrap();
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].seq, 2);
+        assert_eq!(second[0].payload, b"[two]");
+        // The first row sits at the floor: `after_seq = 0` reads from the
+        // start.
+        let first = read_since(&db, "s-1", 0, 1).await.unwrap();
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].seq, 1);
+        // A position past the end is an empty page, not an error.
+        assert!(read_since(&db, "s-1", 3, 1).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn seq_is_per_session() {
         let db = fresh_db().await;
         let (a1, b1) = pair(1);

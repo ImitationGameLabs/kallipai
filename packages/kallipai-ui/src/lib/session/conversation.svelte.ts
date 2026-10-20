@@ -65,7 +65,7 @@ import {
   readPendingByTagma,
   readTailBefore,
 } from "@kallipai/kallipai-keryx-client";
-import type { Transport } from "./transport.ts";
+import type { SendOptions, Transport } from "./transport.ts";
 import { DirectTransport, type TransportState } from "./directTransport.ts";
 import { DataPlaneApiError } from "@kallipai/kallipai-lesche-client";
 import { KallipaiError } from "@kallipai/kallipai-common";
@@ -117,6 +117,7 @@ export function cachedLineToLine(c: CachedLine): ConversationLine {
     sender: c.sender,
     createdAt: c.createdAt,
     attachment: c.attachment,
+    quote: c.quote,
   };
 }
 
@@ -176,7 +177,12 @@ export abstract class ConversationBase {
    *  already in `transcript` (status "sending"); the single-in-flight send pump
    *  drains this one ack at a time. */
   pending = $state<
-    { localId: number; text: string; attachment?: FileAttachment }[]
+    {
+      localId: number;
+      text: string;
+      attachment?: FileAttachment;
+      quote?: number;
+    }[]
   >([]);
 
   /** Watchdog for the in-flight POST: if neither the ack nor an error
@@ -241,12 +247,20 @@ export abstract class ConversationBase {
   /** Send a user message online: renders the optimistic line, queues it,
    *  and hands off to the shared single-in-flight send pump (the in-flight
    *  POST's `user_message` frame promotes the line via `applyReplyCore`). */
-  send(text: string, attachment?: FileAttachment): void {
+  send(text: string, options?: SendOptions): void {
     if (!this.transport) return;
     const trimmed = text.trim();
-    if (trimmed === "" && attachment === undefined) return;
-    const localId = this.renderPendingLine(trimmed, attachment);
-    this.pending = [...this.pending, { localId, text: trimmed, attachment }];
+    if (trimmed === "" && options?.attachment === undefined) return;
+    const localId = this.renderPendingLine(trimmed, options);
+    this.pending = [
+      ...this.pending,
+      {
+        localId,
+        text: trimmed,
+        attachment: options?.attachment,
+        quote: options?.quote,
+      },
+    ];
     void this.pumpPending();
   }
 
@@ -256,10 +270,9 @@ export abstract class ConversationBase {
    *  optimistic bubble, and writes the durable pending row (removed when
    *  the ack lands). Returns the localSeq, which doubles as the rendered
    *  line's historyId. */
-  protected renderPendingLine(
-    trimmed: string,
-    attachment?: FileAttachment,
-  ): number {
+  protected renderPendingLine(trimmed: string, options?: SendOptions): number {
+    const attachment = options?.attachment;
+    const quote = options?.quote;
     const now = new Date();
     const localId = nextPendingSeq(now.getTime(), this.lastPendingSeq);
     this.lastPendingSeq = localId;
@@ -270,12 +283,14 @@ export abstract class ConversationBase {
       this.localSender,
       attachment,
       now,
+      quote,
     );
     void putPending({
       tagmaId: this.pendingKey,
       localSeq: localId,
       text: trimmed,
       ...(attachment !== undefined ? { attachment } : {}),
+      ...(quote !== undefined ? { quote } : {}),
       createdAt: now.toISOString(),
       status: "queued",
     });
@@ -298,7 +313,12 @@ export abstract class ConversationBase {
     this.transcript = retryLine(this.transcript, localSeq);
     this.pending = [
       ...this.pending,
-      { localId: localSeq, text: line.text, attachment: line.attachment },
+      {
+        localId: localSeq,
+        text: line.text,
+        attachment: line.attachment,
+        quote: line.quote,
+      },
     ];
     void this.pumpPending();
   }
@@ -329,6 +349,7 @@ export abstract class ConversationBase {
           this.localSender,
           row.attachment,
           new Date(row.createdAt),
+          row.quote,
         );
         if (failed) t = sendFailed(t, row.localSeq, row.lastError);
         this.transcript = t;
@@ -340,7 +361,12 @@ export abstract class ConversationBase {
       if (this.pending.some((p) => p.localId === row.localSeq)) continue;
       this.pending = [
         ...this.pending,
-        { localId: row.localSeq, text: row.text, attachment: row.attachment },
+        {
+          localId: row.localSeq,
+          text: row.text,
+          attachment: row.attachment,
+          quote: row.quote,
+        },
       ];
     }
     if (this.pending.length > 0) void this.pumpPending();
@@ -440,6 +466,7 @@ export abstract class ConversationBase {
             sender: wireSender,
             createdAt: confirmed.createdAt,
             attachment: confirmed.attachment,
+            quote: confirmed.quote,
           });
         }
         // The send landed: the durable pending copy is no longer needed.
@@ -478,6 +505,7 @@ export abstract class ConversationBase {
         sender: cl.sender,
         createdAt: cl.createdAt,
         attachment: cl.attachment,
+        quote: cl.quote,
       });
       if (cl.historyId > this.maxRendered) this.maxRendered = cl.historyId;
     }
@@ -495,7 +523,10 @@ export abstract class ConversationBase {
     if (next === undefined) return;
     this.pendingInFlight = { localId: next.localId, text: next.text };
     try {
-      const reqId = await this.transport!.send(next.text, next.attachment);
+      const reqId = await this.transport!.send(next.text, {
+        attachment: next.attachment,
+        quote: next.quote,
+      });
       // The POST was accepted: arm the reply watchdog. From here the only
       // way the line resolves is the ack or an error reply arriving on the
       // wire -- if neither lands (reply lost), the watchdog releases the
@@ -596,6 +627,8 @@ export abstract class ConversationBase {
         text: l.text,
         sender: l.sender,
         createdAt: l.createdAt,
+        attachment: l.attachment,
+        quote: l.quote,
       });
     }
     return this.mergeWindowLines(lines);
@@ -634,6 +667,57 @@ export abstract class ConversationBase {
       this.loadingOlder = false;
     }
   }
+
+  /** Look up one history row by id WITHOUT touching the loaded window.
+   *  A quote block asks whether its target still exists, and a page of the
+   *  target's neighbourhood must never be merged: the pager only moves
+   *  older from the window floor, so a mid-history segment would leave a
+   *  hole that nothing can fill.
+   *
+   *  The decision is made here, once, for every leaf: an id at or below the
+   *  rendered head is read through the leaf's own page source, and the
+   *  answer is the row itself, `"deleted"` (the page held only rows below
+   *  the id, or none at all: a contiguous history without it proves it is
+   *  gone -- and only a COMPLETE page proves contiguity: a window the tagma
+   *  could not decode whole is a hole, so its miss proves nothing) or
+   *  `"error"` (an id that is not a positive integer, an id above the head,
+   *  a leaf that cannot give the page, a page with undecodable rows or one
+   *  that arrived short of its own count, or a page row that maps to no
+   *  line -- an unreadable row could be the quoted one, and nothing could
+   *  be drawn for it). The split is never a leaf's call. */
+  async peekRow(id: number): Promise<ConversationLine | "deleted" | "error"> {
+    if (!Number.isInteger(id) || id <= 0) return "error";
+    // A probe is only meaningful for a rendered row: an id above the head
+    // is not something a quote can point at, and its page would land above
+    // the window as a live row (the reroute only catches ids at or below
+    // the head), which is the hole the probe is meant never to open.
+    if (id > this.maxRendered) return "error";
+    const rows = await this.probePage(id);
+    if (rows === null) return "error";
+    for (const row of rows) {
+      const line = historyEntryLine(row);
+      if (line === null) return "error";
+      if (line.historyId === id) return line;
+    }
+    return "deleted";
+  }
+
+  /** The leaf's page for one probe: the newest rows at or below `id`, read on
+   *  the same cursor the window pages on. That cursor -- and the contiguity
+   *  it buys -- is why `peekRow` may read an empty page as proof of absence;
+   *  the row count is not what makes the verdict sound.
+   *
+   *  Today both leaves that serve a page ask for `before: id + 1` with
+   *  `limit: 1`, so the page holds at most one row, the highest at or below
+   *  `id`. A row above `id` cannot occur on that contract, which is why
+   *  nothing defends against one.
+   *
+   *  Read and not merged -- or `null` when this leaf cannot give a COMPLETE
+   *  page right now (no history source, a stream that is not open, a catch-up
+   *  holding the frames, a read that failed, a window the tagma could not
+   *  decode whole, a page that arrived short of its own count). `null` reads
+   *  as a retryable `error`, never as a verdict. */
+  protected abstract probePage(id: number): Promise<HistoryEntry[] | null>;
 
   /** The leaf page source (cache-first, then transport). The caller
    * holds the single-flight slot and has verified the window has
@@ -764,6 +848,29 @@ export function shouldNotify(floor: number, reply: TagmaReply): boolean {
 interface RelayPull {
   rows: HistoryEntry[];
   settle: ((count: number, more: boolean, undecodable: number) => void) | null;
+}
+
+/** One cursor page's request: `before` is the window floor a scroll-up
+ *  pages below (absent/null for the catch-up window, which asks for the
+ *  newest rows). */
+interface PageRequest {
+  before?: number | null;
+  limit: number;
+}
+
+/** What a page pull settles with: its buffered rows, the marker's count
+ *  and `more`, and whether the marker ever arrived. A timed-out page holds
+ *  rows that may be partial, so callers keep their retry state armed. The
+ *  `undecodable` count says whether the marker's window was whole. */
+interface PageResult {
+  rows: HistoryEntry[];
+  count: number;
+  more: boolean;
+  timedOut: boolean;
+  /** Rows the window held that the tagma could not decode: the batch is
+   *  then a hole, not a complete window. Zero when the marker never came
+   *  (a timed-out page makes no claim either way). */
+  undecodable: number;
 }
 
 export class RelayConversation extends ConversationBase {
@@ -1034,6 +1141,13 @@ export class RelayConversation extends ConversationBase {
    */
   async catchUp(k = WINDOW_PAGE): Promise<void> {
     if (this.windowPull !== null) return; // one window at a time
+    // Content frames carry no request id: a window pull and a before-page
+    // cannot be in flight together (see runPagePull). Waiting on the queue
+    // here is best-effort -- it is a snapshot of its tail, not a lock: a page
+    // queued after this await still races, and the recheck inside runPagePull
+    // is what actually keeps the two apart.
+    await this.beforeQueue;
+    if (this.windowPull !== null) return;
     // Suppress notifications for the whole window: every row in it is old news
     // re-arriving, and a fresh device's window starts below no floor at all
     // (maxRendered 0) -- either way one notification per row would be spam.
@@ -1149,15 +1263,7 @@ export class RelayConversation extends ConversationBase {
    * per-batch timeout is the old watchdog's replacement: on expiry the
    * buffered rows fold, the page reads as terminal, and retry policy
    * stays with the caller. */
-  private async pullPage(opts: {
-    before?: number | null;
-    limit: number;
-  }): Promise<{
-    rows: HistoryEntry[];
-    count: number;
-    more: boolean;
-    timedOut: boolean;
-  }> {
+  private async pullPage(opts: PageRequest): Promise<PageResult> {
     // A dead transport has no channel to page through: fold as a timed-out
     // empty page so the caller keeps hasMoreOlder instead of reading the
     // miss as a terminal end of history.
@@ -1166,9 +1272,57 @@ export class RelayConversation extends ConversationBase {
     }
     const pull: RelayPull = { rows: [], settle: null };
     const isBeforePage = (opts.before ?? 0) > 0;
+    const run = () => this.runPagePull(pull, isBeforePage, opts);
+    // Before-pages queue: one in flight at a time (see withBeforeSlot).
+    return isBeforePage ? await this.withBeforeSlot(run) : await run();
+  }
+
+  /** One before-page in flight at a time. The wire's content frames carry no
+   *  request id (only the batch-end marker does), so a row belongs to "the
+   *  before-page in flight" and to nothing finer. Two of them would trade
+   *  rows: the earlier one settles with an empty, non-timed-out page (its
+   *  quote target then reads as deleted) and the scroll-up loses its page
+   *  (added === 0 disarms the sentinel). Before-pages queue here; the
+   *  catch-up window keeps its own slot. */
+  private beforeQueue: Promise<unknown> = Promise.resolve();
+
+  private async withBeforeSlot<T>(run: () => Promise<T>): Promise<T> {
+    const previous = this.beforeQueue;
+    let release!: () => void;
+    this.beforeQueue = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous.then(
+      () => undefined,
+      () => undefined,
+    );
+    try {
+      return await run();
+    } finally {
+      release();
+    }
+  }
+
+  /** Register this page's buffer, issue the request, and settle on its own
+   *  marker. Reached through {@link pullPage}, which serializes before-pages. */
+  private async runPagePull(
+    pull: RelayPull,
+    isBeforePage: boolean,
+    opts: PageRequest,
+  ): Promise<PageResult> {
     // The try covers the history() call too: if the channel rejects the
     // send, the finally still drops this pull off beforePull — an orphan
     // reroute target would otherwise swallow rows into a dead page.
+    // The sibling slot, re-checked at the point of execution rather than
+    // once before the queue: a before-page can wait in beforeQueue while the
+    // catch-up window starts, and the wire cannot tell the two apart (content
+    // frames carry no request id). A page that ran anyway would swallow the
+    // window's replayed rows; the window would then fold around an empty page.
+    // Idle out as a timed-out page instead: scroll paging keeps its sentinel
+    // armed, and the quote probe reads an error, never a deleted target.
+    if (isBeforePage && this.windowPull !== null) {
+      return { rows: [], count: 0, more: true, timedOut: true, undecodable: 0 };
+    }
     let req_id = -1;
     try {
       // Register the buffer BEFORE the request: the rows ride the drain and can
@@ -1207,6 +1361,27 @@ export class RelayConversation extends ConversationBase {
         this.beforePull = null;
       }
       if (!isBeforePage && this.windowPull === pull) this.windowPull = null;
+    }
+  }
+
+  /** The relay leaf's probe page: one before-page below the id, read and
+   *  not merged -- the transcript's window stays exactly as the reader left
+   *  it. A before-page returns the newest rows at or below the cursor, which
+   *  is what lets the base read a contiguous miss as `deleted`. */
+  protected async probePage(id: number): Promise<HistoryEntry[] | null> {
+    // A live catch-up window owns the drain's content frames: a probe now
+    // would divide them between two buffers, so the block stays retryable
+    // until the catch-up ends.
+    if (!this.connected || this.windowPull !== null) return null;
+    try {
+      const { rows, count, timedOut, undecodable } = await this.pullPage({
+        before: id + 1,
+        limit: 1,
+      });
+      // A hole, or rows that never arrived, cannot prove a contiguous miss.
+      return timedOut || undecodable > 0 || rows.length < count ? null : rows;
+    } catch {
+      return null;
     }
   }
 
@@ -1338,6 +1513,26 @@ export class LocalConversation extends ConversationBase {
     // added === 0 reads this window -- all-dropped rows cannot move the cursor.
     if (!more || added === 0) this.hasMoreOlder = false;
   }
+
+  /** The local leaf's probe page: one before-page straight off the
+   *  transport, read and not merged -- the window keeps its floor, so a
+   *  mid-history segment cannot leave a hole. */
+  protected async probePage(id: number): Promise<HistoryEntry[] | null> {
+    const t = this.direct;
+    // No probe while the stream is down or reconnecting.
+    if (!t || this.status !== "open") return null;
+    try {
+      const { rows, undecodable } = await t.pullHistory({
+        before: id + 1,
+        limit: 1,
+      });
+      // A hole cannot prove a contiguous miss; the reply is one atomic JSON
+      // body, so the only rows it can lose are the ones dropped in decode.
+      return undecodable > 0 ? null : rows;
+    } catch {
+      return null;
+    }
+  }
 }
 
 /** The degraded offline view of a relay conversation: the key exchange
@@ -1366,14 +1561,20 @@ export class OfflineConversation extends ConversationBase {
     return this.tagmaId;
   }
 
+  /** The offline view pages its cache for scroll-up but holds no history
+   *  source, so it cannot answer a probe. */
+  protected probePage(): Promise<HistoryEntry[] | null> {
+    return Promise.resolve(null);
+  }
+
   /** The base send early-returns without a transport; the offline view
    *  sends by design -- the line renders (failed, retryable) and lands in
    *  the pending store for the reconnect auto-flush. No pump: there is
    *  nothing to pump into until a real channel opens. */
-  override send(text: string, attachment?: FileAttachment): void {
+  override send(text: string, options?: SendOptions): void {
     const trimmed = text.trim();
-    if (trimmed === "" && attachment === undefined) return;
-    const localId = this.renderPendingLine(trimmed, attachment);
+    if (trimmed === "" && options?.attachment === undefined) return;
+    const localId = this.renderPendingLine(trimmed, options);
     this.transcript = sendFailed(this.transcript, localId, chat_send_failed());
   }
 

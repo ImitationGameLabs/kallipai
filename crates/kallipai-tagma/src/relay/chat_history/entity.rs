@@ -52,6 +52,12 @@ pub struct Model {
     /// decode path; `NULL` (older rows, no attachment) replays as `None`.
     #[sea_orm(column_type = "Text", nullable)]
     pub attachment: Option<String>,
+    /// The id of the row this message quotes, or `NULL`. An id, not a text
+    /// snapshot: the quoted content stays the quoted row's own; a deleted
+    /// target replays as a placeholder at read time. Inbound rows carry one
+    /// (the operator quoting an earlier reply); outbound rows never do (the
+    /// agent does not quote).
+    pub quote: Option<i64>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

@@ -8,7 +8,7 @@
 // field existed) are transparent: they render no marker and do NOT reset the
 // group, so a stray system line between two messages doesn't split them.
 
-import { formatStampInZone } from "../time/stamp.ts";
+import { ROW_TIME, formatStampInZone } from "../time/stamp.ts";
 import { getLocale } from "../../paraglide/runtime.js";
 import {
   timeline_today,
@@ -52,7 +52,7 @@ const dayFmt =
 const timeFmt =
   (timezone?: string | null) =>
   (ms: number): string =>
-    formatStampInZone(ms, { hour: "numeric", minute: "2-digit" }, timezone);
+    formatStampInZone(ms, ROW_TIME, timezone);
 
 export function timelineMarkers(
   lines: readonly { createdAt?: string }[],

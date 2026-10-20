@@ -33,19 +33,45 @@ export interface ComposerModel {
   binding: DraftBinding | undefined;
   /** Increments on each requestFocus; an effect keyed on it focuses the field. */
   readonly focusToken: number;
+  /** The caret the field last reported (textarea selectionStart). The mention
+   *  picker reads the draft through it; without it a draft is just text and an
+   *  `@` the user has already typed past would still open a popup. */
+  caret: number;
+  /** Increments on each requestCaret; an effect keyed on it places the caret. */
+  readonly caretToken: number;
+  /** Where requestCaret put the caret (the last request wins). */
+  readonly caretRequest: number | undefined;
   readonly canSend: boolean;
   /** True while the conversation this composer is bound to has a submit in
    *  flight (covers the parked retry window); drives the button spinner.
    *  Another conversation's in-flight send leaves this one free. */
   readonly sending: boolean;
   requestFocus: () => void;
+  /** Move the caret to `position` after the next flush -- accepting a
+   *  candidate rewrites the draft, and a rewritten field puts the caret at the
+   *  end; this puts it back where the token was. */
+  requestCaret: (position: number) => void;
   submit: () => Promise<void>;
 }
 
 export function createComposer(options: ComposerOptions): ComposerModel {
   let draft = $state("");
-  let sending = $state(false);
+  /** Keys with a submit in flight, so one conversation's POST cannot
+   *  disable another conversation's send button. */
+  let sendingKeys = $state<Record<string, true>>({});
   let focusToken = $state(0);
+  let caret = $state(0);
+  let caretToken = $state(0);
+  let caretRequest = $state<number | undefined>(undefined);
+  /** The binding this composer holds. As plain state it would be proxied
+   *  on every read, and the failed-send path compares bindings by identity;
+   *  $state.raw tracks the reads without wrapping the object, so a rebind
+   *  reaches the button and the spinner while that identity stays intact.
+   *  It wakes readers on assignment alone: assign it, never mutate in place. */
+  let binding = $state.raw<DraftBinding | undefined>(undefined);
+  /** Whether this composer's own conversation has a submit in flight. */
+  const inFlight = (): boolean =>
+    binding !== undefined && sendingKeys[binding.key] === true;
 
   return {
     get draft() {
@@ -63,6 +89,18 @@ export function createComposer(options: ComposerOptions): ComposerModel {
     get focusToken() {
       return focusToken;
     },
+    get caret() {
+      return caret;
+    },
+    set caret(value: number) {
+      caret = value;
+    },
+    get caretToken() {
+      return caretToken;
+    },
+    get caretRequest() {
+      return caretRequest;
+    },
     get sending() {
       return inFlight();
     },
@@ -74,6 +112,10 @@ export function createComposer(options: ComposerOptions): ComposerModel {
     },
     requestFocus() {
       focusToken += 1;
+    },
+    requestCaret(position: number) {
+      caretRequest = position;
+      caretToken += 1;
     },
     async submit() {
       const value = draft.trim();

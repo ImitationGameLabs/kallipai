@@ -524,6 +524,7 @@ const SYNONYMS: string[][] = [
     "manage_profiles_set_modalities_label",
   ],
   ["files_download_aria", "chat_file_download_aria"],
+  ["chat_attachment_remove", "chat_mention_remove_aria"],
   ["account_menu", "settings_account"],
   ["settings_heading", "rooms_menu_settings"],
   ["connection_connecting", "shell_connecting"],

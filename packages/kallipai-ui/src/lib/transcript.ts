@@ -104,6 +104,11 @@ export interface ConversationLine {
    *  optimistic user line that carries it, or a replayed user row). Rendered
    *  as a file card; absent on plain-text lines and system/error lines. */
   readonly attachment?: FileAttachment;
+  /** The seq this line quotes, in the numbering of its own transcript: a 1:1
+   *  history row id, or a direct session's own seq. An id, not the quoted
+   *  text: the bubble resolves it against the loaded lines, so a target that
+   *  is gone renders as a placeholder instead of stale copy. */
+  readonly quote?: number;
 }
 
 type ConversationStatus = "idle" | "busy" | "error";
@@ -131,6 +136,7 @@ function line(
   sender: ConversationSender | undefined,
   createdAt?: string,
   attachment?: FileAttachment,
+  quote?: number,
 ): ConversationTranscript {
   const trimmed = text.trim();
   if (trimmed === "" && attachment === undefined) return state;
@@ -145,6 +151,7 @@ function line(
         sender,
         createdAt,
         ...(attachment !== undefined ? { attachment } : {}),
+        ...(quote !== undefined ? { quote } : {}),
       },
     ],
   };
@@ -193,6 +200,7 @@ export function applyTagmaReply(
         cs,
         reply.created_at,
         reply.attachment,
+        reply.quote,
       );
     case "event":
       return applyAuthored(state, reply.event, cs, lineId, reply.created_at);
@@ -247,6 +255,7 @@ export function historyEntryLine(entry: HistoryEntry): ConversationLine | null {
       ...(reply.attachment !== undefined
         ? { attachment: reply.attachment }
         : {}),
+      ...(reply.quote !== undefined ? { quote: reply.quote } : {}),
     };
   }
   return null;
@@ -370,6 +379,7 @@ export function withUserLine(
   sender: ConversationSender,
   attachment?: FileAttachment,
   now: Date = new Date(),
+  quote?: number,
 ): ConversationTranscript {
   const trimmed = text.trim();
   if (trimmed === "" && attachment === undefined) return state;
@@ -388,6 +398,7 @@ export function withUserLine(
         createdAt: now.toISOString(),
         status: "sending",
         ...(attachment !== undefined ? { attachment } : {}),
+        ...(quote !== undefined ? { quote } : {}),
       },
     ],
     status: "busy",
@@ -545,6 +556,7 @@ export function cacheLineOf(
   sender?: ConversationSender;
   createdAt?: string;
   attachment?: FileAttachment;
+  quote?: number;
 } | null {
   const cs = sender ? toSender(sender) : undefined;
   if (reply.kind === "user_message") {
@@ -558,6 +570,7 @@ export function cacheLineOf(
           ...(reply.attachment !== undefined
             ? { attachment: reply.attachment }
             : {}),
+          ...(reply.quote !== undefined ? { quote: reply.quote } : {}),
         }
       : null;
   }

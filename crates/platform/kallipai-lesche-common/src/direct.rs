@@ -83,15 +83,20 @@ pub use kallipai_common::protocol::agent::FileAttachment;
 
 /// The direct-session message payload: the plaintext content one tagma sends
 /// to its direct-session peer. Mirrors the room payload's minimalism (a
-/// message is text plus an optional file link); stored opaquely by the lesche
-/// and decoded only by the endpoints. The optional attachment rides with
-/// `serde(default)` + `skip_serializing_if`, so messages without one keep the
-/// bare `{"text": ...}` shape byte-for-byte.
+/// message is text, an optional file link, and -- when it answers another
+/// message -- that message's position in this session's own log); stored
+/// opaquely by the lesche and decoded only by the endpoints. Both optional
+/// fields ride with `serde(default)` + `skip_serializing_if`, so a message
+/// carrying neither keeps the bare `{"text": ...}` shape byte-for-byte.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DirectMessage {
     pub text: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attachment: Option<FileAttachment>,
+    /// The position, in this session's own log, that this message answers.
+    /// Absent when it answers nothing; the quoted text itself is never copied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quote: Option<i64>,
 }
 
 /// The peer end of a direct session, as the caller sees it: the peer's tagma
@@ -205,10 +210,33 @@ mod tests {
         let m = DirectMessage {
             text: "hi".to_string(),
             attachment: None,
+            quote: None,
         };
         assert_eq!(serde_json::to_vec(&m).unwrap(), br#"{"text":"hi"}"#);
         let decoded: DirectMessage = serde_json::from_str(r#"{"text":"hi"}"#).unwrap();
         assert_eq!(decoded.text, "hi");
         assert!(decoded.attachment.is_none());
+    }
+
+    #[test]
+    fn a_direct_quote_rides_the_wire_only_when_present() {
+        // The answered position is the one field a direct payload may carry
+        // besides text and an attachment. A message that answers nothing
+        // keeps the bare shape a pre-quote writer produced, byte for byte,
+        // so an unquoted send is unchanged on the wire.
+        let quoted = DirectMessage {
+            text: "hi".to_string(),
+            attachment: None,
+            quote: Some(7),
+        };
+        let bytes = serde_json::to_vec(&quoted).unwrap();
+        assert_eq!(bytes, br#"{"text":"hi","quote":7}"#);
+        let decoded: DirectMessage = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(decoded.quote, Some(7));
+        // A payload written before the field existed still decodes, and reads
+        // back as no quote.
+        let legacy: DirectMessage = serde_json::from_str(r#"{"text":"hi"}"#).unwrap();
+        assert_eq!(legacy.quote, None);
+        assert_eq!(serde_json::to_vec(&legacy).unwrap(), br#"{"text":"hi"}"#);
     }
 }

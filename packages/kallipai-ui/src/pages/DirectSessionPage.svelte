@@ -18,6 +18,7 @@
   import { directSessionsStore } from "../lib/session/directSessions.svelte";
   import { createDirectTranscript } from "../lib/session/directTranscript.svelte.ts";
   import { saveBlob } from "../lib/saveBlob.ts";
+  import { directQuoteBlocksByTarget } from "../lib/quote.ts";
   import {
     chat_direct_empty,
     chat_direct_title,
@@ -44,10 +45,17 @@
 
   const peerLabel = $derived(directSessionsStore.peerLabel(peerId));
 
+  // The quote blocks the transcript draws, keyed by the seq of the row each
+  // one quotes -- the key the bubble looks up. One pass over the window it
+  // holds: the quoting row and its target come from the same read, so a
+  // target outside the window stays an absent block instead of a probe.
+  const quotes = $derived(directQuoteBlocksByTarget(lines));
+
   /** Map a wire row onto the shared transcript line. Own messages (sent by
-   * the fetch-through daemon's agent) render on the user side; the peer's
-   * handle displays through the store's label resolution so an enrolled
-   * tagma shows the owner's name for it, not the raw relay stamp. */
+   * the fetch-through daemon's agent) render on the user side and keep the
+   * handle the wire stamped on them, so a quoted own row still names an
+   * author; the peer's handle displays through the store's label resolution
+   * so an enrolled tagma shows the owner's name for it, not the raw stamp. */
   function toLine(row: DirectMessageRow): ConversationLine | null {
     if (row.text === "" && row.attachment === undefined) return null;
     const own = row.sender.tagma_id === tagmaId;
@@ -59,7 +67,7 @@
         kind: own ? "user" : "agent",
         id: row.sender.id,
         handle: own
-          ? ""
+          ? row.sender.handle
           : directSessionsStore.peerLabel(
               row.sender.tagma_id ?? "",
               row.sender.handle,
@@ -67,6 +75,7 @@
       },
       createdAt: row.created_at,
       ...(row.attachment !== undefined ? { attachment: row.attachment } : {}),
+      ...(row.quote !== undefined ? { quote: row.quote } : {}),
     };
   }
 
@@ -118,6 +127,7 @@
       disabled={true}
       pendingCount={0}
       {downloadAttachment}
+      resolveQuote={(quotedSeq) => quotes.get(quotedSeq)}
     >
       {#snippet notice()}
         {#if phase === "loading"}

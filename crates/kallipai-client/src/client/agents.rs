@@ -51,6 +51,7 @@ impl TagmaClient {
                         text: text.to_owned(),
                         attachment: None,
                         defer,
+                        quote: None,
                     }),
             )
             .send()

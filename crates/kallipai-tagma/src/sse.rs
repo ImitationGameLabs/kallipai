@@ -373,6 +373,7 @@ mod tests {
                 text: "hi".into(),
                 created_at: None,
                 attachment: None,
+                quote: None,
             },
         })
         .unwrap();

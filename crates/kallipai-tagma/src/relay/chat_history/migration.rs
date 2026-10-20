@@ -13,6 +13,7 @@ mod m_20260804_01_typed_history;
 mod m_20260809_01_peer_keyed;
 mod m_20260901_01_attachment;
 mod m_20261020_01_chat_read_cursor;
+mod m_20261020_02_chat_quote;
 
 /// The chat-history migrator. New migrations are appended to
 /// [`MigratorTrait::migrations`].
@@ -26,6 +27,7 @@ impl MigratorTrait for Migrator {
             Box::new(m_20260809_01_peer_keyed::Migration),
             Box::new(m_20260901_01_attachment::Migration),
             Box::new(m_20261020_01_chat_read_cursor::Migration),
+            Box::new(m_20261020_02_chat_quote::Migration),
         ]
     }
 }

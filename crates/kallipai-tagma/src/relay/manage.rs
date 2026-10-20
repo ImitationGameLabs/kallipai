@@ -442,15 +442,23 @@ mod tests {
         let mut unread_rx = state.bus.subscribe::<UnreadFrame>().unwrap();
         let mut alice = Vec::new();
         for text in ["a1", "a2"] {
-            let (id, _) =
-                chat_history::append(&db, Some("alice"), Some("alice"), "outbound", text, None)
-                    .await
-                    .unwrap();
-            alice.push(id);
-        }
-        let (bob, _) = chat_history::append(&db, Some("bob"), Some("bob"), "outbound", "b1", None)
+            let (id, _) = chat_history::append(
+                &db,
+                Some("alice"),
+                Some("alice"),
+                "outbound",
+                text,
+                None,
+                None,
+            )
             .await
             .unwrap();
+            alice.push(id);
+        }
+        let (bob, _) =
+            chat_history::append(&db, Some("bob"), Some("bob"), "outbound", "b1", None, None)
+                .await
+                .unwrap();
         assert!(bob > *alice.last().unwrap(), "one global id sequence");
 
         let response = manage_send(

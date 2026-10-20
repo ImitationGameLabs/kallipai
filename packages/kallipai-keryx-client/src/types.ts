@@ -49,6 +49,10 @@ export type TagmaRequest =
       readonly req_id: number;
       readonly text: string;
       readonly attachment?: FileAttachment;
+      /** The 1:1 history row id this message quotes (`send_message` op). An
+       * id, never the quoted text: the tagma resolves it against its own
+       * history, and a row that is gone degrades to a placeholder. */
+      readonly quote?: number;
     }
   | { readonly op: "interrupt"; readonly req_id: number };
 

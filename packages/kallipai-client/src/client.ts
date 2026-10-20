@@ -105,12 +105,15 @@ export class TagmaClient {
     id: AgentId,
     text: string,
     attachment?: FileAttachment,
+    /** The 1:1 history row id this message quotes, when the sender
+     *  answered one. Absent leaves the historical body shape untouched. */
+    quote?: number,
   ): Promise<MessageResponse> {
+    // A send carrying neither optional piece keeps the historical
+    // `{"text":...}` bytes: `JSON.stringify` drops undefined fields.
     return this.json<MessageResponse>(`/agents/${id}/message`, {
       method: "POST",
-      body: attachment
-        ? JSON.stringify({ text, attachment })
-        : JSON.stringify({ text }),
+      body: JSON.stringify({ text, attachment, quote }),
     });
   }
 

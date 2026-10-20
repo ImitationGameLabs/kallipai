@@ -4,5 +4,6 @@
 mod client;
 
 pub use client::{
-    LescheClient, LescheClientBuilder, LescheHttpError, UpstreamAck, UpstreamFaceCounts,
+    LescheClient, LescheClientBuilder, LescheHttpError, RoomHistoryQuery, UpstreamAck,
+    UpstreamFaceCounts,
 };

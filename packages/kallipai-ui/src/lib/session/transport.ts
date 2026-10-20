@@ -26,6 +26,20 @@ import type {
 import type { TagmaStatusSummary } from "../tagmata.svelte.ts";
 import type { ConversationSender } from "../transcript.ts";
 
+/** The payload one send carries: the text plus at most one attachment and
+ *  one quoted row id. Grouped as one argument so the seam stays short as
+ *  kinds of payload accrete (the Rust delivery seam groups them for the
+ *  same reason). */
+export interface SendOptions {
+  /** Rides the wire message and comes back on the ack and the history
+   *  replay. */
+  readonly attachment?: FileAttachment;
+  /** The 1:1 history row id this message quotes. Both transports carry
+   *  it: the relay rides it in the envelope, the direct path in the POST
+   *  body, and the history read hands it back either way. */
+  readonly quote?: number;
+}
+
 /** One unit the transcript reducer consumes: the wire sender paired with the
  * content-only reply. Both transports yield this uniform shape so the reducer
  * has one path for live-online, live-offline, and replay (the sender rides the
@@ -55,14 +69,14 @@ export interface Transport {
    *  The conversation drains this into its `statusSnapshot`, so the chat header
    *  has one uniform source regardless of transport. */
   status(): AsyncGenerator<TagmaStatusSummary>;
-  /** Send a user message. `attachment`, when given, rides the wire message
-   *  (the relay op / the direct POST body) and comes back on the
+  /** Send a user message. `options.attachment`, when given, rides the wire
+   *  message (the relay op / the direct POST body) and comes back on the
    *  `message_accepted` ack and history replay. Resolves when the wire accept
    *  lands (direct: 200; relay: 202), to the request's `req_id` when the
    *  transport has one (relay channel; direct has none, resolves void) -- the
    *  conversation correlates the eventual `error` reply on it. The tagma's
    *  reply (ack/error/authored) flows via {@link replies}. */
-  send(text: string, attachment?: FileAttachment): Promise<number | void>;
+  send(text: string, options?: SendOptions): Promise<number | void>;
   /** Tear down the underlying stream(s) synchronously. */
   close(): void;
 }

@@ -436,6 +436,7 @@ mod tests {
                 "outbound",
                 "hi",
                 None,
+                None,
             )
             .await
             .unwrap();

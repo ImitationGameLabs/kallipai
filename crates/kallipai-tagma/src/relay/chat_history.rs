@@ -274,7 +274,7 @@ pub(crate) async fn append_outbound_snapshot(
     text: &str,
 ) -> Result<(i64, i64, i64, u32)> {
     seed_cursor(db, user_id).await?;
-    let (id, created_at) = append(db, user_id, username, "outbound", text, None).await?;
+    let (id, created_at) = append(db, user_id, username, "outbound", text, None, None).await?;
     let (cursor, unread) = unread_snapshot(db, user_id).await?;
     Ok((id, created_at, cursor, unread))
 }
@@ -303,6 +303,8 @@ pub(crate) async fn peers(db: &Db) -> Result<Vec<Option<String>>> {
 /// zero skew. `direction` is `outbound`/`inbound`; `user_id`/`username` are the
 /// peer (`None` = the operator on the direct path). No sender is stored: the
 /// agent is reconstructed at read, and the peer's identity is `user_id`.
+/// `quote` is the id of the row this message quotes (`None` = no quote); the
+/// id is stored as-is and resolved at read, never expanded into text.
 pub(crate) async fn append(
     db: &Db,
     user_id: Option<&str>,
@@ -310,6 +312,7 @@ pub(crate) async fn append(
     direction: &str,
     text: &str,
     attachment: Option<&kallipai_common::protocol::agent::FileAttachment>,
+    quote: Option<i64>,
 ) -> Result<(i64, i64)> {
     let now = unix_secs();
     let attachment = attachment
@@ -323,6 +326,7 @@ pub(crate) async fn append(
         text: sea_orm::Set(text.to_string()),
         created_at: sea_orm::Set(now),
         attachment: sea_orm::Set(attachment),
+        quote: sea_orm::Set(quote),
         ..Default::default()
     };
     let res = Entity::insert(row)
@@ -396,6 +400,7 @@ fn history_row_from_model(m: Model) -> HistoryRow {
         text: m.text,
         created_at: m.created_at,
         attachment: m.attachment,
+        quote: m.quote,
     }
 }
 
@@ -502,7 +507,23 @@ mod tests {
     /// `user_id = None` is the direct (operator) partition.
     async fn ap(db: &Db, user_id: Option<&str>, direction: &str, text: &str) -> i64 {
         let username = user_id.map(|_| "peer-handle");
-        append(db, user_id, username, direction, text, None)
+        append(db, user_id, username, direction, text, None, None)
+            .await
+            .unwrap()
+            .0
+    }
+
+    /// Append with an explicit quote id: the column round trip needs a real
+    /// row id, which only the store can supply.
+    async fn apq(
+        db: &Db,
+        user_id: Option<&str>,
+        direction: &str,
+        text: &str,
+        quote: Option<i64>,
+    ) -> i64 {
+        let username = user_id.map(|_| "peer-handle");
+        append(db, user_id, username, direction, text, None, quote)
             .await
             .unwrap()
             .0
@@ -667,10 +688,18 @@ mod tests {
         // => agent, inbound => peer from user_id/username) and decode_row maps
         // direction + text onto the wire reply shape.
         let (db, _d) = open_tmp().await;
-        append(&db, Some("u1"), Some("Alice"), "outbound", "hello", None)
-            .await
-            .unwrap();
-        append(&db, Some("u1"), Some("Alice"), "inbound", "hi", None)
+        append(
+            &db,
+            Some("u1"),
+            Some("Alice"),
+            "outbound",
+            "hello",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        append(&db, Some("u1"), Some("Alice"), "inbound", "hi", None, None)
             .await
             .unwrap();
 
@@ -843,5 +872,89 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(unread_snapshot(&db, Some("u1")).await.unwrap().1, 1);
+    }
+
+    #[tokio::test]
+    async fn quote_survives_every_read_window_and_decodes() {
+        let (db, _d) = open_tmp().await;
+        // The agent's line is what gets quoted; the peer's answering line
+        // carries the id (the wire UserMessage is the inbound side).
+        let original = ap(&db, Some("u1"), "outbound", "the first one").await;
+        let reply = apq(&db, Some("u1"), "inbound", "answering it", Some(original)).await;
+
+        let last = read_last_n(&db, Some("u1"), 10).await.unwrap();
+        assert_eq!(last.len(), 2);
+        assert_eq!(last[1].id, reply);
+        assert_eq!(last[1].quote, Some(original), "last_n carries the id");
+
+        let older = read_before(&db, Some("u1"), reply + 1, 10).await.unwrap();
+        let quotes: Vec<Option<i64>> = older.iter().map(|r| r.quote).collect();
+        assert_eq!(quotes, vec![None, Some(original)]);
+
+        let mut newer = read_after(&db, Some("u1"), original, 10).await.unwrap();
+        assert_eq!(newer.len(), 1);
+        assert_eq!(newer[0].quote, Some(original), "after carries the id");
+
+        // The wire shape keeps it too: the echo is a UserMessage with the id.
+        let row = newer.pop().unwrap();
+        let sender = peer_sender(&row);
+        match decode_row(row, sender) {
+            Some(HistoryEntry {
+                reply: TagmaReply::UserMessage { quote, .. },
+                ..
+            }) => assert_eq!(quote, Some(original)),
+            other => panic!("expected UserMessage, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn rows_inserted_without_the_quote_column_replay_without_one() {
+        let (db, _d) = open_tmp().await;
+        // A row inserted without naming the column -- what a writer from
+        // before the column (or a raw insert) leaves behind: the value is NULL.
+        db.execute(Statement::from_string(
+            DatabaseBackend::Sqlite,
+            "INSERT INTO chat_history (user_id, username, direction, text, created_at) \
+             VALUES ('u1', 'peer-handle', 'inbound', 'legacy row', 1700000000)",
+        ))
+        .await
+        .unwrap();
+        // Re-applying the migrator must neither re-add the column nor drop the
+        // row it backfilled with NULL.
+        migration::Migrator::up(&db, None).await.unwrap();
+
+        let rows = read_last_n(&db, Some("u1"), 10).await.unwrap();
+        assert_eq!(rows.len(), 1, "the legacy row is still there");
+        assert_eq!(rows[0].text, "legacy row");
+        assert_eq!(rows[0].quote, None, "a pre-column row replays quote-less");
+    }
+
+    /// A connection with no migrations applied: the upgrade path needs a
+    /// store that already exists at the previous schema.
+    async fn open_raw(dir: &TempDir) -> Db {
+        let path = dir.path().join("raw.sqlite");
+        let url = format!("sqlite://{}?mode=rwc", path.display());
+        Database::connect(&url).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn an_install_at_the_previous_schema_upgrades_with_its_rows_intact() {
+        let dir = TempDir::new().unwrap();
+        let db = open_raw(&dir).await;
+        // Stop one migration short: a real pre-quote install.
+        migration::Migrator::up(&db, Some(5)).await.unwrap();
+        db.execute(Statement::from_string(
+            DatabaseBackend::Sqlite,
+            "INSERT INTO chat_history (user_id, username, direction, text, created_at) \
+             VALUES ('peer-1', 'peer-handle', 'inbound', 'before the upgrade', 1700000000)",
+        ))
+        .await
+        .unwrap();
+        // The upgrade an install performs on boot.
+        migration::Migrator::up(&db, None).await.unwrap();
+        let rows = read_last_n(&db, Some("peer-1"), 10).await.unwrap();
+        assert_eq!(rows.len(), 1, "the upgraded store keeps the row");
+        assert_eq!(rows[0].text, "before the upgrade");
+        assert_eq!(rows[0].quote, None, "a row from before the column has none");
     }
 }

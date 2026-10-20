@@ -5,6 +5,13 @@
 // where even the default formatter is unavailable.
 import { getLocale } from "../../paraglide/runtime.js";
 
+/** The time-of-day shape every transcript row label uses. A spoken row
+ * sentence must match the label beside it, so both read this one shape. */
+export const ROW_TIME: Intl.DateTimeFormatOptions = {
+  hour: "numeric",
+  minute: "2-digit",
+};
+
 export function formatStampInZone(
   value: string | number,
   opts: Intl.DateTimeFormatOptions | undefined,

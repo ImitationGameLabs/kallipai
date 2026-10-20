@@ -55,16 +55,21 @@ export class LescheClient extends BaseClient {
     );
   }
 
-  /** `GET /rooms/{id}/messages` — the room's message history. `afterSeq` is
-   * exclusive (rows with `seq > afterSeq`); `limit` caps the page. 404 = not a
-   * member. */
+  /** `GET /rooms/{id}/messages` — the room's message history: one page in
+   * one direction. `afterSeq` is exclusive forward (`seq > afterSeq`);
+   * `beforeSeq` is exclusive backward (the newest rows with `seq < beforeSeq`,
+   * returned ascending). Sending both is a 400 -- one page moves one way.
+   * `limit` caps the page. 404 = not a member. */
   fetchRoomMessages(
     roomId: string,
-    opts?: { afterSeq?: number; limit?: number },
+    opts?: { afterSeq?: number; beforeSeq?: number; limit?: number },
   ): Promise<RoomMessageView[]> {
     const params = new URLSearchParams();
     if (opts?.afterSeq !== undefined) {
       params.set("after_seq", String(opts.afterSeq));
+    }
+    if (opts?.beforeSeq !== undefined) {
+      params.set("before_seq", String(opts.beforeSeq));
     }
     if (opts?.limit !== undefined) params.set("limit", String(opts.limit));
     const query = params.toString();

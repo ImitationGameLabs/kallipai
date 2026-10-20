@@ -66,10 +66,16 @@ const settle = () => new Promise<void>((r) => setTimeout(r, 0));
 interface ScriptedPull {
   rows: { sender: Participant; reply: TagmaReply }[];
   more?: boolean;
+  /** RAW rows the marker counts: scripts a page the client received short
+   *  (an envelope lost on the way, not a row dropped in decode). */
+  count?: number;
   /** The tagma's stamped count and the cursor it was measured at: the marker
    *  carries the pair or nothing, so the badge is assigned, never counted. */
   stamp?: { unread: number; cursor: number };
   noMarker?: boolean;
+  /** Rows the server could not decode in this window: the marker reports the
+   *  count so a page that lost rows is never read as a complete history. */
+  undecodable?: number;
   after?: number | null;
   before?: number | null;
 }
@@ -162,17 +168,27 @@ class FakeChannel {
   }
 
   private deliverMarker(s: ScriptedPull, req_id: number): void {
-    const marker = {
+    const base = {
       kind: "history_batch_end" as const,
       req_id,
-      count: s.rows.length,
+      count: s.count ?? s.rows.length,
       more: s.more ?? false,
     };
-    this.deliver?.({
-      sender: AGENT,
-      // The stamp is a pair or nothing, like the wire type: no half-stamp.
-      reply: s.stamp === undefined ? marker : { ...marker, ...s.stamp },
-    });
+    // The stamp is a pair or nothing, like the wire type: no half-stamp. This
+    // fixture also drops the undecodable count when it drops the stamp, which
+    // is the version skew it models: a tagma that predates the count sends
+    // neither stamp nor field, while the current one always sends the count.
+    const marker: TagmaReply =
+      s.stamp === undefined
+        ? base
+        : {
+            ...base,
+            ...s.stamp,
+            ...(s.undecodable === undefined
+              ? {}
+              : { undecodable: s.undecodable }),
+          };
+    this.deliver?.({ sender: AGENT, reply: marker });
   }
 }
 
@@ -378,6 +394,11 @@ Deno.test(
     const conv = makeConv(channel);
     const probe = conv as unknown as { notifyFloor: number };
     const p = conv.catchUp();
+    // The floor goes up once the queued before-pages drain (a microtask) and
+    // the marker lands a macrotask later, so this reads the replay window
+    // itself -- rows buffered while no notification may fire.
+    await Promise.resolve();
+    await Promise.resolve();
     assertEquals(probe.notifyFloor, Number.MAX_SAFE_INTEGER); // replay
     await p;
     assertEquals(probe.notifyFloor, 3); // the live edge after re-arm
@@ -415,10 +436,17 @@ Deno.test("a dead transport folds pulls and drops deliveries", async () => {
         count: number;
         more: boolean;
         timedOut: boolean;
+        undecodable: number;
       }>;
     }
   ).pullPage({ limit: 10 });
-  assertEquals(page, { rows: [], count: 0, more: true, timedOut: true });
+  assertEquals(page, {
+    rows: [],
+    count: 0,
+    more: true,
+    timedOut: true,
+    undecodable: 0,
+  });
   await (
     conv as unknown as {
       loadOlderPage(k: number): Promise<void>;
@@ -893,3 +921,222 @@ Deno.test("a rootless install warns once per tunnel", async () => {
   assertEquals(channel.manages.filter((c) => c.method === "GET").length, 2);
   assertEquals(warnings.filter((w) => w.includes("root agent")).length, 1);
 });
+
+// --- quote probes -----------------------------------------------------------
+// A peek reads one page for one id: it never merges, never disturbs the
+// window, and never borrows another page's rows. These cases pin the three
+// ways the shared before-page slot can break that promise.
+
+/** A window holding only row 60, with the floor and head set as the page
+ *  would leave them after a catch-up. */
+function windowAt60(conv: RelayConv): void {
+  conv.minRendered = 60;
+  conv.maxRendered = 80;
+  conv.transcript = { lines: [lineOf(60)], status: "idle" };
+}
+
+Deno.test("two quote probes in flight each read their own page", async () => {
+  const channel = new FakeChannel([
+    { rows: [eventRow(30)] },
+    { rows: [eventRow(40)] },
+  ]);
+  const conv = makeConv(channel);
+  windowAt60(conv);
+  const [first, second] = await Promise.all([
+    conv.peekRow(30),
+    conv.peekRow(40),
+  ]);
+  assertEquals(typeof first === "string" ? first : first.historyId, 30);
+  assertEquals(typeof second === "string" ? second : second.historyId, 40);
+  // One page per probe, one row each: the answer needs a single row, and a
+  // full page would wake rows nobody reads.
+  assertEquals(channel.calls.length, 2);
+  assertEquals(channel.calls[0]!.limit, 1);
+  assertEquals(channel.calls[1]!.limit, 1);
+});
+
+Deno.test("a scroll-up page is not disarmed by a probe in flight", async () => {
+  const page = Array.from({ length: WINDOW_PAGE }, (_, i) => eventRow(10 + i));
+  const channel = new FakeChannel([
+    { rows: [eventRow(30)] },
+    { rows: page, more: true },
+  ]);
+  const conv = makeConv(channel);
+  windowAt60(conv);
+  const [probe] = await Promise.all([conv.peekRow(30), conv.loadOlder()]);
+  assertEquals(typeof probe === "string" ? probe : probe.historyId, 30);
+  // The scroll-up page landed whole: history below still exists, and the
+  // rows are in the transcript rather than in the probe's buffer.
+  assertEquals(conv.hasMoreOlder, true);
+  assertEquals(conv.transcript.lines.length, 1 + WINDOW_PAGE);
+  assertEquals(conv.transcript.lines[0]!.historyId, 10);
+  assertEquals(conv.minRendered, 10);
+});
+
+Deno.test(
+  "a probe above the rendered window is refused, never merged",
+  async () => {
+    const channel = new FakeChannel([{ rows: [eventRow(90)] }]);
+    const conv = makeConv(channel);
+    windowAt60(conv);
+    // A target above the head cannot be quoted (only rendered rows can), and
+    // its page would land above the window as a live row: refuse instead.
+    assertEquals(await conv.peekRow(90), "error");
+    assertEquals(conv.transcript.lines.length, 1);
+    assertEquals(channel.calls.length, 0);
+  },
+);
+
+Deno.test(
+  "a probe for a non-positive id is a read error, not a deletion",
+  async () => {
+    const channel = new FakeChannel([]);
+    const conv = makeConv(channel);
+    windowAt60(conv);
+    // No row ever carried these ids, so "the row is gone" is not an answer
+    // this client can give: a deletion is a fact about a contiguous history.
+    assertEquals(await conv.peekRow(0), "error");
+    assertEquals(await conv.peekRow(-3), "error");
+    assertEquals(channel.calls.length, 0);
+  },
+);
+Deno.test(
+  "a probe whose page stops below the target reads as deleted",
+  async () => {
+    // The probe asks for `before = id + 1, limit: 1`: on a contiguous history the
+    // answer is either the target itself or a row below it. A row below is proof
+    // of absence -- the one verdict that offers no retry.
+    const channel = new FakeChannel([{ rows: [eventRow(29)] }]);
+    const conv = makeConv(channel);
+    windowAt60(conv);
+    assertEquals(await conv.peekRow(30), "deleted");
+    // A read, not a merge: the window and its floor are untouched.
+    assertEquals(conv.transcript.lines.length, 1);
+    assertEquals(conv.minRendered, 60);
+    assertEquals(channel.calls.length, 1);
+  },
+);
+
+Deno.test(
+  "a probe that loses its marker reads as an error, not a deletion",
+  async () => {
+    // No marker, so nothing proves the history is contiguous down to the target:
+    // the block must offer a retry instead of claiming the message is gone.
+    const channel = new FakeChannel([{ rows: [eventRow(29)], noMarker: true }]);
+    const conv = makeConv(channel);
+    windowAt60(conv);
+    conv.pullTimeoutMs = 50;
+    assertEquals(await conv.peekRow(30), "error");
+  },
+);
+
+Deno.test("a queued probe never runs inside the catch-up window", async () => {
+  // Content frames carry no request id, so a before-page and the window cannot
+  // be in flight together: a page that ran anyway would swallow the window's
+  // replayed rows and leave the window folded around an empty page.
+  const windowRows = Array.from({ length: WINDOW_PAGE }, (_, i) =>
+    eventRow(200 + i),
+  );
+  const channel = new FakeChannel([
+    { rows: [eventRow(30)] }, // the probe in flight
+    { rows: [eventRow(40)] }, // the probe waiting behind it
+    { rows: windowRows, more: true }, // the catch-up window
+  ]);
+  const conv = makeConv(channel);
+  windowAt60(conv);
+  const inFlight = conv.peekRow(30);
+  const queued = conv.peekRow(40); // waits in the shared before-page queue
+  const caught = conv.catchUp(); // waits for that queue to drain
+  const [first, second] = await Promise.all([inFlight, queued, caught]);
+  // The window is the LAST request: a before-page that registered while it
+  // was in flight would have taken the window's rows for its own page.
+  assertEquals(
+    channel.calls.map((call) => call.limit),
+    [1, 1, WINDOW_PAGE],
+  );
+  assertEquals(channel.calls[2]!.before, null);
+  // Each probe read its own page and the window adopted the whole batch.
+  assertEquals(typeof first === "string" ? first : first.historyId, 30);
+  assertEquals(typeof second === "string" ? second : second.historyId, 40);
+  assertEquals(
+    conv.transcript.lines.map((line) => line.historyId),
+    windowRows.map((_, i) => 200 + i),
+  );
+});
+
+Deno.test(
+  "a probe whose page lost a row reads as an error, not a deletion",
+  async () => {
+    // The page came back short: one row in the window could not be decoded, so
+    // a row below the target proves nothing about the target. Retry, never a
+    // verdict.
+    const channel = new FakeChannel([
+      { rows: [eventRow(29)], stamp: { unread: 0, cursor: 0 }, undecodable: 1 },
+    ]);
+    const conv = makeConv(channel);
+    windowAt60(conv);
+    assertEquals(await conv.peekRow(30), "error");
+    assertEquals(channel.calls.length, 1, "one probe page, one answer");
+  },
+);
+
+Deno.test("a window short by a hole keeps the sentinel armed", async () => {
+  // Two rows decoded and one dropped: the window falls short of k only
+  // because of the hole, so nothing here says the history is exhausted.
+  const channel = new FakeChannel([
+    {
+      rows: [userRow(1), eventRow(2)],
+      stamp: { unread: 0, cursor: 0 },
+      undecodable: 1,
+    },
+  ]);
+  const conv = makeConv(channel);
+  await conv.catchUp(3);
+  assertEquals(conv.transcript.lines.length, 2);
+  assertEquals(conv.hasMoreOlder, true);
+});
+
+Deno.test("a window short without a hole disarms the sentinel", async () => {
+  // The control the case above needs: k raw rows are not there to be had.
+  const channel = new FakeChannel([
+    {
+      rows: [userRow(1), eventRow(2)],
+      stamp: { unread: 0, cursor: 0 },
+      undecodable: 0,
+    },
+  ]);
+  const conv = makeConv(channel);
+  await conv.catchUp(3);
+  assertEquals(conv.hasMoreOlder, false);
+});
+
+Deno.test(
+  "an all-dropped before-page disarms and is not re-paged",
+  async () => {
+    // No row of this page could be decoded, so the cursor cannot move: paging
+    // again would return the same rows. The verdict is about this window
+    // being unpageable, not about the history ending.
+    const channel = new FakeChannel([
+      { rows: [], more: true, stamp: { unread: 0, cursor: 0 }, undecodable: 3 },
+    ]);
+    const conv = makeConv(channel);
+    windowAt60(conv);
+    await conv.loadOlder(3);
+    assertEquals(conv.hasMoreOlder, false);
+    await conv.loadOlder(3);
+    assertEquals(channel.calls.length, 1, "a disarmed sentinel pages nothing");
+  },
+);
+
+Deno.test(
+  "a probe whose page arrived short of its own count reads as an error",
+  async () => {
+    // The marker counted a row the client never received, so the page is a
+    // hole and a miss in it proves nothing about the target.
+    const channel = new FakeChannel([{ rows: [], count: 1 }]);
+    const conv = makeConv(channel);
+    windowAt60(conv);
+    assertEquals(await conv.peekRow(30), "error");
+    assertEquals(channel.calls.length, 1, "one probe page, one answer");
+  },
+);

@@ -1,12 +1,25 @@
-import { assertEquals } from "@std/assert";
+import { assert, assertEquals, assertFalse, assertThrows } from "@std/assert";
 import {
   appendRoomLine,
+  checkedMentions,
   decodeRoomMessage,
   encodeRoomSendMessage,
+  MENTIONS_MAX,
+  mentionChipsOf,
   parseParticipantHandle,
+  roomLineFrom,
   roomLinePending,
+  roomMessageLabel,
+  roomRowAnchorId,
+  roomRowAnnouncement,
+  shortIdOf,
+  type MentionTarget,
   type RoomLine,
 } from "./room-message.ts";
+
+/** A canonical participant id both codecs accept; the mention tests reuse it.
+ *  Every case that needs a distinct id mints its own with crypto.randomUUID. */
+const MENTION_ID = "6f9619ff-8b86-d011-b42d-00cf4fc964ff";
 
 // The room-message plaintext is a JSON-serialized `RoomMessage { text }`
 // (rooms and the bilateral 1:1 path are disjoint; a room message is just text).
@@ -108,7 +121,7 @@ Deno.test("encodeRoomSendMessage attaches the file when given", () => {
     size: 1234,
   };
   assertEquals(
-    encodeRoomSendMessage("see attachment", att),
+    encodeRoomSendMessage("see attachment", { attachment: att }),
     '{"text":"see attachment","attachment":{"record_id":"00000000-0000-0000-0000-000000000000","name":"report.pdf","size":1234}}',
   );
   assertEquals(encodeRoomSendMessage("plain"), '{"text":"plain"}');
@@ -357,4 +370,643 @@ Deno.test("roomLinePending is false for a live inbound line", () => {
     seq: 42,
   };
   assertEquals(roomLinePending(inboundSynced), false);
+});
+
+// --- quoting: a room message names the row it answers by that row's seq ---
+
+Deno.test("decodeRoomMessage reads a positive quote and drops the rest", () => {
+  // Only a positive integer names a row: the Rust side reads `<= 0` as no
+  // quote (there is no row 0), and a malformed field must not cost the frame.
+  const decode = (raw: string) =>
+    decodeRoomMessage(new TextEncoder().encode(raw));
+  assertEquals(decode('{"text":"hi","quote":7}'), {
+    op: "message",
+    text: "hi",
+    quote: 7,
+  });
+  for (const quote of ["0", "-4", "1.5", '"7"', "null", "{}"]) {
+    assertEquals(decode(`{"text":"hi","quote":${quote}}`), {
+      op: "message",
+      text: "hi",
+    });
+  }
+});
+
+Deno.test("a quoted message keeps its attachment and its quote", () => {
+  const attachment = { record_id: "r1", name: "a.pdf", size: 12 };
+  const decoded = decodeRoomMessage(
+    new TextEncoder().encode(
+      JSON.stringify({ text: "", attachment, quote: 3 }),
+    ),
+  );
+  assertEquals(decoded, { op: "message", text: "", attachment, quote: 3 });
+});
+
+Deno.test("a send still emits no quote field", () => {
+  // The room composer cannot quote yet: the wire shape stays byte-identical to
+  // what every tagma already accepts, so an older reader sees nothing new.
+  assertEquals(encodeRoomSendMessage("hi"), '{"text":"hi"}');
+  assertEquals(
+    encodeRoomSendMessage("hi", {
+      attachment: { record_id: "r1", name: "a.pdf", size: 12 },
+    }),
+    '{"text":"hi","attachment":{"record_id":"r1","name":"a.pdf","size":12}}',
+  );
+});
+
+Deno.test("a decoded quote lands on the line", () => {
+  const line = roomLineFrom(
+    { op: "message", text: "reply", quote: 4 },
+    { id: "u1", kind: "human", handle: "@ada" },
+    { seq: 9, createdAt: "2026-10-21T00:00:00Z", selfId: "u2" },
+  );
+  assertEquals(line.quote, 4);
+  assertEquals(line.text, "reply");
+  assertEquals(line.senderHandle, "@ada");
+  assertEquals(line.mine, false);
+});
+
+Deno.test("an unquoted line carries no quote key", () => {
+  const line = roomLineFrom(
+    { op: "message", text: "plain" },
+    { id: "u1", kind: "human", handle: "@ada" },
+    { seq: 9, createdAt: "2026-10-21T00:00:00Z", selfId: "u1" },
+  );
+  assertEquals("quote" in line, false);
+  assertEquals(line.mine, true);
+});
+
+Deno.test("a wire quote reaches the rendered line", () => {
+  // Decoding a field is not the same as the line carrying it: this is the seam
+  // both inbound paths cross.
+  const decoded = decodeRoomMessage(
+    new TextEncoder().encode('{"text":"reply","quote":4}'),
+  );
+  if (decoded.op !== "message") throw new Error("expected a message frame");
+  const line = roomLineFrom(
+    decoded,
+    { id: "u1", kind: "human", handle: "@ada" },
+    { seq: 9, createdAt: "2026-10-21T00:00:00Z", selfId: "u1" },
+  );
+  assertEquals(line.quote, 4);
+});
+
+Deno.test("a wire mention list survives the decode", () => {
+  // Wire-level, like the quote seam above: the ids a sender named must survive
+  // the decode.
+  const named = "6f9619ff-8b86-d011-b42d-00cf4fc964ff";
+  const decoded = decodeRoomMessage(
+    new TextEncoder().encode(
+      JSON.stringify({ text: "look", mentions: [named] }),
+    ),
+  );
+  assertEquals(decoded, { op: "message", text: "look", mentions: [named] });
+});
+
+Deno.test("a send carries mentions only when there are any", () => {
+  assertEquals(encodeRoomSendMessage("hi"), '{"text":"hi"}');
+  assertEquals(
+    encodeRoomSendMessage("hi", { mentions: [MENTION_ID] }),
+    '{"text":"hi","mentions":["' + MENTION_ID + '"]}',
+  );
+  // Either case names the same member, so what ships is the canonical
+  // spelling of the id the picker chose.
+  assertEquals(
+    encodeRoomSendMessage("hi", { mentions: [MENTION_ID.toUpperCase()] }),
+    '{"text":"hi","mentions":["' + MENTION_ID + '"]}',
+  );
+  // An empty list leaves the historical shape alone.
+  assertEquals(encodeRoomSendMessage("hi", { mentions: [] }), '{"text":"hi"}');
+});
+
+Deno.test("a send refuses a mention it cannot honor", () => {
+  // A picked member must never vanish into a send that looks like a mention and
+  // names nobody, so an unusable list throws at the encoder.
+  assertThrows(
+    () => encodeRoomSendMessage("hi", { mentions: ["not-an-id"] }),
+    Error,
+    "not a participant id",
+  );
+  const many = Array.from({ length: MENTIONS_MAX + 1 }, () =>
+    crypto.randomUUID(),
+  );
+  assertThrows(
+    () => encodeRoomSendMessage("hi", { mentions: many }),
+    Error,
+    "more than",
+  );
+});
+
+Deno.test("a send folds a member named twice into one", () => {
+  // A repeat names the member already placed, so it costs nobody: the send goes
+  // out with that member once, spelled the way the wire writes it. The
+  // mixed-case pair pins the fold happening before the repeat is judged.
+  const once = '{"text":"hi","mentions":["' + MENTION_ID + '"]}';
+  assertEquals(
+    encodeRoomSendMessage("hi", { mentions: [MENTION_ID, MENTION_ID] }),
+    once,
+  );
+  assertEquals(
+    encodeRoomSendMessage("hi", {
+      mentions: [MENTION_ID.toUpperCase(), MENTION_ID],
+    }),
+    once,
+  );
+});
+
+Deno.test("a send may carry the full list the cap allows", () => {
+  // Exactly MENTIONS_MAX members is a send the encoder takes. The assertion
+  // reads the encoder's own output: a decode roundtrip has a cap of its own, so
+  // a widened encode would still trim on the way back and pass.
+  const full = Array.from({ length: MENTIONS_MAX }, () => crypto.randomUUID());
+  const sent: { mentions?: string[] } = JSON.parse(
+    encodeRoomSendMessage("hi", { mentions: full }),
+  );
+  assertEquals(sent.mentions?.length, MENTIONS_MAX);
+});
+
+Deno.test("a repeat does not cost a full list its send", () => {
+  // The cap counts members, not the entries the picker emitted: seventeen
+  // entries naming sixteen members is a send of sixteen, so folding has to
+  // happen before the cap is judged. A guard on the raw length fails here.
+  const members = Array.from({ length: MENTIONS_MAX }, () =>
+    crypto.randomUUID(),
+  );
+  const decoded = decodeRoomMessage(
+    new TextEncoder().encode(
+      encodeRoomSendMessage("hi", { mentions: [...members, members[3]] }),
+    ),
+  );
+  if (decoded.op !== "message") throw new Error("expected a message frame");
+  assertEquals(decoded.mentions, members);
+});
+
+Deno.test("a malformed mention entry costs only that entry", () => {
+  const decoded = decodeRoomMessage(
+    new TextEncoder().encode(
+      JSON.stringify({
+        text: "look",
+        mentions: ["not-an-id", MENTION_ID, 42, null, { id: MENTION_ID }],
+      }),
+    ),
+  );
+  assertEquals(decoded, {
+    op: "message",
+    text: "look",
+    mentions: [MENTION_ID],
+  });
+});
+
+Deno.test("a non-list mention value costs no text", () => {
+  const decoded = decodeRoomMessage(
+    new TextEncoder().encode(JSON.stringify({ text: "look", mentions: "ada" })),
+  );
+  assertEquals(decoded, { op: "message", text: "look" });
+});
+
+Deno.test("mentions are deduplicated in the sender's order and capped", () => {
+  const ids = Array.from({ length: MENTIONS_MAX + 4 }, () =>
+    crypto.randomUUID(),
+  );
+  const decoded = decodeRoomMessage(
+    new TextEncoder().encode(
+      JSON.stringify({
+        text: "look",
+        mentions: [ids[1], ids[0], ids[1], ...ids],
+      }),
+    ),
+  );
+  if (decoded.op !== "message") throw new Error("expected a message frame");
+  assertEquals(decoded.mentions?.length, MENTIONS_MAX);
+  assertEquals(decoded.mentions?.slice(0, 2), [ids[1], ids[0]]);
+});
+
+Deno.test("the mention cap matches the wire contract", () => {
+  // The normative number lives in the Rust crate, which cannot be imported
+  // here, so this reads it: one source, and the constant below follows it. A
+  // literal pin would let both sides move together and still disagree.
+  const source = Deno.readTextFileSync(
+    new URL(
+      "../../../../crates/platform/kallipai-lesche-common/src/message.rs",
+      import.meta.url,
+    ),
+  );
+  const declared = /^pub const MENTIONS_MAX: usize = (\d+);$/m.exec(source);
+  if (declared === null) {
+    throw new Error("MENTIONS_MAX is not declared as expected");
+  }
+  assertEquals(MENTIONS_MAX, Number(declared[1]));
+});
+
+Deno.test("the mention refusals read the same on both sides", () => {
+  // The two refusals live in the Rust crate as one-hole templates; this codec
+  // fills the same holes. Pinning the template (not the filled sentence) puts
+  // the anchor on the constant name and the hole shape, so a rename or a
+  // reworded hole fails loudly here instead of drifting quietly on one side.
+  const source = Deno.readTextFileSync(
+    new URL(
+      "../../../../crates/platform/kallipai-lesche-common/src/message.rs",
+      import.meta.url,
+    ),
+  );
+  const template = (name: string): string => {
+    const hits = [
+      ...source.matchAll(
+        new RegExp(`^(?:pub )?const ${name}: &str = "(.*)";$`, "gm"),
+      ),
+    ];
+    if (hits.length !== 1) {
+      throw new Error(
+        `${name} must be declared exactly once, saw ${hits.length}`,
+      );
+    }
+    return hits[0][1];
+  };
+  const fill = (hole: string, value: string): string =>
+    hole.replace("{}", value);
+  const refusalText = (fn: () => unknown): string => {
+    const caught = assertThrows(fn);
+    return caught instanceof Error ? caught.message : String(caught);
+  };
+
+  assertEquals(
+    refusalText(() => checkedMentions(["not-an-id"])),
+    fill(template("MENTION_MALFORMED"), "not-an-id"),
+  );
+  const over = Array.from({ length: MENTIONS_MAX + 1 }, () =>
+    crypto.randomUUID(),
+  );
+  assertEquals(
+    refusalText(() => checkedMentions(over)),
+    fill(template("MENTION_TOO_MANY"), String(MENTIONS_MAX)),
+  );
+});
+
+Deno.test("only a hyphenated id names a participant", () => {
+  // The same six spellings the Rust side holds: one shape in either case is
+  // accepted, four other ways of writing that id are dropped.
+  const canonical = crypto.randomUUID();
+  const decoded = decodeRoomMessage(
+    new TextEncoder().encode(
+      JSON.stringify({
+        text: "look",
+        mentions: [
+          canonical,
+          canonical.toUpperCase(),
+          `{${canonical}}`,
+          canonical.replaceAll("-", ""),
+          `urn:uuid:${canonical}`,
+          "not-an-id",
+        ],
+      }),
+    ),
+  );
+  if (decoded.op !== "message") throw new Error("expected a message frame");
+  assertEquals(decoded.mentions, [canonical]);
+});
+
+Deno.test("a mention is stored in its canonical case", () => {
+  // A writer that spells an id in upper case names the same member, so the
+  // stored id must be the one form the comparison downstream relies on.
+  const canonical = crypto.randomUUID();
+  const decoded = decodeRoomMessage(
+    new TextEncoder().encode(
+      JSON.stringify({ text: "look", mentions: [canonical.toUpperCase()] }),
+    ),
+  );
+  if (decoded.op !== "message") throw new Error("expected a message frame");
+  assertEquals(decoded.mentions, [canonical]);
+});
+
+Deno.test("one member named in two cases counts once", () => {
+  const canonical = crypto.randomUUID();
+  const decoded = decodeRoomMessage(
+    new TextEncoder().encode(
+      JSON.stringify({
+        text: "look",
+        mentions: [canonical.toUpperCase(), canonical],
+      }),
+    ),
+  );
+  if (decoded.op !== "message") throw new Error("expected a message frame");
+  assertEquals(decoded.mentions, [canonical]);
+});
+
+Deno.test("mentions reach the rendered line", () => {
+  const decoded = decodeRoomMessage(
+    new TextEncoder().encode(
+      JSON.stringify({ text: "look", mentions: [MENTION_ID] }),
+    ),
+  );
+  if (decoded.op !== "message") throw new Error("expected a message frame");
+  const line = roomLineFrom(
+    decoded,
+    { id: "u1", kind: "human", handle: "@ada" },
+    {
+      seq: 9,
+      createdAt: "2026-10-21T00:00:00Z",
+      selfId: "u2",
+    },
+  );
+  assertEquals(line.mentions, [MENTION_ID]);
+});
+
+// --- mention chips -------------------------------------------------------
+// A chip is the view's projection of one mentioned id: the same handle
+// vocabulary the message header draws, plus the two states the header never
+// meets -- an id the roster cannot name, and the viewer's own mention.
+
+const MENTION_TARGETS: readonly MentionTarget[] = [
+  { id: MENTION_ID, kind: "human", handle: "@alice", label: "Alice" },
+  {
+    id: "11111111-2222-4333-8444-555555555555",
+    kind: "agent",
+    handle: "abc123@alice",
+    label: "Scout",
+    tagma_id: "8f6e0a4c-0000-4000-8000-000000000001",
+  },
+  {
+    id: "22222222-3333-4444-8555-666666666666",
+    kind: "agent",
+    handle: "def456@alice",
+  },
+  {
+    id: "33333333-4444-4555-8666-777777777777",
+    kind: "human",
+    handle: "user 333333",
+  },
+];
+
+function rosterOf(
+  targets: readonly MentionTarget[],
+): Map<string, MentionTarget> {
+  return new Map(targets.map((t) => [t.id, t] as const));
+}
+
+Deno.test("no mentions draw no chips", () => {
+  assertEquals(
+    mentionChipsOf(undefined, rosterOf(MENTION_TARGETS), null, true),
+    [],
+  );
+  assertEquals(mentionChipsOf([], rosterOf(MENTION_TARGETS), null, true), []);
+});
+
+Deno.test(
+  "a roster member resolves to its label, handle and profile link",
+  () => {
+    const [chip] = mentionChipsOf(
+      [MENTION_ID],
+      rosterOf(MENTION_TARGETS),
+      null,
+      true,
+    );
+    assertEquals(chip, {
+      id: MENTION_ID,
+      self: false,
+      member: {
+        kind: "human",
+        handle: "@alice",
+        label: "Alice",
+        href: "/user/alice",
+      },
+    });
+  },
+);
+
+Deno.test("an agent chip deep-links through its tagma id", () => {
+  const [chip] = mentionChipsOf(
+    ["11111111-2222-4333-8444-555555555555"],
+    rosterOf(MENTION_TARGETS),
+    null,
+    true,
+  );
+  assertEquals(
+    chip.member?.href,
+    "/tagma/8f6e0a4c-0000-4000-8000-000000000001",
+  );
+});
+
+Deno.test("an agent chip without a tagma id carries no link", () => {
+  const [chip] = mentionChipsOf(
+    ["22222222-3333-4444-8555-666666666666"],
+    rosterOf(MENTION_TARGETS),
+    null,
+    true,
+  );
+  assertEquals(chip.member?.handle, "def456@alice");
+  assertEquals(chip.member?.href, undefined);
+});
+
+Deno.test(
+  "a roster member the registry could not resolve keeps that handle",
+  () => {
+    const [chip] = mentionChipsOf(
+      ["33333333-4444-4555-8666-777777777777"],
+      rosterOf(MENTION_TARGETS),
+      null,
+      true,
+    );
+    // The degraded `<kind> <prefix>` text renders verbatim, and it must not
+    // become a link: the human arm's handle carries no `@`, and the agent arm
+    // has no `tagma_id` to link through.
+    assertEquals(chip.member, { kind: "human", handle: "user 333333" });
+  },
+);
+
+Deno.test(
+  "an id the landed roster does not hold is unknown, with no member block",
+  () => {
+    const id = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+    const [chip] = mentionChipsOf([id], new Map(), null, true);
+    assertEquals(chip, { id, self: false, unnamed: "unknown" });
+    // The wire carries ids alone, so an unknown member's kind is unknowable:
+    // no member block (and so no kind word, no link) may be invented. The chip
+    // still has the id, which is what the short-id token is cut from.
+    assertEquals(chip.member, undefined);
+    assertEquals(shortIdOf(chip.id), "aaaaaa");
+  },
+);
+
+Deno.test("before the roster lands a miss reads unloaded, not unknown", () => {
+  const id = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+  const [chip] = mentionChipsOf([id], new Map(), null, false);
+  assertEquals(chip, { id, self: false, unnamed: "unloaded" });
+  assertEquals(chip.member, undefined);
+  // The flag only decides how a MISS reads: a hit is still named, so a roster
+  // that arrives in pieces never un-names a member it already resolved.
+  const [named] = mentionChipsOf(
+    [MENTION_ID],
+    rosterOf(MENTION_TARGETS),
+    null,
+    false,
+  );
+  assertEquals(named.member?.handle, "@alice");
+});
+
+Deno.test("the viewer's own mention is flagged in all three states", () => {
+  const [named] = mentionChipsOf(
+    [MENTION_ID],
+    rosterOf(MENTION_TARGETS),
+    MENTION_ID,
+    true,
+  );
+  const ownId = "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff";
+  const [unknown] = mentionChipsOf([ownId], new Map(), ownId, true);
+  const [unloaded] = mentionChipsOf([ownId], new Map(), ownId, false);
+  assertEquals([named.self, unknown.self, unloaded.self], [true, true, true]);
+  assertEquals(unknown.unnamed, "unknown");
+  assertEquals(unloaded.unnamed, "unloaded");
+});
+
+Deno.test("chips keep the sender's order", () => {
+  const ids = ["22222222-3333-4444-8555-666666666666", MENTION_ID];
+  assertEquals(
+    mentionChipsOf(ids, rosterOf(MENTION_TARGETS), null, true).map((c) => c.id),
+    ids,
+  );
+});
+
+Deno.test("a repeated id folds to its first chip", () => {
+  // So the returned list is unique by construction and the component may key on
+  // the id; case folding stays the decoder's job, which is why the repeat here
+  // is an exact one.
+  const ids = [MENTION_ID, MENTION_ID, "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"];
+  assertEquals(
+    mentionChipsOf(ids, rosterOf(MENTION_TARGETS), null, true).map((c) => c.id),
+    [MENTION_ID, "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"],
+  );
+});
+
+Deno.test("the short id is six code points, not six bytes", () => {
+  assertEquals(shortIdOf("6f9619ff-8b86"), "6f9619");
+  assertEquals(shortIdOf("abc"), "abc");
+  assertEquals(shortIdOf("日本語のメンバー"), "日本語のメン");
+});
+
+Deno.test("a send carries the quoted seq only when it quotes one", () => {
+  // Wire-level: this helper serializes the payload and the Rust `RoomMessage`
+  // reads `quote` out of it, so the exact string pins the emitted shape, not
+  // just that a key exists.
+  assertEquals(
+    encodeRoomSendMessage("hi", { quote: 7 }),
+    '{"text":"hi","quote":7}',
+  );
+  assertEquals(
+    encodeRoomSendMessage("hi", { quote: 7, mentions: [MENTION_ID] }),
+    '{"text":"hi","quote":7,"mentions":["' + MENTION_ID + '"]}',
+  );
+});
+
+Deno.test("a quote that cannot name a row fails the send", () => {
+  // Same strictness as checkedMentions: a quote the wire cannot place is a
+  // message that answers nothing, so it must not ship silently empty.
+  for (const bad of [0, -3, 1.5, Number.NaN]) {
+    assertThrows(() => encodeRoomSendMessage("hi", { quote: bad }));
+  }
+});
+
+Deno.test("a quoted send reads back as the same seq", () => {
+  const decoded = decodeRoomMessage(
+    new TextEncoder().encode(encodeRoomSendMessage("hi", { quote: 12 })),
+  );
+  assertEquals(decoded, { op: "message", text: "hi", quote: 12 });
+});
+
+/** A row carrying the fields a spoken label reads. A case overrides one field
+ *  at a time, so a failure names the input the label ignored. */
+function labelled(over: Partial<RoomLine> = {}): RoomLine {
+  return {
+    seq: 7,
+    senderId: MENTION_ID,
+    senderKind: "human",
+    senderHandle: "@alice",
+    text: "hi",
+    createdAt: "2026-10-23T10:00:00Z",
+    mine: false,
+    ...over,
+  };
+}
+
+// A room row is a bare node in a log region: who wrote it, when, and whether it
+// answers another message are spoken from this label alone. The cases below read
+// the data (handle, time) and the relationships (quoting changes the sentence,
+// the anchor matches the target row), never the catalog's wording, so a
+// translation cannot fail them.
+
+Deno.test("a room row's label names its author and its time", () => {
+  const label = roomMessageLabel(labelled(), { time: "10:00 AM" });
+  assert(label.trim().length > 0, "the row has to say something");
+  assert(label.includes("@alice"), "the author belongs in the row's name");
+  assert(label.includes("10:00 AM"), "so does when it was said");
+});
+
+Deno.test("a quoting row's label differs from a plain row's", () => {
+  const plain = roomMessageLabel(labelled(), { time: "10:00 AM" });
+  const quoting = roomMessageLabel(labelled({ quote: 3 }), {
+    time: "10:00 AM",
+  });
+  assert(quoting !== plain, "answering a message changes what is spoken");
+  assert(quoting.includes("@alice"), "and still names the author");
+});
+
+Deno.test(
+  "the roster's name wins, then the handle, then the sender kind",
+  () => {
+    const named = roomMessageLabel(labelled(), {
+      time: "10:00 AM",
+      authorLabel: "Alice A.",
+    });
+    assert(named.includes("Alice A."), "a roster label replaces the handle");
+    const handled = roomMessageLabel(labelled(), { time: "10:00 AM" });
+    assert(handled.includes("@alice"), "with no roster the handle speaks");
+    const anonymous = labelled({ senderHandle: "" });
+    const human = roomMessageLabel(anonymous, { time: "10:00 AM" });
+    const agent = roomMessageLabel(
+      { ...anonymous, senderKind: "agent" },
+      { time: "10:00 AM" },
+    );
+    assert(
+      human.trim().length > 0 && agent.trim().length > 0,
+      "never an empty name",
+    );
+    assert(agent !== human, "an agent row and a human row do not read alike");
+  },
+);
+
+Deno.test("a jump to a room row names the author its label names", () => {
+  const line = labelled();
+  const spoken = roomRowAnnouncement(line, { time: "10:00 AM" });
+  const label = roomMessageLabel(line, { time: "10:00 AM" });
+  assert(spoken.includes("@alice"), "the jump names the author");
+  assert(label.includes("@alice"), "and so does the row's own label");
+  const named = roomRowAnnouncement(line, {
+    time: "10:00 AM",
+    authorLabel: "Alice A.",
+  });
+  assert(named.includes("Alice A."), "the roster name reaches the jump");
+});
+
+Deno.test("a jump to a room row says when it was sent", () => {
+  const spoken = roomRowAnnouncement(labelled(), { time: "10:00 AM" });
+  assert(spoken.includes("10:00 AM"), "the time belongs in the sentence");
+  assert(spoken.includes("@alice"), "so does the author");
+});
+
+Deno.test("a room row with no time is named by its author alone", () => {
+  const timed = roomRowAnnouncement(labelled(), { time: "10:00 AM" });
+  const untimed = roomRowAnnouncement(labelled(), {});
+  assert(untimed.includes("@alice"), "the author still speaks");
+  assert(untimed !== timed, "a missing time drops the time, not the row");
+  assertFalse(untimed.includes("10:00 AM"), "no dangling time");
+});
+
+Deno.test("a room row's anchor is its own name, not a shared one", () => {
+  assertFalse(
+    roomRowAnchorId(7).startsWith("msg-a11y-"),
+    "room anchors do not shadow the bilateral ids",
+  );
+  assert(
+    roomRowAnchorId(7) !== roomRowAnchorId(8),
+    "two rows never share an anchor",
+  );
 });

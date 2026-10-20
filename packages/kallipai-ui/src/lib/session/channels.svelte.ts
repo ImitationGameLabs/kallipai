@@ -12,7 +12,6 @@
 import { type TagmaView } from "@kallipai/kallipai-archeion-client";
 import {
   type Envelope,
-  type FileAttachment,
   DataPlaneApiError,
   type SignalEvent,
 } from "@kallipai/kallipai-lesche-client";
@@ -28,6 +27,7 @@ import {
 } from "./archeion.svelte.ts";
 import type { DirectTransport } from "./directTransport.ts";
 import { RelayTransport } from "./relayTransport.ts";
+import type { SendOptions } from "./transport.ts";
 import {
   cachedLineToLine,
   ConversationBase,
@@ -607,12 +607,9 @@ export class ChannelsStore {
   }
   /** Send a prompt to a conversation. Renders the optimistic line and hands off
    *  to the conversation's send path (single-in-flight pump for relay; inline
-   *  POST for local). */
-  send(
-    conversationId: string,
-    text: string,
-    attachment?: FileAttachment,
-  ): void {
+   *  POST for local). Options travel as one group; a quote id only reaches the
+   *  relay path -- local transports drop it. */
+  send(conversationId: string, text: string, options?: SendOptions): void {
     const conv = this.conversations.get(conversationId);
     // Same gate the chat page's canSubmit uses: open sends live,
     // offline queues to the store. Judging transport here instead made
@@ -621,7 +618,7 @@ export class ChannelsStore {
     if (!conv || (conv.status !== "open" && conv.status !== "offline")) {
       return;
     }
-    void conv.send(text, attachment);
+    void conv.send(text, options);
   }
 
   /** Close + drop a conversation by tagma id (revoke path: no plaintext left

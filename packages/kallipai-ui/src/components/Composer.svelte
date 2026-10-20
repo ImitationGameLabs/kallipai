@@ -2,6 +2,8 @@
   import { ArrowUp, Paperclip } from "@lucide/svelte";
   import type { Snippet } from "svelte";
   import type { ComposerModel } from "../lib/composer.svelte";
+  import { composerKeyIntent } from "../lib/composerKeys.ts";
+  import { MENTION_LIST_ID } from "../lib/mentions.ts";
   import {
     composer_placeholder,
     composer_message_aria,
@@ -19,7 +21,13 @@
     disabledNotice,
     fileButton,
     attachmentBar,
+    quoteBar,
+    mentionBar,
+    mentionPicker,
+    onComposeKey,
+    mentionAria,
     onSubmitted,
+    onCancelQuote,
     onResized,
   }: {
     composer: ComposerModel;
@@ -49,6 +57,30 @@
     // measure-collapse below can clamp a pinned scrollTop against
     // the transient layout).
     onResized?: () => void;
+    // Optional strip rendered above the input card (the pending quote). The
+    // page owns the quotation state; the composer only places the strip.
+    quoteBar?: Snippet;
+    // Escape in the field drops the pending quote. The caret stays put, so
+    // the key never costs the user typed text.
+    onCancelQuote?: () => void;
+    // Optional strip above the input card listing the members picked for
+    // this send. Its own strip, not part of the quote's: a send can carry
+    // both, and each is spent independently.
+    mentionBar?: Snippet;
+    // Optional candidate popup. It floats above the input card, so opening
+    // it never reflows the transcript behind it.
+    mentionPicker?: Snippet;
+    // Optional last look at a key press, taken before the submit/IME rule
+    // below: the mention picker's arrows and Enter belong to it, not to the
+    // send path. Returning true means the hook consumed the event.
+    onComposeKey?: (event: KeyboardEvent) => boolean;
+    // What the field announces about the candidate popup: whether it is
+    // showing, and which option `aria-activedescendant` points at. One
+    // object, so the two cannot drift apart.
+    mentionAria?: {
+      readonly open: boolean;
+      readonly activeId: string | undefined;
+    };
   } = $props();
 
   let area: HTMLTextAreaElement | undefined = $state();
@@ -69,6 +101,24 @@
     const token = composer.focusToken;
     if (token > 0) area?.focus();
   });
+  // Place the caret a request asked for. Accepting a candidate rewrites the
+  // draft, and a rewritten field puts the caret at its end; this puts it back
+  // where the token started. Post-flush for the same reason as the focus
+  // effect: the value has to have landed before the range is set.
+  $effect(() => {
+    const token = composer.caretToken;
+    const position = composer.caretRequest;
+    if (token === 0 || position === undefined) return;
+    area?.focus();
+    area?.setSelectionRange(position, position);
+    composer.caret = position;
+  });
+  // Report the caret as it moves. The mention picker decides from the draft
+  // plus where the caret sits, so moves that change no text -- arrows,
+  // clicks, selecting -- are read here too, not only on input.
+  function trackCaret(): void {
+    if (area) composer.caret = area.selectionStart;
+  }
   // Cross-breakpoint rows: below md the composer starts at one line and caps
   // at five (mobile spec); at md+ it keeps the historical two-line start
   // and 240px cap. Mirrors the AppShell mdQuery listener pattern; the
@@ -115,11 +165,16 @@
     onSubmitted?.();
     void composer.submit();
   }
-  // Enter submits at md+ (the desktop IM convention); below md Enter inserts
-  // a newline instead and the send button is the only way to submit (mobile
-  // keyboards pair Enter with a newline habit, so submit-on-Enter mistypes).
+  // Which key does what delegates to `composerKeyIntent`, where the layout
+  // and IME rules live and are unit-tested.
   function onKeydown(event: KeyboardEvent) {
-    if (desktop && event.key === "Enter" && !event.shiftKey) {
+    if (onComposeKey?.(event)) return;
+    const intent = composerKeyIntent(event, desktop);
+    if (intent === "cancel-quote") {
+      onCancelQuote?.();
+      return;
+    }
+    if (intent === "submit") {
       event.preventDefault();
       submitAtTail();
     }
@@ -186,6 +241,15 @@
          signal the active field. Below md the send button moves outside
          the card (mobile composer spec): the outer row aligns it with the
          textarea's last line instead. -->
+    <!-- The pending quote sits above the whole input card, so it reads as
+         state of the send area rather than part of the typed message. -->
+    {#if quoteBar}{@render quoteBar()}{/if}
+    {#if mentionBar}{@render mentionBar()}{/if}
+    {#if mentionPicker}
+      <!-- A zero-height anchor: the popup hangs off its top edge, so it
+           opens upward over the strips without reflowing anything. -->
+      <div class="relative">{@render mentionPicker()}</div>
+    {/if}
     <div class="flex items-end gap-2 md:block">
       <div
         class="flex-1 min-w-0 rounded-2xl border-2 border-surface-300-700 shadow-sm p-1 md:p-2 transition hover:shadow-xl focus-within:border-surface-400-600"
@@ -195,6 +259,19 @@
           bind:this={area}
           bind:value={composer.draft}
           onkeydown={onKeydown}
+          oninput={trackCaret}
+          onkeyup={trackCaret}
+          onclick={trackCaret}
+          onselect={trackCaret}
+          role={mentionPicker ? "combobox" : undefined}
+          aria-expanded={mentionPicker ? mentionAria?.open === true : undefined}
+          aria-controls={mentionPicker && mentionAria?.open === true
+            ? MENTION_LIST_ID
+            : undefined}
+          aria-activedescendant={mentionPicker && mentionAria?.open === true
+            ? mentionAria.activeId
+            : undefined}
+          aria-autocomplete={mentionPicker ? "list" : undefined}
           placeholder={desktop ? composer_placeholder() : ""}
           rows={desktop ? 2 : 1}
           aria-label={composer_message_aria()}

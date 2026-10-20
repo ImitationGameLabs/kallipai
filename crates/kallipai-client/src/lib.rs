@@ -2,7 +2,9 @@ pub mod client;
 pub mod profile;
 pub mod types;
 
-pub use client::{TagmaClient, TagmaClientBuilder};
+pub use client::{
+    DirectReadQuery, MessageDelivery, RoomReadQuery, TagmaClient, TagmaClientBuilder,
+};
 pub use kallipai_common::agentid::AgentId;
 pub use kallipai_common::approval::{ApprovalStatus, ToolCallContent};
 pub use kallipai_common::policy::{ExecDecision, ExecOverride, ExecPolicy, PolicyPreset};

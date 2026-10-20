@@ -7,6 +7,7 @@
   // fully mode-agnostic: status, transcript, and pending count are all read off
   // the Conversation, so online and offline render identically.
   import ConversationView from "../components/ConversationView.svelte";
+  import QuoteBar from "../components/QuoteBar.svelte";
   import { timezoneSetting } from "../lib/time/stamp.svelte.ts";
   import TagmaStatusHeader from "../components/TagmaStatusHeader.svelte";
   import AttachmentBar from "../components/AttachmentBar.svelte";
@@ -47,6 +48,7 @@
   import { createAttachmentTray } from "../lib/attachmentTray.svelte.ts";
   import type { FileAttachment } from "@kallipai/kallipai-lesche-client";
   import { ConversationBase } from "../lib/session/conversation.svelte.ts";
+  import { createQuotes } from "../lib/quotes.svelte.ts";
   import { unreadStore, tagmaKey } from "../lib/session/unread.svelte.ts";
   import { formatDateTime } from "../lib/tagmata.svelte";
   import { navigate } from "../lib/shell/port.ts";
@@ -114,6 +116,32 @@
       ? { hasMoreOlder: conv.hasMoreOlder, loadingOlder: conv.loadingOlder }
       : {},
   );
+
+  // --- quoting ---------------------------------------------------------
+
+  // The quoting state machine (armed id, peeked answers, probes) lives in
+  // the controller alongside the page's other headless pieces; the page
+  // only forwards and reads.
+  const quotes = createQuotes({ conversation: () => conv });
+
+  // Quoting needs two capabilities: serve a probe (the relay asks over the
+  // envelope, the direct path over the history GET's query string) and carry
+  // an armed id on send (the relay again in the envelope, the direct path in
+  // the POST body). This flag stands for both holding; it does not itself
+  // gate the carry, which is unconditional at the send site -- only an armed
+  // id can travel, and arming starts at the entry points this flag gates, so
+  // withholding the flag is what keeps a probe-less leaf from quoting. The
+  // degraded offline view has neither capability, so it gets neither the
+  // composer's entry point nor the block's retry. A leaf added later inherits
+  // both; one that can probe but not carry would show the entry and then drop
+  // the reference without saying so, while one that cannot probe shows up as
+  // a block stuck retryable instead of quoting silently missing.
+  const canQuote = $derived(!(conv instanceof OfflineConversation));
+
+  // Every quote id the window cannot resolve gets exactly one peek. The
+  // block renders nothing until that answer lands: a placeholder would
+  // have to claim deletion or failure before either is known.
+  $effect(() => quotes.sync());
 
   // --- /chat/{id} deep-link dead-end guard -------------------------------
   // A channel for this id may never open (offline tagma, or a conversation
@@ -241,6 +269,17 @@
 
   const composer = createComposer({
     send: (text) => {
+      // The bucket this send belongs to, read once here so the clear below
+      // lands on the draft the reader typed into. The body runs to
+      // tray.clear(owner) with no await in between, so the capture states
+      // the contract rather than repairing a live drift; onFilesPicked is
+      // the arm where an await really does intervene.
+      const owner = storageKey;
+      // One send carries one quote: the first message, the one the text
+      // rides. Captured up front and cleared here, so a second submit
+      // cannot inherit the strip the user already spent.
+      const quoteId = quotes.quoted ?? undefined;
+      quotes.cancel();
       // One message per ready file; the composer text rides the first and
       // the rest go out attachment-only (an empty text with an attachment
       // is a real line on the wire and in the transcript).
@@ -256,12 +295,15 @@
       }
       const first = ready.shift();
       if (first === undefined) {
-        channelsStore.send(conversationId, text);
+        channelsStore.send(conversationId, text, { quote: quoteId });
         return;
       }
-      channelsStore.send(conversationId, text, first);
+      channelsStore.send(conversationId, text, {
+        attachment: first,
+        quote: quoteId,
+      });
       for (const att of ready) {
-        channelsStore.send(conversationId, "", att);
+        channelsStore.send(conversationId, "", { attachment: att });
       }
       tray.clear(owner);
     },
@@ -499,6 +541,10 @@
               ? { onFilesPicked }
               : undefined}
             {downloadAttachment}
+            onQuote={canQuote ? quotes.quote : undefined}
+            resolveQuote={quotes.resolve}
+            onQuoteRetry={canQuote ? quotes.retry : undefined}
+            onCancelQuote={() => quotes.cancel()}
           >
             {#snippet notice()}
               {#if conv.kind === "offline-view" && conv.transcript.lines.length === 0}
@@ -523,6 +569,15 @@
                     })}
                   </p>
                 {/if}
+              {/if}
+            {/snippet}
+            {#snippet quoteBar()}
+              {#if quotes.quotedView}
+                <QuoteBar
+                  author={quotes.quotedView.author}
+                  preview={quotes.quotedView.preview}
+                  onCancel={() => quotes.cancel()}
+                />
               {/if}
             {/snippet}
             {#snippet attachmentBar()}

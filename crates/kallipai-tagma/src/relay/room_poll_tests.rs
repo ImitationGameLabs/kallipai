@@ -141,6 +141,40 @@ async fn poll_failure_keeps_prior_cache() {
     );
 }
 
+/// The poll's snapshot carries each room's roster: one tick warms the ids and
+/// the members together, so the room send route judges a mention off the same
+/// answer that told it the room exists.
+#[tokio::test]
+async fn poll_warms_rosters_with_the_room_ids() {
+    use kallipai_archeion_common::ids::{ParticipantKind, TagmaId};
+    use kallipai_lesche_common::rooms::{MemberId, RoomMember};
+
+    let ada = MemberId::for_tagma(&TagmaId::from("ada".to_string()));
+    let mut view = room_view("room-a");
+    view.members = vec![RoomMember {
+        id: ada.clone(),
+        kind: ParticipantKind::Agent,
+    }];
+    let rooms: Rooms = Arc::new(Mutex::new(vec![view]));
+    let (handle, state) = setup(rooms).await;
+
+    let room = RoomId::from("room-a".to_string());
+    assert_eq!(
+        state.joined_rooms.members_of("test", &room).await,
+        None,
+        "cold before the first tick"
+    );
+
+    handle.poll_rooms().await;
+    let roster = state
+        .joined_rooms
+        .members_of("test", &room)
+        .await
+        .expect("the tick warmed the roster with the room id");
+    assert_eq!(roster.len(), 1);
+    assert!(roster.contains(&ada));
+}
+
 /// A thread through which a test can flip the direct-sessions route to a
 /// 500 (best-effort degrade probing).
 type FailDirect = Arc<AtomicBool>;

@@ -16,9 +16,13 @@ use super::*;
 impl RelayHandle {
     /// Poll the lesche for this tagma's rooms and refresh the joined-rooms
     /// cache. The cache is a full replace (a removed membership self-heals on
-    /// the next tick); the lesche member-gated routes (404 for non-members)
-    /// backstop any stale entry. Best-effort: a poll failure logs and retries
-    /// on the next tick -- a stale cache only transiently misroutes an inbound
+    /// the next tick) and carries each room's roster in the same write: a room
+    /// and its members are one `list_my_rooms` answer, so they refresh
+    /// together. The lesche member-gated routes (404 for non-members) backstop
+    /// any stale entry, and a room the snapshot leaves out reads as unknown
+    /// rather than as an empty room -- the room send route refreshes before
+    /// it judges a mention. Best-effort: a poll failure logs and retries on
+    /// the next tick; a stale cache only transiently misroutes an inbound
     /// envelope, never leaks a room (the lesche enforces membership).
     pub(super) async fn poll_rooms(&self) {
         let rooms = match self.inner.client.list_my_rooms(&self.inner.tagma_id).await {
@@ -34,7 +38,7 @@ impl RelayHandle {
         if let Some(state) = self.inner.state.upgrade() {
             state
                 .joined_rooms
-                .set_joined_rooms(&self.inner.name, rooms.iter().map(|v| v.room_id.clone()))
+                .set_room_snapshot(&self.inner.name, &rooms)
                 .await;
         }
     }

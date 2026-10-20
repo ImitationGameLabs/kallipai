@@ -24,6 +24,17 @@ pub struct LescheMessageRequest {
     pub room: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tagma: Option<String>,
+    /// The position, in that conversation's own log, that this message
+    /// answers: a room's `seq`, or that session's own `seq`. Absent for a
+    /// send that answers nothing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quote: Option<i64>,
+    /// The participant ids this message names, as the sender wrote them. The
+    /// tagma judges each one -- its shape, the cap, and whether it names a
+    /// member of the room -- and answers 400 with the reason. A send that
+    /// names nobody leaves the key off the wire, the way the CLI does.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mentions: Vec<String>,
 }
 
 /// One row of the unified session list (`GET /agents/{id}/lesche/sessions`,

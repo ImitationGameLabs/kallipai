@@ -24,7 +24,7 @@ use kallipai_lesche_common::event::UpstreamEvent;
 use kallipai_lesche_common::message::{
     Envelope, Participant, RoomMessage, TagmaReply, TagmaRequest,
 };
-use kallipai_lesche_common::rooms::RoomId;
+use kallipai_lesche_common::rooms::{MemberId, RoomId};
 use std::sync::Arc;
 use tempfile::TempDir;
 use tokio::sync::{Mutex, broadcast, mpsc};
@@ -311,6 +311,7 @@ async fn send_message_round_trips() {
                 req_id: 10,
                 text: "hello".into(),
                 attachment: None,
+                quote: None,
             },
         ))
         .await;
@@ -372,6 +373,7 @@ async fn op_before_key_exchange_is_dropped() {
                 req_id: 1,
                 text: "x".into(),
                 attachment: None,
+                quote: None,
             },
         ))
         .await;
@@ -395,6 +397,7 @@ async fn first_inbound_seq_zero_of_an_epoch_is_accepted() {
                 req_id: 1,
                 text: "first of epoch".into(),
                 attachment: None,
+                quote: None,
             },
         ))
         .await;
@@ -418,6 +421,7 @@ async fn replayed_inbound_envelope_is_dropped() {
             req_id: 1,
             text: "first".into(),
             attachment: None,
+            quote: None,
         },
     );
     handle.handle_user_op(env.clone()).await;
@@ -463,6 +467,7 @@ async fn garbage_ciphertext_does_not_advance_replay_window() {
                 req_id: 1,
                 text: "after forge".into(),
                 attachment: None,
+                quote: None,
             },
         ))
         .await;
@@ -615,6 +620,7 @@ async fn send_message_persists_inbound_and_forwards_usermessage() {
                 req_id: 10,
                 text: "hi".into(),
                 attachment: None,
+                quote: None,
             },
         ))
         .await;
@@ -690,6 +696,7 @@ async fn send_message_attachment_persists_and_replays() {
                 req_id: 10,
                 text: "see attached".into(),
                 attachment: Some(att),
+                quote: None,
             },
         ))
         .await;
@@ -737,6 +744,79 @@ async fn send_message_attachment_persists_and_replays() {
     );
 }
 
+/// `SendMessage` carrying a quote persists the id on the inbound row, echoes
+/// it on the ack, and replays it on the `UserMessage` frame: the id survives
+/// storage, the ack, and history, with no quoted text copied anywhere.
+#[tokio::test]
+async fn send_message_quote_persists_and_replays() {
+    let (handle, key, capture, _prompt_rx, _root_id, _state, db, _dir) =
+        setup_with_history(8).await;
+    let conv = conv_of(&handle);
+    let user = peer();
+    // The quoted row is a real one in the peer's partition.
+    let quoted = chat_history::append(
+        &db,
+        Some(user.id.as_ref()),
+        Some("peer-handle"),
+        "outbound",
+        "the message being quoted",
+        None,
+        None,
+    )
+    .await
+    .unwrap()
+    .0;
+    handle
+        .handle_user_op(user_envelope(
+            &key,
+            &conv,
+            1,
+            TagmaRequest::SendMessage {
+                req_id: 11,
+                text: "quoting you".into(),
+                attachment: None,
+                quote: Some(quoted),
+            },
+        ))
+        .await;
+    let replies = drain_replies(&capture, &key).await;
+    let ack = replies.iter().find_map(|r| match r {
+        TagmaReply::MessageAccepted {
+            req_id: 11, quote, ..
+        } => Some(*quote),
+        _ => None,
+    });
+    assert_eq!(ack.flatten(), Some(quoted), "the ack echoes the id");
+
+    let rows = chat_history::read_last_n(&db, Some(user.id.as_ref()), 10)
+        .await
+        .unwrap();
+    let inbound = rows
+        .iter()
+        .find(|r| r.direction == "inbound")
+        .expect("inbound row persisted");
+    assert_eq!(inbound.quote, Some(quoted), "the row stores the id");
+    let inbound_id = inbound.id;
+
+    capture.lock().await.clear();
+    let trace = TraceId::from("h".to_string());
+    handle
+        .handle_history(&trace, 1, &user, None, None, 50)
+        .await;
+    let replies = drain_replies(&capture, &key).await;
+    let replayed = replies.iter().find_map(|r| match r {
+        TagmaReply::UserMessage {
+            history_id, quote, ..
+        } if *history_id == inbound_id => Some(*quote),
+        _ => None,
+    });
+    assert_eq!(
+        replayed.flatten(),
+        Some(quoted),
+        "the replay carries the id"
+    );
+}
+
 /// `handle_history` (latest mode) replays both outbound and inbound rows in
 /// id order: outbound as its stored `Event` reply, inbound as a `UserMessage`
 /// echo, each stamped with its row id, then a `HistoryBatchEnd` marker.
@@ -756,6 +836,7 @@ async fn handle_history_latest_replays_both_directions_in_order() {
         "outbound",
         "o0",
         None,
+        None,
     )
     .await
     .unwrap();
@@ -766,6 +847,7 @@ async fn handle_history_latest_replays_both_directions_in_order() {
         "inbound",
         "u0",
         None,
+        None,
     )
     .await
     .unwrap();
@@ -775,6 +857,7 @@ async fn handle_history_latest_replays_both_directions_in_order() {
         Some(user.handle.as_str()),
         "outbound",
         "o1",
+        None,
         None,
     )
     .await
@@ -862,6 +945,7 @@ async fn handle_history_latest_more_is_false_even_at_full_page() {
             "outbound",
             &format!("e{i}"),
             None,
+            None,
         )
         .await
         .unwrap();
@@ -901,6 +985,7 @@ async fn handle_history_after_and_before_windows() {
                 Some(user.handle.as_str()),
                 "outbound",
                 &format!("e{i}"),
+                None,
                 None,
             )
             .await
@@ -976,10 +1061,10 @@ async fn handle_user_op_routes_joined_room_to_the_room_path() {
     let room = RoomId::from("00000000-0000-0000-0000-000000000aa1".to_string());
     state
         .joined_rooms
-        .set_joined_rooms("test", [room.clone()])
+        .mark_rooms_rosterless("test", [room.clone()])
         .await;
 
-    let envelope = room_envelope(&room, "hi room", "Alice");
+    let envelope = room_envelope(&room, "hi room", "Alice", None);
     handle.handle_user_op(envelope).await;
 
     // Fail fast (timeout) if a regression skips the room path instead of
@@ -1009,6 +1094,97 @@ async fn handle_user_op_routes_joined_room_to_the_room_path() {
     );
 }
 
+/// A room envelope whose payload quotes an earlier row carries that position
+/// into the prompt header, so the agent can see which room line the sender
+/// answered -- as a position in the room's own log, with the quoted text never
+/// copied into the header.
+#[tokio::test]
+async fn handle_user_op_carries_the_quoted_seq_into_the_room_header() {
+    let (handle, _key, _capture, _signals, _prompt_rx, root_id, state, _history) =
+        setup_inner(8, None).await;
+    let room = RoomId::from("00000000-0000-0000-0000-000000000aa2".to_string());
+    state
+        .joined_rooms
+        .mark_rooms_rosterless("test", [room.clone()])
+        .await;
+
+    let envelope = room_envelope(&room, "answering that", "Alice", Some(7));
+    handle.handle_user_op(envelope).await;
+
+    let delivered = state
+        .inboxes
+        .get()
+        .unwrap()
+        .pull_undelivered(&root_id)
+        .await
+        .unwrap();
+    assert!(
+        delivered.contains(&format!("| room {room} | quote=7")),
+        "expected the quoted seq in the room header, got: {delivered}"
+    );
+}
+
+/// A room send that names this tagma reaches the prompt header as the
+/// recipient's own view: the viewer is the relay handle's tagma id, so naming
+/// it reads `you` rather than a count of one member.
+#[tokio::test]
+async fn handle_user_op_reports_this_tagmas_own_mention_in_the_room_header() {
+    let (handle, _key, _capture, _signals, _prompt_rx, root_id, state, _history) =
+        setup_inner(8, None).await;
+    let room = RoomId::from("00000000-0000-0000-0000-000000000aa3".to_string());
+    state
+        .joined_rooms
+        .mark_rooms_rosterless("test", [room.clone()])
+        .await;
+
+    // `setup_inner` gives the handle this tagma's id; the payload names exactly
+    // that member.
+    let me = MemberId::for_tagma(&TagmaId::from("tagma".to_string()));
+    let envelope = room_envelope_naming(&room, "come look", "Alice", None, vec![me]);
+    handle.handle_user_op(envelope).await;
+
+    let delivered = state
+        .inboxes
+        .get()
+        .unwrap()
+        .pull_undelivered(&root_id)
+        .await
+        .unwrap();
+    assert!(
+        delivered.contains("| mentions=you]"),
+        "expected this tagma's own view in the room header, got: {delivered}"
+    );
+}
+
+/// A room send that names members other than this tagma reads as their count,
+/// which is the other half of the same reading.
+#[tokio::test]
+async fn handle_user_op_counts_the_other_members_a_room_send_names() {
+    let (handle, _key, _capture, _signals, _prompt_rx, root_id, state, _history) =
+        setup_inner(8, None).await;
+    let room = RoomId::from("00000000-0000-0000-0000-000000000aa4".to_string());
+    state
+        .joined_rooms
+        .mark_rooms_rosterless("test", [room.clone()])
+        .await;
+
+    let ada = MemberId::for_tagma(&TagmaId::from("ada".to_string()));
+    let envelope = room_envelope_naming(&room, "for ada", "Alice", None, vec![ada]);
+    handle.handle_user_op(envelope).await;
+
+    let delivered = state
+        .inboxes
+        .get()
+        .unwrap()
+        .pull_undelivered(&root_id)
+        .await
+        .unwrap();
+    assert!(
+        delivered.contains("| mentions=1]"),
+        "expected the other member counted in the room header, got: {delivered}"
+    );
+}
+
 /// A conversation_id that is NOT a joined room skips the room path. It falls
 /// through to the bilateral path, whose AEAD decrypt of the raw-JSON ciphertext
 /// fails (rooms and bilateral use disjoint wire forms), so no prompt is
@@ -1020,7 +1196,7 @@ async fn handle_user_op_skips_room_path_for_non_joined_room() {
     let (handle, _key, _capture, _signals, _prompt_rx, root_id, state, _history) =
         setup_inner(8, None).await;
     let not_joined = RoomId::from("00000000-0000-0000-0000-000000000bb2".to_string());
-    let envelope = room_envelope(&not_joined, "hi room", "Alice");
+    let envelope = room_envelope(&not_joined, "hi room", "Alice", None);
     handle.handle_user_op(envelope).await;
     // No message delivered to inbox on the bilateral fallthrough.
     let leaked = state
@@ -1037,11 +1213,27 @@ async fn handle_user_op_skips_room_path_for_non_joined_room() {
 
 /// Build a room-path envelope: `conversation_id` is the room, the sender is a
 /// human peer, and `ciphertext` is the RAW `RoomMessage` JSON (the room path
-/// treats `ciphertext.0` as plaintext -- no bilateral decrypt).
-fn room_envelope(room: &RoomId, text: &str, handle: &str) -> Envelope {
+/// treats `ciphertext.0` as plaintext -- no bilateral decrypt). `quote` is the
+/// room seq the message answers, when it answers one, and the row names nobody.
+fn room_envelope(room: &RoomId, text: &str, handle: &str, quote: Option<i64>) -> Envelope {
+    room_envelope_naming(room, text, handle, quote, Vec::new())
+}
+
+/// The same envelope with a mentions list: `mentions` names the members the row
+/// addresses, which the recipient reads as its own view of them. Kept beside
+/// [`room_envelope`] so the rows that name nobody keep their short form.
+fn room_envelope_naming(
+    room: &RoomId,
+    text: &str,
+    handle: &str,
+    quote: Option<i64>,
+    mentions: Vec<MemberId>,
+) -> Envelope {
     let plaintext = serde_json::to_vec(&RoomMessage {
         text: text.into(),
         attachment: None,
+        quote,
+        mentions,
     })
     .unwrap();
     Envelope {
@@ -1076,7 +1268,7 @@ async fn handle_user_op_routes_direct_session_to_the_direct_path() {
         .set_direct_sessions("test", [session.clone()])
         .await;
 
-    let envelope = direct_envelope(&session, "hi direct", "Bob");
+    let envelope = direct_envelope(&session, "hi direct", "Bob", None);
     handle.handle_user_op(envelope).await;
 
     let delivered = state
@@ -1096,6 +1288,12 @@ async fn handle_user_op_routes_direct_session_to_the_direct_path() {
         "delivered: {delivered}"
     );
     assert!(delivered.contains("hi direct"), "delivered: {delivered}");
+    // A payload that answers nothing gains no segment: the header keeps the
+    // shape it had before the direct payload could carry a position.
+    assert!(
+        !delivered.contains("quote="),
+        "an unquoted direct payload adds no segment, got: {delivered}"
+    );
     // The direct path skips the bilateral ACK, like the room path.
     assert!(
         capture.lock().await.is_empty(),
@@ -1113,7 +1311,7 @@ async fn handle_user_op_skips_direct_path_for_unknown_session() {
     let (handle, _key, _capture, _signals, _prompt_rx, root_id, state, _history) =
         setup_inner(8, None).await;
     let not_mine = DirectSessionId::from("00000000-0000-4000-8000-000000000dd4".to_string());
-    let envelope = direct_envelope(&not_mine, "hi direct", "Bob");
+    let envelope = direct_envelope(&not_mine, "hi direct", "Bob", None);
     handle.handle_user_op(envelope).await;
     let leaked = state
         .inboxes
@@ -1131,10 +1329,16 @@ async fn handle_user_op_skips_direct_path_for_unknown_session() {
 /// sender is an agent peer (a tagma), and `ciphertext` is the RAW
 /// `DirectMessage` JSON (the direct path treats `ciphertext.0` as
 /// plaintext, like rooms).
-fn direct_envelope(session: &DirectSessionId, text: &str, handle: &str) -> Envelope {
+fn direct_envelope(
+    session: &DirectSessionId,
+    text: &str,
+    handle: &str,
+    quote: Option<i64>,
+) -> Envelope {
     let plaintext = serde_json::to_vec(&DirectMessage {
         text: text.into(),
         attachment: None,
+        quote,
     })
     .unwrap();
     let peer = TagmaId::from("peer-tagma".to_string());
@@ -1151,6 +1355,39 @@ fn direct_envelope(session: &DirectSessionId, text: &str, handle: &str) -> Envel
         timestamp: OffsetDateTime::now_utc(),
         ciphertext: Ciphertext(plaintext),
     }
+}
+
+/// A direct-session payload's quote reaches the recipient as the same
+/// `| quote=<seq>` segment a room row renders: the row it answers carries
+/// the position the sender wrote, and nothing else crosses with it.
+#[tokio::test]
+async fn a_direct_payload_carrying_a_quote_renders_the_segment() {
+    let (handle, _key, _capture, _signals, _prompt_rx, root_id, state, _history) =
+        setup_inner(8, None).await;
+    let session = DirectSessionId::from("00000000-0000-4000-8000-000000000ee5".to_string());
+    state
+        .direct_sessions
+        .set_direct_sessions("test", [session.clone()])
+        .await;
+
+    let envelope = direct_envelope(&session, "hi direct", "Bob", Some(7));
+    handle.handle_user_op(envelope).await;
+
+    let delivered = state
+        .inboxes
+        .get()
+        .unwrap()
+        .pull_undelivered(&root_id)
+        .await
+        .unwrap();
+    assert!(
+        delivered.contains(&format!("| direct {session}")),
+        "expected the direct header, got: {delivered}"
+    );
+    assert!(
+        delivered.contains("| quote=7]"),
+        "expected the answered position in the direct header, got: {delivered}"
+    );
 }
 
 /// The converged slot primitive: start is idempotent, stop clears the slot,
@@ -1174,6 +1411,45 @@ async fn pump_slot_is_idempotent_and_restartable() {
     );
     slot.stop_and_await().await;
     assert!(!slot.is_running().await, "second stop must clear the slot");
+}
+
+/// A quote id the store cannot mean (zero or negative) dies at the entry:
+/// the header and the row agree, so nothing downstream re-checks it.
+#[tokio::test]
+async fn send_message_drops_a_non_positive_quote() {
+    let (handle, key, capture, _prompt_rx, _root_id, _state, db, _dir) =
+        setup_with_history(8).await;
+    let conv = conv_of(&handle);
+    let user = peer();
+    handle
+        .handle_user_op(user_envelope(
+            &key,
+            &conv,
+            1,
+            TagmaRequest::SendMessage {
+                req_id: 12,
+                text: "quoting nothing".into(),
+                attachment: None,
+                quote: Some(0),
+            },
+        ))
+        .await;
+    let replies = drain_replies(&capture, &key).await;
+    let ack = replies.iter().find_map(|r| match r {
+        TagmaReply::MessageAccepted {
+            req_id: 12, quote, ..
+        } => Some(*quote),
+        _ => None,
+    });
+    assert_eq!(ack.flatten(), None, "the ack drops the unusable id");
+    let rows = chat_history::read_last_n(&db, Some(user.id.as_ref()), 10)
+        .await
+        .unwrap();
+    let inbound = rows
+        .iter()
+        .find(|r| r.direction == "inbound")
+        .expect("inbound row persisted");
+    assert_eq!(inbound.quote, None, "the row stores no quote either");
 }
 
 /// A query naming two cursors asks for two windows at once. The relay answers

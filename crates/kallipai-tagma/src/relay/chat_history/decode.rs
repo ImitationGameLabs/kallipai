@@ -33,6 +33,8 @@ pub(crate) struct HistoryRow {
     /// The JSON blob from the row's `attachment` column (`None` = no file;
     /// deserialized here so a corrupt blob degrades to no file, not a lost row).
     pub(crate) attachment: Option<String>,
+    /// The quoted row id from the row's `quote` column (`None` = no quote).
+    pub(crate) quote: Option<i64>,
 }
 
 /// Decode one stored [`HistoryRow`] into a [`HistoryEntry`] (`sender` + the
@@ -72,6 +74,7 @@ pub(crate) fn decode_row(row: HistoryRow, sender: Participant) -> Option<History
                 text: row.text,
                 created_at: None,
                 attachment,
+                quote: row.quote,
             };
             r.set_created_at(row.created_at);
             r

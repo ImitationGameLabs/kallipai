@@ -9,7 +9,7 @@
   },
   "scripts": {
     "check": "svelte-check --tsconfig ./tsconfig.json",
-    "test": "deno test --allow-env --allow-read=../kallipai-app/src,../kallipai-direct/src,../kallipai-site/src,../kallipai-web/src,./src,../kallipai-client/src/types.ts"
+    "test": "deno test --allow-env --allow-read=../../crates/platform/kallipai-lesche-common/src/message.rs,../kallipai-app/src,../kallipai-direct/src,../kallipai-site/src,../kallipai-web/src,./src,../kallipai-client/src/types.ts"
   },
   "dependencies": {
     "@kallipai/kallipai-common": "workspace:*",

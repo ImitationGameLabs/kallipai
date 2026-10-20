@@ -11,6 +11,8 @@
 //! The encrypted emit tail (`emit`) lives in `bilateral` and is likewise
 //! `pub(super)`; the plaintext signal uplink rides the upstream flusher.
 
+use kallipai_lesche_common::rooms::MemberId;
+
 use super::*;
 
 impl RelayHandle {
@@ -31,22 +33,36 @@ impl RelayHandle {
         sender: Participant,
         payload: RoomPayload,
     ) {
-        // Both payload types are `{ text, attachment? }` with the same JSON
-        // shape, but each surface decodes its own type so a future field on
-        // one surface cannot silently leak into the other's decode.
+        // Each surface decodes its own payload type (`RoomMessage` /
+        // `DirectMessage`) rather than one shared type, so a field that belongs
+        // to one surface cannot silently appear in the other's decode.
         // The attachment field is deliberately dropped at this decode:
         // attachments do not render on the relay surfaces (direct
         // included).
-        let decoded: Result<String, _> = match surface {
+        //
+        // Both payloads also carry `quote`: the position, in that surface's
+        // own log, that this message answers -- a room's `seq`, or the seq of
+        // the row it answers in the session's own transcript. It is read here
+        // because the decode is the one place the row is still in hand, and it
+        // travels with the message into the delivery seam. An absent field is
+        // no quote, which is the fact, not a placeholder.
+        //
+        // Mentions are read the same way and for the same reason: the room
+        // payload names the members it addresses, the direct payload has no
+        // such field. They are not judged or routed on here -- the header the
+        // recipient reads is their only consumer on this side.
+        let decoded: Result<(String, Option<i64>, Vec<MemberId>), _> = match surface {
             crate::messaging::Surface::Room(_) => {
-                serde_json::from_slice::<RoomMessage>(&payload.plaintext).map(|r| r.text)
+                serde_json::from_slice::<RoomMessage>(&payload.plaintext)
+                    .map(|r| (r.text, r.quote, r.mentions))
             }
             crate::messaging::Surface::Direct(_) => {
-                serde_json::from_slice::<DirectMessage>(&payload.plaintext).map(|r| r.text)
+                serde_json::from_slice::<DirectMessage>(&payload.plaintext)
+                    .map(|r| (r.text, r.quote, Vec::new()))
             }
         };
-        let text = match decoded {
-            Ok(text) => text,
+        let (text, quote, mentions) = match decoded {
+            Ok(decoded) => decoded,
             Err(e) => {
                 warn!(
                     surface = surface.label(),
@@ -55,6 +71,13 @@ impl RelayHandle {
                 return;
             }
         };
+        // Mentions are read as this tagma's own view because this tagma is the
+        // recipient: the header says whether the message names it and how many
+        // other members are named, never what the room's roster holds. A
+        // surface without a member list decodes as an empty list, which has no
+        // view at all.
+        let mentions =
+            crate::messaging::MentionView::of(&mentions, &MemberId::for_tagma(self.tagma_id()));
         // The sender identity is non-forgeable: it is the relay-authenticated
         // `envelope.sender.id` (the keryx validates id + kind against the
         // authed principal before stamping the row), decoded here as the
@@ -67,18 +90,18 @@ impl RelayHandle {
         // `Agent` sender, and vice versa, or the keryx's require_* check
         // rejects it); the handle is spoofable + sanitized in
         // `format_relay_incoming`.
-        let sender_kind = sender.kind.as_str();
-        let sender_handle = sender.handle.clone();
-        if let Err(e) = crate::delivery::deliver_inbound_relay_message(
-            state,
-            &self.inner.root_agent,
+        let inbound = crate::messaging::RelayInbound {
             surface,
-            sender_kind,
-            &sender_id,
-            sender_handle,
-            &text,
-        )
-        .await
+            sender_kind: sender.kind.as_str(),
+            sender_id: &sender_id,
+            sender_handle: &sender.handle,
+            text: &text,
+            quote,
+            mentions,
+        };
+        if let Err(e) =
+            crate::delivery::deliver_inbound_relay_message(state, &self.inner.root_agent, &inbound)
+                .await
         {
             warn!(
                 surface = surface.label(),
@@ -280,14 +303,23 @@ impl RelayHandle {
                 req_id,
                 text,
                 attachment,
+                quote,
             } => {
+                // A quote id that is zero or negative names no row (the
+                // client reserves negative ids for lines it has not seen
+                // acknowledged). Drop it at the boundary so the stored row,
+                // the delivered event, and the ack all report one value.
+                let quote = quote.filter(|q| *q > 0);
                 let resp = crate::delivery::deliver_message(
                     &state,
                     Identity::Operator,
                     Some(sender),
                     &self.inner.root_agent,
-                    &text,
-                    attachment.clone(),
+                    crate::delivery::OutgoingMessage {
+                        text: &text,
+                        attachment: attachment.clone(),
+                        quote,
+                    },
                     false,
                 )
                 .await?;
@@ -305,6 +337,7 @@ impl RelayHandle {
                     // created_at when it persists the authored half.
                     created_at: None,
                     attachment,
+                    quote,
                 })
             }
             TagmaRequest::Interrupt { req_id } => {

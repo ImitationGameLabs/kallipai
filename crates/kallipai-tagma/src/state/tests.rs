@@ -720,14 +720,14 @@ async fn joined_rooms_slices_are_per_relay() {
     let r2 = RoomId::from("22222222-2222-2222-2222-222222222222".to_string());
 
     // Warm both relays' slices: a refresh of one must not clear the other.
-    rooms.set_joined_rooms("main", [r1.clone()]).await;
-    rooms.set_joined_rooms("second", [r2.clone()]).await;
-    rooms.set_joined_rooms("main", []).await; // main's poll now sees no rooms
+    rooms.mark_rooms_rosterless("main", [r1.clone()]).await;
+    rooms.mark_rooms_rosterless("second", [r2.clone()]).await;
+    rooms.mark_rooms_rosterless("main", []).await; // main's poll now sees no rooms
     assert!(!rooms.is_joined(&r1).await);
     assert!(rooms.is_joined(&r2).await, "second's slice survives");
 
     // Union snapshot for the agent room-list route.
-    rooms.set_joined_rooms("main", [r1.clone()]).await;
+    rooms.mark_rooms_rosterless("main", [r1.clone()]).await;
     let all = rooms.joined_rooms().await;
     assert_eq!(all.len(), 2);
 
@@ -736,6 +736,80 @@ async fn joined_rooms_slices_are_per_relay() {
     assert_eq!(rooms.owner_of(&r2).await.as_deref(), Some("second"));
     let cold = RoomId::from("33333333-3333-3333-3333-333333333333".to_string());
     assert_eq!(rooms.owner_of(&cold).await, None);
+}
+
+/// The roster rides the same slice as the room set: a snapshot write fills both
+/// in one go, and a rosterless slice leaves the roster unknown (not empty); one
+/// relay's roster never stands in for another's.
+#[tokio::test]
+async fn room_snapshots_carry_rosters_beside_the_room_ids() {
+    use kallipai_archeion_common::ids::{ParticipantKind, TagmaId};
+    use kallipai_lesche_common::rooms::{MemberId, RoomId, RoomMember, TagmaRoomView, Visibility};
+
+    let room_view = |room: &RoomId, members: Vec<MemberId>| TagmaRoomView {
+        room_id: room.clone(),
+        members: members
+            .into_iter()
+            .map(|id| RoomMember {
+                id,
+                kind: ParticipantKind::Agent,
+            })
+            .collect(),
+        membership_epoch: 1,
+        is_creator: false,
+        visibility: Visibility::Private,
+        name: None,
+    };
+
+    let rooms = JoinedRooms::new();
+    let r1 = RoomId::from("11111111-1111-1111-1111-111111111111".to_string());
+    let r2 = RoomId::from("22222222-2222-2222-2222-222222222222".to_string());
+    let ada = MemberId::for_tagma(&TagmaId::from("ada".to_string()));
+    let bo = MemberId::for_tagma(&TagmaId::from("bo".to_string()));
+
+    // Ids without a roster: the room is known, its members are not. The
+    // difference matters -- a caller refreshes on unknown, refuses on empty.
+    rooms.mark_rooms_rosterless("main", [r1.clone()]).await;
+    assert!(rooms.is_joined(&r1).await);
+    assert_eq!(
+        rooms.members_of("main", &r1).await,
+        None,
+        "ids alone name no roster"
+    );
+
+    // One snapshot write fills both facts.
+    rooms
+        .set_room_snapshot("main", &[room_view(&r1, vec![ada.clone(), bo.clone()])])
+        .await;
+    let roster = rooms.members_of("main", &r1).await.expect("roster cached");
+    assert_eq!(roster.len(), 2);
+    assert!(roster.contains(&ada) && roster.contains(&bo));
+
+    // Full replace per relay: a room the snapshot no longer lists loses its
+    // roster with it.
+    rooms
+        .set_room_snapshot("main", &[room_view(&r2, vec![bo.clone()])])
+        .await;
+    assert!(!rooms.is_joined(&r1).await, "the slice was replaced");
+    assert_eq!(rooms.members_of("main", &r1).await, None);
+
+    // A room another relay knows by id only keeps its roster unknown: the
+    // slices are separate facts about separate lesches.
+    rooms.mark_rooms_rosterless("second", [r1.clone()]).await;
+    assert_eq!(
+        rooms.members_of("second", &r1).await,
+        None,
+        "second knows the room but carries no roster"
+    );
+    assert_eq!(
+        rooms.members_of("main", &r2).await.map(|r| r.len()),
+        Some(1)
+    );
+    assert_eq!(
+        rooms.members_of("second", &r2).await,
+        None,
+        "another relay's slice never answers for main's room"
+    );
 }
 
 #[tokio::test]

@@ -27,10 +27,17 @@ import {
 } from "../../paraglide/messages.js";
 import {
   appendRoomLine,
+  checkedMentions,
+  checkedQuote,
   decodeRoomMessage,
   encodeRoomSendMessage,
+  mentionsField,
+  quoteField,
+  roomLineFrom,
   type RoomLine,
+  type RoomLineSender,
   type RoomMessage,
+  type RoomSendOptions,
 } from "../room-message.ts";
 
 // `RoomLine` is re-exported for the view + tests (its pure dedup lives in
@@ -242,12 +249,20 @@ class RoomConversationsStore {
    * real seq lands on the next history fetch, where the lesche-assigned seq
    * dedups it). On a post failure the optimistic line is marked errored (not
    * removed) so the user can retry. THROWS when no signed-in user is resolved
-   * (the room UI surfaces it inline). */
-  async send(roomId: string, text: string): Promise<void> {
+   * (the room UI surfaces it inline). A mention list that cannot be placed
+   * throws here, before the optimistic line exists: nothing is drawn for a
+   * send that names nobody. */
+  async send(
+    roomId: string,
+    text: string,
+    options?: RoomSendOptions,
+  ): Promise<void> {
     const trimmed = text.trim();
     if (!trimmed) return;
     const participantId = archeionSession.participantId;
     if (!participantId) throw new Error("no signed-in user");
+    const mentions = checkedMentions(options?.mentions);
+    const quote = checkedQuote(options?.quote);
     const conv = this.convs.get(roomId);
     // Optimistic line: synthetic seq below any real (positive) seq. Sender is
     // the participant id (not the raw user_id) so the history echo dedups it.
@@ -267,11 +282,15 @@ class RoomConversationsStore {
       text: trimmed,
       createdAt: new Date().toISOString(),
       mine: true,
+      ...mentionsField(mentions),
+      ...quoteField(quote),
     };
     if (conv) conv.lines = [...conv.lines, optimistic];
     try {
       const payload = encodeB64(
-        new TextEncoder().encode(encodeRoomSendMessage(trimmed)),
+        new TextEncoder().encode(
+          encodeRoomSendMessage(trimmed, { mentions, quote }),
+        ),
       );
       await lescheClientOrFail().postRoomEnvelope(
         roomId,
@@ -299,12 +318,16 @@ class RoomConversationsStore {
   /** Retry a failed optimistic line: drop it, then re-send its text through the
    * normal send path (fresh optimistic line + POST). The failed line is removed
    * first so the retry does not duplicate it. THROWS on failure (the view
-   * surfaces it). */
+   * surfaces it), and the retry keeps the names and the quote the failed send
+   * carried -- a retried reply must not turn into an unquoted one. */
   async resend(roomId: string, line: RoomLine): Promise<void> {
     const conv = this.convs.get(roomId);
     if (!conv) return;
     conv.lines = conv.lines.filter((l) => l.seq !== line.seq);
-    await this.send(roomId, line.text);
+    await this.send(roomId, line.text, {
+      mentions: line.mentions,
+      quote: line.quote,
+    });
   }
 
   /** Render a live inbound room envelope (delivered by the realtime SSE
@@ -313,12 +336,7 @@ class RoomConversationsStore {
   deliverLive(
     roomId: string,
     ciphertextB64: string,
-    sender: {
-      id: string;
-      kind: "human" | "agent";
-      handle: string;
-      tagma_id?: string;
-    },
+    sender: RoomLineSender,
   ): void {
     const conv = this.convs.get(roomId);
     if (!conv) return;
@@ -443,12 +461,7 @@ class RoomConversationsStore {
   private renderPublic(
     conv: RoomConversation,
     ciphertextB64: string,
-    sender: {
-      id: string;
-      kind: "human" | "agent";
-      handle: string;
-      tagma_id?: string;
-    },
+    sender: RoomLineSender,
     seq: number | null,
     createdAt?: string,
   ): void {
@@ -463,16 +476,11 @@ class RoomConversationsStore {
     }
     if (decoded.op !== "message") return;
     const me = archeionSession.participantId;
-    const line: RoomLine = {
+    const line = roomLineFrom(decoded, sender, {
       seq: seq ?? conv.nextSyntheticSeq(),
-      senderId: sender.id,
-      senderKind: sender.kind,
-      senderHandle: sender.handle,
-      senderTagmaId: sender.tagma_id,
-      text: decoded.text,
       createdAt: createdAt ?? new Date().toISOString(),
-      mine: sender.id === me,
-    };
+      selfId: me,
+    });
     this.commitLine(conv, line, seq);
   }
 

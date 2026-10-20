@@ -22,11 +22,33 @@
     createAutoScroll,
     createTogglePin,
   } from "../lib/transcript.svelte.ts";
+  import type { ArmedQuote } from "../lib/quote.ts";
+  import {
+    armedQuoteSeq,
+    previewOf,
+    roomQuoteBlocksByLine,
+  } from "../lib/quote.ts";
+  import { createReveal, revealMark } from "../lib/reveal.svelte.ts";
+  import { createRowActions } from "../lib/rowActions.svelte.ts";
+  import { ROW_TIME } from "../lib/time/stamp.ts";
   import { createComposer } from "../lib/composer.svelte.ts";
+  import { createMentionPicker } from "../lib/mentionPicker.svelte.ts";
+  import { mentionOptionId } from "../lib/mentions.ts";
   import { bindDraft } from "../lib/session/drafts.svelte.ts";
   import { roomDraftKey } from "../lib/session/drafts.ts";
-  import { roomLinePending } from "../lib/room-message.ts";
+  import {
+    mentionChipsOf,
+    type RoomLine,
+    roomRowAnnouncement,
+    roomLinePending,
+    roomMessageLabel,
+    roomRowAnchorId,
+  } from "../lib/room-message.ts";
   import MemberRow from "../components/rooms/MemberRow.svelte";
+  import MentionPicker from "../components/rooms/MentionPicker.svelte";
+  import MentionChips from "../components/MentionChips.svelte";
+  import RowQuoteAffordance from "../components/RowQuoteAffordance.svelte";
+  import QuoteBar from "../components/QuoteBar.svelte";
   import SenderIdentity from "../components/rooms/SenderIdentity.svelte";
   import { roomConversationsStore } from "../lib/session/roomConversations.svelte.ts";
   import { roomsStore } from "../lib/session/rooms.svelte";
@@ -36,6 +58,7 @@
   import { profileHref } from "../lib/room-message.ts";
   import { startVisibleInterval } from "../lib/visibleInterval.ts";
   import { TONAL_ICON_SURF } from "../lib/classes.ts";
+  import { formatStamp } from "../lib/time/stamp.svelte.ts";
   import {
     common_loading,
     common_retry,
@@ -71,15 +94,27 @@
     room?.name || room_label_fallback({ id: roomId.slice(0, 8) }),
   );
 
-  // Display labels keyed by participant id. The wire `Participant` on each
-  // message carries the sender's kind + server-resolved handle (the lesche
-  // derives it fresh at read time, so it is already correct); it does NOT carry
-  // the mutable display label, so the bubble header resolves just the label
-  // from the roster. Undefined for a sender not in the roster / before the
-  // roster lands (handle alone); re-renders when the roster updates.
-  const labelById = $derived(
-    new Map((conv?.roster?.members ?? []).map((m) => [m.id, m.label] as const)),
+  // The quote block each line draws, resolved once per render over the window
+  // already on screen. The room transcript keeps every line it has loaded (a
+  // history page is capped at 200 rows, but the store appends pages and live
+  // frames without trimming), so a lookup per row would be quadratic in it.
+  const quotes = $derived(roomQuoteBlocksByLine(conv?.lines ?? []));
+
+  // The roster keyed by participant id: one pass serves both the sender label
+  // the bubble header draws and the members a line mentions. The wire
+  // `Participant` on each message carries the sender's kind + server-resolved
+  // handle (the lesche derives it fresh at read time, so it is already
+  // correct) but not the mutable display label, so the header reads that label
+  // here; a mention carries ids alone, so the chip resolves label/handle/href
+  // here too. Undefined for a sender not in the roster / before the roster
+  // lands (handle alone); rebuilt with the roster, so a rename re-renders both.
+  const memberById = $derived(
+    new Map((conv?.roster?.members ?? []).map((m) => [m.id, m] as const)),
   );
+
+  // Whether the roster has landed -- the chip draws the bare short id until
+  // it does.
+  const rosterLoaded = $derived(conv?.roster != null);
 
   // Open the conversation (loads the history). Driven from an effect (not a
   // one-shot onMount) gated on the self participant id (needed to flag own
@@ -128,10 +163,17 @@
   const scroll = createAutoScroll();
   // Session-key reset must be declared BEFORE the stick effect: effects in
   // the same flush run in declaration order, so a param change resets the
-  // controller before stick() observes the new room's lines.
+  // controllers before stick() observes the new room's lines. The row
+  // controller is dropped here and not by its scope check, which may only
+  // hide: this effect is the host's word that the session moved. The sentence
+  // the reveal spoke goes with them, from this effect's cleanup: destroy()
+  // reads back the spoken slot it wrote to flip it, and a tracked body would
+  // register that read and dirty itself; a cleanup has no reaction to record.
   $effect(() => {
     void roomId;
     scroll.reset();
+    rowActions.reset();
+    return () => reveal.destroy();
   });
   $effect(() => {
     void conv?.lines.length;
@@ -168,20 +210,139 @@
   // actions elements to it on a raw toggle.
   const togglePin = createTogglePin(() => scroll.viewport);
 
+  // Jumping to the row a quote names: the same row table, scroll and brief
+  // mark the 1:1 transcript uses, keyed by this room's seq.
+  const reveal = createReveal({
+    scope: () => roomId,
+    // A jump moves focus without a word, so the controller speaks the row it
+    // landed on: the author and time that row's own label names.
+    describe: (seq) => {
+      const line = conv?.lines.find((row) => row.seq === seq);
+      if (line === undefined) return undefined;
+      return roomRowAnnouncement(line, {
+        time: formatStamp(line.createdAt, ROW_TIME),
+        authorLabel: memberById.get(line.senderId)?.label,
+      });
+    },
+  });
+
   const disabled = $derived(conv?.status !== "open");
 
   // The togglable member side-panel (online dots driven by the room's live
   // online-member set + roster identity).
   let showMembers = $state(false);
 
+  // The row this send answers, tagged with the room that armed it: one quote
+  // at a time, replaced by quoting another row and spent by sending or Escape.
+  let pendingQuote = $state<ArmedQuote | null>(null);
+
+  // Reads go through one gate: a seq armed in the room just left numbers a
+  // different row here, so the bar, the preview and the send see undefined.
+  const armedSeq = $derived(armedQuoteSeq(pendingQuote, roomId));
+
+  // Only a row the room has numbered can be quoted: an optimistic line has no
+  // seq the other side could resolve, and a failed one is about to be resent as
+  // a different line.
+  function quotable(line: RoomLine): boolean {
+    return line.seq > 0 && !roomLinePending(line) && !line.failed;
+  }
+  // Which row's menu is open and the touch hold that opens it: one state
+  // machine per transcript, shared with the 1:1 surface. The scope is this
+  // room: a room swap drops the menu with it.
+  const rowActions = createRowActions<RoomLine>({
+    idOf: (line) => line.seq,
+    quotable,
+    onQuote: (line) => (pendingQuote = { scope: roomId, seq: line.seq }),
+    scope: () => roomId,
+  });
+  // A flash or hold timer outliving the transcript would touch a torn-down
+  // view: the final teardown runs each controller's own cleanup -- the reveal
+  // timer's destroy and the row state's reset -- and a room swap drops the
+  // sentence from its own effect's cleanup, its body resetting the rest.
+  $effect(() => () => {
+    reveal.destroy();
+    rowActions.reset();
+  });
+
   const composer = createComposer({
-    send: (text) => roomConversationsStore.send(roomId, text),
+    send: (text) => {
+      // One send spends the strips: the picks and the quote are captured here
+      // and cleared before the transport await, so a second submit cannot
+      // inherit what the user already spent. A failed send keeps both on the
+      // optimistic line, which is where the retry reads them back.
+      const mentions = picker.picked;
+      const quote = armedSeq;
+      picker.clear();
+      pendingQuote = null;
+      return roomConversationsStore.send(roomId, text, { mentions, quote });
+    },
     // Busy is not a gate: send renders the optimistic line at once + posts.
     canSubmit: () => conv?.status === "open",
   });
 
   // Draft storage: rooms key on the room id.
   bindDraft(composer, () => roomDraftKey(roomId));
+
+  // The mention picker: the page holds its state, lib/mentions.ts holds every
+  // rule it applies. Candidates are the roster already loaded for the chips --
+  // no second fetch, and no popup before the roster lands (there would be
+  // nothing to offer, and a half-state popup is worse than none).
+  const picker = createMentionPicker({
+    // The picks are the composer's, so a swap keeps each room's own and the
+    // reader shows the live one: coming back restores what was picked here.
+    scope: () => roomId,
+    members: () => conv?.roster?.members ?? [],
+    draft: () => composer.draft,
+    caret: () => composer.caret,
+    dropToken: (start, end) => {
+      const draft = composer.draft;
+      composer.draft = draft.slice(0, start) + draft.slice(end);
+      composer.requestCaret(start);
+    },
+  });
+
+  // The picked members as the same chips a message draws: one vocabulary, one
+  // degradation rule. A member who has left the roster keeps the chip the user
+  // picked -- it falls back to the roster-missing shape rather than vanishing.
+  const pickedChips = $derived(
+    mentionChipsOf(
+      picker.picked,
+      memberById,
+      archeionSession.participantId,
+      rosterLoaded,
+    ),
+  );
+
+  // Keys the picker owns come first (it decides from the draft and the caret);
+  // the rest of this hook is the backspace-on-empty-draft gesture, which drops
+  // the last pick and can never eat a character the user typed.
+  function onComposeKey(event: KeyboardEvent): boolean {
+    if (picker.key(event)) {
+      // Arrows would move the caret, Enter would submit, Tab would leave the
+      // field: none of that is wanted while the popup has the key.
+      event.preventDefault();
+      return true;
+    }
+    if (
+      event.key === "Backspace" &&
+      !event.isComposing &&
+      composer.draft.length === 0 &&
+      picker.picked.length > 0
+    ) {
+      picker.removeLast();
+      return true;
+    }
+    return false;
+  }
+
+  // The row the armed quote points at, re-resolved every render against the
+  // window: a row that scrolls out of it drops to the neutral author label
+  // instead of showing stale copy.
+  const quotedLine = $derived(
+    armedSeq === undefined
+      ? undefined
+      : conv?.lines.find((line) => line.seq === armedSeq),
+  );
 
   // The message wire carries the sender's kind + server-resolved stable handle
   // (the lesche derives it fresh at read time via the same resolver the roster
@@ -262,6 +423,16 @@
     </div>
   {:else}
     <div class="flex-1 min-h-0 flex relative">
+      <!-- A jump moves focus without a word, so the row it landed on is
+           spoken here. Two slots, written in turn: two jumps that land on rows
+           named the same are two separate events, and re-writing one node with
+           the same text says nothing at all. -->
+      <div class="sr-only" aria-live="polite" aria-atomic="true">
+        {reveal.slot === 0 ? (reveal.announcement ?? "") : ""}
+      </div>
+      <div class="sr-only" aria-live="polite" aria-atomic="true">
+        {reveal.slot === 1 ? (reveal.announcement ?? "") : ""}
+      </div>
       <!-- UA scroll anchoring is retired here: the controller owns the
            anchoring (stick/observe), and an anchor adjustment racing the
            flex reflow could ship a scroll event with a large
@@ -281,23 +452,48 @@
             <!-- Still-sending = own optimistic line (see roomLinePending); an
             inbound frame carries no seq yet but is delivered. -->
             {@const pending = roomLinePending(line)}
+            {@const quotedSeq = line.quote}
+            {@const q = quotes.get(line.seq)}
+            {@const quoteTarget = q?.jumpable === true ? quotedSeq : undefined}
+            {@const rowLabel = roomMessageLabel(line, {
+              time: formatStamp(line.createdAt, ROW_TIME),
+              authorLabel: memberById.get(line.senderId)?.label,
+            })}
+            {@const chips = mentionChipsOf(
+              line.mentions,
+              memberById,
+              archeionSession.participantId,
+              rosterLoaded,
+            )}
             {@const href = profileHref(
               line.senderKind,
               line.senderHandle,
               line.senderTagmaId,
             )}
+            <!-- Pointer handlers only arm the long-press menu; keyboard users
+                 reach the same menu from the row actions button. -->
+            <!-- svelte-ignore a11y_no_static_element_interactions -->
             <div
-              class="group flex flex-col {line.mine
+              use:reveal.trackRow={line.seq}
+              tabindex="-1"
+              onpointerdown={(event) => rowActions.pressStart(line, event)}
+              onpointerup={rowActions.pressCancel}
+              onpointercancel={rowActions.pressCancel}
+              onpointerleave={rowActions.pressCancel}
+              class="relative group flex flex-col {line.mine
                 ? 'items-end'
-                : 'items-start'}"
+                : 'items-start'} {revealMark(reveal.highlightId, line.seq)}"
             >
+              <span id={roomRowAnchorId(line.seq)} class="sr-only">
+                {rowLabel}
+              </span>
               <span
                 class="text-xs px-1 mb-0.5 max-w-[80%] min-w-0 flex items-center"
               >
                 <SenderIdentity
                   kind={line.senderKind}
                   handle={line.senderHandle}
-                  label={labelById.get(line.senderId)}
+                  label={memberById.get(line.senderId)?.label}
                   {href}
                 />
               </span>
@@ -308,6 +504,14 @@
                 {pending}
                 bare={pending}
                 pin={togglePin}
+                quote={q}
+                quoteDescribedBy={quoteTarget === undefined
+                  ? undefined
+                  : roomRowAnchorId(quoteTarget)}
+                mentions={chips}
+                onQuoteClick={quoteTarget === undefined
+                  ? undefined
+                  : () => reveal.jump(quoteTarget)}
               />
               {#if line.mine && pending && !line.failed}
                 <span
@@ -327,6 +531,15 @@
                       .catch(() => {});
                   }}>{common_retry()}</button
                 >
+              {/if}
+              {#if quotable(line)}
+                <RowQuoteAffordance
+                  side={line.mine ? "right" : "left"}
+                  menuOpen={rowActions.isMenuOpen(line)}
+                  onMenuOpenChange={(open) =>
+                    rowActions.setMenuOpen(line, open)}
+                  onQuote={() => rowActions.quote(line)}
+                />
               {/if}
             </div>
           {/each}
@@ -400,6 +613,50 @@
       disabledNotice={room_unavailable()}
       onSubmitted={() => scroll.forceBottom()}
       onResized={() => scroll.reanchorIfFollowing()}
-    />
+      onCancelQuote={() => (pendingQuote = null)}
+      {onComposeKey}
+      mentionAria={{
+        open: picker.open,
+        activeId:
+          picker.activeId === undefined
+            ? undefined
+            : mentionOptionId(picker.activeId),
+      }}
+    >
+      <!-- The two strips and the popup live in the composer's own slot family:
+           the quote this send answers, the members it names, and the
+           candidates while an `@` token is open. -->
+      {#snippet quoteBar()}
+        {#if armedSeq !== undefined}
+          <QuoteBar
+            author={quotedLine?.senderHandle}
+            preview={quotedLine === undefined
+              ? undefined
+              : previewOf(quotedLine)}
+            onCancel={() => (pendingQuote = null)}
+          />
+        {/if}
+      {/snippet}
+      {#snippet mentionBar()}
+        {#if pickedChips.length > 0}
+          <div class="mb-1">
+            <MentionChips
+              chips={pickedChips}
+              onRemove={(id) => picker.remove(id)}
+            />
+          </div>
+        {/if}
+      {/snippet}
+      {#snippet mentionPicker()}
+        {#if picker.open}
+          <MentionPicker
+            rows={picker.rows}
+            activeIndex={picker.activeIndex}
+            limitHit={picker.limitHit}
+            onPick={(id) => picker.pick(id)}
+          />
+        {/if}
+      {/snippet}
+    </Composer>
   {/if}
 </div>

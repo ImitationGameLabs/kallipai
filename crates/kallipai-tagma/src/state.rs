@@ -83,6 +83,14 @@ impl ProfileBundle {
     }
 }
 
+/// One relay's slice of the room cache: room id -> the roster that snapshot
+/// carried (`None` when it carried none). One map rather than two, so a
+/// reader never pairs one tick's room set with another tick's rosters.
+type RelayRooms = HashMap<
+    kallipai_lesche_common::rooms::RoomId,
+    Option<HashSet<kallipai_lesche_common::rooms::MemberId>>,
+>;
+
 /// Tagma-side cache of the rooms this tagma belongs to, keyed by relay name:
 /// each online relay's room-membership poll owns its slice, so two concurrently
 /// connected archeions never overwrite each other. Rooms are plaintext
@@ -94,12 +102,17 @@ impl ProfileBundle {
 /// (the room-membership pump in `relay::room_poll`, whose immediate first tick
 /// warms it on tunnel-up) and refreshed on each `Wake` nudge.
 ///
+/// The same tick also fills each room's roster (`TagmaRoomView.members`), so
+/// "does this tagma belong to the room" and "who is in it" are one snapshot
+/// of one call: the room send route reads the roster to judge a mention
+/// (see [`JoinedRooms::members_of`]) and refreshes on a miss.
+///
 /// Best-effort: a cold or stale miss for a room routes the envelope to the
 /// bilateral path, where it is dropped (the lesche member-gated read still
 /// works) -- self-correcting on the next poll that warms the entry.
 #[derive(Default)]
 pub struct JoinedRooms {
-    rooms: Mutex<HashMap<String, HashSet<kallipai_lesche_common::rooms::RoomId>>>,
+    rooms: Mutex<HashMap<String, RelayRooms>>,
 }
 
 impl JoinedRooms {
@@ -113,26 +126,35 @@ impl JoinedRooms {
             .lock()
             .await
             .values()
-            .any(|set| set.contains(room))
+            .any(|slice| slice.contains_key(room))
     }
 
-    /// Replace the named relay's room set from a fresh `list_my_rooms`
-    /// snapshot. Each relay's poll owns its slice; other relays' slices are
-    /// untouched.
-    pub async fn set_joined_rooms(
+    /// Mark every room of `relay` rosterless: the slice shape whose rooms
+    /// answer `members_of` with `None`. Each relay's poll owns its slice, so
+    /// other relays' slices are untouched.
+    ///
+    /// Test seam. No production writer mints a rosterless slice today -- the
+    /// poll writes rooms and rosters together, from one answer -- so this
+    /// exists to hold the branch that reads an unknown roster as unknown
+    /// rather than as an empty room.
+    #[cfg(test)]
+    pub(crate) async fn mark_rooms_rosterless(
         &self,
         relay: &str,
         rooms: impl IntoIterator<Item = kallipai_lesche_common::rooms::RoomId>,
     ) {
         let mut g = self.rooms.lock().await;
-        g.insert(relay.to_owned(), rooms.into_iter().collect());
+        g.insert(
+            relay.to_owned(),
+            rooms.into_iter().map(|r| (r, None)).collect(),
+        );
     }
 
     /// Snapshot of the room ids across all relays (for the agent's
     /// room-list route).
     pub async fn joined_rooms(&self) -> HashSet<kallipai_lesche_common::rooms::RoomId> {
         let g = self.rooms.lock().await;
-        g.values().flat_map(|s| s.iter().cloned()).collect()
+        g.values().flat_map(|slice| slice.keys().cloned()).collect()
     }
 
     /// The relay whose lesche owns `room`, if any poll has warmed the entry.
@@ -144,7 +166,47 @@ impl JoinedRooms {
             .lock()
             .await
             .iter()
-            .find_map(|(relay, set)| set.contains(room).then(|| relay.clone()))
+            .find_map(|(relay, slice)| slice.contains_key(room).then(|| relay.clone()))
+    }
+
+    /// Replace the named relay's slice from a fresh `list_my_rooms` snapshot,
+    /// rooms and rosters together: one tick, one lock, so no reader can pair
+    /// one tick's room set with another tick's roster. `TagmaRoomView.members`
+    /// is the live membership that same call resolved, so the two facts keep
+    /// one home. Other relays' slices are untouched.
+    pub async fn set_room_snapshot(
+        &self,
+        relay: &str,
+        rooms: &[kallipai_lesche_common::rooms::TagmaRoomView],
+    ) {
+        let mut g = self.rooms.lock().await;
+        g.insert(
+            relay.to_owned(),
+            rooms
+                .iter()
+                .map(|view| {
+                    let roster = view.members.iter().map(|m| m.id.clone()).collect();
+                    (view.room_id.clone(), Some(roster))
+                })
+                .collect(),
+        );
+    }
+
+    /// The members the last poll learned for `room` on `relay`, if any poll
+    /// learned them. `None` means this relay's slice holds no roster for this
+    /// room: either the room is absent from the slice, or the snapshot that
+    /// wrote the slice did not carry its members.
+    /// A caller that needs an answer refreshes from the lesche rather than
+    /// reading this as "no members". Scoped by relay like [`Self::owner_of`]:
+    /// the answer and the refresh must come from the slice the send addresses.
+    pub async fn members_of(
+        &self,
+        relay: &str,
+        room: &kallipai_lesche_common::rooms::RoomId,
+    ) -> Option<HashSet<kallipai_lesche_common::rooms::MemberId>> {
+        let g = self.rooms.lock().await;
+        g.get(relay)
+            .and_then(|slice| slice.get(room).cloned().flatten())
     }
 }
 /// Direct-session routing cache: which of this tagma's direct sessions exist

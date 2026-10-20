@@ -105,7 +105,22 @@ fn busy_peer_response(
         ),
     }
 }
-/// Deliver `text` to agent `id` as `identity`, attaching the `[From: ...]`
+
+/// The content half of a delivery: the text, its attachment, and the row it
+/// quotes.
+///
+/// Grouped as one argument so the delivery seam stays short as kinds of payload
+/// accrete.
+pub struct OutgoingMessage<'a> {
+    /// The message body as authored.
+    pub text: &'a str,
+    /// File attachment delivered alongside the text, if any.
+    pub attachment: Option<kallipai_common::protocol::agent::FileAttachment>,
+    /// Id of the row this message quotes (`None` = no quote).
+    pub quote: Option<i64>,
+}
+
+/// Deliver `message` to agent `id` as `identity`, attaching the `[From: ...]`
 /// header, enqueuing on the live prompt channel, and reactivating a dead agent.
 /// The HTTP `send_message` handler and the in-process relay share this single
 /// seam so reactivation + header formatting cannot drift.
@@ -113,6 +128,10 @@ fn busy_peer_response(
 /// `defer` (the wire `MessageRequest.defer`) asks for run-boundary
 /// visibility: no in-round notice and no parked kick — the message still
 /// lands in the inbox either way.
+///
+/// `message.quote` is the id of the row the message quotes (`None` = no quote). It
+/// rides the prompt header as a segment and is persisted on the inbound row;
+/// the quoted content itself is never copied into either.
 ///
 /// `sender` is the user-facing wire sender (`Participant`): the relay passes
 /// the (relay-authenticated) envelope peer; the offline HTTP path passes `None`
@@ -125,8 +144,7 @@ pub async fn deliver_message(
     identity: crate::auth::Identity,
     sender: Option<Participant>,
     id: &AgentId,
-    text: &str,
-    attachment: Option<kallipai_common::protocol::agent::FileAttachment>,
+    message: OutgoingMessage<'_>,
     defer: bool,
 ) -> Result<MessageResponse, ApiError> {
     // Sanitize the wire sender's handle once, at ingest, so the persisted row
@@ -163,7 +181,7 @@ pub async fn deliver_message(
         }
     };
     info!(receiver = %id, sender = ?header_sender, relation = ?relation, "delivering message");
-    let envelope = format_incoming(&header_sender, relation, text);
+    let envelope = format_incoming(&header_sender, relation, message.quote, message.text);
 
     let response = enqueue_prompt(
         state,
@@ -195,7 +213,12 @@ pub async fn deliver_message(
         && let Some(projector) = state.external.get()
     {
         projector
-            .record_inbound(sender.clone(), text.to_string(), attachment)
+            .record_inbound(
+                sender.clone(),
+                message.text.to_string(),
+                message.attachment,
+                message.quote,
+            )
             .await;
     }
 
@@ -207,38 +230,34 @@ pub async fn deliver_message(
 /// `send_room_message` / `send_direct_message` in `routes/lesche`). The
 /// header carries the authenticated sender id + the surface id (`room <id>`
 /// / `direct <id>`), so the agent can reply with `kallip lesche send --room
-/// <room>` / `send --tagma <tagma-id>`. Unlike [`deliver_message`], this does
-/// NOT call `record_inbound`: relay surfaces bypass the bilateral projector
-/// entirely (the lesche is the surface's store of record; the tagma is one
-/// member, not the transcript owner), so no local `chat_history` row is
-/// written and no bilateral `UserMessage` frame is published. The shared
-/// `enqueue_prompt` (fast path + reactivation) is reused so a relay
-/// message wakes a dead root agent just like a bilateral one.
+/// <room>` / `send --tagma <tagma-id>`. The inbound struct also carries the
+/// quoted position, which rides the same header as a `| quote=<seq>` segment.
+/// Unlike [`deliver_message`], this does NOT call `record_inbound`: relay
+/// surfaces bypass the bilateral projector entirely (the lesche is the
+/// surface's store of record; the tagma is one member, not the transcript
+/// owner), so no local `chat_history` row is written and no bilateral
+/// `UserMessage` frame is published. The shared `enqueue_prompt` (fast path +
+/// reactivation) is reused so a relay message wakes a dead root agent just
+/// like a bilateral one.
 pub async fn deliver_inbound_relay_message(
     state: &SharedState,
     id: &AgentId,
-    surface: crate::messaging::Surface<'_>,
-    sender_kind: &str,
-    sender_id: &str,
-    sender_handle: String,
-    text: &str,
+    inbound: &crate::messaging::RelayInbound<'_>,
 ) -> Result<MessageResponse, ApiError> {
     info!(
-        receiver = %id, surface = surface.label(), sender_kind, sender_id,
+        receiver = %id,
+        surface = inbound.surface.label(),
+        sender_kind = inbound.sender_kind,
+        sender_id = inbound.sender_id,
+        quote = ?inbound.quote,
         "delivering relay message"
     );
-    let envelope = crate::messaging::format_relay_incoming(
-        sender_kind,
-        sender_id,
-        sender_handle,
-        surface,
-        text,
-    );
+    let envelope = crate::messaging::format_relay_incoming(inbound);
     enqueue_prompt(
         state,
         id,
         envelope,
-        surface.source(),
+        inbound.surface.source(),
         DeliveryNotice::Surface,
     )
     .await

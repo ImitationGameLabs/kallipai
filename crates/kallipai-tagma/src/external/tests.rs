@@ -119,7 +119,7 @@ async fn record_inbound_persists_and_publishes() {
     let mut rx = state.bus.subscribe::<AuthoredFrame>().unwrap();
     let user = user_sender();
     projector
-        .record_inbound(Some(user.clone()), "hi".into(), None)
+        .record_inbound(Some(user.clone()), "hi".into(), None, None)
         .await;
 
     let AuthoredFrame { sender, reply } = rx.recv().await.unwrap();
@@ -162,6 +162,29 @@ async fn record_inbound_persists_and_publishes() {
             assert_eq!(text, "hi");
         }
         other => panic!("expected user UserMessage on replay, got {other:?}"),
+    }
+
+    // A quoting inbound: the published frame carries the id, so a reader that
+    // learns the row from the wire (the cache write, a replay, a second
+    // client) can draw its block; the replay carries it too.
+    projector
+        .record_inbound(Some(user.clone()), "about that".into(), None, Some(id))
+        .await;
+    let quoted = match rx.recv().await.unwrap().reply {
+        TagmaReply::UserMessage { quote, .. } => quote,
+        other => panic!("expected UserMessage, got {other:?}"),
+    };
+    assert_eq!(quoted, Some(id), "the frame carries the quoted row id");
+    let page = projector
+        .read_history(Some(user.id.as_ref()), None, None, 50)
+        .await
+        .expect("a readable store answers");
+    assert_eq!(page.entries.len(), 2);
+    match &page.entries[1].reply {
+        TagmaReply::UserMessage { quote, .. } => {
+            assert_eq!(*quote, Some(id), "the replayed row carries it too")
+        }
+        other => panic!("expected UserMessage on replay, got {other:?}"),
     }
 }
 
@@ -237,10 +260,12 @@ async fn direct_and_relay_partitions_persist_and_filter() {
     let user = user_sender();
 
     // Direct inbound -> operator (NULL) partition, stamped.
-    projector.record_inbound(None, "op-msg".into(), None).await;
+    projector
+        .record_inbound(None, "op-msg".into(), None, None)
+        .await;
     // Relay inbound -> this peer's partition, stamped.
     projector
-        .record_inbound(Some(user.clone()), "user-msg".into(), None)
+        .record_inbound(Some(user.clone()), "user-msg".into(), None, None)
         .await;
 
     // read_history(None) sees only the operator partition; the relay row is
@@ -315,7 +340,7 @@ async fn first_outbound_message_of_a_fresh_partition_is_unread() {
     let mut unread_rx = state.bus.subscribe::<UnreadFrame>().unwrap();
     let user = user_sender();
     projector
-        .record_inbound(Some(user.clone()), "hi".into(), None)
+        .record_inbound(Some(user.clone()), "hi".into(), None, None)
         .await;
     let peer = user.id.as_ref();
     let inbound_id = chat_history::read_last_n(&db, Some(peer), 10)
@@ -359,9 +384,17 @@ async fn cold_start_covers_every_partition_beyond_the_bus_ring() {
     const PARTITIONS: usize = 20;
     for i in 0..PARTITIONS {
         let peer = format!("peer-{i}");
-        chat_history::append(&db, Some(&peer), Some("handle"), "outbound", "hi", None)
-            .await
-            .unwrap();
+        chat_history::append(
+            &db,
+            Some(&peer),
+            Some("handle"),
+            "outbound",
+            "hi",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
     }
     let mut peers: Vec<String> = projector
         .cold_start_unread()

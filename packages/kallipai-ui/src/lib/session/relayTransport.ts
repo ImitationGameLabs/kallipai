@@ -9,15 +9,17 @@
 // `signals()` drain consumes them here -- so the conversation drains replies +
 // signals from one uniform interface regardless of transport.
 
-import type {
-  FileAttachment,
-  SignalEvent,
-} from "@kallipai/kallipai-lesche-client";
+import type { SignalEvent } from "@kallipai/kallipai-lesche-client";
 import type { RelayChannel } from "@kallipai/kallipai-keryx-client";
 import type { TagmaStatusSummary } from "../tagmata.svelte.ts";
 import type { ConversationSender } from "../transcript.ts";
 import { toSender } from "../transcript.ts";
-import { AsyncQueue, type IncomingFrame, type Transport } from "./transport.ts";
+import {
+  AsyncQueue,
+  type IncomingFrame,
+  type SendOptions,
+  type Transport,
+} from "./transport.ts";
 
 export class RelayTransport implements Transport {
   private readonly signalQueue = new AsyncQueue<SignalEvent>();
@@ -61,8 +63,10 @@ export class RelayTransport implements Transport {
     this.signalQueue.push(event);
   }
 
-  send(text: string, attachment?: FileAttachment): Promise<number> {
-    return this.channel.send(text, attachment);
+  send(text: string, options?: SendOptions): Promise<number> {
+    // The channel keeps its positional shape: only this adapter calls it, and
+    // its signature predates this seam, so it stays as it is.
+    return this.channel.send(text, options?.attachment, options?.quote);
   }
 
   /** The underlying E2EE pipe. Exposed for the two non-stream ops the store

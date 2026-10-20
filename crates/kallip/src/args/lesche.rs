@@ -36,14 +36,28 @@ pub(crate) struct SendArgs {
     /// `[From: ... | room <id>]` header) to reply in a multi-member room.
     #[arg(long, allow_hyphen_values = true, conflicts_with = "tagma")]
     pub room: Option<String>,
-    /// The peer tagma id to send to (copied from the inbound
-    /// `[From: ... (<tagma-id>) | direct <session>]` header or from
-    /// `sessions`). Sends into that tagma's direct session; the first send
+    /// The peer tagma id to send to: `kallip lesche sessions` pairs it with
+    /// the session id in the inbound `[From: ... | direct <session>]` header
+    /// (the header's parens carry the sender's participant id, not the tagma
+    /// id). Sends into that tagma's direct session; the first send
     /// creates it (idempotent to re-send). Note: attachments must live in a
     /// workspace the peer can read — a private-area file record fails the
     /// peer's fetch with 403.
     #[arg(long, allow_hyphen_values = true)]
     pub tagma: Option<String>,
+    /// The position, in that conversation's own log, that this message answers
+    /// -- a room's `seq`, or that session's own `seq`. A room or `--tagma`
+    /// send: the bilateral 1:1 has no such log, so a send there carrying one
+    /// is rejected.
+    #[arg(long, value_parser = clap::value_parser!(i64).range(1..))]
+    pub quote: Option<i64>,
+    /// The members this send names, one flag per participant id (repeatable).
+    /// A room send only: an id names a member of that room, so a send at the
+    /// bilateral 1:1 or at a peer tagma's session is rejected. The ids reach
+    /// the tagma as written -- whether each one names a member is answered
+    /// where the room is, not here.
+    #[arg(long = "mention", allow_hyphen_values = true)]
+    pub mention: Vec<String>,
 }
 
 /// Args for `kallip lesche read` (pull a conversation's history; exactly
@@ -59,15 +73,43 @@ pub(crate) struct ReadArgs {
         conflicts_with = "tagma"
     )]
     pub room: Option<String>,
-    /// The peer tagma id to read (the session id is derived from the pair,
-    /// so you never type a session id).
+    /// The peer tagma id to read -- the id `kallip lesche sessions` lists for
+    /// the peer, not the `UUID` in a message header's parens (that value is
+    /// the sender's participant id). The session id is derived from the pair,
+    /// so you never type a session id.
     #[arg(long, allow_hyphen_values = true)]
     pub tagma: Option<String>,
-    /// Return only messages with `seq > after_seq` (exclusive). Default: from
-    /// the start.
-    #[arg(long)]
+    /// Return only messages with `seq > <N>` (exclusive). Default: from the
+    /// start.
+    #[arg(long = "after")]
     pub after_seq: Option<i64>,
-    /// Max messages to return (server-clamped).
+    /// Return the page of OLDER messages ending below this position
+    /// (`seq < before_seq`, exclusive), oldest first. A room read only: the
+    /// page below a position is a room's own cursor, and a direct session's
+    /// log is read forward only, so the flag is refused at a direct-session
+    /// target rather than dropped -- dropping it would replay the session
+    /// from its start. Omit to page forward: an omitted cursor is simply
+    /// absent, because `0` would read as "no row" rather than as "from the
+    /// start".
+    #[arg(
+        long = "before",
+        value_parser = clap::value_parser!(i64).range(1..),
+        conflicts_with_all = ["after_seq", "quote"]
+    )]
+    pub before_seq: Option<i64>,
+    /// Read only the one message this position names -- the row a
+    /// `| quote=<seq>` segment points at. A seq names a row in that
+    /// conversation's own log, so this rides a room read or a direct-session
+    /// read alike. The answer is that single block; a position this read
+    /// cannot show is an error, never an empty output.
+    #[arg(
+        long,
+        value_parser = clap::value_parser!(i64).range(1..),
+        conflicts_with_all = ["after_seq", "before_seq", "limit"]
+    )]
+    pub quote: Option<i64>,
+    /// Max messages to return (server-clamped). Not accepted beside `--quote`,
+    /// which always reads one row.
     #[arg(long)]
     pub limit: Option<u64>,
 }
