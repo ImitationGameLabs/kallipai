@@ -7,7 +7,7 @@
 //
 //   - `RelayConversation` (online): the E2EE pipe; history pages are cursor
 //     pulls that await their batch_end marker. A catch-up ADOPTS the newest
-//     window as one batch (one fold, one badge derivation) instead of
+//     window as one batch (one fold) instead of
 //     replaying the whole gap row by row; scroll-up pages continue below the
 //     window head, and replayed rows below the rendered cursor reroute into
 //     the pending page. Only frames above the open-time high-water fire
@@ -52,7 +52,9 @@ import type {
   Participant,
   TagmaReply,
 } from "@kallipai/kallipai-lesche-client";
-import type { CachedLine } from "@kallipai/kallipai-keryx-client";
+import type { CachedLine, RelayChannel } from "@kallipai/kallipai-keryx-client";
+import { manageOk } from "@kallipai/kallipai-keryx-client";
+import { relayRootAgentId } from "./rootAgent.ts";
 import {
   deletePending,
   isFailedPending,
@@ -72,7 +74,7 @@ import {
   chat_send_timed_out,
 } from "../../paraglide/messages.js";
 
-import { tagmaKey, unreadStore } from "./unread.svelte.ts";
+import { PUT_THROTTLE_MS, tagmaKey, unreadStore } from "./unread.svelte.ts";
 import { statusCardStore } from "./statusCard.svelte.ts";
 import { notify } from "./notify.ts";
 
@@ -80,6 +82,22 @@ import { notify } from "./notify.ts";
  * watchdog presumes the reply lost. Aligned with the SSE connect timeout
  * and the per-attempt fetch cap (30s each). */
 const SEND_WATCHDOG_MS = 30_000;
+
+/** Tunnels already told that the roster names no root agent. An install in
+ *  that state can never land a cursor write, so the badge only grows and the
+ *  cause is invisible; one line per tunnel says so without repeating it every
+ *  throttle window, and a reconnect starts clean (a fixed roster warns again
+ *  only if it breaks again). */
+const rootlessWarned = new WeakSet<RelayChannel>();
+
+/** Name the rootless failure once per tunnel (see {@link rootlessWarned}). */
+function warnRootlessOnce(channel: RelayChannel): void {
+  if (rootlessWarned.has(channel)) return;
+  rootlessWarned.add(channel);
+  console.warn(
+    "[read cursor] the tagma roster names no root agent; read cursors are not reported",
+  );
+}
 
 /** The lazy-window page size: how many lines a hydrate, a catch-up batch,
  *  or a scroll-up page brings in at once. Mirrors the server's
@@ -109,14 +127,6 @@ function contentId(reply: TagmaReply): number {
   return reply.kind === "event" || reply.kind === "user_message"
     ? (reply.history_id ?? 0)
     : 0;
-}
-
-/** Whether a frame counts toward the 1:1 unread badge: one definition for
- *  both counting entrances (the live line hook and the adopted window), so
- *  they cannot drift apart. Only the peer's authored event lines count --
- *  `user_message` is my own echo, and protocol traffic carries no durable id. */
-function countsAsUnread(reply: TagmaReply): boolean {
-  return reply.kind === "event" && contentId(reply) > 0;
 }
 
 /** Transport-status surface: the sidebar dot + the chat-page disabled gate. */
@@ -795,6 +805,33 @@ export class RelayConversation extends ConversationBase {
    * (the final maxRendered) when catch-up ends. */
   private notifyFloor = 0;
 
+  /** How the client reports a read cursor: a manage PUT on this
+   *  conversation's own channel. Public as the test seam -- the fake channel
+   *  in relayWindow_test has no manage plane. */
+  readCursorSender: (cursor: number) => Promise<void> = (cursor) =>
+    this.sendReadCursor(cursor);
+
+  /** The highest id already reported by this instance (monotonic). */
+  private lastReportedCursor = 0;
+  /** The cursor a send has in flight: a second report of the same id
+   *  before the first lands would send the same PUT twice, so the guard
+   *  treats it as reported already. Only the write that set the marker
+   *  clears it, so two overlapping writes cannot drop each other's; an
+   *  overlap costs at most one redundant PUT, which the monotonic store
+   *  absorbs. */
+  private inFlightCursor = 0;
+  /** The cursor waiting inside the throttle window: a busy chat lands one
+   *  PUT per `PUT_THROTTLE_MS`, not one per line. 0 = nothing pending. */
+  private pendingCursor = 0;
+  /** The window timer seam: tests run the window without waiting it out. */
+  readCursorTimer: (fn: () => void) => ReturnType<typeof setTimeout> = (fn) =>
+    setTimeout(fn, PUT_THROTTLE_MS);
+  private cursorTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Whether a throttle window is open. The flag, not the timer handle, is the
+   *  window's state: a seam that fires the callback synchronously would leave
+   *  a handle behind that a later report could mistake for an open window. */
+  private cursorWindowOpen = false;
+
   constructor(
     conversationId: string,
     store: ConversationStoreLike,
@@ -825,6 +862,86 @@ export class RelayConversation extends ConversationBase {
    * the entry point its frames use. */
   feed(reply: TagmaReply, sender: Participant | undefined): void {
     this.applyReplyCore(reply, sender);
+  }
+
+  /** The conversation page mounted: tell the tagma how far this device has
+   *  read, so it stamps the badge empty. Rows landing while the page stays
+   *  mounted report through {@link onLineLanded}; a lost report self-heals on
+   *  the next line or the next mount, because the cursor is monotonic
+   *  server-side. */
+  markRead(): void {
+    this.reportReadCursor(this.maxRendered);
+  }
+
+  /** Report a read cursor, page mounted only: a conversation nobody is
+   *  looking at must never be marked read (that is what the tagma's own
+   *  stamps are for). Reports coalesce into one PUT per `PUT_THROTTLE_MS`
+   *  window; {@link flushReadCursor} lands the window early (page unmount).
+   *
+   *  Only a landed write advances the reported watermark, so a failed one keeps
+   *  its retry point: the pending cursor survives and the next line, or this
+   *  page's next mount, reports it again (the cursor is monotonic in the store,
+   *  so a repeat is harmless). */
+  private reportReadCursor(cursor: number): void {
+    if (!Number.isSafeInteger(cursor) || cursor <= this.lastReportedCursor) {
+      return; // already reported, or not a durable id
+    }
+    if (!unreadStore.isViewing(tagmaKey(this.tagmaId))) return;
+    this.pendingCursor = Math.max(this.pendingCursor, cursor);
+    this.openCursorWindow();
+  }
+
+  /** Open the throttle window unless one is already open. */
+  private openCursorWindow(): void {
+    if (this.cursorWindowOpen) return;
+    this.cursorWindowOpen = true;
+    this.cursorTimer = this.readCursorTimer(() => this.flushReadCursor());
+  }
+
+  /** Land the pending cursor now: the window fired, or the page unmounted
+   *  with a report still inside it. Nothing pending is a no-op. */
+  flushReadCursor(): void {
+    if (this.cursorTimer !== null) {
+      clearTimeout(this.cursorTimer);
+      this.cursorTimer = null;
+    }
+    this.cursorWindowOpen = false;
+    const cursor = this.pendingCursor;
+    if (cursor <= Math.max(this.lastReportedCursor, this.inFlightCursor)) {
+      return;
+    }
+    this.inFlightCursor = Math.max(this.inFlightCursor, cursor);
+    void this.readCursorSender(cursor).then(
+      () => {
+        this.lastReportedCursor = Math.max(this.lastReportedCursor, cursor);
+        if (this.inFlightCursor === cursor) this.inFlightCursor = 0;
+      },
+      () => {
+        // Best-effort: the pending cursor stays for the next attempt.
+        if (this.inFlightCursor === cursor) this.inFlightCursor = 0;
+      },
+    );
+  }
+
+  /** The production sender: the tagma scopes the cursor to the peer this
+   *  channel authenticated, so only the id itself crosses the wire. The reply
+   *  is a bare `204`, so the status class is the success judgement and the
+   *  resulting count arrives as an unread frame like any other. */
+  private async sendReadCursor(cursor: number): Promise<void> {
+    const channel = this.relayTransport.relayChannel;
+    const root = await relayRootAgentId(channel);
+    if (root === null) {
+      warnRootlessOnce(channel);
+      throw new Error("root agent id unresolved");
+    }
+    const res = await channel.manage(
+      "PUT",
+      `/agents/${root}/external/read-cursor`,
+      { cursor },
+    );
+    if (!manageOk(res)) {
+      throw new Error(`read cursor rejected: ${res.status}`);
+    }
   }
 
   /** Reroute replay rows into the in-flight before-page. The core's dedup
@@ -864,21 +981,28 @@ export class RelayConversation extends ConversationBase {
     );
   }
 
-  /** Unread counting for LIVE lines: the drain reaches here only for a
-   *  frame above the rendered cursor, so one call is one genuinely new line.
-   *  Pulled rows -- the catch-up window and every scroll page -- fold through
-   *  applyPulledRows and are counted once by applyTagmaWindow instead.
-   *  The counted set is {@link countsAsUnread}, the same predicate the window
-   *  path filters with, so the two counting entrances cannot drift apart. */
+  /** Live lines are the cursor's business, never the badge's. While the page
+   *  is mounted the newest rendered id is reported as read; a line landing
+   *  with the page closed needs nothing from this client -- the tagma stamps
+   *  those itself, and the stamp arrives as a batch marker's count or a live
+   *  `tagma_unread` frame. */
   protected override onLineLanded(reply: TagmaReply, realId: number): void {
     super.onLineLanded(reply, realId);
-    if (countsAsUnread(reply)) {
-      unreadStore.observeTagmaLine(this.tagmaId, realId);
-    }
+    if (realId > 0) this.reportReadCursor(realId);
   }
-
   protected override onReply(reply: TagmaReply): void {
     if (reply.kind === "history_batch_end") {
+      // The tagma's count travels with the marker: assign it, never count the
+      // rows this batch brought. The wire's stamp is one object -- count and
+      // cursor arrive as a pair -- so a tagma that predates the field sends
+      // neither, and an absent stamp must not overwrite one that arrived by
+      // another carrier.
+      if (reply.unread !== undefined) {
+        unreadStore.setTagmaUnread(this.tagmaId, {
+          unread: reply.unread,
+          cursor: reply.cursor,
+        });
+      }
       const pull = this.pendingPulls.get(reply.req_id);
       if (pull) {
         this.pendingPulls.delete(reply.req_id);
@@ -918,7 +1042,7 @@ export class RelayConversation extends ConversationBase {
     this.notifyFloor = Number.MAX_SAFE_INTEGER;
     try {
       const page = await this.pullPage({ limit: k });
-      this.adoptWindow(page.rows, k);
+      this.adoptWindow(page.rows);
       // A short window IS the whole server history; a timed-out one proves
       // nothing about what lies below (rows may have stopped mid-page without
       // the marker), so the sentinel stays armed for a retry.
@@ -934,28 +1058,26 @@ export class RelayConversation extends ConversationBase {
     }
   }
 
-  /** Fold an adopted window: drop rendered rows it does not reach, fold the
-   *  whole batch in one pass, then hand the badge one window to derive from. */
-  private adoptWindow(rows: HistoryEntry[], k: number): void {
+  /** Fold an adopted window: drop rendered rows it does not reach, then fold
+   *  the whole batch in one pass. The badge is untouched: it arrives stamped
+   *  from the tagma, so adopting rows -- a cache rehydrate, a replay, a stale
+   *  page -- can never move it. */
+  private adoptWindow(rows: HistoryEntry[]): void {
     if (rows.length === 0) return;
-    // head/tail come from CONTENT rows only. The window buffer is fed by a
+    // head comes from CONTENT rows only. The window buffer is fed by a
     // content-id guard, but the bracket must not rest on that: one zero would
-    // silently disarm the continuity test (head - 1) and the cap test
-    // downstream, so filter here and bail instead of trusting the feeder.
+    // silently disarm the continuity test, so filter here and bail instead
+    // of trusting the feeder.
     const ids = rows.map((e) => contentId(e.reply)).filter((id) => id > 0);
     if (ids.length === 0) return;
     const head = Math.min(...ids);
-    const tail = Math.max(...ids);
     this.pruneRenderedBefore(head);
     this.applyPulledRows(rows);
-    unreadStore.applyTagmaWindow(this.tagmaId, {
-      headId: head,
-      tailId: tail,
-      peerIds: rows
-        .filter((e) => countsAsUnread(e.reply))
-        .map((e) => contentId(e.reply)),
-      full: rows.length >= k,
-    });
+    // The window is what this device has now read: report the newest rendered
+    // id so a conversation opened with unread rows clears on the server too,
+    // not only through the badge `enter` zeroed locally. The report is a no-op
+    // when the page is not mounted (reportReadCursor checks viewing).
+    this.reportReadCursor(this.maxRendered);
   }
 
   /** Drop rendered durable rows that the adopted window does not reach. They

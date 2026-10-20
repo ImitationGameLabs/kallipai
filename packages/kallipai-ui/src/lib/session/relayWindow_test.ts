@@ -30,8 +30,7 @@ declare global {
 const { assertEquals } = await import("@std/assert");
 const { shouldNotify, WINDOW_PAGE, RelayConversation } =
   await import("./conversation.svelte.ts");
-const { unreadStore, tagmaKey, badgeLabel } =
-  await import("./unread.svelte.ts");
+const { unreadStore, tagmaKey } = await import("./unread.svelte.ts");
 type ConversationStoreLike = {
   get(id: string): unknown;
 };
@@ -46,11 +45,30 @@ import type { Transport } from "./transport.ts";
 const AGENT: Participant = { id: "tagma-1", kind: "agent", handle: "Tagma" };
 const USER: Participant = { id: "user-1", kind: "human", handle: "alice" };
 
+/** The manage plane's roster answer: the root is the entry nothing created,
+ *  with the upstream roll-up beside it (the real body's shape). */
+const ROSTER = {
+  status: 200,
+  body: {
+    agents: [
+      { id: "child-1", created_by: "root-1" },
+      { id: "root-1", created_by: null },
+    ],
+    upstream_facts: [],
+  },
+};
+
+/** Let the fire-and-forget cursor send settle. */
+const settle = () => new Promise<void>((r) => setTimeout(r, 0));
+
 /** One scripted history pull: the rows the fake replays plus the marker
  * fields (or NO_MARKER to emulate the server's partial-delivery stop). */
 interface ScriptedPull {
   rows: { sender: Participant; reply: TagmaReply }[];
   more?: boolean;
+  /** The tagma's stamped count and the cursor it was measured at: the marker
+   *  carries the pair or nothing, so the badge is assigned, never counted. */
+  stamp?: { unread: number; cursor: number };
   noMarker?: boolean;
   after?: number | null;
   before?: number | null;
@@ -79,6 +97,35 @@ class FakeChannel {
   private deliver:
     | ((f: { sender: Participant; reply: TagmaReply }) => void)
     | null = null;
+
+  /** Every manage call this channel received, in order: the cursor write's
+   *  route is what these cases assert. */
+  readonly manages: { method: string; path: string; body: unknown }[] = [];
+  /** Scripted answers, popped per call. A spent script falls back to
+   *  {@link manageFallback}. */
+  manageScript: { status: number; body?: unknown }[] = [];
+  /** The tagma's default answer: the roster GET resolves, writes ack bare. */
+  manageFallback(
+    method: string,
+    path: string,
+  ): { status: number; body?: unknown } {
+    if (method === "GET" && path === "/agents") return ROSTER;
+    return { status: 204 };
+  }
+
+  manage(
+    method: string,
+    path: string,
+    body: unknown = null,
+  ): Promise<{ status: number; body: unknown }> {
+    this.manages.push({ method, path, body });
+    const answer =
+      this.manageScript.shift() ?? this.manageFallback(method, path);
+    return Promise.resolve({
+      status: answer.status,
+      body: answer.body ?? null,
+    });
+  }
 
   constructor(script: ScriptedPull[]) {
     this.script = script;
@@ -115,14 +162,16 @@ class FakeChannel {
   }
 
   private deliverMarker(s: ScriptedPull, req_id: number): void {
+    const marker = {
+      kind: "history_batch_end" as const,
+      req_id,
+      count: s.rows.length,
+      more: s.more ?? false,
+    };
     this.deliver?.({
       sender: AGENT,
-      reply: {
-        kind: "history_batch_end",
-        req_id,
-        count: s.rows.length,
-        more: s.more ?? false,
-      },
+      // The stamp is a pair or nothing, like the wire type: no half-stamp.
+      reply: s.stamp === undefined ? marker : { ...marker, ...s.stamp },
     });
   }
 }
@@ -438,26 +487,16 @@ Deno.test("the adopted window folds in one transcript update", async () => {
   assertEquals(await run([1]), [1]);
 });
 
-Deno.test("a fresh device badges nothing for the replayed window", async () => {
+Deno.test("the marker's stamp lands once, at the batch's end", async () => {
   unreadStore.reset();
-  unreadStore.hydrateTagma("tagma-1", null); // no stored watermark
   const channel = new FakeChannel([
-    { rows: [1, 2, 3, 4, 5].map((id) => eventRow(id)) },
+    {
+      rows: [eventRow(1), eventRow(2), eventRow(3)],
+      stamp: { unread: 3, cursor: 3 },
+    },
   ]);
-  const conv = makeConv(channel);
-  await conv.catchUp();
-  assertEquals(conv.transcript.lines.length, 5);
-  assertEquals(unreadStore.countOf(tagmaKey("tagma-1")), 0);
-});
-
-Deno.test("the badge moves once, at the batch's end", async () => {
-  unreadStore.reset();
-  unreadStore.hydrateTagma("tagma-1", 0);
-  const channel = new FakeChannel([
-    { rows: [eventRow(1), eventRow(2), eventRow(3)] },
-  ]);
-  // Rows land inside the request; the marker has not. The badge must still
-  // read 0 here and take the batch's value in one assignment.
+  // Rows land inside the request; the marker has not. The badge must not
+  // tick while the batch arrives -- the tagma's number rides the marker.
   channel.syncRows = true;
   const conv = makeConv(channel);
   const done = conv.catchUp();
@@ -466,53 +505,168 @@ Deno.test("the badge moves once, at the batch's end", async () => {
   assertEquals(unreadStore.countOf(tagmaKey("tagma-1")), 3);
 });
 
-Deno.test("a window that reaches the watermark counts exactly", async () => {
+Deno.test(
+  "each marker's stamp replaces the last, never adds to it",
+  async () => {
+    unreadStore.reset();
+    const channel = new FakeChannel([
+      {
+        rows: [eventRow(10), eventRow(11), eventRow(12)],
+        stamp: { unread: 12, cursor: 12 },
+      },
+      // The tagma's answer to the open (a cursor write landed): a smaller
+      // number at a higher cursor is the newer fact.
+      { rows: [eventRow(20)], stamp: { unread: 2, cursor: 40 } },
+    ]);
+    const conv = makeConv(channel);
+    await conv.catchUp();
+    assertEquals(unreadStore.countOf(tagmaKey("tagma-1")), 12);
+    await conv.catchUp();
+    assertEquals(unreadStore.countOf(tagmaKey("tagma-1")), 2);
+  },
+);
+
+Deno.test("a marker without the stamp leaves the badge untouched", async () => {
   unreadStore.reset();
-  unreadStore.hydrateTagma("tagma-1", 44);
-  const channel = new FakeChannel([
+  unreadStore.setTagmaUnread("tagma-1", { unread: 7, cursor: 3 }); // cold start
+  const channel = new FakeChannel([{ rows: [eventRow(1)] }]); // pre-field tagma
+  const conv = makeConv(channel);
+  await conv.catchUp();
+  assertEquals(unreadStore.countOf(tagmaKey("tagma-1")), 7);
+});
+
+/** Run the cursor window at once: these cases assert what a landed window
+ *  sends. Coalescing has its own test below. */
+function landWindowNow(conv: RelayConv): void {
+  conv.readCursorTimer = (fn) => {
+    fn();
+    return 0 as unknown as ReturnType<typeof setTimeout>;
+  };
+}
+Deno.test(
+  "mounting the page reports the newest rendered id as read",
+  async () => {
+    unreadStore.reset();
+    const channel = new FakeChannel([{ rows: [eventRow(5), eventRow(6)] }]);
+    const conv = makeConv(channel);
+    landWindowNow(conv);
+    const sent: number[] = [];
+    conv.readCursorSender = (cursor) => {
+      sent.push(cursor);
+      return Promise.resolve();
+    };
+    await conv.catchUp();
+    assertEquals(sent, []); // closed page: a conversation nobody reads
+    unreadStore.enter(tagmaKey("tagma-1"));
+    conv.markRead();
+    assertEquals(sent, [6]);
+    conv.markRead(); // monotonic: the same cursor is not re-sent
+    assertEquals(sent, [6]);
+  },
+);
+
+Deno.test("a line landing while viewing reports the cursor; closed, no", () => {
+  unreadStore.reset();
+  const conv = makeConv(new FakeChannel([]));
+  landWindowNow(conv);
+  const sent: number[] = [];
+  conv.readCursorSender = (cursor) => {
+    sent.push(cursor);
+    return Promise.resolve();
+  };
+  // Page closed: the tagma stamps this line itself and the badge arrives by
+  // its own carriers, so this client reports nothing.
+  conv.feed(
     {
-      rows: [
-        userRow(40),
-        eventRow(41),
-        eventRow(42),
-        eventRow(43),
-        eventRow(45),
-        eventRow(46),
-        eventRow(47),
-      ],
+      kind: "event",
+      event: { type: "assistant_content", content: "first" },
+      history_id: 21,
+      created_at: "2026-08-23T00:00:21Z",
     },
-  ]);
-  const conv = makeConv(channel);
-  await conv.catchUp();
-  // 41..43 sit at or below the watermark (already read); only 45..47 are new,
-  // and none of my own rows count.
-  assertEquals(unreadStore.countOf(tagmaKey("tagma-1")), 3);
+    AGENT,
+  );
+  assertEquals(sent, []);
+  unreadStore.enter(tagmaKey("tagma-1"));
+  conv.feed(
+    {
+      kind: "event",
+      event: { type: "assistant_content", content: "second" },
+      history_id: 22,
+      created_at: "2026-08-23T00:00:22Z",
+    },
+    AGENT,
+  );
+  assertEquals(sent, [22]);
 });
 
-Deno.test("a contentless event counts on the window path too", async () => {
+Deno.test("a burst lands one PUT, and the unmount lands the last one", () => {
   unreadStore.reset();
-  unreadStore.hydrateTagma("tagma-1", 0);
-  const channel = new FakeChannel([{ rows: [eventRow(1), eventRow(2, "")] }]);
-  const conv = makeConv(channel);
-  await conv.catchUp();
-  // countsAsUnread is the single predicate behind both entrances: an event
-  // line with a durable id badges even when its content renders nothing, the
-  // same set the live hook counts.
-  assertEquals(unreadStore.countOf(tagmaKey("tagma-1")), 2);
+  const conv = makeConv(new FakeChannel([]));
+  const sent: number[] = [];
+  conv.readCursorSender = (cursor) => {
+    sent.push(cursor);
+    return Promise.resolve();
+  };
+  // Hold the window open: nothing is sent until it lands.
+  const windows: (() => void)[] = [];
+  conv.readCursorTimer = (fn) => {
+    windows.push(fn);
+    return 0 as unknown as ReturnType<typeof setTimeout>;
+  };
+  unreadStore.enter(tagmaKey("tagma-1"));
+  for (const id of [31, 32, 33]) {
+    conv.feed(
+      {
+        kind: "event",
+        event: { type: "assistant_content", content: `line ${id}` },
+        history_id: id,
+        created_at: "2026-08-23T00:00:31Z",
+      },
+      AGENT,
+    );
+  }
+  assertEquals(sent, []); // three lines, one window, nothing sent yet
+  assertEquals(windows.length, 1); // one window, not one per line
+  windows[0]();
+  assertEquals(sent, [33]); // the PUT carries the newest cursor
+  conv.feed(
+    {
+      kind: "event",
+      event: { type: "assistant_content", content: "line 34" },
+      history_id: 34,
+      created_at: "2026-08-23T00:00:34Z",
+    },
+    AGENT,
+  );
+  assertEquals(sent, [33]); // a fresh window opened
+  conv.flushReadCursor(); // the page unmounted
+  assertEquals(sent, [33, 34]);
 });
 
-Deno.test("a full window short of the watermark reads as the cap", async () => {
-  unreadStore.reset();
-  unreadStore.hydrateTagma("tagma-1", 10);
-  const rows = Array.from({ length: WINDOW_PAGE }, (_, i) => eventRow(500 + i));
-  const channel = new FakeChannel([{ rows, more: false }]);
-  const conv = makeConv(channel);
-  await conv.catchUp();
-  // Rows between the watermark and the window head were never pulled, so the
-  // number is a floor, not a count: it must read as the cap, never as a
-  // silently short "50".
-  assertEquals(badgeLabel(unreadStore.countOf(tagmaKey("tagma-1"))), "99+");
-});
+Deno.test(
+  "the window landing reports the newest rendered id to the tagma",
+  async () => {
+    unreadStore.reset();
+    // The window buffer drops ids it already rendered, so the second pull
+    // carries fresh rows (5-7 land closed-page, 8-10 while viewing).
+    const channel = new FakeChannel([
+      { rows: [eventRow(5), eventRow(6), eventRow(7)] },
+      { rows: [eventRow(8), eventRow(9), eventRow(10)] },
+    ]);
+    const conv = makeConv(channel);
+    const sent: number[] = [];
+    conv.readCursorSender = (cursor) => {
+      sent.push(cursor);
+      return Promise.resolve();
+    };
+    landWindowNow(conv);
+    await conv.catchUp();
+    assertEquals(sent, []); // closed page: nothing reported
+    unreadStore.enter(tagmaKey("tagma-1"));
+    await conv.catchUp();
+    assertEquals(sent, [10]); // opening the conversation clears it upstream
+  },
+);
 
 Deno.test(
   "a window adopted over a gap leaves no stale segment rendered",
@@ -612,3 +766,130 @@ Deno.test(
     assertEquals(channel.calls[0]?.before, 497);
   },
 );
+
+// -- the production cursor write: one manage PUT on the resolved root --------
+
+Deno.test("the cursor write addresses the root the roster names", async () => {
+  unreadStore.reset();
+  const channel = new FakeChannel([]);
+  const conv = makeConv(channel);
+  landWindowNow(conv);
+  unreadStore.enter(tagmaKey("tagma-1"));
+  conv.maxRendered = 42;
+  conv.markRead();
+  await settle();
+  assertEquals(channel.manages, [
+    { method: "GET", path: "/agents", body: null },
+    {
+      method: "PUT",
+      path: "/agents/root-1/external/read-cursor",
+      body: { cursor: 42 },
+    },
+  ]);
+  // The ack is a bare 204, so the status class is the whole verdict: the
+  // watermark advanced and the same cursor is not sent a second time.
+  conv.markRead();
+  await settle();
+  assertEquals(channel.manages.length, 2);
+});
+
+Deno.test("a rejected cursor write keeps its retry point", async () => {
+  unreadStore.reset();
+  const channel = new FakeChannel([]);
+  channel.manageScript = [ROSTER, { status: 500 }];
+  const conv = makeConv(channel);
+  landWindowNow(conv);
+  unreadStore.enter(tagmaKey("tagma-1"));
+  conv.maxRendered = 42;
+  conv.markRead();
+  await settle();
+  const puts = () =>
+    channel.manages.filter((c) => c.method === "PUT").map((c) => c.body);
+  assertEquals(puts(), [{ cursor: 42 }]);
+  // A rejected write must not advance the watermark: the next mount reports
+  // the same cursor again (the store's cursor is monotonic, so a repeat is
+  // harmless), instead of believing a write that never landed.
+  conv.markRead();
+  await settle();
+  assertEquals(puts(), [{ cursor: 42 }, { cursor: 42 }]);
+  // The roster is read once: the resolved id is cached on the channel.
+  assertEquals(channel.manages.filter((c) => c.method === "GET").length, 1);
+});
+
+Deno.test("an unreadable roster sends no cursor write", async () => {
+  unreadStore.reset();
+  const channel = new FakeChannel([]);
+  // The body carries the upstream roll-up but no `agents`: reading the body
+  // itself as the roster finds no root, and a write needs one.
+  channel.manageScript = [{ status: 200, body: { upstream_facts: [] } }];
+  const conv = makeConv(channel);
+  landWindowNow(conv);
+  unreadStore.enter(tagmaKey("tagma-1"));
+  conv.maxRendered = 42;
+  conv.markRead();
+  await settle();
+  assertEquals(
+    channel.manages.map((c) => c.method),
+    ["GET"],
+  );
+});
+
+Deno.test("a settled write does not clear a newer one's marker", async () => {
+  unreadStore.reset();
+  const conv = makeConv(new FakeChannel([]));
+  landWindowNow(conv);
+  const sent: number[] = [];
+  const pending: (() => void)[] = [];
+  conv.readCursorSender = (cursor) => {
+    sent.push(cursor);
+    return new Promise<void>((resolve) => pending.push(resolve));
+  };
+  unreadStore.enter(tagmaKey("tagma-1"));
+  conv.maxRendered = 10;
+  conv.markRead();
+  assertEquals(sent, [10]);
+  conv.maxRendered = 20;
+  conv.markRead();
+  assertEquals(sent, [10, 20]);
+  pending[0](); // the older write lands while the newer is still in flight
+  await settle();
+  // Re-reporting 20 would be a duplicate PUT: the newer marker still stands.
+  conv.markRead();
+  assertEquals(sent, [10, 20]);
+  pending[1]();
+  await settle();
+  conv.maxRendered = 21;
+  conv.markRead();
+  assertEquals(sent, [10, 20, 21]);
+});
+
+Deno.test("a rootless install warns once per tunnel", async () => {
+  unreadStore.reset();
+  const channel = new FakeChannel([]);
+  // A roster answer with no `agents` resolves no root, so no cursor can be
+  // written. The first report says so; the next window must not repeat it.
+  channel.manageScript = [
+    { status: 200, body: { upstream_facts: [] } },
+    { status: 200, body: { upstream_facts: [] } },
+  ];
+  const conv = makeConv(channel);
+  landWindowNow(conv);
+  unreadStore.enter(tagmaKey("tagma-1"));
+  const warnings: string[] = [];
+  const realWarn = console.warn;
+  console.warn = (...args: unknown[]) => {
+    warnings.push(args.map((arg) => String(arg)).join(" "));
+  };
+  try {
+    conv.maxRendered = 42;
+    conv.markRead();
+    await settle();
+    conv.maxRendered = 43;
+    conv.markRead();
+    await settle();
+  } finally {
+    console.warn = realWarn;
+  }
+  assertEquals(channel.manages.filter((c) => c.method === "GET").length, 2);
+  assertEquals(warnings.filter((w) => w.includes("root agent")).length, 1);
+});

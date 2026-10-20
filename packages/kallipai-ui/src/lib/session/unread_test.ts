@@ -1,13 +1,12 @@
-// Tests for the unread store badge model: the per-key watermark
-// fence counts every source exactly once (1:1 line-entry hook, room
-// catch-up pull), explicit-open viewing clears without touching other keys,
-// the cursor-changed reduction converges order-safely, and the room cursor
-// write coalesces into one request per throttle window. Rune-bearing module
-// under `deno test`: passthrough $state shim (the statusCard_test pattern).
-// The store's IndexedDB watermark persistence degrades to null here (no IDB
-// in deno), which is exactly the seed-pending branch a fresh device takes;
-// the durable round-trip is a browser walkthrough concern, not a unit
-// one. All IO seams are stubbed; no network, no real timers.
+// Tests for the unread store badge model: rooms keep their local fold (the
+// lesche has no per-room stamp), 1:1 badges are ASSIGNED from the tagma's
+// stamped count instead of accumulated from landed rows, the stamp ordering
+// drops stale carriers, explicit-open viewing suppresses the badge, and the
+// room cursor write coalesces into one request per throttle window.
+// Rune-bearing module under `deno test`: passthrough $state shim (the
+// statusCard_test pattern). The tagma owns every 1:1 number, so the store
+// holds no device-local watermark at all -- there is nothing to persist or
+// rehydrate. All IO seams are stubbed; no network, no real timers.
 
 declare global {
   function $state<T>(initial: T): T;
@@ -24,7 +23,6 @@ const { unreadStore, badgeLabel, roomKey, tagmaKey, CATCHUP_PAGE } =
 
 let armed: (() => void)[] = [];
 let puts: [string, number][] = [];
-let wmPuts: [string, number][] = [];
 let selfId: string | null = "me";
 let pages: Map<string, { seq: number; senderId: string }[]>;
 
@@ -35,10 +33,6 @@ function installSeams(): void {
   });
   unreadStore.setReadCursorPutter((roomId, seq) => {
     puts.push([roomId, seq]);
-    return Promise.resolve();
-  });
-  unreadStore.setWatermarkPutter((tagmaId, historyId) => {
-    wmPuts.push([tagmaId, historyId]);
     return Promise.resolve();
   });
   unreadStore.setSelfId(() => selfId);
@@ -56,39 +50,74 @@ const flush = () => new Promise<void>((r) => setTimeout(r, 0));
 function baseline(): void {
   armed = [];
   puts = [];
-  wmPuts = [];
   selfId = "me";
   pages = new Map();
   installSeams();
   unreadStore.reset();
 }
 
-Deno.test(
-  "1:1 line entry: new ids count, replays at/below the fence do not",
-  async () => {
-    baseline();
-    unreadStore.hydrateTagma("t1", 3);
-    unreadStore.observeTagmaLine("t1", 5);
-    assertEquals(unreadStore.countOf(tagmaKey("t1")), 1);
-    unreadStore.observeTagmaLine("t1", 5); // replay (== knownSeq)
-    assertEquals(unreadStore.countOf(tagmaKey("t1")), 1);
-    unreadStore.observeTagmaLine("t1", 4); // replay (< knownSeq, late catch-up row)
-    assertEquals(unreadStore.countOf(tagmaKey("t1")), 1);
-    unreadStore.observeTagmaLine("t1", 6);
-    assertEquals(unreadStore.countOf(tagmaKey("t1")), 2);
-    await flush();
-  },
-);
+// -- 1:1 badges: assigned, never accumulated ---------------------------------
+
+Deno.test("a second 1:1 stamp overwrites the first instead of adding", () => {
+  baseline();
+  unreadStore.setTagmaUnread("t1", { unread: 4, cursor: 9 });
+  assertEquals(unreadStore.countOf(tagmaKey("t1")), 4);
+  // A later stamp from a higher cursor is a new fact, not a delta: a device
+  // syncing a long backlog must show its number once, not tick per row.
+  unreadStore.setTagmaUnread("t1", { unread: 7, cursor: 12 });
+  assertEquals(unreadStore.countOf(tagmaKey("t1")), 7);
+  // The tagma's answer to a cursor write is a smaller number again.
+  unreadStore.setTagmaUnread("t1", { unread: 0, cursor: 20 });
+  assertEquals(unreadStore.countOf(tagmaKey("t1")), 0);
+});
+
+Deno.test("a stale or duplicate stamp never regresses the badge", () => {
+  baseline();
+  unreadStore.setTagmaUnread("t1", { unread: 6, cursor: 12 });
+  // An older snapshot (one carrier overtook another en route) is dropped.
+  unreadStore.setTagmaUnread("t1", { unread: 9, cursor: 11 });
+  assertEquals(unreadStore.countOf(tagmaKey("t1")), 6);
+  // The same cursor with a smaller count is a duplicate.
+  unreadStore.setTagmaUnread("t1", { unread: 5, cursor: 12 });
+  assertEquals(unreadStore.countOf(tagmaKey("t1")), 6);
+});
+
+Deno.test("a stamp that lands while viewing holds the badge at zero", () => {
+  baseline();
+  unreadStore.enter(tagmaKey("t1"));
+  unreadStore.setTagmaUnread("t1", { unread: 5, cursor: 7 });
+  assertEquals(unreadStore.countOf(tagmaKey("t1")), 0);
+  // Leaving ends the viewing flag; the tagma's answer to the open (cursor 9,
+  // count 0) is what shows, and an unrelated key is untouched.
+  unreadStore.leaveTagma("t1");
+  unreadStore.setTagmaUnread("t1", { unread: 0, cursor: 9 });
+  assertEquals(unreadStore.countOf(tagmaKey("t1")), 0);
+  unreadStore.setTagmaUnread("t2", { unread: 3, cursor: 1 });
+  assertEquals(unreadStore.countOf(tagmaKey("t2")), 3);
+});
+
+Deno.test("a stamp masked by viewing returns when the page unmounts", () => {
+  baseline();
+  unreadStore.setTagmaUnread("t1", { unread: 5, cursor: 7 });
+  assertEquals(unreadStore.countOf(tagmaKey("t1")), 5);
+  // Mounting the page hides the badge but keeps the tagma's number: a stamp
+  // computed before the open's cursor write landed must not lower the bar the
+  // next stamp has to clear.
+  unreadStore.enter(tagmaKey("t1"));
+  assertEquals(unreadStore.countOf(tagmaKey("t1")), 0);
+  unreadStore.setTagmaUnread("t1", { unread: 9, cursor: 7 });
+  assertEquals(unreadStore.countOf(tagmaKey("t1")), 0); // still masked
+  // Unmounting shows the stamped count again, not the zero the mask left.
+  unreadStore.leaveTagma("t1");
+  assertEquals(unreadStore.countOf(tagmaKey("t1")), 9);
+});
 
 Deno.test(
   "explicit open clears only the viewed key; other keys keep their count",
   () => {
     baseline();
-    unreadStore.hydrateTagma("t1", 3);
-    unreadStore.hydrateTagma("t2", 3);
-    unreadStore.observeTagmaLine("t1", 4);
-    unreadStore.observeTagmaLine("t1", 5);
-    unreadStore.observeTagmaLine("t2", 4);
+    unreadStore.setTagmaUnread("t1", { unread: 2, cursor: 4 });
+    unreadStore.setTagmaUnread("t2", { unread: 1, cursor: 4 });
     assertEquals(unreadStore.countOf(tagmaKey("t1")), 2);
     assertEquals(unreadStore.countOf(tagmaKey("t2")), 1);
     // The ONLY clear path is enter() from the conversation page's mount effect
@@ -101,6 +130,21 @@ Deno.test(
     assertEquals(unreadStore.countOf(tagmaKey("t2")), 1);
   },
 );
+
+Deno.test("the bar total is the sum across conversations", async () => {
+  baseline();
+  unreadStore.setTagmaUnread("t1", { unread: 2, cursor: 3 });
+  pages.set("r1", [
+    { seq: 1, senderId: "p" },
+    { seq: 2, senderId: "p" },
+    { seq: 3, senderId: "p" },
+  ]);
+  unreadStore.initRooms([{ roomId: "r1", lastReadSeq: 0 }]);
+  await flush();
+  assertEquals(unreadStore.total(), 5);
+});
+
+// -- rooms: the local fold (no server stamp) ---------------------------------
 
 Deno.test(
   "room pull counts precisely, skips own lines; a full page reads 99+",
@@ -139,21 +183,6 @@ Deno.test("badgeLabel caps the display at the cap", () => {
   assertEquals(badgeLabel(100), "99+");
 });
 
-Deno.test("the bar total is the sum across conversations", async () => {
-  baseline();
-  unreadStore.hydrateTagma("t1", 0);
-  unreadStore.observeTagmaLine("t1", 1);
-  unreadStore.observeTagmaLine("t1", 2);
-  pages.set("r1", [
-    { seq: 1, senderId: "p" },
-    { seq: 2, senderId: "p" },
-    { seq: 3, senderId: "p" },
-  ]);
-  unreadStore.initRooms([{ roomId: "r1", lastReadSeq: 0 }]);
-  await flush();
-  assertEquals(unreadStore.total(), 5);
-});
-
 Deno.test(
   "cursor-changed reduces by the advance; stale events never regress",
   async () => {
@@ -175,27 +204,6 @@ Deno.test(
     // A jump past everything we have seen zeroes without going negative.
     unreadStore.applyServerRead("r1", 40);
     assertEquals(unreadStore.countOf(roomKey("r1")), 0);
-  },
-);
-
-Deno.test(
-  "watermark rehydration: restored fence counts the delta, null seeds",
-  async () => {
-    baseline();
-    // A restored watermark: the reload's catch-up replays nothing below it.
-    unreadStore.hydrateTagma("t1", 240);
-    unreadStore.observeTagmaLine("t1", 240);
-    assertEquals(unreadStore.countOf(tagmaKey("t1")), 0);
-    unreadStore.observeTagmaLine("t1", 241);
-    assertEquals(unreadStore.countOf(tagmaKey("t1")), 1);
-    // No stored watermark (fresh device): the FIRST observed line seeds the
-    // fence instead of counting the whole replay as unread.
-    unreadStore.hydrateTagma("t2", null);
-    unreadStore.observeTagmaLine("t2", 100);
-    assertEquals(unreadStore.countOf(tagmaKey("t2")), 0);
-    unreadStore.observeTagmaLine("t2", 101);
-    assertEquals(unreadStore.countOf(tagmaKey("t2")), 1);
-    await flush();
   },
 );
 
@@ -251,97 +259,5 @@ Deno.test(
       ["r1", 3],
       ["r1", 9],
     ]);
-  },
-);
-
-Deno.test(
-  "window adoption: the seed suppresses the whole window, live lines accrue",
-  () => {
-    baseline();
-    unreadStore.hydrateTagma("t1", null); // never stored a watermark
-    unreadStore.applyTagmaWindow("t1", {
-      headId: 10,
-      tailId: 14,
-      peerIds: [10, 11, 12, 13, 14],
-      full: false,
-    });
-    assertEquals(unreadStore.countOf(tagmaKey("t1")), 0);
-    // A line that lands AFTER the window is genuinely new.
-    unreadStore.observeTagmaLine("t1", 15);
-    assertEquals(unreadStore.countOf(tagmaKey("t1")), 1);
-    // The next window counts the rows above the adopted tail.
-    unreadStore.applyTagmaWindow("t1", {
-      headId: 16,
-      tailId: 18,
-      peerIds: [16, 17, 18],
-      full: false,
-    });
-    assertEquals(unreadStore.countOf(tagmaKey("t1")), 4);
-  },
-);
-
-Deno.test("window adoption while viewing keeps the badge at zero", () => {
-  baseline();
-  unreadStore.hydrateTagma("t1", 0);
-  unreadStore.enter(tagmaKey("t1"));
-  unreadStore.applyTagmaWindow("t1", {
-    headId: 1,
-    tailId: 3,
-    peerIds: [1, 2, 3],
-    full: false,
-  });
-  assertEquals(unreadStore.countOf(tagmaKey("t1")), 0);
-});
-
-Deno.test(
-  "a full window short of the watermark caps; an adjacent one is exact",
-  () => {
-    baseline();
-    unreadStore.hydrateTagma("t1", 10); // watermark far below the window
-    const far = Array.from({ length: 50 }, (_, i) => 500 + i);
-    unreadStore.applyTagmaWindow("t1", {
-      headId: 500,
-      tailId: 549,
-      peerIds: far,
-      full: true,
-    });
-    // Rows between the watermark and the window head were never pulled: the
-    // count is a floor, so it reads as the cap instead of a short number.
-    assertEquals(badgeLabel(unreadStore.countOf(tagmaKey("t1"))), "99+");
-
-    unreadStore.hydrateTagma("t2", 40);
-    unreadStore.applyTagmaWindow("t2", {
-      headId: 41, // reaches the watermark: nothing between them
-      tailId: 45,
-      peerIds: [41, 42, 43, 45],
-      full: true,
-    });
-    assertEquals(unreadStore.countOf(tagmaKey("t2")), 4);
-  },
-);
-
-Deno.test(
-  "a stale 1:1 window never writes the persisted watermark back",
-  () => {
-    baseline();
-    unreadStore.hydrateTagma("t1", 10);
-    unreadStore.applyTagmaWindow("t1", {
-      headId: 20,
-      tailId: 30,
-      peerIds: [25],
-      full: false,
-    });
-    assertEquals(wmPuts, [["t1", 30]]);
-    assertEquals(unreadStore.countOf(tagmaKey("t1")), 1);
-    // A window from a stale instance (its catch-up resolved late) sits
-    // below the fence: it must neither count nor move the watermark back.
-    unreadStore.applyTagmaWindow("t1", {
-      headId: 5,
-      tailId: 8,
-      peerIds: [6, 7],
-      full: false,
-    });
-    assertEquals(wmPuts, [["t1", 30]]);
-    assertEquals(unreadStore.countOf(tagmaKey("t1")), 1);
   },
 );

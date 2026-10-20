@@ -4,47 +4,62 @@
 //
 //   count      the number the badge shows (rendered through {@link badgeLabel},
 //              which caps the display at "99+").
-//   knownSeq   the highest line seq this session has SEEN from any source (SSE
-//              live frame, catch-up page, room pull). The dedup fence:
-//              any line at or below it is a replay and is ignored,
+//   knownSeq   rooms only: the highest line seq this session has SEEN from any
+//              source (SSE live frame, catch-up page, room pull). The dedup
+//              fence: any line at or below it is a replay and is ignored,
 //              whatever path carried it -- so live frames racing a catch-up
 //              pull can never double-count.
-//   readSeq    the server-acknowledged read cursor (rooms; the
-//              room_read_cursors watermark). 1:1 has no server cursor, so
-//              there the three sequence fields mirror each other: both 1:1
-//              entry points advance knownSeq, readSeq and unreadFrom to the
-//              same highest id.
-//   unreadFrom the cursor position the current count was computed against
-//              (rooms: a cursor-changed event reduces the count by exactly
+//   readSeq    rooms only: the server-acknowledged read cursor (the
+//              room_read_cursors watermark).
+//   unreadFrom rooms only: the cursor position the current count was computed
+//              against (a cursor-changed event reduces the count by exactly
 //              the watermark advance, so an out-of-order or partial event can
-//              neither resurrect unread nor push the count negative). For 1:1
-//              it is a mirror, not a count floor: a window's rows are counted
-//              against the knownSeq in force when the window arrived, and
-//              that floor is not stored (the 1:1 badge is derived, not a
-//              cursor delta).
+//              neither resurrect unread nor push the count negative).
 //
-// Line sources feed it from two directions:
-//   - 1:1, catch-up: RelayConversation adopts ONE newest window per open and
-//     hands it to {@link applyTagmaWindow}, which derives the badge from that
-//     window in one store update per window. The count is a property of the
-//     data the client holds, never a running tally of rows arriving one by
-//     one: what the badge measures is the client's own state, not the pace
-//     of a replay. It is an increment, not an assignment: see the += note
-//     in {@link applyTagmaWindow}.
-//   - 1:1, live: {@link observeTagmaLine} per landed line (the frame is
-//     genuinely new, so one line is one unread). The watermark persists to the
-//     kallipai-keryx IndexedDB (getReadWatermark/putReadWatermark) and
-//     rehydrates at channel open ({@link hydrateTagma}), so a reload restores
-//     the badge and the adopted window counts only rows above it.
+// 1:1 keeps no local tally at all: the tagma owns the number. It counts the
+// outbound rows past this user's read cursor in its own store and stamps the
+// result -- when it appends a reply and when the cursor moves -- through
+// three carriers:
+//   - the `history_batch_end` marker's `unread` (every catch-up window and
+//     before-page answers with the count as of that answer);
+//   - a live relay frame the keryx surfaces as `tagma_unread` on this user's
+//     own app stream;
+//   - the keryx's cached copy, flushed on `/me/events` connect, so a cold
+//     client badges before its first conversation opens.
+// The store only ASSIGNS those numbers ({@link setTagmaUnread}): a device
+// syncing a long history shows one number, never a counter ticking per
+// landed row.
+//
+// The other direction is the read cursor: the client reports how far it has
+// read and the tagma stamps the resulting count (again through
+// {@link setTagmaUnread}). Reporting is plumbing, not counting --
+// RelayConversation sends the id of the newest row it renders, on page mount
+// and per live line while the page stays mounted; the store reads back only
+// what comes stamped.
+//
+// Cold start is the third carrier's job: the keryx keeps one cached
+// snapshot per tunnel and the tagma re-announces every partition as its
+// upstream link comes up, so `/me/events` opens with one frame per tagma.
+// The hub's badge is then a sum of assigned numbers -- no local
+// accumulation and no per-conversation open required.
+//
+// Metadata note: a plaintext upstream carrying `cursor`/`unread` lets the
+// relay observe how far this user has read in a 1:1 -- the same trade the
+// room cursor already makes (room watermarks are server-side too).
+// Deliberate, and scoped: those frames reach the user's own app stream
+// only, never the peer tagma or any other principal.
+//
+// Rooms still derive their count locally, because the lesche has no
+// per-room stamp:
 //   - rooms: the RootLayout envelope demux calls {@link noteRoomActivity} for
 //     every room-addressed envelope, open room or not. A live room envelope
 //     carries no server seq (the fan reuses the sender's envelope; the route
 //     ignores sequence_n), so precise counting needs a seq-bearing pull:
 //     noteRoomActivity marks the room dirty and single-flights one page after
-//     knownSeq (CATCHUP_PAGE mirrors the lesche's HISTORY_MAX_LIMIT) -- a full
-//     page reads as "99+", and knownSeq advances to the page tail. A landing
-//     mid-pull leaves a dirty flag for one trailing re-pull, so a burst can
-//     hide rows.
+//     knownSeq (CATCHUP_PAGE mirrors the lesche's HISTORY_MAX_LIMIT) -- a
+//     full page reads as "99+", and knownSeq advances to the page tail. A
+//     landing mid-pull leaves a dirty flag for one trailing re-pull, so a
+//     burst can hide rows.
 //
 // Viewing discipline: only an explicitly opened conversation page
 // is "viewing" -- boot auto-open never calls enter(), so a login can never
@@ -62,10 +77,6 @@
 // max-clamp would pin irreversibly (and a late lower write cannot regress the
 // cursor anyway: the server clamps to max).
 import { SvelteMap } from "svelte/reactivity";
-import {
-  clearReadWatermarks,
-  putReadWatermark,
-} from "@kallipai/kallipai-keryx-client";
 import { archeionSession, lescheClientOrFail } from "./archeion.svelte.ts";
 
 /** Badge display cap: anything above renders as "99+" ({@link badgeLabel}). */
@@ -90,6 +101,15 @@ export function badgeLabel(count: number): string {
   return count > UNREAD_CAP ? "99+" : String(count);
 }
 
+/** One unread stamp as the tagma sends it: the count and the read cursor it
+ *  was measured against. One object because the pair is the ordering fact -- a
+ *  count without its cursor cannot be placed against another stamp, so the
+ *  carriers hand over the whole thing or nothing. */
+export interface UnreadStamp {
+  readonly unread: number;
+  readonly cursor: number;
+}
+
 /** One conversation's unread state. Per-field `$state` runes (not a plain
  *  object): SvelteMap values are not deep-proxied, so in-place field writes
  *  must carry their own reactivity (mirrors RoomConversation). */
@@ -98,38 +118,28 @@ export class UnreadEntry {
   knownSeq = $state(0);
   readSeq = $state(0);
   unreadFrom = $state(0);
-  /** 1:1 only: a hydrated-null watermark arms seeding -- the device has never
-   *  stored a watermark, so its whole backlog is "already read" as far as the
-   *  badge is concerned. The adopted window consumes the flag and suppresses
-   *  THAT ENTIRE WINDOW (its tail becomes the watermark); a line landing before
-   *  any window arrives seeds the same way. Masking only the first replayed
-   *  row -- what the per-line fence alone could do -- badged the rest. */
-  seedPending = false;
+  /** 1:1 only: the read cursor the current count was stamped against. A
+   *  stamp computed before a cursor write landed carries a smaller cursor
+   *  than one computed after it, so the pair orders the stamps even
+   *  when two carriers race on their way here. */
+  stampCursor = 0;
+  /** 1:1 only: the tagma's own number, never zeroed by viewing. {@link count}
+   *  is what the badge shows (0 while the page is mounted); this is the fact
+   *  the next stamp has to beat, so opening the page cannot lower the bar a
+   *  later stamp has to clear. */
+  stampCount = 0;
 
   constructor(
     count: number,
     knownSeq: number,
     readSeq: number,
     unreadFrom: number,
-    seedPending = false,
   ) {
     this.count = count;
     this.knownSeq = knownSeq;
     this.readSeq = readSeq;
     this.unreadFrom = unreadFrom;
-    this.seedPending = seedPending;
   }
-}
-
-/** One adopted 1:1 window: the ids the badge is derived from. `peerIds` are
- *  the peer-authored ids inside the window (any order), `headId` its oldest
- *  id, `tailId` its newest (the new watermark), and `full` says the window may
- *  have more history behind it than it pulled. */
-export interface TagmaWindow {
-  headId: number;
-  tailId: number;
-  peerIds: number[];
-  full: boolean;
 }
 
 /** One seq-bearing row of a room catch-up pull (the store only needs the seq
@@ -147,7 +157,6 @@ type RoomPageFetcher = (
 type ReadCursorPutter = (roomId: string, seq: number) => Promise<void>;
 type SelfIdGetter = () => string | null;
 type TimerArmer = (fn: () => void) => ReturnType<typeof setTimeout>;
-type WatermarkPutter = (tagmaId: string, historyId: number) => Promise<void>;
 
 function defaultFetchRoomPage(
   roomId: string,
@@ -160,12 +169,6 @@ function defaultFetchRoomPage(
 }
 function defaultPutCursor(roomId: string, seq: number): Promise<void> {
   return lescheClientOrFail().setRoomReadCursor(roomId, seq);
-}
-function defaultPutWatermark(
-  tagmaId: string,
-  historyId: number,
-): Promise<void> {
-  return putReadWatermark(tagmaId, historyId);
 }
 function defaultSelfId(): string | null {
   return archeionSession.participantId;
@@ -185,14 +188,11 @@ class UnreadStore {
   private putPending = new Map<string, number>();
   private timerArmed = false;
   private timerId: ReturnType<typeof setTimeout> | null = null;
-
-  // Test seams (null restores the production default). Every 1:1
-  // watermark write goes through putWatermark, not a direct put.
+  // Test seams (null restores the production default).
   private fetchRoomPage: RoomPageFetcher = defaultFetchRoomPage;
   private putCursor: ReadCursorPutter = defaultPutCursor;
   private selfId: SelfIdGetter = defaultSelfId;
   private armTimer: TimerArmer = defaultArmTimer;
-  private putWatermark: WatermarkPutter = defaultPutWatermark;
 
   setRoomPageFetcher(f: RoomPageFetcher | null): void {
     this.fetchRoomPage = f ?? defaultFetchRoomPage;
@@ -205,9 +205,6 @@ class UnreadStore {
   }
   setTimerArmer(f: TimerArmer | null): void {
     this.armTimer = f ?? defaultArmTimer;
-  }
-  setWatermarkPutter(f: WatermarkPutter | null): void {
-    this.putWatermark = f ?? defaultPutWatermark;
   }
 
   /** Seed room entries from the registry list (the list_rooms response
@@ -253,122 +250,46 @@ class UnreadStore {
     this.scheduleRoomPull(roomId);
   }
 
-  /** One 1:1 LIVE line landed: RelayConversation's line-entry hook, reached
-   *  only from the live drain (pulled windows and scroll pages fold through
-   *  {@link applyTagmaWindow} instead). Advances the fence and the mirrored
-   *  cursors, counts the line, and persists the watermark best-effort. */
-  observeTagmaLine(tagmaId: string, historyId: number): void {
-    if (!Number.isSafeInteger(historyId) || historyId <= 0) return;
-    const key = tagmaKey(tagmaId);
-    const entry = this.entries.get(key);
-    if (!entry) {
-      // First sight before hydrateTagma could run (a live frame racing the
-      // channel open): seed here so the pre-seed backlog is not re-counted.
-      this.entries.set(
-        key,
-        new UnreadEntry(0, historyId, historyId, historyId),
-      );
-      void this.putWatermark(tagmaId, historyId);
-      return;
-    }
-    if (entry.seedPending) {
-      entry.seedPending = false;
-      entry.knownSeq = historyId;
-      entry.readSeq = historyId;
-      entry.unreadFrom = historyId;
-      void this.putWatermark(tagmaId, historyId);
-      return;
-    }
-    if (historyId <= entry.knownSeq) return; // dedup fence
-    entry.knownSeq = historyId;
-    entry.readSeq = historyId; // the three mirror each other for 1:1
-    entry.unreadFrom = historyId;
-    if (!this.viewing.has(key)) entry.count += 1;
-    // Viewing or not, the watermark persists: the badge survives a reload.
-    void this.putWatermark(tagmaId, historyId);
-  }
-
-  /** Rehydrate the 1:1 watermark at channel open (openRelay awaits its cache
-   *  reads before the drain starts, so this lands before the first observe).
-   *  A null watermark (fresh device) arms seed-pending. Idempotent under
-   *  re-key: only a strictly fresher watermark moves an existing entry. */
-  hydrateTagma(tagmaId: string, watermark: number | null): void {
-    const key = tagmaKey(tagmaId);
-    const entry = this.entries.get(key);
-    if (watermark === null) {
-      if (!entry) this.entries.set(key, new UnreadEntry(0, 0, 0, 0, true));
-      return;
-    }
-    if (!Number.isSafeInteger(watermark) || watermark < 0) return;
-    if (!entry) {
-      this.entries.set(
-        key,
-        new UnreadEntry(0, watermark, watermark, watermark),
-      );
-    } else if (watermark > entry.knownSeq) {
-      entry.knownSeq = watermark;
-      entry.readSeq = Math.max(entry.readSeq, watermark);
-      entry.unreadFrom = Math.max(entry.unreadFrom, watermark);
-    }
-  }
-
-  /** Adopt one 1:1 catch-up window: derive the badge from the window and
-   *  fold it into the count in ONE update per window (the counterpart of the
-   *  room pull's one-page count). Per-line observation stays for LIVE frames
-   *  only -- a replayed row must never be accrued.
+  /** A 1:1 unread stamp from the server: assign, never derive. The
+   *  tagma counts the outbound rows past this user's read cursor, so the number
+   *  already accounts for the whole backlog -- a client that syncs a long
+   *  history shows one number, not a counter ticking per landed row. Every
+   *  carrier lands here: the batch marker's stamp, a live `tagma_unread` frame,
+   *  and the keryx's cold-start flush.
    *
-   *  The update is count += derived, not an assignment: derived covers only
-   *  the rows above the knownSeq in force when the window arrived, so
-   *  consecutive windows are disjoint, while live ticks in between have
-   *  already contributed their own counts -- assigning would discard them.
-   *
-   *  A fresh device (hydrated-null watermark) suppresses the WHOLE window: its
-   *  tail becomes the watermark and nothing badges, which is the seed promise
-   *  the per-line fence could only keep for the first row.
-   *
-   *  A returning device counts the peer-authored rows above its watermark.
-   *  When the window is full and still does not reach the watermark, the rows
-   *  in between were never pulled: the count is a floor, so it reads as the
-   *  cap (as a full room page does) instead of a silently short number.
-   *
-   *  The fence decides the cursors AND the persisted watermark: a window from
-   *  a stale conversation instance can land after a fresher one, and writing
-   *  its tail back would make the next launch recount rows this device read.
-   */
-  applyTagmaWindow(tagmaId: string, window: TagmaWindow): void {
-    const { headId, tailId, peerIds, full } = window;
-    if (!Number.isSafeInteger(headId) || !Number.isSafeInteger(tailId)) return;
+   *  While the conversation page is mounted the user is reading it, so the
+   *  badge shows 0; the stamped count is still recorded, because a stamp the
+   *  tagma computed before our cursor write reached it must not flash a badge
+   *  the cursor is about to clear, yet it must also stay the bar the next stamp
+   *  has to beat. */
+  setTagmaUnread(tagmaId: string, stamp: UnreadStamp): void {
+    const { unread } = stamp;
+    if (!Number.isFinite(unread) || !Number.isFinite(stamp.cursor)) return;
     const key = tagmaKey(tagmaId);
     let entry = this.entries.get(key);
     if (!entry) {
       entry = new UnreadEntry(0, 0, 0, 0);
       this.entries.set(key, entry);
     }
-    const seeding = entry.seedPending;
-    entry.seedPending = false;
-    const floor = entry.knownSeq;
-    const peers = seeding
-      ? 0
-      : peerIds.filter((id) => Number.isSafeInteger(id) && id > floor).length;
-    const shortOfWatermark = !seeding && full && headId > floor + 1;
-    const derived = this.viewing.has(key)
-      ? 0
-      : shortOfWatermark
-        ? UNREAD_CAP + 1
-        : peers;
-    if (derived > 0) entry.count += derived;
-    if (tailId > entry.knownSeq) {
-      entry.knownSeq = tailId;
-      entry.readSeq = tailId;
-      entry.unreadFrom = tailId;
-      void this.putWatermark(tagmaId, tailId);
+    // A stamp older than the one already recorded is stale: the carriers
+    // (marker, live frame, cold-start flush) can reach this store out of the
+    // tagma's emission order. The cursor orders them, and at the same cursor a
+    // smaller count is a duplicate of the same fact.
+    if (stamp.cursor < entry.stampCursor) return;
+    if (stamp.cursor === entry.stampCursor && unread < entry.stampCount) {
+      return;
     }
+    entry.stampCursor = stamp.cursor;
+    entry.stampCount = Math.max(0, Math.floor(unread));
+    entry.count = this.viewing.has(key) ? 0 : entry.stampCount;
   }
 
   /** The user explicitly opened the conversation (the page's mount effect;
-   *  boot auto-open never calls this). Zeroes the badge; rooms schedule the
-   *  throttled cursor write. Safe on a not-yet-listed room: the entry is
-   *  zeroed and the leave sync (or a fresher list) fills the watermarks. */
+   *  boot auto-open never calls this). Zeroes the badge -- for a 1:1 the
+   *  tagma's stamp for the cursor this open reports lands right after and
+   *  agrees; rooms schedule the throttled cursor write. Safe on a
+   *  not-yet-listed room: the entry is zeroed and the leave sync (or a
+   *  fresher list) fills the watermarks. */
   enter(key: string): void {
     this.viewing.add(key);
     let entry = this.entries.get(key);
@@ -402,10 +323,15 @@ class UnreadStore {
     this.flushRoomPut(roomId, entry.knownSeq);
   }
 
-  /** The 1:1 chat page unmounted. Nothing to flush: the watermark persists
-   *  per observe; only the viewing flag ends. */
+  /** The 1:1 chat page unmounted: the viewing flag ends, so the tagma's own
+   *  stamped count shows again (whatever it said last, including the count that
+   *  arrived while the page masked it). Nothing to flush -- the cursor was
+   *  already reported per line while the page was mounted. */
   leaveTagma(tagmaId: string): void {
-    this.viewing.delete(tagmaKey(tagmaId));
+    const key = tagmaKey(tagmaId);
+    this.viewing.delete(key);
+    const entry = this.entries.get(key);
+    if (entry) entry.count = entry.stampCount;
   }
 
   /** The room page's line tick while viewing: rendered lines count as read
@@ -467,10 +393,10 @@ class UnreadStore {
     return t;
   }
 
-  /** Logout: drop all state + pending writes, clear the persisted 1:1
-   *  watermarks (shared-device privacy, the message cache's contract).
-   *  Rooms cursors live server-side; nothing to clear there. In-flight
-   *  pulls re-check the entry/viewing after each await and bail. */
+  /** Logout: drop all state and pending room writes. Both cursors live
+   *  server-side (room_read_cursors, the tagma's chat_read_cursor), so there
+   *  is nothing device-local to clear. In-flight pulls re-check the
+   *  entry/viewing after each await and bail. */
   reset(): void {
     this.entries.clear();
     this.viewing.clear();
@@ -481,7 +407,6 @@ class UnreadStore {
       this.timerId = null;
       this.timerArmed = false;
     }
-    void clearReadWatermarks();
   }
 
   // -- internals -------------------------------------------------------------

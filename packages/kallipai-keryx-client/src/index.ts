@@ -15,6 +15,7 @@
 export const PACKAGE_NAME = "@kallipai/kallipai-keryx-client";
 
 export { KeryxClient } from "./http.ts";
+export { manageOk } from "./channel.ts";
 export {
   ManageChannelError,
   type ManageChannelErrorReason,
@@ -27,15 +28,12 @@ export {
   type CachedLine,
   clear as clearConvCache,
   clearPendings,
-  clearReadWatermarks,
   deletePending,
-  getReadWatermark,
   isFailedPending,
   markPendingFailed,
   type PendingLine,
   put,
   putPending,
-  putReadWatermark,
   readPendingByTagma,
   readTail,
   readTailBefore,

@@ -129,6 +129,13 @@ export async function openRelayChannel(
   );
 }
 
+/** Whether a manage result counts as success. The tagma answers 2xx -- `204`
+ *  for an ack with no body -- so the status class is the whole success contract
+ *  for a manage call; the body is data, never a verdict. */
+export function manageOk(res: { status: number }): boolean {
+  return res.status >= 200 && res.status < 300;
+}
+
 /**
  * One E2EE channel to a tagma. Outbound: encrypt a `TagmaRequest` into an
  * envelope and POST it. Inbound: the SSE demux feeds envelopes to `enqueue`;

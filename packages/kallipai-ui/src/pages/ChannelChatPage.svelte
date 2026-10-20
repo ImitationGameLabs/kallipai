@@ -87,14 +87,20 @@
   );
 
   // Viewing: the open chat page clears the badge for the tagma's
-  // 1:1 conversation; the line-entry hook (RelayConversation.onLineLanded)
-  // keeps the local watermark fresh while viewing, and cleanup only ends the
-  // viewing flag (the watermark persists per line). Local conversations
-  // (the offline shell) carry no unread badge.
+  // 1:1 conversation and reports the read cursor (markRead), so the
+  // tagma's own count drops too -- on every device. Lines landing while
+  // the page stays mounted advance the cursor (one coalesced PUT per window),
+  // and cleanup lands the pending write before the viewing flag drops.
+  // Local conversations (the offline shell) carry no unread badge.
   $effect(() => {
     if (!(conv instanceof RelayConversation)) return;
     unreadStore.enter(tagmaKey(conv.tagmaId));
-    return () => unreadStore.leaveTagma(conv.tagmaId);
+    conv.markRead();
+    return () => {
+      // Leaving the page: land the cursor still inside the throttle window.
+      conv.flushReadCursor();
+      unreadStore.leaveTagma(conv.tagmaId);
+    };
   });
   // The lazy-window pager runs on both transports; each conversation leaf
   // supplies its own page source behind the shared base loadOlder.

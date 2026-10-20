@@ -149,6 +149,23 @@ export type TagmaReply =
       readonly req_id: number;
       readonly count: number;
       readonly more: boolean;
+      /** The tagma's unread count for this conversation at the moment it
+       * answered the batch. */
+      readonly unread: number;
+      /** The read cursor the count was computed against, so a client can
+       * order two stamps that arrive out of the tagma's emission order. */
+      readonly cursor: number;
+    }
+  | {
+      readonly kind: "history_batch_end";
+      readonly req_id: number;
+      readonly count: number;
+      readonly more: boolean;
+      /** A tagma that predates the read cursor sends neither: the stamp is
+       * one atom (a count without its cursor cannot be ordered against
+       * another stamp), so it is present as a pair or not at all. */
+      readonly unread?: undefined;
+      readonly cursor?: undefined;
     }
   | {
       /** The result of a `TagmaControl::Manage` op. `status` mirrors the HTTP

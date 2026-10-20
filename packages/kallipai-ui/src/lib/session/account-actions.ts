@@ -24,8 +24,8 @@ export async function logout() {
   // next session on a shared device.
   roomsStore.reset();
   roomConversationsStore.reset();
-  // Drop the unread state + the persisted 1:1 read watermarks (the store
-  // clears them; same shared-device privacy contract as the transcripts).
+  // Drop the unread badges (same shared-device privacy contract as the
+  // transcripts above).
   unreadStore.reset();
   // Drop the status card's cached agent rows/contexts (same shared-device
   // contract): the next user must not see the previous session's agents.

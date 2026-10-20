@@ -22,6 +22,7 @@ import type {
 } from "@kallipai/kallipai-client";
 import { archeionSession } from "./archeion.svelte";
 import { channelsStore } from "./channels.svelte";
+import { relayRootAgentId } from "./rootAgent.ts";
 import { chat_direct_fallback } from "../../paraglide/messages.js";
 
 /** One deduped direct session as the console lists it: the pair (two of this
@@ -54,10 +55,6 @@ export class DirectSessionsStore {
   #entries = new SvelteMap<string, DirectSessionEntry>();
   /** pairKey → last tick that reported the pair (prune stamp). */
   #seen = new Map<string, number>();
-  /** tagmaId → root agent id (stable per daemon; resolved over the manage
-   * bridge once, because `/agents/root` is an HTTP special case that is not
-   * in the manage subset). */
-  #rootIds = new Map<string, string>();
   #tickNo = 0;
   #timer: ReturnType<typeof setInterval> | null = null;
   #inFlight = new Set<string>();
@@ -182,22 +179,17 @@ export class DirectSessionsStore {
     return channel.manage(method, path, null);
   }
 
-  /** The root agent id for a daemon, resolved once (the manage subset has no
-   * `/agents/root` special case; the root is the one agent `created_by`
-   * nothing -- the registry's documented root invariant). */
+  /** The root agent id for a daemon, resolved through the one shared helper
+   *  (the manage subset has no `/agents/root` special case; the root is the one
+   *  agent `created_by` nothing -- the registry's documented root invariant).
+   *  The helper caches on the channel, so every caller on this tunnel shares the
+   *  answer and a reconnect asks again. */
   protected async rootId(tagmaId: string): Promise<string> {
-    const cached = this.#rootIds.get(tagmaId);
-    if (cached) return cached;
-    const res = await this.manage(tagmaId, "GET", "/agents");
-    if (res.status !== 200) {
-      throw new Error(`agent list failed: ${res.status}`);
-    }
-    const root = (
-      res.body as Array<{ id: string; created_by: string | null }>
-    ).find((a) => a.created_by === null);
-    if (!root) throw new Error(`no root agent on ${tagmaId}`);
-    this.#rootIds.set(tagmaId, root.id);
-    return root.id;
+    const channel = channelsStore.relayChannelOf(tagmaId);
+    if (!channel) throw new Error(`no open channel for ${tagmaId}`);
+    const root = await relayRootAgentId(channel);
+    if (root === null) throw new Error(`no root agent on ${tagmaId}`);
+    return root;
   }
 
   /** The overridable fetch leg (tests script this): one daemon's direct rows

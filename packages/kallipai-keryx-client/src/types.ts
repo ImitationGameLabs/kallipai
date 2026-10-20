@@ -94,7 +94,7 @@ export interface KeyExchangeResponse {
  * field shapes for the shared family: the split changes who emits the
  * frames, not their bytes. This stream carries the bilateral (1:1)
  * conversation family (envelopes, the tagma presence pair, status and
- * signal) plus `file_delivered` (the files push, which only the keryx
+ * signal, unread) plus `file_delivered` (the files push, which only the
  * emits). The room family stays on the lesche stream. */
 export type KeryxEvent =
   | { readonly type: "envelope"; readonly envelope: Envelope }
@@ -108,6 +108,16 @@ export type KeryxEvent =
       readonly type: "tagma_signal";
       readonly tagma_id: string;
       readonly event: SignalEvent;
+    }
+  | {
+      // The tagma's unread count for this conversation: outbound rows
+      // past the user's read cursor, stamped by the tagma. The client
+      // assigns the number, it never derives one of its own.
+      readonly type: "tagma_unread";
+      readonly tagma_id: string;
+      readonly peer: string;
+      readonly cursor: number;
+      readonly unread: number;
     }
   | {
       // A file landed in this user's files space (the delivery side of

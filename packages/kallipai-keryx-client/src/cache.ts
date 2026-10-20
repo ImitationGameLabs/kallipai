@@ -42,14 +42,18 @@ export interface CachedLine {
 
 const DB_NAME = "kallipai-keryx";
 // v2: the keyPath field was renamed `convId` -> `conversationId`. v3: the row
-// gained an optional `sender`. v4: added the `read_watermarks` store (the 1:1
-// unread high-water). The messages store is a disposable derived cache
-// (re-pulled from the tagma), so on upgrade we drop+recreate it rather than
-// migrate rows; the watermark store is created once and never dropped.
-const DB_VERSION = 5;
+// gained an optional `sender`. The messages store is a disposable derived
+// cache (re-pulled from the tagma), so on upgrade we drop+recreate it
+// rather than migrate rows. The pending store holds unsent sends and is
+// created once and never dropped. v6: the 1:1 read watermarks live in the
+// tagma, so the browser's copy is deleted on upgrade -- an old install would
+// otherwise keep rows nothing reads.
+const DB_VERSION = 6;
 const STORE = "messages";
-const WATERMARK_STORE = "read_watermarks";
 const PENDING_STORE = "pending";
+/** The 1:1 watermark store that v4 added and v6 drops: one row per
+ *  conversation. */
+const V5_WATERMARK_STORE = "read_watermarks";
 
 let dbPromise: Promise<IDBDatabase> | null = null;
 
@@ -78,16 +82,16 @@ function openDb(): Promise<IDBDatabase> {
           keyPath: ["conversationId", "historyId"],
         });
       }
-      if (!d.objectStoreNames.contains(WATERMARK_STORE)) {
-        // v4: the per-tagma unread high-water, one row per tagma. Never
-        // dropped on upgrade: recreating it empty would re-count every
-        // delivered line as unread once the catch-up pull lands.
-        d.createObjectStore(WATERMARK_STORE, { keyPath: "tagmaId" });
+      // v6: delete the watermark store, and only it -- the pending rows
+      // beside it are unsent messages that exist nowhere else, so the rest
+      // of the database is left exactly as it is.
+      if (d.objectStoreNames.contains(V5_WATERMARK_STORE)) {
+        d.deleteObjectStore(V5_WATERMARK_STORE);
       }
       if (!d.objectStoreNames.contains(PENDING_STORE)) {
         // v5: unsent local messages, one row per attempt, keyed
-        // [tagmaId, localSeq]. Survives upgrades like the watermark store:
-        // these rows exist nowhere else -- a dropped row is a lost message.
+        // [tagmaId, localSeq]. These rows exist nowhere else -- a dropped
+        // row is a lost message.
         d.createObjectStore(PENDING_STORE, {
           keyPath: ["tagmaId", "localSeq"],
         });
@@ -101,18 +105,20 @@ function openDb(): Promise<IDBDatabase> {
 // --- one-shot legacy migration (pre-split database) ---------------------------
 //
 // This package inherited its IndexedDB schema from the pre-split
-// `kallipai-relay` database; the rename aside, the schema is byte-identical
-// (same store names, same keyPaths, same version). On the first open after
-// the rename the durable rows move over and the legacy database is deleted.
-// The messages store is deliberately left behind -- a disposable derived
-// cache re-pulled from the tagma, so paying the copy cost buys nothing.
+// `kallipai-relay` database. The two matched at the rename; this side
+// has moved since: it is at v6, it creates `messages` and `pending`,
+// and it does not create the `read_watermarks` store, while a legacy
+// database keeps that store at whatever version it reached (rows
+// nothing reads). On the first open after the rename the durable rows
+// move over and the legacy database is deleted. The messages store is
+// deliberately left behind -- a disposable derived cache re-pulled from
+// the tagma, so paying the copy cost buys nothing.
 
 /** Migrate the legacy `kallipai-relay` database into this one, whenever the
  * legacy database exists. Durable rows only: pending (unsent) lines are
- * copied verbatim -- a dropped pending row is a lost message -- while read
- * watermarks copy as a monotone max (a legacy tab can race this copy
- * against a newer read already persisted here); the disposable messages
- * cache is skipped and re-pulled.
+ * copied verbatim -- a dropped pending row is a lost message -- and the
+ * disposable messages cache is skipped and re-pulled. Only pending rows
+ * have anything to copy: 1:1 read state is not device-local any more.
  *
  * There is deliberately no "done" flag: the probe is the truth, because a
  * localStorage mark can drift from disk (a blocked delete leaves the
@@ -137,22 +143,7 @@ export async function migrateLegacyCache(): Promise<"migrated" | "absent"> {
   }
   // openDb, not db: db() awaits this very migration.
   const target = await openDb();
-  const watermarks = await readLegacyRows(legacy, WATERMARK_STORE);
   const pendings = await readLegacyRows(legacy, PENDING_STORE);
-  for (const row of watermarks) {
-    // The watermark is a monotone read position: a legacy tab can race
-    // this copy against a newer read already persisted here, so never
-    // move it backwards -- copy the row only when it advances the
-    // stored value.
-    const mark = row as ReadWatermarkRow;
-    const current = await getRowOn<ReadWatermarkRow>(
-      target,
-      WATERMARK_STORE,
-      mark.tagmaId,
-    );
-    if (current && current.knownSeq >= mark.knownSeq) continue;
-    await putRowOn(target, WATERMARK_STORE, row);
-  }
   for (const row of pendings) {
     await putRowOn(target, PENDING_STORE, row);
   }
@@ -195,8 +186,8 @@ function ensureMigrated(): Promise<void> {
 
 /** Open the legacy database without ever creating it: an upgrade event here
  * means it does not exist, and aborting the upgrade fails the open, which
- * maps to null. Stores absent from an older legacy version (read_watermarks
- * is v4, pending is v5) read as empty. */
+ * maps to null. Stores absent from an older legacy version (pending is v5)
+ * read as empty. */
 function openLegacyIfExists(): Promise<IDBDatabase | null> {
   return new Promise((resolve, reject) => {
     if (typeof indexedDB === "undefined") {
@@ -230,25 +221,6 @@ function putRowOn(
     req.onsuccess = () => resolve();
     req.onerror = () =>
       reject(req.error ?? new Error("legacy cache copy failed"));
-  });
-}
-
-/** Read one row from an open database handle, by key (same direct-handle
- * rule as `putRowOn`: the public getters go through db(), which awaits
- * this very migration). */
-function getRowOn<T>(
-  target: IDBDatabase,
-  store: string,
-  key: string,
-): Promise<T | undefined> {
-  return new Promise((resolve, reject) => {
-    const req = target
-      .transaction(store, "readonly")
-      .objectStore(store)
-      .get(key);
-    req.onsuccess = () => resolve(req.result as T | undefined);
-    req.onerror = () =>
-      reject(req.error ?? new Error("legacy cache read failed"));
   });
 }
 
@@ -407,64 +379,6 @@ export async function clear(conversationId: string): Promise<void> {
     // best-effort
   }
 }
-
-/** -- 1:1 unread high-water ---------------------------------------------------
- *
- *  The per-tagma watermark behind the unread badge (kallipai-ui's unread
- *  store): the largest `chat_history.id` this device has counted or seen
- *  while viewing the tagma's channel. Persisted so a reload/restore keeps
- *  the count stable, and cleared on logout (shared-device privacy, same
- *  contract as the message cache). Same degrade-quietly contract: a failed
- *  read returns null (the store re-seeds from its first observed line); a
- *  failed write only means the next observe re-persists. */
-
-interface ReadWatermarkRow {
-  tagmaId: string;
-  knownSeq: number;
-}
-
-/** The stored high-water for a tagma, or null when none / on any IndexedDB
- *  failure (private mode etc. -- the unread store then re-seeds). */
-export async function getReadWatermark(
-  tagmaId: string,
-): Promise<number | null> {
-  try {
-    const row = await run<ReadWatermarkRow | undefined>(
-      "readonly",
-      (s) => s.get(tagmaId),
-      WATERMARK_STORE,
-    );
-    return typeof row?.knownSeq === "number" ? row.knownSeq : null;
-  } catch {
-    return null;
-  }
-}
-
-/** Persist the high-water for a tagma (upsert). Best-effort. */
-export async function putReadWatermark(
-  tagmaId: string,
-  knownSeq: number,
-): Promise<void> {
-  try {
-    await run(
-      "readwrite",
-      (s) => s.put({ tagmaId, knownSeq }),
-      WATERMARK_STORE,
-    );
-  } catch {
-    // best-effort; the next observe re-persists
-  }
-}
-
-/** Drop every read watermark (logout). Best-effort. */
-export async function clearReadWatermarks(): Promise<void> {
-  try {
-    await run("readwrite", (s) => s.clear(), WATERMARK_STORE);
-  } catch {
-    // best-effort
-  }
-}
-
 // --- unsent local messages (v5) ---------------------------------------------
 
 /** One locally-sent-but-unconfirmed chat line, durable across reloads. These

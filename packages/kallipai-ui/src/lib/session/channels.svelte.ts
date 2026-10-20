@@ -26,7 +26,6 @@ import {
   archeionSession,
   keryxClientOrFail,
 } from "./archeion.svelte.ts";
-import { unreadStore } from "./unread.svelte.ts";
 import type { DirectTransport } from "./directTransport.ts";
 import { RelayTransport } from "./relayTransport.ts";
 import {
@@ -40,7 +39,6 @@ import {
 import {
   clearConvCache,
   clearPendings,
-  getReadWatermark,
   readTail,
 } from "@kallipai/kallipai-keryx-client";
 import { configStore } from "../config/config.svelte.ts";
@@ -346,15 +344,6 @@ export class ChannelsStore {
       // catch-up pull lands one recent batch.
     }
 
-    // Rehydrate the unread watermark before the drain starts: the store's
-    // per-observe persists only help if the baseline landed first, and the
-    // cache read above is already openRelay's serialization point. A fresh
-    // device (null) arms the store's seed-pending: the whole adopted window
-    // is then read as already read, and its tail becomes the watermark.
-    unreadStore.hydrateTagma(
-      tagma.tagma_id,
-      await getReadWatermark(tagma.tagma_id),
-    );
     // A successful open supersedes any degraded offline view; see
     // sweepOfflineViewsFor.
     this.sweepOfflineViewsFor(tagma.tagma_id);

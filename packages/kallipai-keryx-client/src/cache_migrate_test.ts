@@ -219,7 +219,6 @@ function seedLegacy(
   version: number,
   rows: {
     messages?: FakeRow[];
-    watermarks?: FakeRow[];
     pendings?: FakeRow[];
   },
 ) {
@@ -229,9 +228,6 @@ function seedLegacy(
       keyPath: ["conversationId", "historyId"],
     });
   }
-  if (version >= 4 || rows.watermarks) {
-    db.createObjectStore("read_watermarks", { keyPath: "tagmaId" });
-  }
   if (version >= 5 || rows.pendings) {
     db.createObjectStore("pending", { keyPath: ["tagmaId", "localSeq"] });
   }
@@ -239,9 +235,28 @@ function seedLegacy(
     db.transaction(store, "readwrite").objectStore().put(row);
   };
   for (const row of rows.messages ?? []) put("messages", row);
-  for (const row of rows.watermarks ?? []) put("read_watermarks", row);
   for (const row of rows.pendings ?? []) put("pending", row);
   databases.set("kallipai-relay", db);
+}
+
+/** Seed the CURRENT database at an older version, so the next open runs the
+ *  upgrade over a populated world (the dropped store beside live data). */
+function seedCurrent(
+  version: number,
+  rows: { watermarks?: FakeRow[]; pendings?: FakeRow[] },
+) {
+  const db = new FakeDatabase("kallipai-keryx", version);
+  db.createObjectStore("messages", {
+    keyPath: ["conversationId", "historyId"],
+  });
+  db.createObjectStore("read_watermarks", { keyPath: "tagmaId" });
+  db.createObjectStore("pending", { keyPath: ["tagmaId", "localSeq"] });
+  const put = (store: string, row: FakeRow) => {
+    db.transaction(store, "readwrite").objectStore().put(row);
+  };
+  for (const row of rows.watermarks ?? []) put("read_watermarks", row);
+  for (const row of rows.pendings ?? []) put("pending", row);
+  databases.set("kallipai-keryx", db);
 }
 
 const { assertEquals } = await import("@std/assert");
@@ -252,7 +267,6 @@ Deno.test(
     const restore = installFakes();
     try {
       seedLegacy(5, {
-        watermarks: [{ tagmaId: "t-1", knownSeq: 41 }],
         pendings: [
           {
             tagmaId: "t-1",
@@ -282,7 +296,6 @@ Deno.test(
         pendings.map((p) => p.localSeq),
         [-1000, -2000],
       );
-      assertEquals(await cache.getReadWatermark("t-1"), 41);
       // messages are disposable: not copied, re-pulled on demand
       assertEquals(await cache.readTail("c-1", 50), []);
       assertEquals(databases.has("kallipai-relay"), false);
@@ -317,7 +330,6 @@ Deno.test(
       });
       const cache = await import("./cache.ts?case=oldver");
       assertEquals(await cache.readPendingByTagma("t-1"), []);
-      assertEquals(await cache.getReadWatermark("t-1"), null);
       assertEquals(databases.has("kallipai-relay"), false);
     } finally {
       restore();
@@ -334,7 +346,6 @@ Deno.test("a partial copy failure converges on the next run", async () => {
   };
   try {
     seedLegacy(5, {
-      watermarks: [{ tagmaId: "t-1", knownSeq: 41 }],
       pendings: [
         {
           tagmaId: "t-1",
@@ -366,7 +377,6 @@ Deno.test("a partial copy failure converges on the next run", async () => {
       pendings.map((p) => p.localSeq),
       [-1000, -2000],
     );
-    assertEquals(await second.getReadWatermark("t-1"), 41);
     assertEquals(databases.has("kallipai-relay"), false);
     assertEquals(warns, 1);
   } finally {
@@ -377,65 +387,26 @@ Deno.test("a partial copy failure converges on the next run", async () => {
 });
 
 Deno.test(
-  "the watermark copy never moves the read position backwards",
-  async () => {
-    const restore = installFakes();
-    try {
-      seedLegacy(5, {
-        pendings: [
-          {
-            tagmaId: "t-1",
-            localSeq: -1000,
-            text: "unsent",
-            createdAt: "2026-10-08T01:00:00Z",
-          },
-        ],
-      });
-      // Halfway failure (the first pending put) leaves the legacy db
-      // alive.
-      failNextPuts = 1;
-      const cache = await import("./cache.ts?case=stale-mark");
-      assertEquals(await cache.readPendingByTagma("t-1"), []);
-      // This session then reads on: the new db's watermark reaches 41,
-      // while a still-open legacy tab holds 30 there.
-      await cache.putReadWatermark("t-1", 41);
-      const legacy = databases.get("kallipai-relay");
-      if (!legacy) throw new Error("legacy db missing");
-      legacy.transaction("read_watermarks", "readwrite").objectStore().put({
-        tagmaId: "t-1",
-        knownSeq: 30,
-      });
-      // The retry copies 30 only when it advances: 41 survives, the
-      // pending line lands, and the legacy db is reaped.
-      assertEquals(await cache.migrateLegacyCache(), "migrated");
-      assertEquals(await cache.getReadWatermark("t-1"), 41);
-      assertEquals(
-        (await cache.readPendingByTagma("t-1")).map((p) => p.localSeq),
-        [-1000],
-      );
-      assertEquals(databases.has("kallipai-relay"), false);
-      // The advancing direction still lands: a lower local mark is
-      // pushed up by the legacy value on the next copy.
-      await cache.putReadWatermark("t-1", 20);
-      seedLegacy(5, { watermarks: [{ tagmaId: "t-1", knownSeq: 30 }] });
-      assertEquals(await cache.migrateLegacyCache(), "migrated");
-      assertEquals(await cache.getReadWatermark("t-1"), 30);
-    } finally {
-      failNextPuts = 0;
-      restore();
-    }
-  },
-);
-
-Deno.test(
   "a legacy db reappearing after migration is probed and re-copied",
   async () => {
     const restore = installFakes();
     try {
       // First document migrates cleanly and reaps the legacy db.
-      seedLegacy(5, { watermarks: [{ tagmaId: "t-1", knownSeq: 30 }] });
+      seedLegacy(5, {
+        pendings: [
+          {
+            tagmaId: "t-1",
+            localSeq: -1000,
+            text: "first unsent",
+            createdAt: "2026-10-08T01:00:00Z",
+          },
+        ],
+      });
       const first = await import("./cache.ts?case=reappear");
-      assertEquals(await first.getReadWatermark("t-1"), 30);
+      assertEquals(
+        (await first.readPendingByTagma("t-1")).map((p) => p.text),
+        ["first unsent"],
+      );
       assertEquals(databases.has("kallipai-relay"), false);
       // A still-open legacy tab (its delete was blocked) later writes
       // an unsent line into the orphaned db.
@@ -456,7 +427,6 @@ Deno.test(
         (await second.readPendingByTagma("t-1")).map((p) => p.text),
         ["late unsent"],
       );
-      assertEquals(await second.getReadWatermark("t-1"), 30);
       assertEquals(databases.has("kallipai-relay"), false);
     } finally {
       restore();
@@ -469,18 +439,70 @@ Deno.test(
   async () => {
     const restore = installFakes();
     try {
-      seedLegacy(5, { watermarks: [{ tagmaId: "t-1", knownSeq: 30 }] });
+      seedLegacy(5, {
+        pendings: [
+          {
+            tagmaId: "t-1",
+            localSeq: -1000,
+            text: "unsent",
+            createdAt: "2026-10-08T01:00:00Z",
+          },
+        ],
+      });
       blockNextDelete = true;
       const first = await import("./cache.ts?case=blocked-del");
       // the copy is durable but the legacy db survived the blocked delete
-      assertEquals(await first.getReadWatermark("t-1"), 30);
+      assertEquals(
+        (await first.readPendingByTagma("t-1")).map((p) => p.text),
+        ["unsent"],
+      );
       assertEquals(databases.has("kallipai-relay"), true);
       // a later document probes, re-copies (a no-op upsert), and deletes
       const second = await import("./cache.ts?case=blocked-retry");
-      assertEquals(await second.getReadWatermark("t-1"), 30);
+      assertEquals(
+        (await second.readPendingByTagma("t-1")).map((p) => p.text),
+        ["unsent"],
+      );
       assertEquals(databases.has("kallipai-relay"), false);
     } finally {
       blockNextDelete = false;
+      restore();
+    }
+  },
+);
+
+Deno.test(
+  "the upgrade deletes the watermark store and leaves the pending rows",
+  async () => {
+    const restore = installFakes();
+    try {
+      seedCurrent(5, {
+        watermarks: [{ tagmaId: "t-1", knownSeq: 9 }],
+        pendings: [
+          {
+            tagmaId: "t-1",
+            localSeq: -1000,
+            text: "unsent line",
+            createdAt: "2026-10-08T01:00:00Z",
+          },
+        ],
+      });
+      const cache = await import("./cache.ts?case=watermarks");
+      // Opening the current database is what runs the upgrade.
+      const pendings = await cache.readPendingByTagma("t-1");
+      // The unsent line is still there: it exists nowhere else, so the upgrade
+      // must not touch it.
+      assertEquals(
+        pendings.map((p) => p.localSeq),
+        [-1000],
+      );
+      const db = databases.get("kallipai-keryx");
+      assertEquals(db?.stores.has("read_watermarks"), false);
+      assertEquals([...(db?.stores.keys() ?? [])].sort(), [
+        "messages",
+        "pending",
+      ]);
+    } finally {
       restore();
     }
   },

@@ -38,6 +38,7 @@ import { reverifySession, type SessionVerifier } from "./realtimeReverify.ts";
 import type { TagmaStatusSummary } from "../tagmata.svelte.ts";
 import { keryxClientOrFail, lescheClientOrFail } from "./archeion.svelte.ts";
 import { MeCursor, ResyncBatcher, type ResyncPlan } from "./cursor.ts";
+import { unreadStore } from "./unread.svelte.ts";
 
 /** Sink for inbound conversation envelopes. Bound by the shell to
  * `channelsStore.deliver`. `null` (the default) drops envelopes -- harmless
@@ -547,6 +548,16 @@ class RealtimeStore {
         // routed to the owning channel's transcript as a status transition
         // and/or a transient system line.
         this.signalSink?.(ev.tagma_id, ev.event);
+        break;
+      case "tagma_unread":
+        // The tagma's own count for this conversation: stamped when it
+        // appended a reply or when a read cursor moved (another device's
+        // included -- that is how a badge falls on this one). No local
+        // tally anywhere: the store assigns what the tagma counted.
+        unreadStore.setTagmaUnread(ev.tagma_id, {
+          unread: ev.unread,
+          cursor: ev.cursor,
+        });
         break;
       case "file_delivered":
         // A file landed in the user's files space. The files listing is the
