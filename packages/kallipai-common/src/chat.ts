@@ -155,6 +155,11 @@ export type TagmaReply =
       /** The read cursor the count was computed against, so a client can
        * order two stamps that arrive out of the tagma's emission order. */
       readonly cursor: number;
+      /** Rows the batch window held that the tagma could not decode. They are
+       *  not in the batch, so a non-zero count marks the window as incomplete:
+       *  enough to make a probe retryable, never enough to prove absence.
+       *  Absent on batches from a tagma that predates it (reads as zero). */
+      readonly undecodable?: number;
     }
   | {
       readonly kind: "history_batch_end";
@@ -166,6 +171,8 @@ export type TagmaReply =
        * another stamp), so it is present as a pair or not at all. */
       readonly unread?: undefined;
       readonly cursor?: undefined;
+      /** A tagma that predates the stamp cannot report this either. */
+      readonly undecodable?: undefined;
     }
   | {
       /** The result of a `TagmaControl::Manage` op. `status` mirrors the HTTP

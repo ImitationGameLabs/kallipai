@@ -6,6 +6,7 @@ use kallipai_common::protocol::{ApiError, MessageResponse};
 use serde::{Deserialize, Serialize};
 
 use super::MessageRequest;
+use crate::external::HistoryReadError;
 use crate::sse::sse_stream;
 use crate::state::SharedState;
 use kallipai_common::agentid::AgentId;
@@ -168,6 +169,12 @@ pub struct ExternalHistoryQuery {
 pub struct ExternalHistoryResponse {
     pub rows: Vec<kallipai_lesche_common::message::HistoryEntry>,
     pub more: bool,
+    /// Rows the window held that the decoder could not read: they are not in
+    /// `rows`, so a non-zero count means this page is a hole in the history
+    /// rather than a complete window. Absent on payloads from a tagma that
+    /// predates the field (`serde(default)`), where it reads as zero.
+    #[serde(default)]
+    pub undecodable: u32,
 }
 
 pub async fn external_history(
@@ -187,10 +194,28 @@ pub async fn external_history(
     const MAX_LIMIT: u32 = 50;
     let limit = query.limit.unwrap_or(DEFAULT_LIMIT).min(MAX_LIMIT);
     // The direct endpoint serves the operator partition (`user_id IS NULL`).
-    let (rows, more) = projector
+    let page = match projector
         .read_history(None, query.after, query.before, limit)
-        .await;
-    Ok(Json(ExternalHistoryResponse { rows, more }))
+        .await
+    {
+        Ok(page) => page,
+        // A query naming two cursors asks for two windows at once: refusing it
+        // keeps the "an empty page means an empty history" reading intact.
+        Err(HistoryReadError::BothCursors { .. }) => {
+            return Err(ApiError::bad_request(
+                "history takes at most one cursor (after or before)",
+            ));
+        }
+        // An unreadable store is not an empty conversation.
+        Err(e) => {
+            return Err(ApiError::unavailable(format!("history read failed: {e}")));
+        }
+    };
+    Ok(Json(ExternalHistoryResponse {
+        rows: page.entries,
+        more: page.more,
+        undecodable: page.undecodable,
+    }))
 }
 
 /// The relay peer a manage-plane request targets: inserted as a request

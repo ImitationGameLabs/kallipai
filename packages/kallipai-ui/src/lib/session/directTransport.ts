@@ -183,9 +183,13 @@ export class DirectTransport implements Transport {
     after?: number | null;
     before?: number | null;
     limit?: number;
-  }): Promise<{ rows: HistoryEntry[]; more: boolean }> {
+  }): Promise<{ rows: HistoryEntry[]; more: boolean; undecodable: number }> {
     const resp = await this.client.externalHistory(this.agentId, opts);
-    return { rows: resp.rows as HistoryEntry[], more: resp.more };
+    return {
+      rows: resp.rows as HistoryEntry[],
+      more: resp.more,
+      undecodable: resp.undecodable ?? 0,
+    };
   }
 
   close(): void {

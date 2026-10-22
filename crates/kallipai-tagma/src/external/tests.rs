@@ -143,12 +143,13 @@ async fn record_inbound_persists_and_publishes() {
 
     // The history read (filtered to this peer) decodes the inbound row back
     // into a UserMessage paired with the peer sender.
-    let (entries, more) = projector
+    let page = projector
         .read_history(Some(user.id.as_ref()), None, None, 50)
-        .await;
-    assert!(!more);
-    assert_eq!(entries.len(), 1);
-    match &entries[0] {
+        .await
+        .expect("a readable store answers");
+    assert!(!page.more);
+    assert_eq!(page.entries.len(), 1);
+    match &page.entries[0] {
         HistoryEntry {
             sender,
             reply: TagmaReply::UserMessage {
@@ -244,9 +245,12 @@ async fn direct_and_relay_partitions_persist_and_filter() {
 
     // read_history(None) sees only the operator partition; the relay row is
     // in a different partition and is excluded.
-    let (op_entries, _) = projector.read_history(None, None, None, 50).await;
-    assert_eq!(op_entries.len(), 1);
-    match &op_entries[0] {
+    let op_page = projector
+        .read_history(None, None, None, 50)
+        .await
+        .expect("a readable store answers");
+    assert_eq!(op_page.entries.len(), 1);
+    match &op_page.entries[0] {
         HistoryEntry {
             sender,
             reply: TagmaReply::UserMessage { text, .. },
@@ -258,11 +262,12 @@ async fn direct_and_relay_partitions_persist_and_filter() {
         other => panic!("expected operator UserMessage, got {other:?}"),
     }
     // read_history(Some(peer)) sees only that peer's partition.
-    let (user_entries, _) = projector
+    let user_page = projector
         .read_history(Some(user.id.as_ref()), None, None, 50)
-        .await;
-    assert_eq!(user_entries.len(), 1);
-    match &user_entries[0] {
+        .await
+        .expect("a readable store answers");
+    assert_eq!(user_page.entries.len(), 1);
+    match &user_page.entries[0] {
         HistoryEntry {
             sender,
             reply: TagmaReply::UserMessage { text, .. },
@@ -368,4 +373,106 @@ async fn cold_start_covers_every_partition_beyond_the_bus_ring() {
     let mut expected: Vec<String> = (0..PARTITIONS).map(|i| format!("peer-{i}")).collect();
     expected.sort();
     assert_eq!(peers, expected);
+}
+
+/// A store the read cannot answer from is a failed read, not an empty
+/// conversation: the projector reports it instead of an empty page.
+#[tokio::test]
+async fn read_history_reports_an_unreadable_store() {
+    let state = make_state();
+    let root = AgentId::from("root".to_string());
+    {
+        let mut registry = state.registry.write().await;
+        registry
+            .register_root(
+                root.clone(),
+                RegistryEntry::Live(make_entry(None, "tok".into())),
+            )
+            .unwrap();
+    }
+    let dir = TempDir::new().unwrap();
+    let db = chat_history::open(
+        &dir.path().join("h.sqlite"),
+        std::time::Duration::from_millis(100),
+    )
+    .await
+    .unwrap();
+    let conv = ConversationId::for_tagma(&tagma_id());
+    let projector = ExternalProjector::new(
+        Arc::downgrade(&state),
+        Some(db.clone()),
+        Some(conv.clone()),
+        Some(tagma_id()),
+        Some("Tagma".into()),
+        MessageLimits::default(),
+    );
+    sea_orm::ConnectionTrait::execute(
+        &db,
+        sea_orm::Statement::from_string(
+            sea_orm::DatabaseBackend::Sqlite,
+            "DROP TABLE chat_history".to_owned(),
+        ),
+    )
+    .await
+    .expect("break the store for the duration of the test");
+
+    projector
+        .read_history(None, None, None, 50)
+        .await
+        .expect_err("an unreadable store is not an empty history");
+}
+
+/// A row the decoder cannot read is skipped on the wire but counted in the
+/// page, so the caller can tell "some of this window is missing" from "this
+/// window is complete".
+#[tokio::test]
+async fn read_history_counts_the_rows_it_cannot_decode() {
+    let state = make_state();
+    let root = AgentId::from("root".to_string());
+    {
+        let mut registry = state.registry.write().await;
+        registry
+            .register_root(
+                root.clone(),
+                RegistryEntry::Live(make_entry(None, "tok".into())),
+            )
+            .unwrap();
+    }
+    let dir = TempDir::new().unwrap();
+    let db = chat_history::open(
+        &dir.path().join("h.sqlite"),
+        std::time::Duration::from_millis(100),
+    )
+    .await
+    .unwrap();
+    let conv = ConversationId::for_tagma(&tagma_id());
+    let projector = ExternalProjector::new(
+        Arc::downgrade(&state),
+        Some(db.clone()),
+        Some(conv.clone()),
+        Some(tagma_id()),
+        Some("Tagma".into()),
+        MessageLimits::default(),
+    );
+    let user = user_sender();
+    for (direction, text) in [("inbound", "good"), ("sideways", "corrupt")] {
+        chat_history::append(
+            &db,
+            Some(user.id.as_ref()),
+            Some(user.handle.as_str()),
+            direction,
+            text,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    }
+
+    let page = projector
+        .read_history(Some(user.id.as_ref()), None, None, 50)
+        .await
+        .expect("a readable store answers");
+    assert_eq!(page.entries.len(), 1, "the decodable row still replays");
+    assert_eq!(page.undecodable, 1, "the undecodable row is counted");
 }

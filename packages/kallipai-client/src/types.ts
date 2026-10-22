@@ -104,6 +104,11 @@ export interface ExternalHistoryResponse {
    * the live `{sender, body}` shape). */
   readonly rows: readonly HistoryEntry[];
   readonly more: boolean;
+  /** Rows the window held that the tagma could not decode. They are not in
+   * `rows`, so a non-zero count means this page is a hole in the history
+   * rather than a complete window. Absent on payloads from a tagma that
+   * predates the field (reads as zero). */
+  readonly undecodable?: number;
 }
 
 // --- Management API wire types ---

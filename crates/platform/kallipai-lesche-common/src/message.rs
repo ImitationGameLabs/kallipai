@@ -239,6 +239,12 @@ pub enum TagmaReply {
         /// different paths. Zero on payloads from a peer predating it.
         #[serde(default)]
         cursor: i64,
+        /// Rows the window held that the decoder could not read: the tagma
+        /// skips them, so a non-zero count means the batch is a window with
+        /// a hole in it -- enough to say "not empty", never enough to prove
+        /// absence. Zero on payloads from a peer predating it.
+        #[serde(default)]
+        undecodable: u32,
     },
     /// The result of a `TagmaControl::Manage` op. `status` mirrors the HTTP
     /// status the tagma handler returned (200, 201, 204, 400, 404, 409, etc.);
@@ -565,6 +571,7 @@ mod tests {
                 more: true,
                 unread: 0,
                 cursor: 0,
+                undecodable: 0,
             })
             .unwrap(),
         ];
@@ -625,18 +632,26 @@ mod tests {
             more: true,
             unread: 4,
             cursor: 9,
+            undecodable: 0,
         })
         .unwrap();
         assert_eq!(
             hbe,
-            r#"{"kind":"history_batch_end","req_id":3,"count":10,"more":true,"unread":4,"cursor":9}"#
+            r#"{"kind":"history_batch_end","req_id":3,"count":10,"more":true,"unread":4,"cursor":9,"undecodable":0}"#
         );
         // A batch marker from a tagma that predates `unread` still parses.
         let old: TagmaReply = serde_json::from_str(
             r#"{"kind":"history_batch_end","req_id":3,"count":10,"more":true}"#,
         )
         .unwrap();
-        assert!(matches!(old, TagmaReply::HistoryBatchEnd { unread: 0, .. }));
+        assert!(matches!(
+            old,
+            TagmaReply::HistoryBatchEnd {
+                unread: 0,
+                undecodable: 0,
+                ..
+            }
+        ));
         // set_history_id stamps Event and MessageAccepted; leaves others alone.
         let mut ev = TagmaReply::Event {
             event: AuthoredEvent::AssistantContent {

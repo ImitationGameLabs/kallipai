@@ -825,6 +825,7 @@ async fn handle_history_latest_replays_both_directions_in_order() {
                 more,
                 unread,
                 cursor: _,
+                undecodable,
             } => {
                 assert_eq!(*req_id, 7);
                 assert_eq!(*count, 3);
@@ -833,6 +834,7 @@ async fn handle_history_latest_replays_both_directions_in_order() {
                 // The marker's count is the store's unread tally for this
                 // partition: no outbound row sits above the seeded cursor.
                 assert_eq!(*unread, 0);
+                assert_eq!(*undecodable, 0, "every seeded row decoded");
             }
             other => panic!("unexpected reply {other:?}"),
         }
@@ -954,7 +956,8 @@ async fn handle_history_without_store_emits_empty_batch_end() {
             count: 0,
             more: false,
             unread: 0,
-            cursor: 0
+            cursor: 0,
+            undecodable: 0,
         }]
     ));
 }
@@ -1171,4 +1174,115 @@ async fn pump_slot_is_idempotent_and_restartable() {
     );
     slot.stop_and_await().await;
     assert!(!slot.is_running().await, "second stop must clear the slot");
+}
+
+/// A query naming two cursors asks for two windows at once. The relay answers
+/// with nothing at all: a batch marker would tell the app the
+/// conversation ends here.
+#[tokio::test]
+async fn handle_history_refuses_both_cursors_without_a_marker() {
+    let (handle, key, capture, _prompt_rx, _root_id, _state, db, _dir) =
+        setup_with_history(8).await;
+    let user = peer();
+    chat_history::append(
+        &db,
+        Some(user.id.as_ref()),
+        Some(user.handle.as_str()),
+        "outbound",
+        "o0",
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let trace = kallipai_archeion_common::ids::TraceId::from("test".to_string());
+
+    capture.lock().await.clear();
+    handle
+        .handle_history(&trace, 9, &user, Some(1), Some(9), 50)
+        .await;
+
+    let frames = drain_with_senders(&capture, &key).await;
+    assert!(
+        frames.is_empty(),
+        "two cursors name two windows, so no batch and no marker: {} frames",
+        frames.len()
+    );
+}
+
+/// A store the read cannot answer from produces no batch marker: without one
+/// the app retries (its cursor has not advanced) instead of believing the
+/// conversation is empty.
+#[tokio::test]
+async fn handle_history_emits_no_marker_when_the_store_is_unreadable() {
+    let (handle, key, capture, _prompt_rx, _root_id, _state, db, _dir) =
+        setup_with_history(8).await;
+    let user = peer();
+    sea_orm::ConnectionTrait::execute(
+        &db,
+        sea_orm::Statement::from_string(
+            sea_orm::DatabaseBackend::Sqlite,
+            "DROP TABLE chat_history".to_owned(),
+        ),
+    )
+    .await
+    .expect("break the store for the duration of the test");
+    let trace = kallipai_archeion_common::ids::TraceId::from("test".to_string());
+
+    capture.lock().await.clear();
+    handle
+        .handle_history(&trace, 11, &user, None, None, 50)
+        .await;
+
+    let frames = drain_with_senders(&capture, &key).await;
+    assert!(
+        frames.is_empty(),
+        "an unreadable store is not an empty history, so no marker: {} frames",
+        frames.len()
+    );
+}
+
+/// The batch marker carries the count of rows the decoder could not read, so
+/// the app can tell a complete window from one with a hole in it.
+#[tokio::test]
+async fn handle_history_marker_counts_a_row_it_cannot_decode() {
+    let (handle, key, capture, _prompt_rx, _root_id, _state, db, _dir) =
+        setup_with_history(8).await;
+    let user = peer();
+    for (direction, text) in [("inbound", "good"), ("sideways", "corrupt")] {
+        chat_history::append(
+            &db,
+            Some(user.id.as_ref()),
+            Some(user.handle.as_str()),
+            direction,
+            text,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    }
+    let trace = kallipai_archeion_common::ids::TraceId::from("test".to_string());
+
+    capture.lock().await.clear();
+    handle
+        .handle_history(&trace, 13, &user, None, None, 50)
+        .await;
+
+    let replies = drain_replies(&capture, &key).await;
+    let mut count = None;
+    let mut undecodable = None;
+    for reply in &replies {
+        if let TagmaReply::HistoryBatchEnd {
+            count: c,
+            undecodable: u,
+            ..
+        } = reply
+        {
+            count = Some(*c);
+            undecodable = Some(*u);
+        }
+    }
+    assert_eq!(count, Some(1), "one readable row was emitted");
+    assert_eq!(undecodable, Some(1), "the undecodable row is reported");
 }

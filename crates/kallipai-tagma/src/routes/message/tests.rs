@@ -685,3 +685,115 @@ async fn read_sse_frame(stream: &mut axum::body::BodyDataStream) -> String {
     .expect("frame bytes");
     String::from_utf8(frame.to_vec()).expect("utf8 frame")
 }
+
+// -- unreadable is not empty: the history read refuses what it cannot answer --
+
+/// A query naming two cursors asks for two windows at once. The read is
+/// refused rather than answered with an empty page, which the client
+/// would render as "this conversation has nothing in it".
+#[tokio::test]
+async fn external_history_refuses_both_cursors_at_once() {
+    let state = make_state();
+    install_inbox_store(&state).await;
+    let (_db, _frames, _dir) = install_projector(&state).await;
+    let root = AgentId::random();
+    let (entry, _rx) = make_entry_with_rx(None, "root".into());
+    state
+        .registry
+        .write()
+        .await
+        .register_root(root.clone(), RegistryEntry::Live(entry))
+        .unwrap();
+
+    let err = external_history(
+        State(state.clone()),
+        AuthIdentity::test_new(Identity::Operator),
+        Path(root),
+        Query(ExternalHistoryQuery {
+            after: Some(1),
+            before: Some(9),
+            limit: Some(50),
+        }),
+    )
+    .await
+    .expect_err("two cursors name two windows, so there is nothing to answer");
+    assert_eq!(err.status, 400, "unusable query: {}", err.message);
+}
+
+/// A store the read cannot answer from is not an empty conversation: the
+/// endpoint reports the failure instead of a zero-row page.
+#[tokio::test]
+async fn external_history_reports_an_unreadable_store() {
+    let state = make_state();
+    install_inbox_store(&state).await;
+    let (db, _frames, _dir) = install_projector(&state).await;
+    let root = AgentId::random();
+    let (entry, _rx) = make_entry_with_rx(None, "root".into());
+    state
+        .registry
+        .write()
+        .await
+        .register_root(root.clone(), RegistryEntry::Live(entry))
+        .unwrap();
+    sea_orm::ConnectionTrait::execute(
+        &db,
+        sea_orm::Statement::from_string(
+            sea_orm::DatabaseBackend::Sqlite,
+            "DROP TABLE chat_history".to_owned(),
+        ),
+    )
+    .await
+    .expect("break the store for the duration of the test");
+
+    let err = external_history(
+        State(state.clone()),
+        AuthIdentity::test_new(Identity::Operator),
+        Path(root),
+        Query(ExternalHistoryQuery {
+            after: None,
+            before: None,
+            limit: Some(50),
+        }),
+    )
+    .await
+    .expect_err("an unreadable store is not an empty history");
+    assert_eq!(err.status, 503, "unreadable store: {}", err.message);
+}
+
+/// A row the decoder cannot read leaves a hole in the window. The page still
+/// carries the readable rows, and the hole is counted so the caller does not
+/// mistake a partial window for a complete one.
+#[tokio::test]
+async fn external_history_counts_a_row_it_cannot_decode() {
+    let state = make_state();
+    install_inbox_store(&state).await;
+    let (db, _frames, _dir) = install_projector(&state).await;
+    let root = AgentId::random();
+    let (entry, _rx) = make_entry_with_rx(None, "root".into());
+    state
+        .registry
+        .write()
+        .await
+        .register_root(root.clone(), RegistryEntry::Live(entry))
+        .unwrap();
+    for (direction, text) in [("inbound", "good"), ("sideways", "corrupt")] {
+        crate::relay::chat_history::append(&db, None, None, direction, text, None, None)
+            .await
+            .expect("seed a row into the operator partition");
+    }
+
+    let Json(body) = external_history(
+        State(state.clone()),
+        AuthIdentity::test_new(Identity::Operator),
+        Path(root),
+        Query(ExternalHistoryQuery {
+            after: None,
+            before: None,
+            limit: Some(50),
+        }),
+    )
+    .await
+    .expect("a readable store answers");
+    assert_eq!(body.rows.len(), 1, "the decodable row still rides the page");
+    assert_eq!(body.undecodable, 1, "the undecodable row is counted");
+}

@@ -141,6 +141,30 @@ fn resolve_sender(row: &chat_history::HistoryRow, agent: &Participant) -> Partic
     }
 }
 
+/// One history read's answer. `undecodable` counts the rows the window held
+/// that the decoder could not read: they are not replayed, so a non-zero count
+/// means the page is a hole in the history, not a complete window.
+#[derive(Debug, Default)]
+pub(crate) struct HistoryPage {
+    pub(crate) entries: Vec<HistoryEntry>,
+    pub(crate) more: bool,
+    pub(crate) undecodable: u32,
+}
+
+/// Why a history read could not answer. The direct route tells the two apart:
+/// a query that names no window is a caller error (400); a store that could
+/// not be read is an outage (503). The relay route sends no marker for
+/// either, so a caller sees a timeout and finds the cause in the log.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum HistoryReadError {
+    /// Both cursors were supplied: the request names two windows, not one.
+    #[error("history read takes at most one cursor (after={after}, before={before})")]
+    BothCursors { after: i64, before: i64 },
+    /// The store could not be read. The conversation is unknown, not empty.
+    #[error("history store read failed: {0}")]
+    Store(#[source] anyhow::Error),
+}
+
 impl ExternalProjector {
     /// Construct the handle and spawn the event pump that subscribes to the
     /// root agent's broadcast. `history` is always `Some` in production (the Db
@@ -454,27 +478,45 @@ impl ExternalProjector {
     /// recent-N snapshot is always `more=false`. The wire sender is
     /// reconstructed per row: outbound becomes the agent, inbound becomes the
     /// peer (or the operator for `NULL`).
+    ///
+    /// The contract: **an `Ok` empty window means the conversation really holds
+    /// nothing there.** Nothing else produces one. A store that cannot be read
+    /// is `Err`, a window the decoder could not read whole reports the dropped
+    /// rows in `undecodable` (the page is then a hole, not a complete window),
+    /// and a query naming two cursors is refused rather than answered with an
+    /// empty page. The one empty window above suspicion is "no store yet": a
+    /// tagma that never wrote a row.
     pub(crate) async fn read_history(
         &self,
         user_id: Option<&str>,
         after: Option<i64>,
         before: Option<i64>,
         limit: u32,
-    ) -> (Vec<HistoryEntry>, bool) {
+    ) -> Result<HistoryPage, HistoryReadError> {
         let Some(db) = self.inner.history.clone() else {
-            return (Vec::new(), false);
+            return Ok(HistoryPage::default());
         };
         let rows = match (after, before) {
+            (Some(a), Some(b)) => {
+                error!(
+                    after = a,
+                    before = b,
+                    "history read refused: both cursors name no window"
+                );
+                return Err(HistoryReadError::BothCursors {
+                    after: a,
+                    before: b,
+                });
+            }
             (Some(a), None) => chat_history::read_after(&db, user_id, a, limit).await,
             (None, Some(b)) => chat_history::read_before(&db, user_id, b, limit).await,
             (None, None) => chat_history::read_last_n(&db, user_id, limit as u64).await,
-            (Some(_), Some(_)) => Ok(Vec::new()),
         };
         let rows = match rows {
             Ok(r) => r,
             Err(e) => {
                 error!("history read failed: {e:#}");
-                return (Vec::new(), false);
+                return Err(HistoryReadError::Store(e));
             }
         };
         let more = match (after, before) {
@@ -482,14 +524,29 @@ impl ExternalProjector {
             _ => rows.len() as u32 == limit && limit > 0,
         };
         let agent = self.agent_sender();
+        let mut undecodable = 0u32;
         let entries = rows
             .into_iter()
             .filter_map(|r| {
                 let sender = resolve_sender(&r, &agent);
-                chat_history::decode_row(r, sender)
+                let entry = chat_history::decode_row(r, sender);
+                if entry.is_none() {
+                    undecodable += 1;
+                }
+                entry
             })
             .collect();
-        (entries, more)
+        if undecodable > 0 {
+            warn!(
+                undecodable,
+                "history window holds rows that did not decode; the page is not complete"
+            );
+        }
+        Ok(HistoryPage {
+            entries,
+            more,
+            undecodable,
+        })
     }
 
     /// Append an outbound row once, stamp its row id + `created_at` onto

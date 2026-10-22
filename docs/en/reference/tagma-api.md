@@ -607,7 +607,12 @@ JSON `type` field); each frame's `data:` is the JSON payload:
 The `TagmaReply` shape mirrors the relay's envelope payload (`kind`-tagged,
 snake_case): `event` (authored `assistant_content`), `user_message` (a replayed
 inbound row), `message_accepted` (an ack), `error`, `interrupted`, and
-`history_batch_end`. The relayed path carries the same payload inside the E2EE
+`history_batch_end` (a batch marker carrying `count`, `more`, `unread`,
+`cursor` and `undecodable`: rows the store held that the tagma could not
+decode, so a non-zero value marks the window as incomplete -- a probe
+against such a window proves nothing, so the app surfaces it as retryable
+rather than reading it as proof of absence). The
+relayed path carries the same payload inside the E2EE
 envelope; the direct (offline) path serves it plaintext with no relay and no
 E2EE. Status snapshots are pushed on a fixed cadence; the transcript is driven
 by signals (busy/idle), not by these snapshots.

@@ -152,8 +152,10 @@ impl RelayHandle {
     ///
     /// `more` is true when a paginated (`after`/`before`) query returned exactly
     /// `limit` rows (more may remain pullable); the `latest` snapshot mode is
-    /// always `more=false`. `count` is the rows actually emitted (decode
-    /// failures are skipped, not counted).
+    /// always `more=false`. `count` counts the rows emitted; `undecodable`
+    /// counts rows the window held that the decoder could not read -- those
+    /// are not sent, so a non-zero `undecodable` marks the batch as a window
+    /// with a hole in it. A read that cannot be answered emits no marker.
     pub(super) async fn handle_history(
         &self,
         trace: &kallipai_archeion_common::ids::TraceId,
@@ -182,6 +184,7 @@ impl RelayHandle {
                         more: false,
                         unread: 0,
                         cursor: 0,
+                        undecodable: 0,
                     },
                     None,
                 )
@@ -203,9 +206,12 @@ impl RelayHandle {
     ) {
         let limit = limit.min(Self::HISTORY_BATCH_MAX);
         // Read + decode through the external projector, the single history read
-        // path shared with the direct `/external/history` endpoint. Returns
-        // decoded replies + the `more` flag. Filter to THIS peer's partition so
-        // each device sees only its own conversation.
+        // path shared with the direct `/external/history` endpoint. Returns the
+        // decoded page: sender + reply per row, the `more` flag, and how many
+        // rows the decoder could not read (they are not in the page, so a
+        // non-zero count marks a hole). An Err answer carries no frames at
+        // all. Filter to THIS peer's partition so each device sees only its
+        // own conversation.
         let Some(projector) = self
             .inner
             .state
@@ -215,9 +221,20 @@ impl RelayHandle {
             // Tagma shutting down: nothing to emit.
             return;
         };
-        let (entries, more) = projector
+        let page = match projector
             .read_history(Some(peer.id.as_ref()), after, before, limit)
-            .await;
+            .await
+        {
+            Ok(page) => page,
+            // An unreadable store, or a query naming two cursors, is not an
+            // empty conversation: no marker at all, so the app times out and
+            // retries instead of folding an empty window into its transcript.
+            Err(e) => {
+                error!(req_id, "history read failed: {e}; no marker");
+                return;
+            }
+        };
+        let (entries, more, undecodable) = (page.entries, page.more, page.undecodable);
         let mut count = 0u32;
         for entry in entries {
             // Stamp the row's stored sender (user for an inbound row, agent for
@@ -248,6 +265,7 @@ impl RelayHandle {
                     req_id,
                     count,
                     more,
+                    undecodable,
                     unread,
                     cursor,
                 },

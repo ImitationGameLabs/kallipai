@@ -763,7 +763,7 @@ export function shouldNotify(floor: number, reply: TagmaReply): boolean {
  * when the batch_end marker or the pull timeout lands. */
 interface RelayPull {
   rows: HistoryEntry[];
-  settle: ((count: number, more: boolean) => void) | null;
+  settle: ((count: number, more: boolean, undecodable: number) => void) | null;
 }
 
 export class RelayConversation extends ConversationBase {
@@ -1007,7 +1007,7 @@ export class RelayConversation extends ConversationBase {
       if (pull) {
         this.pendingPulls.delete(reply.req_id);
         if (this.beforePull === pull) this.beforePull = null;
-        pull.settle?.(reply.count, reply.more);
+        pull.settle?.(reply.count, reply.more, reply.undecodable ?? 0);
       }
       // Close the window bracket: drain-side batches advance only
       // maxRendered, so the scroll sentinel needs minRendered recomputed
@@ -1160,7 +1160,7 @@ export class RelayConversation extends ConversationBase {
     // empty page so the caller keeps hasMoreOlder instead of reading the
     // miss as a terminal end of history.
     if (!this.connected) {
-      return { rows: [], count: 0, more: true, timedOut: true };
+      return { rows: [], count: 0, more: true, timedOut: true, undecodable: 0 };
     }
     const pull: RelayPull = { rows: [], settle: null };
     const isBeforePage = (opts.before ?? 0) > 0;
@@ -1185,11 +1185,18 @@ export class RelayConversation extends ConversationBase {
             count: pull.rows.length,
             more: false,
             timedOut: true,
+            undecodable: 0,
           });
         }, this.pullTimeoutMs);
-        pull.settle = (count, more) => {
+        pull.settle = (count, more, undecodable) => {
           clearTimeout(timer);
-          resolve({ rows: pull.rows, count, more, timedOut: false });
+          resolve({
+            rows: pull.rows,
+            count,
+            more,
+            timedOut: false,
+            undecodable,
+          });
         };
       });
     } finally {
