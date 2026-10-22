@@ -166,32 +166,16 @@ impl RelayHandle {
         limit: u32,
     ) {
         // req_id-aware panic boundary (mirrors `handle_agent_op`): a panic in
-        // the batch is contained and surfaces as an empty `HistoryBatchEnd` so
-        // the app is not left waiting on its deadline; it retries on reconnect.
+        // the batch is contained and nothing is emitted. A marker here would
+        // report a window that came back empty and whole, which the app folds
+        // into its transcript as "no history below this point"; it waits out
+        // its deadline instead and retries on reconnect.
         if AssertUnwindSafe(self.handle_history_inner(trace, req_id, peer, after, before, limit))
             .catch_unwind()
             .await
             .is_err()
         {
-            error!(req_id, "history batch panicked; emitting empty marker");
-            if let Err(e) = self
-                .emit(
-                    trace,
-                    self.agent_sender(),
-                    TagmaReply::HistoryBatchEnd {
-                        req_id,
-                        count: 0,
-                        more: false,
-                        unread: 0,
-                        cursor: 0,
-                        undecodable: 0,
-                    },
-                    None,
-                )
-                .await
-            {
-                warn!(req_id, "history panic-marker emit failed: {e:#}");
-            }
+            error!(req_id, "history batch panicked; no marker");
         }
     }
 

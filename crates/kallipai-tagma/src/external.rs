@@ -151,15 +151,20 @@ pub(crate) struct HistoryPage {
     pub(crate) undecodable: u32,
 }
 
-/// Why a history read could not answer. The direct route tells the two apart:
-/// a query that names no window is a caller error (400); a store that could
-/// not be read is an outage (503). The relay route sends no marker for
-/// either, so a caller sees a timeout and finds the cause in the log.
+/// Why a history read could not answer. The direct route keeps caller errors
+/// apart from an outage: a query naming two windows at once, or asking for
+/// zero rows, is a 400; a store that could not be read is a 503.
+/// The relay route sends no marker for either, so a caller times out
+/// and finds the cause in the log.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum HistoryReadError {
     /// Both cursors were supplied: the request names two windows, not one.
     #[error("history read takes at most one cursor (after={after}, before={before})")]
     BothCursors { after: i64, before: i64 },
+    /// The query asked for zero rows: no page can satisfy it, and an empty
+    /// page would read as an empty conversation.
+    #[error("history read takes a positive limit (limit={limit})")]
+    ZeroLimit { limit: u32 },
     /// The store could not be read. The conversation is unknown, not empty.
     #[error("history store read failed: {0}")]
     Store(#[source] anyhow::Error),
@@ -485,10 +490,10 @@ impl ExternalProjector {
     /// there.** Nothing else produces one in production. A store that cannot
     /// be read is `Err`; a window the decoder could not read whole reports
     /// the dropped rows in `undecodable`, and the page is then a hole, not a
-    /// complete window; a query naming two cursors is refused rather than
-    /// answered with an empty page. The one remaining `Ok` empty window
-    /// comes from a projector assembled without a store, which only test
-    /// wiring builds.
+    /// complete window; a query naming two cursors, or a window of zero rows,
+    /// is refused rather than answered with an empty page. The one remaining
+    /// `Ok` empty window comes from a projector assembled without a store,
+    /// which only test wiring builds.
     pub(crate) async fn read_history(
         &self,
         user_id: Option<&str>,
@@ -509,6 +514,12 @@ impl ExternalProjector {
                 after: a,
                 before: b,
             });
+        }
+        // A window of zero rows has no answer either: the empty page it would
+        // produce reads as an empty conversation, which it does not prove.
+        if limit == 0 {
+            error!(limit, "history read refused: the limit asks for no rows");
+            return Err(HistoryReadError::ZeroLimit { limit });
         }
         let Some(db) = self.inner.history.clone() else {
             return Ok(HistoryPage::default());

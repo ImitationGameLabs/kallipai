@@ -1286,3 +1286,24 @@ async fn handle_history_marker_counts_a_row_it_cannot_decode() {
     assert_eq!(count, Some(1), "one readable row was emitted");
     assert_eq!(undecodable, Some(1), "the undecodable row is reported");
 }
+
+/// A limit of zero asks for a window that cannot hold anything: like the other
+/// refusals, no batch and no marker, so the app retries instead of folding an
+/// empty conversation into its transcript.
+#[tokio::test]
+async fn handle_history_refuses_a_zero_limit_without_a_marker() {
+    let (handle, key, capture, _prompt_rx, _root_id, _state, _db, _dir) =
+        setup_with_history(8).await;
+    let user = peer();
+    let trace = kallipai_archeion_common::ids::TraceId::from("test".to_string());
+
+    capture.lock().await.clear();
+    handle.handle_history(&trace, 9, &user, None, None, 0).await;
+
+    let frames = drain_with_senders(&capture, &key).await;
+    assert!(
+        frames.is_empty(),
+        "a zero limit has no window to report: {} frames",
+        frames.len()
+    );
+}

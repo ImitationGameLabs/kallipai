@@ -159,12 +159,14 @@ pub struct ExternalHistoryQuery {
 
 /// `GET /agents/{id}/external/history` -- the pull-based history window for the
 /// direct (offline) path, cursor-driven by the frontend's high-water mark.
-/// Root-only and projector-owned; returns decoded entries (sender + reply) and
-/// a `more` flag. The direct SSE stays live-only; history is always a
-/// frontend-initiated pull, symmetric with the relay's `TagmaControl::History`.
-/// The badge count does not ride this reply: it reaches the client on the
-/// unread frames the tagma pushes, so a history pull never doubles as a count
-/// read.
+/// Root-only and projector-owned; returns the decoded entries (sender + reply),
+/// a `more` flag, and the count of rows the decoder could not read. A request
+/// naming two cursors, or a window of zero rows, is refused with 400; a store
+/// that cannot answer is refused with 503. The direct SSE stays live-only;
+/// history is always a frontend-initiated pull, symmetric with the relay's
+/// `TagmaControl::History`. The badge count does not ride this reply: it
+/// reaches the client on the unread frames the tagma pushes, so a history pull
+/// never doubles as a count read.
 #[derive(Debug, Serialize)]
 pub struct ExternalHistoryResponse {
     pub rows: Vec<kallipai_lesche_common::message::HistoryEntry>,
@@ -205,6 +207,11 @@ pub async fn external_history(
             return Err(ApiError::bad_request(
                 "history takes at most one cursor (after or before)",
             ));
+        }
+        // A window of zero rows cannot be answered either: it would come back
+        // as a 200 empty page, which the client renders as an empty history.
+        Err(HistoryReadError::ZeroLimit { .. }) => {
+            return Err(ApiError::bad_request("history takes a positive limit"));
         }
         // An unreadable store is not an empty conversation.
         Err(e) => {

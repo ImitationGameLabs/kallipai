@@ -797,3 +797,35 @@ async fn external_history_counts_a_row_it_cannot_decode() {
     assert_eq!(body.rows.len(), 1, "the decodable row still rides the page");
     assert_eq!(body.undecodable, 1, "the undecodable row is counted");
 }
+
+/// A limit of zero asks for a window that cannot hold anything. Refused like
+/// the two-cursor query: a 200 empty page would render as an empty
+/// history.
+#[tokio::test]
+async fn external_history_refuses_a_zero_limit() {
+    let state = make_state();
+    install_inbox_store(&state).await;
+    let (_db, _frames, _dir) = install_projector(&state).await;
+    let root = AgentId::random();
+    let (entry, _rx) = make_entry_with_rx(None, "root".into());
+    state
+        .registry
+        .write()
+        .await
+        .register_root(root.clone(), RegistryEntry::Live(entry))
+        .unwrap();
+
+    let err = external_history(
+        State(state.clone()),
+        AuthIdentity::test_new(Identity::Operator),
+        Path(root),
+        Query(ExternalHistoryQuery {
+            after: None,
+            before: None,
+            limit: Some(0),
+        }),
+    )
+    .await
+    .expect_err("a zero-row window has no answer");
+    assert_eq!(err.status, 400, "unusable query: {}", err.message);
+}

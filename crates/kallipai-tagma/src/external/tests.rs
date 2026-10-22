@@ -506,3 +506,35 @@ async fn read_history_refuses_two_cursors_without_a_store() {
         "expected BothCursors, got {err:?}"
     );
 }
+
+/// A limit of zero asks for a window that cannot hold anything: refused rather
+/// than answered with an empty page the caller would read as an empty
+/// conversation.
+#[tokio::test]
+async fn read_history_refuses_a_zero_limit() {
+    let state = make_state();
+    let dir = TempDir::new().unwrap();
+    let db = chat_history::open(
+        &dir.path().join("h.sqlite"),
+        std::time::Duration::from_millis(100),
+    )
+    .await
+    .unwrap();
+    let conv = ConversationId::for_tagma(&tagma_id());
+    let projector = ExternalProjector::new(
+        Arc::downgrade(&state),
+        Some(db.clone()),
+        Some(conv.clone()),
+        Some(tagma_id()),
+        Some("Tagma".into()),
+        MessageLimits::default(),
+    );
+    let err = projector
+        .read_history(None, None, None, 0)
+        .await
+        .expect_err("a zero-row window has no answer");
+    assert!(
+        matches!(err, HistoryReadError::ZeroLimit { limit: 0 }),
+        "expected ZeroLimit, got {err:?}"
+    );
+}
