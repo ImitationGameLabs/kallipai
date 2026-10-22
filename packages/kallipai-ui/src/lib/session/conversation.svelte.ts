@@ -1043,10 +1043,10 @@ export class RelayConversation extends ConversationBase {
     try {
       const page = await this.pullPage({ limit: k });
       this.adoptWindow(page.rows);
-      // A short window IS the whole server history; a timed-out one proves
-      // nothing about what lies below (rows may have stopped mid-page without
-      // the marker), so the sentinel stays armed for a retry.
-      if (!page.timedOut && page.count < k) this.hasMoreOlder = false;
+      // A window short of k RAW rows (decoded plus dropped) IS all the history
+      // there is; a timed-out one proves nothing below and keeps the sentinel.
+      const rawRows = page.count + page.undecodable;
+      if (!page.timedOut && rawRows < k) this.hasMoreOlder = false;
     } catch {
       // Dead channel: the drain surfaces transport status; the window stays on
       // whatever the hydrate landed and live frames keep arriving.
@@ -1132,6 +1132,8 @@ export class RelayConversation extends ConversationBase {
       limit: k,
     });
     const added = this.applyPulledRows(rows);
+    // added === 0 disarms for a different reason than !more: a page whose rows
+    // all failed to decode cannot move the cursor, so re-paging returns it again.
     if (!timedOut && (!more || added === 0)) this.hasMoreOlder = false;
   }
 
@@ -1293,18 +1295,22 @@ export class LocalConversation extends ConversationBase {
             after: this.maxRendered,
             limit: k,
           });
+          // Nothing rendered is no evidence of the end: the cursor has nowhere
+          // to go, so the loop stops here before `more` is consulted; whether
+          // older rows exist is left to the sentinel, which the next page
+          // settles.
           if (rows.length === 0) break;
           const before = this.maxRendered;
           this.applyPulledRows(rows);
           if (this.maxRendered <= before || !more) break;
         }
       } else {
-        const { rows } = await t.pullHistory({ limit: k });
+        const { rows, undecodable } = await t.pullHistory({ limit: k });
         this.applyPulledRows(rows);
-        // A short recent batch IS the whole server history (recent-N
-        // carries no `more`); disarm the sentinel so it never arms
-        // again for a page that cannot exist.
-        if (rows.length < k) this.hasMoreOlder = false;
+        // A recent batch short of k RAW rows (decoded plus dropped) IS the
+        // whole server history (recent-N carries no `more`); disarm the
+        // sentinel so it never arms again for a page that cannot exist.
+        if (rows.length + undecodable < k) this.hasMoreOlder = false;
       }
     } catch {
       // Server unreachable: the drain surfaces transport status; the window
@@ -1328,6 +1334,8 @@ export class LocalConversation extends ConversationBase {
     if (!t) return;
     const { rows, more } = await t.pullHistory({ before: head, limit: k });
     const added = this.applyPulledRows(rows);
+    // Same distinction as the relay leaf: !more reads the database, while
+    // added === 0 reads this window -- all-dropped rows cannot move the cursor.
     if (!more || added === 0) this.hasMoreOlder = false;
   }
 }
@@ -1381,6 +1389,8 @@ export class OfflineConversation extends ConversationBase {
     if (!head) return;
     const cached = await readTailBefore(this.cacheConversationId, head, k);
     this.mergeWindowLines(cached.map(cachedLineToLine));
+    // The cache is the only source offline: a short page means it holds
+    // nothing older, and no transport could have dropped rows.
     if (cached.length < k) this.hasMoreOlder = false;
   }
 }
