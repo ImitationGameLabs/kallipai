@@ -6,6 +6,8 @@
 // once per key change -- which keeps this module runnable from plain Deno
 // tests without the Svelte compiler.
 
+import type { DraftBinding } from "../composer.svelte.ts";
+
 /** `sessionStorage` keys holding drafts share this prefix; `reset` scans it. */
 const PREFIX = "kallipai.draft.";
 
@@ -99,6 +101,32 @@ export class ChatDraftsStore {
 
 export const chatDraftsStore = new ChatDraftsStore();
 
+/** Where a failed send puts its text back. The store entry always returns
+ *  under the key the submit started with -- that is the conversation the
+ *  reader typed in -- while the visible field is repainted only while the
+ *  composer still holds the very binding the submit captured. Identity, not
+ *  key equality: a return to the same conversation installs a new binding. */
+export function restoreFailedDraft(args: {
+  /** Key the submit started under: where the text is stored. */
+  readonly sendingKey: string;
+  /** The binding the submit captured; the restore runs from its own
+   *  closure, so the composer's binding is always present here. */
+  readonly sendingBinding: DraftBinding;
+  /** The binding installed now; undefined when nothing is bound. */
+  readonly liveBinding: DraftBinding | undefined;
+  readonly text: string;
+  readonly store: Pick<ChatDraftsStore, "set">;
+  /** Show the text in the live field (the composer's draft setter). */
+  readonly show: (text: string) => void;
+}): void {
+  args.store.set(args.sendingKey, args.text);
+  // The key only decides where the text is stored; the binding decides
+  // whether it is painted.
+  if (args.liveBinding === args.sendingBinding) {
+    args.show(args.text);
+  }
+}
+
 // Stable draft keys per conversation surface. The bilateral tagma chat is
 // keyed on the tagma id -- stable across re-KEX and shared by both entries
 // into the page (the sidebar /tagma/{id}/chat route and a /chat/{conversationId}
@@ -109,3 +137,17 @@ export const chatDraftsStore = new ChatDraftsStore();
 export const tagmaDraftKey = (tagmaId: string) => `t:${tagmaId}`;
 export const roomDraftKey = (roomId: string) => `r:${roomId}`;
 export const convDraftKey = (conversationId: string) => `c:${conversationId}`;
+
+/** The one storage key a chat page derives and shares: its draft and its
+ *  attachment tray then key on the same bucket. The tagma id once the
+ *  conversation resolved to a relay channel (stable across re-KEX, shared by
+ *  both routes into the page); the conversation id otherwise -- the local
+ *  conversation, or a relay id in the brief window before it resolves. */
+export function conversationStorageKey(
+  conversationId: string,
+  relayTagmaId: string | undefined,
+): string {
+  return relayTagmaId === undefined
+    ? convDraftKey(conversationId)
+    : tagmaDraftKey(relayTagmaId);
+}

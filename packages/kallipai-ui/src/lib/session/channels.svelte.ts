@@ -188,6 +188,21 @@ export class ChannelsStore {
     }
   }
 
+  /** Coarse by design: true while any ensureOpen is in flight for any
+   * tagma, which is all the dead-end guard can use. The open set is keyed
+   * by tagma, and a pending open has no conversation id yet: the relay
+   * derives it and the store records it only once that open settles, so
+   * this reports only whether the store is still working on some channel,
+   * never whether one particular conversationId is opening. For the
+   * complete per-tagma answer (pending / unavailable / absent, plus the
+   * conversation id once settled) read getTagmaChannelState above; this
+   * predicate is for the page that has no tagma to ask about yet.
+   * Reactive when read in an effect: it reads the SvelteSet, so a settle
+   * that empties the set re-runs the reader. */
+  get anyChannelOpening(): boolean {
+    return this.pendingOpens.size > 0;
+  }
+
   /** The store key a chat page delegates to ChannelChatPage with, for a
    * tagma id: the conversation id once the channel settled, undefined
    * while absent/pending/unavailable. The shell's mobile top row reads

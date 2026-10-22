@@ -5,7 +5,11 @@
 
 import { assertEquals } from "@std/assert";
 import type { DraftStorage } from "./drafts.ts";
-import { ChatDraftsStore } from "./drafts.ts";
+import {
+  ChatDraftsStore,
+  conversationStorageKey,
+  restoreFailedDraft,
+} from "./drafts.ts";
 
 function memoryStorage(seed?: Record<string, string>): DraftStorage {
   const data = new Map(Object.entries(seed ?? {}));
@@ -59,4 +63,63 @@ Deno.test("reset drops only prefixed keys, keeping foreign entries", () => {
   assertEquals(storage.getItem("kallipai.draft.t:tagma-1"), null);
   assertEquals(storage.getItem("kallipai.draft.r:room-1"), null);
   assertEquals(storage.getItem("unrelated.key"), "keep me");
+});
+
+Deno.test("a failed send stores its text under the key that sent it", () => {
+  const store = new ChatDraftsStore(memoryStorage());
+  const shown: string[] = [];
+  const sending = { key: "r:room-a", restore: () => {} };
+  const live = { key: "r:room-b", restore: () => {} };
+  restoreFailedDraft({
+    sendingKey: "r:room-a",
+    sendingBinding: sending,
+    liveBinding: live,
+    text: "half typed",
+    store,
+    show: (text) => shown.push(text),
+  });
+  assertEquals(store.get("r:room-a"), "half typed");
+  assertEquals(store.get("r:room-b"), "");
+  assertEquals(shown, []);
+});
+
+Deno.test("a failed send repaints the field while its binding holds", () => {
+  const store = new ChatDraftsStore(memoryStorage());
+  const shown: string[] = [];
+  const sending = { key: "r:room-a", restore: () => {} };
+  restoreFailedDraft({
+    sendingKey: "r:room-a",
+    sendingBinding: sending,
+    liveBinding: sending,
+    text: "half typed",
+    store,
+    show: (text) => shown.push(text),
+  });
+  assertEquals(store.get("r:room-a"), "half typed");
+  assertEquals(shown, ["half typed"]);
+});
+
+Deno.test("a return to the same conversation keeps its new input", () => {
+  const store = new ChatDraftsStore(memoryStorage());
+  const shown: string[] = [];
+  const sentFrom = { key: "r:room-a", restore: () => {} };
+  // Back on the same conversation, through a binding installed later: the
+  // key matches and the object does not, so the new input stays on screen.
+  const live = { key: "r:room-a", restore: () => {} };
+  restoreFailedDraft({
+    sendingKey: "r:room-a",
+    sendingBinding: sentFrom,
+    liveBinding: live,
+    text: "half typed",
+    store,
+    show: (text) => shown.push(text),
+  });
+  assertEquals(store.get("r:room-a"), "half typed");
+  assertEquals(shown, []);
+});
+
+Deno.test("a relay conversation keys on its tagma, else on its id", () => {
+  assertEquals(conversationStorageKey("conv-1", "tagma-1"), "t:tagma-1");
+  assertEquals(conversationStorageKey("conv-1", undefined), "c:conv-1");
+  assertEquals(conversationStorageKey("local", undefined), "c:local");
 });

@@ -15,19 +15,37 @@
 // the restored value, not the stale one -- the persist write happens after
 // restore in the same flush, with the new draft already in place.
 
-import type { ComposerModel } from "../composer.svelte.ts";
-import { chatDraftsStore } from "./drafts.ts";
+import type { ComposerModel, DraftBinding } from "../composer.svelte.ts";
+import { chatDraftsStore, restoreFailedDraft } from "./drafts.ts";
 import { untrack } from "svelte";
 
 /** Bind `composer`'s draft to the store entry under `key()`. Call once from
  * a component's script body; the effects live and die with that component.
  * `key()` is re-evaluated reactively, so a conversation resolving (or the
- * page switching conversations) re-binds to the new key. */
+ * page switching conversations) re-binds to the new key. Each rebind also
+ * installs a fresh binding, so a send that fails later returns its text to
+ * that conversation -- and only while that same object is still installed. */
 export function bindDraft(composer: ComposerModel, key: () => string): void {
   $effect.pre(() => {
     const k = key();
     untrack(() => {
       composer.draft = chatDraftsStore.get(k);
+      const installed: DraftBinding = {
+        key: k,
+        restore: (text) => {
+          restoreFailedDraft({
+            sendingKey: k,
+            sendingBinding: installed,
+            liveBinding: composer.binding,
+            text,
+            store: chatDraftsStore,
+            show: (restored) => {
+              composer.draft = restored;
+            },
+          });
+        },
+      };
+      composer.binding = installed;
     });
   });
   $effect(() => {

@@ -140,6 +140,100 @@ export function createAutoScroll(options: AutoScrollOptions = {}): AutoScroll {
   };
 }
 
+/**
+ * Manual scroll anchor for a top prepend: CSS overflow-anchor is UA- and
+ * WebView-dependent, so the caller snapshots the viewport before an older
+ * page lands and restores the position by the height delta once the DOM has
+ * grown.
+ *
+ * The snapshot describes ONE transcript's geometry, so it carries the scope
+ * (the session key) it was taken in: a page still in flight when the session
+ * moves belongs to the surface that asked for it, and applying its delta
+ * here would drag the reader in the session that replaced it. A scope is
+ * compared by value on every use, so an unscoped caller (undefined on both
+ * sides) keeps the plain capture-and-restore.
+ */
+export interface ScrollAnchor {
+  /** Whether a snapshot is held, awaiting its page. */
+  readonly pending: boolean;
+  /** Snapshot the position before requesting an older page. */
+  capture: (contentLength: number) => void;
+  /** Restore once the content grew. A scope mismatch only drops it. */
+  consume: (contentLength: number) => boolean;
+  /** Drop a snapshot whose page settled without changing the content. */
+  release: (contentLength: number, loading: boolean) => void;
+  /** Drop the snapshot: the session feeding this transcript changed. */
+  drop: () => void;
+}
+
+export function createScrollAnchor(
+  getViewport: () => HTMLDivElement | undefined,
+  scope: () => string | undefined,
+): ScrollAnchor {
+  let held: {
+    scrollTop: number;
+    scrollHeight: number;
+    count: number;
+    scope: string | undefined;
+  } | null = null;
+
+  /** Drop a snapshot from another session; true means it was not ours. */
+  function foreign(): boolean {
+    if (held === null) return false;
+    if (held.scope === scope()) return false;
+    held = null;
+    return true;
+  }
+
+  function capture(contentLength: number): void {
+    const viewport = getViewport();
+    if (!viewport) return;
+    const key = scope();
+    // One page at a time: a second sentinel hit before the first lands
+    // would otherwise re-baseline against a half-grown transcript.
+    if (held !== null && held.scope === key) return;
+    held = {
+      scrollTop: viewport.scrollTop,
+      scrollHeight: viewport.scrollHeight,
+      count: contentLength,
+      scope: key,
+    };
+  }
+
+  function consume(contentLength: number): boolean {
+    if (foreign()) return false;
+    const snapshot = held;
+    if (snapshot === null) return false;
+    const viewport = getViewport();
+    if (!viewport || contentLength === snapshot.count) return false;
+    const delta = viewport.scrollHeight - snapshot.scrollHeight;
+    if (delta > 0) viewport.scrollTop = snapshot.scrollTop + delta;
+    held = null;
+    return true;
+  }
+
+  function release(contentLength: number, loading: boolean): void {
+    if (foreign()) return;
+    const snapshot = held;
+    if (snapshot === null) return;
+    if (!loading && contentLength === snapshot.count) held = null;
+  }
+
+  function drop(): void {
+    held = null;
+  }
+
+  return {
+    get pending() {
+      return held !== null;
+    },
+    capture,
+    consume,
+    release,
+    drop,
+  };
+}
+
 /** Scroll-pin function for a raw-toggle on a single message bubble. The markdown/Shiki
  *  mount settles across several frames: when a taller-than-raw bubble collapses (or vice
  *  versa) the control the user just clicked would drift away from the cursor. `pin` keeps

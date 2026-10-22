@@ -31,7 +31,9 @@ Deno.test(
   () => {
     const src = source(COMPOSER);
     assert(
-      src.includes("(!value && !emptyOk) || !options.canSubmit() || sending"),
+      src.includes(
+        "(!value && !emptyOk) || !options.canSubmit() || inFlight()",
+      ),
     );
   },
 );

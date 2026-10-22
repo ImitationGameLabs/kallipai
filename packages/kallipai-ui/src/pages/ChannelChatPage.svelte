@@ -25,9 +25,10 @@
   } from "@kallipai/kallipai-keryx-client";
   import { keryxBaseUrlOrFail } from "../lib/session/archeion.svelte.ts";
   import { managementBackend } from "../lib/manage/client.ts";
-  import { convDraftKey, tagmaDraftKey } from "../lib/session/drafts.ts";
+  import { conversationStorageKey } from "../lib/session/drafts.ts";
   import { channelsStore } from "../lib/session/channels.svelte";
   import { tagmaForConversation } from "../lib/session/convOf.ts";
+  import { createUnresolvedGuard } from "../lib/session/unresolvedGuard.svelte.ts";
   import {
     chat_conversation_unknown,
     chat_offline_no_history,
@@ -43,6 +44,7 @@
     newAttachment,
     type AttachmentItem,
   } from "../lib/attachments.ts";
+  import { createAttachmentTray } from "../lib/attachmentTray.svelte.ts";
   import type { FileAttachment } from "@kallipai/kallipai-lesche-client";
   import { ConversationBase } from "../lib/session/conversation.svelte.ts";
   import { unreadStore, tagmaKey } from "../lib/session/unread.svelte.ts";
@@ -118,37 +120,67 @@
   // from a previous boot). Reverse-resolve the owning tagma from the
   // remembered conv-of keys and mount its degraded offline view, so the
   // page renders history instead of a permanent "opening" placeholder.
-  let unknownConversation = $state(false);
+  // The banner carries the id it was decided for: the page instance survives a
+  // conversation switch (only the route param changes), so an unkeyed flag
+  // would paint the miss over the next conversation. What counts as decided,
+  // and why a still-opening channel records nothing, is the guard's own
+  // module doc.
+  const unresolved = createUnresolvedGuard();
   $effect(() => {
-    if (conv || isLocal) return;
+    if (conv || isLocal) {
+      unresolved.settle();
+      return;
+    }
     const tagmaId = tagmaForConversation(conversationId);
     if (tagmaId) {
+      unresolved.settle();
       void channelsStore.attachOfflineView(tagmaId);
+    } else if (channelsStore.anyChannelOpening) {
+      // Still opening: drop any earlier verdict and wait for the set to drain,
+      // which re-runs this effect and reaches a verdict then.
+      unresolved.settle();
     } else {
-      unknownConversation = true;
+      unresolved.markUnknown(conversationId);
     }
   });
+  const unknownConversation = $derived(unresolved.unknown(conversationId));
 
   // --- attachments (relay 1:1 only; the file button stays off otherwise) ---
   // Picked files upload at once (shared-space put, then inbox delivery);
   // the send gate holds until every item is ready, and one submit fans out
   // one message per file with the composer text riding the first.
-  let attachments = $state<AttachmentItem[]>([]);
+  //
+  // The tray and the draft share one storage key (conversationStorageKey):
+  // an upload that outlives a switch lands in the bucket it was picked for
+  // and a send reads only the current bucket -- a record id minted for one
+  // tagma cannot ride a message to another.
+
+  const storageKey = $derived(
+    conversationStorageKey(
+      conversationId,
+      conv instanceof RelayConversation ? conv.tagmaId : undefined,
+    ),
+  );
+  const tray = createAttachmentTray(() => storageKey);
+  const attachments = $derived(tray.current());
   let attachSeq = 0;
 
-  function setAttachment(id: string, patch: Partial<AttachmentItem>): void {
-    attachments = attachments.map((a) =>
-      a.id === id ? { ...a, ...patch } : a,
-    );
+  function setAttachment(
+    owner: string,
+    id: string,
+    patch: Partial<AttachmentItem>,
+  ): void {
+    tray.patch(owner, id, patch);
   }
 
   async function uploadOne(
     item: AttachmentItem,
     tagmaId: string,
+    owner: string,
   ): Promise<void> {
     const username = archeionSession.user?.username;
     if (!username) {
-      setAttachment(item.id, { status: "failed" });
+      setAttachment(owner, item.id, { status: "failed" });
       return;
     }
     try {
@@ -160,23 +192,29 @@
       // The message references the recipient's inbox copy -- the send
       // response's record id -- which the user keeps full read on (Row1).
       const sent = await client.send(put.record_id, { toTagma: tagmaId });
-      setAttachment(item.id, { status: "ready", recordId: sent.record_id });
+      setAttachment(owner, item.id, {
+        status: "ready",
+        recordId: sent.record_id,
+      });
     } catch {
-      setAttachment(item.id, { status: "failed" });
+      setAttachment(owner, item.id, { status: "failed" });
     }
   }
 
   function onFilesPicked(files: File[]): void {
     if (!(conv instanceof RelayConversation)) return;
+    // The bucket this pick belongs to, captured before any await: the reader
+    // may leave this conversation while the uploads are still running.
+    const owner = storageKey;
     for (const file of files) {
       const item = newAttachment(attachSeq++, file);
-      attachments = [...attachments, item];
+      tray.add(owner, item);
       // Over the client-side cap: no wire traffic, straight to too_large
       // (the server 413 remains the authority for tighter limits).
       if (isTooLarge(item)) {
-        setAttachment(item.id, { status: "too_large" });
+        setAttachment(owner, item.id, { status: "too_large" });
       } else {
-        void uploadOne(item, conv.tagmaId);
+        void uploadOne(item, conv.tagmaId, owner);
       }
     }
   }
@@ -184,12 +222,13 @@
   function retryAttachment(id: string): void {
     const item = attachments.find((a) => a.id === id);
     if (!item || !(conv instanceof RelayConversation)) return;
-    setAttachment(id, { status: "uploading" });
-    void uploadOne(item, conv.tagmaId);
+    const owner = storageKey;
+    setAttachment(owner, id, { status: "uploading" });
+    void uploadOne(item, conv.tagmaId, owner);
   }
 
   function removeAttachment(id: string): void {
-    attachments = attachments.filter((a) => a.id !== id);
+    tray.remove(storageKey, id);
   }
 
   // The card's download I/O: pull the referenced inbox copy (the user
@@ -224,7 +263,7 @@
       for (const att of ready) {
         channelsStore.send(conversationId, "", att);
       }
-      attachments = [];
+      tray.clear(owner);
     },
     // Busy is not a gate: send renders the optimistic line at once and POSTs as
     // soon as the previous POST's user_message frame lands (single-in-flight
@@ -237,19 +276,9 @@
     allowEmpty: () => attachments.length > 0 && allReady(attachments),
   });
 
-  // Draft storage: tagma chats key on the tagma id -- stable across re-KEX
-  // and shared by both entries into this page (the sidebar
-  // /tagma/{tagmaId}/chat route and a /chat/{conversationId} deep link
-  // resolve to the same conversation).
-  // The local chat and the brief window before `conv`
-  // resolves key on the conversation id, so no draft leaks across
-  // conversations.
-  const draftKey = $derived(
-    conv instanceof RelayConversation
-      ? tagmaDraftKey(conv.tagmaId)
-      : convDraftKey(conversationId),
-  );
-  bindDraft(composer, () => draftKey);
+  // Draft storage: the very key the tray uses, so a draft and its
+  // attachments never disagree about which conversation they belong to.
+  bindDraft(composer, () => storageKey);
 
   // Status-area placement: the user's chosen form of the status area --
   // top bar (default) or right sidebar -- persisted across reloads via

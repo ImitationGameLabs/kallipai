@@ -12,9 +12,11 @@
   import type { FileAttachment } from "@kallipai/kallipai-lesche-client";
   import type { DirectMessageRow } from "@kallipai/kallipai-client";
   import type { ConversationLine } from "../lib/transcript.ts";
+  import { untrack } from "svelte";
   import ConversationView from "../components/ConversationView.svelte";
   import { filesClientOrFail } from "../lib/session/archeion.svelte.ts";
   import { directSessionsStore } from "../lib/session/directSessions.svelte";
+  import { createDirectTranscript } from "../lib/session/directTranscript.svelte.ts";
   import { saveBlob } from "../lib/saveBlob.ts";
   import {
     chat_direct_empty,
@@ -26,10 +28,19 @@
 
   let { tagmaId, peerId }: { tagmaId: string; peerId: string } = $props();
 
-  type Phase = "loading" | "ready" | "unavailable";
-  let phase = $state<Phase>("loading");
-  let lines = $state<ConversationLine[]>([]);
-  let lastSeq = $state(0);
+  // The transcript lives in a controller: this page instance is reused when
+  // the route pair changes, so an answer that arrives after the reader moved
+  // on is dropped by generation instead of being written into the new pair.
+  const transcript = createDirectTranscript({
+    fetchPage: (tagma, peer, afterSeq, limit) =>
+      directSessionsStore.fetchTranscript(tagma, peer, afterSeq, limit),
+  });
+  const phase = $derived(transcript.phase);
+  const lines = $derived(
+    transcript.rows
+      .map(toLine)
+      .filter((l): l is ConversationLine => l !== null),
+  );
 
   const peerLabel = $derived(directSessionsStore.peerLabel(peerId));
 
@@ -59,64 +70,27 @@
     };
   }
 
-  /** One transcript refresh: hydrate pages from the top when empty, then an
-   * incremental tail pull keyed on the last seq. Throws map to the
-   * unavailable phase (the retry re-runs the same pipeline). */
-  async function refresh(): Promise<void> {
-    if (lines.length === 0) {
-      const PAGE = 25;
-      const MAX_PAGES = 20;
-      let collected: DirectMessageRow[] = [];
-      let after = 0;
-      for (let i = 0; i < MAX_PAGES; i++) {
-        const batch = await directSessionsStore.fetchTranscript(
-          tagmaId,
-          peerId,
-          after,
-          PAGE,
-        );
-        collected = [...collected, ...batch];
-        if (batch.length < PAGE) break;
-        after = batch[batch.length - 1]!.seq;
-      }
-      lines = collected
-        .map(toLine)
-        .filter((l): l is ConversationLine => l !== null);
-      lastSeq = collected.reduce((max, r) => Math.max(max, r.seq), 0);
-    } else {
-      const batch = await directSessionsStore.fetchTranscript(
-        tagmaId,
-        peerId,
-        lastSeq,
-      );
-      if (batch.length > 0) {
-        lines = [
-          ...lines,
-          ...batch.map(toLine).filter((l): l is ConversationLine => l !== null),
-        ];
-        lastSeq = batch[batch.length - 1]!.seq;
-      }
-    }
-    phase = "ready";
-  }
-
   // Hydrate on mount, then poll while mounted. The poll is page-scoped (the
   // hub list has its own slower one): a transcript nobody is looking at costs
   // nothing, and navigating away tears the interval down with the effect.
+  // Opening a pair bumps the controller's generation, so the previous pair's
+  // answers stop counting the moment the route changes.
   $effect(() => {
-    void tagmaId;
-    void peerId;
-    phase = "loading";
-    lines = [];
-    lastSeq = 0;
+    transcript.open(tagmaId, peerId);
     const run = () => {
-      refresh().catch(() => {
-        phase = "unavailable";
+      // The controller reads its own reactive state (rows, last seq): inside
+      // an effect that would make this effect depend on the answer it just
+      // asked for. The route pair above is the only real trigger.
+      untrack(() => {
+        void transcript.refresh();
       });
     };
-    void run();
+    run();
     const timer = setInterval(run, 15_000);
-    return () => clearInterval(timer);
+    return () => {
+      clearInterval(timer);
+      transcript.close();
+    };
   });
 
   // The file card's download I/O (the ChannelChatPage pattern): pull the
@@ -153,12 +127,7 @@
             <button
               type="button"
               class="btn btn-sm preset-outlined-primary-500 hover:preset-filled-primary-500"
-              onclick={() => {
-                phase = "loading";
-                void refresh().catch(() => {
-                  phase = "unavailable";
-                });
-              }}
+              onclick={() => void transcript.retry()}
             >
               {common_retry()}
             </button>

@@ -15,14 +15,28 @@ export interface ComposerOptions {
   readonly allowEmpty?: () => boolean;
 }
 
+/** The draft a composer is currently bound to: the conversation key plus the
+ *  writer that puts text back for it. bindDraft installs a fresh object per
+ *  key change, so a submit compares objects, not key strings. */
+export interface DraftBinding {
+  readonly key: string;
+  /** Put `text` back for this key; repaints the field only if still bound. */
+  restore: (text: string) => void;
+}
+
 export interface ComposerModel {
   /** Two-way bindable draft text. */
   draft: string;
+  /** The binding bindDraft installed for the current conversation key. A
+   *  submit captures it up front and compares the object, not the key; a
+   *  composer with no binding refuses to send, with a logged contract error. */
+  binding: DraftBinding | undefined;
   /** Increments on each requestFocus; an effect keyed on it focuses the field. */
   readonly focusToken: number;
   readonly canSend: boolean;
-  /** True while a submit is awaiting the transport (covers the parked
-   * retry window); drives the send button spinner. */
+  /** True while the conversation this composer is bound to has a submit in
+   *  flight (covers the parked retry window); drives the button spinner.
+   *  Another conversation's in-flight send leaves this one free. */
   readonly sending: boolean;
   requestFocus: () => void;
   submit: () => Promise<void>;
@@ -40,11 +54,17 @@ export function createComposer(options: ComposerOptions): ComposerModel {
     set draft(value: string) {
       draft = value;
     },
+    get binding() {
+      return binding;
+    },
+    set binding(value: DraftBinding | undefined) {
+      binding = value;
+    },
     get focusToken() {
       return focusToken;
     },
     get sending() {
-      return sending;
+      return inFlight();
     },
     get canSend() {
       return (
@@ -57,22 +77,38 @@ export function createComposer(options: ComposerOptions): ComposerModel {
     },
     async submit() {
       const value = draft.trim();
+      // Hold the binding this submit started under: the reader may move to
+      // another conversation before the transport answers.
+      const bound = binding;
       // allowEmpty lifts the non-empty rule (attachment-only sends once
       // every upload is ready); the default keeps the historical gate.
       const emptyOk = options.allowEmpty?.() ?? false;
-      if ((!value && !emptyOk) || !options.canSubmit() || sending) return;
-      sending = true;
+      if ((!value && !emptyOk) || !options.canSubmit() || inFlight()) return;
+      if (bound === undefined) {
+        // A host that never installed a binding cannot say where this text
+        // came from, so a failed send would have nowhere safe to put it
+        // back. Sending anyway is the cross-conversation write this seam
+        // exists to prevent: refuse, and make the broken contract loud.
+        console.error("composer submit without a draft binding");
+        return;
+      }
+      const sendingKey = bound.key;
+      sendingKeys = { ...sendingKeys, [sendingKey]: true };
       draft = "";
       try {
         await options.send(value);
       } catch (e) {
-        // Restore the draft so a failed send does not lose the user's input;
-        // swallow the rejection (the caller surfaces it -- e.g. a room store
-        // marks the optimistic line failed + the page renders a retry).
-        draft = value;
+        // Restore the text where it was typed. Through the captured binding
+        // it always lands under the sending conversation's key, and the field
+        // is repainted only while the composer still holds this same binding.
+        // The caller surfaces the failure: a room store marks the optimistic
+        // line failed and the page renders its retry.
+        bound.restore(value);
         if (e instanceof Error) console.error("send failed:", e.message);
       } finally {
-        sending = false;
+        const next = { ...sendingKeys };
+        delete next[sendingKey];
+        sendingKeys = next;
       }
     },
   };
