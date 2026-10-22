@@ -476,3 +476,33 @@ async fn read_history_counts_the_rows_it_cannot_decode() {
     assert_eq!(page.entries.len(), 1, "the decodable row still replays");
     assert_eq!(page.undecodable, 1, "the undecodable row is counted");
 }
+
+/// A query naming two cursors asks for two windows at once, so it is
+/// refused even when the projector carries no store: a missing store is
+/// not an answer to a question that has no answer.
+#[tokio::test]
+async fn read_history_refuses_two_cursors_without_a_store() {
+    let state = make_state();
+    let projector = ExternalProjector::new(
+        Arc::downgrade(&state),
+        None,
+        None,
+        Some(tagma_id()),
+        None,
+        MessageLimits::default(),
+    );
+    let err = projector
+        .read_history(None, Some(10), Some(20), 50)
+        .await
+        .expect_err("two cursors name two windows");
+    assert!(
+        matches!(
+            err,
+            HistoryReadError::BothCursors {
+                after: 10,
+                before: 20
+            }
+        ),
+        "expected BothCursors, got {err:?}"
+    );
+}

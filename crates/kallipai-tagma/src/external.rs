@@ -470,7 +470,8 @@ impl ExternalProjector {
     }
 
     /// Read a history window for one peer partition as decoded entries (each a
-    /// sender and reply) with a `more` flag. Used by the direct
+    /// sender and reply) with a `more` flag and the count of rows that did
+    /// not decode. Used by the direct
     /// `/external/history` endpoint and the relay history replay (the single
     /// read path). `user_id = None` reads the operator (direct) partition;
     /// `Some(id)` reads that peer's relay partition. `more` is true only for
@@ -479,13 +480,15 @@ impl ExternalProjector {
     /// reconstructed per row: outbound becomes the agent, inbound becomes the
     /// peer (or the operator for `NULL`).
     ///
-    /// The contract: **an `Ok` empty window means the conversation really holds
-    /// nothing there.** Nothing else produces one. A store that cannot be read
-    /// is `Err`, a window the decoder could not read whole reports the dropped
-    /// rows in `undecodable` (the page is then a hole, not a complete window),
-    /// and a query naming two cursors is refused rather than answered with an
-    /// empty page. The one empty window above suspicion is "no store yet": a
-    /// tagma that never wrote a row.
+    /// The contract: **an `Ok` empty window in which nothing was dropped
+    /// (`undecodable == 0`) means the conversation really holds nothing
+    /// there.** Nothing else produces one in production. A store that cannot
+    /// be read is `Err`; a window the decoder could not read whole reports
+    /// the dropped rows in `undecodable`, and the page is then a hole, not a
+    /// complete window; a query naming two cursors is refused rather than
+    /// answered with an empty page. The one remaining `Ok` empty window
+    /// comes from a projector assembled without a store, which only test
+    /// wiring builds.
     pub(crate) async fn read_history(
         &self,
         user_id: Option<&str>,
@@ -493,24 +496,29 @@ impl ExternalProjector {
         before: Option<i64>,
         limit: u32,
     ) -> Result<HistoryPage, HistoryReadError> {
+        // A query naming two cursors asks for two windows at once. Refused
+        // before the store check, so a projector without a store cannot
+        // answer it with an empty page either.
+        if let (Some(a), Some(b)) = (after, before) {
+            error!(
+                after = a,
+                before = b,
+                "history read refused: two cursors name two windows"
+            );
+            return Err(HistoryReadError::BothCursors {
+                after: a,
+                before: b,
+            });
+        }
         let Some(db) = self.inner.history.clone() else {
             return Ok(HistoryPage::default());
         };
-        let rows = match (after, before) {
-            (Some(a), Some(b)) => {
-                error!(
-                    after = a,
-                    before = b,
-                    "history read refused: both cursors name no window"
-                );
-                return Err(HistoryReadError::BothCursors {
-                    after: a,
-                    before: b,
-                });
-            }
-            (Some(a), None) => chat_history::read_after(&db, user_id, a, limit).await,
-            (None, Some(b)) => chat_history::read_before(&db, user_id, b, limit).await,
-            (None, None) => chat_history::read_last_n(&db, user_id, limit as u64).await,
+        let rows = if let Some(a) = after {
+            chat_history::read_after(&db, user_id, a, limit).await
+        } else if let Some(b) = before {
+            chat_history::read_before(&db, user_id, b, limit).await
+        } else {
+            chat_history::read_last_n(&db, user_id, limit as u64).await
         };
         let rows = match rows {
             Ok(r) => r,

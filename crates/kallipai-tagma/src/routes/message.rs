@@ -171,9 +171,9 @@ pub struct ExternalHistoryResponse {
     pub more: bool,
     /// Rows the window held that the decoder could not read: they are not in
     /// `rows`, so a non-zero count means this page is a hole in the history
-    /// rather than a complete window. Absent on payloads from a tagma that
-    /// predates the field (`serde(default)`), where it reads as zero.
-    #[serde(default)]
+    /// rather than a complete window. This struct only serializes, so the
+    /// field always goes out; the compatibility lives in the client, where
+    /// `undecodable` is optional and the direct transport fills in zero.
     pub undecodable: u32,
 }
 
