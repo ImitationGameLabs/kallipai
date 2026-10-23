@@ -57,7 +57,7 @@ export function parkedReasonText(r: WireParkedReason, now: number): string {
       v.reset !== undefined && v.reset > now
         ? `, reopens in ${remainingHint(now, v.reset)}`
         : "";
-    return `quota blocked (${v.endpoint} · account ${v.accountHint}${reset}): ${v.detail}`;
+    return `quota blocked (${v.profile}${reset}): ${v.detail}`;
   }
   return unrecognized(Object.keys(r)[0]);
 }

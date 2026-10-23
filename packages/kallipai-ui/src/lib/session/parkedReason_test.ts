@@ -60,39 +60,34 @@ Deno.test("transient retry exhaust renders its fixed word", () => {
   );
 });
 
-Deno.test(
-  "quota block renders endpoint, account hint, reset and evidence",
-  () => {
-    assertEquals(
-      parkedReasonText(
-        {
-          quotaBlocked: {
-            endpoint: "openai",
-            accountHint: "3f9a1b2c",
-            reset: NOW + 2 * 3_600 + 3 * 60,
-            detail: "insufficient_quota",
-          },
+Deno.test("quota block renders profile, reset and evidence", () => {
+  assertEquals(
+    parkedReasonText(
+      {
+        quotaBlocked: {
+          profile: "deepseek-main",
+          reset: NOW + 2 * 3_600 + 3 * 60,
+          detail: "insufficient_quota",
         },
-        NOW,
-      ),
-      "quota blocked (openai · account 3f9a1b2c, reopens in 2h 3min): insufficient_quota",
-    );
-  },
-);
+      },
+      NOW,
+    ),
+    "quota blocked (deepseek-main, reopens in 2h 3min): insufficient_quota",
+  );
+});
 
 Deno.test("a quota block without a reset hint omits the reopens clause", () => {
   assertEquals(
     parkedReasonText(
       {
         quotaBlocked: {
-          endpoint: "openai",
-          accountHint: "3f9a1b2c",
+          profile: "deepseek-main",
           detail: "insufficient_quota",
         },
       },
       NOW,
     ),
-    "quota blocked (openai · account 3f9a1b2c): insufficient_quota",
+    "quota blocked (deepseek-main): insufficient_quota",
   );
 });
 
@@ -101,15 +96,14 @@ Deno.test("a reset hint already past is not rendered as a promise", () => {
     parkedReasonText(
       {
         quotaBlocked: {
-          endpoint: "openai",
-          accountHint: "3f9a1b2c",
+          profile: "deepseek-main",
           reset: NOW - 1,
           detail: "insufficient_quota",
         },
       },
       NOW,
     ),
-    "quota blocked (openai · account 3f9a1b2c): insufficient_quota",
+    "quota blocked (deepseek-main): insufficient_quota",
   );
 });
 

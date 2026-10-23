@@ -41,14 +41,12 @@ export type WireParkedReason =
   | "maxRoundsExceeded"
   | "transientRetryExhausted";
 
-/** The structured reason a quota or payment block parks an agent: which endpoint
- * (provider id) and account hit the wall, the moment the upstream said service
- * resumes, and the evidence. `accountHint` is 8 hex of the credential
- * fingerprint; `reset` is the display face of the upstream's own hint, omitted
+/** The structured reason a quota or payment block parks an agent: the profile
+ * that hit the wall, the moment the upstream said service resumes, and the
+ * evidence. `reset` is the display face of the upstream's own hint, omitted
  * when it gave none or gave one past the trust bound. */
 export interface WireQuotaBlockedInfo {
-  readonly endpoint: string;
-  readonly accountHint: string;
+  readonly profile: string;
   readonly reset?: number;
   readonly detail: string;
 }
