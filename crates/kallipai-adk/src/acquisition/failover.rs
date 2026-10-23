@@ -293,20 +293,37 @@ pub(crate) async fn advance_failover(
                 // the rebuilt request fits. summarize_and_evict no-ops when the context already
                 // fits (it checks before any LLM call); it uses ctx.client, already swapped to
                 // the working profile above.
-                let messages = match summarize_and_evict(ctx).await {
-                    Ok(CompactOutcome::Compacted) => compose_context(ctx.store.clone()).await,
-                    Ok(CompactOutcome::NothingToCompact) => prior_messages,
-                    Ok(CompactOutcome::BudgetExceeded { consumed, budget }) => {
-                        return FailoverOutcome::BudgetExceeded { consumed, budget };
-                    }
-                    Err(err) => {
-                        warn!("failover compaction failed on the new endpoint: {err:#}");
-                        match note_compaction_failure(ctx, &err, round).await {
-                            CompactionVerdict::Stop { message } => {
-                                return FailoverOutcome::Stop { message };
-                            }
-                            CompactionVerdict::Retry { .. } | CompactionVerdict::Defer { .. } => {
-                                prior_messages
+                // The pass answers to the same window the sends do: an endpoint
+                // the table has marked gets no summarizer call. The claim channel is
+                // not available this early — the episode still holds the window it
+                // took on the profile that just failed, and the fresh one starts once
+                // this returns — so the pass stands down by reading the table, and the
+                // carried context goes out as it stands.
+                let paced = ctx.profile_pacing.as_deref().is_some_and(|health| {
+                    candidate_marked(health, &candidate.id, timefmt::now_epoch())
+                });
+                let messages = if paced {
+                    warn!(
+                        from = %from,
+                        candidate = %candidate.id,
+                        "the new endpoint is paced: compaction skipped"
+                    );
+                    prior_messages
+                } else {
+                    match summarize_and_evict(ctx).await {
+                        Ok(CompactOutcome::Compacted) => compose_context(ctx.store.clone()).await,
+                        Ok(CompactOutcome::NothingToCompact) => prior_messages,
+                        Ok(CompactOutcome::BudgetExceeded { consumed, budget }) => {
+                            return FailoverOutcome::BudgetExceeded { consumed, budget };
+                        }
+                        Err(err) => {
+                            warn!("failover compaction failed on the new endpoint: {err:#}");
+                            match note_compaction_failure(ctx, &err, round).await {
+                                CompactionVerdict::Stop { message } => {
+                                    return FailoverOutcome::Stop { message };
+                                }
+                                CompactionVerdict::Retry { .. }
+                                | CompactionVerdict::Defer { .. } => prior_messages,
                             }
                         }
                     }
