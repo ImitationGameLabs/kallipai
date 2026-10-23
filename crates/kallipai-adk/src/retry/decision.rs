@@ -405,6 +405,11 @@ pub(crate) enum ShapeKey {
 /// Shape-class retries allowed for one shape key, per endpoint, per episode.
 const SHAPE_REPEAT_ALLOWED: u32 = 1;
 
+/// Sends one episode spends on a throttle before the chain is charged: the
+/// first send and one jittered resend. The episode's own budget caps the
+/// allowance too, so the row can never vote past what the send path allows.
+const THROTTLE_SENDS_ALLOWED: u32 = 2;
+
 /// Shape-class sends the episode may still perform for `key`: the per-shape
 /// allowance minus the one already spent when the episode's slot holds that same
 /// shape. A different key starts a fresh allowance — the slot is per shape, and
@@ -434,8 +439,12 @@ pub(crate) enum TransientKind {
 pub(crate) enum FailureClass {
     /// Worth another send after a backoff.
     Transient(TransientKind),
-    /// Quota or payment rejection: 429, 402, or a 403 carrying quota evidence.
+    /// Quota or payment rejection: 402, a 403 carrying quota evidence, or a
+    /// 429 that names its reset moment.
     QuotaBlocked,
+    /// A throttle the upstream left open-ended: a 429 that names no reset
+    /// moment. Worth one jittered send before the chain is charged.
+    Throttled,
     /// The endpoint or its credentials cannot serve this request.
     EndpointPermanent,
     /// The request itself is bad: resending it changes nothing.
@@ -455,6 +464,7 @@ impl FailureClass {
         match self {
             Self::Transient(_) => "transient failure",
             Self::QuotaBlocked => "upstream quota or payment rejection",
+            Self::Throttled => "upstream throttled the request with no reset moment",
             Self::EndpointPermanent => "endpoint or credentials rejected the request",
             Self::RequestPermanent => "the request itself was rejected",
             Self::LocalConfig => "local client configuration error",
@@ -593,8 +603,12 @@ fn from_status(
 ) -> FailureClass {
     use reqwest::StatusCode as Status;
     match status {
-        // Quota and payment rejections share one class: neither recovers by
-        // resending the same request.
+        // A 429 that names its reset moment is a quota rejection like any
+        // other: 402 and a 403 carrying quota evidence join it. One that
+        // names none is a throttle — the upstream is still saying later, not
+        // that this account is out — so the episode spends one jittered send
+        // on it before the chain is charged.
+        Status::TOO_MANY_REQUESTS if !body_carries_reset_hint(body) => FailureClass::Throttled,
         Status::TOO_MANY_REQUESTS | Status::PAYMENT_REQUIRED => FailureClass::QuotaBlocked,
         Status::FORBIDDEN if quota_evidence(code, error_type, body) => FailureClass::QuotaBlocked,
         // Credentials or endpoint identity: another profile may serve.
@@ -667,8 +681,8 @@ fn from_transport(error: &TransportError, phase: Phase) -> FailureClass {
 }
 
 /// The observation kind recorded when this class's failure leaves one: the retry
-/// that follows it, or the stop it lands on (a quota rejection never reaches the
-/// retry arm, so its record is the stop). `Some` marks the classes that can write
+/// that follows it, or the stop it lands on. A throttle reaches both arms, so its
+/// record is the one the verdict chose. `Some` marks the classes that can write
 /// a record; an episode whose budget or deadline ends the round records nothing.
 ///
 /// The retry log is an observation surface, not a budget ledger: a class with
@@ -687,7 +701,7 @@ pub(crate) fn retry_kind(class: &FailureClass) -> Option<RetryKind> {
         }
         FailureClass::Transient(TransientKind::Timeout) => Some(RetryKind::Timeout),
         FailureClass::Transient(TransientKind::Server) => Some(RetryKind::Server),
-        FailureClass::QuotaBlocked => Some(RetryKind::RateLimit),
+        FailureClass::QuotaBlocked | FailureClass::Throttled => Some(RetryKind::RateLimit),
         FailureClass::ResponseShape => Some(RetryKind::Transport),
         FailureClass::EndpointPermanent
         | FailureClass::RequestPermanent
@@ -704,11 +718,11 @@ const RESET_HINT_KEYS: [&str; 3] = ["retry_after", "retryDelay", "retry_after_se
 /// The fact this class leaves behind, if the table should carry one.
 ///
 /// The write points are the failover advances, so the mapping covers the
-/// classes that reach one: a quota or payment rejection, a credential or
-/// endpoint-identity rejection, and a response shape that arrived twice. The
-/// other classes are either retried on the same endpoint (the transient rows)
-/// or are about the request itself, which a sibling endpoint would reject the
-/// same way.
+/// classes that reach one: a quota or payment rejection, a throttle that names
+/// no reset moment, a credential or endpoint-identity rejection, and a response
+/// shape that arrived twice. The other classes are either retried on the same
+/// endpoint (the transient rows) or are about the request itself, which a
+/// sibling endpoint would reject the same way.
 ///
 /// A shape failure reaches a write point only on its repeat, so
 /// [`FailureClass::ResponseShape`] maps unconditionally: the first failure of
@@ -722,12 +736,15 @@ const RESET_HINT_KEYS: [&str; 3] = ["retry_after", "retryDelay", "retry_after_se
 /// the reader's business, not this function's.
 pub(crate) fn fact_of(class: FailureClass, error: &BackendError, now: u64) -> Option<Block> {
     let kind = match class {
-        // 402 is the provider naming payment; 429 — and a 403 carrying quota
-        // evidence — is exhaustion. One class, two facts.
+        // 402 is the provider naming payment; 403-with-quota-evidence is
+        // exhaustion. A throttle leaves the same exhaustion, with no reset.
         FailureClass::QuotaBlocked => match provider_rejection(error).map(|r| r.status) {
             Some(reqwest::StatusCode::PAYMENT_REQUIRED) => BlockKind::Payment,
             _ => BlockKind::Quota,
         },
+        // A throttle names no reset moment at all, so this block carries no
+        // until: the reader's window rule is what bounds it.
+        FailureClass::Throttled => BlockKind::Quota,
         FailureClass::EndpointPermanent => BlockKind::EndpointAuth,
         FailureClass::ResponseShape => BlockKind::EndpointShape,
         FailureClass::Transient(_)
@@ -742,6 +759,16 @@ pub(crate) fn fact_of(class: FailureClass, error: &BackendError, now: u64) -> Op
         status: provider_rejection(error).map(|rejection| rejection.status.as_u16()),
         recorded_at: now,
     })
+}
+
+/// Whether the provider named a reset moment: the one hint parser, asked
+/// without a clock. An absent, unparsable, or keyless body reads as not
+/// given, exactly as `reset_hint` reads it.
+fn body_carries_reset_hint(body: Option<&str>) -> bool {
+    let Some(body) = body else { return false };
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .is_some_and(|value| find_reset_secs(&value).is_some())
 }
 
 /// The upstream's reset hint as an absolute moment, when it gave one.
@@ -883,6 +910,19 @@ pub(crate) fn decide(facts: &Facts, policy: &RetryPolicy) -> Decision {
                 reason: SHAPE_UNIDENTIFIED,
             },
         },
+        // A throttle the upstream left open-ended spends this episode's sends
+        // before the chain is charged. The allowance is clamped by the budget
+        // the send path's head guard enforces, so a verdict past it can never
+        // come back as a spent budget.
+        FailureClass::Throttled => {
+            if facts.attempts < THROTTLE_SENDS_ALLOWED.min(max_sends(policy)) {
+                retry_or_stop(facts, policy)
+            } else {
+                Decision::AdvanceFailover {
+                    reason: class.label(),
+                }
+            }
+        }
         FailureClass::QuotaBlocked | FailureClass::EndpointPermanent => Decision::AdvanceFailover {
             reason: class.label(),
         },
@@ -1242,6 +1282,14 @@ mod tests {
     fn http_status_rows_of_the_table() {
         assert_eq!(
             classify_connect(&provider_status(StatusCode::TOO_MANY_REQUESTS, "")),
+            FailureClass::Throttled
+        );
+        // A 429 that names its reset moment is the quota wall it always was.
+        assert_eq!(
+            classify_connect(&provider_status(
+                StatusCode::TOO_MANY_REQUESTS,
+                r#"{"retry_after":120}"#
+            )),
             FailureClass::QuotaBlocked
         );
         assert_eq!(
@@ -1378,7 +1426,7 @@ mod tests {
                 },
                 Phase::Connect,
             ),
-            FailureClass::QuotaBlocked
+            FailureClass::Throttled
         );
         assert_eq!(
             from_transport(
@@ -1411,6 +1459,10 @@ mod tests {
         );
         assert_eq!(
             retry_kind(&FailureClass::QuotaBlocked),
+            Some(RetryKind::RateLimit)
+        );
+        assert_eq!(
+            retry_kind(&FailureClass::Throttled),
             Some(RetryKind::RateLimit)
         );
         assert_eq!(
@@ -1659,6 +1711,97 @@ mod tests {
             "a shape whose key cannot be computed has no repeat to compare"
         );
     }
+    /// A throttle is the one quota-shaped failure worth another send: this
+    /// episode spends its allowance on the same endpoint, then the chain is
+    /// charged.
+    #[test]
+    fn a_throttle_spends_its_allowance_then_advances() {
+        let policy = policy(4, 1, 5, 60);
+        let throttle = FailureClass::Throttled;
+        let first = Episode::new(1_000).after_attempt();
+        assert_eq!(
+            decide(
+                &facts(&first, Phase::Connect, Some(throttle), None, Duration::ZERO),
+                &policy
+            ),
+            Decision::Retry {
+                after: Duration::from_secs(1)
+            },
+            "the throttled send is repeated once"
+        );
+
+        let spent = first.after_attempt();
+        assert_eq!(
+            decide(
+                &facts(&spent, Phase::Connect, Some(throttle), None, Duration::ZERO),
+                &policy
+            ),
+            Decision::AdvanceFailover {
+                reason: "upstream throttled the request with no reset moment"
+            },
+            "the allowance, not the episode budget, is what ends the retry"
+        );
+    }
+
+    /// The allowance may not outvote the episode's own budget: the send path's
+    /// head guard reads a verdict past it as a spent budget and fails the round,
+    /// so a one-send budget advances instead of retrying.
+    #[test]
+    fn a_throttle_never_votes_past_the_episode_budget() {
+        let policy = policy(0, 1, 5, 60);
+        let first = Episode::new(1_000).after_attempt();
+        assert_eq!(
+            decide(
+                &facts(
+                    &first,
+                    Phase::Connect,
+                    Some(FailureClass::Throttled),
+                    None,
+                    Duration::ZERO
+                ),
+                &policy
+            ),
+            Decision::AdvanceFailover {
+                reason: "upstream throttled the request with no reset moment"
+            }
+        );
+    }
+
+    /// The deadline governs the throttle retry as it governs every other one.
+    #[test]
+    fn a_throttle_retry_still_obeys_the_episode_deadline() {
+        let policy = policy(4, 1, 5, 0);
+        let first = Episode::new(1_000).after_attempt();
+        assert_eq!(
+            decide(
+                &facts(
+                    &first,
+                    Phase::Connect,
+                    Some(FailureClass::Throttled),
+                    None,
+                    Duration::ZERO
+                ),
+                &policy
+            ),
+            Decision::Stop {
+                kind: StopKind::ChainExhausted,
+                reason: DEADLINE_EXHAUSTED
+            }
+        );
+    }
+
+    /// The throttle's fact is the exhaustion it is, with no until: the reader's
+    /// window rule is what bounds it.
+    #[test]
+    fn a_throttle_leaves_the_quota_fact_with_no_until() {
+        let now = 1_700_000_000;
+        let error = provider_status(StatusCode::TOO_MANY_REQUESTS, r#"{"error":"slow down"}"#);
+        assert_eq!(classify_connect(&error), FailureClass::Throttled);
+        let block = fact_of(FailureClass::Throttled, &error, now).expect("a quota fact");
+        assert_eq!(block.kind, BlockKind::Quota);
+        assert_eq!(block.until, None, "the upstream named no moment");
+    }
+
     /// The fact each class leaves behind: the account-level rows (quota, payment)
     /// and the endpoint-level rows (credentials, shape). The classes the table
     /// does not track leave nothing — a transient failure is the same endpoint's
@@ -1670,7 +1813,7 @@ mod tests {
             fact_of(classify_connect(error), error, now).map(|block| block.kind)
         };
 
-        // 429 is exhaustion, 402 is payment: one class, two facts.
+        // A hintless 429 is the throttle, 402 is payment: exhaustion either way.
         let quota = provider_status(StatusCode::TOO_MANY_REQUESTS, "{\"error\":\"slow down\"}");
         assert_eq!(kind(&quota), Some(BlockKind::Quota));
         let payment = provider_status(StatusCode::PAYMENT_REQUIRED, "{\"error\":\"pay up\"}");

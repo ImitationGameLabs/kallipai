@@ -1984,7 +1984,7 @@ mod tests {
                 "recording",
                 TransportError::HttpStatus {
                     status: reqwest::StatusCode::TOO_MANY_REQUESTS,
-                    body: "slow down".to_owned(),
+                    body: crate::test_support::QUOTA_RESET_BODY.to_owned(),
                 },
             ));
         }

@@ -20,8 +20,9 @@ use tokio_util::sync::CancellationToken;
 use crate::budget_gate::{BudgetAction, enforce_pre_call_budget};
 use crate::retry::{AttemptOrigin, Episode, RetryCall, RetryPolicy, stream_with_retry};
 use crate::test_support::{
-    FAILURE_PIN_WINDOW, MapSource, RecordingBackend, RecordingPacing, ctx_from_source, mock_source,
-    profile, request, seed_over_budget_store, set_context_window, system_msg, user_msg,
+    FAILURE_PIN_WINDOW, MapSource, QUOTA_RESET_BODY, RecordingBackend, RecordingPacing,
+    ctx_from_source, mock_source_answering, profile, request, seed_over_budget_store,
+    set_context_window, system_msg, user_msg,
 };
 use just_llm_client::LlmBackend;
 use just_llm_client::types::generation::ReasoningEffort;
@@ -961,7 +962,7 @@ async fn a_quota_rejection_advances_to_the_next_profile() {
         "recording",
         TransportError::HttpStatus {
             status: reqwest::StatusCode::TOO_MANY_REQUESTS,
-            body: "slow down".to_owned(),
+            body: QUOTA_RESET_BODY.to_owned(),
         },
     ));
     backend.queue_stream("resp-1");
@@ -1006,7 +1007,7 @@ async fn a_quota_rejection_with_no_candidate_left_parks() {
         "recording",
         TransportError::HttpStatus {
             status: reqwest::StatusCode::TOO_MANY_REQUESTS,
-            body: "slow down".to_owned(),
+            body: QUOTA_RESET_BODY.to_owned(),
         },
     ));
     // A stream is queued so a second send would succeed: the request count pins
@@ -1039,7 +1040,7 @@ async fn a_quota_rejection_with_no_candidate_left_parks() {
         panic!("a quota rejection with no candidate left parks with the structured reason");
     };
     assert_eq!(info.profile, "a");
-    assert_eq!(info.reset, None, "the body carried no resumption hint");
+    assert!(info.reset.is_some(), "the body named the reset moment");
     assert!(info.detail.contains("429"), "{:?}", info.detail);
     assert_eq!(pacing.recorded().len(), 1, "one rejection, one fact");
     assert_eq!(
@@ -1047,6 +1048,118 @@ async fn a_quota_rejection_with_no_candidate_left_parks() {
         1,
         "the endpoint is asked exactly once"
     );
+}
+
+/// A throttle is not a wall: the episode spends one jittered send on the same
+/// endpoint, and the send after the 429 really happens.
+#[tokio::test]
+async fn a_throttle_that_clears_on_the_retry_serves_the_round() {
+    let backend = RecordingBackend::new();
+    backend.queue_error(BackendError::provider(
+        "recording",
+        TransportError::HttpStatus {
+            status: reqwest::StatusCode::TOO_MANY_REQUESTS,
+            body: "slow down".to_owned(),
+        },
+    ));
+    backend.queue_stream("resp-1");
+    let source = Arc::new(MapSource(HashMap::from([(
+        "p1".to_string(),
+        backend.clone() as Arc<dyn LlmBackend>,
+    )])));
+    let mut ctx = ctx_from_source(
+        vec![profile("a", "p1", 100_000)],
+        source,
+        RetryPolicy {
+            base_delay: std::time::Duration::from_millis(1),
+            max_delay: std::time::Duration::from_millis(5),
+            ..RetryPolicy::default()
+        },
+    )
+    .await;
+    let pacing = Arc::new(RecordingPacing::default());
+    ctx.profile_pacing = Some(pacing.clone());
+
+    let outcome = acquire_stream(
+        &mut ctx,
+        vec![user_msg("q1")],
+        Vec::new(),
+        &tokio::sync::mpsc::channel(16).0,
+        &CancellationToken::new(),
+        0,
+    )
+    .await;
+
+    assert!(
+        matches!(outcome, AcquireResult::Consumed(_)),
+        "the throttled send is repeated, not given up"
+    );
+    assert_eq!(
+        backend.take_requests().len(),
+        2,
+        "one send, one jittered resend on the same endpoint"
+    );
+    assert!(
+        pacing.recorded().is_empty(),
+        "a throttle the resend clears leaves no fact behind"
+    );
+}
+
+/// The allowance is what ends a throttle: two sends, then the park, and the fact
+/// carries no reset moment because the upstream named none.
+#[tokio::test]
+async fn a_throttle_that_does_not_clear_parks_after_the_allowance() {
+    let backend = RecordingBackend::new();
+    for _ in 0..2 {
+        backend.queue_error(BackendError::provider(
+            "recording",
+            TransportError::HttpStatus {
+                status: reqwest::StatusCode::TOO_MANY_REQUESTS,
+                body: "slow down".to_owned(),
+            },
+        ));
+    }
+    // A stream is queued so a third send would succeed: the count pins the claim
+    // that the allowance, not the transport, is what stopped the round.
+    backend.queue_stream("resp-1");
+    let source = Arc::new(MapSource(HashMap::from([(
+        "p1".to_string(),
+        backend.clone() as Arc<dyn LlmBackend>,
+    )])));
+    let mut ctx = ctx_from_source(
+        vec![profile("a", "p1", 100_000)],
+        source,
+        RetryPolicy {
+            base_delay: std::time::Duration::from_millis(1),
+            max_delay: std::time::Duration::from_millis(5),
+            ..RetryPolicy::default()
+        },
+    )
+    .await;
+    let pacing = Arc::new(RecordingPacing::default());
+    ctx.profile_pacing = Some(pacing.clone());
+
+    let outcome = acquire_stream(
+        &mut ctx,
+        vec![user_msg("q1")],
+        Vec::new(),
+        &tokio::sync::mpsc::channel(16).0,
+        &CancellationToken::new(),
+        0,
+    )
+    .await;
+
+    let AcquireResult::Outcome(AgentOutcome::QuotaBlocked(info)) = outcome else {
+        panic!("a throttle with no chain left parks the round");
+    };
+    assert_eq!(info.profile, "a");
+    assert_eq!(info.reset, None, "the body named no reset moment");
+    assert_eq!(
+        backend.take_requests().len(),
+        2,
+        "the episode spends its throttle allowance, then stops"
+    );
+    assert_eq!(pacing.recorded().len(), 1, "the throttle leaves one fact");
 }
 
 /// A candidate that exists but cannot be built is no candidate: the switch finds
@@ -1058,7 +1171,7 @@ async fn an_unbuildable_candidate_turns_a_quota_switch_into_a_park() {
         "recording",
         TransportError::HttpStatus {
             status: reqwest::StatusCode::TOO_MANY_REQUESTS,
-            body: "slow down".to_owned(),
+            body: QUOTA_RESET_BODY.to_owned(),
         },
     ));
     backend.queue_stream("resp-1");
@@ -2043,7 +2156,7 @@ async fn a_post_walk_failure_is_recorded_against_the_profile_that_served_it() {
         "recording",
         TransportError::HttpStatus {
             status: reqwest::StatusCode::TOO_MANY_REQUESTS,
-            body: "slow down".to_owned(),
+            body: QUOTA_RESET_BODY.to_owned(),
         },
     ));
     let source = Arc::new(MapSource(HashMap::from([
@@ -2255,7 +2368,7 @@ const SUMMARY_PROBE_MARKER: &str = "acquisition-summary-probe-marker";
 
 #[tokio::test]
 async fn the_advance_arm_records_the_class_and_clears_the_ledger_for_the_new_endpoint() {
-    let (source, server) = mock_source(&["p1", "p2"], 429).await;
+    let (source, server) = mock_source_answering(&["p1", "p2"], 429, Some(QUOTA_RESET_BODY)).await;
     let mut ctx = ctx_from_source(
         vec![
             profile("a", "p1", FAILURE_PIN_WINDOW),

@@ -4,9 +4,11 @@
 //! `just_llm_client::Conversation` boundary: each attempt asks the conversation to open a
 //! streaming generation and classifies the resulting [`BackendError`] through the
 //! `decision` table — by HTTP status for provider rejections, by variant otherwise. Only the
-//! transient classes retry: a quota or payment rejection (429/402) advances the failover
-//! chain instead, and the endpoint-level permanent classes (401/403/404) do the same. Both
-//! write what they learned to the shared upstream fact table. The
+//! transient classes retry: a quota or payment rejection (402, a 403 carrying quota
+//! evidence, or a 429 that names its reset moment) advances the failover chain instead, and
+//! the endpoint-level permanent classes (401/403/404) do the same. A 429 that names no reset
+//! moment is a throttle: it spends this episode's allowance on the same endpoint first. All
+//! of them write what they learned to the shared upstream fact table. The
 //! retry budget is the episode's own attempt count ([`Episode`]), not the persisted retry
 //! log: `max_retries` bounds the sends of one episode, `retry_timeout` bounds how long that
 //! episode stays on trial. The server's `retry-after` header is not reachable through the
@@ -433,7 +435,9 @@ pub async fn stream_with_retry(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{RecordingBackend, RecordingPacing, request, user_msg};
+    use crate::test_support::{
+        QUOTA_RESET_BODY, RecordingBackend, RecordingPacing, request, user_msg,
+    };
     use just_llm_client::TransportError;
     use kallipai_common::facts::{Block, BlockKind};
     use kallipai_common::retry::RetryKind;
@@ -547,10 +551,81 @@ mod tests {
             .await;
     }
 
+    /// The same mount, answering with a body: where a quota row names the moment
+    /// it can be used again.
+    async fn mount_status_with_body(server: &MockServer, status: u16, body: &str) {
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(status)
+                    .insert_header("content-type", "application/json")
+                    .set_body_string(body.to_owned()),
+            )
+            .mount(server)
+            .await;
+    }
+
+    /// A throttle names no reset moment, so the same endpoint is worth one more
+    /// send: the episode spends it, then the round hands the switch on.
     #[tokio::test]
-    async fn rate_limit_switches_without_retrying() {
+    async fn a_throttle_spends_one_resend_then_switches() {
         let server = MockServer::start().await;
         mount_status(&server, 429).await;
+
+        let client = mock_client(&server);
+        let mut conversation = client.conversation();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        let mut retry_log = Vec::new();
+        let mut episode = Episode::new(timefmt::now_epoch());
+
+        let result = stream_with_retry(
+            RetryCall {
+                conversation: &mut conversation,
+                request: request("gpt-4.1-mini", vec![user_msg("hi")]),
+                policy: &fast_policy(4),
+                round: 0,
+                episode: &mut episode,
+                provider_id: "test",
+                profile_id: "test",
+                pacing: None,
+            },
+            &tx,
+            &mut retry_log,
+            CancellationToken::new(),
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(RequestFailure::Switch {
+                reason: "upstream throttled the request with no reset moment",
+                ..
+            })
+        ));
+        assert_eq!(retrying_count(&mut rx), 1, "one retry precedes the switch");
+        assert_eq!(
+            episode.attempts(),
+            2,
+            "the episode spent its throttle allowance"
+        );
+        assert_eq!(
+            server.received_requests().await.unwrap().len(),
+            2,
+            "the throttled send is repeated once, no more"
+        );
+        assert_eq!(retry_log.len(), 2, "one retry record and one observation");
+        assert!(
+            retry_log
+                .iter()
+                .all(|record| record.kind == RetryKind::RateLimit),
+            "both records name the rate limit"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_quota_wall_that_names_its_reset_switches_without_retrying() {
+        let server = MockServer::start().await;
+        mount_status_with_body(&server, 429, QUOTA_RESET_BODY).await;
 
         let client = mock_client(&server);
         let mut conversation = client.conversation();
@@ -587,9 +662,9 @@ mod tests {
         assert_eq!(retry_log.len(), 1, "a quota rejection writes one record");
         assert!(matches!(retry_log[0].kind, RetryKind::RateLimit));
         assert_eq!(retry_log[0].delay_secs, 0.0, "no wait precedes the switch");
-        assert_eq!(
-            retry_log[0].quota_reset, None,
-            "a bare rejection carries no reset hint"
+        assert!(
+            retry_log[0].quota_reset.is_some(),
+            "the body named the reset moment"
         );
         assert_eq!(retrying_count(&mut rx), 0);
         assert_eq!(

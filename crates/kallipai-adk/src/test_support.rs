@@ -216,6 +216,10 @@ pub(crate) async fn ctx_with_unservable_image() -> (AgentContext, Arc<RecordingB
 /// touching the network.
 pub(crate) const PLACEHOLDER_KEY_STATUS: u16 = 401;
 
+/// The body a quota rejection carries when it names its reset moment: what
+/// separates the quota wall from a throttle in the class table.
+pub(crate) const QUOTA_RESET_BODY: &str = r#"{"error":"slow down","retry_after":120}"#;
+
 /// A `MapSource` of loopback-mock backends: every provider id maps to a real
 /// OpenAI-compatible backend pointed at a mock server, so a round's HTTP call
 /// never leaves the host and a wall-clock budget races neither DNS nor TLS. The
@@ -225,9 +229,25 @@ pub(crate) async fn mock_source(
     providers: &[&str],
     status: u16,
 ) -> (Arc<dyn BackendSource>, wiremock::MockServer) {
+    mock_source_answering(providers, status, None).await
+}
+
+/// [`mock_source`] whose answer carries a body too: where a quota row names the
+/// moment it can be used again.
+pub(crate) async fn mock_source_answering(
+    providers: &[&str],
+    status: u16,
+    body: Option<&str>,
+) -> (Arc<dyn BackendSource>, wiremock::MockServer) {
     let server = wiremock::MockServer::start().await;
+    let mut template = wiremock::ResponseTemplate::new(status);
+    if let Some(body) = body {
+        template = template
+            .insert_header("content-type", "application/json")
+            .set_body_string(body.to_owned());
+    }
     wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .respond_with(wiremock::ResponseTemplate::new(status))
+        .respond_with(template)
         .mount(&server)
         .await;
     let backend = just_llm_client::provider::OpenAiCompatBackend::new(

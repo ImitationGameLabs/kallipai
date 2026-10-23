@@ -173,8 +173,9 @@ mod tests {
     use crate::retry::decision::RETRY_JITTER_MAX;
     use crate::retry::{RetryPolicy, max_sends};
     use crate::test_support::{
-        FAILURE_PIN_WINDOW, RecordingPacing, ctx_from_source, make_ctx, mock_source, mount_summary,
-        profile, seed_over_budget_store, set_context_window, usage,
+        FAILURE_PIN_WINDOW, QUOTA_RESET_BODY, RecordingPacing, ctx_from_source, make_ctx,
+        mock_source_answering, mount_summary, profile, seed_over_budget_store, set_context_window,
+        usage,
     };
     use kallipai_common::retry::RetryKind;
     use std::sync::Arc;
@@ -205,7 +206,16 @@ mod tests {
     /// drops the progressive-warning level so one call reaches the compaction
     /// branch.
     async fn gate_ctx(status: u16, policy: RetryPolicy) -> (AgentContext, wiremock::MockServer) {
-        let (source, server) = mock_source(&["ep1"], status).await;
+        gate_ctx_answering(status, None, policy).await
+    }
+
+    /// [`gate_ctx`] whose summarizer answer carries a body too.
+    async fn gate_ctx_answering(
+        status: u16,
+        body: Option<&str>,
+        policy: RetryPolicy,
+    ) -> (AgentContext, wiremock::MockServer) {
+        let (source, server) = mock_source_answering(&["ep1"], status, body).await;
         let mut ctx = ctx_from_source(vec![profile("p1", "ep1", 500_000)], source, policy).await;
         ctx.config.context_thresholds = vec![80];
         set_context_window(&mut ctx, FAILURE_PIN_WINDOW).await;
@@ -435,7 +445,8 @@ mod tests {
     /// gate quiet until the main send's outcome is known, and the round sends.
     #[tokio::test]
     async fn a_chain_owned_compaction_failure_is_deferred_to_the_main_send() {
-        let (mut ctx, server) = gate_ctx(429, latching_policy()).await;
+        let (mut ctx, server) =
+            gate_ctx_answering(429, Some(QUOTA_RESET_BODY), latching_policy()).await;
         let pacing = Arc::new(RecordingPacing::default());
         ctx.profile_pacing = Some(pacing.clone());
 

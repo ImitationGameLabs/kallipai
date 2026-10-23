@@ -481,7 +481,10 @@ async fn on_mid_stream_failure(
             // The class decides the carrier, exactly as it does on the
             // send path: a kind that parks the round uses the structured
             // reason, every other kind keeps its wording.
-            let exhaustion = if class == decision::FailureClass::QuotaBlocked {
+            let exhaustion = if matches!(
+                class,
+                decision::FailureClass::QuotaBlocked | decision::FailureClass::Throttled
+            ) {
                 Exhaustion::QuotaBlocked(quota_blocked_payload(ctx, &profile_id, rendered.clone()))
             } else {
                 Exhaustion::ExternalOnly {
