@@ -69,10 +69,10 @@ pub struct RetryRecord {
     /// is an observation rather than a retry that ran.
     pub delay_secs: f64,
     /// Provider id this retry was against (`None` on legacy records). Each record names the
-    /// endpoint it was observed on; the retry budget itself belongs to the episode, not to
-    /// the endpoint.
+    /// provider it was observed on; the retry budget itself belongs to the episode, not to
+    /// the provider.
     #[serde(default)]
-    pub endpoint: Option<String>,
+    pub provider: Option<String>,
     /// Coarse failure class (see [`RetryKind`]); defaults to transport on
     /// legacy records.
     #[serde(default)]
@@ -108,7 +108,7 @@ impl RetryRecord {
     pub fn retry(
         at: RetryAttempt,
         now: u64,
-        endpoint: Option<String>,
+        provider: Option<String>,
         kind: RetryKind,
         error: String,
         delay_secs: f64,
@@ -120,7 +120,7 @@ impl RetryRecord {
             max_attempts: at.max_attempts,
             error,
             delay_secs,
-            endpoint,
+            provider,
             kind,
             quota_reset: None,
         }
@@ -132,7 +132,7 @@ impl RetryRecord {
     pub fn observed(
         at: RetryAttempt,
         now: u64,
-        endpoint: Option<String>,
+        provider: Option<String>,
         kind: RetryKind,
         error: String,
         quota_reset: Option<u64>,
@@ -144,7 +144,7 @@ impl RetryRecord {
             max_attempts: at.max_attempts,
             error,
             delay_secs: 0.0,
-            endpoint,
+            provider,
             kind,
             quota_reset,
         }

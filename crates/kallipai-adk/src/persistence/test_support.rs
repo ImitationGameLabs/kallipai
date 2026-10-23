@@ -72,7 +72,7 @@ pub fn wreckable_dir(oldest_damaged: bool) -> (TempDir, ContextStore) {
         max_attempts: 3,
         error: "wreck".into(),
         delay_secs: 1.0,
-        endpoint: None,
+        provider: None,
         kind: kallipai_common::retry::RetryKind::Transport,
         quota_reset: None,
     });
@@ -103,7 +103,7 @@ pub fn legacy_fixture() -> (ContextStore, Vec<TurnMessage>) {
         max_attempts: 3,
         error: "legacy".into(),
         delay_secs: 1.0,
-        endpoint: None,
+        provider: None,
         kind: kallipai_common::retry::RetryKind::Transport,
         quota_reset: None,
     });

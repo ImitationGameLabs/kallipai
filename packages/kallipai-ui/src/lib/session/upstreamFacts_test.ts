@@ -14,15 +14,14 @@ const quota: FactView = {
   until: NOW + 2 * 3_600,
   detail: "insufficient_quota",
   recorded_at: NOW - 60,
-  endpoint: { family: "openai", base_url: "https://api.openai.com/v1" },
-  account_hint: "3f9a1b2c",
+  profile: "openai-main",
 };
 
 const payment: FactView = {
   kind: "payment",
   detail: "billing hard limit reached",
   recorded_at: NOW - 30,
-  account_hint: "aa11bb22",
+  profile: "billing-main",
 };
 
 Deno.test("one line per fact, in the wire's own order", () => {
@@ -32,25 +31,14 @@ Deno.test("one line per fact, in the wire's own order", () => {
   assertEquals(lines[1]?.kind, "payment");
 });
 
-Deno.test(
-  "an endpoint fact names its family, an account fact is account-wide",
-  () => {
-    const lines = factLines([quota, payment], NOW);
-    assertEquals(lines[0]?.scope, "openai");
-    assertEquals(lines[1]?.scope, "account-wide");
-  },
-);
-
-Deno.test("the account hint renders as the wire's eight hex", () => {
-  assertEquals(factLines([quota], NOW)[0]?.account, "account 3f9a1b2c");
+Deno.test("each line names the profile the fact is about", () => {
+  const lines = factLines([quota, payment], NOW);
+  assertEquals(lines[0]?.profile, "openai-main");
+  assertEquals(lines[1]?.profile, "billing-main");
 });
 
 Deno.test("a reset hint renders as a countdown", () => {
   assertEquals(factLines([quota], NOW)[0]?.reopens, "reopens in 2h");
-});
-
-Deno.test("an account-wide fact carries no endpoint", () => {
-  assertEquals(factLines([payment], NOW)[0]?.endpoint, undefined);
 });
 
 Deno.test("no reset hint, or one already past, renders no countdown", () => {
@@ -68,25 +56,19 @@ Deno.test("the upstream's own words ride through verbatim", () => {
   );
 });
 
-Deno.test("endpoint facts key apart by base URL, not only by family", () => {
-  // One account, one family, two bases, the same second: the tagma keeps
-  // these as separate endpoint entries, so the lines must stay separate —
-  // equal keys throw in the keyed each.
-  const other: FactView = {
-    ...quota,
-    endpoint: { family: "openai", base_url: "https://relay.example/v1" },
-  };
+Deno.test("facts key apart by profile, not only by kind", () => {
+  // The table keeps one record per profile, so two profiles can carry the
+  // same kind: the lines must stay separate -- equal keys throw in the
+  // keyed each.
+  const other: FactView = { ...quota, profile: "openai-backup" };
   const lines = factLines([quota, other], NOW);
   assertEquals(lines[0]?.key === lines[1]?.key, false);
-  assertEquals(lines[0]?.endpoint, "https://api.openai.com/v1");
-  assertEquals(lines[1]?.endpoint, "https://relay.example/v1");
+  assertEquals(lines[0]?.profile, "openai-main");
+  assertEquals(lines[1]?.profile, "openai-backup");
 });
 
-Deno.test(
-  "lines stay keyed apart by kind, scope, account and record time",
-  () => {
-    const lines = factLines([quota, { ...quota, recorded_at: NOW - 120 }], NOW);
-    assertEquals(lines[0]?.key === lines[1]?.key, false);
-    assertEquals(factLines([quota], NOW)[0]?.key, lines[0]?.key);
-  },
-);
+Deno.test("lines stay keyed apart by kind, profile and record time", () => {
+  const lines = factLines([quota, { ...quota, recorded_at: NOW - 120 }], NOW);
+  assertEquals(lines[0]?.key === lines[1]?.key, false);
+  assertEquals(factLines([quota], NOW)[0]?.key, lines[0]?.key);
+});

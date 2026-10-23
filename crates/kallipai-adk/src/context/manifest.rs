@@ -109,7 +109,7 @@ mod tests {
                 max_attempts: 10,
                 error: "boom".into(),
                 delay_secs: 1.5,
-                endpoint: Some("deepseek".into()),
+                provider: Some("deepseek".into()),
                 kind: kallipai_common::retry::RetryKind::RateLimit,
                 quota_reset: Some(1234),
             }],
@@ -120,7 +120,7 @@ mod tests {
         assert_eq!(back.cumulative_usage.consumed(), 15);
         assert_eq!(back.next_turn_id, 10);
         assert_eq!(back.retry_log.len(), 1);
-        assert_eq!(back.retry_log[0].endpoint.as_deref(), Some("deepseek"));
+        assert_eq!(back.retry_log[0].provider.as_deref(), Some("deepseek"));
     }
 
     #[test]

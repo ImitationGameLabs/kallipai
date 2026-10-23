@@ -190,34 +190,25 @@ export interface RetryRecord {
   readonly max_attempts: number;
   readonly error: string;
   readonly delay_secs: number;
-  readonly endpoint: string | null;
+  readonly provider: string | null;
 }
 
 /** What an upstream fact is about (`FactView.kind`), in the wire's snake_case. */
 export type FactKind = "quota" | "payment" | "endpoint_auth" | "endpoint_shape";
 
-/** The endpoint a fact was observed on (`FactView.endpoint`): the display face of
- * the endpoint-level key. `base_url` is omitted for providers that need none. */
-export interface FactEndpoint {
-  readonly family: string;
-  readonly base_url?: string;
-}
-
-/** One upstream-failure fact, shared tagma-wide: what one agent learned about an
- * endpoint or an account, readable by every agent and shown by the status and
- * fleet surfaces (`AgentStatusResponse.upstream_facts` and
- * `ListAgentsManagementResponse.upstream_facts`). The credential never crosses
- * the wire: `account_hint` is 8 hex of its fingerprint. `until` is the
- * upstream's own reset hint, omitted when it gave none or gave one past the
- * trust bound (shown as unknown rather than as a promise). */
+/** One upstream-failure fact, shared tagma-wide: what one agent learned about a
+ * profile, readable by every agent and shown by the status and fleet surfaces
+ * (`AgentStatusResponse.upstream_facts` and
+ * `ListAgentsManagementResponse.upstream_facts`). A credential never crosses
+ * the wire. `until` is the upstream's own reset hint, omitted when it gave none
+ * or gave one past the trust bound (shown as unknown rather than as a promise). */
 export interface FactView {
   readonly kind: FactKind;
   readonly until?: number;
   readonly detail: string;
   readonly recorded_at: number;
-  /** Omitted for an account-level fact, which is not about one endpoint. */
-  readonly endpoint?: FactEndpoint;
-  readonly account_hint: string;
+  /** The profile the fact names. */
+  readonly profile: string;
 }
 
 /** Runtime-active model profile (`AgentStatusResponse.profile`): the id of the

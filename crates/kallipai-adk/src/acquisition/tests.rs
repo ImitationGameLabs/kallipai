@@ -911,7 +911,7 @@ async fn in_window_log_records_do_not_shrink_the_episode_budget() {
             max_attempts: 2,
             error: "endpoint down".to_owned(),
             delay_secs: 0.0,
-            endpoint: Some("p1".to_owned()),
+            provider: Some("p1".to_owned()),
             kind: RetryKind::Server,
             quota_reset: None,
         })
@@ -1907,7 +1907,7 @@ async fn a_mid_stream_quota_rejection_leaves_an_observation_record() {
     assert_eq!(records[0].delay_secs, 0.0, "no wait follows a quota stop");
     let reset = records[0].quota_reset.expect("the hint rides the record");
     assert!(reset >= before + 120, "{reset}");
-    assert_eq!(records[0].endpoint.as_deref(), Some("p1"));
+    assert_eq!(records[0].provider.as_deref(), Some("p1"));
 }
 
 // -- a fact that ends a round: what the gateway hears ------------------
@@ -2090,7 +2090,7 @@ async fn a_post_walk_failure_is_recorded_against_the_profile_that_served_it() {
         !log.is_empty()
             && log
                 .iter()
-                .all(|record| record.endpoint.as_deref() == Some("p2")),
+                .all(|record| record.provider.as_deref() == Some("p2")),
         "the retry records name the endpoint that served the attempt"
     );
 }

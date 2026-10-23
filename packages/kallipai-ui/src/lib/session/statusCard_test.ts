@@ -355,14 +355,13 @@ const FACTS: readonly FactView[] = [
     until: 1_700_003_600,
     detail: "insufficient_quota",
     recorded_at: 1_699_999_940,
-    endpoint: { family: "openai" },
-    account_hint: "3f9a1b2c",
+    profile: "openai-main",
   },
   {
     kind: "payment",
     detail: "billing hard limit reached",
     recorded_at: 1_699_999_970,
-    account_hint: "aa11bb22",
+    profile: "billing-main",
   },
 ];
 

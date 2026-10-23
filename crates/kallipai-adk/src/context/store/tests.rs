@@ -386,7 +386,7 @@ fn manifest_projection_carries_state_history_cannot_rebuild() {
         max_attempts: 3,
         error: "rate limited".into(),
         delay_secs: 2.0,
-        endpoint: None,
+        provider: None,
         kind: kallipai_common::retry::RetryKind::RateLimit,
         quota_reset: Some(500),
     });
@@ -408,7 +408,7 @@ fn record_retries_evicts_stale_then_bounds() {
         max_attempts: 3,
         error: "x".into(),
         delay_secs: 0.0,
-        endpoint: None,
+        provider: None,
         kind: kallipai_common::retry::RetryKind::Transport,
         quota_reset: None,
     };

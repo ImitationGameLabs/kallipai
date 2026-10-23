@@ -1,33 +1,29 @@
 // The shared fact table as the fleet panel renders it: one line per fact, so
-// an operator sees what this tagma learned about upstream endpoints and
-// accounts. Pure and i18n-backed (the same-layer precedent as
-// retryFormat.ts), so a test can pin the rendering without a runes module.
+// an operator sees what this tagma learned about a profile. Pure and
+// i18n-backed (the same-layer precedent as retryFormat.ts), so a test can
+// pin the rendering without a runes module.
 // The table is tagma-wide -- the wire sends it once per response, not once per
 // agent -- so callers render these lines in exactly one tagma-level place.
 
 import type { FactKind, FactView } from "@kallipai/kallipai-client";
 import { formatRemaining } from "../tagmata.svelte.ts";
 import {
-  tagma_facts_account,
   tagma_facts_kind_endpoint_auth,
   tagma_facts_kind_endpoint_shape,
   tagma_facts_kind_payment,
   tagma_facts_kind_quota,
   tagma_facts_reopens,
-  tagma_facts_scope_account,
 } from "../../paraglide/messages.js";
 
 /** One rendered fact. `key` is the line's identity across refreshes (the wire
  * carries no fact id), built from the same fields the tagma keys its own
- * endpoint/account entries by; `reopens` is absent when the upstream gave no
- * reset hint, or gave one already past. `endpoint` is the base URL the fact
- * was recorded against, absent on account-wide facts. */
+ * profile records by; `reopens` is absent when the upstream gave no reset
+ * hint, or gave one already past. `profile` names the profile the fact is
+ * about -- the only subject the table has. */
 export interface FactLine {
   readonly key: string;
   readonly kind: string;
-  readonly scope: string;
-  readonly endpoint?: string;
-  readonly account: string;
+  readonly profile: string;
   readonly reopens?: string;
   readonly detail: string;
 }
@@ -49,27 +45,18 @@ export function factLines(
   now: number,
 ): readonly FactLine[] {
   return facts.map((fact) => {
-    const scope = fact.endpoint?.family ?? tagma_facts_scope_account();
     const until = fact.until;
     const reopens =
       until !== undefined && until > now
         ? tagma_facts_reopens({ when: formatRemaining((until - now) * 1_000) })
         : undefined;
     return {
-      // The endpoint's own identity rides in the key: one account and family
-      // can carry facts for two bases recorded in the same second, and the
-      // keyed each throws on equal keys.
-      key: [
-        fact.kind,
-        fact.endpoint?.family ?? "",
-        fact.endpoint?.base_url ?? "",
-        fact.account_hint,
-        fact.recorded_at,
-      ].join(":"),
+      // The table keeps one record per profile, so the profile id is what tells
+      // two lines apart; the record time keeps a refreshed fact from reusing
+      // its predecessor's key.
+      key: [fact.kind, fact.profile, fact.recorded_at].join(),
       kind: KIND_LABELS[fact.kind]?.() ?? fact.kind,
-      scope,
-      endpoint: fact.endpoint?.base_url,
-      account: tagma_facts_account({ hint: fact.account_hint }),
+      profile: fact.profile,
       reopens,
       detail: fact.detail,
     };

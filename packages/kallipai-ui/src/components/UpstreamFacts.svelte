@@ -41,11 +41,7 @@
         <div class="py-1">
           <div class="flex items-center gap-1.5 text-sm">
             <span class="font-medium">{line.kind}</span>
-            <span class="opacity-60">{line.scope}</span>
-            {#if line.endpoint}
-              <span class="opacity-60 font-mono truncate">{line.endpoint}</span>
-            {/if}
-            <span class="opacity-60">{line.account}</span>
+            <span class="opacity-60 font-mono truncate">{line.profile}</span>
             {#if line.reopens}
               <span class="opacity-60">{line.reopens}</span>
             {/if}

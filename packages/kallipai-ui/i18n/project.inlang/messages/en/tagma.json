@@ -50,7 +50,5 @@
   "tagma_facts_kind_payment": "payment",
   "tagma_facts_kind_endpoint_auth": "endpoint auth",
   "tagma_facts_kind_endpoint_shape": "endpoint shape",
-  "tagma_facts_scope_account": "account-wide",
-  "tagma_facts_account": "account {hint}",
   "tagma_facts_reopens": "reopens in {when}"
 }
