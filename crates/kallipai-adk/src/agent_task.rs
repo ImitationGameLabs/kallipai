@@ -1250,9 +1250,10 @@ fn pacing_wake_epoch(ctx: &AgentContext, profile_id: &str, now: u64) -> u64 {
     earliest.unwrap_or_else(|| now.saturating_add(MIN_RETRY_INTERVAL_SECS))
 }
 
-/// Clear an armed pacing wake. Called on every non-pacing wake so a stale
-/// stored permit (a sleep that fired after a different arm won the race) cannot
-/// start a round nobody asked for, the same discipline `clear_transient_retry`
+/// Clear an armed pacing wake. Called on the prompt and notify wakes, and by
+/// the pacing arm itself when it spends the permit, so a stale stored permit
+/// (a sleep that fired after a different arm won the race) cannot start a
+/// round nobody asked for, the same discipline `clear_transient_retry`
 /// carries.
 fn clear_pacing_wake(ctx: &AgentContext) {
     *ctx.pacing_wake_at.lock().unwrap_or_else(|e| e.into_inner()) = None;
