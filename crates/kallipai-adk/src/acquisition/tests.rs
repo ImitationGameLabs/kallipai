@@ -1477,8 +1477,8 @@ async fn acquire_once(ctx: &mut AgentContext) -> AcquireResult {
 }
 
 /// A fact the table carries stops a system-initiated attempt before it sends:
-/// the endpoint is asked nothing at all, and the account-level fact parks the
-/// round with the structured reason.
+/// the endpoint is asked nothing at all, and the fact on that profile parks
+/// the round with the structured reason.
 #[tokio::test]
 async fn a_fact_the_table_carries_skips_the_send_and_parks() {
     let backend = RecordingBackend::new();
@@ -2106,10 +2106,10 @@ async fn an_endpoint_auth_fact_with_a_status_the_gateway_ignores_stays_silent() 
     assert!(signal_rx.try_recv().is_err(), "404 never signals");
 }
 
-/// An account-level fact never signals, whatever status it carries: a quota
-/// block arrives as a 403 too, and the level — not the status — is what says
-/// this is not an auth rejection. The walk it drives finds no buildable
-/// candidate, so the round parks and the gateway hears nothing.
+/// A quota fact never signals, whatever status it carries: a quota block
+/// arrives as a 403 too, and the emitter reads the fact's kind — not its
+/// status — to say there is no auth answer to send. The walk it drives finds
+/// no buildable candidate, so the round parks and the gateway hears nothing.
 #[tokio::test]
 async fn a_quota_fact_never_signals_the_gateway() {
     let backend = RecordingBackend::new();

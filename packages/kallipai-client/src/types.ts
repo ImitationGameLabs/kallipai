@@ -156,8 +156,8 @@ export interface WireAgentManagementSummary {
 /** `GET /agents` response wrapper. */
 export interface ListAgentsManagementResponse {
   readonly agents: readonly WireAgentManagementSummary[];
-  /** Facts this tagma's agents learned about upstream endpoints and accounts;
-   * tagma-wide, so it rides the list once instead of on every entry. Absent on
+  /** Facts this tagma's agents learned about upstream profiles; tagma-wide, so
+   * it rides the list once instead of on every entry. Absent on
    * responses from older servers. */
   readonly upstream_facts?: readonly FactView[];
 }
@@ -266,8 +266,8 @@ export interface AgentStatusResponse {
   /** Tagma-wide single-launch usage totals. Absent only on responses from
    * tagma versions that predate the field. */
   readonly usage_totals?: TagmaUsageTotals;
-  /** Facts this tagma's agents learned about upstream endpoints and accounts;
-   * tagma-wide, so every status response carries the same list. Absent on
+  /** Facts this tagma's agents learned about upstream profiles; tagma-wide,
+   * so every status response carries the same list. Absent on
    * responses from older servers. */
   readonly upstream_facts?: readonly FactView[];
 }

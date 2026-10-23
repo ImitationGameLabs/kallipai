@@ -299,6 +299,9 @@ pub(crate) async fn advance_failover(
                 // took on the profile that just failed, and the fresh one starts once
                 // this returns — so the pass stands down by reading the table, and the
                 // carried context goes out as it stands.
+                // The only way a candidate reaches this line already marked is a write that
+                // lands after the walk read the table — another agent on that profile — so
+                // the check takes a fresh clock rather than trusting the walk's snapshot.
                 let paced = ctx.profile_pacing.as_deref().is_some_and(|pacing| {
                     candidate_marked(pacing, &candidate.id, timefmt::now_epoch())
                 });

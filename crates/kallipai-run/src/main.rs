@@ -53,7 +53,7 @@ struct Cli {
 /// Mapped to process exit codes via `#[repr(u8)]`:
 /// 0 = success (agent went idle), 1 = error, 2 = max rounds exceeded,
 /// 3 = cancelled, 4 = token budget exceeded, 5 = failover chain exhausted,
-/// 6 = quota or payment block (parked, nothing armed).
+/// 6 = quota or payment block (parked until the earliest window ends).
 ///
 /// Serialized to the JSON `"exit"` field as a snake_case string
 /// (`"success"`, `"max_rounds"`, …) via [`serde::Serialize`].

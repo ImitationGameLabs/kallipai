@@ -937,9 +937,9 @@ pub(crate) fn decide(facts: &Facts, policy: &RetryPolicy) -> Decision {
 }
 
 /// The exit a fact leaves: advance when the chain has a candidate, stop when it
-/// does not. The candidate was resolved by the shell against the fact's own
-/// level, so an account-level fact only ever finds a candidate on another
-/// account.
+/// does not. The candidate was resolved by the shell against the table, which
+/// keys one fact per profile, so a fact only ever rules out the profile it
+/// names.
 fn blocked_exit(facts: &Facts, block: &Block) -> Decision {
     let reason = fact_reason(block.kind);
     match facts.alternative {
