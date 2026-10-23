@@ -67,10 +67,10 @@ enum RunExit {
     Cancelled = 3,
     BudgetExceeded = 4,
     FailoverChainExhausted = 5,
-    /// The endpoint's account is out of quota or credit and no candidate could
-    /// serve: the agent parked waiting for an external trigger. Distinct from
-    /// `FailoverChainExhausted` — nothing was armed and nothing will re-run on
-    /// its own.
+    /// The profile is out of quota or credit and no candidate could serve: the
+    /// agent parked with a wake armed for the earliest window end on the chain,
+    /// so it comes back on its own and an external trigger reaches it sooner.
+    /// Distinct from `FailoverChainExhausted`, which ends the run.
     QuotaBlocked = 6,
 }
 

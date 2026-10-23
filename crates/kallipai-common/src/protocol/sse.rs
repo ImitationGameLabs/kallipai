@@ -199,12 +199,12 @@ pub enum SseEvent {
         transient_retry: Option<TransientRetryInfo>,
     },
 
-    /// The endpoint's account is out of quota or credit and no candidate could
-    /// serve: the agent parks with the structured reason instead of a free-text
-    /// error, so the surfaces can show which endpoint and account, when the
-    /// upstream said service resumes, and the evidence. Terminal for the turn.
-    /// No transient re-run follows: the park ends when the profile's window
-    /// does, on its own timer, and an external trigger wakes it sooner.
+    /// The profile is out of quota or credit and no candidate could serve: the
+    /// agent parks with the structured reason instead of a free-text error, so
+    /// the surfaces can show which profile, when the upstream said service
+    /// resumes, and the evidence. Terminal for the turn. No transient re-run
+    /// follows: the park ends at the earliest window end on the chain, on its
+    /// own timer, and an external trigger wakes it sooner.
     QuotaBlocked(QuotaBlockedInfo),
 }
 impl SseEvent {

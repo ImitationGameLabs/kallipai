@@ -176,8 +176,8 @@ pub struct AgentContext {
     /// The armed wait-timer deadline (`break(wait)` or a budget-blocked
     /// re-arm), or `None`. Mirrors `retry_at`'s authority pattern: the wait
     /// select arm honors a stored permit only when this is `Some(t)` with
-    /// `t <= now`, then clears it; every other wake clears it too, so a
-    /// stale stored permit cannot fire a spurious turn.
+    /// `t <= now`, then clears it; the prompt wake and the notify wake clear
+    /// it too, so a stale stored permit cannot fire a spurious turn.
     pub wait_until: Arc<std::sync::Mutex<Option<tokio::time::Instant>>>,
     /// Wake signal for the wait timer. Separate from `notify` for the same
     /// reason as `retry_notify` (each signal's guard stays the sole
@@ -187,12 +187,13 @@ pub struct AgentContext {
     /// The `timeout_secs` the wait timer was last armed with (for the
     /// elapsed-turn text). Meaningful only while `wait_until` is armed.
     pub wait_armed_secs: u64,
-    /// The armed pacing-wake deadline: the end of the window a quota park
-    /// waits out, plus jitter, or `None` when no such wake is pending. Same
-    /// authority pattern as `retry_at`: the pacing select arm honors a stored
-    /// permit only when this is `Some(t)` with `t <= now`, then clears it;
-    /// every other wake clears it too, so a permit left by a sleep that lost
-    /// the race cannot start a round nobody asked for.
+    /// The armed pacing-wake deadline: the earliest window end on the chain a
+    /// quota park waits out, plus jitter, or `None` when no such wake is
+    /// pending. Same authority pattern as `retry_at`: the pacing select arm
+    /// honors a stored permit only when this is `Some(t)` with `t <= now`,
+    /// then clears it; the prompt wake and the notify wake clear it too, so a
+    /// permit left by a sleep that lost the race cannot start a round nobody
+    /// asked for.
     pub pacing_wake_at: Arc<std::sync::Mutex<Option<tokio::time::Instant>>>,
     /// Wake signal for the pacing timer. Separate from `notify` for the same
     /// reason as `retry_notify` (each signal's guard stays the sole authority

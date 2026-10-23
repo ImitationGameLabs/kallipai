@@ -998,8 +998,8 @@ async fn a_quota_rejection_advances_to_the_next_profile() {
 }
 
 /// The same rejection with no candidate left parks the round with the
-/// structured reason: the endpoint, the account behind it, and the evidence.
-/// The endpoint is asked exactly once, and nothing is armed.
+/// structured reason: the profile and the evidence. That profile is asked
+/// exactly once, and the round comes back when that window ends.
 #[tokio::test]
 async fn a_quota_rejection_with_no_candidate_left_parks() {
     let backend = RecordingBackend::new();

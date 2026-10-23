@@ -184,7 +184,7 @@ pub struct RetryCall<'a> {
     pub policy: &'a RetryPolicy,
     pub round: usize,
     pub episode: &'a mut Episode,
-    /// The provider this call connects through: the retry record's `endpoint` column
+    /// The provider this call connects through: the retry record's `provider` column
     /// carries it. Not the fact key — that is `profile_id`.
     pub provider_id: &'a str,
     /// The profile this call sends for: the key a fact it leaves behind is

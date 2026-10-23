@@ -85,9 +85,9 @@ so the runner emits only a completion hint by default.
 `budget_exceeded`, `failover_chain_exhausted`, `quota_blocked`. If the tagma is
 unreachable, the agent id is unknown, or `post_message` fails, no JSON object is
 emitted; the error is printed to stderr and the exit code is `1`. `quota_blocked`
-(exit code 6) means the account behind the endpoint is out of quota or credit and
-no candidate could serve: the agent parks on a window, and the round comes back
-when that window ends. An external trigger reaches it sooner.
+(exit code 6) means the profile is out of quota or credit and no candidate
+could serve: the agent parks on a window, and the round comes back when the
+earliest window on the chain ends. An external trigger reaches it sooner.
 
 ```bash
 kallipai-run --json --prompt "Refactor the config loader"

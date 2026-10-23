@@ -307,7 +307,7 @@ pub(super) fn fact_stop_message(
 /// The observation line a skipped send leaves: the fact hit rate is counted from
 /// these lines (one per skipped send), so it names the agent, the profile it
 /// would have used, the moment the upstream said service reopens, and why the
-/// reopens, and why the send did not happen.
+/// send did not happen.
 pub(super) fn log_fact_skip(ctx: &AgentContext, reading: &TableReading, reason: &str) {
     let Some(fact) = reading.blocked.as_ref() else {
         return;

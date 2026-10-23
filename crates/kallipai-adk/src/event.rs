@@ -102,11 +102,12 @@ pub enum AgentEvent {
         detail: String,
         transient_retry: Option<TransientRetryInfo>,
     },
-    /// The endpoint's account is out of quota or credit and no candidate could
-    /// serve (terminal for the turn). Unlike [`FailoverChainExhausted`](Self::FailoverChainExhausted)
-    /// this adds no transient re-run: the park ends when the profile's window does,
-    /// on its own timer, and an external trigger still wakes the agent sooner.
-    /// `SseEvent::QuotaBlocked`; emitted by `run_and_report`.
+    /// The profile is out of quota or credit and no candidate could serve
+    /// (terminal for the turn). Unlike [`FailoverChainExhausted`](Self::FailoverChainExhausted)
+    /// this adds no transient re-run: the park ends at the earliest window
+    /// end on the chain, on its own timer, and an external trigger still
+    /// wakes the agent sooner. `SseEvent::QuotaBlocked`; emitted by
+    /// `run_and_report`.
     QuotaBlocked(QuotaBlockedInfo),
 }
 
@@ -310,9 +311,9 @@ pub enum AgentOutcome {
         reason: FailoverChainExhaustion,
         detail: String,
     },
-    /// The endpoint's account is out of quota or credit and no candidate could
-    /// serve: the agent parks with the structured reason until the profile's
-    /// window ends — the wake rides that moment rather than a re-run budget.
+    /// The profile is out of quota or credit and no candidate could serve: the
+    /// agent parks with the structured reason until the earliest window on the
+    /// chain ends — the wake rides that moment rather than a re-run budget.
     /// Sibling of `FailoverChainExhausted` in the round-end taxonomy, minus
     /// the transient re-run budget.
     QuotaBlocked(QuotaBlockedInfo),

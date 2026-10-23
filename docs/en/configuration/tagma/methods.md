@@ -182,11 +182,11 @@ is readable by every agent running that profile.
 The verdict is recorded as a fact against the profile, carrying the reset the
 upstream promised, or a window measured from the record itself when it
 promised none. When no profile in the chain can serve, each sitting inside its
-own window, the round parks and arms a wake at the end of the window belonging
-to the profile it stopped on, so the round comes back on its own. The wake
-starts a fresh episode, which is why it claims the window that just opened
-rather than the window an earlier round already took. It is a system-origin
-round: no prompt is added for it, and nothing is forced.
+own window, the round parks and arms a wake at the earliest window end on the
+chain, so the round comes back on its own. The wake starts a fresh episode,
+which is why it claims the window that just opened rather than the window an
+earlier round already took. It is a system-origin round: no prompt is added
+for it, and nothing is forced.
 
 An external trigger is the faster path and is forced: the round may send
 inside a window, and the record restarts from that moment, so the wait after
@@ -196,7 +196,18 @@ its author. While a window runs, the record appears as a single fact in the
 status and fleet snapshots: the kind, the upstream's words, the profile it
 names, and the reset the upstream gave — shown unless it gave none or named a
 moment past the trust bound. The record is written at the moment the chain
-advances, keyed by the profile that sent the failing request.
+advances, keyed by the profile that sent the failing request. Claiming a
+window that has already run out writes the record again — the same kind and
+the same words, its start moved to that claim and the upstream's reset hint
+dropped, since the moment it named has passed — so the clock a reader sees
+belongs to the wait in progress.
+
+**A throttle that names no reset moment is not a wall.** The upstream said
+later, not that the profile has nothing left to spend, so the same profile
+gets one more send — jittered like any retry — before the chain is charged.
+Only when that send comes back the same way does the round move on to the next
+profile, where the verdict lands as a fact like any other. A 429 that does
+name its reset moment is a quota wall and paces its profile straight away.
 
 Current tuning values, not a contract: a record with no upstream reset paces
 its profile for 60 seconds, a payment verdict for 300, an upstream reset is
