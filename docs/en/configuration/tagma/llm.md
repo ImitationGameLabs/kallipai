@@ -22,7 +22,7 @@ The layers relate like this: an agent never binds a single profile; it binds a p
 
 Each layer exists on its own for a concrete reason.
 
-**Provider is its own layer because an upstream rejection is scoped to a credential and the endpoint it was used against.** The shared fact table keys what one agent learned that way: a quota or payment block follows the credential, so every endpoint on it is affected, while a rejected credential or a repeated response shape names one endpoint. The provider declares the `api_key`, `family`, and `base_url` those keys are built from, so the fact table's ownership lands on this layer naturally.
+**Provider is its own layer because a credential and the endpoint it serves are one unit, swapped whole.** Failover never re-points a profile at a different key: the provider declares the `api_key`, `family`, and `base_url`, so changing any of them means changing the provider. The shared fact table is keyed by profile: a verdict recorded against a profile is readable by every agent running that profile, and two profiles on the same credential share nothing. Repointing a profile at another provider does not erase what its former provider taught: the record stays until its window ends, or until a successful send clears it.
 
 **A profile declares its capabilities because the context window follows the new profile's declaration on failover.** Windows may differ within a set; when a switch happens, the context is handled against the newly active profile's declared window, and budget-invariant checks rely on that declared value. The window is therefore a property of the profile, not a global constant.
 

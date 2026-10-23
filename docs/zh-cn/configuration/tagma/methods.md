@@ -105,6 +105,12 @@ set 按名字寻址：root agent 绑定配置的 `default` set，每个 subagent
 
 前进时，上下文窗口跟随新 profile 声明的 `max_context_window`（set 内窗口可以不同；一个 set 放不同窗口的模型是支持的）。若携带的上下文现在超过新的（可能更小的）窗口，runner 在重试前先压缩，该轮因此能在切换后存活。窗口会违反预算不变式的候选在前进**之前**被跳过（agent 因此绝不会向小窗口模型发送超限请求）；无可行候选时，链条报告为无可行窗口错误：每个候选都与预算冲突（调 `KALLIPAI_SUMMARY_MAX_TOKENS` / `KALLIPAI_PINNED_BUDGET_RATIO` 或加大窗口）。**活跃** profile 的窗口（非故障转移候选）在 spawn 时校验：违反预算不变式的窗口直接拒绝 spawn（fail-fast），而非悄悄回落。
 
-重试预算属于 **episode**（一次重试回合），既不属于端点，也不属于 profile：一个 episode 从首次尝试走到判定，允许 `max_retries + 1` 次发送（`KALLIPAI_MAX_RETRIES`，默认 10）。`retry_timeout`（`KALLIPAI_RETRY_TIMEOUT_SECS`，默认 300）界定该 episode 的观察期，从首次尝试起算；中途断流仍属同一 episode，因此发送次数与时限覆盖整段。前进会开启新的 episode，接手的 profile 从自己的预算与自己的时限开始。索引只向前走，链条不会回到它离开的 profile。共享同一端点的 profile 共享的是上游事实表：一个 agent 付出代价换来的配额或凭据判定，tagma 内其他 agent 也读得到。
+重试预算属于 **episode**（一次重试回合），既不属于端点，也不属于 profile：一个 episode 从首次尝试走到判定，允许 `max_retries + 1` 次发送（`KALLIPAI_MAX_RETRIES`，默认 10）。`retry_timeout`（`KALLIPAI_RETRY_TIMEOUT_SECS`，默认 300）界定该 episode 的观察期，从首次尝试起算；中途断流仍属同一 episode，因此发送次数与时限覆盖整段。前进会开启新的 episode，接手的 profile 从自己的预算与自己的时限开始。索引只向前走，链条不会回到它离开的 profile。上游事实表按 profile 建键，不按端点：记在某个 profile 上的判定，任何运行该 profile 的 agent 都读得到。
+
+**撞上配额墙或付款墙的 profile 只是进入一段等待窗口（pacing），而不是永久停泊。** 判定按 profile 记成一条 fact，带上游承诺的重置时刻；上游没承诺时，则从记录本身起算一段窗口。当链上再没有 profile 能服务——各自都在自己的窗口里——这一轮停泊，并在它所停在的那条 profile 的窗口结束处留下唤醒，于是自己回来。醒来是新的一轮（新 episode），所以它领的是刚开的窗口，而不是更早那一轮已经领走的那段窗口；它是 System 来源的回合：不会为它追加 prompt，也不强制开窗。
+
+外部触发是更快的路径，且带强制：窗口内也能发，记录从那一刻重新起算，其后的等待按最新这次请求重新计时，而不是维持原样。发送成功会清掉记录，不问是谁写的：清除作用于记录本身，不追问写者。窗口进行中，这条记录在 status 与 fleet 快照里显示为一条 fact：kind、上游原话、它所指向的 profile，以及上游给了的重置时刻（没给就没有；给得超过信任上界也按没有显示）。记录写于链条前进那一刻，键是发出这次失败的那条 profile。
+
+以下为当前调优取值，不是契约：上游没给重置时刻的记录会让该 profile 等 60 秒，付款判定的窗口是 300 秒，上游重置最多被采信到记录之后 86400 秒，重试延迟与唤醒各加不超过 1 秒的抖动。
 
 边界情形：记录的 set 名匹配不到任何活 set 的 agent 会悬空：记录保留名字，恢复容忍占位，但 prompt 投递以 `409` 拒绝，直到该 set 以该名字回归。

@@ -174,9 +174,34 @@ on trial, measured from its first attempt; a mid-stream failure continues the
 same episode, so the send count and the deadline both cover the whole stretch.
 Advancing the chain opens a fresh episode, so the profile that takes over starts
 with its own budget and its own deadline. The index only advances forward, so the
-chain never returns to the profile it left behind. What profiles sharing an
-endpoint do share is the upstream fact table: a quota or credential verdict one
-agent paid for is readable by every other agent in the tagma.
+chain never returns to the profile it left behind. The upstream fact table is
+keyed by profile rather than by endpoint: a verdict recorded against a profile
+is readable by every agent running that profile.
+
+**A profile that met a quota or payment wall is paced, not parked forever.**
+The verdict is recorded as a fact against the profile, carrying the reset the
+upstream promised, or a window measured from the record itself when it
+promised none. When no profile in the chain can serve, each sitting inside its
+own window, the round parks and arms a wake at the end of the window belonging
+to the profile it stopped on, so the round comes back on its own. The wake
+starts a fresh episode, which is why it claims the window that just opened
+rather than the window an earlier round already took. It is a system-origin
+round: no prompt is added for it, and nothing is forced.
+
+An external trigger is the faster path and is forced: the round may send
+inside a window, and the record restarts from that moment, so the wait after
+it is measured again from the latest ask. A send that succeeds clears the
+record whoever wrote it, because the clearing acts on the record and never on
+its author. While a window runs, the record appears as a single fact in the
+status and fleet snapshots: the kind, the upstream's words, the profile it
+names, and the reset the upstream gave — shown unless it gave none or named a
+moment past the trust bound. The record is written at the moment the chain
+advances, keyed by the profile that sent the failing request.
+
+Current tuning values, not a contract: a record with no upstream reset paces
+its profile for 60 seconds, a payment verdict for 300, an upstream reset is
+honored up to 86400 seconds past the record, and up to one second of jitter is
+added both to retry delays and to the wake.
 
 Edge case: an agent whose recorded set name matches no live set dangles: the
 record keeps the name, restore tolerates it as a placeholder, but prompt

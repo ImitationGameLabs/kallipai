@@ -21,7 +21,7 @@ order: 20
 
 每层单独存在都有明确的设计原因。
 
-**Provider 独立成层，因为上游拒绝的效力以凭据（及其所用端点）为界。** 共享事实表按这一口径为各 agent 学到的东西建键：配额或付款受阻跟随凭据，该凭据上的每个端点都受影响；而凭据被拒或响应形态重复则指名某个端点。provider 声明的 `api_key`、`family` 与 `base_url` 正是这些键的组成部分，事实表的归属因此自然落在这一层。
+**Provider 独立成层，因为凭据连同它所服务的端点是一个整体，要换就整体换。** 故障转移不会把单个 profile 改指到另一把密钥：provider 声明了 `api_key`、`family` 与 `base_url`，改动其中任何一项就等于换 provider。共享事实表按 profile 建键：记在某个 profile 上的判定，任何运行该 profile 的 agent 都读得到；同一份凭据上的两条 profile 之间不共享任何判定。把 profile 改指另一个 provider 不会抹掉它上一个 provider 留下的记录——记录留着，直到窗口结束，或某次发送成功把它清掉。
 
 **Profile 独立声明能力，因为故障转移时上下文窗口要跟随新 profile 的声明。** set 内各 profile 的窗口可以不同；切换发生时，上下文按新 profile 声明的窗口处理，预算不变式的校验也依赖这份声明值。窗口因此是 profile 的属性，不是全局常量。
 
