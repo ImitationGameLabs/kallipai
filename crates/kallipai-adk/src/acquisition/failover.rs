@@ -57,8 +57,8 @@ pub(super) enum Exhaustion {
     /// exhaustion stops the round with the class's own wording.
     ExternalOnly { stop_reason: &'static str },
     /// A quota or payment block: exhaustion parks the agent with the structured
-    /// reason — which profile, the moment the upstream said service
-    /// resumes, the evidence — and arms nothing.
+    /// reason — which profile, the moment the upstream said service resumes,
+    /// the evidence — and the park waits out that window on its own timer.
     QuotaBlocked(QuotaBlockedInfo),
 }
 
@@ -149,8 +149,8 @@ pub(super) async fn step_failover(
                     });
                 }
                 // A quota or payment block: the round ends as a structured park
-                // rather than as an error. Nothing is armed — the payload is the
-                // whole reason, and recovery comes from an external trigger.
+                // rather than as an error. The payload is the whole reason, and
+                // the park wakes when the window it names ends.
                 Exhaustion::QuotaBlocked(info) => {
                     return FailoverStep::Done(AcquireResult::Outcome(AgentOutcome::QuotaBlocked(
                         info,

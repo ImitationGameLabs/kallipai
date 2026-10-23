@@ -266,6 +266,8 @@ pub(crate) async fn spawn_agent(mut args: SpawnArgs) -> anyhow::Result<(Agent, A
         wait_until: Arc::new(std::sync::Mutex::new(None)),
         wait_notify: Arc::new(tokio::sync::Notify::new()),
         wait_armed_secs: 0,
+        pacing_wake_at: Arc::new(std::sync::Mutex::new(None)),
+        pacing_notify: Arc::new(tokio::sync::Notify::new()),
         token_budget: token_budget.clone(),
         usage_stats: usage_stats.clone(),
         profile_pacing: Some(args.shared_state.profile_pacing.clone()),

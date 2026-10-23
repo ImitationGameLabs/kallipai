@@ -104,8 +104,8 @@ pub enum AgentEvent {
     },
     /// The endpoint's account is out of quota or credit and no candidate could
     /// serve (terminal for the turn). Unlike [`FailoverChainExhausted`](Self::FailoverChainExhausted)
-    /// this **arms no timer and adds no transient re-run**: recovery comes from an
-    /// external trigger only (a user message or a task delivery). Bridges to
+    /// this adds no transient re-run: the park ends when the profile's window does,
+    /// on its own timer, and an external trigger still wakes the agent sooner.
     /// `SseEvent::QuotaBlocked`; emitted by `run_and_report`.
     QuotaBlocked(QuotaBlockedInfo),
 }
@@ -311,8 +311,9 @@ pub enum AgentOutcome {
         detail: String,
     },
     /// The endpoint's account is out of quota or credit and no candidate could
-    /// serve: the agent parks with the structured reason and waits for an
-    /// external trigger. Sibling of `FailoverChainExhausted` in the round-end
-    /// taxonomy, minus the transient re-run: no timer is armed.
+    /// serve: the agent parks with the structured reason until the profile's
+    /// window ends — the wake rides that moment rather than a re-run budget.
+    /// Sibling of `FailoverChainExhausted` in the round-end taxonomy, minus
+    /// the transient re-run budget.
     QuotaBlocked(QuotaBlockedInfo),
 }

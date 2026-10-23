@@ -83,9 +83,10 @@ pub enum ParkedReason {
     /// agent instead of re-arming another backoff.
     TransientRetryExhausted,
     /// The endpoint's account is out of quota or credit and no candidate could
-    /// serve: the agent parks until an external trigger (a user message or a task
-    /// delivery) wakes it. The payload carries the whole reason — which endpoint
-    /// and account, when the upstream said service resumes, and the evidence — so
+    /// serve: the agent parks for as long as the profile's window lasts, then
+    /// wakes on its own timer to try again (an external trigger wakes it
+    /// sooner). The payload carries the whole reason — which endpoint and
+    /// account, when the upstream said service resumes, and the evidence — so
     /// no surface has to re-derive it from prose.
     QuotaBlocked(QuotaBlockedInfo),
 }

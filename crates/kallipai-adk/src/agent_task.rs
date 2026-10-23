@@ -186,6 +186,17 @@ pub struct AgentContext {
     /// The `timeout_secs` the wait timer was last armed with (for the
     /// elapsed-turn text). Meaningful only while `wait_until` is armed.
     pub wait_armed_secs: u64,
+    /// The armed pacing-wake deadline: the end of the window a quota park
+    /// waits out, plus jitter, or `None` when no such wake is pending. Same
+    /// authority pattern as `retry_at`: the pacing select arm honors a stored
+    /// permit only when this is `Some(t)` with `t <= now`, then clears it;
+    /// every other wake clears it too, so a permit left by a sleep that lost
+    /// the race cannot start a round nobody asked for.
+    pub pacing_wake_at: Arc<std::sync::Mutex<Option<tokio::time::Instant>>>,
+    /// Wake signal for the pacing timer. Separate from `notify` for the same
+    /// reason as `retry_notify` (each signal's guard stays the sole authority
+    /// for its wake). Driven by a best-effort, cancel-aware spawned sleep.
+    pub pacing_notify: Arc<Notify>,
     /// Instance-wide token budget shared by all agents.
     /// Cloned from `AppState` — same underlying Arc counters across all agents.
     pub token_budget: crate::token_budget::TokenBudget,
@@ -558,6 +569,7 @@ pub async fn agent_task(
                     Some(text) => {
                         clear_transient_retry(&ctx);
                         clear_wait_timer(&ctx);
+                        clear_pacing_wake(&ctx);
                         ctx.record_message_turn(&text).await;
                         let disposition = run_and_report(
                             &mut ctx,
@@ -657,6 +669,7 @@ pub async fn agent_task(
                 if should_run {
                     clear_transient_retry(&ctx);
                     clear_wait_timer(&ctx);
+                    clear_pacing_wake(&ctx);
                     let disposition = run_and_report(
                         &mut ctx,
                         &agent_tx,
@@ -705,6 +718,25 @@ pub async fn agent_task(
                         ctx.record_turn(vec![Message::user(wait_elapsed_text(armed_secs))])
                             .await;
                     }
+                    let disposition = run_and_report(
+                        &mut ctx,
+                        &agent_tx,
+                        &mut prompt_rx,
+                        AttemptOrigin::System,
+                    )
+                    .await;
+                    if disposition == WakeDisposition::Terminated {
+                        break;
+                    }
+                }
+            }
+            // Pacing wake: the window a quota park was waiting out has ended.
+            // Guard-authoritative like the other timer arms. The round starts
+            // fresh, so its episode claims the window rather than obeying the
+            // record this wake was armed for.
+            _ = ctx.pacing_notify.notified() => {
+                if pacing_wake_due(&ctx) {
+                    clear_pacing_wake(&ctx);
                     let disposition = run_and_report(
                         &mut ctx,
                         &agent_tx,
@@ -986,14 +1018,18 @@ pub async fn run_and_report(
             }
             Ok(runner::RoundOutcome::Park(AgentOutcome::QuotaBlocked(info))) => {
                 // A quota or payment block: park with the structured reason and
-                // arm nothing. No timer, no re-run, and `transient_fails` is left
-                // where it stands — this is not a transient park. The one way out
-                // is an external trigger (a user message or a task delivery),
-                // which the delivery gate already kicks on.
+                // wake at the end of the window the fact opened. The park lasts
+                // as long as that window and no longer: the round comes back on
+                // its own. `transient_fails` is left where it stands (this is not
+                // a transient park), and an external trigger still wakes the
+                // agent first when it arrives before the window ends.
                 agent_tx
                     .send(AgentEvent::QuotaBlocked(info.clone()))
                     .await
                     .ok();
+                // The alarm answers to the fact this park wrote, read here: a
+                // window another instance recorded paces this wake too.
+                let _ = arm_pacing_wake(ctx, &info.profile);
                 ctx.settle(
                     LifecycleState::Parked {
                         reason: ParkedReason::QuotaBlocked(info),
@@ -1156,6 +1192,51 @@ fn wait_elapsed_text(armed_secs: u64) -> String {
 /// authority: a stored permit is only honored when the armed deadline has passed.
 fn transient_retry_due(ctx: &AgentContext) -> bool {
     ctx.retry_at
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .map(|t| t <= tokio::time::Instant::now())
+        .unwrap_or(false)
+}
+/// Arm the wake that ends a quota park: the moment the profile's window ends,
+/// plus jitter. The window is read from the table here, so a fact another
+/// instance recorded paces this wake too; a profile with no readable fact falls
+/// back to the kind's own interval counted from now. The fallback only ever sets
+/// the alarm — it writes nothing. Mirrors the other timers' best-effort,
+/// cancel-aware spawn; the pacing arm's due guard is authoritative.
+fn arm_pacing_wake(ctx: &AgentContext, profile_id: &str) -> tokio::time::Instant {
+    let now = timefmt::now_epoch();
+    let wake_epoch = ctx
+        .profile_pacing
+        .as_deref()
+        .and_then(|table| table.paced_for(profile_id, now))
+        .map(|fact| kallipai_common::facts::window_end(&fact.block))
+        .unwrap_or_else(|| now.saturating_add(kallipai_common::facts::MIN_RETRY_INTERVAL_SECS));
+    let wait = std::time::Duration::from_secs(wake_epoch.saturating_sub(now));
+    let deadline = tokio::time::Instant::now() + wait + crate::retry::jitter_now();
+    *ctx.pacing_wake_at.lock().unwrap_or_else(|e| e.into_inner()) = Some(deadline);
+    let notify = ctx.pacing_notify.clone();
+    let cancel = ctx.cancel.clone();
+    tokio::spawn(async move {
+        tokio::select! {
+            _ = tokio::time::sleep_until(deadline) => notify.notify_one(),
+            _ = cancel.cancelled() => {}
+        }
+    });
+    deadline
+}
+
+/// Clear an armed pacing wake. Called on every non-pacing wake so a stale
+/// stored permit (a sleep that fired after a different arm won the race) cannot
+/// start a round nobody asked for, the same discipline `clear_transient_retry`
+/// carries.
+fn clear_pacing_wake(ctx: &AgentContext) {
+    *ctx.pacing_wake_at.lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
+/// Whether the pacing wake is genuinely due right now. The pacing arm's
+/// authority: a stored permit is honored only when the armed deadline passed.
+fn pacing_wake_due(ctx: &AgentContext) -> bool {
+    ctx.pacing_wake_at
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .map(|t| t <= tokio::time::Instant::now())
@@ -1968,9 +2049,9 @@ mod tests {
 
     /// A quota rejection ends the round as a structured park instead of arming a
     /// transient re-run: the endpoint is asked once, the agent parks with the
-    /// payload, and no fuse is left.
+    /// payload, and the wake it leaves answers to the window the fact opened.
     #[tokio::test]
-    async fn a_quota_block_parks_without_arming_a_rerun() {
+    async fn a_quota_block_parks_and_arms_a_wake_at_the_window_end() {
         use crate::test_support::{
             MapSource, RecordingBackend, ctx_from_source, profile, user_msg,
         };
@@ -2001,6 +2082,7 @@ mod tests {
         ctx.record_turn(vec![user_msg("q1")]).await;
         let retry_at = ctx.retry_at.clone();
         let wait_until = ctx.wait_until.clone();
+        let pacing_wake_at = ctx.pacing_wake_at.clone();
 
         let (tx, _rx) = tokio::sync::mpsc::channel::<AgentEvent>(64);
         let (_prompt_tx, mut prompt_rx) = tokio::sync::mpsc::channel::<String>(16);
@@ -2024,6 +2106,10 @@ mod tests {
             wait_until.lock().unwrap().is_none(),
             "a stop must leave no wait fuse armed"
         );
+        assert!(
+            pacing_wake_at.lock().unwrap().is_some(),
+            "a quota park leaves a wake armed so the round can leave on its own"
+        );
         let parked = ctx
             .lifecycle
             .lock()
@@ -2044,6 +2130,134 @@ mod tests {
         }
     }
 
+    /// The wake is armed at the window's end, never before it: a fact the table
+    /// holds for this profile sets the alarm, and a profile with no readable fact
+    /// still gets one — from the kind's own interval counted at now, which only
+    /// ever sets the alarm.
+    #[tokio::test]
+    async fn a_pacing_wake_sits_where_the_window_ends() {
+        use crate::test_support::{RecordingPacing, make_ctx, profile};
+        use kallipai_common::facts::{Block, BlockKind};
+
+        let now = timefmt::now_epoch();
+        let pacing = Arc::new(RecordingPacing::default());
+        pacing.seed(
+            "test",
+            Block {
+                kind: BlockKind::Quota,
+                until: Some(now + 5),
+                detail: "HTTP 429".into(),
+                status: Some(429),
+                recorded_at: now,
+            },
+        );
+        let mut ctx = make_ctx(vec![profile("test", "ep1", 4096)], &["ep1"]).await;
+        ctx.profile_pacing = Some(pacing);
+
+        let armed = arm_pacing_wake(&ctx, "test");
+        assert!(!pacing_wake_due(&ctx), "a running window is not a wake");
+        let remaining = armed.saturating_duration_since(tokio::time::Instant::now());
+        assert!(
+            remaining >= std::time::Duration::from_secs(4),
+            "the wake may not fire before the window ends: {remaining:?}"
+        );
+
+        // No readable fact: the wake still arms, so a park is never a dead end
+        // waiting on an outside trigger that may never come.
+        let bare = make_ctx(vec![profile("test", "ep1", 4096)], &["ep1"]).await;
+        let fallback = arm_pacing_wake(&bare, "test");
+        let remaining = fallback.saturating_duration_since(tokio::time::Instant::now());
+        assert!(
+            remaining > std::time::Duration::from_secs(1),
+            "the fallback is a real wait, not an immediate re-run: {remaining:?}"
+        );
+    }
+
+    /// The pacing arm's due guard is the authority: a permit a sleep stored after
+    /// the wake was cleared cannot start a round nobody asked for.
+    #[tokio::test]
+    async fn stale_pacing_permit_is_inert_after_clear() {
+        let ctx = crate::test_support::make_ctx(
+            vec![crate::test_support::profile("test", "ep1", 4096)],
+            &["ep1"],
+        )
+        .await;
+        let _ = arm_pacing_wake(&ctx, "test");
+        assert!(
+            !pacing_wake_due(&ctx),
+            "a freshly armed wake is not yet due"
+        );
+        ctx.pacing_notify.notify_one(); // stale permit: the sleep fired after the clear
+        clear_pacing_wake(&ctx);
+        assert!(!pacing_wake_due(&ctx), "a stale permit must be inert");
+    }
+
+    /// A parked quota round comes back on its own: the wake fires at the window's
+    /// end with nothing external arriving, and the round it starts claims the
+    /// reopened window and sends. A round resuming the parked episode could not:
+    /// its episode already holds the window, so the claim would read as spent.
+    #[tokio::test]
+    async fn a_paced_park_wakes_itself_and_serves_the_round() {
+        use crate::test_support::{
+            MapSource, RecordingBackend, RecordingPacing, ctx_from_source, profile,
+        };
+        use just_llm_client::{BackendError, LlmBackend, TransportError};
+
+        let backend = RecordingBackend::new();
+        backend.queue_error(BackendError::provider(
+            "recording",
+            TransportError::HttpStatus {
+                status: reqwest::StatusCode::TOO_MANY_REQUESTS,
+                body: r#"{"error":"slow down","retry_after":1}"#.to_owned(),
+            },
+        ));
+        backend.queue_stream("r1");
+        let source = Arc::new(MapSource(std::collections::HashMap::from([(
+            "p1".to_string(),
+            backend.clone() as Arc<dyn LlmBackend>,
+        )])));
+        let mut ctx = ctx_from_source(
+            vec![profile("a", "p1", 100_000)],
+            source,
+            crate::retry::RetryPolicy::default(),
+        )
+        .await;
+        ctx.profile_pacing = Some(Arc::new(RecordingPacing::default()));
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentEvent>(256);
+        let (_prompt_tx, prompt_rx) = tokio::sync::mpsc::channel::<String>(16);
+        let handle = tokio::spawn(agent_task(ctx, Some("q1".to_owned()), prompt_rx, tx));
+
+        let parked = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while let Some(event) = rx.recv().await {
+                if matches!(event, AgentEvent::QuotaBlocked(_)) {
+                    return true;
+                }
+            }
+            false
+        })
+        .await;
+        assert_eq!(parked.ok(), Some(true), "the round parks on the rejection");
+
+        // Nothing else can start the next round — no prompt, no notify, no
+        // approval — so the send this waits for is the wake's own doing.
+        backend.take_requests();
+        let resumed = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            loop {
+                if !backend.take_requests().is_empty() {
+                    return true;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        })
+        .await;
+        assert_eq!(
+            resumed.ok(),
+            Some(true),
+            "the parked round sends again with nothing external arriving"
+        );
+        handle.abort();
+    }
     /// A rejected move trips the legality check and leaves the state where it
     /// was: the state is applied before it is recorded, so a refused call
     /// cannot advance the agent's lifecycle.

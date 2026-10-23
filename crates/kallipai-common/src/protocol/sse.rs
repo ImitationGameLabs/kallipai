@@ -202,9 +202,9 @@ pub enum SseEvent {
     /// The endpoint's account is out of quota or credit and no candidate could
     /// serve: the agent parks with the structured reason instead of a free-text
     /// error, so the surfaces can show which endpoint and account, when the
-    /// upstream said service resumes, and the evidence. Terminal for the turn;
-    /// **no timer is armed and no transient re-run follows** — recovery comes
-    /// from an external trigger (a user message or a task delivery).
+    /// upstream said service resumes, and the evidence. Terminal for the turn.
+    /// No transient re-run follows: the park ends when the profile's window
+    /// does, on its own timer, and an external trigger wakes it sooner.
     QuotaBlocked(QuotaBlockedInfo),
 }
 impl SseEvent {
