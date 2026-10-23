@@ -1802,10 +1802,12 @@ mod tests {
         assert_eq!(block.until, None, "the upstream named no moment");
     }
 
-    /// The fact each class leaves behind: the account-level rows (quota, payment)
-    /// and the endpoint-level rows (credentials, shape). The classes the table
-    /// does not track leave nothing — a transient failure is the same endpoint's
-    /// business, and a request-level one would fail on a sibling the same way.
+    /// The fact each class leaves behind: the quota and payment rows, which
+    /// park the round on the spot with the structured reason, and the
+    /// credential and shape rows, which stop it with the failure that caused
+    /// them. The classes the table does not track leave nothing — a transient
+    /// failure is the same endpoint's business, and a request-level one would
+    /// fail on a sibling the same way.
     #[test]
     fn the_fact_table_rows_of_the_class_table() {
         let now = 1_700_000_000;

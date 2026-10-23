@@ -57,8 +57,10 @@ pub(crate) fn resolve_user_agent(provided: Option<&str>) -> &str {
 /// `base_url`. Cheap — no construction — so misconfiguration fails fast at startup, before any
 /// agent relies on a failover profile. Unreferenced providers are not checked (dead config).
 /// It also warns — and never fails — when two referenced providers share one API key:
-/// their account is one, so a quota or credential rejection on either is
-/// account-level for both.
+/// the account behind it is one, so a quota or credential rejection on one says the
+/// same thing about the other. A fact is recorded per profile, so the warning is
+/// advice for the operator rather than a shortcut: a sibling profile is still tried
+/// on its own and pays a send to learn the same lesson.
 fn validate_providers(cfg: &ProfileConfig, factory: &BackendFactory) -> Result<()> {
     let families: Vec<&str> = factory.families().collect();
     let mut by_credential: HashMap<&str, Vec<&str>> = HashMap::new();
@@ -91,7 +93,7 @@ fn validate_providers(cfg: &ProfileConfig, factory: &BackendFactory) -> Result<(
         }
     }
     // Providers sharing one credential share the account behind it, so a quota
-    // or credential rejection on one is account-level for the other too. Legal,
+    // or credential rejection on one says the same thing about the other. Legal,
     // and usually unintentional: one line at startup, naming the ids and not
     // the key.
     for ids in by_credential.values_mut() {
@@ -100,7 +102,7 @@ fn validate_providers(cfg: &ProfileConfig, factory: &BackendFactory) -> Result<(
         if ids.len() > 1 {
             warn!(
                 providers = %ids.join(", "),
-                "providers share one credential, so a rejection on one is account-level for all of them"
+                "providers share one credential: a quota or auth rejection on one is about the same account"
             );
         }
     }
