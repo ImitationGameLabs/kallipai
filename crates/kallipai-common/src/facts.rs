@@ -223,7 +223,10 @@ pub trait ProfilePacing: Send + Sync {
     /// `force` is a send that must happen anyway: it is granted inside a running
     /// window and still moves that window's start to `now`, so the pacing which
     /// follows answers to the send that was actually made.
-    fn claim(&self, profile_id: &str, now: u64, force: bool) -> Claim;
+    ///
+    /// The record a start wrote comes back with the claim: the caller keeps
+    /// it, so that very record can be told from a fact it has to obey.
+    fn claim(&self, profile_id: &str, now: u64, force: bool) -> (Claim, Option<Block>);
 
     /// Drop this profile's fact: a send it answered for went through, so there
     /// is nothing left to pace anyone with.
@@ -233,9 +236,10 @@ pub trait ProfilePacing: Send + Sync {
     ///
     /// A claim answers for one probing send; a caller that takes the window
     /// and then never sends leaves nothing to pace anyone with. The record
-    /// goes only when it is still the one that claim wrote — a fresher fact
-    /// recorded since is someone else's answer and stays.
-    fn release(&self, profile_id: &str, started_at: u64);
+    /// goes only while the record there is still that very one: same kind,
+    /// same words, same start. A rejection recorded since — even in the
+    /// same second — is another writer's answer and stays.
+    fn release(&self, profile_id: &str, window: &Block);
 
     /// The readable fact for this profile at `now`, if any.
     ///

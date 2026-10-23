@@ -793,17 +793,18 @@ impl ProfilePacing for RecordingPacing {
             .push((profile_id.to_string(), block));
     }
 
-    fn claim(&self, profile_id: &str, now: u64, force: bool) -> Claim {
+    fn claim(&self, profile_id: &str, now: u64, force: bool) -> (Claim, Option<Block>) {
         self.claims.fetch_add(1, Ordering::Relaxed);
         let mut blocks = self.blocks.lock().unwrap_or_else(|e| e.into_inner());
         let Some(index) = blocks.iter().rposition(|(id, _)| id == profile_id) else {
-            return Claim::Granted;
+            return (Claim::Granted, None);
         };
         let (claim, renewed) = claim_window(Some(&blocks[index].1), now, force);
         if let Some(block) = renewed {
-            blocks[index].1 = block;
+            blocks[index].1 = block.clone();
+            return (claim, Some(block));
         }
-        claim
+        (claim, None)
     }
 
     fn note_success(&self, profile_id: &str) {
@@ -813,11 +814,11 @@ impl ProfilePacing for RecordingPacing {
             .retain(|(id, _)| id != profile_id);
     }
 
-    fn release(&self, profile_id: &str, started_at: u64) {
+    fn release(&self, profile_id: &str, window: &Block) {
         self.blocks
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .retain(|(id, block)| id != profile_id || block.recorded_at != started_at);
+            .retain(|(id, block)| id != profile_id || block != window);
     }
 
     fn paced_for(&self, profile_id: &str, now: u64) -> Option<BlockedFact> {

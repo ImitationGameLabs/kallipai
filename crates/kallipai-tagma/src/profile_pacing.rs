@@ -45,25 +45,23 @@ impl ProfilePacing for ProfilePacingTable {
         insert_fact(&mut self.lock(), profile_id.to_string(), block);
     }
 
-    fn claim(&self, profile_id: &str, now: u64, force: bool) -> Claim {
+    fn claim(&self, profile_id: &str, now: u64, force: bool) -> (Claim, Option<Block>) {
         let mut facts = self.lock();
         let (claim, renewed) = claim_window(facts.get(profile_id), now, force);
         if let Some(block) = renewed {
-            facts.insert(profile_id.to_string(), block);
+            facts.insert(profile_id.to_string(), block.clone());
+            return (claim, Some(block));
         }
-        claim
+        (claim, None)
     }
 
     fn note_success(&self, profile_id: &str) {
         self.lock().remove(profile_id);
     }
 
-    fn release(&self, profile_id: &str, started_at: u64) {
+    fn release(&self, profile_id: &str, window: &Block) {
         let mut facts = self.lock();
-        if facts
-            .get(profile_id)
-            .is_some_and(|block| block.recorded_at == started_at)
-        {
+        if facts.get(profile_id) == Some(window) {
             facts.remove(profile_id);
         }
     }
@@ -213,7 +211,7 @@ mod tests {
         table.record("a", block(BlockKind::Quota, T0, None));
 
         assert_eq!(
-            table.claim("a", T0 + 1, false),
+            table.claim("a", T0 + 1, false).0,
             Claim::Paced {
                 not_before: T0 + MIN_RETRY_INTERVAL_SECS
             }
@@ -236,13 +234,13 @@ mod tests {
         let table = table();
         table.record("a", block(BlockKind::Quota, T0, Some(T0 + 600)));
         assert!(matches!(
-            table.claim("a", T0 + 1, false),
+            table.claim("a", T0 + 1, false).0,
             Claim::Paced { .. }
         ));
 
         table.note_success("a");
         assert!(table.paced_for("a", T0 + 1).is_none());
-        assert_eq!(table.claim("a", T0 + 1, false), Claim::Granted);
+        assert_eq!(table.claim("a", T0 + 1, false).0, Claim::Granted);
         assert!(
             table.snapshot(T0 + 1).is_empty(),
             "an unmarked profile is not written down by a claim"
@@ -255,14 +253,49 @@ mod tests {
         table.record("a", block(BlockKind::Quota, T0, None));
         let later = T0 + MIN_RETRY_INTERVAL_SECS;
 
-        assert_eq!(table.claim("a", later, false), Claim::Started);
-        let fact = table.paced_for("a", later).unwrap();
-        assert_eq!(fact.block.recorded_at, later);
-        assert_eq!(fact.block.until, None);
+        let (claim, record) = table.claim("a", later, false);
+        assert_eq!(claim, Claim::Started);
+        let record = record.expect("a claim that starts a window writes it down");
+        assert_eq!(
+            table.paced_for("a", later).unwrap().block,
+            record,
+            "the record the claim hands back is the one the table holds"
+        );
+        assert_eq!(record.recorded_at, later, "the window starts at the claim");
+        assert_eq!(record.until, None, "the ended window's hint stays behind");
         assert!(
             table
                 .paced_for("a", later + MIN_RETRY_INTERVAL_SECS)
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn a_release_spares_a_record_it_did_not_write() {
+        let table = table();
+        table.record("a", block(BlockKind::Quota, T0, None));
+        let (claim, mine) = table.claim("a", T0 + MIN_RETRY_INTERVAL_SECS, false);
+        assert_eq!(claim, Claim::Started);
+        let mine = mine.expect("the claim started a window");
+
+        // A rejection lands in the same second: same start, another writer.
+        let refusal = Block {
+            status: Some(429),
+            ..block(BlockKind::Quota, mine.recorded_at, Some(T0 + 600))
+        };
+        table.record("a", refusal.clone());
+
+        table.release("a", &mine);
+        assert_eq!(
+            table.paced_for("a", mine.recorded_at).unwrap().block,
+            refusal,
+            "the record it did not write stays"
+        );
+
+        table.release("a", &refusal);
+        assert!(
+            table.paced_for("a", mine.recorded_at).is_none(),
+            "its own record goes back"
         );
     }
 

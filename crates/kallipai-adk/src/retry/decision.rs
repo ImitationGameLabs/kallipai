@@ -63,14 +63,14 @@ pub struct Episode {
     claim: Option<ClaimedWindow>,
 }
 
-/// The window one episode took: the profile it was taken on and the
-/// instant the claim stamped on the record it wrote. The instant is
-/// `None` when the claim wrote no record — a profile with no fact to
-/// take over — which leaves nothing to give back.
+/// The window one episode took: the profile it was taken on and the record
+/// the claim wrote there. The record is `None` when the claim wrote none —
+/// a profile with no fact to take over — which leaves nothing to give back
+/// and nothing to recognise.
 #[derive(Clone, Debug)]
 pub(crate) struct ClaimedWindow {
     profile: String,
-    started_at: Option<u64>,
+    record: Option<Block>,
 }
 
 impl ClaimedWindow {
@@ -80,9 +80,9 @@ impl ClaimedWindow {
         &self.profile
     }
 
-    /// The instant the claim wrote into the record, when it wrote one.
-    pub(crate) fn started_at(&self) -> Option<u64> {
-        self.started_at
+    /// The record the claim wrote, when it wrote one.
+    pub(crate) fn record(&self) -> Option<&Block> {
+        self.record.as_ref()
     }
 }
 
@@ -130,10 +130,10 @@ impl Episode {
         self.claim.is_some()
     }
 
-    /// The moment a claim started a window, when it started one. A record
-    /// stamped with it is the episode's own, not a fact to obey.
-    pub(crate) fn window_started_at(&self) -> Option<u64> {
-        self.claim.as_ref().and_then(ClaimedWindow::started_at)
+    /// The record a claim wrote, when it wrote one. That record is the
+    /// episode's own — the one window it may spend — not a fact to obey.
+    pub(crate) fn claimed_record(&self) -> Option<&Block> {
+        self.claim.as_ref().and_then(ClaimedWindow::record)
     }
 
     /// The window this episode holds, if any: what it took, on which
@@ -143,14 +143,14 @@ impl Episode {
     }
 
     /// Mark the window as taken, so the next send in this episode does not
-    /// claim it again. `started` says whether the claim wrote a record of
-    /// its own, which is what makes that record the episode's to spend —
-    /// and, if the episode never sends, the episode's to give back.
-    pub(crate) fn after_claim(&self, profile: &str, now: u64, started: bool) -> Self {
+    /// claim it again. `record` is the one the claim wrote on the table,
+    /// which is what makes it the episode's to spend — and, if the episode
+    /// never sends, the episode's to give back.
+    pub(crate) fn after_claim(&self, profile: &str, record: Option<Block>) -> Self {
         Self {
             claim: Some(ClaimedWindow {
                 profile: profile.to_owned(),
-                started_at: started.then_some(now),
+                record,
             }),
             ..self.clone()
         }

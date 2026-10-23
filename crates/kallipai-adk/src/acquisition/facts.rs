@@ -89,14 +89,15 @@ pub(super) fn table_reading(ctx: &AgentContext, now: u64) -> TableReading {
     let current = ctx.failover.current_profile().id.clone();
     // The record this episode's own claim wrote is not a fact to obey: the
     // window it opened is the one the send that took it is spending. Only that
-    // send: every send after it obeys the window like any other reader.
+    // send, and only while the table still holds that very record: a rejection
+    // another writer lands in the same second is a fact like any other.
     let own = ctx
         .episode
-        .window_started_at()
+        .claimed_record()
         .filter(|_| ctx.episode.attempts() == 0);
     let blocked = pacing
         .paced_for(&current, now)
-        .filter(|fact| Some(fact.block.recorded_at) != own);
+        .filter(|fact| own != Some(&fact.block));
     // With no fact there is nothing to escape, so no candidate is needed.
     let alternative = blocked.as_ref().and_then(|_| resolve_alternative(ctx, now));
     TableReading {
@@ -134,14 +135,15 @@ pub(crate) fn claim_window(
     }
     let pacing = ctx.profile_pacing.as_deref()?;
     let force = origin == AttemptOrigin::External;
-    match pacing.claim(profile_id, now, force) {
+    let (claim, record) = pacing.claim(profile_id, now, force);
+    match claim {
         Claim::Paced { not_before } => Some(not_before),
         Claim::Granted => {
-            ctx.episode = ctx.episode.after_claim(profile_id, now, false);
+            ctx.episode = ctx.episode.after_claim(profile_id, None);
             None
         }
         Claim::Started => {
-            ctx.episode = ctx.episode.after_claim(profile_id, now, true);
+            ctx.episode = ctx.episode.after_claim(profile_id, record);
             None
         }
     }
@@ -153,7 +155,7 @@ pub(crate) fn claim_window(
 /// then never sends — the compaction pass that finds nothing to summarize,
 /// the gate that stops before the send — leaves a record that would pace the
 /// next round for a send nobody made. The window goes back, and the table
-/// drops it only while it is still the one this claim wrote.
+/// drops it only while it still holds the very record this claim wrote.
 pub(crate) fn release_unspent_window(ctx: &mut AgentContext) {
     if ctx.episode.attempts() > 0 {
         // A send spent the window: what the table holds now answers for
@@ -164,9 +166,9 @@ pub(crate) fn release_unspent_window(ctx: &mut AgentContext) {
         return;
     };
     let profile = window.profile().to_owned();
-    let started_at = window.started_at();
-    if let (Some(pacing), Some(started_at)) = (ctx.profile_pacing.as_deref(), started_at) {
-        pacing.release(&profile, started_at);
+    let record = window.record().cloned();
+    if let (Some(pacing), Some(record)) = (ctx.profile_pacing.as_deref(), record) {
+        pacing.release(&profile, &record);
     }
     ctx.episode = ctx.episode.after_release();
 }

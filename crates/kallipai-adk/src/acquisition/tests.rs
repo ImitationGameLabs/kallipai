@@ -1,7 +1,7 @@
 //! The acquisition loop's suite: the within-set walk driven end to end over the
 //! recording backend and the shared fact table.
 
-use super::facts::{claim_window, emit_gateway_signal, rejection_payload};
+use super::facts::{claim_window, emit_gateway_signal, rejection_payload, table_reading};
 use super::stream::fatal_provider_status;
 
 use super::*;
@@ -1633,13 +1633,13 @@ struct FactLandsMidWalk {
 impl ProfilePacing for FactLandsMidWalk {
     fn record(&self, _profile_id: &str, _block: Block) {}
 
-    fn claim(&self, _profile_id: &str, _now: u64, _force: bool) -> Claim {
-        Claim::Granted
+    fn claim(&self, _profile_id: &str, _now: u64, _force: bool) -> (Claim, Option<Block>) {
+        (Claim::Granted, None)
     }
 
     fn note_success(&self, _profile_id: &str) {}
 
-    fn release(&self, _profile_id: &str, _started_at: u64) {}
+    fn release(&self, _profile_id: &str, _window: &Block) {}
 
     fn paced_for(&self, profile_id: &str, _now: u64) -> Option<BlockedFact> {
         let block = match profile_id {
@@ -2820,5 +2820,64 @@ async fn a_spent_round_keeps_the_fact_its_send_wrote() {
         pacing.recorded().len(),
         carried,
         "the fact the send's failure wrote stays"
+    );
+}
+
+/// A rejection another writer lands in the same second as the claim is not the
+/// window this episode took: the two records share a start and nothing else, so
+/// the reading obeys it and giving the window back leaves it standing.
+#[tokio::test]
+async fn a_rejection_from_the_claim_s_second_is_a_fact_like_any_other() {
+    let backend = RecordingBackend::new();
+    let source = Arc::new(MapSource(HashMap::from([(
+        "p1".to_string(),
+        backend.clone() as Arc<dyn LlmBackend>,
+    )])));
+    let mut ctx = ctx_from_source(
+        vec![profile("a", "p1", 100_000)],
+        source,
+        RetryPolicy::default(),
+    )
+    .await;
+    let pacing = Arc::new(RecordingPacing::default());
+    let now = timefmt::now_epoch();
+    // An ended window, so the claim may open the next one.
+    pacing.seed(
+        "a",
+        Block {
+            kind: BlockKind::Quota,
+            until: Some(now.saturating_sub(1)),
+            detail: "seeded evidence".to_owned(),
+            status: None,
+            recorded_at: now.saturating_sub(600),
+        },
+    );
+    ctx.profile_pacing = Some(pacing.clone());
+    let _ = claim_window(&mut ctx, "a", now, AttemptOrigin::System);
+    // The compression pass's own refusal lands in the same second.
+    pacing.record(
+        "a",
+        Block {
+            kind: BlockKind::Quota,
+            until: Some(now + 600),
+            detail: "answered".to_owned(),
+            status: Some(429),
+            recorded_at: now,
+        },
+    );
+
+    assert_eq!(
+        table_reading(&ctx, now)
+            .blocked
+            .as_ref()
+            .map(|fact| fact.block.detail.as_str()),
+        Some("answered"),
+        "a record the claim did not write is a fact to obey"
+    );
+
+    release_unspent_window(&mut ctx);
+    assert!(
+        pacing.paced_for("a", now).is_some(),
+        "giving the window back leaves another writer's rejection standing"
     );
 }
