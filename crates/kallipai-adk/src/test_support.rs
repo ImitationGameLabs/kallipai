@@ -731,9 +731,6 @@ impl LlmBackend for RecordingBackend {
 #[derive(Default)]
 pub(crate) struct RecordingHealth {
     blocks: Mutex<Vec<(String, Block)>>,
-    /// Provider ids listed in one inner vector share an account. Ids the groups
-    /// do not name read as different accounts, the fail-open default.
-    accounts: Mutex<Vec<Vec<String>>>,
 }
 
 impl RecordingHealth {
@@ -747,70 +744,37 @@ impl RecordingHealth {
 
     /// Seed a fact as if another agent had written it: no write happens on this
     /// context, which is what a reader's own reading must pick up.
-    pub(crate) fn seed(&self, provider_id: &str, block: Block) {
+    pub(crate) fn seed(&self, profile_id: &str, block: Block) {
         self.blocks
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .push((provider_id.to_string(), block));
-    }
-
-    /// Declare two provider ids as one account: the credential they share, which
-    /// this double has no hash for.
-    pub(crate) fn share_account(&self, a: &str, b: &str) {
-        self.accounts
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .push(vec![a.to_string(), b.to_string()]);
+            .push((profile_id.to_string(), block));
     }
 }
 
 impl EndpointHealth for RecordingHealth {
-    fn record(&self, provider_id: &str, block: Block) {
+    fn record(&self, profile_id: &str, block: Block) {
         self.blocks
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .push((provider_id.to_string(), block));
+            .push((profile_id.to_string(), block));
     }
 
-    fn blocked_for(&self, provider_id: &str, now: u64) -> Option<BlockedFact> {
-        let accounts = self.accounts.lock().unwrap_or_else(|e| e.into_inner());
-        // An id shares this provider's account when one group names both.
-        let same_account = |id: &str| {
-            accounts.iter().any(|group| {
-                group.iter().any(|member| member == id)
-                    && group.iter().any(|member| member == provider_id)
-            })
-        };
-        // Newest first: the same reading order the tagma's table uses. An
-        // account-level fact answers for every endpoint on the credential, which
-        // is what `share_account` declares here.
+    fn blocked_for(&self, profile_id: &str, now: u64) -> Option<BlockedFact> {
+        // Newest first: the same reading order the tagma's table uses.
         self.blocks
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .iter()
             .rev()
-            .find(|(id, block)| {
-                is_active(block.recorded_at, block.until, now)
-                    && (id == provider_id || (block.kind.is_account_level() && same_account(id)))
-            })
+            .find(|(id, block)| id == profile_id && is_active(block, now))
             .map(|(holder, block)| BlockedFact {
                 block: block.clone(),
-                // The holder's hint, as the tagma's table computes it from the
-                // credential the fact was recorded through — not the asker's.
-                account_hint: account_hint(holder),
+                profile: holder.clone(),
             })
     }
 
     fn snapshot(&self, _now: u64) -> Vec<FactView> {
         Vec::new()
     }
-}
-
-/// A deterministic stand-in for the tagma's 8-hex credential hint: the double
-/// has no credential to hash.
-pub(crate) fn account_hint(provider_id: &str) -> String {
-    let digest = provider_id.bytes().fold(0u32, |acc, byte| {
-        acc.wrapping_mul(31).wrapping_add(u32::from(byte))
-    });
-    format!("{digest:08x}")
 }

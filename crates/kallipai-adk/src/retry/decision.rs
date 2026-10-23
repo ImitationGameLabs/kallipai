@@ -153,15 +153,14 @@ pub enum AttemptOrigin {
 ///
 /// The shell resolves it — it owns the chain and the table handle — and hands
 /// over the first candidate that could serve where the current endpoint cannot:
-/// one the shared table has nothing to say about. What "nothing to say" means at
-/// each fact level is the table's own keying, not a rule here: an account-level
-/// fact answers for every endpoint on the credential, an endpoint-level one only
-/// for its own endpoint. The core reads only that a candidate exists: which
-/// endpoint it is, and how many were skipped, stay in the shell.
+/// one the shared table has nothing to say about. What "nothing to say" means is
+/// the table's own keying, not a rule here: a fact names one profile, so it
+/// answers for that profile alone. The core reads only that a candidate exists:
+/// which one it is, and how many were skipped, stay in the shell.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Alternative;
 
-/// What the shared table says about one attempt: the fact the endpoint it would
+/// What the shared table says about one attempt: the fact the profile it would
 /// go to already carries, and whether the chain has a candidate to offer
 /// instead.
 ///
@@ -171,8 +170,7 @@ pub(crate) struct Alternative;
 /// facts.
 #[derive(Clone, Debug)]
 pub(crate) struct TableReading {
-    /// The readable fact for the endpoint the attempt would go to, if any, with
-    /// the account hint the shell's log line carries.
+    /// The readable fact for the profile the attempt would go to, if any.
     pub(crate) blocked: Option<BlockedFact>,
     /// The candidate the shell resolved, when one exists.
     pub(crate) alternative: Option<Alternative>,
@@ -940,8 +938,7 @@ mod tests {
         episode.facts(&attempt)
     }
 
-    /// A fact the shared table carries for the endpoint, with the hint a log
-    /// line shows.
+    /// A fact the shared table carries for a profile.
     fn blocked(kind: BlockKind, until: Option<u64>) -> BlockedFact {
         BlockedFact {
             block: Block {
@@ -951,7 +948,7 @@ mod tests {
                 status: None,
                 recorded_at: 1_000,
             },
-            account_hint: "01234567".to_owned(),
+            profile: "p1".to_owned(),
         }
     }
 

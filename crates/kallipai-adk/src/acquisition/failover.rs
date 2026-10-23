@@ -57,7 +57,7 @@ pub(super) enum Exhaustion {
     /// exhaustion stops the round with the class's own wording.
     ExternalOnly { stop_reason: &'static str },
     /// A quota or payment block: exhaustion parks the agent with the structured
-    /// reason — which endpoint and account, the moment the upstream said service
+    /// reason — which profile, the moment the upstream said service
     /// resumes, the evidence — and arms nothing.
     QuotaBlocked(QuotaBlockedInfo),
 }
@@ -230,21 +230,21 @@ pub(crate) async fn advance_failover(
     let mut offset = 1usize;
     // Track why candidates were skipped so the terminal exhaustion reason steers the operator:
     // a window-infeasible chain means the budget shape needs tuning; an unbuildable chain means
-    // credentials/endpoint config; a chain the shared table has marked means another account or
-    // another endpoint has to be configured. (See the coalescing rule on
+    // credentials/endpoint config; a chain the shared table has marked means another
+    // profile has to be configured. (See the coalescing rule on
     // `FailoverChainExhaustion`.)
     let mut skipped_infeasible = false;
     let mut skipped_unbuildable = false;
     let mut skipped_marked = false;
     // The shared table's own reading is what keeps the walk off a marked
-    // endpoint; the fact being escaped was written before the walk starts, so an
-    // account-level one already answers for the whole account.
+    // profile; the fact being escaped was written before the walk starts, so a
+    // mark on a candidate already answers for it.
     let now = timefmt::now_epoch();
     while let Some(candidate) = ctx.failover.candidate_profile(offset) {
         // A candidate the table has already marked cannot serve: switching into it
         // would burn an attempt to learn what another agent already paid for.
         if let Some(health) = ctx.endpoint_health.as_deref()
-            && candidate_marked(health, &candidate.endpoint, now)
+            && candidate_marked(health, &candidate.id, now)
         {
             warn!(
                 from = %from,

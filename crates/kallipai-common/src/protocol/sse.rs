@@ -79,14 +79,12 @@ pub struct TransientRetryInfo {
     pub retry_in_secs: f64,
 }
 
-/// The structured reason a quota or payment block parks an agent: which endpoint
-/// and account hit the wall, the moment the upstream said it reopens, and the
-/// evidence. Carried by [`SseEvent::QuotaBlocked`] and, on the runtime side, by
-/// the matching `AgentEvent`, so the payload has one shape and one owner: the
-/// event that reports it.
+/// The structured reason a quota or payment block parks an agent: which profile
+/// hit the wall, the moment the upstream said it reopens, and the evidence.
+/// Carried by [`SseEvent::QuotaBlocked`] and, on the runtime side, by the
+/// matching `AgentEvent`, so the payload has one shape and one owner: the event
+/// that reports it.
 ///
-/// `account_hint` is the first eight hex of the credential fingerprint — enough
-/// for a reader to tell two accounts apart, never the credential itself.
 /// `reset` is the *display* face of the upstream's hint ([`crate::facts::display_until`]):
 /// a moment further out than the trust bound reads as `None`, which is what
 /// "the upstream did not say, or said something nobody should believe" means to
@@ -94,10 +92,8 @@ pub struct TransientRetryInfo {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QuotaBlockedInfo {
-    /// The endpoint (provider id) that hit the wall.
-    pub endpoint: String,
-    /// First eight hex of the credential fingerprint behind that endpoint.
-    pub account_hint: String,
+    /// The profile that hit the wall.
+    pub profile: String,
     /// When the upstream said service resumes, as a value a reader may show.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reset: Option<u64>,
@@ -366,8 +362,7 @@ mod tests {
             transient_retry: None,
         },
         SseEvent::QuotaBlocked(QuotaBlockedInfo {
-            endpoint: String::new(),
-            account_hint: String::new(),
+            profile: String::new(),
             reset: Some(0),
             detail: String::new(),
         }),
@@ -408,10 +403,7 @@ mod tests {
             ("interrupted", &[]),
             ("tokenBudgetExceeded", &["budget", "consumed"]),
             ("failoverChainExhausted", &["detail", "reason"]),
-            (
-                "quotaBlocked",
-                &["accountHint", "detail", "endpoint", "reset"],
-            ),
+            ("quotaBlocked", &["detail", "profile", "reset"]),
         ];
         assert_eq!(
             ALL_VARIANTS.len(),
@@ -564,15 +556,14 @@ mod tests {
     #[test]
     fn quota_blocked_wire_bytes_are_pinned() {
         let info = QuotaBlockedInfo {
-            endpoint: "p1".to_owned(),
-            account_hint: "01234567".to_owned(),
+            profile: "p1".to_owned(),
             reset: Some(1_700_000_600),
             detail: "HTTP 429 slow down".to_owned(),
         };
         let json = serde_json::to_string(&SseEvent::QuotaBlocked(info)).unwrap();
         assert_eq!(
             json,
-            "{\"type\":\"quotaBlocked\",\"endpoint\":\"p1\",\"accountHint\":\"01234567\",\"reset\":1700000600,\"detail\":\"HTTP 429 slow down\"}"
+            "{\"type\":\"quotaBlocked\",\"profile\":\"p1\",\"reset\":1700000600,\"detail\":\"HTTP 429 slow down\"}"
         );
     }
 
@@ -582,8 +573,7 @@ mod tests {
     #[test]
     fn a_quota_block_without_a_usable_reset_omits_the_field() {
         let info = QuotaBlockedInfo {
-            endpoint: "p1".to_owned(),
-            account_hint: "01234567".to_owned(),
+            profile: "p1".to_owned(),
             reset: None,
             detail: "HTTP 429".to_owned(),
         };
@@ -594,6 +584,6 @@ mod tests {
             panic!("round-trips as the same variant");
         };
         assert_eq!(back.reset, None);
-        assert_eq!(back.account_hint, "01234567");
+        assert_eq!(back.profile, "p1");
     }
 }

@@ -241,8 +241,7 @@ mod tests {
             transient_retry: None,
         },
         AgentEvent::QuotaBlocked(QuotaBlockedInfo {
-            endpoint: String::new(),
-            account_hint: String::new(),
+            profile: String::new(),
             reset: Some(0),
             detail: String::new(),
         }),
@@ -282,7 +281,7 @@ mod tests {
             "Interrupted",
             "TokenBudgetExceeded { consumed: 0, budget: 0 }",
             "FailoverChainExhausted { reason: NoFailoverConfigured, detail: \"\", transient_retry: None }",
-            "QuotaBlocked(QuotaBlockedInfo { endpoint: \"\", account_hint: \"\", reset: Some(0), detail: \"\" })",
+            "QuotaBlocked(QuotaBlockedInfo { profile: \"\", reset: Some(0), detail: \"\" })",
         ];
         for (v, want) in SAMPLES.iter().zip(expected) {
             assert_eq!(format!("{v:?}"), *want);

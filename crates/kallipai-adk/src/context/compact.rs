@@ -543,7 +543,7 @@ pub(crate) async fn note_compaction_failure(
             if let Some(backend) = backend {
                 crate::retry::record_endpoint_fact(
                     ctx.endpoint_health.as_deref(),
-                    &ctx.failover.current_profile().endpoint,
+                    &ctx.failover.current_profile().id,
                     class,
                     backend,
                     now,

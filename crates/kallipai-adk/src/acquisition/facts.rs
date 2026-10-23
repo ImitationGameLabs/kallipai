@@ -59,10 +59,10 @@ pub(super) fn emit_gateway_signal(ctx: &AgentContext, payload: SignalPayload) {
 }
 
 /// Signal the gateway about the fact the table carried, when it is the kind that
-/// says this endpoint's credentials were rejected. An account-level quota or
-/// payment block parks the round instead, and a shape fact is not an auth answer;
-/// the status gate itself stays in the emitter. A fact stores no error code, so
-/// the signal carries none.
+/// says this profile's credentials were rejected. A quota or payment block parks
+/// the round instead, and a shape fact is not an auth answer; the status gate
+/// itself stays in the emitter. A fact stores no error code, so the signal
+/// carries none.
 pub(super) fn emit_fact_signal(ctx: &AgentContext, blocked: Option<&BlockedFact>) {
     let Some(block) = blocked.map(|fact| &fact.block) else {
         return;
@@ -76,7 +76,7 @@ pub(super) fn emit_fact_signal(ctx: &AgentContext, blocked: Option<&BlockedFact>
     emit_gateway_signal(ctx, (status, None));
 }
 
-/// What the shared table says about the endpoint the next send would go to: the
+/// What the shared table says about the profile the next send would go to: the
 /// fact it carries, and whether the chain has a candidate to offer instead.
 ///
 /// Fail-open at every step: no handle, an unknown provider, a table that cannot
@@ -86,7 +86,7 @@ pub(super) fn table_reading(ctx: &AgentContext, now: u64) -> TableReading {
     let Some(health) = ctx.endpoint_health.as_deref() else {
         return TableReading::none();
     };
-    let current = ctx.failover.current_profile().endpoint.clone();
+    let current = ctx.failover.current_profile().id.clone();
     let blocked = health.blocked_for(&current, now);
     // With no fact there is nothing to escape, so no candidate is needed.
     let alternative = blocked.as_ref().and_then(|_| resolve_alternative(ctx, now));
@@ -103,17 +103,14 @@ pub(super) fn table_reading(ctx: &AgentContext, now: u64) -> TableReading {
 /// sibling does not hide a usable endpoint behind it. `None` means the chain has
 /// nowhere to go.
 ///
-/// The fact's level decides what "marked" means without a second rule here: the
-/// table keys an account-level fact by the credential, so it answers for every
-/// endpoint on that account (see [`EndpointHealth::blocked_for`]), which is what
-/// leaves a same-account sibling no candidate for escaping a quota block — while
-/// an endpoint-level fact keys by endpoint, so a sibling on the same account
-/// stays one.
+/// The table keys one fact per profile, so a mark answers for exactly the
+/// profile it names (see [`EndpointHealth::blocked_for`]): every other
+/// profile in the chain stays a candidate.
 fn resolve_alternative(ctx: &AgentContext, now: u64) -> Option<Alternative> {
     let health = ctx.endpoint_health.as_deref()?;
     let mut offset = 1;
     while let Some(candidate) = ctx.failover.candidate_profile(offset) {
-        if !candidate_marked(health, &candidate.endpoint, now) {
+        if !candidate_marked(health, &candidate.id, now) {
             return Some(Alternative);
         }
         offset += 1;
@@ -122,42 +119,32 @@ fn resolve_alternative(ctx: &AgentContext, now: u64) -> Option<Alternative> {
 }
 
 /// Whether the shared table rules this candidate out: it carries a fact of its
-/// own — of either level, since an account-level fact answers for every endpoint
-/// on the credential.
+/// own — and a fact names one profile, so it answers for exactly this one.
 ///
-/// Fail-open: an unknown provider, or a handle that cannot read, reads as a
-/// candidate that may serve.
+/// Fail-open: a table that cannot be read reads as a candidate that may serve.
 pub(super) fn candidate_marked(health: &dyn EndpointHealth, candidate: &str, now: u64) -> bool {
     health.blocked_for(candidate, now).is_some()
 }
 
-/// The structured reason a quota or payment block parks with: which endpoint and
-/// account, the moment the upstream said service resumes, and the evidence.
+/// The structured reason a quota or payment block parks with: the profile it
+/// names, the moment the upstream said service resumes, and the evidence.
 ///
-/// The table is read for the account hint, fail-open: a context without a table,
-/// or an endpoint the table cannot key, leaves the hint empty rather than
-/// withholding the park. `reset` carries the *display* face of the upstream's
-/// hint ([`display_until`]), so the trust rule is applied once, here, and every
-/// reader only has to tell `Some` from `None`.
+/// `reset` carries the *display* face of the upstream's hint
+/// ([`display_until`]), so the trust rule is applied once, here, and every
+/// reader only has to tell `Some` from `None`. A context without a table
+/// leaves the reset empty rather than withholding the park.
 pub(super) fn quota_blocked_payload(
     ctx: &AgentContext,
-    endpoint_id: &str,
+    profile_id: &str,
     detail: String,
 ) -> QuotaBlockedInfo {
-    let fact = ctx
+    let reset = ctx
         .endpoint_health
         .as_deref()
-        .and_then(|health| health.blocked_for(endpoint_id, timefmt::now_epoch()));
-    let (account_hint, reset) = match fact {
-        Some(fact) => (
-            fact.account_hint,
-            display_until(fact.block.recorded_at, fact.block.until),
-        ),
-        None => (String::new(), None),
-    };
+        .and_then(|health| health.blocked_for(profile_id, timefmt::now_epoch()))
+        .and_then(|fact| display_until(fact.block.recorded_at, fact.block.until));
     QuotaBlockedInfo {
-        endpoint: endpoint_id.to_string(),
-        account_hint,
+        profile: profile_id.to_string(),
         reset,
         detail,
     }
@@ -194,8 +181,7 @@ pub(super) fn fact_error(reading: &TableReading) -> anyhow::Error {
 /// Why a fact hit stops without walking the chain: there is no endpoint left to
 /// try. Three situations produce that, and the note names the one that applies —
 /// a set with nothing to walk, a chain already at its last profile, or a chain
-/// whose candidates are all marked in the shared table (or share the blocked
-/// account).
+/// whose candidates are all marked in the shared table.
 pub(super) fn fact_chain_note(ctx: &AgentContext) -> &'static str {
     if ctx.failover.profile_count() == 1 {
         return "no failover attempted: the set has a single profile";
@@ -203,7 +189,7 @@ pub(super) fn fact_chain_note(ctx: &AgentContext) -> &'static str {
     if ctx.failover.profile_idx() + 1 >= ctx.failover.profile_count() {
         return "no failover attempted: the chain is already at its last profile";
     }
-    "no failover attempted: every endpoint ahead is marked in the shared fact table or shares the blocked account"
+    "no failover attempted: every profile ahead is marked in the shared fact table"
 }
 
 /// The operator-facing message for a stop the shared table caused: which endpoint
@@ -220,10 +206,9 @@ pub(super) fn fact_stop_message(
     chain_note: &str,
 ) -> String {
     let profile = ctx.failover.current_profile();
-    // An account-level fact parks with the payload instead, so what reaches here
-    // is an endpoint-level fact — and the write side records the upstream's reset
-    // hint for every kind it writes, so this one has a moment to report whenever
-    // the upstream named one. The sentence is the one fact_error carries: one
+    // The write side records the upstream's reset hint for every kind it
+    // writes, so a fact reaching here has a moment to report whenever the
+    // upstream named one. The sentence is the one fact_error carries: one
     // fact, one wording, on both diagnostic faces.
     let Some(fact) = reading.blocked.as_ref() else {
         return format!(
@@ -243,22 +228,16 @@ pub(super) fn fact_stop_message(
 }
 
 /// The observation line a skipped send leaves: the fact hit rate is counted from
-/// these lines (one per skipped send), so it names the agent, the endpoint it
-/// would have used, the account hint, the moment the upstream said the endpoint
+/// these lines (one per skipped send), so it names the agent, the profile it
+/// would have used, the moment the upstream said service reopens, and why the
 /// reopens, and why the send did not happen.
-pub(super) fn log_fact_skip(
-    ctx: &AgentContext,
-    endpoint_id: &str,
-    reading: &TableReading,
-    reason: &str,
-) {
+pub(super) fn log_fact_skip(ctx: &AgentContext, reading: &TableReading, reason: &str) {
     let Some(fact) = reading.blocked.as_ref() else {
         return;
     };
     info!(
         agent = ?ctx.config.agent_id,
-        endpoint = endpoint_id,
-        account_hint = %fact.account_hint,
+        profile = %fact.profile,
         until = ?fact.block.until,
         skip_reason = reason,
         "shared fact skipped a send"

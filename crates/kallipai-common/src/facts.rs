@@ -1,35 +1,44 @@
-//! Shared upstream-failure facts: what one agent learned about an endpoint or
-//! an account, readable by every agent.
+//! Shared upstream-failure facts: what one agent learned about a profile,
+//! readable by every agent.
 //!
-//! A fact is written when a failure verdict says the endpoint or the account
-//! cannot serve the request (quota, payment, credentials, a repeated response
-//! shape). The table lives in the tagma and is keyed by the credential
-//! fingerprint — an identity the callers never see: they hand over a provider
-//! id and get a verdict, or a display row, back.
+//! A fact is written when a failure verdict says the profile cannot serve the
+//! request (quota, payment, credentials, a repeated response shape). The table
+//! lives in the tagma and is keyed by the profile id — the unit an agent runs,
+//! and the unit an upstream answers about, so the id a writer hands its failure
+//! in under is the id a reader gets its verdict back from.
 //!
-//! This module carries the value types and the one hit predicate every reader
-//! shares. The implementation (key computation, storage, capacity) is the
-//! tagma's; the adk only holds the handle.
+//! This module carries the value types and the one window rule every reader
+//! shares. The implementation (storage, capacity, claiming) is the tagma's; the
+//! adk only holds the handle.
 
 use serde::{Deserialize, Serialize};
 
-/// How long a fact without an upstream reset hint stays readable: the
-/// conservative window a writer leaves behind when it has no better answer.
-pub const FACT_TTL_MAX_SECS: u64 = 3600;
+/// The window a fact leaves behind when the upstream named no reset moment.
+///
+/// Short by intent: it buys one probing send per window rather than an hour of
+/// silence, so a limit the upstream never explained costs a pause instead of a
+/// parked round.
+pub const MIN_RETRY_INTERVAL_SECS: u64 = 60;
+
+/// The same window for a payment wall, which does not clear on its own within
+/// seconds: a longer pause is cheaper than asking a billing gate twice.
+pub const PAYMENT_RETRY_INTERVAL_SECS: u64 = 300;
 
 /// How many facts the table keeps. Oldest by `recorded_at` is evicted when a
 /// new key arrives at capacity, so a long-lived tagma cannot grow without bound.
 pub const FACT_TABLE_CAPACITY: usize = 256;
 
-/// Trust bound on an upstream reset hint, for display only: a reset further out
-/// than this is shown as unknown. It never extends or shortens a fact's life —
-/// [`is_active`] does not read it.
+/// Trust bound on an upstream reset hint: a moment further out than this is
+/// shown as unknown, and [`window_end`] caps the window there too, so what a
+/// surface shows and what a reader honors cannot disagree.
 pub const QUOTA_RESET_TRUST_MAX_SECS: u64 = 86_400;
 
 /// What the upstream rejected.
 ///
-/// The first two are account-level (every endpoint sharing the credential is
-/// affected); the last two are endpoint-level (a sibling endpoint may serve).
+/// The kinds name where the wall is, not who owns it: every fact is recorded
+/// against one profile, and none of them reaches a sibling. They differ in how
+/// the round ends ([`BlockKind::parks_the_round`]) and in how long the record
+/// stays readable ([`retry_interval`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BlockKind {
@@ -44,9 +53,10 @@ pub enum BlockKind {
 }
 
 impl BlockKind {
-    /// Whether a sibling endpoint can serve despite this fact. Account-level
-    /// facts follow the credential, so only a different account clears them.
-    pub fn is_account_level(self) -> bool {
+    /// Whether a fact of this kind ends the round on the spot: the quota and
+    /// payment exits carry the structured parked reason, where the others stop
+    /// with the failure that caused them.
+    pub fn parks_the_round(self) -> bool {
         matches!(self, Self::Quota | Self::Payment)
     }
 
@@ -63,22 +73,24 @@ impl BlockKind {
     }
 }
 
-/// The endpoint a fact was observed on, as the display face of the endpoint
-/// level key. `base_url` is `None` for providers that need none (the native
-/// families), which is also what their key component is.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct EndpointRef {
-    pub family: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub base_url: Option<String>,
+/// The window a fact of this kind leaves behind when the upstream said nothing
+/// about when the profile may be used again.
+pub fn retry_interval(kind: BlockKind) -> u64 {
+    match kind {
+        BlockKind::Payment => PAYMENT_RETRY_INTERVAL_SECS,
+        BlockKind::Quota | BlockKind::EndpointAuth | BlockKind::EndpointShape => {
+            MIN_RETRY_INTERVAL_SECS
+        }
+    }
 }
 
-/// One stored fact: the class, the upstream's own words, and when it was seen.
+/// One stored fact: the class, the upstream's own words, and when the window it
+/// opens starts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Block {
     pub kind: BlockKind,
     /// Epoch seconds the upstream said the endpoint reopens, when it said so at
-    /// all. It can only shorten the readable window, never extend it.
+    /// all. It can only move the window earlier, never past the trust bound.
     pub until: Option<u64>,
     /// Bounded excerpt of the upstream's own text (the response body).
     pub detail: String,
@@ -88,21 +100,33 @@ pub struct Block {
     /// decision, whether a settled failure tells the gateway this endpoint's
     /// credentials were rejected.
     pub status: Option<u16>,
-    /// Epoch seconds when the failure was observed.
+    /// Epoch seconds when the window this fact opens begins.
+    ///
+    /// One moment, one meaning: it is the writer's clock at the failure, and
+    /// the only time a reader uses, so the write side and the read side cannot
+    /// disagree about when the window started.
     pub recorded_at: u64,
+}
+
+/// The moment this fact stops being readable: the end of the window it opened.
+///
+/// An upstream reset ends it when that is nearer, capped by the trust bound so
+/// a hint nobody should believe cannot pin a profile for a day. Without a hint
+/// the window is the kind's own interval ([`retry_interval`]).
+pub fn window_end(block: &Block) -> u64 {
+    let capped = block.recorded_at.saturating_add(QUOTA_RESET_TRUST_MAX_SECS);
+    match block.until {
+        Some(until) => until.min(capped),
+        None => block.recorded_at.saturating_add(retry_interval(block.kind)),
+    }
 }
 
 /// The one hit predicate: is this fact still readable at `now`?
 ///
-/// Two conditions, both required: the fact is inside its own window
-/// (`FACT_TTL_MAX_SECS` from `recorded_at`), and — when the upstream gave a
-/// reset — that moment is still ahead. An upstream hint therefore shortens the
-/// window when it is nearer, and is ignored when it is further out.
-pub fn is_active(recorded_at: u64, until: Option<u64>, now: u64) -> bool {
-    if now.saturating_sub(recorded_at) >= FACT_TTL_MAX_SECS {
-        return false;
-    }
-    until.is_none_or(|u| u > now)
+/// A fact is readable until its window ends, and no longer: every reader asks
+/// this one question, so an expired fact is never half there.
+pub fn is_active(block: &Block, now: u64) -> bool {
+    now < window_end(block)
 }
 
 /// The reset hint as a reader may show it: `None` when the upstream gave none,
@@ -114,9 +138,8 @@ pub fn display_until(recorded_at: u64, until: Option<u64>) -> Option<u64> {
     (until <= trusted).then_some(until)
 }
 
-/// One fact as a status surface shows it: the class, the upstream's words, and
-/// an 8-hex hint of the account — never the credential, never the full
-/// fingerprint, which stay inside the tagma.
+/// One fact as a status surface shows it: the kind, the upstream's words, and
+/// the profile it names — never a credential, which stays inside the tagma.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FactView {
     pub kind: BlockKind,
@@ -125,47 +148,36 @@ pub struct FactView {
     pub until: Option<u64>,
     pub detail: String,
     pub recorded_at: u64,
-    /// The endpoint level this fact belongs to; `None` for an account-level
-    /// fact, which is not about one endpoint.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub endpoint: Option<EndpointRef>,
-    /// First 8 hex of the credential fingerprint.
-    pub account_hint: String,
+    /// The profile the fact names.
+    pub profile: String,
 }
 
-/// One readable fact about a provider, as a reader that keys a verdict on it
-/// sees it: the fact itself, plus the 8-hex account hint the log lines carry.
-///
-/// The hint is the same face the status surfaces show — never the credential,
-/// never the full fingerprint, both of which stay inside the tagma.
+/// One readable fact about a profile, as a reader that keys a verdict on it sees
+/// it: the fact itself, plus the profile id the log lines carry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlockedFact {
     pub block: Block,
-    /// First 8 hex of the credential fingerprint.
-    pub account_hint: String,
+    /// The profile the fact names.
+    pub profile: String,
 }
 
-/// The shared fact table, as the adk sees it: hand over a provider id, get
+/// The shared fact table, as the adk sees it: hand over a profile id, get
 /// either a stored fact back or nothing. Implemented by the tagma, which owns
-/// the key computation (the caller never names a credential or a fingerprint).
+/// the storage.
 ///
 /// Every method is fail-open by contract: a reader that cannot reach the table
 /// behaves as if there were no facts, because a missing fact must never be able
 /// to change a verdict on its own.
 pub trait EndpointHealth: Send + Sync {
-    /// Record a failure fact about the endpoint this provider id names.
-    fn record(&self, provider_id: &str, block: Block);
+    /// Record a failure fact about this profile.
+    fn record(&self, profile_id: &str, block: Block);
 
-    /// The readable fact for this provider id at `now`, if any, with the account
-    /// hint a log line carries.
+    /// The readable fact for this profile at `now`, if any.
     ///
-    /// An account-level fact answers for **every** endpoint on the credential,
-    /// not just the one it was recorded through: that is what makes a sibling on
-    /// the same account no candidate for escaping an account-level fact, while a
-    /// sibling stays a candidate for escaping an endpoint-level one. When both
-    /// levels carry a fact, the account-level one answers: the stronger
-    /// constraint is the one a reader has to see.
-    fn blocked_for(&self, provider_id: &str, now: u64) -> Option<BlockedFact>;
+    /// A fact answers for the profile it was recorded on and for no other: a
+    /// sibling profile is a candidate again the moment the walk reaches it, and
+    /// pays its own probing send to find out.
+    fn blocked_for(&self, profile_id: &str, now: u64) -> Option<BlockedFact>;
 
     /// Every readable fact at `now`, for the status and fleet surfaces.
     fn snapshot(&self, now: u64) -> Vec<FactView>;
@@ -177,25 +189,51 @@ mod tests {
 
     const T0: u64 = 1_700_000_000;
 
-    #[test]
-    fn without_a_reset_the_ttl_is_the_whole_window() {
-        assert!(is_active(T0, None, T0));
-        assert!(is_active(T0, None, T0 + FACT_TTL_MAX_SECS - 1));
-        assert!(!is_active(T0, None, T0 + FACT_TTL_MAX_SECS));
-        assert!(!is_active(T0, None, T0 + FACT_TTL_MAX_SECS * 10));
+    fn block(kind: BlockKind, until: Option<u64>) -> Block {
+        Block {
+            kind,
+            until,
+            detail: "HTTP 429".into(),
+            status: None,
+            recorded_at: T0,
+        }
     }
 
     #[test]
-    fn a_reset_hint_only_shortens_the_window() {
-        // Nearer than the TTL: the hint is the window.
-        let near = T0 + 60;
-        assert!(is_active(T0, Some(near), near - 1));
-        assert!(!is_active(T0, Some(near), near));
+    fn without_a_reset_the_window_is_the_kind_interval() {
+        let quota = block(BlockKind::Quota, None);
+        assert!(is_active(&quota, T0));
+        assert!(is_active(&quota, T0 + MIN_RETRY_INTERVAL_SECS - 1));
+        assert!(!is_active(&quota, T0 + MIN_RETRY_INTERVAL_SECS));
+        assert_eq!(window_end(&quota), T0 + MIN_RETRY_INTERVAL_SECS);
 
-        // Further out than the TTL: the TTL still ends it.
+        let payment = block(BlockKind::Payment, None);
+        assert!(is_active(&payment, T0 + PAYMENT_RETRY_INTERVAL_SECS - 1));
+        assert!(!is_active(&payment, T0 + PAYMENT_RETRY_INTERVAL_SECS));
+        assert_eq!(window_end(&payment), T0 + PAYMENT_RETRY_INTERVAL_SECS);
+
+        // The kinds that never park a round wait the plain interval.
+        for kind in [BlockKind::EndpointAuth, BlockKind::EndpointShape] {
+            assert_eq!(retry_interval(kind), MIN_RETRY_INTERVAL_SECS, "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn a_reset_hint_ends_the_window_when_it_is_nearer() {
+        let near = T0 + 30;
+        let hinted = block(BlockKind::Quota, Some(near));
+        assert_eq!(window_end(&hinted), near);
+        assert!(is_active(&hinted, near - 1));
+        assert!(!is_active(&hinted, near));
+    }
+
+    #[test]
+    fn a_reset_beyond_the_trust_bound_is_capped() {
         let far = T0 + QUOTA_RESET_TRUST_MAX_SECS * 30;
-        assert!(is_active(T0, Some(far), T0 + FACT_TTL_MAX_SECS - 1));
-        assert!(!is_active(T0, Some(far), T0 + FACT_TTL_MAX_SECS));
+        let capped = block(BlockKind::Quota, Some(far));
+        assert_eq!(window_end(&capped), T0 + QUOTA_RESET_TRUST_MAX_SECS);
+        assert!(is_active(&capped, T0 + QUOTA_RESET_TRUST_MAX_SECS - 1));
+        assert!(!is_active(&capped, T0 + QUOTA_RESET_TRUST_MAX_SECS));
     }
 
     #[test]
@@ -211,30 +249,11 @@ mod tests {
     }
 
     #[test]
-    fn only_quota_and_payment_follow_the_account() {
-        assert!(BlockKind::Quota.is_account_level());
-        assert!(BlockKind::Payment.is_account_level());
-        assert!(!BlockKind::EndpointAuth.is_account_level());
-        assert!(!BlockKind::EndpointShape.is_account_level());
-    }
-
-    #[test]
-    fn a_view_serializes_without_the_parts_it_does_not_have() {
-        let view = FactView {
-            kind: BlockKind::EndpointAuth,
-            until: None,
-            detail: "HTTP 401".into(),
-            recorded_at: T0,
-            endpoint: Some(EndpointRef {
-                family: "openai".into(),
-                base_url: None,
-            }),
-            account_hint: "0123456789abcdef"[..8].to_string(),
-        };
-        let json = serde_json::to_string(&view).unwrap();
-        assert!(json.contains("\"endpoint_auth\""));
-        assert!(!json.contains("until"));
-        assert!(!json.contains("base_url"));
+    fn only_quota_and_payment_park_the_round() {
+        assert!(BlockKind::Quota.parks_the_round());
+        assert!(BlockKind::Payment.parks_the_round());
+        assert!(!BlockKind::EndpointAuth.parks_the_round());
+        assert!(!BlockKind::EndpointShape.parks_the_round());
     }
 
     #[test]
@@ -248,5 +267,21 @@ mod tests {
             let wire = serde_json::to_value(kind).unwrap();
             assert_eq!(wire.as_str(), Some(kind.as_str()), "{kind:?}");
         }
+    }
+
+    #[test]
+    fn a_view_serializes_exactly_the_fields_it_has() {
+        let view = FactView {
+            kind: BlockKind::EndpointAuth,
+            until: None,
+            detail: "HTTP 401".into(),
+            recorded_at: T0,
+            profile: "a".into(),
+        };
+        let json = serde_json::to_string(&view).unwrap();
+        assert_eq!(
+            json,
+            r#"{"kind":"endpoint_auth","detail":"HTTP 401","recorded_at":1700000000,"profile":"a"}"#
+        );
     }
 }

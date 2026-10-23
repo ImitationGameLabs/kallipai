@@ -130,8 +130,7 @@ pub async fn bridge_task(
                                     AgentEvent::QuotaBlocked(info) => {
                                         error!(
                                             id = %agent_id,
-                                            endpoint = %info.endpoint,
-                                            account_hint = %info.account_hint,
+                                            profile = %info.profile,
                                             reset = ?info.reset,
                                             "quota blocked, parking: {}",
                                             info.detail

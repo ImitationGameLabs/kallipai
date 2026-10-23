@@ -20,9 +20,8 @@ use tokio_util::sync::CancellationToken;
 use crate::budget_gate::{BudgetAction, enforce_pre_call_budget};
 use crate::retry::{AttemptOrigin, Episode, RetryCall, RetryPolicy, stream_with_retry};
 use crate::test_support::{
-    FAILURE_PIN_WINDOW, MapSource, RecordingBackend, RecordingHealth, account_hint,
-    ctx_from_source, mock_source, profile, request, seed_over_budget_store, set_context_window,
-    system_msg, user_msg,
+    FAILURE_PIN_WINDOW, MapSource, RecordingBackend, RecordingHealth, ctx_from_source, mock_source,
+    profile, request, seed_over_budget_store, set_context_window, system_msg, user_msg,
 };
 use just_llm_client::LlmBackend;
 use just_llm_client::types::generation::ReasoningEffort;
@@ -148,6 +147,7 @@ async fn failover_advance_rebuilds_the_conversation_chain() {
             round: 0,
             episode: &mut Episode::new(timefmt::now_epoch()),
             endpoint_id: "p1",
+            profile_id: "a",
             health: None,
         },
         &tokio::sync::mpsc::channel(16).0,
@@ -190,6 +190,7 @@ async fn failover_advance_rebuilds_the_conversation_chain() {
             round: 0,
             episode: &mut Episode::new(timefmt::now_epoch()),
             endpoint_id: "p2",
+            profile_id: "b",
             health: None,
         },
         &tokio::sync::mpsc::channel(16).0,
@@ -1037,11 +1038,7 @@ async fn a_quota_rejection_with_no_candidate_left_parks() {
     let AcquireResult::Outcome(AgentOutcome::QuotaBlocked(info)) = outcome else {
         panic!("a quota rejection with no candidate left parks with the structured reason");
     };
-    assert_eq!(info.endpoint, "p1");
-    assert!(
-        !info.account_hint.is_empty(),
-        "the fact the rejection wrote answers the read back: {info:?}"
-    );
+    assert_eq!(info.profile, "a");
     assert_eq!(info.reset, None, "the body carried no resumption hint");
     assert!(info.detail.contains("429"), "{:?}", info.detail);
     assert_eq!(health.recorded().len(), 1, "one rejection, one fact");
@@ -1318,16 +1315,16 @@ async fn the_mid_stream_path_writes_the_fact_a_rejection_leaves() {
     // A single-profile set has nowhere to fail over, so the round stops here
     // with the rejection in hand — and the fact is on the record either way.
     let AcquireResult::Stop { message } = outcome else {
-        panic!("an endpoint-level rejection with no sibling to try stops the round");
+        panic!("a 401 with no sibling to try stops the round");
     };
     assert!(message.contains("401"), "the stop carries it: {message}");
     let recorded = health.recorded();
     assert_eq!(recorded.len(), 1, "one rejection, one fact");
-    assert_eq!(recorded[0].0, "p1");
+    assert_eq!(recorded[0].0, "a", "the fact is keyed by the profile");
     assert_eq!(recorded[0].1.kind, BlockKind::EndpointAuth);
     assert!(
-        !recorded[0].1.kind.is_account_level(),
-        "a credential rejection is about this endpoint, not the account"
+        !recorded[0].1.kind.parks_the_round(),
+        "a credential rejection stops the walk instead of parking the round"
     );
 }
 
@@ -1386,19 +1383,15 @@ async fn a_fact_the_table_carries_skips_the_send_and_parks() {
     )
     .await;
     let health = Arc::new(RecordingHealth::default());
-    health.seed("p1", seeded(BlockKind::Quota, None));
+    health.seed("a", seeded(BlockKind::Quota, None));
     ctx.endpoint_health = Some(health.clone());
 
     let outcome = acquire_once(&mut ctx).await;
 
     let AcquireResult::Outcome(AgentOutcome::QuotaBlocked(info)) = outcome else {
-        panic!("an account-level fact with no candidate left parks the round");
+        panic!("a quota fact with no candidate left parks the round");
     };
-    assert_eq!(info.endpoint, "p1");
-    assert!(
-        !info.account_hint.is_empty(),
-        "the seeded fact answers the read back: {info:?}"
-    );
+    assert_eq!(info.profile, "a");
     assert!(info.detail.contains("seeded evidence"), "{:?}", info.detail);
     assert_eq!(
         backend.take_requests().len(),
@@ -1407,12 +1400,11 @@ async fn a_fact_the_table_carries_skips_the_send_and_parks() {
     );
 }
 
-/// An endpoint-level fact accepts a sibling on the same account: the
-/// credentials are the endpoint's business, so another relay of the same
-/// credential is a candidate. Requiring a different account here would leave
-/// the sibling unused — the flip this case is written to catch.
+/// A credential rejection names one profile, so the next profile stays a
+/// candidate: the sibling serves the turn. Requiring a second rule here would
+/// leave the sibling unused — the flip this case is written to catch.
 #[tokio::test]
-async fn an_endpoint_level_fact_advances_to_a_sibling_on_the_same_account() {
+async fn a_marked_profile_leaves_the_next_one_a_candidate() {
     let backend = RecordingBackend::new();
     backend.queue_stream("resp-1");
     let source = Arc::new(MapSource(HashMap::from([
@@ -1426,8 +1418,7 @@ async fn an_endpoint_level_fact_advances_to_a_sibling_on_the_same_account() {
     )
     .await;
     let health = Arc::new(RecordingHealth::default());
-    health.seed("p1", seeded(BlockKind::EndpointAuth, None));
-    health.share_account("p1", "p2");
+    health.seed("a", seeded(BlockKind::EndpointAuth, None));
     ctx.endpoint_health = Some(health.clone());
 
     let outcome = acquire_once(&mut ctx).await;
@@ -1440,15 +1431,15 @@ async fn an_endpoint_level_fact_advances_to_a_sibling_on_the_same_account() {
     assert_eq!(requests.len(), 1, "only the sibling is asked");
     assert_eq!(
         requests[0].model, "b-model",
-        "a same-account sibling is a candidate for an endpoint-level fact"
+        "a sibling profile is a candidate once the first one is marked"
     );
 }
 
-/// An account-level fact does not accept one: the quota follows the
-/// credential, so a sibling on the same account would meet the same wall. The
-/// round parks instead, and neither endpoint is asked.
+/// A quota fact names one profile: a mark on another profile leaves this
+/// round alone, so the turn goes to the profile the chain is on. A mark
+/// leaking across profiles is the flip this case catches.
 #[tokio::test]
-async fn an_account_level_fact_refuses_a_sibling_on_the_same_account() {
+async fn a_quota_fact_on_another_profile_leaves_the_round_alone() {
     let backend = RecordingBackend::new();
     backend.queue_stream("resp-1");
     let source = Arc::new(MapSource(HashMap::from([
@@ -1462,20 +1453,20 @@ async fn an_account_level_fact_refuses_a_sibling_on_the_same_account() {
     )
     .await;
     let health = Arc::new(RecordingHealth::default());
-    health.seed("p1", seeded(BlockKind::Quota, None));
-    health.share_account("p1", "p2");
+    health.seed("b", seeded(BlockKind::Quota, None));
     ctx.endpoint_health = Some(health.clone());
 
     let outcome = acquire_once(&mut ctx).await;
 
-    let AcquireResult::Outcome(AgentOutcome::QuotaBlocked(info)) = outcome else {
-        panic!("a quota fact with only a same-account sibling parks the round");
-    };
-    assert_eq!(info.endpoint, "p1");
+    assert!(
+        matches!(outcome, AcquireResult::Consumed(_)),
+        "the profile this round runs on is unmarked, so the turn is sent"
+    );
+    let requests = backend.take_requests();
+    assert_eq!(requests.len(), 1, "the unmarked profile is asked once");
     assert_eq!(
-        backend.take_requests().len(),
-        0,
-        "neither endpoint is asked"
+        requests[0].model, "a-model",
+        "another profile's mark does not stop this round"
     );
 }
 
@@ -1501,9 +1492,9 @@ async fn a_marked_candidate_is_skipped_for_the_next_one() {
     )
     .await;
     let health = Arc::new(RecordingHealth::default());
-    health.seed("p1", seeded(BlockKind::Quota, None));
+    health.seed("a", seeded(BlockKind::Quota, None));
     // The sibling in the middle carries a fact of its own.
-    health.seed("p2", seeded(BlockKind::EndpointAuth, None));
+    health.seed("b", seeded(BlockKind::EndpointAuth, None));
     ctx.endpoint_health = Some(health.clone());
 
     let outcome = acquire_once(&mut ctx).await;
@@ -1520,19 +1511,19 @@ async fn a_marked_candidate_is_skipped_for_the_next_one() {
 /// A sibling whose fact lands mid-walk: it answers unmarked for the walk's own
 /// readings and marked on the reading the attempt makes after it.
 struct FactLandsMidWalk {
-    walk_endpoint: Block,
+    walk_profile: Block,
     sibling: Block,
     sibling_reads_before_visible: usize,
     sibling_reads: AtomicUsize,
 }
 
 impl EndpointHealth for FactLandsMidWalk {
-    fn record(&self, _provider_id: &str, _block: Block) {}
+    fn record(&self, _profile_id: &str, _block: Block) {}
 
-    fn blocked_for(&self, provider_id: &str, _now: u64) -> Option<BlockedFact> {
-        let block = match provider_id {
-            "p1" => Some(&self.walk_endpoint),
-            "p2" => {
+    fn blocked_for(&self, profile_id: &str, _now: u64) -> Option<BlockedFact> {
+        let block = match profile_id {
+            "a" => Some(&self.walk_profile),
+            "b" => {
                 let read = self.sibling_reads.fetch_add(1, Ordering::SeqCst);
                 (read >= self.sibling_reads_before_visible).then_some(&self.sibling)
             }
@@ -1540,7 +1531,7 @@ impl EndpointHealth for FactLandsMidWalk {
         }?;
         Some(BlockedFact {
             block: block.clone(),
-            account_hint: account_hint(provider_id),
+            profile: profile_id.to_owned(),
         })
     }
 
@@ -1571,7 +1562,7 @@ async fn a_fact_written_mid_walk_stops_the_next_send() {
     )
     .await;
     ctx.endpoint_health = Some(Arc::new(FactLandsMidWalk {
-        walk_endpoint: seeded(BlockKind::EndpointAuth, None),
+        walk_profile: seeded(BlockKind::EndpointAuth, None),
         sibling: seeded(BlockKind::EndpointAuth, None),
         // The count matters: 1 would mark the sibling for the walk itself, 3 would
         // let the attempt read past it, and either way the window this test pins
@@ -1614,7 +1605,7 @@ async fn the_wake_first_attempt_sends_once_through_a_fact() {
     )
     .await;
     let health = Arc::new(RecordingHealth::default());
-    health.seed("p1", seeded(BlockKind::Quota, None));
+    health.seed("a", seeded(BlockKind::Quota, None));
     ctx.endpoint_health = Some(health.clone());
     ctx.attempt_origin = AttemptOrigin::External;
 
@@ -1668,7 +1659,7 @@ async fn a_quota_rejection_with_a_reset_hint_carries_it() {
         reset >= before + 120,
         "the hint is the upstream's own value: {reset} vs {before}"
     );
-    assert!(!info.account_hint.is_empty(), "{info:?}");
+    assert_eq!(info.profile, "a", "{info:?}");
 }
 
 /// A fact stop on a set with nothing to walk says so, rather than claiming
@@ -1688,7 +1679,7 @@ async fn a_fact_stop_on_a_single_profile_names_that() {
     )
     .await;
     let health = Arc::new(RecordingHealth::default());
-    health.seed("p1", seeded(BlockKind::EndpointAuth, None));
+    health.seed("a", seeded(BlockKind::EndpointAuth, None));
     ctx.endpoint_health = Some(health.clone());
 
     let outcome = acquire_once(&mut ctx).await;
@@ -1721,7 +1712,7 @@ async fn a_fact_stop_reports_the_resumption_the_upstream_named() {
     .await;
     let health = Arc::new(RecordingHealth::default());
     let until = timefmt::now_epoch() + 300;
-    health.seed("p1", seeded(BlockKind::EndpointAuth, Some(until)));
+    health.seed("a", seeded(BlockKind::EndpointAuth, Some(until)));
     ctx.endpoint_health = Some(health.clone());
 
     let outcome = acquire_once(&mut ctx).await;
@@ -1760,7 +1751,7 @@ async fn a_fact_stop_quotes_the_hint_the_display_face_clamps() {
     let recorded_at = timefmt::now_epoch();
     let until = recorded_at + QUOTA_RESET_TRUST_MAX_SECS + 3_600;
     health.seed(
-        "p1",
+        "a",
         Block {
             kind: BlockKind::EndpointAuth,
             until: Some(until),
@@ -1802,8 +1793,8 @@ async fn a_fact_stop_with_every_candidate_marked_names_the_marking() {
     )
     .await;
     let health = Arc::new(RecordingHealth::default());
-    health.seed("p1", seeded(BlockKind::EndpointAuth, None));
-    health.seed("p2", seeded(BlockKind::EndpointAuth, None));
+    health.seed("a", seeded(BlockKind::EndpointAuth, None));
+    health.seed("b", seeded(BlockKind::EndpointAuth, None));
     ctx.endpoint_health = Some(health.clone());
 
     let outcome = acquire_once(&mut ctx).await;
@@ -1852,7 +1843,7 @@ async fn the_wake_origin_is_spent_on_the_first_attempt() {
     )
     .await;
     let health = Arc::new(RecordingHealth::default());
-    health.seed("p1", seeded(BlockKind::Quota, None));
+    health.seed("a", seeded(BlockKind::Quota, None));
     ctx.endpoint_health = Some(health.clone());
     ctx.attempt_origin = AttemptOrigin::External;
 
@@ -1870,49 +1861,6 @@ async fn the_wake_origin_is_spent_on_the_first_attempt() {
         ),
         "the fact the second reading sees parks the round"
     );
-}
-
-/// The account hint a park carries is the fact holder's, not the asker's: two
-/// endpoints on one credential answer the same fact, and the hint has to name
-/// the credential the fact came through.
-#[tokio::test]
-async fn a_park_hint_names_the_fact_holder_not_the_asker() {
-    let backend = RecordingBackend::new();
-    backend.queue_stream("resp-1");
-    let source = Arc::new(MapSource(HashMap::from([
-        ("p1".to_string(), backend.clone() as Arc<dyn LlmBackend>),
-        ("p2".to_string(), backend.clone() as Arc<dyn LlmBackend>),
-    ])));
-    // p2 is the endpoint in use; the fact was recorded through p1, on the
-    // credential the two share.
-    let mut ctx = ctx_from_source(
-        vec![profile("a", "p2", 100_000), profile("b", "p1", 100_000)],
-        source,
-        RetryPolicy::default(),
-    )
-    .await;
-    let health = Arc::new(RecordingHealth::default());
-    health.seed("p1", seeded(BlockKind::Quota, None));
-    health.share_account("p1", "p2");
-    ctx.endpoint_health = Some(health.clone());
-
-    let outcome = acquire_once(&mut ctx).await;
-
-    let AcquireResult::Outcome(AgentOutcome::QuotaBlocked(info)) = outcome else {
-        panic!("an account-level fact parks the round");
-    };
-    assert_eq!(info.endpoint, "p2", "the endpoint in use is the asker");
-    assert_eq!(
-        info.account_hint,
-        account_hint("p1"),
-        "the hint names the credential the fact came through"
-    );
-    assert_ne!(
-        info.account_hint,
-        account_hint("p2"),
-        "not the asker's own id"
-    );
-    assert_eq!(backend.take_requests().len(), 0, "nothing is asked");
 }
 
 /// A mid-stream quota rejection leaves the same observation record the send
@@ -1984,7 +1932,7 @@ async fn an_endpoint_auth_fact_signals_the_gateway_when_it_ends_the_round() {
     )
     .await;
     let health = Arc::new(RecordingHealth::default());
-    health.seed("p1", seeded_with_status(BlockKind::EndpointAuth, None, 401));
+    health.seed("a", seeded_with_status(BlockKind::EndpointAuth, None, 401));
     ctx.endpoint_health = Some(health.clone());
     let (signal_tx, mut signal_rx) = tokio::sync::mpsc::unbounded_channel();
     ctx.gateway_signals = Some(signal_tx);
@@ -2023,7 +1971,7 @@ async fn an_endpoint_auth_fact_with_a_status_the_gateway_ignores_stays_silent() 
     )
     .await;
     let health = Arc::new(RecordingHealth::default());
-    health.seed("p1", seeded_with_status(BlockKind::EndpointAuth, None, 404));
+    health.seed("a", seeded_with_status(BlockKind::EndpointAuth, None, 404));
     ctx.endpoint_health = Some(health.clone());
     let (signal_tx, mut signal_rx) = tokio::sync::mpsc::unbounded_channel();
     ctx.gateway_signals = Some(signal_tx);
@@ -2042,7 +1990,7 @@ async fn an_endpoint_auth_fact_with_a_status_the_gateway_ignores_stays_silent() 
 /// this is not an auth rejection. The walk it drives finds no buildable
 /// candidate, so the round parks and the gateway hears nothing.
 #[tokio::test]
-async fn an_account_level_fact_never_signals_the_gateway() {
+async fn a_quota_fact_never_signals_the_gateway() {
     let backend = RecordingBackend::new();
     // p2 is declared but absent from the source, so building it fails: the
     // fact-driven walk ends here rather than on another endpoint's answer.
@@ -2057,7 +2005,7 @@ async fn an_account_level_fact_never_signals_the_gateway() {
     )
     .await;
     let health = Arc::new(RecordingHealth::default());
-    health.seed("p1", seeded_with_status(BlockKind::Quota, None, 403));
+    health.seed("a", seeded_with_status(BlockKind::Quota, None, 403));
     ctx.endpoint_health = Some(health.clone());
     let (signal_tx, mut signal_rx) = tokio::sync::mpsc::unbounded_channel();
     ctx.gateway_signals = Some(signal_tx);
@@ -2077,11 +2025,11 @@ async fn an_account_level_fact_never_signals_the_gateway() {
     );
 }
 
-/// The walk hands the round on: the endpoint that serves the attempt owns what
+/// The walk hands the round on: the profile that serves the attempt owns what
 /// the attempt leaves behind. The requested model pins where the send went, and
-/// the recorded fact, the retry record and the park all name that endpoint.
+/// the recorded fact, the retry record and the park all name that profile.
 #[tokio::test]
-async fn a_post_walk_failure_is_recorded_against_the_endpoint_that_served_it() {
+async fn a_post_walk_failure_is_recorded_against_the_profile_that_served_it() {
     let backend = RecordingBackend::new();
     backend.queue_error(BackendError::provider(
         "recording",
@@ -2104,7 +2052,7 @@ async fn a_post_walk_failure_is_recorded_against_the_endpoint_that_served_it() {
     )
     .await;
     let health = Arc::new(RecordingHealth::default());
-    health.seed("p1", seeded_with_status(BlockKind::EndpointAuth, None, 401));
+    health.seed("a", seeded_with_status(BlockKind::EndpointAuth, None, 401));
     ctx.endpoint_health = Some(health.clone());
 
     let outcome = acquire_once(&mut ctx).await;
@@ -2112,13 +2060,8 @@ async fn a_post_walk_failure_is_recorded_against_the_endpoint_that_served_it() {
         panic!("the walk's 429 parks the round");
     };
     assert_eq!(
-        info.endpoint, "p2",
-        "the park names the endpoint that served the attempt"
-    );
-    assert_eq!(
-        info.account_hint,
-        account_hint("p2"),
-        "the hint is that endpoint's account"
+        info.profile, "b",
+        "the park names the profile that served the attempt"
     );
 
     let requests = backend.take_requests();
@@ -2134,12 +2077,12 @@ async fn a_post_walk_failure_is_recorded_against_the_endpoint_that_served_it() {
         .recorded()
         .into_iter()
         .filter(|(_, block)| block.kind == BlockKind::Quota)
-        .map(|(endpoint, _)| endpoint)
+        .map(|(profile, _)| profile)
         .collect();
     assert_eq!(
         quota,
-        ["p2"],
-        "the failure belongs to the endpoint that served the attempt"
+        ["b"],
+        "the failure belongs to the profile that served the attempt"
     );
 
     let log = ctx.store.lock().await.retry_log.clone();
@@ -2169,8 +2112,7 @@ async fn a_fact_the_chain_recovers_from_stays_silent() {
     )
     .await;
     let health = Arc::new(RecordingHealth::default());
-    health.seed("p1", seeded_with_status(BlockKind::EndpointAuth, None, 401));
-    health.share_account("p1", "p2");
+    health.seed("a", seeded_with_status(BlockKind::EndpointAuth, None, 401));
     ctx.endpoint_health = Some(health.clone());
     let (signal_tx, mut signal_rx) = tokio::sync::mpsc::unbounded_channel();
     ctx.gateway_signals = Some(signal_tx);

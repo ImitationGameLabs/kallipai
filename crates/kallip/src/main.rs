@@ -305,16 +305,12 @@ async fn main() -> Result<()> {
                 }
                 if !status.upstream_facts.is_empty() {
                     println!();
-                    // The shared fact table as this agent reads it: which endpoints
-                    // and accounts the upstream is refusing, and until when. The
-                    // account hint is the eight-hex face, never the credential.
+                    // The pacing table as this agent reads it: which profile the
+                    // upstream is refusing, since when, and until when. One record
+                    // per profile, keyed by that profile's id.
                     println!("upstream facts: {}", status.upstream_facts.len());
                     for fact in &status.upstream_facts {
-                        let scope = fact
-                            .endpoint
-                            .as_ref()
-                            .map(|endpoint| endpoint.family.clone())
-                            .unwrap_or_else(|| "account".to_string());
+                        let since = timefmt::format_relative(now, fact.recorded_at);
                         let until = fact
                             .until
                             .map(|until| {
@@ -322,10 +318,9 @@ async fn main() -> Result<()> {
                             })
                             .unwrap_or_default();
                         println!(
-                            "  {:<14} {:<9} {}{until}  {}",
+                            "  {:<14} {:<9} recorded {since}{until}  {}",
                             fact.kind.as_str(),
-                            scope,
-                            fact.account_hint,
+                            fact.profile,
                             fact_excerpt(&fact.detail)
                         );
                     }

@@ -108,8 +108,8 @@ impl std::fmt::Display for ParkedReason {
                 };
                 write!(
                     f,
-                    "quota blocked on endpoint {} (account {}): {resumption}; evidence: {}",
-                    info.endpoint, info.account_hint, info.detail
+                    "quota blocked on profile {}: {resumption}; evidence: {}",
+                    info.profile, info.detail
                 )
             }
         }
@@ -280,8 +280,8 @@ pub struct AgentSummary {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ListAgentsResponse {
     pub agents: Vec<AgentSummary>,
-    /// Facts this tagma's agents learned about upstream endpoints and accounts;
-    /// see [`FactView`]. Tagma-wide, so it rides the list once instead of on
+    /// Facts this tagma's agents learned about upstream profiles; see
+    /// [`FactView`]. Tagma-wide, so it rides the list once instead of on
     /// every entry. Absent on responses from older servers.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub upstream_facts: Vec<FactView>,
@@ -498,8 +498,8 @@ pub struct AgentStatusResponse {
     /// responses from tagma versions that predate the field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage_totals: Option<TagmaUsageTotals>,
-    /// Facts this tagma's agents learned about upstream endpoints and accounts;
-    /// see [`FactView`]. Tagma-wide, so every status response carries the same
+    /// Facts this tagma's agents learned about upstream profiles; see
+    /// [`FactView`]. Tagma-wide, so every status response carries the same
     /// list. Absent on responses from older servers.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub upstream_facts: Vec<FactView>,
@@ -883,34 +883,31 @@ mod tests {
     #[test]
     fn parked_reason_quota_blocked_wire_bytes_are_pinned() {
         let reason = ParkedReason::QuotaBlocked(QuotaBlockedInfo {
-            endpoint: "p1".to_owned(),
-            account_hint: "01234567".to_owned(),
+            profile: "p1".to_owned(),
             reset: Some(1_700_000_600),
             detail: "HTTP 429 slow down".to_owned(),
         });
         let json = serde_json::to_string(&reason).unwrap();
         assert_eq!(
             json,
-            "{\"quotaBlocked\":{\"endpoint\":\"p1\",\"accountHint\":\"01234567\",\"reset\":1700000600,\"detail\":\"HTTP 429 slow down\"}}"
+            "{\"quotaBlocked\":{\"profile\":\"p1\",\"reset\":1700000600,\"detail\":\"HTTP 429 slow down\"}}"
         );
         let back: ParkedReason = serde_json::from_str(&json).unwrap();
         assert_eq!(back, reason);
     }
 
-    /// The prose face carries all three elements — which endpoint and account,
-    /// when the upstream said service resumes, and the evidence — and says so
-    /// when the upstream gave no usable moment.
+    /// The prose face carries all three elements — which profile, when the
+    /// upstream said service resumes, and the evidence — and says so when the
+    /// upstream gave no usable moment.
     #[test]
     fn the_quota_prose_names_every_element() {
         let info = |reset| QuotaBlockedInfo {
-            endpoint: "p1".to_owned(),
-            account_hint: "01234567".to_owned(),
+            profile: "p1".to_owned(),
             reset,
             detail: "HTTP 429 slow down".to_owned(),
         };
         let text = ParkedReason::QuotaBlocked(info(Some(1_700_000_600))).to_string();
-        assert!(text.contains("endpoint p1"), "{text}");
-        assert!(text.contains("account 01234567"), "{text}");
+        assert!(text.contains("profile p1"), "{text}");
         assert!(text.contains("1700000600"), "{text}");
         assert!(text.contains("HTTP 429 slow down"), "{text}");
 

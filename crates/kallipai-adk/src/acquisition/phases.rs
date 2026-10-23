@@ -52,6 +52,7 @@ pub(crate) async fn acquire_stream(
     let mut retry_records = Vec::new();
     let consumed = loop {
         let endpoint_id = ctx.failover.current_profile().endpoint.clone();
+        let profile_id = ctx.failover.current_profile().id.clone();
         // The endpoint, the clock, the attempt origin and the table's reading are
         // all taken here, so a chain that advanced is seen with fresh values: the
         // verdict on them is `enter_attempt`'s, which owns what a carried fact means.
@@ -75,6 +76,7 @@ pub(crate) async fn acquire_stream(
                     round,
                     episode: &mut ctx.episode,
                     endpoint_id: &endpoint_id,
+                    profile_id: &profile_id,
                     health: ctx.endpoint_health.as_deref(),
                 },
                 tx,
@@ -92,16 +94,16 @@ pub(crate) async fn acquire_stream(
         let stream = match result {
             Ok(stream) => {
                 // The first successful send that crosses the fact the table
-                // carries: how long the account stayed refused, measured from the
-                // fact's own observation. Log channel only — the record face
+                // carries: how long the profile stayed refused, measured from the
+                // moment the record's window began. Log channel only — the record
                 // carries failures, and this is the recovery side of the same
                 // window.
                 if let (Some(fact), AttemptOrigin::External) = (reading.blocked.as_ref(), origin)
-                    && fact.block.kind.is_account_level()
+                    && fact.block.kind.parks_the_round()
                 {
                     info!(
                         agent = ?ctx.config.agent_id,
-                        endpoint = %endpoint_id,
+                        profile = %profile_id,
                         since_quota_ts = fact.block.recorded_at,
                         blocked_secs =
                             timefmt::now_epoch().saturating_sub(fact.block.recorded_at),
@@ -149,8 +151,8 @@ pub(crate) async fn acquire_stream(
                 // wording. The criterion is the fact the failure leaves, not the
                 // exit it happens to share.
                 let exhaustion = match block {
-                    Some(kind) if kind.is_account_level() => Exhaustion::QuotaBlocked(
-                        quota_blocked_payload(ctx, &endpoint_id, rendered.clone()),
+                    Some(kind) if kind.parks_the_round() => Exhaustion::QuotaBlocked(
+                        quota_blocked_payload(ctx, &profile_id, rendered.clone()),
                     ),
                     _ => Exhaustion::ExternalOnly {
                         stop_reason: reason,
@@ -261,6 +263,7 @@ async fn enter_attempt(
     pre_send: Attempt,
 ) -> PreSend {
     let endpoint_id = ctx.failover.current_profile().endpoint.clone();
+    let profile_id = ctx.failover.current_profile().id.clone();
     let reading = pre_send.reading();
     let verdict = decision::decide(&ctx.episode.facts(&pre_send), &ctx.config.retry_policy);
     match verdict {
@@ -269,15 +272,15 @@ async fn enter_attempt(
         // fact's own reason, and running out of candidates stops the round
         // (no re-run: another attempt would meet the same fact).
         Decision::AdvanceFailover { reason } => {
-            log_fact_skip(ctx, &endpoint_id, reading, reason);
+            log_fact_skip(ctx, reading, reason);
             let fact = fact_error(reading);
             let rendered = crate::llm_error::render_error(fact.as_ref());
-            // An account-level fact means the walk is the quota exit, so
-            // running out parks with the structured reason; an endpoint-level
-            // one has no account to name and stops with the fact's wording.
+            // A kind that parks the round makes the walk the quota exit, so
+            // running out parks with the structured reason; any other kind stops
+            // with the fact's own wording.
             let exhaustion = match reading.blocked.as_ref() {
-                Some(blocked) if blocked.block.kind.is_account_level() => Exhaustion::QuotaBlocked(
-                    quota_blocked_payload(ctx, &endpoint_id, blocked.block.detail.clone()),
+                Some(blocked) if blocked.block.kind.parks_the_round() => Exhaustion::QuotaBlocked(
+                    quota_blocked_payload(ctx, &profile_id, blocked.block.detail.clone()),
                 ),
                 _ => Exhaustion::ExternalOnly {
                     stop_reason: reason,
@@ -312,16 +315,16 @@ async fn enter_attempt(
             kind: StopKind::ExternalOnly,
             reason,
         } => {
-            log_fact_skip(ctx, &endpoint_id, reading, reason);
+            log_fact_skip(ctx, reading, reason);
             if let Some(fact) = reading.blocked.as_ref()
-                && fact.block.kind.is_account_level()
+                && fact.block.kind.parks_the_round()
             {
                 return PreSend::Done(AcquireResult::Outcome(AgentOutcome::QuotaBlocked(
-                    quota_blocked_payload(ctx, &endpoint_id, fact.block.detail.clone()),
+                    quota_blocked_payload(ctx, &profile_id, fact.block.detail.clone()),
                 )));
             }
-            // The round ends on the table's verdict: an endpoint-level auth
-            // fact says the same thing a rejection would.
+            // The round ends on the table's verdict: a fact that does not park
+            // says the same thing a rejection would.
             emit_fact_signal(ctx, reading.blocked.as_ref());
             return PreSend::Done(AcquireResult::Stop {
                 message: fact_stop_message(reason, ctx, reading, fact_chain_note(ctx)),
@@ -337,6 +340,7 @@ async fn enter_attempt(
                 attempts = ctx.episode.attempts(),
                 max_attempts = ctx.config.retry_policy.max_retries,
                 endpoint = %endpoint_id,
+                profile = %profile_id,
                 reason,
                 "episode retry budget exhausted, advancing failover chain"
             );
@@ -414,6 +418,7 @@ async fn on_mid_stream_failure(
     e: just_llm_client::TransportError,
 ) -> Option<AcquireResult> {
     let endpoint_id = ctx.failover.current_profile().endpoint.clone();
+    let profile_id = ctx.failover.current_profile().id.clone();
     let policy = &ctx.config.retry_policy;
     let attempt = ctx.episode.attempts();
     let error_msg = crate::llm_error::render_error(&e);
@@ -459,21 +464,20 @@ async fn on_mid_stream_failure(
             );
             void_partial(tx, error_msg, attempt, policy.max_retries, 0.0);
             let rendered = crate::llm_error::render_error(&promoted);
-            // What this failure taught about the endpoint or the account
-            // outlives the round, so it goes to the shared table before the
-            // chain walks.
+            // What this failure taught about the profile outlives the
+            // round, so it goes to the shared table before the chain walks.
             crate::retry::record_endpoint_fact(
                 ctx.endpoint_health.as_deref(),
-                &endpoint_id,
+                &profile_id,
                 class,
                 &promoted,
                 timefmt::now_epoch(),
             );
             // The class decides the carrier, exactly as it does on the
-            // send path: a quota or payment block parks with the
-            // structured reason, an endpoint-level one keeps its wording.
+            // send path: a kind that parks the round uses the structured
+            // reason, every other kind keeps its wording.
             let exhaustion = if class == decision::FailureClass::QuotaBlocked {
-                Exhaustion::QuotaBlocked(quota_blocked_payload(ctx, &endpoint_id, rendered.clone()))
+                Exhaustion::QuotaBlocked(quota_blocked_payload(ctx, &profile_id, rendered.clone()))
             } else {
                 Exhaustion::ExternalOnly {
                     stop_reason: reason,
@@ -489,7 +493,7 @@ async fn on_mid_stream_failure(
             let block = decision::fact_of(class, &promoted, now);
             if block
                 .as_ref()
-                .is_some_and(|block| block.kind.is_account_level())
+                .is_some_and(|block| block.kind.parks_the_round())
                 && let Some(kind) = decision::retry_kind(&class)
             {
                 ctx.store.lock().await.record_retries(

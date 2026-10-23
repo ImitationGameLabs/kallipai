@@ -2029,7 +2029,7 @@ mod tests {
                 reason: ParkedReason::QuotaBlocked(info),
                 ..
             } => {
-                assert_eq!(info.endpoint, "p1");
+                assert_eq!(info.profile, "a");
                 assert!(
                     info.detail.contains("429"),
                     "the payload carries the evidence: {info:?}"

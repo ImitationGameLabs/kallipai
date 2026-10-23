@@ -74,8 +74,8 @@ pub enum RequestFailure {
         #[source]
         error: BackendError,
         /// The kind of fact this failure leaves behind, when it leaves one: the
-        /// caller picks the carrier from it — an account-level block parks with
-        /// the structured reason, an endpoint-level one stops with its wording.
+        /// caller picks the carrier from it — a kind that parks the round carries
+        /// the structured reason, any other kind stops with its wording.
         block: Option<BlockKind>,
     },
     /// Stop now: the chain cannot help at all (no candidate left, or a local
@@ -158,17 +158,18 @@ pub(crate) fn spent_budget_error() -> BackendError {
 ///
 /// The one place both shells hand a settled failure to the shared table, so a
 /// failure records the same fact wherever it is met. Fail-open by contract: no
-/// handle, or a class the table does not track, writes nothing.
+/// handle, or a class the table does not track, writes nothing. The record is
+/// keyed by the profile the failing send ran on, never by its endpoint.
 pub(crate) fn record_endpoint_fact(
     health: Option<&dyn EndpointHealth>,
-    endpoint_id: &str,
+    profile_id: &str,
     class: decision::FailureClass,
     error: &BackendError,
     now: u64,
 ) {
     let Some(health) = health else { return };
     if let Some(block) = decision::fact_of(class, error, now) {
-        health.record(endpoint_id, block);
+        health.record(profile_id, block);
     }
 }
 
@@ -182,8 +183,11 @@ pub struct RetryCall<'a> {
     pub round: usize,
     pub episode: &'a mut Episode,
     pub endpoint_id: &'a str,
+    /// The profile this call sends for: the key a fact it leaves behind is
+    /// recorded under.
+    pub profile_id: &'a str,
     /// The shared fact table, when the caller has one: a failure this call
-    /// settles writes what it learned about the endpoint or the account.
+    /// settles writes what it learned about that profile.
     pub health: Option<&'a dyn EndpointHealth>,
 }
 
@@ -231,6 +235,7 @@ pub async fn stream_with_retry(
         round,
         episode,
         endpoint_id,
+        profile_id,
         health,
     } = call;
 
@@ -352,16 +357,16 @@ pub async fn stream_with_retry(
                 // retry, so it adds no second record.
                 //
                 // Which classes get that record comes from the same core mapping
-                // the fact table uses: the account-level facts are exactly the
-                // stops that would otherwise leave no trace.
+                // the fact table uses: the kinds that park the round are exactly
+                // the stops that would otherwise leave no trace.
                 let now = timefmt::now_epoch();
                 // One evaluation of what this failure leaves behind: the record
                 // predicate and the carrier the caller picks both read it.
                 let fact = decision::fact_of(class, &error, now);
-                let account_level = fact
+                let parks_the_round = fact
                     .as_ref()
-                    .is_some_and(|block| block.kind.is_account_level());
-                if account_level && let Some(kind) = decision::retry_kind(&class) {
+                    .is_some_and(|block| block.kind.parks_the_round());
+                if parks_the_round && let Some(kind) = decision::retry_kind(&class) {
                     retry_log.push(RetryRecord::observed(
                         RetryAttempt {
                             round,
@@ -378,7 +383,7 @@ pub async fn stream_with_retry(
                         fact.as_ref().and_then(|block| block.until),
                     ));
                 }
-                record_endpoint_fact(health, endpoint_id, class, &error, now);
+                record_endpoint_fact(health, profile_id, class, &error, now);
                 return Err(RequestFailure::Switch {
                     reason,
                     error,
@@ -551,6 +556,7 @@ mod tests {
                 round: 0,
                 episode: &mut Episode::new(timefmt::now_epoch()),
                 endpoint_id: "test",
+                profile_id: "test",
                 health: None,
             },
             &tx,
@@ -606,6 +612,7 @@ mod tests {
                 round: 0,
                 episode: &mut Episode::new(timefmt::now_epoch()),
                 endpoint_id: "test",
+                profile_id: "test",
                 health: None,
             },
             &tx,
@@ -644,6 +651,7 @@ mod tests {
                 round: 0,
                 episode: &mut Episode::new(timefmt::now_epoch()),
                 endpoint_id: "test",
+                profile_id: "test",
                 health: None,
             },
             &tx,
@@ -675,6 +683,7 @@ mod tests {
                 round: 0,
                 episode: &mut Episode::new(timefmt::now_epoch()),
                 endpoint_id: "test",
+                profile_id: "test",
                 health: None,
             },
             &tx,
@@ -707,6 +716,7 @@ mod tests {
                 round: 0,
                 episode: &mut Episode::new(timefmt::now_epoch()),
                 endpoint_id: "test",
+                profile_id: "test",
                 health: None,
             },
             &tx,
@@ -745,6 +755,7 @@ mod tests {
                 round: 0,
                 episode: &mut Episode::new(timefmt::now_epoch()),
                 endpoint_id: "test",
+                profile_id: "test",
                 health: None,
             },
             &tx,
@@ -788,6 +799,7 @@ mod tests {
                 round: 0,
                 episode: &mut Episode::new(timefmt::now_epoch()),
                 endpoint_id: "test",
+                profile_id: "test",
                 health: None,
             },
             &tx,
@@ -830,6 +842,7 @@ mod tests {
                 round: 0,
                 episode: &mut Episode::new(timefmt::now_epoch()),
                 endpoint_id: "test",
+                profile_id: "test",
                 health: None,
             },
             &tx,
@@ -869,6 +882,7 @@ mod tests {
                 round: 0,
                 episode: &mut Episode::new(timefmt::now_epoch()),
                 endpoint_id: "test",
+                profile_id: "test",
                 health: None,
             },
             &tx,
@@ -902,6 +916,7 @@ mod tests {
                 round: 0,
                 episode: &mut Episode::new(timefmt::now_epoch()),
                 endpoint_id: "test",
+                profile_id: "test",
                 health: None,
             },
             &tokio::sync::mpsc::channel(16).0,
@@ -1033,6 +1048,7 @@ mod tests {
                 round: 0,
                 episode: &mut Episode::new(timefmt::now_epoch()),
                 endpoint_id: "test",
+                profile_id: "test",
                 health: None,
             },
             &tokio::sync::mpsc::channel(16).0,
@@ -1095,6 +1111,7 @@ mod tests {
                 round: 0,
                 episode: &mut episode,
                 endpoint_id: "test",
+                profile_id: "test",
                 health: None,
             },
             &tx,
@@ -1139,6 +1156,7 @@ mod tests {
                 round: 0,
                 episode: &mut episode,
                 endpoint_id: "test",
+                profile_id: "test",
                 health: None,
             },
             &tx,
@@ -1183,6 +1201,7 @@ mod tests {
                 round: 0,
                 episode: &mut episode,
                 endpoint_id: "test",
+                profile_id: "test",
                 health: None,
             },
             &tx,
@@ -1228,6 +1247,7 @@ mod tests {
                 round: 0,
                 episode: &mut episode,
                 endpoint_id: "test",
+                profile_id: "test",
                 health: None,
             },
             &tx,
@@ -1271,6 +1291,7 @@ mod tests {
                 round: 0,
                 episode: &mut Episode::new(timefmt::now_epoch()),
                 endpoint_id: "test",
+                profile_id: "test",
                 health: None,
             },
             &tx,
@@ -1318,6 +1339,7 @@ mod tests {
                 round: 0,
                 episode: &mut Episode::new(timefmt::now_epoch()),
                 endpoint_id: "test",
+                profile_id: "test",
                 health: None,
             },
             &tx,
@@ -1338,8 +1360,8 @@ mod tests {
         assert_eq!(retrying_count(&mut rx), 0);
     }
     /// The connect path writes what the rejection taught: the 429 that stops this
-    /// endpoint leaves an account-level quota fact, under the provider id the
-    /// call was made through.
+    /// profile leaves a quota fact, keyed by the profile id the call was made
+    /// through.
     #[tokio::test]
     async fn the_connect_path_writes_the_fact_a_rejection_leaves() {
         let server = MockServer::start().await;
@@ -1359,6 +1381,7 @@ mod tests {
                 round: 0,
                 episode: &mut Episode::new(timefmt::now_epoch()),
                 endpoint_id: "test",
+                profile_id: "test",
                 health: Some(health.as_ref()),
             },
             &tx,
@@ -1372,12 +1395,12 @@ mod tests {
         assert_eq!(recorded.len(), 1, "one rejection, one fact");
         assert_eq!(
             recorded[0].0, "test",
-            "the fact names the provider it was observed through"
+            "the record is keyed by the profile the send ran on"
         );
         assert_eq!(recorded[0].1.kind, BlockKind::Quota);
         assert!(
-            recorded[0].1.kind.is_account_level(),
-            "a quota rejection follows the credential, not the endpoint"
+            recorded[0].1.kind.parks_the_round(),
+            "a quota rejection parks the round"
         );
     }
 
@@ -1410,6 +1433,7 @@ mod tests {
                 round: 0,
                 episode: &mut Episode::new(timefmt::now_epoch()),
                 endpoint_id: "test",
+                profile_id: "test",
                 health: None,
             },
             &tx,
