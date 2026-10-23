@@ -20,7 +20,7 @@ use tokio_util::sync::CancellationToken;
 use crate::budget_gate::{BudgetAction, enforce_pre_call_budget};
 use crate::retry::{AttemptOrigin, Episode, RetryCall, RetryPolicy, stream_with_retry};
 use crate::test_support::{
-    FAILURE_PIN_WINDOW, MapSource, RecordingBackend, RecordingHealth, ctx_from_source, mock_source,
+    FAILURE_PIN_WINDOW, MapSource, RecordingBackend, RecordingPacing, ctx_from_source, mock_source,
     profile, request, seed_over_budget_store, set_context_window, system_msg, user_msg,
 };
 use just_llm_client::LlmBackend;
@@ -148,7 +148,7 @@ async fn failover_advance_rebuilds_the_conversation_chain() {
             episode: &mut Episode::new(timefmt::now_epoch()),
             provider_id: "p1",
             profile_id: "a",
-            health: None,
+            pacing: None,
         },
         &tokio::sync::mpsc::channel(16).0,
         &mut Vec::new(),
@@ -191,7 +191,7 @@ async fn failover_advance_rebuilds_the_conversation_chain() {
             episode: &mut Episode::new(timefmt::now_epoch()),
             provider_id: "p2",
             profile_id: "b",
-            health: None,
+            pacing: None,
         },
         &tokio::sync::mpsc::channel(16).0,
         &mut Vec::new(),
@@ -1022,8 +1022,8 @@ async fn a_quota_rejection_with_no_candidate_left_parks() {
         RetryPolicy::default(),
     )
     .await;
-    let health = Arc::new(RecordingHealth::default());
-    ctx.profile_pacing = Some(health.clone());
+    let pacing = Arc::new(RecordingPacing::default());
+    ctx.profile_pacing = Some(pacing.clone());
 
     let outcome = acquire_stream(
         &mut ctx,
@@ -1041,7 +1041,7 @@ async fn a_quota_rejection_with_no_candidate_left_parks() {
     assert_eq!(info.profile, "a");
     assert_eq!(info.reset, None, "the body carried no resumption hint");
     assert!(info.detail.contains("429"), "{:?}", info.detail);
-    assert_eq!(health.recorded().len(), 1, "one rejection, one fact");
+    assert_eq!(pacing.recorded().len(), 1, "one rejection, one fact");
     assert_eq!(
         backend.take_requests().len(),
         1,
@@ -1298,8 +1298,8 @@ async fn the_mid_stream_path_writes_the_fact_a_rejection_leaves() {
         RetryPolicy::default(),
     )
     .await;
-    let health = Arc::new(RecordingHealth::default());
-    ctx.profile_pacing = Some(health.clone());
+    let pacing = Arc::new(RecordingPacing::default());
+    ctx.profile_pacing = Some(pacing.clone());
 
     let (tx, _rx) = tokio::sync::mpsc::channel(64);
     let outcome = acquire_stream(
@@ -1318,7 +1318,7 @@ async fn the_mid_stream_path_writes_the_fact_a_rejection_leaves() {
         panic!("a 401 with no sibling to try stops the round");
     };
     assert!(message.contains("401"), "the stop carries it: {message}");
-    let recorded = health.recorded();
+    let recorded = pacing.recorded();
     assert_eq!(recorded.len(), 1, "one rejection, one fact");
     assert_eq!(recorded[0].0, "a", "the fact is keyed by the profile");
     assert_eq!(recorded[0].1.kind, BlockKind::EndpointAuth);
@@ -1382,9 +1382,9 @@ async fn a_fact_the_table_carries_skips_the_send_and_parks() {
         RetryPolicy::default(),
     )
     .await;
-    let health = Arc::new(RecordingHealth::default());
-    health.seed("a", seeded(BlockKind::Quota, None));
-    ctx.profile_pacing = Some(health.clone());
+    let pacing = Arc::new(RecordingPacing::default());
+    pacing.seed("a", seeded(BlockKind::Quota, None));
+    ctx.profile_pacing = Some(pacing.clone());
 
     let outcome = acquire_once(&mut ctx).await;
 
@@ -1417,9 +1417,9 @@ async fn a_marked_profile_leaves_the_next_one_a_candidate() {
         RetryPolicy::default(),
     )
     .await;
-    let health = Arc::new(RecordingHealth::default());
-    health.seed("a", seeded(BlockKind::EndpointAuth, None));
-    ctx.profile_pacing = Some(health.clone());
+    let pacing = Arc::new(RecordingPacing::default());
+    pacing.seed("a", seeded(BlockKind::EndpointAuth, None));
+    ctx.profile_pacing = Some(pacing.clone());
 
     let outcome = acquire_once(&mut ctx).await;
 
@@ -1452,9 +1452,9 @@ async fn a_quota_fact_on_another_profile_leaves_the_round_alone() {
         RetryPolicy::default(),
     )
     .await;
-    let health = Arc::new(RecordingHealth::default());
-    health.seed("b", seeded(BlockKind::Quota, None));
-    ctx.profile_pacing = Some(health.clone());
+    let pacing = Arc::new(RecordingPacing::default());
+    pacing.seed("b", seeded(BlockKind::Quota, None));
+    ctx.profile_pacing = Some(pacing.clone());
 
     let outcome = acquire_once(&mut ctx).await;
 
@@ -1491,11 +1491,11 @@ async fn a_marked_candidate_is_skipped_for_the_next_one() {
         RetryPolicy::default(),
     )
     .await;
-    let health = Arc::new(RecordingHealth::default());
-    health.seed("a", seeded(BlockKind::Quota, None));
+    let pacing = Arc::new(RecordingPacing::default());
+    pacing.seed("a", seeded(BlockKind::Quota, None));
     // The sibling in the middle carries a fact of its own.
-    health.seed("b", seeded(BlockKind::EndpointAuth, None));
-    ctx.profile_pacing = Some(health.clone());
+    pacing.seed("b", seeded(BlockKind::EndpointAuth, None));
+    ctx.profile_pacing = Some(pacing.clone());
 
     let outcome = acquire_once(&mut ctx).await;
 
@@ -1612,9 +1612,9 @@ async fn the_wake_first_attempt_sends_once_through_a_fact() {
         RetryPolicy::default(),
     )
     .await;
-    let health = Arc::new(RecordingHealth::default());
-    health.seed("a", seeded(BlockKind::Quota, None));
-    ctx.profile_pacing = Some(health.clone());
+    let pacing = Arc::new(RecordingPacing::default());
+    pacing.seed("a", seeded(BlockKind::Quota, None));
+    ctx.profile_pacing = Some(pacing.clone());
     ctx.attempt_origin = AttemptOrigin::External;
 
     let outcome = acquire_once(&mut ctx).await;
@@ -1653,8 +1653,8 @@ async fn a_quota_rejection_with_a_reset_hint_carries_it() {
         RetryPolicy::default(),
     )
     .await;
-    let health = Arc::new(RecordingHealth::default());
-    ctx.profile_pacing = Some(health.clone());
+    let pacing = Arc::new(RecordingPacing::default());
+    ctx.profile_pacing = Some(pacing.clone());
     let before = timefmt::now_epoch();
 
     let outcome = acquire_once(&mut ctx).await;
@@ -1686,9 +1686,9 @@ async fn a_fact_stop_on_a_single_profile_names_that() {
         RetryPolicy::default(),
     )
     .await;
-    let health = Arc::new(RecordingHealth::default());
-    health.seed("a", seeded(BlockKind::EndpointAuth, None));
-    ctx.profile_pacing = Some(health.clone());
+    let pacing = Arc::new(RecordingPacing::default());
+    pacing.seed("a", seeded(BlockKind::EndpointAuth, None));
+    ctx.profile_pacing = Some(pacing.clone());
 
     let outcome = acquire_once(&mut ctx).await;
 
@@ -1718,10 +1718,10 @@ async fn a_fact_stop_reports_the_resumption_the_upstream_named() {
         RetryPolicy::default(),
     )
     .await;
-    let health = Arc::new(RecordingHealth::default());
+    let pacing = Arc::new(RecordingPacing::default());
     let until = timefmt::now_epoch() + 300;
-    health.seed("a", seeded(BlockKind::EndpointAuth, Some(until)));
-    ctx.profile_pacing = Some(health.clone());
+    pacing.seed("a", seeded(BlockKind::EndpointAuth, Some(until)));
+    ctx.profile_pacing = Some(pacing.clone());
 
     let outcome = acquire_once(&mut ctx).await;
 
@@ -1755,10 +1755,10 @@ async fn a_fact_stop_quotes_the_hint_the_display_face_clamps() {
         RetryPolicy::default(),
     )
     .await;
-    let health = Arc::new(RecordingHealth::default());
+    let pacing = Arc::new(RecordingPacing::default());
     let recorded_at = timefmt::now_epoch();
     let until = recorded_at + QUOTA_RESET_TRUST_MAX_SECS + 3_600;
-    health.seed(
+    pacing.seed(
         "a",
         Block {
             kind: BlockKind::EndpointAuth,
@@ -1768,7 +1768,7 @@ async fn a_fact_stop_quotes_the_hint_the_display_face_clamps() {
             recorded_at,
         },
     );
-    ctx.profile_pacing = Some(health.clone());
+    ctx.profile_pacing = Some(pacing.clone());
 
     let outcome = acquire_once(&mut ctx).await;
 
@@ -1800,10 +1800,10 @@ async fn a_fact_stop_with_every_candidate_marked_names_the_marking() {
         RetryPolicy::default(),
     )
     .await;
-    let health = Arc::new(RecordingHealth::default());
-    health.seed("a", seeded(BlockKind::EndpointAuth, None));
-    health.seed("b", seeded(BlockKind::EndpointAuth, None));
-    ctx.profile_pacing = Some(health.clone());
+    let pacing = Arc::new(RecordingPacing::default());
+    pacing.seed("a", seeded(BlockKind::EndpointAuth, None));
+    pacing.seed("b", seeded(BlockKind::EndpointAuth, None));
+    ctx.profile_pacing = Some(pacing.clone());
 
     let outcome = acquire_once(&mut ctx).await;
 
@@ -1849,9 +1849,9 @@ async fn a_served_stream_spends_the_mark_so_the_retry_goes() {
         },
     )
     .await;
-    let health = Arc::new(RecordingHealth::default());
-    health.seed("a", seeded(BlockKind::Quota, None));
-    ctx.profile_pacing = Some(health.clone());
+    let pacing = Arc::new(RecordingPacing::default());
+    pacing.seed("a", seeded(BlockKind::Quota, None));
+    ctx.profile_pacing = Some(pacing.clone());
     ctx.attempt_origin = AttemptOrigin::External;
 
     let outcome = acquire_once(&mut ctx).await;
@@ -1866,7 +1866,7 @@ async fn a_served_stream_spends_the_mark_so_the_retry_goes() {
         "the retry lands on the stream the endpoint serves next"
     );
     assert!(
-        health.recorded().is_empty(),
+        pacing.recorded().is_empty(),
         "the served stream leaves no fact behind"
     );
 }
@@ -1896,8 +1896,8 @@ async fn a_mid_stream_quota_rejection_leaves_an_observation_record() {
         RetryPolicy::default(),
     )
     .await;
-    let health = Arc::new(RecordingHealth::default());
-    ctx.profile_pacing = Some(health.clone());
+    let pacing = Arc::new(RecordingPacing::default());
+    ctx.profile_pacing = Some(pacing.clone());
     let before = timefmt::now_epoch();
 
     let outcome = acquire_once(&mut ctx).await;
@@ -1939,9 +1939,9 @@ async fn an_endpoint_auth_fact_signals_the_gateway_when_it_ends_the_round() {
         RetryPolicy::default(),
     )
     .await;
-    let health = Arc::new(RecordingHealth::default());
-    health.seed("a", seeded_with_status(BlockKind::EndpointAuth, None, 401));
-    ctx.profile_pacing = Some(health.clone());
+    let pacing = Arc::new(RecordingPacing::default());
+    pacing.seed("a", seeded_with_status(BlockKind::EndpointAuth, None, 401));
+    ctx.profile_pacing = Some(pacing.clone());
     let (signal_tx, mut signal_rx) = tokio::sync::mpsc::unbounded_channel();
     ctx.gateway_signals = Some(signal_tx);
 
@@ -1978,9 +1978,9 @@ async fn an_endpoint_auth_fact_with_a_status_the_gateway_ignores_stays_silent() 
         RetryPolicy::default(),
     )
     .await;
-    let health = Arc::new(RecordingHealth::default());
-    health.seed("a", seeded_with_status(BlockKind::EndpointAuth, None, 404));
-    ctx.profile_pacing = Some(health.clone());
+    let pacing = Arc::new(RecordingPacing::default());
+    pacing.seed("a", seeded_with_status(BlockKind::EndpointAuth, None, 404));
+    ctx.profile_pacing = Some(pacing.clone());
     let (signal_tx, mut signal_rx) = tokio::sync::mpsc::unbounded_channel();
     ctx.gateway_signals = Some(signal_tx);
 
@@ -2012,9 +2012,9 @@ async fn a_quota_fact_never_signals_the_gateway() {
         RetryPolicy::default(),
     )
     .await;
-    let health = Arc::new(RecordingHealth::default());
-    health.seed("a", seeded_with_status(BlockKind::Quota, None, 403));
-    ctx.profile_pacing = Some(health.clone());
+    let pacing = Arc::new(RecordingPacing::default());
+    pacing.seed("a", seeded_with_status(BlockKind::Quota, None, 403));
+    ctx.profile_pacing = Some(pacing.clone());
     let (signal_tx, mut signal_rx) = tokio::sync::mpsc::unbounded_channel();
     ctx.gateway_signals = Some(signal_tx);
 
@@ -2059,9 +2059,9 @@ async fn a_post_walk_failure_is_recorded_against_the_profile_that_served_it() {
         },
     )
     .await;
-    let health = Arc::new(RecordingHealth::default());
-    health.seed("a", seeded_with_status(BlockKind::EndpointAuth, None, 401));
-    ctx.profile_pacing = Some(health.clone());
+    let pacing = Arc::new(RecordingPacing::default());
+    pacing.seed("a", seeded_with_status(BlockKind::EndpointAuth, None, 401));
+    ctx.profile_pacing = Some(pacing.clone());
 
     let outcome = acquire_once(&mut ctx).await;
     let AcquireResult::Outcome(AgentOutcome::QuotaBlocked(info)) = outcome else {
@@ -2081,7 +2081,7 @@ async fn a_post_walk_failure_is_recorded_against_the_profile_that_served_it() {
         ["b-model"],
         "the walk's new endpoint is the one that is asked"
     );
-    let quota: Vec<String> = health
+    let quota: Vec<String> = pacing
         .recorded()
         .into_iter()
         .filter(|(_, block)| block.kind == BlockKind::Quota)
@@ -2119,9 +2119,9 @@ async fn a_fact_the_chain_recovers_from_stays_silent() {
         RetryPolicy::default(),
     )
     .await;
-    let health = Arc::new(RecordingHealth::default());
-    health.seed("a", seeded_with_status(BlockKind::EndpointAuth, None, 401));
-    ctx.profile_pacing = Some(health.clone());
+    let pacing = Arc::new(RecordingPacing::default());
+    pacing.seed("a", seeded_with_status(BlockKind::EndpointAuth, None, 401));
+    ctx.profile_pacing = Some(pacing.clone());
     let (signal_tx, mut signal_rx) = tokio::sync::mpsc::unbounded_channel();
     ctx.gateway_signals = Some(signal_tx);
 
@@ -2271,8 +2271,8 @@ async fn the_advance_arm_records_the_class_and_clears_the_ledger_for_the_new_end
     ctx.config.context_thresholds = vec![80];
     seed_over_budget_store(&mut ctx).await;
     ctx.summarizer.prompt = SUMMARY_PROBE_MARKER.to_owned();
-    let health = Arc::new(RecordingHealth::default());
-    ctx.profile_pacing = Some(health.clone());
+    let pacing = Arc::new(RecordingPacing::default());
+    ctx.profile_pacing = Some(pacing.clone());
     let prior_messages = vec![user_msg("carried turn")];
 
     // The pre-call gate charges the first failure to the ledger before the
@@ -2318,9 +2318,9 @@ async fn the_advance_arm_records_the_class_and_clears_the_ledger_for_the_new_end
         );
     }
     assert_eq!(
-        health.recorded().len(),
+        pacing.recorded().len(),
         2,
-        "each arm writes its class to the endpoint-health view"
+        "each arm writes its class to the pacing table"
     );
     let log = ctx.store.lock().await.retry_log.clone();
     assert_eq!(log.len(), 2, "each arm reaches the retry log");
@@ -2347,9 +2347,9 @@ async fn an_ended_window_is_claimed_and_the_send_goes() {
         RetryPolicy::default(),
     )
     .await;
-    let health = Arc::new(RecordingHealth::default());
+    let pacing = Arc::new(RecordingPacing::default());
     let now = timefmt::now_epoch();
-    health.seed(
+    pacing.seed(
         "a",
         Block {
             kind: BlockKind::Quota,
@@ -2359,7 +2359,7 @@ async fn an_ended_window_is_claimed_and_the_send_goes() {
             recorded_at: now.saturating_sub(600),
         },
     );
-    ctx.profile_pacing = Some(health.clone());
+    ctx.profile_pacing = Some(pacing.clone());
 
     let outcome = acquire_once(&mut ctx).await;
 
@@ -2368,9 +2368,9 @@ async fn an_ended_window_is_claimed_and_the_send_goes() {
         "the ended window is the send's to spend"
     );
     assert_eq!(backend.take_requests().len(), 1, "the send goes out");
-    assert_eq!(health.claims(), 1, "the send took a window before it went");
+    assert_eq!(pacing.claims(), 1, "the send took a window before it went");
     assert!(
-        health.recorded().is_empty(),
+        pacing.recorded().is_empty(),
         "the opened stream spent the window the claim started"
     );
 }
@@ -2390,14 +2390,14 @@ async fn one_episode_takes_one_window() {
         RetryPolicy::default(),
     )
     .await;
-    let health = Arc::new(RecordingHealth::default());
-    ctx.profile_pacing = Some(health.clone());
+    let pacing = Arc::new(RecordingPacing::default());
+    ctx.profile_pacing = Some(pacing.clone());
     let now = timefmt::now_epoch();
 
     let _ = claim_window(&mut ctx, "a", now, AttemptOrigin::System);
     let _ = claim_window(&mut ctx, "a", now, AttemptOrigin::System);
 
-    assert_eq!(health.claims(), 1, "one episode, one window");
+    assert_eq!(pacing.claims(), 1, "one episode, one window");
     assert!(
         ctx.episode.claimed(),
         "the episode holds the window it took"
@@ -2419,9 +2419,9 @@ async fn a_claim_on_an_ended_window_starts_a_running_one() {
         RetryPolicy::default(),
     )
     .await;
-    let health = Arc::new(RecordingHealth::default());
+    let pacing = Arc::new(RecordingPacing::default());
     let now = timefmt::now_epoch();
-    health.seed(
+    pacing.seed(
         "a",
         Block {
             kind: BlockKind::Quota,
@@ -2431,15 +2431,15 @@ async fn a_claim_on_an_ended_window_starts_a_running_one() {
             recorded_at: now.saturating_sub(600),
         },
     );
-    ctx.profile_pacing = Some(health.clone());
+    ctx.profile_pacing = Some(pacing.clone());
     assert!(
-        health.paced_for("a", now).is_none(),
+        pacing.paced_for("a", now).is_none(),
         "the seeded window has ended"
     );
 
     let _ = claim_window(&mut ctx, "a", now, AttemptOrigin::System);
 
-    let fact = health
+    let fact = pacing
         .paced_for("a", now)
         .expect("the claim leaves a window behind");
     assert!(
@@ -2467,9 +2467,9 @@ async fn a_forced_claim_moves_a_running_window() {
         RetryPolicy::default(),
     )
     .await;
-    let health = Arc::new(RecordingHealth::default());
+    let pacing = Arc::new(RecordingPacing::default());
     let now = timefmt::now_epoch();
-    health.seed(
+    pacing.seed(
         "a",
         Block {
             kind: BlockKind::Quota,
@@ -2479,15 +2479,15 @@ async fn a_forced_claim_moves_a_running_window() {
             recorded_at: now.saturating_sub(60),
         },
     );
-    ctx.profile_pacing = Some(health.clone());
+    ctx.profile_pacing = Some(pacing.clone());
     assert!(
-        health.paced_for("a", now).is_some(),
+        pacing.paced_for("a", now).is_some(),
         "the seeded window is running"
     );
 
     let _ = claim_window(&mut ctx, "a", now, AttemptOrigin::External);
 
-    let fact = health
+    let fact = pacing
         .paced_for("a", now)
         .expect("the claim leaves a window behind");
     assert!(
@@ -2520,9 +2520,9 @@ async fn a_window_the_pass_never_spent_does_not_pace_the_send() {
         RetryPolicy::default(),
     )
     .await;
-    let health = Arc::new(RecordingHealth::default());
+    let pacing = Arc::new(RecordingPacing::default());
     let now = timefmt::now_epoch();
-    health.seed(
+    pacing.seed(
         "a",
         Block {
             kind: BlockKind::Quota,
@@ -2532,7 +2532,7 @@ async fn a_window_the_pass_never_spent_does_not_pace_the_send() {
             recorded_at: now.saturating_sub(600),
         },
     );
-    ctx.profile_pacing = Some(health.clone());
+    ctx.profile_pacing = Some(pacing.clone());
 
     assert!(
         crate::context::claim_compaction_window(&mut ctx, now),
@@ -2548,12 +2548,12 @@ async fn a_window_the_pass_never_spent_does_not_pace_the_send() {
     );
     assert_eq!(backend.take_requests().len(), 1, "the send goes out once");
     assert_eq!(
-        health.claims(),
+        pacing.claims(),
         1,
         "one episode, one window: the send spends the pass's claim"
     );
     assert!(
-        health.recorded().is_empty(),
+        pacing.recorded().is_empty(),
         "the send spent the window, so nothing is left to pace the next round"
     );
 }
@@ -2573,9 +2573,9 @@ async fn an_external_wake_after_the_claim_leaves_the_window_alone() {
         RetryPolicy::default(),
     )
     .await;
-    let health = Arc::new(RecordingHealth::default());
+    let pacing = Arc::new(RecordingPacing::default());
     let now = timefmt::now_epoch();
-    health.seed(
+    pacing.seed(
         "a",
         Block {
             kind: BlockKind::Quota,
@@ -2585,9 +2585,9 @@ async fn an_external_wake_after_the_claim_leaves_the_window_alone() {
             recorded_at: now.saturating_sub(600),
         },
     );
-    ctx.profile_pacing = Some(health.clone());
+    ctx.profile_pacing = Some(pacing.clone());
     let _ = claim_window(&mut ctx, "a", now, AttemptOrigin::System);
-    let started = health
+    let started = pacing
         .paced_for("a", now)
         .expect("the claim leaves a window behind")
         .block
@@ -2596,12 +2596,12 @@ async fn an_external_wake_after_the_claim_leaves_the_window_alone() {
     let _ = claim_window(&mut ctx, "a", now + 5, AttemptOrigin::External);
 
     assert_eq!(
-        health.claims(),
+        pacing.claims(),
         1,
         "one episode, one claim, however the wake arrives"
     );
     assert_eq!(
-        health
+        pacing
             .paced_for("a", now + 5)
             .expect("the window is still there")
             .block
@@ -2626,9 +2626,9 @@ async fn a_window_a_round_never_spent_goes_back() {
         RetryPolicy::default(),
     )
     .await;
-    let health = Arc::new(RecordingHealth::default());
+    let pacing = Arc::new(RecordingPacing::default());
     let now = timefmt::now_epoch();
-    health.seed(
+    pacing.seed(
         "a",
         Block {
             kind: BlockKind::Quota,
@@ -2638,10 +2638,10 @@ async fn a_window_a_round_never_spent_goes_back() {
             recorded_at: now.saturating_sub(600),
         },
     );
-    ctx.profile_pacing = Some(health.clone());
+    ctx.profile_pacing = Some(pacing.clone());
     let _ = claim_window(&mut ctx, "a", now, AttemptOrigin::System);
     assert_eq!(
-        health.recorded().len(),
+        pacing.recorded().len(),
         1,
         "the claim leaves a window behind"
     );
@@ -2649,7 +2649,7 @@ async fn a_window_a_round_never_spent_goes_back() {
     release_unspent_window(&mut ctx);
 
     assert!(
-        health.recorded().is_empty(),
+        pacing.recorded().is_empty(),
         "nothing was spent, so nothing stays"
     );
     assert!(
@@ -2673,9 +2673,9 @@ async fn a_spent_round_keeps_the_fact_its_send_wrote() {
         RetryPolicy::default(),
     )
     .await;
-    let health = Arc::new(RecordingHealth::default());
+    let pacing = Arc::new(RecordingPacing::default());
     let now = timefmt::now_epoch();
-    health.seed(
+    pacing.seed(
         "a",
         Block {
             kind: BlockKind::Quota,
@@ -2685,10 +2685,10 @@ async fn a_spent_round_keeps_the_fact_its_send_wrote() {
             recorded_at: now.saturating_sub(600),
         },
     );
-    ctx.profile_pacing = Some(health.clone());
+    ctx.profile_pacing = Some(pacing.clone());
     let _ = claim_window(&mut ctx, "a", now, AttemptOrigin::System);
     ctx.episode = ctx.episode.after_attempt();
-    health.record(
+    pacing.record(
         "a",
         Block {
             kind: BlockKind::Quota,
@@ -2699,12 +2699,12 @@ async fn a_spent_round_keeps_the_fact_its_send_wrote() {
         },
     );
 
-    let carried = health.recorded().len();
+    let carried = pacing.recorded().len();
 
     release_unspent_window(&mut ctx);
 
     assert_eq!(
-        health.recorded().len(),
+        pacing.recorded().len(),
         carried,
         "the fact the send's failure wrote stays"
     );

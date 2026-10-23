@@ -83,7 +83,7 @@ pub(super) fn emit_fact_signal(ctx: &AgentContext, blocked: Option<&BlockedFact>
 /// be read — each reads as no fact, because a table that cannot be read must
 /// never withhold a send.
 pub(super) fn table_reading(ctx: &AgentContext, now: u64) -> TableReading {
-    let Some(health) = ctx.profile_pacing.as_deref() else {
+    let Some(pacing) = ctx.profile_pacing.as_deref() else {
         return TableReading::none();
     };
     let current = ctx.failover.current_profile().id.clone();
@@ -94,7 +94,7 @@ pub(super) fn table_reading(ctx: &AgentContext, now: u64) -> TableReading {
         .episode
         .window_started_at()
         .filter(|_| ctx.episode.attempts() == 0);
-    let blocked = health
+    let blocked = pacing
         .paced_for(&current, now)
         .filter(|fact| Some(fact.block.recorded_at) != own);
     // With no fact there is nothing to escape, so no candidate is needed.
@@ -182,10 +182,10 @@ pub(crate) fn release_unspent_window(ctx: &mut AgentContext) {
 /// profile it names (see [`ProfilePacing::paced_for`]): every other
 /// profile in the chain stays a candidate.
 fn resolve_alternative(ctx: &AgentContext, now: u64) -> Option<Alternative> {
-    let health = ctx.profile_pacing.as_deref()?;
+    let pacing = ctx.profile_pacing.as_deref()?;
     let mut offset = 1;
     while let Some(candidate) = ctx.failover.candidate_profile(offset) {
-        if !candidate_marked(health, &candidate.id, now) {
+        if !candidate_marked(pacing, &candidate.id, now) {
             return Some(Alternative);
         }
         offset += 1;
@@ -197,8 +197,8 @@ fn resolve_alternative(ctx: &AgentContext, now: u64) -> Option<Alternative> {
 /// own — and a fact names one profile, so it answers for exactly this one.
 ///
 /// Fail-open: a table that cannot be read reads as a candidate that may serve.
-pub(super) fn candidate_marked(health: &dyn ProfilePacing, candidate: &str, now: u64) -> bool {
-    health.paced_for(candidate, now).is_some()
+pub(super) fn candidate_marked(pacing: &dyn ProfilePacing, candidate: &str, now: u64) -> bool {
+    pacing.paced_for(candidate, now).is_some()
 }
 
 /// The structured reason a quota or payment block parks with: the profile it
@@ -216,7 +216,7 @@ pub(super) fn quota_blocked_payload(
     let reset = ctx
         .profile_pacing
         .as_deref()
-        .and_then(|health| health.paced_for(profile_id, timefmt::now_epoch()))
+        .and_then(|pacing| pacing.paced_for(profile_id, timefmt::now_epoch()))
         .and_then(|fact| display_until(fact.block.recorded_at, fact.block.until));
     QuotaBlockedInfo {
         profile: profile_id.to_string(),

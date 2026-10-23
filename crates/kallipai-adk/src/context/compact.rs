@@ -703,7 +703,7 @@ mod tests {
     use crate::retry::RetryPolicy;
     use crate::retry::decision::TransientKind;
     use crate::test_support::{
-        FAILURE_PIN_WINDOW, MapSource, RecordingHealth, ctx_from_source, ctx_with_mock,
+        FAILURE_PIN_WINDOW, MapSource, RecordingPacing, ctx_from_source, ctx_with_mock,
         mount_summary, profile, seed_over_budget_store, set_context_window, tool_result_msg,
         user_msg,
     };
@@ -1177,9 +1177,9 @@ mod tests {
         set_context_window(&mut ctx, FAILURE_PIN_WINDOW).await;
         seed_over_budget_store(&mut ctx).await;
         ctx.config.context_thresholds = vec![80];
-        let health = Arc::new(RecordingHealth::default());
+        let pacing = Arc::new(RecordingPacing::default());
         let until = timefmt::now_epoch() + 600;
-        health.seed(
+        pacing.seed(
             "p1",
             Block {
                 kind: BlockKind::Quota,
@@ -1189,7 +1189,7 @@ mod tests {
                 recorded_at: timefmt::now_epoch(),
             },
         );
-        ctx.profile_pacing = Some(health.clone());
+        ctx.profile_pacing = Some(pacing.clone());
 
         compact_pre_loop(&mut ctx).await;
 
@@ -1213,9 +1213,9 @@ mod tests {
         set_context_window(&mut ctx, FAILURE_PIN_WINDOW).await;
         seed_over_budget_store(&mut ctx).await;
         ctx.config.context_thresholds = vec![80];
-        let health = Arc::new(RecordingHealth::default());
+        let pacing = Arc::new(RecordingPacing::default());
         let now = timefmt::now_epoch();
-        health.seed(
+        pacing.seed(
             "p1",
             Block {
                 kind: BlockKind::Quota,
@@ -1225,12 +1225,12 @@ mod tests {
                 recorded_at: now.saturating_sub(600),
             },
         );
-        ctx.profile_pacing = Some(health.clone());
+        ctx.profile_pacing = Some(pacing.clone());
 
         compact_pre_loop(&mut ctx).await;
 
         assert!(
-            health.recorded().is_empty(),
+            pacing.recorded().is_empty(),
             "the pass that landed spends the window it took"
         );
     }

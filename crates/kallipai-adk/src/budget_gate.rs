@@ -173,7 +173,7 @@ mod tests {
     use crate::retry::decision::RETRY_JITTER_MAX;
     use crate::retry::{RetryPolicy, max_sends};
     use crate::test_support::{
-        FAILURE_PIN_WINDOW, RecordingHealth, ctx_from_source, make_ctx, mock_source, mount_summary,
+        FAILURE_PIN_WINDOW, RecordingPacing, ctx_from_source, make_ctx, mock_source, mount_summary,
         profile, seed_over_budget_store, set_context_window, usage,
     };
     use kallipai_common::retry::RetryKind;
@@ -431,22 +431,22 @@ mod tests {
     }
 
     /// A class the failover chain owns is deferred, not stopped: the observation
-    /// reaches the endpoint-health view and the retry log, the latch keeps the
+    /// reaches the pacing table and the retry log, the latch keeps the
     /// gate quiet until the main send's outcome is known, and the round sends.
     #[tokio::test]
     async fn a_chain_owned_compaction_failure_is_deferred_to_the_main_send() {
         let (mut ctx, server) = gate_ctx(429, latching_policy()).await;
-        let health = Arc::new(RecordingHealth::default());
-        ctx.profile_pacing = Some(health.clone());
+        let pacing = Arc::new(RecordingPacing::default());
+        ctx.profile_pacing = Some(pacing.clone());
 
         let action = gate(&mut ctx, 0).await;
 
         assert!(matches!(action, BudgetAction::Proceed));
         assert_eq!(summary_posts(&server).await, 1);
         assert_eq!(
-            health.recorded().len(),
+            pacing.recorded().len(),
             1,
-            "the class is written to the endpoint-health view"
+            "the class is written to the pacing table"
         );
         let log = ctx.store.lock().await.retry_log.clone();
         assert_eq!(log.len(), 1, "the class reaches the retry log");

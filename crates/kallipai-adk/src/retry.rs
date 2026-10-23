@@ -161,15 +161,15 @@ pub(crate) fn spent_budget_error() -> BackendError {
 /// handle, or a class the table does not track, writes nothing. The record is
 /// keyed by the profile the failing send ran on, never by its endpoint.
 pub(crate) fn record_fact(
-    health: Option<&dyn ProfilePacing>,
+    pacing: Option<&dyn ProfilePacing>,
     profile_id: &str,
     class: decision::FailureClass,
     error: &BackendError,
     now: u64,
 ) {
-    let Some(health) = health else { return };
+    let Some(pacing) = pacing else { return };
     if let Some(block) = decision::fact_of(class, error, now) {
-        health.record(profile_id, block);
+        pacing.record(profile_id, block);
     }
 }
 
@@ -190,7 +190,7 @@ pub struct RetryCall<'a> {
     pub profile_id: &'a str,
     /// The shared fact table, when the caller has one: a failure this call
     /// settles writes what it learned about that profile.
-    pub health: Option<&'a dyn ProfilePacing>,
+    pub pacing: Option<&'a dyn ProfilePacing>,
 }
 
 /// Open a streaming generation through the caller's conversation, retrying transient errors.
@@ -238,7 +238,7 @@ pub async fn stream_with_retry(
         episode,
         provider_id,
         profile_id,
-        health,
+        pacing,
     } = call;
 
     loop {
@@ -277,7 +277,7 @@ pub async fn stream_with_retry(
             Ok(stream) => {
                 // A stream that opened is a window served: the record a paced
                 // endpoint carries has done its job.
-                if let Some(pacing) = health {
+                if let Some(pacing) = pacing {
                     pacing.note_success(profile_id);
                 }
                 return Ok(stream);
@@ -392,7 +392,7 @@ pub async fn stream_with_retry(
                         fact.as_ref().and_then(|block| block.until),
                     ));
                 }
-                record_fact(health, profile_id, class, &error, now);
+                record_fact(pacing, profile_id, class, &error, now);
                 return Err(RequestFailure::Switch {
                     reason,
                     error,
@@ -433,7 +433,7 @@ pub async fn stream_with_retry(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{RecordingBackend, RecordingHealth, request, user_msg};
+    use crate::test_support::{RecordingBackend, RecordingPacing, request, user_msg};
     use just_llm_client::TransportError;
     use kallipai_common::facts::{Block, BlockKind};
     use kallipai_common::retry::RetryKind;
@@ -566,7 +566,7 @@ mod tests {
                 episode: &mut Episode::new(timefmt::now_epoch()),
                 provider_id: "test",
                 profile_id: "test",
-                health: None,
+                pacing: None,
             },
             &tx,
             &mut retry_log,
@@ -622,7 +622,7 @@ mod tests {
                 episode: &mut Episode::new(timefmt::now_epoch()),
                 provider_id: "test",
                 profile_id: "test",
-                health: None,
+                pacing: None,
             },
             &tx,
             &mut retry_log,
@@ -661,7 +661,7 @@ mod tests {
                 episode: &mut Episode::new(timefmt::now_epoch()),
                 provider_id: "test",
                 profile_id: "test",
-                health: None,
+                pacing: None,
             },
             &tx,
             &mut retry_log,
@@ -693,7 +693,7 @@ mod tests {
                 episode: &mut Episode::new(timefmt::now_epoch()),
                 provider_id: "test",
                 profile_id: "test",
-                health: None,
+                pacing: None,
             },
             &tx,
             &mut retry_log,
@@ -726,7 +726,7 @@ mod tests {
                 episode: &mut Episode::new(timefmt::now_epoch()),
                 provider_id: "test",
                 profile_id: "test",
-                health: None,
+                pacing: None,
             },
             &tx,
             &mut retry_log,
@@ -765,7 +765,7 @@ mod tests {
                 episode: &mut Episode::new(timefmt::now_epoch()),
                 provider_id: "test",
                 profile_id: "test",
-                health: None,
+                pacing: None,
             },
             &tx,
             &mut retry_log,
@@ -809,7 +809,7 @@ mod tests {
                 episode: &mut Episode::new(timefmt::now_epoch()),
                 provider_id: "test",
                 profile_id: "test",
-                health: None,
+                pacing: None,
             },
             &tx,
             &mut retry_log,
@@ -852,7 +852,7 @@ mod tests {
                 episode: &mut Episode::new(timefmt::now_epoch()),
                 provider_id: "test",
                 profile_id: "test",
-                health: None,
+                pacing: None,
             },
             &tx,
             &mut retry_log,
@@ -883,9 +883,9 @@ mod tests {
         let mut conversation = client.conversation();
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
         let mut retry_log = Vec::new();
-        let health = Arc::new(RecordingHealth::default());
+        let pacing = Arc::new(RecordingPacing::default());
         let now = timefmt::now_epoch();
-        health.seed(
+        pacing.seed(
             "test",
             Block {
                 kind: BlockKind::Quota,
@@ -905,7 +905,7 @@ mod tests {
                 episode: &mut Episode::new(now),
                 provider_id: "test",
                 profile_id: "test",
-                health: Some(health.as_ref()),
+                pacing: Some(pacing.as_ref()),
             },
             &tx,
             &mut retry_log,
@@ -915,7 +915,7 @@ mod tests {
 
         assert!(result.is_ok(), "the stream opens");
         assert!(
-            health.recorded().is_empty(),
+            pacing.recorded().is_empty(),
             "the window the record paced is spent"
         );
     }
@@ -940,7 +940,7 @@ mod tests {
                 episode: &mut Episode::new(timefmt::now_epoch()),
                 provider_id: "test",
                 profile_id: "test",
-                health: None,
+                pacing: None,
             },
             &tx,
             &mut retry_log,
@@ -974,7 +974,7 @@ mod tests {
                 episode: &mut Episode::new(timefmt::now_epoch()),
                 provider_id: "test",
                 profile_id: "test",
-                health: None,
+                pacing: None,
             },
             &tokio::sync::mpsc::channel(16).0,
             &mut Vec::new(),
@@ -1106,7 +1106,7 @@ mod tests {
                 episode: &mut Episode::new(timefmt::now_epoch()),
                 provider_id: "test",
                 profile_id: "test",
-                health: None,
+                pacing: None,
             },
             &tokio::sync::mpsc::channel(16).0,
             &mut retry_log,
@@ -1169,7 +1169,7 @@ mod tests {
                 episode: &mut episode,
                 provider_id: "test",
                 profile_id: "test",
-                health: None,
+                pacing: None,
             },
             &tx,
             &mut retry_log,
@@ -1214,7 +1214,7 @@ mod tests {
                 episode: &mut episode,
                 provider_id: "test",
                 profile_id: "test",
-                health: None,
+                pacing: None,
             },
             &tx,
             &mut retry_log,
@@ -1259,7 +1259,7 @@ mod tests {
                 episode: &mut episode,
                 provider_id: "test",
                 profile_id: "test",
-                health: None,
+                pacing: None,
             },
             &tx,
             &mut retry_log,
@@ -1305,7 +1305,7 @@ mod tests {
                 episode: &mut episode,
                 provider_id: "test",
                 profile_id: "test",
-                health: None,
+                pacing: None,
             },
             &tx,
             &mut retry_log,
@@ -1349,7 +1349,7 @@ mod tests {
                 episode: &mut Episode::new(timefmt::now_epoch()),
                 provider_id: "test",
                 profile_id: "test",
-                health: None,
+                pacing: None,
             },
             &tx,
             &mut retry_log,
@@ -1397,7 +1397,7 @@ mod tests {
                 episode: &mut Episode::new(timefmt::now_epoch()),
                 provider_id: "test",
                 profile_id: "test",
-                health: None,
+                pacing: None,
             },
             &tx,
             &mut retry_log,
@@ -1428,7 +1428,7 @@ mod tests {
         let mut conversation = client.conversation();
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
         let mut retry_log = Vec::new();
-        let health = Arc::new(RecordingHealth::default());
+        let pacing = Arc::new(RecordingPacing::default());
 
         let result = stream_with_retry(
             RetryCall {
@@ -1439,7 +1439,7 @@ mod tests {
                 episode: &mut Episode::new(timefmt::now_epoch()),
                 provider_id: "test",
                 profile_id: "test",
-                health: Some(health.as_ref()),
+                pacing: Some(pacing.as_ref()),
             },
             &tx,
             &mut retry_log,
@@ -1448,7 +1448,7 @@ mod tests {
         .await;
 
         assert!(matches!(result, Err(RequestFailure::Switch { .. })));
-        let recorded = health.recorded();
+        let recorded = pacing.recorded();
         assert_eq!(recorded.len(), 1, "one rejection, one fact");
         assert_eq!(
             recorded[0].0, "test",
@@ -1491,7 +1491,7 @@ mod tests {
                 episode: &mut Episode::new(timefmt::now_epoch()),
                 provider_id: "test",
                 profile_id: "test",
-                health: None,
+                pacing: None,
             },
             &tx,
             &mut retry_log,

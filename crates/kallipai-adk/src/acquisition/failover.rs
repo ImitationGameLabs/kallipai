@@ -243,8 +243,8 @@ pub(crate) async fn advance_failover(
     while let Some(candidate) = ctx.failover.candidate_profile(offset) {
         // A candidate the table has already marked cannot serve: switching into it
         // would burn an attempt to learn what another agent already paid for.
-        if let Some(health) = ctx.profile_pacing.as_deref()
-            && candidate_marked(health, &candidate.id, now)
+        if let Some(pacing) = ctx.profile_pacing.as_deref()
+            && candidate_marked(pacing, &candidate.id, now)
         {
             warn!(
                 from = %from,
@@ -299,8 +299,8 @@ pub(crate) async fn advance_failover(
                 // took on the profile that just failed, and the fresh one starts once
                 // this returns — so the pass stands down by reading the table, and the
                 // carried context goes out as it stands.
-                let paced = ctx.profile_pacing.as_deref().is_some_and(|health| {
-                    candidate_marked(health, &candidate.id, timefmt::now_epoch())
+                let paced = ctx.profile_pacing.as_deref().is_some_and(|pacing| {
+                    candidate_marked(pacing, &candidate.id, timefmt::now_epoch())
                 });
                 let messages = if paced {
                     warn!(

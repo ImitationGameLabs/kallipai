@@ -534,7 +534,7 @@ pub async fn agent_task(
             // so no gate ever takes that stop. What the pre-loop's failure wrote
             // down outlives the execution because its holders do, whichever of them
             // the verdict filled: the shared context store (retry records), the
-            // endpoint-health table, and the agent's own history (a stop's line).
+            // pacing table, and the agent's own history (a stop's line).
             return;
         }
         ctx.record_turn(vec![Message::user(&p)]).await;

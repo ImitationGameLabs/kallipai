@@ -82,7 +82,7 @@ pub(crate) async fn acquire_stream(
                     episode: &mut ctx.episode,
                     provider_id: &provider_id,
                     profile_id: &profile_id,
-                    health: ctx.profile_pacing.as_deref(),
+                    pacing: ctx.profile_pacing.as_deref(),
                 },
                 tx,
                 &mut retry_records,

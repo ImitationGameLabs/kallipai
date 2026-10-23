@@ -732,14 +732,14 @@ impl LlmBackend for RecordingBackend {
 /// assert a write happened with no tagma behind the context — and answers reads
 /// from what it holds, so a seeded fact reaches a verdict.
 #[derive(Default)]
-pub(crate) struct RecordingHealth {
+pub(crate) struct RecordingPacing {
     blocks: Mutex<Vec<(String, Block)>>,
     /// How many claims this double answered, so a test can pin that one
     /// episode takes one window.
     claims: AtomicUsize,
 }
 
-impl RecordingHealth {
+impl RecordingPacing {
     /// Everything recorded so far, oldest first.
     pub(crate) fn recorded(&self) -> Vec<(String, Block)> {
         self.blocks
@@ -763,7 +763,7 @@ impl RecordingHealth {
     }
 }
 
-impl ProfilePacing for RecordingHealth {
+impl ProfilePacing for RecordingPacing {
     fn record(&self, profile_id: &str, block: Block) {
         self.blocks
             .lock()
