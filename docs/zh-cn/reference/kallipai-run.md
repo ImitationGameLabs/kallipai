@@ -61,7 +61,7 @@ kallipai-run [OPTIONS] --prompt <PROMPT>
 }
 ```
 
-`exit` 取值为 `success`、`error`、`max_rounds`、`cancelled`、`budget_exceeded`、`failover_chain_exhausted`、`quota_blocked` 之一。tagma 不可达、agent id 未知或 `post_message` 失败时，不输出 JSON 对象：错误打印到 stderr，退出码为 `1`。`quota_blocked`（退出码 6）表示该 profile 的配额或余额已尽且无候选可用：agent 停在窗口上，链上最早结束的那段窗口结束时这一轮自己回来；外部触发能更快把它叫醒。
+`exit` 取值为 `success`、`error`、`max_rounds`、`cancelled`、`budget_exceeded`、`failover_chain_exhausted`、`quota_blocked` 之一。tagma 不可达、agent id 未知或 `post_message` 失败时，不输出 JSON 对象：错误打印到 stderr，退出码为 `1`。`quota_blocked`（退出码 6）表示该 profile 的配额或余额已尽且无候选可用：agent 停在窗口上，链上最早结束的那段窗口结束时这一轮自己回来；外部触发能更快把它叫醒。CLI 本身当即返回：回来的是 tagma 里那个 agent 的那一轮，不是这次调用。
 
 ```bash
 kallipai-run --json --prompt "Refactor the config loader"

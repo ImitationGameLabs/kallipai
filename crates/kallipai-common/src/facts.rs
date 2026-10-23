@@ -6,6 +6,10 @@
 //! lives in the tagma and is keyed by the profile id — the unit an agent runs,
 //! and the unit an upstream answers about, so the id a writer hands its failure
 //! in under is the id a reader gets its verdict back from.
+//! A failure verdict writes the record; a claim on a window that has already
+//! run out writes it too, through [`claim_window`]: the claim comes back
+//! `Started` with the record renewed in place — same kind, same words, its
+//! start at the claim, and the ended window's reset hint and status dropped.
 //!
 //! This module carries the value types and the one window rule every reader
 //! shares. The implementation (storage, capacity, claiming) is the tagma's; the
