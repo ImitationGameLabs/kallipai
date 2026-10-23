@@ -11,6 +11,7 @@ use crate::acquisition::release_unspent_window;
 use crate::event::{AgentEvent, AgentOutcome};
 use crate::lifecycle::LifecycleState;
 use crate::tools::DEFAULT_BREAK_TIMEOUT_SECS;
+use kallipai_common::facts::{MIN_RETRY_INTERVAL_SECS, window_end};
 use kallipai_common::protocol::{AgentState, ParkedReason, TransientRetryInfo};
 use kallipai_common::timefmt;
 
@@ -1197,20 +1198,15 @@ fn transient_retry_due(ctx: &AgentContext) -> bool {
         .map(|t| t <= tokio::time::Instant::now())
         .unwrap_or(false)
 }
-/// Arm the wake that ends a quota park: the moment the profile's window ends,
+/// Arm the wake that ends a quota park: the earliest window end on the chain,
 /// plus jitter. The window is read from the table here, so a fact another
-/// instance recorded paces this wake too; a profile with no readable fact falls
-/// back to the kind's own interval counted from now. The fallback only ever sets
-/// the alarm — it writes nothing. Mirrors the other timers' best-effort,
+/// instance recorded paces this wake too; a chain with no readable fact falls
+/// back to `MIN_RETRY_INTERVAL_SECS` counted from now. The fallback only ever
+/// sets the alarm — it writes nothing. Mirrors the other timers' best-effort,
 /// cancel-aware spawn; the pacing arm's due guard is authoritative.
 fn arm_pacing_wake(ctx: &AgentContext, profile_id: &str) -> tokio::time::Instant {
     let now = timefmt::now_epoch();
-    let wake_epoch = ctx
-        .profile_pacing
-        .as_deref()
-        .and_then(|table| table.paced_for(profile_id, now))
-        .map(|fact| kallipai_common::facts::window_end(&fact.block))
-        .unwrap_or_else(|| now.saturating_add(kallipai_common::facts::MIN_RETRY_INTERVAL_SECS));
+    let wake_epoch = pacing_wake_epoch(ctx, profile_id, now);
     let wait = std::time::Duration::from_secs(wake_epoch.saturating_sub(now));
     let deadline = tokio::time::Instant::now() + wait + crate::retry::jitter_now();
     *ctx.pacing_wake_at.lock().unwrap_or_else(|e| e.into_inner()) = Some(deadline);
@@ -1223,6 +1219,34 @@ fn arm_pacing_wake(ctx: &AgentContext, profile_id: &str) -> tokio::time::Instant
         }
     });
     deadline
+}
+
+/// The moment a parked quota round may send again: the earliest window end
+/// among the profile it stopped on and the candidates ahead of it.
+///
+/// A wake starts on the profile the round stopped on; the chain only
+/// moves forward from there. A skipped marked candidate leaves the
+/// index where it was, so a park can sit mid-chain with profiles ahead.
+/// Sleeping on the stopping profile alone would outlast a window that
+/// opens sooner.
+fn pacing_wake_epoch(ctx: &AgentContext, profile_id: &str, now: u64) -> u64 {
+    let Some(table) = ctx.profile_pacing.as_deref() else {
+        return now.saturating_add(MIN_RETRY_INTERVAL_SECS);
+    };
+    let mut earliest = table
+        .paced_for(profile_id, now)
+        .map(|fact| window_end(&fact.block));
+    let mut offset = 1;
+    while let Some(candidate) = ctx.failover.candidate_profile(offset) {
+        if let Some(end) = table
+            .paced_for(&candidate.id, now)
+            .map(|fact| window_end(&fact.block))
+        {
+            earliest = Some(earliest.map_or(end, |open| open.min(end)));
+        }
+        offset += 1;
+    }
+    earliest.unwrap_or_else(|| now.saturating_add(MIN_RETRY_INTERVAL_SECS))
 }
 
 /// Clear an armed pacing wake. Called on every non-pacing wake so a stale
@@ -2170,6 +2194,44 @@ mod tests {
         assert!(
             remaining > std::time::Duration::from_secs(1),
             "the fallback is a real wait, not an immediate re-run: {remaining:?}"
+        );
+    }
+
+    /// The alarm answers to the chain, not to the one profile the round stopped
+    /// on: with every profile inside a window, the shortest one sets the wake, so
+    /// a candidate whose window opens sooner is never slept through.
+    #[tokio::test]
+    async fn a_pacing_wake_sits_where_the_earliest_window_ends() {
+        use crate::test_support::{RecordingPacing, make_ctx, profile};
+        use kallipai_common::facts::{Block, BlockKind};
+
+        let now = timefmt::now_epoch();
+        let pacing = Arc::new(RecordingPacing::default());
+        let window = |until: u64| Block {
+            kind: BlockKind::Quota,
+            until: Some(until),
+            detail: "HTTP 429".into(),
+            status: Some(429),
+            recorded_at: now,
+        };
+        pacing.seed("slow", window(now + 600));
+        pacing.seed("quick", window(now + 5));
+        let mut ctx = make_ctx(
+            vec![profile("slow", "ep1", 4096), profile("quick", "ep1", 4096)],
+            &["ep1"],
+        )
+        .await;
+        ctx.profile_pacing = Some(pacing);
+
+        let armed = arm_pacing_wake(&ctx, "slow");
+        let remaining = armed.saturating_duration_since(tokio::time::Instant::now());
+        assert!(
+            remaining < std::time::Duration::from_secs(60),
+            "the wake answers to the shorter window on the chain: {remaining:?}"
+        );
+        assert!(
+            remaining >= std::time::Duration::from_secs(4),
+            "and never fires before the window it waits out ends: {remaining:?}"
         );
     }
 
