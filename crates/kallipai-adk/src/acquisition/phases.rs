@@ -51,7 +51,7 @@ pub(crate) async fn acquire_stream(
 ) -> AcquireResult {
     let mut retry_records = Vec::new();
     let consumed = loop {
-        let endpoint_id = ctx.failover.current_profile().endpoint.clone();
+        let provider_id = ctx.failover.current_profile().endpoint.clone();
         let profile_id = ctx.failover.current_profile().id.clone();
         // The endpoint, the clock, the attempt origin and the table's reading are
         // all taken here, so a chain that advanced is seen with fresh values: the
@@ -75,9 +75,9 @@ pub(crate) async fn acquire_stream(
                     policy: &ctx.config.retry_policy,
                     round,
                     episode: &mut ctx.episode,
-                    endpoint_id: &endpoint_id,
+                    provider_id: &provider_id,
                     profile_id: &profile_id,
-                    health: ctx.endpoint_health.as_deref(),
+                    health: ctx.profile_pacing.as_deref(),
                 },
                 tx,
                 &mut retry_records,
@@ -262,7 +262,7 @@ async fn enter_attempt(
     round: usize,
     pre_send: Attempt,
 ) -> PreSend {
-    let endpoint_id = ctx.failover.current_profile().endpoint.clone();
+    let provider_id = ctx.failover.current_profile().endpoint.clone();
     let profile_id = ctx.failover.current_profile().id.clone();
     let reading = pre_send.reading();
     let verdict = decision::decide(&ctx.episode.facts(&pre_send), &ctx.config.retry_policy);
@@ -339,7 +339,7 @@ async fn enter_attempt(
             error!(
                 attempts = ctx.episode.attempts(),
                 max_attempts = ctx.config.retry_policy.max_retries,
-                endpoint = %endpoint_id,
+                endpoint = %provider_id,
                 profile = %profile_id,
                 reason,
                 "episode retry budget exhausted, advancing failover chain"
@@ -417,7 +417,7 @@ async fn on_mid_stream_failure(
     round: usize,
     e: just_llm_client::TransportError,
 ) -> Option<AcquireResult> {
-    let endpoint_id = ctx.failover.current_profile().endpoint.clone();
+    let provider_id = ctx.failover.current_profile().endpoint.clone();
     let profile_id = ctx.failover.current_profile().id.clone();
     let policy = &ctx.config.retry_policy;
     let attempt = ctx.episode.attempts();
@@ -466,8 +466,8 @@ async fn on_mid_stream_failure(
             let rendered = crate::llm_error::render_error(&promoted);
             // What this failure taught about the profile outlives the
             // round, so it goes to the shared table before the chain walks.
-            crate::retry::record_endpoint_fact(
-                ctx.endpoint_health.as_deref(),
+            crate::retry::record_fact(
+                ctx.profile_pacing.as_deref(),
                 &profile_id,
                 class,
                 &promoted,
@@ -504,7 +504,7 @@ async fn on_mid_stream_failure(
                             max_attempts: policy.max_retries,
                         },
                         now,
-                        Some(endpoint_id.clone()),
+                        Some(provider_id.clone()),
                         kind,
                         crate::llm_error::render_error(&promoted),
                         block.as_ref().and_then(|block| block.until),
@@ -612,7 +612,7 @@ async fn on_mid_stream_failure(
                     max_attempts: policy.max_retries,
                 },
                 timefmt::now_epoch(),
-                Some(endpoint_id.clone()),
+                Some(provider_id.clone()),
                 kind,
                 error_msg,
                 delay_secs,

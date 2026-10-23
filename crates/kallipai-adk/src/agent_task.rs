@@ -195,7 +195,7 @@ pub struct AgentContext {
     /// Tagma-wide upstream-fact table, shared by every agent. Cloned from
     /// `AppState`; `None` in contexts with no tagma behind them (unit
     /// tests), which reads as no facts at all — every read is fail-open.
-    pub endpoint_health: Option<Arc<dyn kallipai_common::facts::EndpointHealth>>,
+    pub profile_pacing: Option<Arc<dyn kallipai_common::facts::ProfilePacing>>,
     /// Pending profile-reset cell: the tagma's apply handler writes a
     /// [`ProfileReset`](crate::failover::ProfileReset) here; the agent task drains it at the top of
     /// [`run_and_report`] and rebuilds its failover state + client. Shared

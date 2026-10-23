@@ -13,7 +13,7 @@ use kallipai_adk::config::{AgentConfig, DelegationMode, permission_class_from_en
 use kallipai_adk::persistence;
 use kallipai_common::agentid::AgentId;
 use kallipai_common::authtoken::MintedToken;
-use kallipai_common::facts::EndpointHealth;
+use kallipai_common::facts::ProfilePacing;
 use kallipai_common::policy::ExecPolicy;
 use kallipai_common::protocol::{
     ApiError, CreateAgentRequest, CreateAgentResponse, ListAgentsQuery, ListAgentsResponse,
@@ -235,7 +235,7 @@ pub async fn list_agents(
     Json(ListAgentsResponse {
         agents: summaries,
         upstream_facts: state
-            .endpoint_health
+            .profile_pacing
             .snapshot(kallipai_common::timefmt::now_epoch()),
     })
 }

@@ -14,16 +14,16 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use kallipai_common::facts::{
-    Block, BlockedFact, EndpointHealth, FACT_TABLE_CAPACITY, FactView, display_until, is_active,
+    Block, BlockedFact, FACT_TABLE_CAPACITY, FactView, ProfilePacing, display_until, is_active,
 };
 
 /// The tagma-wide fact table. One instance per tagma, shared by every agent
 /// (cloned into each `AgentContext`) and read by the status surfaces.
-pub struct EndpointHealthTable {
+pub struct ProfilePacingTable {
     facts: Mutex<HashMap<String, Block>>,
 }
 
-impl EndpointHealthTable {
+impl ProfilePacingTable {
     /// The one construction point (the tagma's `AppState`).
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
@@ -39,12 +39,12 @@ impl EndpointHealthTable {
     }
 }
 
-impl EndpointHealth for EndpointHealthTable {
+impl ProfilePacing for ProfilePacingTable {
     fn record(&self, profile_id: &str, block: Block) {
         insert_fact(&mut self.lock(), profile_id.to_string(), block);
     }
 
-    fn blocked_for(&self, profile_id: &str, now: u64) -> Option<BlockedFact> {
+    fn paced_for(&self, profile_id: &str, now: u64) -> Option<BlockedFact> {
         let facts = self.lock();
         let block = facts.get(profile_id)?;
         // The one hit predicate, applied on the read side: an expired fact is
@@ -114,8 +114,8 @@ mod tests {
 
     const T0: u64 = 1_700_000_000;
 
-    fn table() -> Arc<EndpointHealthTable> {
-        EndpointHealthTable::new()
+    fn table() -> Arc<ProfilePacingTable> {
+        ProfilePacingTable::new()
     }
 
     fn block(kind: BlockKind, recorded_at: u64, until: Option<u64>) -> Block {
@@ -134,12 +134,12 @@ mod tests {
         table.record("a", block(BlockKind::Quota, T0, None));
 
         let fact = table
-            .blocked_for("a", T0)
+            .paced_for("a", T0)
             .expect("the profile carries the record");
         assert_eq!(fact.block.kind, BlockKind::Quota);
         assert_eq!(fact.profile, "a");
         assert!(
-            table.blocked_for("b", T0).is_none(),
+            table.paced_for("b", T0).is_none(),
             "a sibling profile is not covered by another profile's record"
         );
     }
@@ -170,17 +170,15 @@ mod tests {
         let table = table();
         table.record("a", block(BlockKind::Quota, T0, Some(T0 + 60)));
 
-        assert!(table.blocked_for("a", T0 + 59).is_some());
+        assert!(table.paced_for("a", T0 + 59).is_some());
         assert!(
-            table.blocked_for("a", T0 + 60).is_none(),
+            table.paced_for("a", T0 + 60).is_none(),
             "the upstream's own moment ends the window"
         );
 
         table.record("a", block(BlockKind::Quota, T0, None));
         assert!(
-            table
-                .blocked_for("a", T0 + MIN_RETRY_INTERVAL_SECS)
-                .is_none(),
+            table.paced_for("a", T0 + MIN_RETRY_INTERVAL_SECS).is_none(),
             "without a hint the kind's interval is the whole window"
         );
     }
@@ -193,12 +191,12 @@ mod tests {
 
         assert!(
             table
-                .blocked_for("a", T0 + PAYMENT_RETRY_INTERVAL_SECS - 1)
+                .paced_for("a", T0 + PAYMENT_RETRY_INTERVAL_SECS - 1)
                 .is_some()
         );
         assert!(
             table
-                .blocked_for("b", T0 + PAYMENT_RETRY_INTERVAL_SECS - 1)
+                .paced_for("b", T0 + PAYMENT_RETRY_INTERVAL_SECS - 1)
                 .is_none()
         );
     }
@@ -244,10 +242,10 @@ mod tests {
         let table = table();
         table.record("gone", block(BlockKind::EndpointAuth, T0, None));
 
-        assert!(table.blocked_for("gone", T0).is_some());
+        assert!(table.paced_for("gone", T0).is_some());
         assert!(
             table
-                .blocked_for("gone", T0 + MIN_RETRY_INTERVAL_SECS)
+                .paced_for("gone", T0 + MIN_RETRY_INTERVAL_SECS)
                 .is_none()
         );
     }

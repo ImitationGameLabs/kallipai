@@ -21,7 +21,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, warn};
 
 use crate::event::AgentEvent;
-use kallipai_common::facts::{BlockKind, EndpointHealth};
+use kallipai_common::facts::{BlockKind, ProfilePacing};
 use kallipai_common::retry::{RetryAttempt, RetryRecord};
 use kallipai_common::timefmt;
 
@@ -160,8 +160,8 @@ pub(crate) fn spent_budget_error() -> BackendError {
 /// failure records the same fact wherever it is met. Fail-open by contract: no
 /// handle, or a class the table does not track, writes nothing. The record is
 /// keyed by the profile the failing send ran on, never by its endpoint.
-pub(crate) fn record_endpoint_fact(
-    health: Option<&dyn EndpointHealth>,
+pub(crate) fn record_fact(
+    health: Option<&dyn ProfilePacing>,
     profile_id: &str,
     class: decision::FailureClass,
     error: &BackendError,
@@ -182,13 +182,15 @@ pub struct RetryCall<'a> {
     pub policy: &'a RetryPolicy,
     pub round: usize,
     pub episode: &'a mut Episode,
-    pub endpoint_id: &'a str,
+    /// The provider this call connects through: the retry record's `endpoint` column
+    /// carries it. Not the fact key — that is `profile_id`.
+    pub provider_id: &'a str,
     /// The profile this call sends for: the key a fact it leaves behind is
     /// recorded under.
     pub profile_id: &'a str,
     /// The shared fact table, when the caller has one: a failure this call
     /// settles writes what it learned about that profile.
-    pub health: Option<&'a dyn EndpointHealth>,
+    pub health: Option<&'a dyn ProfilePacing>,
 }
 
 /// Open a streaming generation through the caller's conversation, retrying transient errors.
@@ -234,7 +236,7 @@ pub async fn stream_with_retry(
         policy,
         round,
         episode,
-        endpoint_id,
+        provider_id,
         profile_id,
         health,
     } = call;
@@ -334,7 +336,7 @@ pub async fn stream_with_retry(
                         max_attempts: policy.max_retries,
                     },
                     timefmt::now_epoch(),
-                    Some(endpoint_id.to_string()),
+                    Some(provider_id.to_string()),
                     kind,
                     error_msg,
                     delay_secs,
@@ -374,7 +376,7 @@ pub async fn stream_with_retry(
                             max_attempts: policy.max_retries,
                         },
                         now,
-                        Some(endpoint_id.to_string()),
+                        Some(provider_id.to_string()),
                         kind,
                         crate::llm_error::render_error(&error),
                         // The upstream's own moment, as it gave it: this record is
@@ -383,7 +385,7 @@ pub async fn stream_with_retry(
                         fact.as_ref().and_then(|block| block.until),
                     ));
                 }
-                record_endpoint_fact(health, profile_id, class, &error, now);
+                record_fact(health, profile_id, class, &error, now);
                 return Err(RequestFailure::Switch {
                     reason,
                     error,
@@ -555,7 +557,7 @@ mod tests {
                 policy: &fast_policy(2),
                 round: 0,
                 episode: &mut Episode::new(timefmt::now_epoch()),
-                endpoint_id: "test",
+                provider_id: "test",
                 profile_id: "test",
                 health: None,
             },
@@ -611,7 +613,7 @@ mod tests {
                 policy: &fast_policy(2),
                 round: 0,
                 episode: &mut Episode::new(timefmt::now_epoch()),
-                endpoint_id: "test",
+                provider_id: "test",
                 profile_id: "test",
                 health: None,
             },
@@ -650,7 +652,7 @@ mod tests {
                 policy: &fast_policy(2),
                 round: 0,
                 episode: &mut Episode::new(timefmt::now_epoch()),
-                endpoint_id: "test",
+                provider_id: "test",
                 profile_id: "test",
                 health: None,
             },
@@ -682,7 +684,7 @@ mod tests {
                 policy: &fast_policy(3),
                 round: 0,
                 episode: &mut Episode::new(timefmt::now_epoch()),
-                endpoint_id: "test",
+                provider_id: "test",
                 profile_id: "test",
                 health: None,
             },
@@ -715,7 +717,7 @@ mod tests {
                 policy: &fast_policy(3),
                 round: 0,
                 episode: &mut Episode::new(timefmt::now_epoch()),
-                endpoint_id: "test",
+                provider_id: "test",
                 profile_id: "test",
                 health: None,
             },
@@ -754,7 +756,7 @@ mod tests {
                 policy: &fast_policy(3),
                 round: 0,
                 episode: &mut Episode::new(timefmt::now_epoch()),
-                endpoint_id: "test",
+                provider_id: "test",
                 profile_id: "test",
                 health: None,
             },
@@ -798,7 +800,7 @@ mod tests {
                 policy: &fast_policy(1),
                 round: 0,
                 episode: &mut Episode::new(timefmt::now_epoch()),
-                endpoint_id: "test",
+                provider_id: "test",
                 profile_id: "test",
                 health: None,
             },
@@ -841,7 +843,7 @@ mod tests {
                 policy: &fast_policy(2),
                 round: 0,
                 episode: &mut Episode::new(timefmt::now_epoch()),
-                endpoint_id: "test",
+                provider_id: "test",
                 profile_id: "test",
                 health: None,
             },
@@ -881,7 +883,7 @@ mod tests {
                 policy: &fast_policy(1),
                 round: 0,
                 episode: &mut Episode::new(timefmt::now_epoch()),
-                endpoint_id: "test",
+                provider_id: "test",
                 profile_id: "test",
                 health: None,
             },
@@ -915,7 +917,7 @@ mod tests {
                 policy: &fast_policy(2),
                 round: 0,
                 episode: &mut Episode::new(timefmt::now_epoch()),
-                endpoint_id: "test",
+                provider_id: "test",
                 profile_id: "test",
                 health: None,
             },
@@ -1047,7 +1049,7 @@ mod tests {
                 policy: &fast_policy(2),
                 round: 0,
                 episode: &mut Episode::new(timefmt::now_epoch()),
-                endpoint_id: "test",
+                provider_id: "test",
                 profile_id: "test",
                 health: None,
             },
@@ -1110,7 +1112,7 @@ mod tests {
                 policy: &policy,
                 round: 0,
                 episode: &mut episode,
-                endpoint_id: "test",
+                provider_id: "test",
                 profile_id: "test",
                 health: None,
             },
@@ -1155,7 +1157,7 @@ mod tests {
                 policy: &policy,
                 round: 0,
                 episode: &mut episode,
-                endpoint_id: "test",
+                provider_id: "test",
                 profile_id: "test",
                 health: None,
             },
@@ -1200,7 +1202,7 @@ mod tests {
                 policy: &policy,
                 round: 0,
                 episode: &mut episode,
-                endpoint_id: "test",
+                provider_id: "test",
                 profile_id: "test",
                 health: None,
             },
@@ -1246,7 +1248,7 @@ mod tests {
                 policy: &policy,
                 round: 0,
                 episode: &mut episode,
-                endpoint_id: "test",
+                provider_id: "test",
                 profile_id: "test",
                 health: None,
             },
@@ -1290,7 +1292,7 @@ mod tests {
                 policy: &fast_policy(2),
                 round: 0,
                 episode: &mut Episode::new(timefmt::now_epoch()),
-                endpoint_id: "test",
+                provider_id: "test",
                 profile_id: "test",
                 health: None,
             },
@@ -1338,7 +1340,7 @@ mod tests {
                 policy: &fast_policy(2),
                 round: 0,
                 episode: &mut Episode::new(timefmt::now_epoch()),
-                endpoint_id: "test",
+                provider_id: "test",
                 profile_id: "test",
                 health: None,
             },
@@ -1380,7 +1382,7 @@ mod tests {
                 policy: &fast_policy(2),
                 round: 0,
                 episode: &mut Episode::new(timefmt::now_epoch()),
-                endpoint_id: "test",
+                provider_id: "test",
                 profile_id: "test",
                 health: Some(health.as_ref()),
             },
@@ -1432,7 +1434,7 @@ mod tests {
                 policy: &fast_policy(2),
                 round: 0,
                 episode: &mut Episode::new(timefmt::now_epoch()),
-                endpoint_id: "test",
+                provider_id: "test",
                 profile_id: "test",
                 health: None,
             },

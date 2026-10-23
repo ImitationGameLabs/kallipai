@@ -541,8 +541,8 @@ pub(crate) async fn note_compaction_failure(
         }
         Decision::AdvanceFailover { reason } => {
             if let Some(backend) = backend {
-                crate::retry::record_endpoint_fact(
-                    ctx.endpoint_health.as_deref(),
+                crate::retry::record_fact(
+                    ctx.profile_pacing.as_deref(),
                     &ctx.failover.current_profile().id,
                     class,
                     backend,

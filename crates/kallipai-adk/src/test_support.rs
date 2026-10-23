@@ -15,7 +15,7 @@ use just_llm_client::types::generation::{GenerationRequest, Message, ToolCall, U
 /// just-agent-libs migration; test signatures never name the upstream type.
 pub(crate) type TurnMessage = Message;
 use just_llm_client::{LlmBackend, ToolDispatcher};
-use kallipai_common::facts::{Block, BlockedFact, EndpointHealth, FactView, is_active};
+use kallipai_common::facts::{Block, BlockedFact, FactView, ProfilePacing, is_active};
 use tokio_util::sync::CancellationToken;
 
 use crate::agent_task::AgentContext;
@@ -157,7 +157,7 @@ pub(crate) async fn ctx_from_source(
         wait_armed_secs: 0,
         token_budget: TokenBudget::new(1_000_000, 0),
         usage_stats: crate::usage_stats::UsageStats::default(),
-        endpoint_health: None,
+        profile_pacing: None,
         pending_profile_reset: Arc::new(std::sync::Mutex::new(None)),
         message_puller: None,
         persist_failures: Default::default(),
@@ -752,7 +752,7 @@ impl RecordingHealth {
     }
 }
 
-impl EndpointHealth for RecordingHealth {
+impl ProfilePacing for RecordingHealth {
     fn record(&self, profile_id: &str, block: Block) {
         self.blocks
             .lock()
@@ -760,7 +760,7 @@ impl EndpointHealth for RecordingHealth {
             .push((profile_id.to_string(), block));
     }
 
-    fn blocked_for(&self, profile_id: &str, now: u64) -> Option<BlockedFact> {
+    fn paced_for(&self, profile_id: &str, now: u64) -> Option<BlockedFact> {
         // Newest first: the same reading order the tagma's table uses.
         self.blocks
             .lock()

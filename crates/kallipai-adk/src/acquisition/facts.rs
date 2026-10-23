@@ -10,7 +10,7 @@ use crate::agent_task::AgentContext;
 use crate::retry::decision::{Alternative, TableReading};
 use anyhow::Error;
 use just_llm_client::{BackendError, provider_rejection};
-use kallipai_common::facts::{BlockKind, BlockedFact, EndpointHealth, display_until};
+use kallipai_common::facts::{BlockKind, BlockedFact, ProfilePacing, display_until};
 use kallipai_common::protocol::QuotaBlockedInfo;
 use kallipai_common::timefmt;
 use tracing::info;
@@ -83,11 +83,11 @@ pub(super) fn emit_fact_signal(ctx: &AgentContext, blocked: Option<&BlockedFact>
 /// be read — each reads as no fact, because a table that cannot be read must
 /// never withhold a send.
 pub(super) fn table_reading(ctx: &AgentContext, now: u64) -> TableReading {
-    let Some(health) = ctx.endpoint_health.as_deref() else {
+    let Some(health) = ctx.profile_pacing.as_deref() else {
         return TableReading::none();
     };
     let current = ctx.failover.current_profile().id.clone();
-    let blocked = health.blocked_for(&current, now);
+    let blocked = health.paced_for(&current, now);
     // With no fact there is nothing to escape, so no candidate is needed.
     let alternative = blocked.as_ref().and_then(|_| resolve_alternative(ctx, now));
     TableReading {
@@ -104,10 +104,10 @@ pub(super) fn table_reading(ctx: &AgentContext, now: u64) -> TableReading {
 /// nowhere to go.
 ///
 /// The table keys one fact per profile, so a mark answers for exactly the
-/// profile it names (see [`EndpointHealth::blocked_for`]): every other
+/// profile it names (see [`ProfilePacing::paced_for`]): every other
 /// profile in the chain stays a candidate.
 fn resolve_alternative(ctx: &AgentContext, now: u64) -> Option<Alternative> {
-    let health = ctx.endpoint_health.as_deref()?;
+    let health = ctx.profile_pacing.as_deref()?;
     let mut offset = 1;
     while let Some(candidate) = ctx.failover.candidate_profile(offset) {
         if !candidate_marked(health, &candidate.id, now) {
@@ -122,8 +122,8 @@ fn resolve_alternative(ctx: &AgentContext, now: u64) -> Option<Alternative> {
 /// own — and a fact names one profile, so it answers for exactly this one.
 ///
 /// Fail-open: a table that cannot be read reads as a candidate that may serve.
-pub(super) fn candidate_marked(health: &dyn EndpointHealth, candidate: &str, now: u64) -> bool {
-    health.blocked_for(candidate, now).is_some()
+pub(super) fn candidate_marked(health: &dyn ProfilePacing, candidate: &str, now: u64) -> bool {
+    health.paced_for(candidate, now).is_some()
 }
 
 /// The structured reason a quota or payment block parks with: the profile it
@@ -139,9 +139,9 @@ pub(super) fn quota_blocked_payload(
     detail: String,
 ) -> QuotaBlockedInfo {
     let reset = ctx
-        .endpoint_health
+        .profile_pacing
         .as_deref()
-        .and_then(|health| health.blocked_for(profile_id, timefmt::now_epoch()))
+        .and_then(|health| health.paced_for(profile_id, timefmt::now_epoch()))
         .and_then(|fact| display_until(fact.block.recorded_at, fact.block.until));
     QuotaBlockedInfo {
         profile: profile_id.to_string(),

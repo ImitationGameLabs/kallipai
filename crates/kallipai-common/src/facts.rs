@@ -168,7 +168,7 @@ pub struct BlockedFact {
 /// Every method is fail-open by contract: a reader that cannot reach the table
 /// behaves as if there were no facts, because a missing fact must never be able
 /// to change a verdict on its own.
-pub trait EndpointHealth: Send + Sync {
+pub trait ProfilePacing: Send + Sync {
     /// Record a failure fact about this profile.
     fn record(&self, profile_id: &str, block: Block);
 
@@ -177,7 +177,7 @@ pub trait EndpointHealth: Send + Sync {
     /// A fact answers for the profile it was recorded on and for no other: a
     /// sibling profile is a candidate again the moment the walk reaches it, and
     /// pays its own probing send to find out.
-    fn blocked_for(&self, profile_id: &str, now: u64) -> Option<BlockedFact>;
+    fn paced_for(&self, profile_id: &str, now: u64) -> Option<BlockedFact>;
 
     /// Every readable fact at `now`, for the status and fleet surfaces.
     fn snapshot(&self, now: u64) -> Vec<FactView>;

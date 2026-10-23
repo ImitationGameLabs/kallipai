@@ -434,7 +434,7 @@ mod tests {
     async fn a_chain_owned_compaction_failure_is_deferred_to_the_main_send() {
         let (mut ctx, server) = gate_ctx(429, latching_policy()).await;
         let health = Arc::new(RecordingHealth::default());
-        ctx.endpoint_health = Some(health.clone());
+        ctx.profile_pacing = Some(health.clone());
 
         let action = gate(&mut ctx, 0).await;
 

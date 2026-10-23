@@ -26,7 +26,7 @@ use crate::test_support::{
 use just_llm_client::LlmBackend;
 use just_llm_client::types::generation::ReasoningEffort;
 use kallipai_common::facts::{
-    Block, BlockKind, BlockedFact, EndpointHealth, FactView, QUOTA_RESET_TRUST_MAX_SECS,
+    Block, BlockKind, BlockedFact, FactView, ProfilePacing, QUOTA_RESET_TRUST_MAX_SECS,
 };
 use kallipai_common::retry::RetryKind;
 use std::collections::HashMap;
@@ -146,7 +146,7 @@ async fn failover_advance_rebuilds_the_conversation_chain() {
             policy: &ctx.config.retry_policy,
             round: 0,
             episode: &mut Episode::new(timefmt::now_epoch()),
-            endpoint_id: "p1",
+            provider_id: "p1",
             profile_id: "a",
             health: None,
         },
@@ -189,7 +189,7 @@ async fn failover_advance_rebuilds_the_conversation_chain() {
             policy: &ctx.config.retry_policy,
             round: 0,
             episode: &mut Episode::new(timefmt::now_epoch()),
-            endpoint_id: "p2",
+            provider_id: "p2",
             profile_id: "b",
             health: None,
         },
@@ -1023,7 +1023,7 @@ async fn a_quota_rejection_with_no_candidate_left_parks() {
     )
     .await;
     let health = Arc::new(RecordingHealth::default());
-    ctx.endpoint_health = Some(health.clone());
+    ctx.profile_pacing = Some(health.clone());
 
     let outcome = acquire_stream(
         &mut ctx,
@@ -1299,7 +1299,7 @@ async fn the_mid_stream_path_writes_the_fact_a_rejection_leaves() {
     )
     .await;
     let health = Arc::new(RecordingHealth::default());
-    ctx.endpoint_health = Some(health.clone());
+    ctx.profile_pacing = Some(health.clone());
 
     let (tx, _rx) = tokio::sync::mpsc::channel(64);
     let outcome = acquire_stream(
@@ -1384,7 +1384,7 @@ async fn a_fact_the_table_carries_skips_the_send_and_parks() {
     .await;
     let health = Arc::new(RecordingHealth::default());
     health.seed("a", seeded(BlockKind::Quota, None));
-    ctx.endpoint_health = Some(health.clone());
+    ctx.profile_pacing = Some(health.clone());
 
     let outcome = acquire_once(&mut ctx).await;
 
@@ -1419,7 +1419,7 @@ async fn a_marked_profile_leaves_the_next_one_a_candidate() {
     .await;
     let health = Arc::new(RecordingHealth::default());
     health.seed("a", seeded(BlockKind::EndpointAuth, None));
-    ctx.endpoint_health = Some(health.clone());
+    ctx.profile_pacing = Some(health.clone());
 
     let outcome = acquire_once(&mut ctx).await;
 
@@ -1454,7 +1454,7 @@ async fn a_quota_fact_on_another_profile_leaves_the_round_alone() {
     .await;
     let health = Arc::new(RecordingHealth::default());
     health.seed("b", seeded(BlockKind::Quota, None));
-    ctx.endpoint_health = Some(health.clone());
+    ctx.profile_pacing = Some(health.clone());
 
     let outcome = acquire_once(&mut ctx).await;
 
@@ -1495,7 +1495,7 @@ async fn a_marked_candidate_is_skipped_for_the_next_one() {
     health.seed("a", seeded(BlockKind::Quota, None));
     // The sibling in the middle carries a fact of its own.
     health.seed("b", seeded(BlockKind::EndpointAuth, None));
-    ctx.endpoint_health = Some(health.clone());
+    ctx.profile_pacing = Some(health.clone());
 
     let outcome = acquire_once(&mut ctx).await;
 
@@ -1517,10 +1517,10 @@ struct FactLandsMidWalk {
     sibling_reads: AtomicUsize,
 }
 
-impl EndpointHealth for FactLandsMidWalk {
+impl ProfilePacing for FactLandsMidWalk {
     fn record(&self, _profile_id: &str, _block: Block) {}
 
-    fn blocked_for(&self, profile_id: &str, _now: u64) -> Option<BlockedFact> {
+    fn paced_for(&self, profile_id: &str, _now: u64) -> Option<BlockedFact> {
         let block = match profile_id {
             "a" => Some(&self.walk_profile),
             "b" => {
@@ -1561,7 +1561,7 @@ async fn a_fact_written_mid_walk_stops_the_next_send() {
         RetryPolicy::default(),
     )
     .await;
-    ctx.endpoint_health = Some(Arc::new(FactLandsMidWalk {
+    ctx.profile_pacing = Some(Arc::new(FactLandsMidWalk {
         walk_profile: seeded(BlockKind::EndpointAuth, None),
         sibling: seeded(BlockKind::EndpointAuth, None),
         // The count matters: 1 would mark the sibling for the walk itself, 3 would
@@ -1606,7 +1606,7 @@ async fn the_wake_first_attempt_sends_once_through_a_fact() {
     .await;
     let health = Arc::new(RecordingHealth::default());
     health.seed("a", seeded(BlockKind::Quota, None));
-    ctx.endpoint_health = Some(health.clone());
+    ctx.profile_pacing = Some(health.clone());
     ctx.attempt_origin = AttemptOrigin::External;
 
     let outcome = acquire_once(&mut ctx).await;
@@ -1646,7 +1646,7 @@ async fn a_quota_rejection_with_a_reset_hint_carries_it() {
     )
     .await;
     let health = Arc::new(RecordingHealth::default());
-    ctx.endpoint_health = Some(health.clone());
+    ctx.profile_pacing = Some(health.clone());
     let before = timefmt::now_epoch();
 
     let outcome = acquire_once(&mut ctx).await;
@@ -1680,7 +1680,7 @@ async fn a_fact_stop_on_a_single_profile_names_that() {
     .await;
     let health = Arc::new(RecordingHealth::default());
     health.seed("a", seeded(BlockKind::EndpointAuth, None));
-    ctx.endpoint_health = Some(health.clone());
+    ctx.profile_pacing = Some(health.clone());
 
     let outcome = acquire_once(&mut ctx).await;
 
@@ -1713,7 +1713,7 @@ async fn a_fact_stop_reports_the_resumption_the_upstream_named() {
     let health = Arc::new(RecordingHealth::default());
     let until = timefmt::now_epoch() + 300;
     health.seed("a", seeded(BlockKind::EndpointAuth, Some(until)));
-    ctx.endpoint_health = Some(health.clone());
+    ctx.profile_pacing = Some(health.clone());
 
     let outcome = acquire_once(&mut ctx).await;
 
@@ -1760,7 +1760,7 @@ async fn a_fact_stop_quotes_the_hint_the_display_face_clamps() {
             recorded_at,
         },
     );
-    ctx.endpoint_health = Some(health.clone());
+    ctx.profile_pacing = Some(health.clone());
 
     let outcome = acquire_once(&mut ctx).await;
 
@@ -1795,7 +1795,7 @@ async fn a_fact_stop_with_every_candidate_marked_names_the_marking() {
     let health = Arc::new(RecordingHealth::default());
     health.seed("a", seeded(BlockKind::EndpointAuth, None));
     health.seed("b", seeded(BlockKind::EndpointAuth, None));
-    ctx.endpoint_health = Some(health.clone());
+    ctx.profile_pacing = Some(health.clone());
 
     let outcome = acquire_once(&mut ctx).await;
 
@@ -1844,7 +1844,7 @@ async fn the_wake_origin_is_spent_on_the_first_attempt() {
     .await;
     let health = Arc::new(RecordingHealth::default());
     health.seed("a", seeded(BlockKind::Quota, None));
-    ctx.endpoint_health = Some(health.clone());
+    ctx.profile_pacing = Some(health.clone());
     ctx.attempt_origin = AttemptOrigin::External;
 
     let outcome = acquire_once(&mut ctx).await;
@@ -1889,7 +1889,7 @@ async fn a_mid_stream_quota_rejection_leaves_an_observation_record() {
     )
     .await;
     let health = Arc::new(RecordingHealth::default());
-    ctx.endpoint_health = Some(health.clone());
+    ctx.profile_pacing = Some(health.clone());
     let before = timefmt::now_epoch();
 
     let outcome = acquire_once(&mut ctx).await;
@@ -1933,7 +1933,7 @@ async fn an_endpoint_auth_fact_signals_the_gateway_when_it_ends_the_round() {
     .await;
     let health = Arc::new(RecordingHealth::default());
     health.seed("a", seeded_with_status(BlockKind::EndpointAuth, None, 401));
-    ctx.endpoint_health = Some(health.clone());
+    ctx.profile_pacing = Some(health.clone());
     let (signal_tx, mut signal_rx) = tokio::sync::mpsc::unbounded_channel();
     ctx.gateway_signals = Some(signal_tx);
 
@@ -1972,7 +1972,7 @@ async fn an_endpoint_auth_fact_with_a_status_the_gateway_ignores_stays_silent() 
     .await;
     let health = Arc::new(RecordingHealth::default());
     health.seed("a", seeded_with_status(BlockKind::EndpointAuth, None, 404));
-    ctx.endpoint_health = Some(health.clone());
+    ctx.profile_pacing = Some(health.clone());
     let (signal_tx, mut signal_rx) = tokio::sync::mpsc::unbounded_channel();
     ctx.gateway_signals = Some(signal_tx);
 
@@ -2006,7 +2006,7 @@ async fn a_quota_fact_never_signals_the_gateway() {
     .await;
     let health = Arc::new(RecordingHealth::default());
     health.seed("a", seeded_with_status(BlockKind::Quota, None, 403));
-    ctx.endpoint_health = Some(health.clone());
+    ctx.profile_pacing = Some(health.clone());
     let (signal_tx, mut signal_rx) = tokio::sync::mpsc::unbounded_channel();
     ctx.gateway_signals = Some(signal_tx);
 
@@ -2053,7 +2053,7 @@ async fn a_post_walk_failure_is_recorded_against_the_profile_that_served_it() {
     .await;
     let health = Arc::new(RecordingHealth::default());
     health.seed("a", seeded_with_status(BlockKind::EndpointAuth, None, 401));
-    ctx.endpoint_health = Some(health.clone());
+    ctx.profile_pacing = Some(health.clone());
 
     let outcome = acquire_once(&mut ctx).await;
     let AcquireResult::Outcome(AgentOutcome::QuotaBlocked(info)) = outcome else {
@@ -2113,7 +2113,7 @@ async fn a_fact_the_chain_recovers_from_stays_silent() {
     .await;
     let health = Arc::new(RecordingHealth::default());
     health.seed("a", seeded_with_status(BlockKind::EndpointAuth, None, 401));
-    ctx.endpoint_health = Some(health.clone());
+    ctx.profile_pacing = Some(health.clone());
     let (signal_tx, mut signal_rx) = tokio::sync::mpsc::unbounded_channel();
     ctx.gateway_signals = Some(signal_tx);
 
@@ -2264,7 +2264,7 @@ async fn the_advance_arm_records_the_class_and_clears_the_ledger_for_the_new_end
     seed_over_budget_store(&mut ctx).await;
     ctx.summarizer.prompt = SUMMARY_PROBE_MARKER.to_owned();
     let health = Arc::new(RecordingHealth::default());
-    ctx.endpoint_health = Some(health.clone());
+    ctx.profile_pacing = Some(health.clone());
     let prior_messages = vec![user_msg("carried turn")];
 
     // The pre-call gate charges the first failure to the ledger before the

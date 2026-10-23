@@ -243,7 +243,7 @@ pub(crate) async fn advance_failover(
     while let Some(candidate) = ctx.failover.candidate_profile(offset) {
         // A candidate the table has already marked cannot serve: switching into it
         // would burn an attempt to learn what another agent already paid for.
-        if let Some(health) = ctx.endpoint_health.as_deref()
+        if let Some(health) = ctx.profile_pacing.as_deref()
             && candidate_marked(health, &candidate.id, now)
         {
             warn!(

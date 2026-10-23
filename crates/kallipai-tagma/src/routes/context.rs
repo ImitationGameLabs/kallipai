@@ -6,7 +6,7 @@ use kallipai_adk::context::AgenticContext;
 use kallipai_adk::persistence;
 use kallipai_adk::policy::classifier;
 use kallipai_common::agentid::AgentId;
-use kallipai_common::facts::EndpointHealth;
+use kallipai_common::facts::ProfilePacing;
 use kallipai_common::policy::ExecPolicy;
 use kallipai_common::protocol::{
     ActiveProfile, AgentPermissionsResponse, AgentStatusResponse, AgentUsageStats, ApiError,
@@ -66,7 +66,7 @@ pub async fn agent_status(
         cache_hit_rate: totals.cache_hit_rate(),
     };
     let upstream_facts = state
-        .endpoint_health
+        .profile_pacing
         .snapshot(kallipai_common::timefmt::now_epoch());
     Ok(Json(AgentStatusResponse {
         state: live.agent.get_state(),

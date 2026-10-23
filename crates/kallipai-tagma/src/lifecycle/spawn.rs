@@ -268,7 +268,7 @@ pub(crate) async fn spawn_agent(mut args: SpawnArgs) -> anyhow::Result<(Agent, A
         wait_armed_secs: 0,
         token_budget: token_budget.clone(),
         usage_stats: usage_stats.clone(),
-        endpoint_health: Some(args.shared_state.endpoint_health.clone()),
+        profile_pacing: Some(args.shared_state.profile_pacing.clone()),
         pending_profile_reset: pending_profile_reset.clone(),
         message_puller,
         persist_failures: Default::default(),
