@@ -1,7 +1,7 @@
 //! The acquisition loop's suite: the within-set walk driven end to end over the
 //! recording backend and the shared fact table.
 
-use super::facts::{emit_gateway_signal, rejection_payload};
+use super::facts::{claim_window, emit_gateway_signal, rejection_payload};
 use super::stream::fatal_provider_status;
 
 use super::*;
@@ -26,7 +26,7 @@ use crate::test_support::{
 use just_llm_client::LlmBackend;
 use just_llm_client::types::generation::ReasoningEffort;
 use kallipai_common::facts::{
-    Block, BlockKind, BlockedFact, FactView, ProfilePacing, QUOTA_RESET_TRUST_MAX_SECS,
+    Block, BlockKind, BlockedFact, Claim, FactView, ProfilePacing, QUOTA_RESET_TRUST_MAX_SECS,
 };
 use kallipai_common::retry::RetryKind;
 use std::collections::HashMap;
@@ -1520,6 +1520,14 @@ struct FactLandsMidWalk {
 impl ProfilePacing for FactLandsMidWalk {
     fn record(&self, _profile_id: &str, _block: Block) {}
 
+    fn claim(&self, _profile_id: &str, _now: u64, _force: bool) -> Claim {
+        Claim::Granted
+    }
+
+    fn note_success(&self, _profile_id: &str) {}
+
+    fn release(&self, _profile_id: &str, _started_at: u64) {}
+
     fn paced_for(&self, profile_id: &str, _now: u64) -> Option<BlockedFact> {
         let block = match profile_id {
             "a" => Some(&self.walk_profile),
@@ -1809,12 +1817,11 @@ async fn a_fact_stop_with_every_candidate_marked_names_the_marking() {
     assert_eq!(backend.take_requests().len(), 0, "nothing is asked");
 }
 
-/// The wake's own attempt is the only one the table lets through: a
-/// wake-triggered execution sends once even against a marked endpoint, and the
-/// attempt it would make next is withheld. The origin is spent on the first
-/// reading — a second reading that still read `External` would send again.
+/// A wake sends through a marked endpoint, and the stream it opens spends the
+/// mark: the attempt that follows the drop is served too, because the endpoint
+/// answered. Nothing paces a send the endpoint has already been serving.
 #[tokio::test]
-async fn the_wake_origin_is_spent_on_the_first_attempt() {
+async fn a_served_stream_spends_the_mark_so_the_retry_goes() {
     let backend = RecordingBackend::new();
     backend.queue_dropped_stream(
         vec![just_llm_client::types::generation::GenerationEvent::Text {
@@ -1851,15 +1858,16 @@ async fn the_wake_origin_is_spent_on_the_first_attempt() {
 
     assert_eq!(
         backend.take_requests().len(),
-        1,
-        "the wake's own attempt is served, the attempt the table marks is not"
+        2,
+        "the wake's attempt is served, and so is the retry its served stream allows"
     );
     assert!(
-        matches!(
-            outcome,
-            AcquireResult::Outcome(AgentOutcome::QuotaBlocked(_))
-        ),
-        "the fact the second reading sees parks the round"
+        matches!(outcome, AcquireResult::Consumed(_)),
+        "the retry lands on the stream the endpoint serves next"
+    );
+    assert!(
+        health.recorded().is_empty(),
+        "the served stream leaves no fact behind"
     );
 }
 
@@ -2320,5 +2328,384 @@ async fn the_advance_arm_records_the_class_and_clears_the_ledger_for_the_new_end
         log.iter().all(|record| record.kind == RetryKind::RateLimit),
         "429 is the quota class in both arms: {:?}",
         log.iter().map(|record| record.kind).collect::<Vec<_>>()
+    );
+}
+
+/// An ended window is the send's to spend: the claim takes it, moves its start
+/// to now, and the send that took it does not read the record back as a fact.
+#[tokio::test]
+async fn an_ended_window_is_claimed_and_the_send_goes() {
+    let backend = RecordingBackend::new();
+    backend.queue_stream("resp-1");
+    let source = Arc::new(MapSource(HashMap::from([(
+        "p1".to_string(),
+        backend.clone() as Arc<dyn LlmBackend>,
+    )])));
+    let mut ctx = ctx_from_source(
+        vec![profile("a", "p1", 100_000)],
+        source,
+        RetryPolicy::default(),
+    )
+    .await;
+    let health = Arc::new(RecordingHealth::default());
+    let now = timefmt::now_epoch();
+    health.seed(
+        "a",
+        Block {
+            kind: BlockKind::Quota,
+            until: Some(now.saturating_sub(1)),
+            detail: "seeded evidence".to_owned(),
+            status: None,
+            recorded_at: now.saturating_sub(600),
+        },
+    );
+    ctx.profile_pacing = Some(health.clone());
+
+    let outcome = acquire_once(&mut ctx).await;
+
+    assert!(
+        matches!(outcome, AcquireResult::Consumed(_)),
+        "the ended window is the send's to spend"
+    );
+    assert_eq!(backend.take_requests().len(), 1, "the send goes out");
+    assert_eq!(health.claims(), 1, "the send took a window before it went");
+    assert!(
+        health.recorded().is_empty(),
+        "the opened stream spent the window the claim started"
+    );
+}
+
+/// One episode takes one window: an attempt after the first reuses the claim,
+/// so a round pays one claim however many sends it makes.
+#[tokio::test]
+async fn one_episode_takes_one_window() {
+    let backend = RecordingBackend::new();
+    let source = Arc::new(MapSource(HashMap::from([(
+        "p1".to_string(),
+        backend.clone() as Arc<dyn LlmBackend>,
+    )])));
+    let mut ctx = ctx_from_source(
+        vec![profile("a", "p1", 100_000)],
+        source,
+        RetryPolicy::default(),
+    )
+    .await;
+    let health = Arc::new(RecordingHealth::default());
+    ctx.profile_pacing = Some(health.clone());
+    let now = timefmt::now_epoch();
+
+    let _ = claim_window(&mut ctx, "a", now, AttemptOrigin::System);
+    let _ = claim_window(&mut ctx, "a", now, AttemptOrigin::System);
+
+    assert_eq!(health.claims(), 1, "one episode, one window");
+    assert!(
+        ctx.episode.claimed(),
+        "the episode holds the window it took"
+    );
+}
+
+/// A claim on an ended window leaves a running one: the window the send started
+/// is what the next reader waits for.
+#[tokio::test]
+async fn a_claim_on_an_ended_window_starts_a_running_one() {
+    let backend = RecordingBackend::new();
+    let source = Arc::new(MapSource(HashMap::from([(
+        "p1".to_string(),
+        backend.clone() as Arc<dyn LlmBackend>,
+    )])));
+    let mut ctx = ctx_from_source(
+        vec![profile("a", "p1", 100_000)],
+        source,
+        RetryPolicy::default(),
+    )
+    .await;
+    let health = Arc::new(RecordingHealth::default());
+    let now = timefmt::now_epoch();
+    health.seed(
+        "a",
+        Block {
+            kind: BlockKind::Quota,
+            until: Some(now.saturating_sub(1)),
+            detail: "seeded evidence".to_owned(),
+            status: Some(429),
+            recorded_at: now.saturating_sub(600),
+        },
+    );
+    ctx.profile_pacing = Some(health.clone());
+    assert!(
+        health.paced_for("a", now).is_none(),
+        "the seeded window has ended"
+    );
+
+    let _ = claim_window(&mut ctx, "a", now, AttemptOrigin::System);
+
+    let fact = health
+        .paced_for("a", now)
+        .expect("the claim leaves a window behind");
+    assert!(
+        fact.block.recorded_at >= now,
+        "the window starts at the claim"
+    );
+    assert_eq!(
+        fact.block.until, None,
+        "the ended window's hint does not carry into a window nobody was refused in"
+    );
+}
+
+/// A forced claim moves a running window: an external wake opens it at its own
+/// clock, so this send goes and the next round waits a full window.
+#[tokio::test]
+async fn a_forced_claim_moves_a_running_window() {
+    let backend = RecordingBackend::new();
+    let source = Arc::new(MapSource(HashMap::from([(
+        "p1".to_string(),
+        backend.clone() as Arc<dyn LlmBackend>,
+    )])));
+    let mut ctx = ctx_from_source(
+        vec![profile("a", "p1", 100_000)],
+        source,
+        RetryPolicy::default(),
+    )
+    .await;
+    let health = Arc::new(RecordingHealth::default());
+    let now = timefmt::now_epoch();
+    health.seed(
+        "a",
+        Block {
+            kind: BlockKind::Quota,
+            until: Some(now + 600),
+            detail: "seeded evidence".to_owned(),
+            status: Some(429),
+            recorded_at: now.saturating_sub(60),
+        },
+    );
+    ctx.profile_pacing = Some(health.clone());
+    assert!(
+        health.paced_for("a", now).is_some(),
+        "the seeded window is running"
+    );
+
+    let _ = claim_window(&mut ctx, "a", now, AttemptOrigin::External);
+
+    let fact = health
+        .paced_for("a", now)
+        .expect("the claim leaves a window behind");
+    assert!(
+        fact.block.recorded_at >= now,
+        "the forced claim moves the window to its own clock"
+    );
+    assert_eq!(
+        fact.block.until, None,
+        "the running window's hint does not survive the forced claim"
+    );
+    assert_eq!(
+        fact.block.status, None,
+        "nor the answer the refused window carried"
+    );
+}
+
+/// A window the compaction entry took and never spent does not pace the send:
+/// the round still goes out once, and that send spends the window the pass took.
+#[tokio::test]
+async fn a_window_the_pass_never_spent_does_not_pace_the_send() {
+    let backend = RecordingBackend::new();
+    backend.queue_stream("resp-1");
+    let source = Arc::new(MapSource(HashMap::from([(
+        "p1".to_string(),
+        backend.clone() as Arc<dyn LlmBackend>,
+    )])));
+    let mut ctx = ctx_from_source(
+        vec![profile("a", "p1", 100_000)],
+        source,
+        RetryPolicy::default(),
+    )
+    .await;
+    let health = Arc::new(RecordingHealth::default());
+    let now = timefmt::now_epoch();
+    health.seed(
+        "a",
+        Block {
+            kind: BlockKind::Quota,
+            until: Some(now.saturating_sub(1)),
+            detail: "seeded evidence".to_owned(),
+            status: None,
+            recorded_at: now.saturating_sub(600),
+        },
+    );
+    ctx.profile_pacing = Some(health.clone());
+
+    assert!(
+        crate::context::claim_compaction_window(&mut ctx, now),
+        "the ended window is the pass's to take"
+    );
+    // The pass finds nothing to summarize and breaks before the summarizer
+    // call, so no request was charged to the window it took.
+    let outcome = acquire_once(&mut ctx).await;
+
+    assert!(
+        matches!(outcome, AcquireResult::Consumed(_)),
+        "the round sends instead of parking on a window it took itself"
+    );
+    assert_eq!(backend.take_requests().len(), 1, "the send goes out once");
+    assert_eq!(
+        health.claims(),
+        1,
+        "one episode, one window: the send spends the pass's claim"
+    );
+    assert!(
+        health.recorded().is_empty(),
+        "the send spent the window, so nothing is left to pace the next round"
+    );
+}
+
+/// A wake that arrives after the episode took its window takes none of its own:
+/// the table is not written again and the window keeps the start it was given.
+#[tokio::test]
+async fn an_external_wake_after_the_claim_leaves_the_window_alone() {
+    let backend = RecordingBackend::new();
+    let source = Arc::new(MapSource(HashMap::from([(
+        "p1".to_string(),
+        backend.clone() as Arc<dyn LlmBackend>,
+    )])));
+    let mut ctx = ctx_from_source(
+        vec![profile("a", "p1", 100_000)],
+        source,
+        RetryPolicy::default(),
+    )
+    .await;
+    let health = Arc::new(RecordingHealth::default());
+    let now = timefmt::now_epoch();
+    health.seed(
+        "a",
+        Block {
+            kind: BlockKind::Quota,
+            until: Some(now.saturating_sub(1)),
+            detail: "seeded evidence".to_owned(),
+            status: Some(429),
+            recorded_at: now.saturating_sub(600),
+        },
+    );
+    ctx.profile_pacing = Some(health.clone());
+    let _ = claim_window(&mut ctx, "a", now, AttemptOrigin::System);
+    let started = health
+        .paced_for("a", now)
+        .expect("the claim leaves a window behind")
+        .block
+        .recorded_at;
+
+    let _ = claim_window(&mut ctx, "a", now + 5, AttemptOrigin::External);
+
+    assert_eq!(
+        health.claims(),
+        1,
+        "one episode, one claim, however the wake arrives"
+    );
+    assert_eq!(
+        health
+            .paced_for("a", now + 5)
+            .expect("the window is still there")
+            .block
+            .recorded_at,
+        started,
+        "the window keeps the start the episode gave it"
+    );
+}
+
+/// A window a round never spent goes back: the claim wrote it, no send was
+/// charged to it, so the table carries nothing that could pace the next round.
+#[tokio::test]
+async fn a_window_a_round_never_spent_goes_back() {
+    let backend = RecordingBackend::new();
+    let source = Arc::new(MapSource(HashMap::from([(
+        "p1".to_string(),
+        backend.clone() as Arc<dyn LlmBackend>,
+    )])));
+    let mut ctx = ctx_from_source(
+        vec![profile("a", "p1", 100_000)],
+        source,
+        RetryPolicy::default(),
+    )
+    .await;
+    let health = Arc::new(RecordingHealth::default());
+    let now = timefmt::now_epoch();
+    health.seed(
+        "a",
+        Block {
+            kind: BlockKind::Quota,
+            until: Some(now.saturating_sub(1)),
+            detail: "seeded evidence".to_owned(),
+            status: None,
+            recorded_at: now.saturating_sub(600),
+        },
+    );
+    ctx.profile_pacing = Some(health.clone());
+    let _ = claim_window(&mut ctx, "a", now, AttemptOrigin::System);
+    assert_eq!(
+        health.recorded().len(),
+        1,
+        "the claim leaves a window behind"
+    );
+
+    release_unspent_window(&mut ctx);
+
+    assert!(
+        health.recorded().is_empty(),
+        "nothing was spent, so nothing stays"
+    );
+    assert!(
+        !ctx.episode.claimed(),
+        "the episode has no window left to spend"
+    );
+}
+
+/// A round whose send failed keeps the fact that send wrote: giving back is
+/// for the round that never sent, not for one the endpoint answered.
+#[tokio::test]
+async fn a_spent_round_keeps_the_fact_its_send_wrote() {
+    let backend = RecordingBackend::new();
+    let source = Arc::new(MapSource(HashMap::from([(
+        "p1".to_string(),
+        backend.clone() as Arc<dyn LlmBackend>,
+    )])));
+    let mut ctx = ctx_from_source(
+        vec![profile("a", "p1", 100_000)],
+        source,
+        RetryPolicy::default(),
+    )
+    .await;
+    let health = Arc::new(RecordingHealth::default());
+    let now = timefmt::now_epoch();
+    health.seed(
+        "a",
+        Block {
+            kind: BlockKind::Quota,
+            until: Some(now.saturating_sub(1)),
+            detail: "seeded evidence".to_owned(),
+            status: None,
+            recorded_at: now.saturating_sub(600),
+        },
+    );
+    ctx.profile_pacing = Some(health.clone());
+    let _ = claim_window(&mut ctx, "a", now, AttemptOrigin::System);
+    ctx.episode = ctx.episode.after_attempt();
+    health.record(
+        "a",
+        Block {
+            kind: BlockKind::Quota,
+            until: Some(now + 600),
+            detail: "answered".to_owned(),
+            status: Some(429),
+            recorded_at: now,
+        },
+    );
+
+    let carried = health.recorded().len();
+
+    release_unspent_window(&mut ctx);
+
+    assert_eq!(
+        health.recorded().len(),
+        carried,
+        "the fact the send's failure wrote stays"
     );
 }

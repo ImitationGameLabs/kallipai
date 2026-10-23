@@ -6,6 +6,7 @@
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use anyhow::Context;
@@ -15,7 +16,9 @@ use just_llm_client::types::generation::{GenerationRequest, Message, ToolCall, U
 /// just-agent-libs migration; test signatures never name the upstream type.
 pub(crate) type TurnMessage = Message;
 use just_llm_client::{LlmBackend, ToolDispatcher};
-use kallipai_common::facts::{Block, BlockedFact, FactView, ProfilePacing, is_active};
+use kallipai_common::facts::{
+    Block, BlockedFact, Claim, FactView, ProfilePacing, claim_window, is_active,
+};
 use tokio_util::sync::CancellationToken;
 
 use crate::agent_task::AgentContext;
@@ -731,6 +734,9 @@ impl LlmBackend for RecordingBackend {
 #[derive(Default)]
 pub(crate) struct RecordingHealth {
     blocks: Mutex<Vec<(String, Block)>>,
+    /// How many claims this double answered, so a test can pin that one
+    /// episode takes one window.
+    claims: AtomicUsize,
 }
 
 impl RecordingHealth {
@@ -750,6 +756,11 @@ impl RecordingHealth {
             .unwrap_or_else(|e| e.into_inner())
             .push((profile_id.to_string(), block));
     }
+
+    /// The claims answered so far.
+    pub(crate) fn claims(&self) -> usize {
+        self.claims.load(Ordering::Relaxed)
+    }
 }
 
 impl ProfilePacing for RecordingHealth {
@@ -758,6 +769,33 @@ impl ProfilePacing for RecordingHealth {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .push((profile_id.to_string(), block));
+    }
+
+    fn claim(&self, profile_id: &str, now: u64, force: bool) -> Claim {
+        self.claims.fetch_add(1, Ordering::Relaxed);
+        let mut blocks = self.blocks.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(index) = blocks.iter().rposition(|(id, _)| id == profile_id) else {
+            return Claim::Granted;
+        };
+        let (claim, renewed) = claim_window(Some(&blocks[index].1), now, force);
+        if let Some(block) = renewed {
+            blocks[index].1 = block;
+        }
+        claim
+    }
+
+    fn note_success(&self, profile_id: &str) {
+        self.blocks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|(id, _)| id != profile_id);
+    }
+
+    fn release(&self, profile_id: &str, started_at: u64) {
+        self.blocks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|(id, block)| id != profile_id || block.recorded_at != started_at);
     }
 
     fn paced_for(&self, profile_id: &str, now: u64) -> Option<BlockedFact> {

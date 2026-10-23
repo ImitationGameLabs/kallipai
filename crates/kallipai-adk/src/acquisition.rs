@@ -30,6 +30,11 @@ use kallipai_common::retry::RetryRecord;
 use kallipai_common::timefmt;
 
 pub use self::facts::GatewaySignal;
+pub(crate) use self::facts::{claim_window, release_unspent_window};
+
+// The one channel that takes a window, and the one that gives an unspent
+// one back: the compaction entry and the send path share the first, and
+// the episode boundaries use the second.
 #[cfg(test)]
 pub(crate) use self::failover::advance_failover;
 pub(crate) use self::phases::{acquire_stream, degrade_on_image_rejection};

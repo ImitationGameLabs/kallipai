@@ -128,6 +128,47 @@ pub fn window_end(block: &Block) -> u64 {
 pub fn is_active(block: &Block, now: u64) -> bool {
     now < window_end(block)
 }
+/// A probing send's window: either the caller may use this one, or one is
+/// already running and the send waits for its end.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Claim {
+    /// The window is the caller's. With no fact to pace, nothing was written.
+    Granted,
+    /// The window started here: the send may go, and the record this claim wrote
+    /// is the one it spends rather than a fact it obeys.
+    Started,
+    /// A window is still running: no send before `not_before`.
+    Paced { not_before: u64 },
+}
+
+/// The claim rule itself: read the fact a profile carries, decide, and hand
+/// back the record that replaces it.
+///
+/// The arms, in order: no fact (nothing to pace, nothing written); a window
+/// still running (paced until it ends, the record left as it stands); a window
+/// that has ended, and a forced claim inside one (a fresh window starts at
+/// `now`). Only the start moves: `until` was the ended window's hint and
+/// `status` was the ended window's answer, so neither carries into a window
+/// nobody has been refused in yet.
+///
+/// Shared by every table implementation, so the rule lives in one place.
+pub fn claim_window(block: Option<&Block>, now: u64, force: bool) -> (Claim, Option<Block>) {
+    let Some(block) = block else {
+        return (Claim::Granted, None);
+    };
+    let end = window_end(block);
+    if !force && now < end {
+        return (Claim::Paced { not_before: end }, None);
+    }
+    let renewed = Block {
+        kind: block.kind,
+        until: None,
+        detail: block.detail.clone(),
+        status: None,
+        recorded_at: now,
+    };
+    (Claim::Started, Some(renewed))
+}
 
 /// The reset hint as a reader may show it: `None` when the upstream gave none,
 /// and `None` when what it gave is past the trust bound (shown as unknown
@@ -171,6 +212,30 @@ pub struct BlockedFact {
 pub trait ProfilePacing: Send + Sync {
     /// Record a failure fact about this profile.
     fn record(&self, profile_id: &str, block: Block);
+    /// Take this profile's window for one probing send.
+    ///
+    /// The window is the one a fact leaves behind: while it runs, a send waits
+    /// (`Paced`); once it has ended the caller opens a fresh one and may send.
+    /// With no fact at all there is nothing to pace, and the claim is granted
+    /// without writing anything, so an unmarked profile is never held back by a
+    /// probe another sender took.
+    ///
+    /// `force` is a send that must happen anyway: it is granted inside a running
+    /// window and still moves that window's start to `now`, so the pacing which
+    /// follows answers to the send that was actually made.
+    fn claim(&self, profile_id: &str, now: u64, force: bool) -> Claim;
+
+    /// Drop this profile's fact: a send it answered for went through, so there
+    /// is nothing left to pace anyone with.
+    fn note_success(&self, profile_id: &str);
+
+    /// Give back a window that was taken and never spent.
+    ///
+    /// A claim answers for one probing send; a caller that takes the window
+    /// and then never sends leaves nothing to pace anyone with. The record
+    /// goes only when it is still the one that claim wrote — a fresher fact
+    /// recorded since is someone else's answer and stays.
+    fn release(&self, profile_id: &str, started_at: u64);
 
     /// The readable fact for this profile at `now`, if any.
     ///
@@ -283,5 +348,44 @@ mod tests {
             json,
             r#"{"kind":"endpoint_auth","detail":"HTTP 401","recorded_at":1700000000,"profile":"a"}"#
         );
+    }
+
+    #[test]
+    fn a_claim_takes_an_ended_window_and_pages_a_running_one() {
+        assert_eq!(claim_window(None, T0, false), (Claim::Granted, None));
+
+        let running = block(BlockKind::Quota, None);
+        assert_eq!(
+            claim_window(Some(&running), T0 + 1, false),
+            (
+                Claim::Paced {
+                    not_before: T0 + MIN_RETRY_INTERVAL_SECS
+                },
+                None
+            )
+        );
+
+        let mut ended = block(BlockKind::Payment, Some(T0 + 30));
+        ended.status = Some(402);
+        let later = T0 + PAYMENT_RETRY_INTERVAL_SECS;
+        let (claim, renewed) = claim_window(Some(&ended), later, false);
+        assert_eq!(claim, Claim::Started);
+        let renewed = renewed.unwrap();
+        assert_eq!(renewed.kind, BlockKind::Payment);
+        assert_eq!(renewed.detail, ended.detail);
+        assert_eq!(renewed.recorded_at, later);
+        assert_eq!(renewed.until, None);
+        assert_eq!(renewed.status, None);
+    }
+
+    #[test]
+    fn a_forced_claim_opens_the_window_at_its_own_clock() {
+        let running = block(BlockKind::Quota, None);
+        let inside = T0 + 1;
+        let (claim, renewed) = claim_window(Some(&running), inside, true);
+        assert_eq!(claim, Claim::Started);
+        let renewed = renewed.unwrap();
+        assert_eq!(renewed.recorded_at, inside);
+        assert_eq!(window_end(&renewed), inside + MIN_RETRY_INTERVAL_SECS);
     }
 }

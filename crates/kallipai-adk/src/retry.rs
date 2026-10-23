@@ -274,7 +274,14 @@ pub async fn stream_with_retry(
         // happened, and this count is the budget.
         *episode = episode.after_attempt();
         let error = match conversation.stream_generate(request.clone()).await {
-            Ok(stream) => return Ok(stream),
+            Ok(stream) => {
+                // A stream that opened is a window served: the record a paced
+                // endpoint carries has done its job.
+                if let Some(pacing) = health {
+                    pacing.note_success(profile_id);
+                }
+                return Ok(stream);
+            }
             Err(error) => error,
         };
         let attempt = episode.attempts();
@@ -428,7 +435,7 @@ mod tests {
     use super::*;
     use crate::test_support::{RecordingBackend, RecordingHealth, request, user_msg};
     use just_llm_client::TransportError;
-    use kallipai_common::facts::BlockKind;
+    use kallipai_common::facts::{Block, BlockKind};
     use kallipai_common::retry::RetryKind;
     use std::sync::Arc;
 
@@ -862,6 +869,54 @@ mod tests {
             GenerationEvent::Text {
                 delta: "hi".to_owned()
             }
+        );
+    }
+
+    /// A stream that opens spends the window: the record the profile carried is
+    /// dropped, so the next round is not told to wait for a window that served.
+    #[tokio::test]
+    async fn an_open_stream_drops_the_record_the_profile_carried() {
+        let backend = RecordingBackend::new();
+        backend.queue_stream("resp-1");
+        let client =
+            GenerationClient::new(backend.clone(), GenerationClientOptions::new("test-model"));
+        let mut conversation = client.conversation();
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let mut retry_log = Vec::new();
+        let health = Arc::new(RecordingHealth::default());
+        let now = timefmt::now_epoch();
+        health.seed(
+            "test",
+            Block {
+                kind: BlockKind::Quota,
+                until: Some(now + 600),
+                detail: "seeded evidence".to_owned(),
+                status: None,
+                recorded_at: now,
+            },
+        );
+
+        let result = stream_with_retry(
+            RetryCall {
+                conversation: &mut conversation,
+                request: request("test-model", vec![user_msg("q1")]),
+                policy: &fast_policy(2),
+                round: 0,
+                episode: &mut Episode::new(now),
+                provider_id: "test",
+                profile_id: "test",
+                health: Some(health.as_ref()),
+            },
+            &tx,
+            &mut retry_log,
+            CancellationToken::new(),
+        )
+        .await;
+
+        assert!(result.is_ok(), "the stream opens");
+        assert!(
+            health.recorded().is_empty(),
+            "the window the record paced is spent"
         );
     }
 

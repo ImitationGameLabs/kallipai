@@ -10,7 +10,7 @@
 //! loop it re-enters.
 
 use super::facts::{
-    emit_fact_signal, fact_chain_note, fact_error, fact_stop_message, log_fact_skip,
+    claim_window, emit_fact_signal, fact_chain_note, fact_error, fact_stop_message, log_fact_skip,
     quota_blocked_payload, table_reading,
 };
 use super::failover::{
@@ -58,6 +58,11 @@ pub(crate) async fn acquire_stream(
         // verdict on them is `enter_attempt`'s, which owns what a carried fact means.
         let now = timefmt::now_epoch();
         let origin = ctx.take_attempt_origin();
+        // The window is taken before the table is read, so this round answers to
+        // the record the claim wrote rather than to what the table held before.
+        // A window that paces this send needs nothing here: the record it read
+        // is already in the table the reading below sees.
+        let _ = claim_window(ctx, &profile_id, now, origin);
         let reading = table_reading(ctx, now);
         let pre_send = Attempt::pre_send(Phase::Connect, origin, now, reading.clone());
         match enter_attempt(ctx, &mut messages, tx, round_cancel, round, pre_send).await {

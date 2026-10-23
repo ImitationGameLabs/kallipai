@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use tokio::sync::{Mutex, Notify};
 use tokio_util::sync::CancellationToken;
 
+use crate::acquisition::release_unspent_window;
 use crate::event::{AgentEvent, AgentOutcome};
 use crate::lifecycle::LifecycleState;
 use crate::tools::DEFAULT_BREAK_TIMEOUT_SECS;
@@ -407,6 +408,10 @@ impl AgentContext {
     /// does not reset: it continues the episode, so a flapping endpoint cannot
     /// mint budget by dropping connections.
     pub fn start_episode(&mut self) {
+        // The episode ending here gives back a window it took and never sent
+        // against: the record was this episode's, and no request was charged
+        // to it.
+        release_unspent_window(self);
         self.episode = Episode::new(timefmt::now_epoch());
     }
 

@@ -13,7 +13,9 @@ use anyhow::{Result, bail};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
-use crate::acquisition::{AcquireResult, acquire_stream, degrade_on_image_rejection};
+use crate::acquisition::{
+    AcquireResult, acquire_stream, degrade_on_image_rejection, release_unspent_window,
+};
 use crate::agent_task::{AgentContext, cap_external_message};
 use crate::approval::format_approval_notifications;
 use crate::budget_gate::{BudgetAction, enforce_post_stream_budget, enforce_pre_call_budget};
@@ -62,7 +64,24 @@ pub(crate) enum RoundOutcome {
 // ---------------------------------------------------------------------------
 
 /// Run the agent round loop until completion or max rounds.
+///
+/// Every exit gives an unspent window back to the table: a round can take a
+/// window at a gate and then stop before the send that would spend it, and the
+/// record it left must not pace the round after it.
 pub(crate) async fn run_agent_rounds(
+    ctx: &mut AgentContext,
+    tx: &tokio::sync::mpsc::Sender<AgentEvent>,
+    prompt_rx: &mut tokio::sync::mpsc::Receiver<String>,
+    round_cancel: &CancellationToken,
+) -> Result<RoundOutcome> {
+    let outcome = run_rounds(ctx, tx, prompt_rx, round_cancel).await;
+    release_unspent_window(ctx);
+    outcome
+}
+
+/// The round loop itself; [`run_agent_rounds`] wraps it so that every exit,
+/// including an error, ends with the window accounted for.
+async fn run_rounds(
     ctx: &mut AgentContext,
     tx: &tokio::sync::mpsc::Sender<AgentEvent>,
     prompt_rx: &mut tokio::sync::mpsc::Receiver<String>,

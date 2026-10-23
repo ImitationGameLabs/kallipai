@@ -13,14 +13,17 @@ use just_llm_client::BackendError;
 use just_llm_client::types::generation::{ContentPart, Message};
 use kallipai_common::retry::{RetryAttempt, RetryRecord};
 use kallipai_common::timefmt;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use super::turn::{Turn, TurnKind};
 use super::{CONTEXT_SUMMARY_LABEL, summary_record};
+use crate::acquisition::claim_window;
 use crate::agent_task::AgentContext;
 use crate::context::AgenticContext;
 use crate::history::{RecordKind, SystemEvent};
-use crate::retry::decision::{self, Attempt, Decision, FailureClass, Phase, ShapeKey};
+use crate::retry::decision::{
+    self, Attempt, AttemptOrigin, Decision, FailureClass, Phase, ShapeKey,
+};
 use crate::retry::{Episode, max_sends};
 use crate::text_slice::head_tail_slice;
 
@@ -176,6 +179,12 @@ pub(crate) async fn summarize_and_evict(ctx: &AgentContext) -> Result<CompactOut
             )
             .await?;
 
+        // A pass that came back is a window served: a paced endpoint's record
+        // has done its job.
+        if let Some(pacing) = ctx.profile_pacing.as_deref() {
+            pacing.note_success(&ctx.failover.current_profile().id);
+        }
+
         // If the summarizer couldn't fit even one turn alongside the existing summary, stop —
         // evicting 0 turns would leave the same window and loop forever.
         if result.source_turns == 0 {
@@ -246,6 +255,12 @@ pub(crate) async fn summarize_and_evict(ctx: &AgentContext) -> Result<CompactOut
     })
 }
 
+/// Whether the context is over its budget: the one comparison the wrappers
+/// share, so a pass that runs and a pass that is skipped answer to one line.
+fn over_budget(total_tokens: usize, effective_budget: usize) -> bool {
+    total_tokens > effective_budget
+}
+
 /// Compact context if it exceeds the budget.
 /// Called at agent startup for restored agents.
 pub(crate) async fn compact_if_needed(ctx: &AgentContext) -> Result<bool> {
@@ -255,7 +270,7 @@ pub(crate) async fn compact_if_needed(ctx: &AgentContext) -> Result<bool> {
         guard.total_estimated_tokens()
     };
 
-    if total_tokens <= effective_budget {
+    if !over_budget(total_tokens, effective_budget) {
         return Ok(false);
     }
 
@@ -289,7 +304,19 @@ pub(crate) async fn compact_if_needed(ctx: &AgentContext) -> Result<bool> {
 /// A pre-loop pass that returned at all is not a failure (compacted, nothing to
 /// compact, or declined on the summarizer budget), so it ends whatever stretch
 /// the ledger was carrying.
+///
+/// A pass the endpoint paces does not run: it arms the window as the latch the
+/// round after reads, so one pacing answer costs one pass rather than one per
+/// round.
 pub(crate) async fn compact_pre_loop(ctx: &mut AgentContext) {
+    let budget = ctx.config.effective_budget();
+    let total_tokens = {
+        let guard = ctx.store.lock().await;
+        guard.total_estimated_tokens()
+    };
+    if over_budget(total_tokens, budget) && !claim_compaction_window(ctx, timefmt::now_epoch()) {
+        return;
+    }
     match compact_if_needed(ctx).await {
         Ok(_) => {
             ctx.compaction.clear(timefmt::now_epoch());
@@ -306,6 +333,33 @@ pub(crate) async fn compact_pre_loop(ctx: &mut AgentContext) {
                 // where it is (`restart`).
                 ctx.compaction.record_stop(message);
             }
+        }
+    }
+}
+
+/// Take the window for a compaction pass, before the summarizer is asked.
+///
+/// The pass answers to the same window the sends do, and it takes it through
+/// the same claim: a pass that takes the window hands that one to the send
+/// after it, so a round pays one window however much of it the pass uses.
+/// `false` means the pass was skipped, with the window's end armed as the
+/// ledger's latch.
+pub(crate) fn claim_compaction_window(ctx: &mut AgentContext, now: u64) -> bool {
+    let profile = ctx.failover.current_profile().id.clone();
+    if ctx.profile_pacing.is_none() {
+        return true;
+    }
+    match claim_window(ctx, &profile, now, AttemptOrigin::System) {
+        // The episode holds the window, so the pass may run on it.
+        None => true,
+        Some(not_before) => {
+            debug!(
+                profile = %profile,
+                not_before,
+                "compaction is paced by the endpoint"
+            );
+            ctx.compaction.arm(not_before);
+            false
         }
     }
 }
@@ -649,10 +703,12 @@ mod tests {
     use crate::retry::RetryPolicy;
     use crate::retry::decision::TransientKind;
     use crate::test_support::{
-        FAILURE_PIN_WINDOW, MapSource, ctx_from_source, ctx_with_mock, mount_summary, profile,
-        seed_over_budget_store, set_context_window, tool_result_msg, user_msg,
+        FAILURE_PIN_WINDOW, MapSource, RecordingHealth, ctx_from_source, ctx_with_mock,
+        mount_summary, profile, seed_over_budget_store, set_context_window, tool_result_msg,
+        user_msg,
     };
     use just_llm_client::LlmBackend;
+    use kallipai_common::facts::{Block, BlockKind};
     use std::collections::HashMap;
     use std::sync::Arc;
     use std::time::Duration;
@@ -1110,6 +1166,72 @@ mod tests {
         assert_eq!(
             carried["role"], "user",
             "the carried summary is injected context, not a model turn"
+        );
+    }
+
+    /// A paced endpoint skips the pass and arms its end: the summarizer is not
+    /// asked, and the round after waits for the window the claim read.
+    #[tokio::test]
+    async fn a_paced_endpoint_skips_the_pre_loop_pass() {
+        let (mut ctx, server) = summary_ctx().await;
+        set_context_window(&mut ctx, FAILURE_PIN_WINDOW).await;
+        seed_over_budget_store(&mut ctx).await;
+        ctx.config.context_thresholds = vec![80];
+        let health = Arc::new(RecordingHealth::default());
+        let until = timefmt::now_epoch() + 600;
+        health.seed(
+            "p1",
+            Block {
+                kind: BlockKind::Quota,
+                until: Some(until),
+                detail: "seeded evidence".to_owned(),
+                status: None,
+                recorded_at: timefmt::now_epoch(),
+            },
+        );
+        ctx.profile_pacing = Some(health.clone());
+
+        compact_pre_loop(&mut ctx).await;
+
+        assert_eq!(ctx.compaction.attempts(), 0, "the summarizer was not asked");
+        assert_eq!(
+            ctx.compaction.latch_until(),
+            Some(until),
+            "the window's end is the latch the round after reads"
+        );
+        assert!(
+            server.received_requests().await.unwrap().is_empty(),
+            "no summarizer send went out"
+        );
+    }
+
+    /// A pass that lands spends the record: the profile the summarizer served
+    /// carries no window into the round that follows.
+    #[tokio::test]
+    async fn a_landing_pass_drops_the_record_the_profile_carried() {
+        let (mut ctx, _server) = summary_ctx().await;
+        set_context_window(&mut ctx, FAILURE_PIN_WINDOW).await;
+        seed_over_budget_store(&mut ctx).await;
+        ctx.config.context_thresholds = vec![80];
+        let health = Arc::new(RecordingHealth::default());
+        let now = timefmt::now_epoch();
+        health.seed(
+            "p1",
+            Block {
+                kind: BlockKind::Quota,
+                until: Some(now.saturating_sub(1)),
+                detail: "seeded evidence".to_owned(),
+                status: None,
+                recorded_at: now.saturating_sub(600),
+            },
+        );
+        ctx.profile_pacing = Some(health.clone());
+
+        compact_pre_loop(&mut ctx).await;
+
+        assert!(
+            health.recorded().is_empty(),
+            "the pass that landed spends the window it took"
         );
     }
 }

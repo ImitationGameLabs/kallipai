@@ -14,7 +14,7 @@ use tracing::{debug, info};
 use crate::agent_task::AgentContext;
 use crate::context::{
     CompactOutcome, CompactionVerdict, check_progressive_warnings, check_token_budget_warnings,
-    note_compaction_failure, summarize_and_evict,
+    claim_compaction_window, note_compaction_failure, summarize_and_evict,
 };
 use crate::event::AgentOutcome;
 
@@ -88,6 +88,9 @@ pub(crate) async fn enforce_pre_call_budget(
             attempt = ctx.compaction.attempts(),
             "compaction is waiting out its backoff"
         );
+    } else if !claim_compaction_window(ctx, now) {
+        // The endpoint paced this round: the summarizer is not asked, and the
+        // window's end is the latch the round after reads.
     } else {
         match summarize_and_evict(ctx).await {
             Ok(CompactOutcome::Compacted) => {

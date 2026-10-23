@@ -46,8 +46,8 @@ pub(crate) const IMAGE_PLACEHOLDER: &str = "[image omitted]";
 /// constructs the context and owns its initial state.
 pub use compact::CompactionLedger;
 pub(crate) use compact::{
-    CompactOutcome, CompactionVerdict, compact_pre_loop, note_compaction_failure,
-    summarize_and_evict,
+    CompactOutcome, CompactionVerdict, claim_compaction_window, compact_pre_loop,
+    note_compaction_failure, summarize_and_evict,
 };
 pub(crate) use estimate::estimate_context_tokens;
 pub(crate) use warnings::{check_progressive_warnings, check_token_budget_warnings};

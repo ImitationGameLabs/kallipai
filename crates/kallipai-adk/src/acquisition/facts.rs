@@ -7,10 +7,10 @@
 //! one. Both readings live here, so its vocabulary does too.
 
 use crate::agent_task::AgentContext;
-use crate::retry::decision::{Alternative, TableReading};
+use crate::retry::decision::{Alternative, AttemptOrigin, TableReading};
 use anyhow::Error;
 use just_llm_client::{BackendError, provider_rejection};
-use kallipai_common::facts::{BlockKind, BlockedFact, ProfilePacing, display_until};
+use kallipai_common::facts::{BlockKind, BlockedFact, Claim, ProfilePacing, display_until};
 use kallipai_common::protocol::QuotaBlockedInfo;
 use kallipai_common::timefmt;
 use tracing::info;
@@ -87,13 +87,88 @@ pub(super) fn table_reading(ctx: &AgentContext, now: u64) -> TableReading {
         return TableReading::none();
     };
     let current = ctx.failover.current_profile().id.clone();
-    let blocked = health.paced_for(&current, now);
+    // The record this episode's own claim wrote is not a fact to obey: the
+    // window it opened is the one the send that took it is spending. Only that
+    // send: every send after it obeys the window like any other reader.
+    let own = ctx
+        .episode
+        .window_started_at()
+        .filter(|_| ctx.episode.attempts() == 0);
+    let blocked = health
+        .paced_for(&current, now)
+        .filter(|fact| Some(fact.block.recorded_at) != own);
     // With no fact there is nothing to escape, so no candidate is needed.
     let alternative = blocked.as_ref().and_then(|_| resolve_alternative(ctx, now));
     TableReading {
         blocked,
         alternative,
     }
+}
+
+/// Take this episode's window on the profile the next send would use, before
+/// the table is read.
+///
+/// One window per episode, and one channel that takes it: the compaction
+/// entry calls this too, so a pass that takes the window hands the same one
+/// to the send that follows it. A retry inside the same episode reuses the
+/// claim it already took, so a paced window is paid for once per round
+/// rather than once per send. Claiming before the reading is the mechanism:
+/// the record a claim writes is the one that reading sees, so a reopened
+/// window lets the send go and a running one parks it down the path a fact
+/// hit already takes.
+///
+/// An external wake forces the window open: someone asked for this round, so
+/// the claim moves the window to now instead of being paced by it.
+///
+/// `Some(not_before)` is the window that paces this attempt — taken by
+/// another sender, or by someone else's record — and `None` means the
+/// episode holds the window and may send.
+pub(crate) fn claim_window(
+    ctx: &mut AgentContext,
+    profile_id: &str,
+    now: u64,
+    origin: AttemptOrigin,
+) -> Option<u64> {
+    if ctx.episode.claimed() {
+        return None;
+    }
+    let pacing = ctx.profile_pacing.as_deref()?;
+    let force = origin == AttemptOrigin::External;
+    match pacing.claim(profile_id, now, force) {
+        Claim::Paced { not_before } => Some(not_before),
+        Claim::Granted => {
+            ctx.episode = ctx.episode.after_claim(profile_id, now, false);
+            None
+        }
+        Claim::Started => {
+            ctx.episode = ctx.episode.after_claim(profile_id, now, true);
+            None
+        }
+    }
+}
+
+/// Give back a window this episode took and never sent against.
+///
+/// A claim answers for one probing send. A round that takes the window and
+/// then never sends — the compaction pass that finds nothing to summarize,
+/// the gate that stops before the send — leaves a record that would pace the
+/// next round for a send nobody made. The window goes back, and the table
+/// drops it only while it is still the one this claim wrote.
+pub(crate) fn release_unspent_window(ctx: &mut AgentContext) {
+    if ctx.episode.attempts() > 0 {
+        // A send spent the window: what the table holds now answers for
+        // that send, and a fact its failure wrote is not ours to drop.
+        return;
+    }
+    let Some(window) = ctx.episode.claimed_window() else {
+        return;
+    };
+    let profile = window.profile().to_owned();
+    let started_at = window.started_at();
+    if let (Some(pacing), Some(started_at)) = (ctx.profile_pacing.as_deref(), started_at) {
+        pacing.release(&profile, started_at);
+    }
+    ctx.episode = ctx.episode.after_release();
 }
 
 /// The first endpoint ahead of the active profile that could serve where the

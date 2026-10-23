@@ -53,11 +53,37 @@ use super::{RetryPolicy, max_sends};
 /// Alongside the budget it carries the episode's shape memory: the key of the
 /// last shape-class failure, which is what makes a repeat of the same shape an
 /// endpoint-level exit rather than another retry.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct Episode {
     attempts: u32,
     started: u64,
     previous_shape: Option<ShapeKey>,
+    /// The window this episode took, if any: a claim answers once per
+    /// episode, however many sends the episode makes.
+    claim: Option<ClaimedWindow>,
+}
+
+/// The window one episode took: the profile it was taken on and the
+/// instant the claim stamped on the record it wrote. The instant is
+/// `None` when the claim wrote no record — a profile with no fact to
+/// take over — which leaves nothing to give back.
+#[derive(Clone, Debug)]
+pub(crate) struct ClaimedWindow {
+    profile: String,
+    started_at: Option<u64>,
+}
+
+impl ClaimedWindow {
+    /// The profile the window belongs to: the record it wrote is keyed
+    /// there, and that is where giving it back points.
+    pub(crate) fn profile(&self) -> &str {
+        &self.profile
+    }
+
+    /// The instant the claim wrote into the record, when it wrote one.
+    pub(crate) fn started_at(&self) -> Option<u64> {
+        self.started_at
+    }
 }
 
 impl Episode {
@@ -68,6 +94,7 @@ impl Episode {
             attempts: 0,
             started: now,
             previous_shape: None,
+            claim: None,
         }
     }
 
@@ -82,6 +109,7 @@ impl Episode {
             attempts: self.attempts.saturating_add(1),
             started: self.started,
             previous_shape: self.previous_shape,
+            claim: self.claim.clone(),
         }
     }
 
@@ -92,6 +120,48 @@ impl Episode {
             attempts: self.attempts,
             started: self.started,
             previous_shape: Some(key),
+            claim: self.claim.clone(),
+        }
+    }
+
+    /// Whether this episode already took its window. One episode takes at
+    /// most one, however many sends it makes.
+    pub(crate) fn claimed(&self) -> bool {
+        self.claim.is_some()
+    }
+
+    /// The moment a claim started a window, when it started one. A record
+    /// stamped with it is the episode's own, not a fact to obey.
+    pub(crate) fn window_started_at(&self) -> Option<u64> {
+        self.claim.as_ref().and_then(ClaimedWindow::started_at)
+    }
+
+    /// The window this episode holds, if any: what it took, on which
+    /// profile, and where to give it back.
+    pub(crate) fn claimed_window(&self) -> Option<&ClaimedWindow> {
+        self.claim.as_ref()
+    }
+
+    /// Mark the window as taken, so the next send in this episode does not
+    /// claim it again. `started` says whether the claim wrote a record of
+    /// its own, which is what makes that record the episode's to spend —
+    /// and, if the episode never sends, the episode's to give back.
+    pub(crate) fn after_claim(&self, profile: &str, now: u64, started: bool) -> Self {
+        Self {
+            claim: Some(ClaimedWindow {
+                profile: profile.to_owned(),
+                started_at: started.then_some(now),
+            }),
+            ..self.clone()
+        }
+    }
+
+    /// Drop the window this episode holds without spending it: the ledger
+    /// has nothing left to account for on the table.
+    pub(crate) fn after_release(&self) -> Self {
+        Self {
+            claim: None,
+            ..self.clone()
         }
     }
 
@@ -1142,6 +1212,7 @@ mod tests {
             attempts: u32::MAX,
             started: 0,
             previous_shape: None,
+            claim: None,
         };
         assert_eq!(episode.after_attempt().attempts(), u32::MAX);
     }

@@ -14,7 +14,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use kallipai_common::facts::{
-    Block, BlockedFact, FACT_TABLE_CAPACITY, FactView, ProfilePacing, display_until, is_active,
+    Block, BlockedFact, Claim, FACT_TABLE_CAPACITY, FactView, ProfilePacing, claim_window,
+    display_until, is_active,
 };
 
 /// The tagma-wide fact table. One instance per tagma, shared by every agent
@@ -42,6 +43,29 @@ impl ProfilePacingTable {
 impl ProfilePacing for ProfilePacingTable {
     fn record(&self, profile_id: &str, block: Block) {
         insert_fact(&mut self.lock(), profile_id.to_string(), block);
+    }
+
+    fn claim(&self, profile_id: &str, now: u64, force: bool) -> Claim {
+        let mut facts = self.lock();
+        let (claim, renewed) = claim_window(facts.get(profile_id), now, force);
+        if let Some(block) = renewed {
+            facts.insert(profile_id.to_string(), block);
+        }
+        claim
+    }
+
+    fn note_success(&self, profile_id: &str) {
+        self.lock().remove(profile_id);
+    }
+
+    fn release(&self, profile_id: &str, started_at: u64) {
+        let mut facts = self.lock();
+        if facts
+            .get(profile_id)
+            .is_some_and(|block| block.recorded_at == started_at)
+        {
+            facts.remove(profile_id);
+        }
     }
 
     fn paced_for(&self, profile_id: &str, now: u64) -> Option<BlockedFact> {
@@ -180,6 +204,65 @@ mod tests {
         assert!(
             table.paced_for("a", T0 + MIN_RETRY_INTERVAL_SECS).is_none(),
             "without a hint the kind's interval is the whole window"
+        );
+    }
+
+    #[test]
+    fn a_second_claim_inside_the_window_leaves_the_record_where_it_was() {
+        let table = table();
+        table.record("a", block(BlockKind::Quota, T0, None));
+
+        assert_eq!(
+            table.claim("a", T0 + 1, false),
+            Claim::Paced {
+                not_before: T0 + MIN_RETRY_INTERVAL_SECS
+            }
+        );
+        assert_eq!(
+            table.snapshot(T0 + 1)[0].recorded_at,
+            T0,
+            "a paced claim does not move the window"
+        );
+        assert!(
+            table
+                .paced_for("a", T0 + MIN_RETRY_INTERVAL_SECS - 1)
+                .is_some()
+        );
+        assert!(table.paced_for("a", T0 + MIN_RETRY_INTERVAL_SECS).is_none());
+    }
+
+    #[test]
+    fn a_success_drops_the_record_and_the_next_claim_is_free() {
+        let table = table();
+        table.record("a", block(BlockKind::Quota, T0, Some(T0 + 600)));
+        assert!(matches!(
+            table.claim("a", T0 + 1, false),
+            Claim::Paced { .. }
+        ));
+
+        table.note_success("a");
+        assert!(table.paced_for("a", T0 + 1).is_none());
+        assert_eq!(table.claim("a", T0 + 1, false), Claim::Granted);
+        assert!(
+            table.snapshot(T0 + 1).is_empty(),
+            "an unmarked profile is not written down by a claim"
+        );
+    }
+
+    #[test]
+    fn a_claim_past_the_window_starts_a_new_one() {
+        let table = table();
+        table.record("a", block(BlockKind::Quota, T0, None));
+        let later = T0 + MIN_RETRY_INTERVAL_SECS;
+
+        assert_eq!(table.claim("a", later, false), Claim::Started);
+        let fact = table.paced_for("a", later).unwrap();
+        assert_eq!(fact.block.recorded_at, later);
+        assert_eq!(fact.block.until, None);
+        assert!(
+            table
+                .paced_for("a", later + MIN_RETRY_INTERVAL_SECS)
+                .is_none()
         );
     }
 
