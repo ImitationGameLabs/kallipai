@@ -78,7 +78,10 @@ impl TagmaClient {
             self.with_auth(
                 self.inner
                     .http
-                    .post(self.url(&format!("/agents/{id}/lesche/messages")))
+                    .post(self.url(&format!(
+                        "/agents/{}/lesche/messages",
+                        path_segment(id.as_ref())?
+                    )))
                     .json(&crate::types::LescheMessageRequest {
                         text: text.to_owned(),
                         room: delivery.room.map(str::to_owned),
@@ -99,11 +102,10 @@ impl TagmaClient {
     /// The agent's `kallip lesche rooms` subcommand calls this.
     pub async fn list_joined_rooms(&self, id: &AgentId) -> Result<Vec<String>> {
         self.handle_response(
-            self.with_auth(
-                self.inner
-                    .http
-                    .get(self.url(&format!("/agents/{id}/lesche/rooms"))),
-            )
+            self.with_auth(self.inner.http.get(self.url(&format!(
+                "/agents/{}/lesche/rooms",
+                path_segment(id.as_ref())?
+            ))))
             .send()
             .await
             .context("failed to list rooms")?,
@@ -139,7 +141,7 @@ impl TagmaClient {
                     .http
                     .get(self.url(&format!(
                         "/agents/{id}/lesche/rooms/{}/messages",
-                        path_segment(room)
+                        path_segment(room)?
                     )))
                     .query(&params),
             )
@@ -184,7 +186,7 @@ impl TagmaClient {
                     .http
                     .get(self.url(&format!(
                         "/agents/{id}/lesche/direct-sessions/{}/messages",
-                        path_segment(peer)
+                        path_segment(peer)?
                     )))
                     .query(&params),
             )
@@ -227,7 +229,7 @@ impl TagmaClient {
                     .http
                     .get(self.url(&format!(
                         "/agents/{id}/lesche/sessions/{}/messages",
-                        path_segment(session)
+                        path_segment(session)?
                     )))
                     .query(&params),
             )
@@ -277,11 +279,10 @@ impl TagmaClient {
         id: &AgentId,
     ) -> Result<Vec<crate::types::LescheSessionEntry>> {
         self.handle_response(
-            self.with_auth(
-                self.inner
-                    .http
-                    .get(self.url(&format!("/agents/{id}/lesche/sessions"))),
-            )
+            self.with_auth(self.inner.http.get(self.url(&format!(
+                "/agents/{}/lesche/sessions",
+                path_segment(id.as_ref())?
+            ))))
             .send()
             .await
             .context("failed to list sessions")?,

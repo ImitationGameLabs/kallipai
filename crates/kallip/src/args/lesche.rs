@@ -2,6 +2,7 @@
 
 use clap::{Args, Subcommand};
 use kallipai_lesche_common::direct::DirectSessionId;
+use kallipai_lesche_common::ids::check_segment;
 use kallipai_lesche_common::rooms::RoomId;
 
 /// Deliver messages via the tagma's relay (the lesche data-plane).
@@ -44,8 +45,9 @@ pub(crate) struct SendArgs {
     /// id). Sends into that tagma's direct session; the first send
     /// creates it (idempotent to re-send). Note: attachments must live in a
     /// workspace the peer can read — a private-area file record fails the
-    /// peer's fetch with 403.
-    #[arg(long, allow_hyphen_values = true)]
+    /// peer's fetch with 403. The id rides a request path, so an empty
+    /// value or a dot segment is refused here.
+    #[arg(long, allow_hyphen_values = true, value_parser = tagma_id)]
     pub tagma: Option<String>,
     /// The position, in that conversation's own log, that this message answers
     /// -- a room's `seq`, or that session's own `seq`. A room or `--tagma`
@@ -88,10 +90,12 @@ pub(crate) struct ReadArgs {
     /// The peer tagma id to read -- the id `kallip lesche sessions` lists for
     /// the peer, not the `UUID` in a message header's parens (that value is
     /// the sender's participant id). The session id is derived from the pair,
-    /// so you never type a session id.
+    /// so you never type a session id. The id rides a request path, so an
+    /// empty value or a dot segment is refused here.
     #[arg(
         long,
         allow_hyphen_values = true,
+        value_parser = tagma_id,
         conflicts_with_all = ["room", "session"]
     )]
     pub tagma: Option<String>,
@@ -167,9 +171,23 @@ fn session_id(raw: &str) -> Result<String, String> {
         .ok_or_else(|| format!("{raw:?} is not a session id: expected a canonical UUID"))
 }
 
+/// A peer tagma id, as far as it can be judged here: not empty, and not a dot
+/// segment.
+///
+/// The value rides one request path segment, and a dot segment survives
+/// percent-encoding -- a URL parser resolves it after decoding -- so the CLI
+/// refuses it here rather than letting the request reach a route the caller
+/// did not name. The judgement is [`check_segment`], the one the encoder
+/// applies.
+fn tagma_id(raw: &str) -> Result<String, String> {
+    check_segment(raw)
+        .map(|()| raw.to_owned())
+        .map_err(|err| format!("{raw:?} is not a tagma id: {err}"))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{room_id, session_id};
+    use super::{room_id, session_id, tagma_id};
 
     /// A caller-supplied id has to be the canonical spelling the lesche mints:
     /// the value rides a request path, so any other spelling is refused here
@@ -187,5 +205,15 @@ mod tests {
         // canonical form is the only one that counts.
         assert!(room_id("00000000-0000-4000-8000-000000000EE5").is_err());
         assert!(session_id("00000000000040008000000000000ee5").is_err());
+    }
+
+    /// A peer tagma id rides a request path too, so the values encoding
+    /// cannot hold inside a segment are refused at the flag.
+    #[test]
+    fn a_tagma_id_cannot_be_a_dot_segment() {
+        assert_eq!(tagma_id("tagma-abc").as_deref(), Ok("tagma-abc"));
+        for raw in ["", ".", ".."] {
+            assert!(tagma_id(raw).is_err(), "tagma id accepted: {raw:?}");
+        }
     }
 }

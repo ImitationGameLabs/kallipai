@@ -175,7 +175,10 @@ impl LescheClient {
             Duration::from_secs(8),
             Duration::from_secs(16),
         ];
-        let url = self.keryx_route(&format!("/conversations/{conv_id}/envelopes"));
+        let url = self.keryx_route(&format!(
+            "/conversations/{}/envelopes",
+            path_segment(conv_id.as_ref())?
+        ));
         for wait in BACKOFF {
             let resp = self
                 .inner
@@ -228,7 +231,7 @@ impl LescheClient {
         envelope.channel_id = ChannelId::from(room_id.as_ref().to_string());
         let url = self.url(&format!(
             "/rooms/{}/envelopes",
-            path_segment(room_id.as_ref())
+            path_segment(room_id.as_ref())?
         ));
         for wait in BACKOFF {
             let resp = self
@@ -285,7 +288,7 @@ impl LescheClient {
             .http_post
             .get(self.url(&format!(
                 "/rooms/{}/messages",
-                path_segment(room_id.as_ref())
+                path_segment(room_id.as_ref())?
             )))
             .query(&query)
             .bearer_auth(&self.inner.tagma_token)
@@ -312,7 +315,10 @@ impl LescheClient {
         let resp = self
             .inner
             .http_post
-            .get(self.url(&format!("/tagmata/{tagma_id}/rooms")))
+            .get(self.url(&format!(
+                "/tagmata/{}/rooms",
+                path_segment(tagma_id.as_ref())?
+            )))
             .bearer_auth(&self.inner.tagma_token)
             .send()
             .await
@@ -330,7 +336,10 @@ impl LescheClient {
         conv_id: &ConversationId,
         response: &KeyExchangeResponse,
     ) -> Result<()> {
-        let url = self.keryx_route(&format!("/conversations/{conv_id}/key-exchange/response"));
+        let url = self.keryx_route(&format!(
+            "/conversations/{}/key-exchange/response",
+            path_segment(conv_id.as_ref())?
+        ));
         let resp = self
             .inner
             .http_post
@@ -380,7 +389,10 @@ impl LescheClient {
         tagma_id: &TagmaId,
         events: &[UpstreamEvent],
     ) -> Result<UpstreamAck> {
-        let url = self.keryx_route(&format!("/tagmata/{tagma_id}/upstream"));
+        let url = self.keryx_route(&format!(
+            "/tagmata/{}/upstream",
+            path_segment(tagma_id.as_ref())?
+        ));
         let resp = self
             .inner
             .http_post
@@ -441,7 +453,10 @@ impl LescheClient {
         &self,
         tagma_id: &TagmaId,
     ) -> Result<impl futures_core::Stream<Item = Result<LescheAgentEvent>> + use<>> {
-        let url = self.url(&format!("/tagmata/{tagma_id}/events"));
+        let url = self.url(&format!(
+            "/tagmata/{}/events",
+            path_segment(tagma_id.as_ref())?
+        ));
         let resp = self
             .inner
             .http_stream
@@ -533,7 +548,7 @@ impl LescheClient {
         envelope.channel_id = ChannelId::from(session_id.as_ref().to_string());
         let url = self.url(&format!(
             "/direct-sessions/{}/messages",
-            path_segment(session_id.as_ref())
+            path_segment(session_id.as_ref())?
         ));
         for wait in BACKOFF {
             let resp = self
@@ -587,7 +602,7 @@ impl LescheClient {
             .http_post
             .get(self.url(&format!(
                 "/direct-sessions/{}/messages",
-                path_segment(session_id.as_ref())
+                path_segment(session_id.as_ref())?
             )))
             .query(&query)
             .bearer_auth(&self.inner.tagma_token)
@@ -622,7 +637,7 @@ impl LescheClient {
             .http_post
             .put(self.url(&format!(
                 "/direct-sessions/{}/read-cursor",
-                path_segment(session_id.as_ref())
+                path_segment(session_id.as_ref())?
             )))
             .bearer_auth(&self.inner.tagma_token)
             .json(&Body { last_read_seq })
