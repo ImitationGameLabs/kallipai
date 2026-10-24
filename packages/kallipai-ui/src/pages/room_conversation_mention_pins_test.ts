@@ -103,20 +103,17 @@ Deno.test(
   },
 );
 
-Deno.test("the page renders the quoting affordances on each row", () => {
-  const src = flat(source(PAGE));
-  assert(
-    src.includes("<MessageRow"),
-    "the shared row draws the bubble with its quote button and menu",
-  );
-  assert(
-    src.includes("menuOpen={rowActions.isMenuOpen(line)}"),
-    "one open menu per transcript, held by the row controller",
-  );
-  assert(
-    src.includes("onQuote={() => rowActions.quote(line)}"),
-    "the row's quote goes through the same controller",
-  );
-  assert(src.includes("<QuoteBar"), "the armed quote gets its strip");
-  assert(src.includes("<MentionPicker"), "the candidate popup is rendered");
-});
+Deno.test(
+  "the page draws the shared row, the quote strip and the picker",
+  () => {
+    const src = flat(source(PAGE));
+    assert(
+      src.includes("<MessageRow"),
+      "the shared row draws the bubble the quote control rides in",
+    );
+    assert(
+      src.includes("<QuoteBar") && src.includes("<MentionPicker"),
+      "and the armed quote and the candidate popup still render",
+    );
+  },
+);

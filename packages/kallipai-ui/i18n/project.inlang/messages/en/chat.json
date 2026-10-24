@@ -54,7 +54,6 @@
   "chat_offline_no_history": "No messages from this tagma are stored on this device yet. The tagma is currently offline; new messages will appear here when it comes back online.",
   "chat_quote_action": "Quote",
   "chat_quote_action_aria": "Quote this message",
-  "chat_more_actions_aria": "More actions",
   "chat_quote_bar_aria": "Quoting {author}'s message",
   "chat_quote_bar_preview_aria": "Quoted content",
   "chat_quote_cancel_aria": "Cancel quote",

@@ -5,15 +5,15 @@
   // so agent replies render identically everywhere and the markup lives in one place.
   //
   // A presentation LEAF: it owns only its per-bubble raw-source flag + element
-  // refs, and the anchored box that holds whatever a surface puts beside the
-  // bubble. The surrounding `.group`, alignment (items-end/items-start), sender
+  // refs. The surrounding `.group`, alignment (items-end/items-start), sender
   // header, sending pulse, and scroll-pinning all stay in the parent column.
-  // Raw-toggling hands the box + actions elements to the parent-supplied `pin`
+  // Raw-toggling hands the box + action row to the parent-supplied `pin`
   // (a createTogglePin controller), because keeping the clicked control under
   // the cursor is a viewport-level concern that must share ONE active observer
   // across the whole transcript.
   //
-  // An aside arrives as a snippet; the surface decides what it is.
+  // The action row under the bubble is the bubble's own, plus whatever the
+  // surface hands in: the bubble never learns what that action does.
   import { Download, File } from "@lucide/svelte";
   import Markdown from "./Markdown.svelte";
   import CopyButton from "./CopyButton.svelte";
@@ -47,7 +47,7 @@
     quoteDescribedBy,
     onQuoteClick,
     onQuoteRetry,
-    beside,
+    extraActions,
   }: {
     text: string;
     /** Render the source as markdown (agent/assistant replies) with a raw-text toggle.
@@ -89,21 +89,20 @@
     onQuoteClick?: () => void;
     /** Re-attempt loading a quoted message that failed to resolve. */
     onQuoteRetry?: () => void;
-    /** The surface's own aside for this bubble: rendered inside the
-     *  bubble's anchored box, right after the bubble, so something placed
-     *  absolutely beside the bubble measures against the bubble and not the
-     *  row. Absent, the box holds the bubble alone. */
-    beside?: Snippet;
+    /** The surface's own action for this message, rendered in the action
+     *  row under the bubble, before the copy and raw toggles. Absent, the
+     *  row holds the bubble's own controls alone. */
+    extraActions?: Snippet;
   } = $props();
 
   // Per-bubble raw-source view: ephemeral, resets when the bubble unmounts.
   let raw = $state(false);
   let box: HTMLDivElement | undefined = $state();
-  let actions: HTMLDivElement | undefined = $state();
+  let actionRow: HTMLDivElement | undefined = $state();
 
   function toggleRaw(): void {
     raw = !raw;
-    if (box && actions) pin?.(box, actions);
+    if (box && actionRow) pin?.(box, actionRow);
   }
 
   // A failed download renders inline (unavailable) -- never a dialog or a
@@ -121,83 +120,76 @@
   }
 </script>
 
-<!-- Anchored box: the bubble alone, plus whatever the surface brought for
-     beside it. Absolute children resolve against THIS box, so an aside lands
-     relative to the bubble itself -- the action row below is deliberately
-     outside it. Where the aside's centre falls is geometry: read on a
-     deployed build, not by a source pin. -->
-<div class="relative min-w-0 max-w-full">
-  <div
-    bind:this={box}
-    class="max-w-full min-w-0 rounded-base px-3 py-2 text-sm {mine
-      ? 'preset-filled-primary-100-900'
-      : 'preset-tonal-surface'} {!markdown
-      ? 'whitespace-pre-wrap break-words'
-      : ''} {pending ? 'opacity-60' : ''} {failed
-      ? 'ring-1 ring-error-500 dark:ring-error-400'
-      : ''}"
-  >
-    {#if attachment}
-      <div
-        class="mb-1 flex items-center gap-2 rounded-lg border border-black/10 bg-black/5 px-2 py-1.5 dark:border-white/20 dark:bg-white/10"
+<div
+  bind:this={box}
+  class="max-w-full min-w-0 rounded-base px-3 py-2 text-sm {mine
+    ? 'preset-filled-primary-100-900'
+    : 'preset-tonal-surface'} {!markdown
+    ? 'whitespace-pre-wrap break-words'
+    : ''} {pending ? 'opacity-60' : ''} {failed
+    ? 'ring-1 ring-error-500 dark:ring-error-400'
+    : ''}"
+>
+  {#if attachment}
+    <div
+      class="mb-1 flex items-center gap-2 rounded-lg border border-black/10 bg-black/5 px-2 py-1.5 dark:border-white/20 dark:bg-white/10"
+    >
+      <File class="size-4 shrink-0 opacity-70" aria-hidden="true" />
+      <span class="min-w-0 flex-1 truncate">{attachment.name}</span>
+      <span class="shrink-0 text-xs opacity-60"
+        >{chat_file_size_bytes({ size: attachment.size })}</span
       >
-        <File class="size-4 shrink-0 opacity-70" aria-hidden="true" />
-        <span class="min-w-0 flex-1 truncate">{attachment.name}</span>
-        <span class="shrink-0 text-xs opacity-60"
-          >{chat_file_size_bytes({ size: attachment.size })}</span
+      {#if downloadAttachment}
+        <button
+          type="button"
+          class="shrink-0 opacity-70 hover:opacity-100 cursor-pointer"
+          aria-label={chat_file_download_aria({ name: attachment.name })}
+          onclick={download}
         >
-        {#if downloadAttachment}
-          <button
-            type="button"
-            class="shrink-0 opacity-70 hover:opacity-100 cursor-pointer"
-            aria-label={chat_file_download_aria({ name: attachment.name })}
-            onclick={download}
-          >
-            <Download class="size-4" aria-hidden="true" />
-          </button>
-        {/if}
-      </div>
-      {#if downloadFailed}
-        <p class="text-xs text-error-500 dark:text-error-400">
-          {chat_file_unreadable()}
-        </p>
+          <Download class="size-4" aria-hidden="true" />
+        </button>
       {/if}
-    {/if}
-    {#if quote}
-      <QuoteBlock
-        view={quote}
-        describedBy={quoteDescribedBy}
-        onClick={onQuoteClick}
-        onRetry={onQuoteRetry}
-      />
-    {/if}
-    {#if markdown}
-      {#if raw}
-        <div class="min-w-0 whitespace-pre-wrap break-words font-mono text-xs">
-          {text}
-        </div>
-      {:else}
-        <Markdown source={text} />
-      {/if}
-    {:else}
-      {text}
-    {/if}
-    {#if mentions && mentions.length > 0}
-      <MentionChips chips={mentions} />
-    {/if}
-    {#if failureCopy}
-      <p class="mt-1 text-xs text-error-500 dark:text-error-400">
-        {failureCopy}
+    </div>
+    {#if downloadFailed}
+      <p class="text-xs text-error-500 dark:text-error-400">
+        {chat_file_unreadable()}
       </p>
     {/if}
-  </div>
-  {#if beside}{@render beside()}{/if}
+  {/if}
+  {#if quote}
+    <QuoteBlock
+      view={quote}
+      describedBy={quoteDescribedBy}
+      onClick={onQuoteClick}
+      onRetry={onQuoteRetry}
+    />
+  {/if}
+  {#if markdown}
+    {#if raw}
+      <div class="min-w-0 whitespace-pre-wrap break-words font-mono text-xs">
+        {text}
+      </div>
+    {:else}
+      <Markdown source={text} />
+    {/if}
+  {:else}
+    {text}
+  {/if}
+  {#if mentions && mentions.length > 0}
+    <MentionChips chips={mentions} />
+  {/if}
+  {#if failureCopy}
+    <p class="mt-1 text-xs text-error-500 dark:text-error-400">
+      {failureCopy}
+    </p>
+  {/if}
 </div>
 {#if !bare}
-  <!-- Under the bubble, outside the anchored box: the row reorders nothing and
-       shifts nothing that hangs beside the bubble. Natural width, so the
-       row's alignment puts it on the same side as the bubble. -->
-  <div bind:this={actions} class="flex items-center gap-1">
+  <!-- Under the bubble: natural width, so the row's alignment puts it on the
+       same side as the bubble, and the row costs the bubble no width. The
+       surface's own action leads; a bare (failed) line draws no row here. -->
+  <div bind:this={actionRow} class="flex items-center gap-1">
+    {@render extraActions?.()}
     <CopyButton getText={() => text} />
     {#if markdown}
       <RawToggleButton pressed={raw} onclick={toggleRaw} />

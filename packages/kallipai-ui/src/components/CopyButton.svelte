@@ -10,6 +10,7 @@
   import { Copy, Check } from "@lucide/svelte";
   import { copyText } from "../lib/clipboard.ts";
   import { common_copy, common_copied } from "../paraglide/messages.js";
+  import { BUBBLE_ACTION } from "../lib/classes.ts";
 
   let {
     getText,
@@ -37,7 +38,7 @@
   type="button"
   {onclick}
   aria-label={copied ? common_copied() : common_copy()}
-  class="rounded p-1.5 text-surface-500 dark:text-surface-400 opacity-60 [@media(hover:hover)]:opacity-0 [@media(hover:hover)]:group-hover:opacity-100 focus-visible:opacity-100 hover:bg-surface-200-800 transition {klass}"
+  class="{BUBBLE_ACTION} {klass}"
 >
   {#if copied}
     <Check class="size-4" />

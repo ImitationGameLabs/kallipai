@@ -54,7 +54,6 @@
   "chat_offline_no_history": "本设备尚未保存过该 tagma 的消息。对方当前处于离线状态；待其恢复在线后，新消息会显示在这里。",
   "chat_quote_action": "引用",
   "chat_quote_action_aria": "引用这条消息",
-  "chat_more_actions_aria": "更多操作",
   "chat_quote_bar_aria": "正在引用 {author} 的消息",
   "chat_quote_bar_preview_aria": "被引用的内容",
   "chat_quote_cancel_aria": "取消引用",

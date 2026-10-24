@@ -45,10 +45,6 @@ Deno.test("the page tears the reveal controller down", () => {
     block.includes("reveal.destroy();"),
     "the flash timer stops when the page unmounts",
   );
-  assert(
-    block.includes("rowActions.reset();"),
-    "and the row controller goes with it, not through a session swap",
-  );
 });
 
 Deno.test("the jump is offered only for a target in the window", () => {
@@ -211,19 +207,8 @@ Deno.test(
   },
 );
 
-Deno.test("the page hands each controller its own room", () => {
+Deno.test("the page hands the picker its own room", () => {
   const src = flat(source(PAGE));
-
-  const rows = src.indexOf("const rowActions = createRowActions<RoomLine>({");
-  assert(rows !== -1, "the row controller is built on the page");
-  const rowWiring = src.slice(rows, rows + 320);
-  for (const line of [
-    "idOf: (line) => line.seq,",
-    "onQuote: (line) => (pendingQuote = { scope: roomId, seq: line.seq }),",
-    "scope: () => roomId",
-  ]) {
-    assert(rowWiring.includes(line), `row controller wiring: ${line}`);
-  }
 
   const picker = src.indexOf("const picker = createMentionPicker({");
   assert(picker !== -1, "the picker is built on the page");
@@ -245,28 +230,36 @@ Deno.test("the page hands each controller its own room", () => {
   );
 });
 
-Deno.test("the quote control is drawn only for a quotable row", () => {
+Deno.test("the quote control arms the row it is drawn for", () => {
   const src = flat(source(PAGE));
+  assert(
+    src.includes("{#snippet extraActions()}"),
+    "the row's own action rides in through the bubble's slot",
+  );
   assert(
     src.includes("{#if quotable(line)}"),
     "an optimistic or failed row offers no quote entry",
   );
-  assert(src.includes("mine={line.mine}"), "the row learns whose bubble it is");
   assert(
-    src.includes('side={line.mine ? "right" : "left"}'),
-    "and the quote control takes its side from the same fact",
+    src.includes(
+      "onclick={() => (pendingQuote = { scope: roomId, seq: line.seq })}",
+    ),
+    "the button arms this room and this seq, the pair the send reads",
+  );
+  assert(
+    src.includes("{extraActions}"),
+    "the slot reaches the bubble that renders it",
   );
 });
 
-Deno.test("a room change drops the row controller with the scroll", () => {
+Deno.test("a room change returns the scroll to the tail", () => {
   const src = flat(source(PAGE));
   const at = src.indexOf("void roomId;");
   assert(at !== -1, "the room's session effect reads the route");
   const effect = blockAt(src, at);
   assert(
-    effect.includes("scroll.reset();") &&
-      effect.includes("rowActions.reset();"),
-    "the host's session effect drops the menu, not the scope check",
+    effect.includes("scroll.reset();"),
+    "the session effect returns to the tail",
   );
 });
 

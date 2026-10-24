@@ -135,11 +135,7 @@ Deno.test("a session key change resets the view's controllers", () => {
     "void sessionKey;",
     "  });",
   );
-  for (const call of [
-    "scroll.reset()",
-    "rowActions.reset()",
-    "anchor.drop()",
-  ]) {
+  for (const call of ["scroll.reset()", "anchor.drop()"]) {
     assert(effect.includes(call), `the session-key reset must run ${call}`);
   }
 });

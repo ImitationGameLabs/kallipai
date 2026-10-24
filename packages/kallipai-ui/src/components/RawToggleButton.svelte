@@ -10,6 +10,7 @@
     chat_show_raw_text,
     chat_show_rendered_markdown,
   } from "../paraglide/messages.js";
+  import { BUBBLE_ACTION } from "../lib/classes.ts";
 
   let {
     pressed,
@@ -33,7 +34,7 @@
   aria-pressed={pressed}
   title={label}
   aria-label={label}
-  class="rounded p-1.5 text-surface-500 dark:text-surface-400 opacity-60 [@media(hover:hover)]:opacity-0 [@media(hover:hover)]:group-hover:opacity-100 focus-visible:opacity-100 hover:bg-surface-200-800 transition {klass}"
+  class="{BUBBLE_ACTION} {klass}"
 >
   {#if pressed}
     <Eye class="size-4" />

@@ -29,7 +29,6 @@
     roomQuoteBlocksByLine,
   } from "../lib/quote.ts";
   import { createReveal, revealMark } from "../lib/reveal.svelte.ts";
-  import { createRowActions } from "../lib/rowActions.svelte.ts";
   import { ROW_TIME } from "../lib/time/stamp.ts";
   import { createComposer } from "../lib/composer.svelte.ts";
   import { createMentionPicker } from "../lib/mentionPicker.svelte.ts";
@@ -48,7 +47,7 @@
   import MentionPicker from "../components/rooms/MentionPicker.svelte";
   import MentionChips from "../components/MentionChips.svelte";
   import MessageRow from "../components/MessageRow.svelte";
-  import RowQuoteAffordance from "../components/RowQuoteAffordance.svelte";
+  import QuoteButton from "../components/QuoteButton.svelte";
   import QuoteBar from "../components/QuoteBar.svelte";
   import SenderIdentity from "../components/rooms/SenderIdentity.svelte";
   import { roomConversationsStore } from "../lib/session/roomConversations.svelte.ts";
@@ -164,16 +163,17 @@
   const scroll = createAutoScroll();
   // Session-key reset must be declared BEFORE the stick effect: effects in
   // the same flush run in declaration order, so a param change resets the
-  // controllers before stick() observes the new room's lines. The row
-  // controller is dropped here and not by its scope check, which may only
-  // hide: this effect is the host's word that the session moved. The sentence
+  // controllers before stick() observes the new room's lines. A pending
+  // quote is not cleared here: the bar reads it through armedQuoteSeq, which
+  // compares scopes only, so a seq armed in the room just left is unreadable
+  // here while the state stays: returning to that room shows the strip again,
+  // and cancelling or sending are the two paths that clear it. The sentence
   // the reveal spoke goes with them, from this effect's cleanup: destroy()
   // reads back the spoken slot it wrote to flip it, and a tracked body would
   // register that read and dirty itself; a cleanup has no reaction to record.
   $effect(() => {
     void roomId;
     scroll.reset();
-    rowActions.reset();
     return () => reveal.destroy();
   });
   $effect(() => {
@@ -208,7 +208,7 @@
 
   // One scroll-pin controller for the whole room transcript (a single active
   // ResizeObserver across all bubbles); each <MessageBubble> hands its box +
-  // actions elements to it on a raw toggle.
+  // action row to it on a raw toggle.
   const togglePin = createTogglePin(() => scroll.viewport);
 
   // Jumping to the row a quote names: the same row table, scroll and brief
@@ -247,22 +247,12 @@
   function quotable(line: RoomLine): boolean {
     return line.seq > 0 && !roomLinePending(line) && !line.failed;
   }
-  // Which row's menu is open and the touch hold that opens it: one state
-  // machine per transcript, shared with the 1:1 surface. The scope is this
-  // room: a room swap drops the menu with it.
-  const rowActions = createRowActions<RoomLine>({
-    idOf: (line) => line.seq,
-    quotable,
-    onQuote: (line) => (pendingQuote = { scope: roomId, seq: line.seq }),
-    scope: () => roomId,
-  });
-  // A flash or hold timer outliving the transcript would touch a torn-down
-  // view: the final teardown runs each controller's own cleanup -- the reveal
-  // timer's destroy and the row state's reset -- and a room swap drops the
-  // sentence from its own effect's cleanup, its body resetting the rest.
+  // A flash timer outliving the transcript would touch a torn-down view:
+  // the final teardown runs the reveal's own cleanup -- its mark and
+  // sentence with the timer -- and a room swap drops the sentence from its
+  // own effect's cleanup, its body resetting the mark.
   $effect(() => () => {
     reveal.destroy();
-    rowActions.reset();
   });
 
   const composer = createComposer({
@@ -471,28 +461,18 @@
               line.senderHandle,
               line.senderTagmaId,
             )}
-            {#snippet beside()}
+            {#snippet extraActions()}
               {#if quotable(line)}
-                <RowQuoteAffordance
-                  side={line.mine ? "right" : "left"}
-                  menuOpen={rowActions.isMenuOpen(line)}
-                  onMenuOpenChange={(open) =>
-                    rowActions.setMenuOpen(line, open)}
-                  onQuote={() => rowActions.quote(line)}
+                <QuoteButton
+                  onclick={() =>
+                    (pendingQuote = { scope: roomId, seq: line.seq })}
                 />
               {/if}
             {/snippet}
-            <!-- Pointer handlers only arm the long-press menu; keyboard users
-                 reach the same menu from the row actions button. -->
-            <!-- svelte-ignore a11y_no_static_element_interactions -->
             <div
               use:reveal.trackRow={line.seq}
               tabindex="-1"
-              onpointerdown={(event) => rowActions.pressStart(line, event)}
-              onpointerup={rowActions.pressCancel}
-              onpointercancel={rowActions.pressCancel}
-              onpointerleave={rowActions.pressCancel}
-              class="relative group flex flex-col {line.mine
+              class="group flex flex-col {line.mine
                 ? 'items-end'
                 : 'items-start'} {revealMark(reveal.highlightId, line.seq)}"
             >
@@ -511,7 +491,7 @@
               </span>
               <MessageRow mine={line.mine}>
                 <MessageBubble
-                  {beside}
+                  {extraActions}
                   text={line.text}
                   markdown={line.senderKind === "agent"}
                   mine={line.mine}

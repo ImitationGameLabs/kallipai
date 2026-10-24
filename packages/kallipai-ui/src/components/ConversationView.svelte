@@ -8,7 +8,7 @@
   import Composer from "./Composer.svelte";
   import MessageBubble from "./MessageBubble.svelte";
   import MessageRow from "./MessageRow.svelte";
-  import RowQuoteAffordance from "./RowQuoteAffordance.svelte";
+  import QuoteButton from "./QuoteButton.svelte";
   import ScrollToBottomButton from "./ScrollToBottomButton.svelte";
   import { RotateCcw } from "@lucide/svelte";
   import {
@@ -18,7 +18,6 @@
   } from "../lib/transcript.svelte.ts";
   import { timelineMarkers } from "../lib/channel/timeline.ts";
   import { createReveal, revealMark } from "../lib/reveal.svelte.ts";
-  import { createRowActions } from "../lib/rowActions.svelte.ts";
   import { authorName, jumpAnnouncement } from "../lib/rowSpeech.ts";
   import { formatStamp, timezoneSetting } from "../lib/time/stamp.svelte.ts";
   import { ROW_TIME } from "../lib/time/stamp.ts";
@@ -95,12 +94,11 @@
      *  verbatim (omitted = the cards render without a download button). */
     downloadAttachment?: (attachment: FileAttachment) => Promise<void>;
     /** Identity of the conversation feeding `lines` (the route param). A
-     *  change resets the auto-scroll controller, the open row-actions menu,
-     *  any quote reveal mark in flight, and the up-scroll anchor's saved
-     *  session: SvelteKit reuses this component across param changes, and
-     *  the new conversation must not inherit the old one's scroll position,
-     *  missed count, open menu or pending reveal. Omitted = never reset
-     *  (static callers). */
+     *  change resets the auto-scroll controller, any quote reveal mark in
+     *  flight, and the up-scroll anchor's saved session: SvelteKit reuses
+     *  this component across param changes, and the new conversation must
+     *  not inherit the old one's scroll position, missed count or pending
+     *  reveal. Omitted = never reset (static callers). */
     sessionKey?: string;
 
     /** Optional page-supplied notice rendered inside the scrollable transcript
@@ -112,9 +110,9 @@
     quoteBar?: Snippet;
     /** Escape in the composer drops the pending quote. */
     onCancelQuote?: () => void;
-    /** Quoting entry points (the message's quote button, its overflow menu,
-     *  and a long press on touch). Present, each confirmed line can be quoted;
-     *  absent, no row renders a quote control and older callers are unchanged. */
+    /** The quote entry point: the button a bubble's action row offers for a
+     *  confirmed line. Present, each quotable row draws it; absent, no row
+     *  renders a quote control and older callers are unchanged. */
     onQuote?: (line: ConversationLine) => void;
     /** Resolve a line's quote id against what the page knows (the loaded
      *  transcript, or a peeked outcome). Called per render, so the page's
@@ -148,17 +146,18 @@
   );
   // Session-key reset must be declared BEFORE the stick effect: effects in
   // the same flush run in declaration order, so a param change resets the
-  // controllers before stick() observes the new conversation's lines. The row
-  // controller is dropped here and not by its scope check, which may only
-  // hide: this effect is the host's word that the session moved. The paging
-  // snapshot goes with it: it measures the transcript that is leaving.
+  // controllers before stick() observes the new conversation's lines. The
+  // paging snapshot goes with them: it measures the transcript that is
+  // leaving. A pending quote is not reset here: armedNow compares the record's
+  // owner with the live conversation, so a swap makes it unreadable. Reading it
+  // again is only possible while no controller call lands in between, because
+  // own() drops the record on the next call made from another conversation.
   // The reveal's sentence drops from this effect's cleanup: destroy() reads
   // back the spoken slot it wrote to flip it, and a tracked body would
   // register that read and dirty itself; a cleanup has no reaction to record.
   $effect(() => {
     void sessionKey;
     scroll.reset();
-    rowActions.reset();
     anchor.drop();
     return () => reveal.destroy();
   });
@@ -177,7 +176,7 @@
 
   // One scroll-pin controller for the whole transcript (a single active
   // ResizeObserver across all bubbles); each <MessageBubble> hands its box +
-  // actions elements to it on a raw toggle.
+  // action row to it on a raw toggle.
   const togglePin = createTogglePin(() => scroll.viewport);
 
   // --- quoting (optional; armed only when onQuote is passed) ---
@@ -211,23 +210,12 @@
       line.status !== "failed"
     );
   }
-  // Which row's menu is open and the touch hold that opens it: one state
-  // machine per transcript, shared with the room surface. The scope is this
-  // conversation: a session key change drops the menu with it.
-  const rowActions = createRowActions<ConversationLine>({
-    idOf: (line) => line.historyId,
-    quotable,
-    onQuote: (line) => onQuote?.(line),
-    scope: () => sessionKey,
-  });
-  // A flash or hold timer outliving the transcript would touch torn-down
-  // state: the final teardown runs each controller's own cleanup -- the
-  // reveal's mark and sentence with its timer, and the row state's reset --
-  // and a session swap drops the sentence from its own effect's cleanup,
-  // its body resetting the rest.
+  // A flash timer outliving the transcript would touch torn-down state: the
+  // final teardown runs the reveal's own cleanup -- its mark and sentence
+  // with its timer -- and a session swap drops the sentence from its own
+  // effect's cleanup, its body resetting the mark.
   $effect(() => () => {
     reveal.destroy();
-    rowActions.reset();
   });
 
   // Who wrote a line, as spoken: the sender's handle when the row carries
@@ -351,14 +339,9 @@
             : undefined}
         {@const quotedLabelId =
           quoteTarget !== undefined ? `msg-a11y-${quoteTarget}` : undefined}
-        {#snippet beside()}
+        {#snippet extraActions()}
           {#if quotable(line)}
-            <RowQuoteAffordance
-              side={line.role === "user" ? "right" : "left"}
-              menuOpen={rowActions.isMenuOpen(line)}
-              onMenuOpenChange={(open) => rowActions.setMenuOpen(line, open)}
-              onQuote={() => rowActions.quote(line)}
-            />
+            <QuoteButton onclick={() => onQuote?.(line)} />
           {/if}
         {/snippet}
         {#if m?.dateDivider}
@@ -380,19 +363,12 @@
             {line.text}
           </p>
         {:else}
-          <!-- Pointer handlers only arm the long-press menu; keyboard users
-               reach the same menu from the row actions button. -->
-          <!-- svelte-ignore a11y_no_static_element_interactions -->
           <div
             use:reveal.trackRow={line.historyId}
             tabindex="-1"
-            class="group relative flex flex-col {line.role === 'user'
+            class="group flex flex-col {line.role === 'user'
               ? 'items-end'
               : 'items-start'} {revealMark(reveal.highlightId, line.historyId)}"
-            onpointerdown={(e) => rowActions.pressStart(line, e)}
-            onpointerup={rowActions.pressCancel}
-            onpointercancel={rowActions.pressCancel}
-            onpointerleave={rowActions.pressCancel}
           >
             <span id="msg-a11y-{line.historyId}" class="sr-only">
               {messageLabel(line, m?.timeLabel)}
@@ -402,13 +378,14 @@
                 >{line.sender.handle}</span
               >
             {/if}
-            <!-- The row is the bubble's only width cap and its alignment; the
-                 quote control rides in through the bubble, so it anchors to the
-                 bubble instead of at the transcript edge. -->
+            <!-- The row is the bubble's only width cap and its alignment. A
+                 non-bare line's actions ride in the bubble's own row under it,
+                 on the sender's side without capping the bubble. -->
             <MessageRow mine={line.role === "user"}>
               {#if line.role === "user" && line.status === "failed"}
-                <!-- Failed lines are transient: outline + copy always, retry
-                   button only where the page wires a handler, pin/copy never. -->
+                <!-- Failed lines are transient: a bare bubble carries the
+                   outline and the text; retry only where the page wires a
+                   handler; no copy, raw toggle or quote rides here. -->
                 <div class="flex flex-row items-center gap-1.5 self-end">
                   {#if onRetry}
                     <button
@@ -421,7 +398,6 @@
                     </button>
                   {/if}
                   <MessageBubble
-                    {beside}
                     text={line.text}
                     mine
                     bare
@@ -439,7 +415,7 @@
                 </div>
               {:else}
                 <MessageBubble
-                  {beside}
+                  {extraActions}
                   text={line.text}
                   markdown={line.role === "assistant"}
                   mine={line.role === "user"}
