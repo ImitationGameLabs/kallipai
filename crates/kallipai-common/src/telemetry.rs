@@ -65,9 +65,19 @@ const SCHEDULED_DELAY: Duration = Duration::from_secs(5);
 const EXPORT_TIMEOUT: Duration = Duration::from_secs(3);
 /// Passed to `shutdown_with_timeout`, which the SDK ignores: a shutdown flushes
 /// and then waits for one more export, so the real bound is about twice
-/// `EXPORT_TIMEOUT` -- six seconds, inside the ten a container stop allows
+/// `EXPORT_TIMEOUT` -- six seconds, inside the ten a default container stop
 /// before the process is killed.
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(6);
+
+/// The resource namespace every service reports, so one deployment's traces
+/// share a namespace whatever their service names. A deployment that runs
+/// several instances of one service tells them apart with
+/// `OTEL_RESOURCE_ATTRIBUTES=service.instance.id=<slug>`, which the SDK's
+/// environment detector folds into this resource.
+const RESOURCE_NAMESPACE: &str = "kallipai";
+
+/// The path the OTLP HTTP exporter posts traces to; a configured base gains it.
+const TRACES_PATH: &str = "/v1/traces";
 
 /// The export configuration: where spans go and which sampler decides.
 #[derive(Debug, Clone, PartialEq)]
@@ -77,9 +87,10 @@ pub struct Config {
 }
 
 impl Config {
-    /// The collector base URL, verbatim from the environment. The
-    /// specification defines `OTEL_EXPORTER_OTLP_ENDPOINT` as a base, and the
-    /// traces path is resolved from it before the exporter is built.
+    /// The collector endpoint, verbatim from the environment: a base URL whose
+    /// path gains `/v1/traces` unless it already ends there, and a query stays
+    /// on the end. The specification defines the variable as a base, and the
+    /// SDK appends the same path when it reads the variable itself.
     pub fn endpoint(&self) -> &str {
         &self.endpoint
     }
@@ -172,21 +183,30 @@ pub fn config_from_env() -> Option<Config> {
 
 /// The traces URL to post to, resolved from the configured base.
 ///
-/// The SDK appends the signal path only to the endpoint it reads from the
-/// environment itself; a value handed to `with_endpoint` is taken as final. A
-/// base -- no path at all, or a bare `/` -- therefore gains `/v1/traces` here,
-/// and a configured value that already names a path is kept as written.
+/// The variable is a base, and both roads to it must mean the same thing: the
+/// SDK appends the signal path when it reads the variable itself, so a value
+/// handed over here gains the same `/v1/traces`. A value whose path already
+/// ends with it, a trailing `/` aside, is kept as written so a full-signal
+/// value does not double, and a query stays on the end, behind the path.
 fn traces_endpoint(base: &str) -> String {
-    let authority = match base.find("://") {
-        Some(sep) => &base[sep + 3..],
-        None => base,
+    let (endpoint, query) = match base.find('?') {
+        Some(at) => (&base[..at], &base[at..]),
+        None => (base, ""),
     };
-    let path = authority.find('/').map_or("", |at| &authority[at..]);
-    if path.is_empty() || path == "/" {
-        format!("{}/v1/traces", base.trim_end_matches('/'))
-    } else {
-        base.to_string()
+    let endpoint = endpoint.trim_end_matches('/');
+    if path_of(endpoint).ends_with(TRACES_PATH) {
+        return format!("{endpoint}{query}");
     }
+    format!("{endpoint}{TRACES_PATH}{query}")
+}
+
+/// The path an endpoint names, or `""` when it names none.
+fn path_of(endpoint: &str) -> &str {
+    let authority = match endpoint.find("://") {
+        Some(sep) => &endpoint[sep + 3..],
+        None => endpoint,
+    };
+    authority.find('/').map_or("", |at| &authority[at..])
 }
 
 /// Holds the tracer provider for the life of the process and flushes the
@@ -271,6 +291,10 @@ where
 /// propagator with it, so a service that mounts it can inject its context into
 /// an outgoing call and adopt one from an incoming one without a second call.
 ///
+/// The guard owns what it published: shutting it down leaves the process-wide
+/// handle pointing at that provider, so a `global::tracer()` created afterwards
+/// silently records spans nothing exports.
+///
 /// `None` with an inert guard means nothing is exported: no endpoint is set,
 /// or the exporter could not be built (one stderr line, tracing stays local).
 pub fn export_layer(
@@ -346,6 +370,9 @@ const UNMATCHED_ROUTE: &str = "unmatched";
 /// can answer "which room" without a name nothing can aggregate. The status is
 /// recorded once the response exists, and a server-side failure also carries an
 /// error type and the failed status, so a trace can be filtered for them.
+///
+/// A 4xx response only records `http.response.status_code`; the semantic
+/// conventions reserve the error status and `error.type` for a 5xx.
 ///
 /// Only `otel.name` and `otel.kind` are tracing fields: those two render into
 /// the prefix of every event inside the request, and the rest is worth nothing
@@ -480,7 +507,7 @@ where
         .with_resource(
             Resource::builder()
                 .with_service_name(service.to_string())
-                .with_attribute(KeyValue::new("service.namespace", "kallipai"))
+                .with_attribute(KeyValue::new("service.namespace", RESOURCE_NAMESPACE))
                 .build(),
         )
         .with_span_processor(processor)
@@ -896,6 +923,24 @@ mod tests {
         assert_eq!(fields.get("otel.name").as_deref(), Some("GET unmatched"));
     }
 
+    #[cfg(feature = "axum")]
+    #[tokio::test]
+    async fn an_unmatched_request_carries_the_unmatched_route_as_an_attribute() {
+        let app = axum::Router::new().fallback(|| async { "no such path" });
+        let exported = exported_spans(
+            app,
+            request_for("/nowhere/at/all", &[]),
+            "http://collector:4318",
+            "http://collector:4318/v1/traces",
+        )
+        .await;
+        let span = exported
+            .spans
+            .first()
+            .expect("the fallback produced one span");
+        assert_eq!(attribute(span, "http.route").as_deref(), Some("unmatched"));
+    }
+
     #[test]
     fn export_layer_stays_inert_without_a_configuration() {
         let (layer, mut guard) = export_layer(None, &test_filter(), "tagma");
@@ -922,7 +967,7 @@ mod tests {
     }
 
     #[test]
-    fn a_base_endpoint_gets_the_traces_path_and_a_named_one_is_kept() {
+    fn a_base_endpoint_gains_the_traces_path_and_a_full_signal_one_is_kept() {
         assert_eq!(
             traces_endpoint("http://collector:4318"),
             "http://collector:4318/v1/traces"
@@ -937,7 +982,15 @@ mod tests {
         );
         assert_eq!(
             traces_endpoint("https://otel.example.com/otlp"),
-            "https://otel.example.com/otlp"
+            "https://otel.example.com/otlp/v1/traces"
+        );
+        assert_eq!(
+            traces_endpoint("http://collector:4318?x=1"),
+            "http://collector:4318/v1/traces?x=1"
+        );
+        assert_eq!(
+            traces_endpoint("http://collector:4318/v1/traces/"),
+            "http://collector:4318/v1/traces"
         );
     }
 

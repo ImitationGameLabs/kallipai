@@ -718,7 +718,8 @@ fn logs_target() -> Result<std::path::PathBuf> {
 /// the span export layer, so this process is traced like the services on the
 /// shared bootstrap, and building it publishes the process-wide tracer provider
 /// and the W3C propagator; the returned guard flushes the queue on exit. The
-/// variable and the log file prefix also build on.
+/// exported `service.name` is `tagma`, while the log file prefix stays
+/// `instance`, the role name the daemon's instance log listing keys on.
 pub fn init_logging(filter: &tracing_subscriber::EnvFilter) -> kallipai_common::telemetry::Guard {
     use tracing_subscriber::prelude::*;
 
