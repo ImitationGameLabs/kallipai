@@ -167,6 +167,21 @@ pub(crate) struct LescheHistoryQuery {
     pub limit: Option<u64>,
 }
 
+/// Refuse a position the log cannot have.
+///
+/// A position is an ordinal in a log, so a negative one is not a direction: the
+/// lesche would read it as "from the start" and answer a page nobody asked for.
+/// Both reads take the answer from here -- the room read on either cursor, the
+/// direct read on the one cursor it has -- so the status and the sentence
+/// cannot drift apart, and the refusal is this request's mistake rather than an
+/// upstream fault (the lesche's own 400 would reach the caller as a 502).
+fn refuse_negative_position(positions: &[Option<i64>]) -> Result<(), ApiError> {
+    if positions.iter().flatten().any(|seq| *seq < 0) {
+        return Err(ApiError::bad_request("a position cannot be negative"));
+    }
+    Ok(())
+}
+
 /// `GET /agents/{id}/lesche/rooms/{room}/messages` — the `kallip lesche read
 /// --room <room>` path. Fetches the room's history from lesche (payloads are
 /// plaintext `RoomMessage` JSON; the lesche member-gates the read) and renders
@@ -197,13 +212,9 @@ pub async fn read_room_messages(
             "after_seq and before_seq are mutually exclusive",
         ));
     }
-    // A position is an ordinal in the room's log, so a negative one is not a
-    // direction: the lesche would read it as "from the start" and answer a
-    // page nobody asked for. Refused here for the reason above -- the shape is
-    // this request's, and the lesche's 400 would arrive as a 502.
-    if q.after_seq.is_some_and(|seq| seq < 0) || q.before_seq.is_some_and(|seq| seq < 0) {
-        return Err(ApiError::bad_request("a position cannot be negative"));
-    }
+    // Both cursors are this request's own shape, refused before any relay is
+    // resolved for the reason above.
+    refuse_negative_position(&[q.after_seq, q.before_seq])?;
     let room = RoomId::from(room);
     // Route via room ownership: each relay's poll keys its slice of the
     // joined-rooms cache by entry name, and a room id is unique to the lesche
@@ -780,15 +791,11 @@ pub async fn read_direct_session_messages_by_id(
 /// earn on its own.
 ///
 /// Only `json` is accepted: a future format must not silently mean the text
-/// render. A position is an ordinal in the session's log, so a negative one is
-/// not a direction -- the lesche would read it as "from the start" and answer a
-/// page nobody asked for. Both entry points ask this before they resolve a
-/// relay, so a malformed query is answered as such rather than as a relay that
-/// happens to be missing.
+/// render, and a negative position is refused by [`refuse_negative_position`].
+/// Both entry points ask this before they resolve a relay, so a malformed query
+/// is answered as such rather than as a relay that happens to be missing.
 fn direct_read_query(q: &DirectHistoryQuery) -> Result<bool, ApiError> {
-    if q.after_seq.is_some_and(|seq| seq < 0) {
-        return Err(ApiError::bad_request("a position cannot be negative"));
-    }
+    refuse_negative_position(&[q.after_seq])?;
     match q.format.as_deref() {
         None => Ok(false),
         Some("json") => Ok(true),

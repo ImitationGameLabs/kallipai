@@ -405,11 +405,14 @@ fn summarize(text: &str) -> (String, bool) {
     // Counted in clusters, not code points: a combining sequence or a flag is
     // one character to the reader, and cutting between its code points would
     // spell a different one.
-    let cut = collapsed.graphemes(true).count() > QUOTE_SUMMARY_MAX_GRAPHEMES;
-    let mut out: String = collapsed
-        .graphemes(true)
+    let mut clusters = collapsed.graphemes(true);
+    let mut out: String = clusters
+        .by_ref()
         .take(QUOTE_SUMMARY_MAX_GRAPHEMES)
         .collect();
+    // What the cap left behind is what says the body was cut, so one walk over
+    // the clusters answers both.
+    let cut = clusters.next().is_some();
     if cut {
         out.push('…');
     }
