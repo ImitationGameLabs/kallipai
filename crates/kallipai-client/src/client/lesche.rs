@@ -7,6 +7,7 @@
 use super::TagmaClient;
 use anyhow::{Context, Result};
 use kallipai_common::agentid::AgentId;
+use kallipai_lesche_common::ids::path_segment;
 
 /// The page a room-history read asks for. The two positions mean opposite
 /// directions, so they travel as named fields: a page moves one way at a time
@@ -136,7 +137,10 @@ impl TagmaClient {
             .with_auth(
                 self.inner
                     .http
-                    .get(self.url(&format!("/agents/{id}/lesche/rooms/{room}/messages")))
+                    .get(self.url(&format!(
+                        "/agents/{id}/lesche/rooms/{}/messages",
+                        path_segment(room)
+                    )))
                     .query(&params),
             )
             .send()
@@ -179,7 +183,8 @@ impl TagmaClient {
                 self.inner
                     .http
                     .get(self.url(&format!(
-                        "/agents/{id}/lesche/direct-sessions/{peer}/messages"
+                        "/agents/{id}/lesche/direct-sessions/{}/messages",
+                        path_segment(peer)
                     )))
                     .query(&params),
             )
@@ -220,7 +225,10 @@ impl TagmaClient {
             .with_auth(
                 self.inner
                     .http
-                    .get(self.url(&format!("/agents/{id}/lesche/sessions/{session}/messages")))
+                    .get(self.url(&format!(
+                        "/agents/{id}/lesche/sessions/{}/messages",
+                        path_segment(session)
+                    )))
                     .query(&params),
             )
             .send()
@@ -321,6 +329,45 @@ mod tests {
         let api = as_api_error(&err);
         assert_eq!(api.status, 503);
         assert_eq!(api.message, "room offline");
+    }
+
+    /// A caller-supplied id rides one path segment: a value carrying separators
+    /// or a dot segment cannot reach another route, and arrives as the id it is
+    /// rather than reshaped into a different one.
+    #[tokio::test]
+    async fn a_caller_supplied_id_stays_inside_its_segment() {
+        let server = MockServer::start().await;
+        let id = AgentId::random();
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(""))
+            .mount(&server)
+            .await;
+        let client = client_for(&server);
+
+        client
+            .read_room_messages(&id, "../../sessions/abc", RoomReadQuery::default())
+            .await
+            .expect("the room read is sent");
+        client
+            .read_direct_session_by_id_messages(&id, "../rooms/abc", DirectReadQuery::default())
+            .await
+            .expect("the session read is sent");
+
+        let paths = server
+            .received_requests()
+            .await
+            .expect("requests recorded")
+            .iter()
+            .map(|request| request.url.path().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            paths,
+            [
+                format!("/agents/{id}/lesche/rooms/%2E%2E%2F%2E%2E%2Fsessions%2Fabc/messages"),
+                format!("/agents/{id}/lesche/sessions/%2E%2E%2Frooms%2Fabc/messages"),
+            ],
+            "each id stays in its own segment"
+        );
     }
 
     #[tokio::test]

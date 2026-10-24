@@ -1,6 +1,8 @@
 //! `lesche` command subtree of the `kallip` CLI (clap derive).
 
 use clap::{Args, Subcommand};
+use kallipai_lesche_common::direct::DirectSessionId;
+use kallipai_lesche_common::rooms::RoomId;
 
 /// Deliver messages via the tagma's relay (the lesche data-plane).
 /// Targets the calling agent (resolved from `KALLIPAI_ID`), like `activity`.
@@ -72,10 +74,13 @@ pub(crate) struct SendArgs {
 #[derive(Args)]
 pub(crate) struct ReadArgs {
     /// The room id to read from (one of the ids listed by `kallip lesche
-    /// rooms`).
+    /// rooms`). The id rides a request path, so it has to be the id the lesche
+    /// minted -- a canonical UUID -- and is refused before any request is made
+    /// if it is not.
     #[arg(
         long,
         allow_hyphen_values = true,
+        value_parser = room_id,
         required_unless_present_any = ["tagma", "session", "quote"],
         conflicts_with_all = ["tagma", "session"]
     )]
@@ -94,10 +99,13 @@ pub(crate) struct ReadArgs {
     /// inbound message header. Names the log itself rather than deriving it
     /// from a peer pair, which is what a delivered message's read-back command
     /// spells. The log is read forward only, so `--before` is refused here:
-    /// `--quote` reads one row of it and `--after`/`--limit` read a page.
+    /// `--quote` reads one row of it and `--after`/`--limit` read a page. The
+    /// id is a path segment, so it has to be the canonical spelling the tagma
+    /// answers to; anything else is refused before the request is made.
     #[arg(
         long,
         allow_hyphen_values = true,
+        value_parser = session_id,
         conflicts_with_all = ["room", "tagma"]
     )]
     pub session: Option<String>,
@@ -135,4 +143,49 @@ pub(crate) struct ReadArgs {
     /// which always reads one row.
     #[arg(long)]
     pub limit: Option<u64>,
+}
+
+/// A room id as the lesche mints it: a canonical UUID.
+///
+/// The value rides one request path segment, so a value of another shape is not
+/// a room this CLI can address -- it would ask a route for a resource that
+/// cannot exist. The judgement is the room type's own ([`RoomId::parse`]), the
+/// same one the tagma applies where it can see the room.
+fn room_id(raw: &str) -> Result<String, String> {
+    RoomId::parse(raw)
+        .map(String::from)
+        .ok_or_else(|| format!("{raw:?} is not a room id: expected a canonical UUID"))
+}
+
+/// A direct-session id as the tagma derives it: a canonical UUID.
+///
+/// Same rule and same judgement as [`DirectSessionId::parse`], so the CLI and
+/// the route it calls refuse exactly the same spellings.
+fn session_id(raw: &str) -> Result<String, String> {
+    DirectSessionId::parse(raw)
+        .map(|id| id.as_ref().to_owned())
+        .ok_or_else(|| format!("{raw:?} is not a session id: expected a canonical UUID"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{room_id, session_id};
+
+    /// A caller-supplied id has to be the canonical spelling the lesche mints:
+    /// the value rides a request path, so any other spelling is refused here
+    /// rather than asked for over the wire.
+    #[test]
+    fn only_a_canonical_id_is_accepted() {
+        let id = "00000000-0000-4000-8000-000000000ee5";
+        assert_eq!(room_id(id).as_deref(), Ok(id));
+        assert_eq!(session_id(id).as_deref(), Ok(id));
+        for raw in ["../../sessions/abc", "../rooms/abc", "room-1", ""] {
+            assert!(room_id(raw).is_err(), "room id accepted: {raw:?}");
+            assert!(session_id(raw).is_err(), "session id accepted: {raw:?}");
+        }
+        // The same id spelled another way would key a second row, so the
+        // canonical form is the only one that counts.
+        assert!(room_id("00000000-0000-4000-8000-000000000EE5").is_err());
+        assert!(session_id("00000000000040008000000000000ee5").is_err());
+    }
 }

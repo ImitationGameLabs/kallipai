@@ -67,15 +67,11 @@ impl DirectSessionId {
     /// same UUID string, so that is the shape every writer emits. Accepting only
     /// it keeps one session one value wherever the id is compared, cached, or
     /// placed in a request path -- the member-set lookup and the relay cache key
-    /// on the bytes, so a second spelling would be a second session.
+    /// on the bytes, so a second spelling would be a second session. The shape
+    /// judgement itself lives in [`crate::ids::canonical_uuid`], shared with
+    /// every other id this crate spells.
     pub fn parse(raw: &str) -> Option<Self> {
-        let parsed = Uuid::parse_str(raw).ok()?;
-        let canonical = parsed.hyphenated().to_string();
-        if canonical == raw {
-            Some(Self(canonical))
-        } else {
-            None
-        }
+        Some(Self(crate::ids::canonical_uuid(raw)?))
     }
 }
 

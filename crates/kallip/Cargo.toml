@@ -11,6 +11,7 @@ base64 = { workspace = true }
 kallipai-blob-store = { workspace = true }
 kallipai-client = { workspace = true }
 kallipai-common = { workspace = true }
+kallipai-lesche-common = { workspace = true }
 tokio = { workspace = true, features = ["fs"] }
 tokio-util = { workspace = true, features = ["io"] }
 clap = { workspace = true }

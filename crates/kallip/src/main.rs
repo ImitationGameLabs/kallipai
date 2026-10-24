@@ -1283,6 +1283,12 @@ fn unlimited_reject_hint(err: &anyhow::Error) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests {
+    /// The room and session the arg tests address. Both are canonical UUIDs,
+    /// because a `read` target rides a request path and the CLI refuses any
+    /// other spelling of one.
+    const ROOM: &str = "11111111-1111-4111-8111-111111111111";
+    const SESSION: &str = "22222222-2222-4222-8222-222222222222";
+
     use super::*;
 
     #[test]
@@ -1358,13 +1364,29 @@ mod tests {
             "lesche",
             "send",
             "--room",
-            "room-1",
+            ROOM,
             "--tagma",
             "tagma-peer",
         ]) else {
             panic!("conflicting targets accepted")
         };
         assert!(err.to_string().contains("cannot be used with"), "{err}");
+    }
+
+    /// A read target has to be the id the lesche minted: the value rides a
+    /// request path, so any other spelling is refused before a request exists.
+    #[test]
+    fn lesche_read_refuses_a_target_that_is_not_an_id() {
+        for argv in [
+            vec!["kallip", "lesche", "read", "--room", "../../sessions/abc"],
+            vec!["kallip", "lesche", "read", "--session", "../rooms/abc"],
+        ] {
+            let err = match Cli::try_parse_from(&argv) {
+                Ok(_) => panic!("a non-id target parsed: {argv:?}"),
+                Err(err) => err,
+            };
+            assert!(err.to_string().contains("canonical UUID"), "{err}");
+        }
     }
 
     #[test]
@@ -1382,7 +1404,7 @@ mod tests {
             "lesche",
             "read",
             "--room",
-            "room-1",
+            ROOM,
             "--tagma",
             "tagma-peer",
         ]) else {
@@ -1657,8 +1679,8 @@ mod tests {
     /// another target.
     #[test]
     fn a_session_read_names_its_log_and_asks_for_a_page_or_a_row() {
-        let row = parsed_read(&["--session", "sess-1", "--quote", "7"]);
-        assert_eq!(row.session.as_deref(), Some("sess-1"));
+        let row = parsed_read(&["--session", SESSION, "--quote", "7"]);
+        assert_eq!(row.session.as_deref(), Some(SESSION));
         assert_eq!(row.quote, Some(7));
         let query = direct_read_query(&row);
         assert_eq!(
@@ -1668,8 +1690,8 @@ mod tests {
         );
         assert_eq!(query.limit, Some(1));
 
-        let page = parsed_read(&["--session", "sess-1", "--after", "3"]);
-        assert_eq!(page.session.as_deref(), Some("sess-1"));
+        let page = parsed_read(&["--session", SESSION, "--after", "3"]);
+        assert_eq!(page.session.as_deref(), Some(SESSION));
         assert_eq!(page.quote, None);
         let query = direct_read_query(&page);
         assert_eq!(
@@ -1685,11 +1707,11 @@ mod tests {
                 "lesche",
                 "read",
                 "--session",
-                "sess-1",
+                SESSION,
                 "--quote",
                 "7",
                 "--room",
-                "ops"
+                ROOM
             ])
             .is_err(),
             "a read names one log"
@@ -1700,7 +1722,7 @@ mod tests {
                 "lesche",
                 "read",
                 "--session",
-                "sess-1",
+                SESSION,
                 "--quote",
                 "7",
                 "--tagma",
@@ -1724,13 +1746,13 @@ mod tests {
 
     #[test]
     fn lesche_read_parses_both_new_positions() {
-        let backward = parsed_read(&["--room", "ops", "--before", "5"]);
+        let backward = parsed_read(&["--room", ROOM, "--before", "5"]);
         assert_eq!(backward.before_seq, Some(5));
         assert_eq!(backward.quote, None);
-        let quoted = parsed_read(&["--room", "ops", "--quote", "7"]);
+        let quoted = parsed_read(&["--room", ROOM, "--quote", "7"]);
         assert_eq!(quoted.quote, Some(7));
         assert_eq!(quoted.before_seq, None);
-        let forward = parsed_read(&["--room", "ops", "--after", "3"]);
+        let forward = parsed_read(&["--room", ROOM, "--after", "3"]);
         assert_eq!(forward.after_seq, Some(3));
         assert_eq!(forward.before_seq, None);
     }
@@ -1738,10 +1760,10 @@ mod tests {
     #[test]
     fn lesche_read_rejects_paging_both_ways_at_once() {
         for extra in [
-            ["--room", "ops", "--after", "1", "--before", "5"],
-            ["--room", "ops", "--after", "1", "--quote", "7"],
-            ["--room", "ops", "--before", "5", "--quote", "7"],
-            ["--room", "ops", "--quote", "7", "--limit", "3"],
+            ["--room", ROOM, "--after", "1", "--before", "5"],
+            ["--room", ROOM, "--after", "1", "--quote", "7"],
+            ["--room", ROOM, "--before", "5", "--quote", "7"],
+            ["--room", ROOM, "--quote", "7", "--limit", "3"],
         ] {
             let mut argv = vec!["kallip", "lesche", "read"];
             argv.extend_from_slice(&extra);
@@ -1755,9 +1777,9 @@ mod tests {
     #[test]
     fn lesche_read_rejects_a_position_below_one() {
         for extra in [
-            ["--room", "ops", "--before", "0"],
-            ["--room", "ops", "--before", "-3"],
-            ["--room", "ops", "--quote", "0"],
+            ["--room", ROOM, "--before", "0"],
+            ["--room", ROOM, "--before", "-3"],
+            ["--room", ROOM, "--quote", "0"],
         ] {
             let mut argv = vec!["kallip", "lesche", "read"];
             argv.extend_from_slice(&extra);
@@ -1787,7 +1809,7 @@ mod tests {
             "a plain direct read carries no position"
         );
         assert!(
-            reject_backward_cursor_at_non_room(&parsed_read(&["--room", "ops", "--before", "5"]))
+            reject_backward_cursor_at_non_room(&parsed_read(&["--room", ROOM, "--before", "5"]))
                 .is_ok(),
             "a room keeps its backward cursor"
         );
@@ -1800,7 +1822,7 @@ mod tests {
 
     #[test]
     fn a_quote_lookup_asks_for_the_row_above_the_position() {
-        let query = room_read_query(&parsed_read(&["--room", "ops", "--quote", "42"]))
+        let query = room_read_query(&parsed_read(&["--room", ROOM, "--quote", "42"]))
             .expect("quote composes");
         assert_eq!(query.after_seq, None);
         assert_eq!(query.before_seq, Some(43));
@@ -1844,19 +1866,19 @@ mod tests {
 
     #[test]
     fn a_backward_page_passes_its_cursor_through() {
-        let query = room_read_query(&parsed_read(&["--room", "ops", "--before", "9"]))
+        let query = room_read_query(&parsed_read(&["--room", ROOM, "--before", "9"]))
             .expect("backward page");
         assert_eq!(query.before_seq, Some(9));
         assert_eq!(query.after_seq, None);
         assert_eq!(query.limit, None);
         // The shape a pager actually sends: the cursor plus a page size.
         let sized = room_read_query(&parsed_read(&[
-            "--room", "ops", "--before", "9", "--limit", "20",
+            "--room", ROOM, "--before", "9", "--limit", "20",
         ]))
         .expect("sized backward page");
         assert_eq!(sized.before_seq, Some(9));
         assert_eq!(sized.limit, Some(20));
-        let plain = room_read_query(&parsed_read(&["--room", "ops"])).expect("plain page");
+        let plain = room_read_query(&parsed_read(&["--room", ROOM])).expect("plain page");
         assert_eq!(plain.after_seq, None);
         assert_eq!(plain.before_seq, None);
         assert_eq!(plain.limit, None);
@@ -1935,7 +1957,7 @@ mod tests {
     #[test]
     fn a_quote_rides_a_room_or_direct_send() {
         assert_eq!(
-            send_quote(&parsed_send(&["--room", "ops", "--quote", "7"])).expect("room send"),
+            send_quote(&parsed_send(&["--room", ROOM, "--quote", "7"])).expect("room send"),
             Some(7)
         );
         assert_eq!(
@@ -2003,7 +2025,7 @@ mod tests {
     #[test]
     fn lesche_send_rejects_a_position_below_one() {
         assert!(
-            Cli::try_parse_from(["kallip", "lesche", "send", "--room", "ops", "--quote", "0"])
+            Cli::try_parse_from(["kallip", "lesche", "send", "--room", ROOM, "--quote", "0"])
                 .is_err()
         );
     }

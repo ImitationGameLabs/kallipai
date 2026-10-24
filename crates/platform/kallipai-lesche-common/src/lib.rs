@@ -18,6 +18,7 @@
 
 pub mod direct;
 pub mod event;
+pub mod ids;
 pub mod message;
 pub mod projection;
 pub mod proof;

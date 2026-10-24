@@ -19,6 +19,19 @@ id_type! {
     RoomId
 }
 
+impl RoomId {
+    /// The room id a value spells, or `None` when it is not one.
+    ///
+    /// The lesche mints a room id as a v4 UUID spelled canonically, so that is
+    /// the shape a caller-supplied room id has to have: a second spelling of
+    /// the same room would miss every lookup keyed on the string. The judgement
+    /// is [`crate::ids::canonical_uuid`], the same one
+    /// [`crate::direct::DirectSessionId::parse`] applies.
+    pub fn parse(raw: &str) -> Option<Self> {
+        Some(Self::from(crate::ids::canonical_uuid(raw)?))
+    }
+}
+
 /// The room-domain member identity: a [`ParticipantId`] in room clothing. Rooms
 /// address their members by this id ([`RoomMember`], `room_members.member_id`,
 /// the roster, room-presence fan-out). It is the SAME derived UUID as the

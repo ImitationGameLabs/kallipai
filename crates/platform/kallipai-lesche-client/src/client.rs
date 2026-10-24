@@ -37,6 +37,7 @@ use kallipai_keryx_common::tunnel::ManageRestReply;
 use kallipai_keryx_common::tunnel::TunnelInbound;
 use kallipai_lesche_common::direct::{DirectMessageView, DirectSessionId, DirectSessionView};
 use kallipai_lesche_common::event::{LescheAgentEvent, UpstreamEvent};
+use kallipai_lesche_common::ids::path_segment;
 use kallipai_lesche_common::message::Envelope;
 use kallipai_lesche_common::proof::tunnel_transcript;
 use kallipai_lesche_common::rooms::{RoomId, TagmaRoomView};
@@ -121,20 +122,6 @@ pub struct LescheHttpError {
     op: &'static str,
     /// The HTTP status the lesche returned.
     pub status: reqwest::StatusCode,
-}
-
-/// One id placed in a request path segment.
-///
-/// What a request addresses is decided by its path, so only the bytes an id is
-/// made of pass through: a value carrying a separator, a query opener, or the
-/// `.` of a dot segment would otherwise address another resource. The alphabet
-/// is the judgement rather than a list of known-bad bytes, so no byte outside it
-/// can reshape the path, and every id the platform derives -- a plain UUID --
-/// keeps its exact form.
-fn path_segment(raw: &str) -> String {
-    const UUID_BYTES: &percent_encoding::AsciiSet =
-        &percent_encoding::NON_ALPHANUMERIC.remove(b'-');
-    percent_encoding::utf8_percent_encode(raw, UUID_BYTES).to_string()
 }
 
 impl LescheClient {
@@ -824,24 +811,6 @@ mod tests {
     use kallipai_lesche_common::message::{Envelope, Participant};
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
-
-    /// An id keeps its own bytes in the path, and nothing else does: a canonical
-    /// id rides unchanged, while separators, openers, and dot segments are
-    /// escaped so the value stays inside its one segment.
-    #[test]
-    fn a_path_segment_keeps_its_value_inside_its_segment() {
-        assert_eq!(
-            path_segment("00000000-0000-4000-8000-000000000ee5"),
-            "00000000-0000-4000-8000-000000000ee5"
-        );
-        // A dot segment is the one value that changes the path without any
-        // separator in it: `..` must never come back bare.
-        assert_eq!(path_segment(".."), "%2E%2E");
-        assert_eq!(path_segment("."), "%2E");
-        assert_eq!(path_segment("../../agents"), "%2E%2E%2F%2E%2E%2Fagents");
-        assert_eq!(path_segment("a?x=1#f"), "a%3Fx%3D1%23f");
-        assert_eq!(path_segment("100%"), "100%25");
-    }
 
     fn client(server: &MockServer) -> LescheClient {
         LescheClient::builder(&server.uri(), "sk-tagma-test")

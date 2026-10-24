@@ -7,6 +7,7 @@ license.workspace = true
 
 [dependencies]
 kallipai-common = { workspace = true }
+kallipai-lesche-common = { workspace = true }
 just-llm-client = { workspace = true }
 anyhow = { workspace = true }
 reqwest = { workspace = true }
