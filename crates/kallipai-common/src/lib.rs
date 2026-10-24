@@ -24,5 +24,7 @@ pub mod cors;
 pub mod logging;
 #[cfg(feature = "axum")]
 pub mod sse;
+#[cfg(feature = "telemetry")]
+pub mod telemetry;
 
 pub use agentid::AgentId;

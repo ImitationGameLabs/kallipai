@@ -116,16 +116,19 @@ where
 /// active log file, and the level threshold. Stdout mode keeps the plain
 /// formatted layer. The stdout writer is a parameter so tests can capture
 /// it; production passes `std::io::stdout`.
-fn service_layers<W>(
+/// An extra layer (telemetry) sits under the event layers when given: it is
+/// built for the bare registry, so it wraps that, not the composed stack.
+pub(crate) fn service_layers_with<W>(
     filter: &tracing_subscriber::EnvFilter,
     service: &str,
     dir: Option<&Path>,
     stdout: W,
+    extra: Option<Box<dyn tracing_subscriber::Layer<tracing_subscriber::Registry> + Send + Sync>>,
 ) -> impl tracing::Subscriber
 where
     W: for<'a> tracing_subscriber::fmt::MakeWriter<'a> + Send + Sync + 'static,
 {
-    let registry = tracing_subscriber::registry();
+    let registry = tracing_subscriber::registry().with(extra);
     match dir {
         None => {
             // The stdout arm keeps ANSI: it is the only channel and
@@ -154,6 +157,20 @@ where
             registry.with(file_layer)
         }
     }
+}
+
+/// Compose the plain logging stack: `service_layers_with` without an extra
+/// layer.
+pub(crate) fn service_layers<W>(
+    filter: &tracing_subscriber::EnvFilter,
+    service: &str,
+    dir: Option<&Path>,
+    stdout: W,
+) -> impl tracing::Subscriber
+where
+    W: for<'a> tracing_subscriber::fmt::MakeWriter<'a> + Send + Sync + 'static,
+{
+    service_layers_with(filter, service, dir, stdout, None)
 }
 
 /// Install the process-wide subscriber, and with it the `log`

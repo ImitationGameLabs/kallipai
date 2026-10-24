@@ -173,6 +173,23 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Daily-rolling log files for managed instances (see kallipai-tagma's logging).
 tracing-appender = "0.2"
+# OpenTelemetry tracing: kallipai-common::telemetry owns the bootstrap; only that
+# crate depends on these, behind its `telemetry` feature. OTLP/HTTP only:
+# the exporter speaks HTTP/protobuf, so nothing here needs a gRPC port.
+opentelemetry = { version = "0.33.1", default-features = false, features = [
+  "trace",
+] }
+opentelemetry_sdk = { version = "0.33.1", default-features = false, features = [
+  "trace",
+  "rt-tokio-current-thread",
+  "experimental_trace_batch_span_processor_with_async_runtime",
+] }
+opentelemetry-otlp = { version = "0.33.1", default-features = false, features = [
+  "trace",
+  "http-proto",
+  "reqwest-client",
+] }
+tracing-opentelemetry = { version = "0.34.0", default-features = false }
 rable = "0.2.0"
 clap = { version = "4.6", features = ["derive", "env"] }
 clap_complete = "4.6.11"

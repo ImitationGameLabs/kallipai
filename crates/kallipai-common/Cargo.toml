@@ -9,6 +9,13 @@ license.workspace = true
 default = ["axum"]
 axum = ["dep:axum", "dep:tower-http"]
 logging = ["dep:tracing-subscriber", "dep:tracing-appender"]
+telemetry = [
+  "logging",
+  "dep:opentelemetry",
+  "dep:opentelemetry_sdk",
+  "dep:opentelemetry-otlp",
+  "dep:tracing-opentelemetry",
+]
 
 [dependencies]
 axum = { workspace = true, optional = true }
@@ -24,6 +31,10 @@ tracing = { workspace = true }
 tower-http = { workspace = true, optional = true }
 tracing-appender = { workspace = true, optional = true }
 tracing-subscriber = { workspace = true, optional = true }
+opentelemetry = { workspace = true, optional = true }
+opentelemetry_sdk = { workspace = true, optional = true }
+opentelemetry-otlp = { workspace = true, optional = true }
+tracing-opentelemetry = { workspace = true, optional = true }
 uuid = { workspace = true }
 base64 = { workspace = true }
 getrandom = { workspace = true }
