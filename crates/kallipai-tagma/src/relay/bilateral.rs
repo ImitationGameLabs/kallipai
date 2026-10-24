@@ -116,7 +116,18 @@ impl RelayHandle {
         // the first post-reconnect tick) falls through and is dropped here --
         // the same inherited cold-window behavior as rooms, self-correcting
         // via history pull and the next tick.
-        let session = DirectSessionId::from(envelope.channel_id.as_ref().to_string());
+        // The id a direct-session envelope carries is the one the lesche minted
+        // and every hop copied, so it spells a session id exactly. A channel id
+        // that does not spell one cannot name a session, and the cache lookup
+        // below could only answer no to it: stated in the log and dropped here,
+        // never carried on as a 1:1 envelope.
+        let Some(session) = DirectSessionId::parse(envelope.channel_id.as_ref()) else {
+            warn!(
+                conv = %envelope.channel_id,
+                "user op dropped: channel id is not a canonical session id"
+            );
+            return;
+        };
         if state.direct_sessions.is_session(&session).await {
             let payload = RoomPayload {
                 sender_id: sender.id.as_ref().to_string(),

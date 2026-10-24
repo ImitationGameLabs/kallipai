@@ -60,6 +60,23 @@ impl DirectSessionId {
         let bits = (hashed.as_u128() & !(0xF_u128 << 76)) | (4_u128 << 76);
         Self(Uuid::from_u128(bits).to_string())
     }
+
+    /// The canonical spelling of a session id: a lowercase hyphenated UUID.
+    ///
+    /// A direct-session id is DERIVED, never minted: both endpoints compute the
+    /// same UUID string, so that is the shape every writer emits. Accepting only
+    /// it keeps one session one value wherever the id is compared, cached, or
+    /// placed in a request path -- the member-set lookup and the relay cache key
+    /// on the bytes, so a second spelling would be a second session.
+    pub fn parse(raw: &str) -> Option<Self> {
+        let parsed = Uuid::parse_str(raw).ok()?;
+        let canonical = parsed.hyphenated().to_string();
+        if canonical == raw {
+            Some(Self(canonical))
+        } else {
+            None
+        }
+    }
 }
 
 /// Canonical (byte-ordered) form of a session's member pair: `(min, max)` by
@@ -238,5 +255,35 @@ mod tests {
         let legacy: DirectMessage = serde_json::from_str(r#"{"text":"hi"}"#).unwrap();
         assert_eq!(legacy.quote, None);
         assert_eq!(serde_json::to_vec(&legacy).unwrap(), br#"{"text":"hi"}"#);
+    }
+
+    #[test]
+    fn a_session_id_parses_only_in_its_canonical_spelling() {
+        // The uuid parser also accepts the braced, URN, and unhyphenated
+        // forms, and any case: none of them is the id this platform derives,
+        // so each is refused rather than normalized to it.
+        let canonical = DirectSessionId::for_pair(
+            &tagma("6d42c8c5-2e9c-4896-af0e-e714ec3e3560"),
+            &tagma("0e70ad8c-5340-41ba-b106-ea0050d86daf"),
+        );
+        assert_eq!(
+            DirectSessionId::parse(canonical.as_ref()).as_ref(),
+            Some(&canonical)
+        );
+        for raw in [
+            "6D42C8C5-2E9C-4896-AF0E-E714EC3E3560",
+            "{6d42c8c5-2e9c-4896-af0e-e714ec3e3560}",
+            "urn:uuid:6d42c8c5-2e9c-4896-af0e-e714ec3e3560",
+            "6d42c8c52e9c4896af0ee714ec3e3560",
+            "../../agents",
+            "6d42c8c5-2e9c-4896-af0e-e714ec3e3560?x=1",
+            "sess-1",
+            "",
+        ] {
+            assert!(
+                DirectSessionId::parse(raw).is_none(),
+                "accepted a non-canonical session id: {raw}"
+            );
+        }
     }
 }

@@ -197,6 +197,13 @@ pub async fn read_room_messages(
             "after_seq and before_seq are mutually exclusive",
         ));
     }
+    // A position is an ordinal in the room's log, so a negative one is not a
+    // direction: the lesche would read it as "from the start" and answer a
+    // page nobody asked for. Refused here for the reason above -- the shape is
+    // this request's, and the lesche's 400 would arrive as a 502.
+    if q.after_seq.is_some_and(|seq| seq < 0) || q.before_seq.is_some_and(|seq| seq < 0) {
+        return Err(ApiError::bad_request("a position cannot be negative"));
+    }
     let room = RoomId::from(room);
     // Route via room ownership: each relay's poll keys its slice of the
     // joined-rooms cache by entry name, and a room id is unique to the lesche
@@ -724,10 +731,10 @@ pub async fn read_direct_session_messages(
     Query(q): Query<DirectHistoryQuery>,
 ) -> Result<Response, ApiError> {
     require_root_self_or_operator(&state, auth.identity(), &id).await?;
-    // The query's own format is answered first: a malformed one is this
+    // The query's own shape is answered first: a malformed one is this
     // request's fault whether or not a relay happens to be installed, and a
     // missing relay would blame the wrong party.
-    let json = direct_read_format(&q)?;
+    let json = direct_read_query(&q)?;
     // TagmaId parses leniently (an opaque id string); an unknown peer
     // surfaces from the lesche history read as a 404, not a 400.
     let peer = TagmaId::from(peer_str);
@@ -756,20 +763,32 @@ pub async fn read_direct_session_messages_by_id(
     Query(q): Query<DirectHistoryQuery>,
 ) -> Result<Response, ApiError> {
     require_root_self_or_operator(&state, auth.identity(), &id).await?;
-    // Same answer as the pair-addressed route: the format is the query's own
+    // Same answer as the pair-addressed route: the query is the caller's own
     // to get wrong, before anything is looked up.
-    let json = direct_read_format(&q)?;
-    read_direct_session(&state, &DirectSessionId::from(session), q, json).await
+    let json = direct_read_query(&q)?;
+    // The id was spelled by whoever wrote the command, and nothing here
+    // derived it: a value that is not a canonical session id cannot name a
+    // session, so it is refused as this request's mistake rather than carried
+    // into a member-set lookup that could only say no to it.
+    let Some(session) = DirectSessionId::parse(&session) else {
+        return Err(ApiError::bad_request("not a canonical session id"));
+    };
+    read_direct_session(&state, &session, q, json).await
 }
 
-/// Whether the query asks for the json variant, and the one refusal a format
-/// can earn.
+/// Whether the query asks for the json variant, and the refusals a query can
+/// earn on its own.
 ///
 /// Only `json` is accepted: a future format must not silently mean the text
-/// render. Both entry points ask this before they resolve a relay, so a
-/// malformed query is answered as such rather than as a relay that happens to
-/// be missing.
-fn direct_read_format(q: &DirectHistoryQuery) -> Result<bool, ApiError> {
+/// render. A position is an ordinal in the session's log, so a negative one is
+/// not a direction -- the lesche would read it as "from the start" and answer a
+/// page nobody asked for. Both entry points ask this before they resolve a
+/// relay, so a malformed query is answered as such rather than as a relay that
+/// happens to be missing.
+fn direct_read_query(q: &DirectHistoryQuery) -> Result<bool, ApiError> {
+    if q.after_seq.is_some_and(|seq| seq < 0) {
+        return Err(ApiError::bad_request("a position cannot be negative"));
+    }
     match q.format.as_deref() {
         None => Ok(false),
         Some("json") => Ok(true),
@@ -1681,7 +1700,7 @@ mod tests {
         let err = read_direct_session_messages_by_id(
             State(state),
             AuthIdentity::test_new(Identity::Agent { id: id.clone() }),
-            Path((id, "sess-1".to_string())),
+            Path((id, "00000000-0000-0000-0000-0000000000a1".to_string())),
             Query(DirectHistoryQuery {
                 after_seq: None,
                 limit: None,
@@ -1692,6 +1711,80 @@ mod tests {
         .expect_err("a format the route does not serve is 400");
 
         assert_eq!(err.status, 400, "bad request, not a missing relay");
+    }
+
+    /// The session-addressed read is handed an id somebody spelled, so its
+    /// shape is this request's own: a value that cannot name a session is
+    /// refused as a bad request rather than carried to a member-set lookup
+    /// that could only say no to it.
+    #[tokio::test]
+    async fn a_session_id_that_is_not_canonical_is_refused() {
+        let state = make_state();
+        let id = AgentId::random();
+        let entry = make_entry(None, "tok".to_string());
+        state
+            .registry
+            .write()
+            .await
+            .register(id.clone(), RegistryEntry::Live(entry));
+
+        let err = read_direct_session_messages_by_id(
+            State(state),
+            AuthIdentity::test_new(Identity::Agent { id: id.clone() }),
+            Path((id, "../../agents".to_string())),
+            Query(DirectHistoryQuery {
+                after_seq: None,
+                limit: None,
+                format: None,
+            }),
+        )
+        .await
+        .expect_err("a value that cannot name a session is this request's mistake");
+
+        assert_eq!(err.status, 400, "bad request, not an unavailable relay");
+    }
+
+    /// A position is an ordinal in the log, so a negative one is no direction
+    /// at all. Both reads answer it here: the lesche would read it as "from the
+    /// start", and this hop would surface that answer as an upstream fault.
+    #[tokio::test]
+    async fn a_negative_position_is_refused_by_both_reads() {
+        let state = make_state();
+        let id = AgentId::random();
+        let entry = make_entry(None, "tok".to_string());
+        state
+            .registry
+            .write()
+            .await
+            .register(id.clone(), RegistryEntry::Live(entry));
+
+        let direct = read_direct_session_messages(
+            State(state.clone()),
+            AuthIdentity::test_new(Identity::Agent { id: id.clone() }),
+            Path((id.clone(), "tagma-b".to_string())),
+            Query(DirectHistoryQuery {
+                after_seq: Some(-1),
+                limit: None,
+                format: None,
+            }),
+        )
+        .await
+        .expect_err("a negative position is not a page direction");
+        assert_eq!(direct.status, 400, "bad request, not an unavailable relay");
+
+        let room = read_room_messages(
+            State(state),
+            AuthIdentity::test_new(Identity::Agent { id: id.clone() }),
+            Path((id, "00000000-0000-0000-0000-000000000aa1".to_string())),
+            Query(LescheHistoryQuery {
+                after_seq: Some(-1),
+                before_seq: None,
+                limit: None,
+            }),
+        )
+        .await
+        .expect_err("a negative position is not a page direction");
+        assert_eq!(room.status, 400, "bad request, not an unavailable relay");
     }
 
     /// The unified session list with no relays and no projector returns an

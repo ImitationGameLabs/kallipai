@@ -1390,6 +1390,40 @@ async fn a_direct_payload_carrying_a_quote_renders_the_segment() {
     );
 }
 
+/// A channel id that does not spell a session id names no session: no inbox
+/// row, no bilateral reply, and nothing carried on to the 1:1 path.
+#[tokio::test]
+async fn a_channel_id_that_is_not_a_session_id_is_dropped() {
+    let (handle, _key, capture, _signals, _prompt_rx, root_id, state, _history) =
+        setup_inner(8, None).await;
+    // A session id in a spelling the platform never derives, so the cache
+    // cannot hold it and the value cannot be a session.
+    let mut envelope = direct_envelope(
+        &DirectSessionId::from("00000000-0000-4000-8000-000000000ee5".to_string()),
+        "hi direct",
+        "Bob",
+        None,
+    );
+    envelope.channel_id = ChannelId::from("00000000-0000-4000-8000-000000000EE5".to_string());
+
+    handle.handle_user_op(envelope).await;
+
+    let leaked = state
+        .inboxes
+        .get()
+        .unwrap()
+        .pull_undelivered(&root_id)
+        .await;
+    assert!(
+        leaked.is_none(),
+        "a channel id that names no session must reach no inbox"
+    );
+    assert!(
+        capture.lock().await.is_empty(),
+        "a channel id that names no session must produce no bilateral reply"
+    );
+}
+
 /// The converged slot primitive: start is idempotent, stop clears the slot,
 /// and a stopped slot accepts a fresh pump.
 #[tokio::test]
