@@ -217,9 +217,10 @@ pub async fn read_room_messages(
     // resolved for the reason above.
     refuse_negative_position(&[q.after_seq, q.before_seq])?;
     let room = RoomId::from(room);
-    // The room id rides this read's path to the lesche, and a dot segment
-    // survives encoding, so it is refused here: the client's own refusal
-    // would leave this hop and answer a retryable-looking 502.
+    // The room id rides this read's path to the lesche, and a dot
+    // segment survives encoding, so it is refused here: left to the
+    // client, the value would answer this hop's 503 (no relay owns it)
+    // and read as a missing relay.
     check_segment(room.as_ref()).map_err(|err| ApiError::bad_request(format!("room id: {err}")))?;
     // Route via room ownership: each relay's poll keys its slice of the
     // joined-rooms cache by entry name, and a room id is unique to the lesche
@@ -2839,6 +2840,53 @@ mod tests {
             err.message,
             "after_seq and before_seq are mutually exclusive"
         );
+    }
+
+    /// The answer both room seams give a dot-segment id: the shape
+    /// sentence a caller reads, kept in one place so the pins cannot
+    /// drift.
+    const DOT_SEGMENT_ANSWER: &str = "room id: an id cannot be a dot segment";
+
+    /// A dot segment survives percent-encoding, so the room read
+    /// refuses it at this hop: left to the client, the value would
+    /// answer this hop's 503 (no relay owns it) rather than name the
+    /// request's own shape.
+    #[tokio::test]
+    async fn read_room_rejects_a_dot_segment_at_this_hop() {
+        let state = make_state();
+        let id = AgentId::random();
+        state.registry.write().await.register(
+            id.clone(),
+            RegistryEntry::Live(make_entry(None, "tok".into())),
+        );
+
+        let err = read_room_messages(
+            State(state),
+            AuthIdentity::test_new(Identity::Agent { id: id.clone() }),
+            Path((id, "..".to_string())),
+            Query(LescheHistoryQuery {
+                after_seq: None,
+                before_seq: None,
+                limit: None,
+            }),
+        )
+        .await
+        .expect_err("a dot segment -> 400");
+        assert_eq!(err.status, 400, "expected 400, got {}", err.status);
+        assert_eq!(err.message, DOT_SEGMENT_ANSWER);
+    }
+
+    /// The room send judges the same value the read does, before any relay is
+    /// resolved: a dot segment is this request's shape, not a backup path.
+    #[tokio::test]
+    async fn send_room_rejects_a_dot_segment_at_this_hop() {
+        let state = make_state();
+
+        let err = send_room_message(&state, "..".to_string(), "hello".into(), None, Vec::new())
+            .await
+            .expect_err("a dot segment -> 400");
+        assert_eq!(err.status, 400, "expected 400, got {}", err.status);
+        assert_eq!(err.message, DOT_SEGMENT_ANSWER);
     }
 
     /// The backward cursor crosses this hop: the lesche is asked for the page
