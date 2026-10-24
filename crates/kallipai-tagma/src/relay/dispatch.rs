@@ -25,7 +25,7 @@ const QUOTE_READ_FETCH_FAILED: &str = "the page fetch failed";
 const QUOTE_READ_ROW_MISSING: &str = "the fetched page did not hold that row";
 const QUOTE_READ_DECODE_FAILED: &str = "the row did not decode";
 const QUOTE_READ_POSITION_OUT_OF_RANGE: &str = "the position leaves no page to fetch";
-const QUOTE_READ_ANSWERED_NO_ROW: &str = "the surface answered that it holds no such row";
+const QUOTE_READ_REFUSED: &str = "the surface would not show that row";
 
 /// A read that produced no row to render, in the two shapes the reference tells
 /// apart. An absence means the read answered and its answer is that the log
@@ -47,7 +47,7 @@ enum NoRow {
 /// that answer does not establish that the log holds no such row.
 fn no_row_of_fetch(err: &anyhow::Error) -> NoRow {
     match err.downcast_ref::<kallipai_lesche_client::LescheHttpError>() {
-        Some(http) if http.status.as_u16() == 404 => NoRow::Failed(QUOTE_READ_ANSWERED_NO_ROW),
+        Some(http) if http.status.as_u16() == 404 => NoRow::Failed(QUOTE_READ_REFUSED),
         _ => NoRow::Failed(QUOTE_READ_FETCH_FAILED),
     }
 }
@@ -190,12 +190,12 @@ impl RelayHandle {
     /// reference that cannot be rendered never vanishes without a trace.
     ///
     /// The two no-row shapes stay apart. A log that holds no row at the
-    /// position -- a page beside it, a position with no page to fetch, or a
-    /// lesche answering 404, its word that this reader has no such row -- is
-    /// [`QuoteRead::Absent`]. A fetch that broke, a payload that no longer
-    /// decodes, or a read past the budget is [`QuoteRead::Failed`]. The first
-    /// says the history is missing that row; the second says nothing about the
-    /// row at all.
+    /// position -- a page beside it, or a position with no page to fetch -- is
+    /// [`QuoteRead::Absent`]. A fetch that broke, a surface refusing to show
+    /// this reader the row (its 404), a payload that no longer decodes, or a
+    /// read past the budget is [`QuoteRead::Failed`]. The first says the
+    /// history is missing that row; the second says nothing about the row at
+    /// all.
     ///
     /// Both surfaces number rows from 1 and callers pass only positive
     /// positions; each branch still states what it does with a position that
