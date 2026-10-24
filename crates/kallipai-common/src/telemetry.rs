@@ -196,25 +196,50 @@ pub fn service_layers<W>(
 where
     W: for<'a> tracing_subscriber::fmt::MakeWriter<'a> + Send + Sync + 'static,
 {
-    let (extra, guard) = match config {
-        None => (None, Guard::inert()),
-        Some(config) => match build_export_layer(config, service, filter) {
-            Ok((layer, provider)) => (
-                Some(layer),
-                Guard {
-                    provider: Some(provider),
-                },
-            ),
-            Err(error) => {
-                eprintln!(
-                    "kallipai: {service} telemetry export disabled ({error}); tracing stays local"
-                );
-                (None, Guard::inert())
-            }
-        },
-    };
+    let (extra, guard) = export_layer(config, filter, service);
     let subscriber = logging::service_layers_with(filter, service, dir, stdout, extra);
     (subscriber, guard)
+}
+
+/// The export layer and its guard, for a service that assembles its own
+/// subscriber: the tagma keeps a stderr/file policy, a log-directory ownership
+/// rule and a panic hook that have no place in the shared bootstrap, so it
+/// composes its registry itself and takes only this layer.
+///
+/// `None` with an inert guard means nothing is exported: no endpoint is set,
+/// or the exporter could not be built (one stderr line, tracing stays local).
+pub fn export_layer(
+    config: Option<&Config>,
+    filter: &EnvFilter,
+    service: &str,
+) -> (Option<Box<dyn Layer<Registry> + Send + Sync>>, Guard) {
+    let Some(config) = config else {
+        return (None, Guard::inert());
+    };
+    match build_export_layer(config, service, filter) {
+        Ok((layer, provider)) => (
+            Some(layer),
+            Guard {
+                provider: Some(provider),
+            },
+        ),
+        Err(error) => {
+            eprintln!(
+                "kallipai: {service} telemetry export disabled ({error}); tracing stays local"
+            );
+            (None, Guard::inert())
+        }
+    }
+}
+
+/// Publish the guard's provider as the process-wide one, with the W3C
+/// propagator, so the spans a service records and the context its clients
+/// inject belong to the same trace. Inert when nothing is exported.
+pub fn install_globals(guard: &Guard) {
+    if let Some(provider) = guard.provider.as_ref() {
+        opentelemetry::global::set_text_map_propagator(TraceContextPropagator::new());
+        opentelemetry::global::set_tracer_provider(provider.clone());
+    }
 }
 
 /// Install the process-wide subscriber and, when an endpoint is configured,
@@ -224,10 +249,7 @@ pub fn init_service_telemetry(filter: &EnvFilter, service: &str, dir: Option<&Pa
     let config = config_from_env();
     let (subscriber, guard) =
         service_layers(config.as_ref(), filter, service, dir, std::io::stdout);
-    if let Some(provider) = guard.provider.as_ref() {
-        opentelemetry::global::set_text_map_propagator(TraceContextPropagator::new());
-        opentelemetry::global::set_tracer_provider(provider.clone());
-    }
+    install_globals(&guard);
     subscriber.try_init().ok();
     guard
 }
@@ -244,8 +266,8 @@ const UNMATCHED_ROUTE: &str = "unmatched";
 /// recorded once the response exists, and a server-side failure also carries an
 /// error type and the failed status, so a trace can be filtered for them.
 ///
-/// Mount it with [`with_server_span`]; the platform services mount this one
-/// layer, so a trace reads the same whichever service answered.
+/// Mount it with [`with_server_span`]; every axum router mounts this one layer,
+/// so a trace reads the same whichever service answered.
 #[cfg(feature = "axum")]
 pub async fn server_span(
     request: axum::extract::Request,
@@ -732,5 +754,23 @@ mod tests {
             Some("500")
         );
         assert_eq!(fields.get("error.type").as_deref(), Some("http_500"));
+    }
+
+    #[test]
+    fn export_layer_stays_inert_without_a_configuration() {
+        let (layer, mut guard) = export_layer(None, &test_filter(), "tagma");
+        assert!(layer.is_none(), "an unconfigured service exports nothing");
+        assert!(!guard.shutdown(), "an inert guard owns no provider");
+    }
+
+    #[test]
+    fn export_layer_carries_the_layer_and_the_guard_when_configured() {
+        let dead = config("http://127.0.0.1:1/v1/traces");
+        let (layer, mut guard) = export_layer(Some(&dead), &test_filter(), "tagma");
+        assert!(
+            layer.is_some(),
+            "a configured service exports through this layer"
+        );
+        assert!(guard.shutdown(), "a configured guard owns a provider");
     }
 }

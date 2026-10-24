@@ -122,7 +122,7 @@ tokio-util = { version = "0.7", features = ["rt"] }
 
 axum = "0.8"
 tower = { version = "0.5", features = ["util"] }
-tower-http = { version = "0.6", features = ["trace", "cors", "fs"] }
+tower-http = { version = "0.6", features = ["cors", "fs"] }
 tokio-stream = "0.1"
 uuid = { version = "1", features = ["v4", "v5", "serde"] }
 sea-orm = { version = "1.1", default-features = false, features = [

@@ -3,11 +3,12 @@
 //! axum 0.8 house style: `Router<SharedState>`, `cors_layer()` mirrors tagma's
 //! (origin/methods wildcarded — the bearer is the real boundary; headers use
 //! `AllowHeaders::mirror_request()` so `Authorization` survives preflight),
-//! body-limit outermost. Every management request carries the caller's bearer
-//! plus the claimed agent id (`agent_id` in the create body, `?agent=` query on
-//! the rest); the handler verifies the pair via the tagma and scopes to that
-//! agent's own schedules. `PATCH` is status-only — `next_fire`/`last_fire` are
-//! never client-mutable, which holds the no-rearm invariant.
+//! the span outermost and the body limit innermost. Every management request
+//! carries the caller's bearer plus the claimed agent id (`agent_id` in the
+//! create body, `?agent=` query on the rest); the handler verifies the pair
+//! via the tagma and scopes to that agent's own schedules. `PATCH` is
+//! status-only — `next_fire`/`last_fire` are never client-mutable, which
+//! holds the no-rearm invariant.
 
 use axum::{
     Json, Router,

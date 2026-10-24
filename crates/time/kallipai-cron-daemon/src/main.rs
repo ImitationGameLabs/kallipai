@@ -35,7 +35,11 @@ async fn main() -> Result<()> {
 
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
-    tracing_subscriber::fmt().with_env_filter(filter).init();
+
+    // The shared bootstrap: the same subscriber shape as the platform
+    // services, plus the span export layer when an endpoint is configured.
+    let _telemetry =
+        kallipai_common::telemetry::init_service_telemetry(&filter, "cron-daemon", None);
 
     anyhow::ensure!(
         args.tick_interval_ms >= 1000,
@@ -110,8 +114,8 @@ async fn main() -> Result<()> {
     let app = routes::router()
         .with_state(state)
         .layer(axum::extract::DefaultBodyLimit::max(64 * 1024))
-        .layer(routes::cors_layer())
-        .layer(tower_http::trace::TraceLayer::new_for_http());
+        .layer(routes::cors_layer());
+    let app = kallipai_common::telemetry::with_server_span(app);
 
     info!(addr = %args.listen_addr, "kallipai-cron-daemon listening (loopback only)");
     let listener = tokio::net::TcpListener::bind(&args.listen_addr)

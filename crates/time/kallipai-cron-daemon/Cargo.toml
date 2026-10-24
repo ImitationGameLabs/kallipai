@@ -7,7 +7,7 @@ license.workspace = true
 
 [dependencies]
 kallipai-cron-common = { workspace = true }
-kallipai-common = { workspace = true, features = ["axum"] }
+kallipai-common = { workspace = true, features = ["axum", "telemetry"] }
 kallipai-client = { workspace = true }
 kallipai-db-helper = { workspace = true }
 sea-orm = { workspace = true, features = ["sqlx-sqlite"] }

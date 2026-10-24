@@ -12,7 +12,8 @@ fn main() -> Result<()> {
 
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
-    init_logging(&filter);
+    // The guard keeps the span exporter alive to the end of main.
+    let _telemetry = init_logging(&filter);
 
     // Env governance before the async runtime exists: edition 2024 marks
     // remove_var unsafe because a concurrent getenv on another thread is

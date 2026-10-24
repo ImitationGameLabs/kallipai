@@ -455,7 +455,7 @@ pub async fn run(args: Args, operator_pin: Option<String>) -> Result<()> {
     let app = routes::router().with_state(state.clone());
 
     // Layering: each `.layer` wraps what was built so far, so the LAST layer
-    // added (TraceLayer) is outermost and the body size limit is innermost.
+    // added is outermost and the body size limit is innermost.
     // The limit is enforced when the body is extracted, and neither CORS nor
     // tracing consumes it in passing. When max_body_size_kb > 0, enforce the
     // configured limit; when 0, axum's built-in default (2 MB) applies.
@@ -466,8 +466,8 @@ pub async fn run(args: Args, operator_pin: Option<String>) -> Result<()> {
     } else {
         app
     }
-    .layer(routes::cors_layer())
-    .layer(tower_http::trace::TraceLayer::new_for_http());
+    .layer(routes::cors_layer());
+    let app = kallipai_common::telemetry::with_server_span(app);
 
     let listener = tokio::net::TcpListener::bind(&args.listen_addr)
         .await
@@ -713,8 +713,17 @@ fn logs_target() -> Result<std::path::PathBuf> {
 /// The subscriber also carries the `log` compatibility layer, so
 /// producers that only speak `log`, a dependency's stray warning among
 /// them, land in the same channel.
-pub fn init_logging(filter: &tracing_subscriber::EnvFilter) {
+///
+/// When `OTEL_EXPORTER_OTLP_ENDPOINT` is set the same registry also carries
+/// the span export layer, so this process is traced like the services on the
+/// shared bootstrap; the returned guard flushes it on the way out.
+pub fn init_logging(filter: &tracing_subscriber::EnvFilter) -> kallipai_common::telemetry::Guard {
     use tracing_subscriber::prelude::*;
+
+    let config = kallipai_common::telemetry::config_from_env();
+    let (export, telemetry) =
+        kallipai_common::telemetry::export_layer(config.as_ref(), filter, "tagma");
+    kallipai_common::telemetry::install_globals(&telemetry);
 
     let stderr_layer = || {
         tracing_subscriber::fmt::layer()
@@ -767,9 +776,14 @@ pub fn init_logging(filter: &tracing_subscriber::EnvFilter) {
     let file_layer_live = file_layer.is_some();
     match file_layer {
         // The file layer alone carries the events.
-        Some(file) => tracing_subscriber::registry().with(file).try_init().ok(),
+        Some(file) => tracing_subscriber::registry()
+            .with(export)
+            .with(file)
+            .try_init()
+            .ok(),
         // The variable asked for stderr, or the file layer failed to build.
         None => tracing_subscriber::registry()
+            .with(export)
             .with(stderr_layer())
             .try_init()
             .ok(),
@@ -790,6 +804,7 @@ pub fn init_logging(filter: &tracing_subscriber::EnvFilter) {
             hook(info);
         }
     }));
+    telemetry
 }
 
 /// `KALLIPAI_TAGMA_LOG_TO_STDERR`: `1`/`true` (case-insensitive) turns on
