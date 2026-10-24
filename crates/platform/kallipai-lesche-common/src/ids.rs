@@ -2,9 +2,9 @@
 //!
 //! Both questions belong to the id types this crate defines, so both answers
 //! live here: `canonical_uuid` is the shape the platform mints, and
-//! [`path_segment`] is the one rule for putting an id inside a path. Every
-//! client that addresses a lesche, a tagma, or a room through a URL uses this
-//! rule instead of pasting the raw value into a format string.
+//! [`path_segment`] is the one rule for putting an id inside a path. Every Rust
+//! client in this workspace that puts an id in a lesche URL uses this rule
+//! instead of pasting the raw value into a format string.
 
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 

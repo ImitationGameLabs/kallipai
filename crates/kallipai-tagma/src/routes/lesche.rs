@@ -23,6 +23,7 @@ use kallipai_common::protocol::{ApiError, Modality};
 use kallipai_lesche_common::direct::{
     DirectMessage, DirectMessageView, DirectSessionId, FileAttachment,
 };
+use kallipai_lesche_common::ids::check_segment;
 use kallipai_lesche_common::message::{Envelope, Participant, RoomMessage, checked_mentions};
 use kallipai_lesche_common::rooms::{MemberId, RoomId};
 use serde::{Deserialize, Serialize};
@@ -216,6 +217,10 @@ pub async fn read_room_messages(
     // resolved for the reason above.
     refuse_negative_position(&[q.after_seq, q.before_seq])?;
     let room = RoomId::from(room);
+    // The room id rides this read's path to the lesche, and a dot segment
+    // survives encoding, so it is refused here: the client's own refusal
+    // would leave this hop and answer a retryable-looking 502.
+    check_segment(room.as_ref()).map_err(|err| ApiError::bad_request(format!("room id: {err}")))?;
     // Route via room ownership: each relay's poll keys its slice of the
     // joined-rooms cache by entry name, and a room id is unique to the lesche
     // that created it, so the owning relay's client serves the read. A cold
@@ -458,6 +463,9 @@ async fn send_room_message(
     mentions: Vec<MemberId>,
 ) -> Result<(), ApiError> {
     let room = RoomId::from(room_str);
+    // Same rule as the read: the id reaches the lesche in a path segment, so
+    // a dot segment is this request's own shape and answers 400.
+    check_segment(room.as_ref()).map_err(|err| ApiError::bad_request(format!("room id: {err}")))?;
     // Shared burst cap with the bilateral path (the projector owns the limiter).
     let projector = state
         .external

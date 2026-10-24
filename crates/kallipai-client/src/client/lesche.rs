@@ -140,7 +140,8 @@ impl TagmaClient {
                 self.inner
                     .http
                     .get(self.url(&format!(
-                        "/agents/{id}/lesche/rooms/{}/messages",
+                        "/agents/{}/lesche/rooms/{}/messages",
+                        path_segment(id.as_ref())?,
                         path_segment(room)?
                     )))
                     .query(&params),
@@ -185,7 +186,8 @@ impl TagmaClient {
                 self.inner
                     .http
                     .get(self.url(&format!(
-                        "/agents/{id}/lesche/direct-sessions/{}/messages",
+                        "/agents/{}/lesche/direct-sessions/{}/messages",
+                        path_segment(id.as_ref())?,
                         path_segment(peer)?
                     )))
                     .query(&params),
@@ -228,7 +230,8 @@ impl TagmaClient {
                 self.inner
                     .http
                     .get(self.url(&format!(
-                        "/agents/{id}/lesche/sessions/{}/messages",
+                        "/agents/{}/lesche/sessions/{}/messages",
+                        path_segment(id.as_ref())?,
                         path_segment(session)?
                     )))
                     .query(&params),
@@ -254,11 +257,10 @@ impl TagmaClient {
     /// not hold is the route's error, never an empty body.
     pub async fn read_quote(&self, id: &AgentId, quote: i64) -> Result<String> {
         let response = self
-            .with_auth(
-                self.inner
-                    .http
-                    .get(self.url(&format!("/agents/{id}/external/history/{quote}"))),
-            )
+            .with_auth(self.inner.http.get(self.url(&format!(
+                "/agents/{}/external/history/{quote}",
+                path_segment(id.as_ref())?
+            ))))
             .send()
             .await
             .context("failed to read the quoted row")?;
@@ -368,6 +370,37 @@ mod tests {
                 format!("/agents/{id}/lesche/sessions/%2E%2E%2Frooms%2Fabc/messages"),
             ],
             "each id stays in its own segment"
+        );
+    }
+
+    /// The id the client acts as is no safer than a caller-supplied one: a value
+    /// that is not one UUID cannot walk out of the first path segment.
+    #[tokio::test]
+    async fn a_crafted_agent_id_stays_inside_its_segment() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(""))
+            .mount(&server)
+            .await;
+        client_for(&server)
+            .read_room_messages(
+                &AgentId::from("a/../../profiles".to_string()),
+                "room-1",
+                RoomReadQuery::default(),
+            )
+            .await
+            .expect("the read is sent");
+        let paths = server
+            .received_requests()
+            .await
+            .expect("requests recorded")
+            .iter()
+            .map(|request| request.url.path().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            paths,
+            ["/agents/a%2F%2E%2E%2F%2E%2E%2Fprofiles/lesche/rooms/room-1/messages"],
+            "the agent id stays in the first segment"
         );
     }
 

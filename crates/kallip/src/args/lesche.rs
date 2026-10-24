@@ -45,9 +45,10 @@ pub(crate) struct SendArgs {
     /// id). Sends into that tagma's direct session; the first send
     /// creates it (idempotent to re-send). Note: attachments must live in a
     /// workspace the peer can read — a private-area file record fails the
-    /// peer's fetch with 403. The id rides a request path, so an empty
-    /// value or a dot segment is refused here.
-    #[arg(long, allow_hyphen_values = true, value_parser = tagma_id)]
+    /// peer's fetch with 403. This value travels in the request body, but it is
+    /// the same peer id `read --tagma` puts in a path, so the flag judges it by
+    /// that rule: an empty value or a dot segment is refused here.
+    #[arg(long, allow_hyphen_values = true, value_parser = path_segment_value)]
     pub tagma: Option<String>,
     /// The position, in that conversation's own log, that this message answers
     /// -- a room's `seq`, or that session's own `seq`. A room or `--tagma`
@@ -95,7 +96,7 @@ pub(crate) struct ReadArgs {
     #[arg(
         long,
         allow_hyphen_values = true,
-        value_parser = tagma_id,
+        value_parser = path_segment_value,
         conflicts_with_all = ["room", "session"]
     )]
     pub tagma: Option<String>,
@@ -171,23 +172,22 @@ fn session_id(raw: &str) -> Result<String, String> {
         .ok_or_else(|| format!("{raw:?} is not a session id: expected a canonical UUID"))
 }
 
-/// A peer tagma id, as far as it can be judged here: not empty, and not a dot
-/// segment.
+/// A value that may stand as one request path segment: not empty, and not a
+/// dot segment.
 ///
-/// The value rides one request path segment, and a dot segment survives
-/// percent-encoding -- a URL parser resolves it after decoding -- so the CLI
-/// refuses it here rather than letting the request reach a route the caller
-/// did not name. The judgement is [`check_segment`], the one the encoder
-/// applies.
-fn tagma_id(raw: &str) -> Result<String, String> {
+/// A dot segment survives percent-encoding -- a URL parser resolves it after
+/// decoding -- so nothing downstream can hold it inside the segment it was
+/// pasted into, and the value is judged here instead. The judgement is
+/// [`check_segment`], the one the encoder applies.
+fn path_segment_value(raw: &str) -> Result<String, String> {
     check_segment(raw)
         .map(|()| raw.to_owned())
-        .map_err(|err| format!("{raw:?} is not a tagma id: {err}"))
+        .map_err(|err| format!("{raw:?} cannot be one path segment: {err}"))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{room_id, session_id, tagma_id};
+    use super::{path_segment_value, room_id, session_id};
 
     /// A caller-supplied id has to be the canonical spelling the lesche mints:
     /// the value rides a request path, so any other spelling is refused here
@@ -211,9 +211,12 @@ mod tests {
     /// cannot hold inside a segment are refused at the flag.
     #[test]
     fn a_tagma_id_cannot_be_a_dot_segment() {
-        assert_eq!(tagma_id("tagma-abc").as_deref(), Ok("tagma-abc"));
+        assert_eq!(path_segment_value("tagma-abc").as_deref(), Ok("tagma-abc"));
         for raw in ["", ".", ".."] {
-            assert!(tagma_id(raw).is_err(), "tagma id accepted: {raw:?}");
+            assert!(
+                path_segment_value(raw).is_err(),
+                "tagma id accepted: {raw:?}"
+            );
         }
     }
 }

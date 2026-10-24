@@ -917,6 +917,24 @@ mod tests {
             .expect("accepted");
     }
 
+    /// A dot segment cannot be encoded away, so the value is refused where the
+    /// path is built: no request leaves the client.
+    #[tokio::test]
+    async fn a_dot_segment_room_is_refused_before_any_request() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(202))
+            .mount(&server)
+            .await;
+        let err = client(&server)
+            .post_room_envelope(&RoomId::from("..".to_string()), &sample_envelope(0))
+            .await
+            .expect_err("a dot segment is refused");
+        assert!(format!("{err:#}").contains("dot segment"), "got: {err:#}");
+        let received = server.received_requests().await.expect("requests recorded");
+        assert!(received.is_empty(), "no request was sent");
+    }
+
     #[tokio::test]
     async fn post_room_envelope_bails_on_404() {
         let server = MockServer::start().await;
