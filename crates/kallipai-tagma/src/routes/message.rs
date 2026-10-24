@@ -162,6 +162,19 @@ pub struct ExternalHistoryQuery {
     pub limit: Option<u32>,
 }
 
+/// The external projector behind a direct-surface read, after the root check
+/// every one of those reads makes; `None` when this tagma has no history store.
+async fn external_projector<'a>(
+    state: &'a SharedState,
+    id: &AgentId,
+) -> Result<&'a crate::external::ExternalProjector, ApiError> {
+    require_root(state, id, "external history").await?;
+    state
+        .external
+        .get()
+        .ok_or_else(|| ApiError::unavailable("external projector not initialized"))
+}
+
 /// `GET /agents/{id}/external/history` -- the pull-based history window for the
 /// direct (offline) path, cursor-driven by the frontend's high-water mark.
 /// Root-only and projector-owned; returns the decoded entries (sender + reply),
@@ -189,12 +202,8 @@ pub async fn external_history(
     _auth: crate::auth::AuthIdentity,
     Path(id): Path<AgentId>,
     Query(query): Query<ExternalHistoryQuery>,
-) -> Result<Json<ExternalHistoryResponse>, ApiError> {
-    require_root(&state, &id, "external history").await?;
-    let projector = state
-        .external
-        .get()
-        .ok_or_else(|| ApiError::unavailable("external projector not initialized"))?;
+) -> Result<axum::response::Response, ApiError> {
+    let projector = external_projector(&state, &id).await?;
     // Bound the page the same way the relay does (HISTORY_BATCH_MAX = 50); a
     // missing `limit` defaults to the cap.
     const DEFAULT_LIMIT: u32 = 50;
@@ -227,7 +236,37 @@ pub async fn external_history(
         rows: page.entries,
         more: page.more,
         undecodable: page.undecodable,
-    }))
+    })
+    .into_response())
+}
+
+/// `GET /agents/{id}/external/history/{row}` -- one stored row, by id: the
+/// read-back behind a `| quote=` reference (`kallip lesche read --quote <id>`).
+///
+/// Its own path rather than a query field on the window read, because the answer
+/// shape differs: this one is the row rendered as the text block every other
+/// history read prints, while the window answers JSON. A row id names exactly
+/// one row, so there are no page fields, and an id no row holds is an error --
+/// an empty answer would read as an empty conversation.
+pub async fn external_history_row(
+    State(state): State<SharedState>,
+    _auth: crate::auth::AuthIdentity,
+    Path((id, row)): Path<(AgentId, i64)>,
+) -> Result<axum::response::Response, ApiError> {
+    let projector = external_projector(&state, &id).await?;
+    if row <= 0 {
+        return Err(ApiError::bad_request("quote must be a positive row id"));
+    }
+    let block = projector
+        .read_quote_block(row)
+        .await
+        .map_err(|e| ApiError::unavailable(format!("history read failed: {e}")))?;
+    match block {
+        Some(text) => Ok(text.into_response()),
+        None => Err(ApiError::not_found(format!(
+            "this conversation holds no row {row}"
+        ))),
+    }
 }
 
 /// The relay peer a manage-plane request targets: inserted as a request

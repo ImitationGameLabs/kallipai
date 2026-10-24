@@ -724,6 +724,44 @@ pub async fn read_direct_session_messages(
     Query(q): Query<DirectHistoryQuery>,
 ) -> Result<Response, ApiError> {
     require_root_self_or_operator(&state, auth.identity(), &id).await?;
+    // TagmaId parses leniently (an opaque id string); an unknown peer
+    // surfaces from the lesche history read as a 404, not a 400.
+    let peer = TagmaId::from(peer_str);
+    let Some(first) = state.relay_handles().first().cloned() else {
+        return Err(ApiError::unavailable(
+            "no relay installed; cannot read a direct session",
+        ));
+    };
+    let session = DirectSessionId::for_pair(first.tagma_id(), &peer);
+    read_direct_session(&state, &session, q).await
+}
+
+/// `GET /agents/{id}/lesche/sessions/{session}/messages` -- the same read
+/// addressed by the session id itself (`kallip lesche read --session <session>
+/// --quote <seq>`).
+///
+/// The pair-addressed route derives the session from (self, peer); this one is
+/// handed the id an inbound header already spells (`direct <session>`), which
+/// is what a delivered message's read-back command names. Nothing is derived
+/// and nothing is looked up, so that command cannot land on another
+/// conversation.
+pub async fn read_direct_session_messages_by_id(
+    State(state): State<SharedState>,
+    auth: crate::auth::AuthIdentity,
+    Path((id, session)): Path<(AgentId, String)>,
+    Query(q): Query<DirectHistoryQuery>,
+) -> Result<Response, ApiError> {
+    require_root_self_or_operator(&state, auth.identity(), &id).await?;
+    read_direct_session(&state, &DirectSessionId::from(session), q).await
+}
+
+/// The shared body of both direct-session reads: the relay that owns the
+/// session, one page from the lesche, and the render the query asks for.
+async fn read_direct_session(
+    state: &SharedState,
+    session: &DirectSessionId,
+    q: DirectHistoryQuery,
+) -> Result<Response, ApiError> {
     // Only `json` is accepted: a future format must not silently mean the
     // text render.
     let json = match q.format.as_deref() {
@@ -735,17 +773,8 @@ pub async fn read_direct_session_messages(
             )));
         }
     };
-    // TagmaId parses leniently (an opaque id string); an unknown peer
-    // surfaces from the lesche history read as a 404, not a 400.
-    let peer = TagmaId::from(peer_str);
-    let Some(first) = state.relay_handles().first().cloned() else {
-        return Err(ApiError::unavailable(
-            "no relay installed; cannot read a direct session",
-        ));
-    };
-    let session = DirectSessionId::for_pair(first.tagma_id(), &peer);
     let client = {
-        let Some(owner) = state.direct_sessions.owner_of(&session).await else {
+        let Some(owner) = state.direct_sessions.owner_of(session).await else {
             return Err(ApiError::unavailable(
                 "no online relay knows this direct session; cannot read its history",
             ));
@@ -765,7 +794,7 @@ pub async fn read_direct_session_messages(
         .limit
         .or_else(|| json.then_some(DIRECT_JSON_DEFAULT_LIMIT));
     let rows = client
-        .fetch_direct_messages(&session, q.after_seq, limit)
+        .fetch_direct_messages(session, q.after_seq, limit)
         .await
         .map_err(|e| map_lesche_error("direct session history fetch failed", &e))?;
     if json {
@@ -773,11 +802,11 @@ pub async fn read_direct_session_messages(
         // fatal (same rule as the text render).
         let view: Vec<DirectMessageJsonRow> = rows
             .into_iter()
-            .filter_map(|row| direct_json_row(&session, row))
+            .filter_map(|row| direct_json_row(session, row))
             .collect();
         Ok(Json(view).into_response())
     } else {
-        Ok(render_direct_text(&session, rows).into_response())
+        Ok(render_direct_text(session, rows).into_response())
     }
 }
 
@@ -1704,6 +1733,50 @@ mod tests {
         assert!(query.contains("limit=1"), "{query}");
     }
 
+    /// The session-addressed read fetches the session the path names: no peer
+    /// pair is derived, so the log a delivered message's read-back command
+    /// spells is the log this read asks the lesche for.
+    #[tokio::test]
+    async fn a_session_addressed_read_fetches_that_session() {
+        let (state, id, mock) = setup_lesche_send(Vec::new()).await;
+        let own = TagmaId::from("t1".to_string());
+        let peer = TagmaId::from("tagma-peer".to_string());
+        let session = DirectSessionId::for_pair(&own, &peer);
+        state
+            .direct_sessions
+            .set_direct_sessions("test", [session.clone()])
+            .await;
+
+        let _page = read_direct_session_messages_by_id(
+            State(state),
+            AuthIdentity::test_new(Identity::Agent { id: id.clone() }),
+            Path((id, session.to_string())),
+            axum::extract::Query(DirectHistoryQuery {
+                after_seq: Some(6),
+                limit: Some(1),
+                format: None,
+            }),
+        )
+        .await
+        .expect("the read reaches the lesche");
+
+        let reads = mock.direct_reads.lock().unwrap().clone();
+        assert_eq!(reads.len(), 1, "one history GET");
+        let read = reads[0].as_str();
+        assert!(
+            read.contains(&format!("/direct-sessions/{session}/messages")),
+            "the path names the session itself: {read}"
+        );
+        assert!(
+            read.contains("after_seq=6"),
+            "the cursor rides along: {read}"
+        );
+        assert!(
+            read.contains("limit=1"),
+            "the page size rides along: {read}"
+        );
+    }
+
     /// The direct-send branch shares the per-tagma burst cap with the
     /// bilateral path: a projector configured with a zero-size budget makes
     /// the very first `--tagma` send a 429 before any relay is contacted
@@ -1918,10 +1991,15 @@ mod tests {
                 "/v1/lesche/direct-sessions/{_session}/messages",
                 axum::routing::get(
                     |State(mock): State<LescheSendMock>, uri: axum::http::Uri| async move {
-                        mock.direct_reads
-                            .lock()
-                            .unwrap()
-                            .push(uri.query().unwrap_or_default().to_string());
+                        // The path is recorded with the query: a read is
+                        // addressed by the session in its path, so a test that
+                        // only saw the query could not tell the two direct-read
+                        // routes apart.
+                        let recorded = uri
+                            .path_and_query()
+                            .map(|p| p.as_str().to_string())
+                            .unwrap_or_default();
+                        mock.direct_reads.lock().unwrap().push(recorded);
                         Json(Vec::<serde_json::Value>::new())
                     },
                 )

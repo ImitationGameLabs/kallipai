@@ -15,6 +15,21 @@ use kallipai_lesche_common::rooms::MemberId;
 
 use super::*;
 
+/// How long the delivery seam spends reading back the row a relay-surface
+/// message answers, for the whole read (fetch included).
+///
+/// The reference is an aid, the message is the cargo: past this budget the
+/// reference says it could not be read, and the message is delivered on time
+/// regardless.
+const QUOTE_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+// Why a one-row read produced no row. Each case is stated in the log on its
+// own: which one it was is what tells a failed fetch apart from a page that
+// landed beside the position, or a row whose payload no longer decodes.
+const QUOTE_READ_FETCH_FAILED: &str = "the page fetch failed";
+const QUOTE_READ_ROW_MISSING: &str = "the fetched page did not hold that row";
+const QUOTE_READ_DECODE_FAILED: &str = "the row did not decode";
+const QUOTE_READ_POSITION_OVERFLOW: &str = "the position has no page above it";
+
 impl RelayHandle {
     /// Dispatch a plaintext relay-surface message (room or direct session) to
     /// the root agent -- the relay path's own tail (separate from the bilateral
@@ -90,6 +105,15 @@ impl RelayHandle {
         // `Agent` sender, and vice versa, or the keryx's require_* check
         // rejects it); the handle is spoofable + sanitized in
         // `format_relay_incoming`.
+        // Read back the row this message answers, from the same surface history
+        // the receiver would read: the reference the agent gets is what that
+        // log holds, not what the payload claims to answer. A missing or slow
+        // read degrades the reference line alone -- the message is delivered
+        // either way.
+        let quote_view = match quote.filter(|position| *position > 0) {
+            Some(position) => self.read_quoted_row(surface, position).await,
+            None => None,
+        };
         let inbound = crate::messaging::RelayInbound {
             surface,
             sender_kind: sender.kind.as_str(),
@@ -97,6 +121,7 @@ impl RelayHandle {
             sender_handle: &sender.handle,
             text: &text,
             quote,
+            quote_view,
             mentions,
         };
         if let Err(e) =
@@ -107,6 +132,102 @@ impl RelayHandle {
                 surface = surface.label(),
                 "relay message deliver failed: {e:#}"
             );
+        }
+    }
+
+    /// The row a relay-surface message answers, read back from that surface's
+    /// own history: one fetch, then a check that the answer is the row asked
+    /// for (a page that landed on the neighbouring row is not that row).
+    ///
+    /// Both surfaces store their log in the lesche, so this is the only read
+    /// available, and it is bounded by [`QUOTE_READ_TIMEOUT`] as a whole: the
+    /// reference is an aid and the message is the cargo, so a slow relay costs
+    /// the reference line, never the delivery.
+    ///
+    /// A read that produces no row logs why, with the surface and the position
+    /// -- the same treatment the bilateral read gives its own failures, so a
+    /// reference that cannot be rendered never vanishes without a trace.
+    async fn read_quoted_row(
+        &self,
+        surface: crate::messaging::Surface<'_>,
+        position: i64,
+    ) -> Option<crate::messaging::QuoteView> {
+        let client = self.lesche_client();
+        let read = async move {
+            match surface {
+                crate::messaging::Surface::Room(room) => {
+                    // A room's one-row lookup is the page ending below the next
+                    // position, clamped to one row.
+                    let rows = client
+                        .fetch_room_messages(
+                            room,
+                            kallipai_lesche_client::RoomHistoryQuery {
+                                after_seq: None,
+                                before_seq: Some(
+                                    position
+                                        .checked_add(1)
+                                        .ok_or(QUOTE_READ_POSITION_OVERFLOW)?,
+                                ),
+                                limit: Some(1),
+                            },
+                        )
+                        .await
+                        .map_err(|_| QUOTE_READ_FETCH_FAILED)?;
+                    let row = rows
+                        .into_iter()
+                        .find(|row| row.seq == position)
+                        .ok_or(QUOTE_READ_ROW_MISSING)?;
+                    let message: RoomMessage = serde_json::from_slice(&row.ciphertext.0)
+                        .map_err(|_| QUOTE_READ_DECODE_FAILED)?;
+                    Ok::<crate::messaging::QuoteView, &'static str>(crate::messaging::QuoteView {
+                        author: crate::messaging::relay_author(
+                            row.sender.kind.as_str(),
+                            row.sender.id.as_ref(),
+                            &row.sender.handle,
+                        ),
+                        text: message.text,
+                    })
+                }
+                crate::messaging::Surface::Direct(session) => {
+                    // A direct log is read forward only, so the row at
+                    // `position` is reached from one below it.
+                    let rows = client
+                        .fetch_direct_messages(session, Some(position - 1), Some(1))
+                        .await
+                        .map_err(|_| QUOTE_READ_FETCH_FAILED)?;
+                    let row = rows
+                        .into_iter()
+                        .find(|row| row.seq == position)
+                        .ok_or(QUOTE_READ_ROW_MISSING)?;
+                    let message: DirectMessage = serde_json::from_slice(&row.ciphertext.0)
+                        .map_err(|_| QUOTE_READ_DECODE_FAILED)?;
+                    Ok::<crate::messaging::QuoteView, &'static str>(crate::messaging::QuoteView {
+                        author: crate::messaging::relay_author(
+                            row.sender.kind.as_str(),
+                            row.sender.id.as_ref(),
+                            &row.sender.handle,
+                        ),
+                        text: message.text,
+                    })
+                }
+            }
+        };
+        match tokio::time::timeout(QUOTE_READ_TIMEOUT, read).await {
+            Ok(Ok(view)) => Some(view),
+            Ok(Err(reason)) => {
+                warn!(
+                    surface = surface.label(),
+                    position, reason, "quoted row read failed"
+                );
+                None
+            }
+            Err(_) => {
+                warn!(
+                    surface = surface.label(),
+                    position, "quoted row read timed out"
+                );
+                None
+            }
         }
     }
 

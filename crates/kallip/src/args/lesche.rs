@@ -60,8 +60,15 @@ pub(crate) struct SendArgs {
     pub mention: Vec<String>,
 }
 
-/// Args for `kallip lesche read` (pull a conversation's history; exactly
-/// one of `--room` / `--tagma`).
+/// Args for `kallip lesche read` (pull a conversation's history).
+///
+/// A read names one log, then asks it for a page or for one row. The targets
+/// name the logs a delivered reference can point into: `--room <room>` a room's
+/// transcript, `--session <session>` a direct session's (the `direct <session>`
+/// value an inbound header spells), `--tagma <peer>` the session derived from
+/// that peer pair, and no target at all the bilateral 1:1 with the user.
+/// `--quote` reads the single row a reference names; `--after`, `--before` and
+/// `--limit` read a page.
 #[derive(Args)]
 pub(crate) struct ReadArgs {
     /// The room id to read from (one of the ids listed by `kallip lesche
@@ -69,16 +76,31 @@ pub(crate) struct ReadArgs {
     #[arg(
         long,
         allow_hyphen_values = true,
-        required_unless_present = "tagma",
-        conflicts_with = "tagma"
+        required_unless_present_any = ["tagma", "session", "quote"],
+        conflicts_with_all = ["tagma", "session"]
     )]
     pub room: Option<String>,
     /// The peer tagma id to read -- the id `kallip lesche sessions` lists for
     /// the peer, not the `UUID` in a message header's parens (that value is
     /// the sender's participant id). The session id is derived from the pair,
     /// so you never type a session id.
-    #[arg(long, allow_hyphen_values = true)]
+    #[arg(
+        long,
+        allow_hyphen_values = true,
+        conflicts_with_all = ["room", "session"]
+    )]
     pub tagma: Option<String>,
+    /// The direct-session id to read -- the `direct <session>` value in an
+    /// inbound message header. Names the log itself rather than deriving it
+    /// from a peer pair, which is what a delivered message's read-back command
+    /// spells. The log is read forward only, so `--before` is refused here:
+    /// `--quote` reads one row of it and `--after`/`--limit` read a page.
+    #[arg(
+        long,
+        allow_hyphen_values = true,
+        conflicts_with_all = ["room", "tagma"]
+    )]
+    pub session: Option<String>,
     /// Return only messages with `seq > <N>` (exclusive). Default: from the
     /// start.
     #[arg(long = "after")]
@@ -99,9 +121,10 @@ pub(crate) struct ReadArgs {
     pub before_seq: Option<i64>,
     /// Read only the one message this position names -- the row a
     /// `| quote=<seq>` segment points at. A seq names a row in that
-    /// conversation's own log, so this rides a room read or a direct-session
-    /// read alike. The answer is that single block; a position this read
-    /// cannot show is an error, never an empty output.
+    /// conversation's own log, so this rides a room read, a direct-session read,
+    /// or -- with no target at all -- the bilateral 1:1, whose rows are ids. The
+    /// answer is that single block; a position this read cannot show is an
+    /// error, never an empty output.
     #[arg(
         long,
         value_parser = clap::value_parser!(i64).range(1..),

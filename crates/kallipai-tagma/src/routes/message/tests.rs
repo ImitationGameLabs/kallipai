@@ -786,7 +786,7 @@ async fn quote_rides_the_direct_send_and_history_read() {
 
 /// The direct history window, read through the route the frontend pulls.
 async fn direct_history(state: &crate::state::SharedState, root: &AgentId) -> Vec<HistoryEntry> {
-    let Json(body) = external_history(
+    let response = external_history(
         State(state.clone()),
         AuthIdentity::test_new(Identity::Operator),
         Path(root.clone()),
@@ -798,7 +798,25 @@ async fn direct_history(state: &crate::state::SharedState, root: &AgentId) -> Ve
     )
     .await
     .expect("the root's history read succeeds");
-    body.rows
+    let body = json_body(response).await;
+    serde_json::from_value(body["rows"].clone()).expect("the history rows decode")
+}
+
+/// The body of a route answer, read as the shape the test expects: a window
+/// read answers JSON, a one-row quote read answers text.
+async fn json_body(response: axum::response::Response) -> serde_json::Value {
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read the response body");
+    serde_json::from_slice(&bytes).expect("decode the json body")
+}
+
+/// The text body of a route answer (the one-row quote read's shape).
+async fn text_body(response: axum::response::Response) -> String {
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read the response body");
+    String::from_utf8(bytes.to_vec()).expect("the body is utf-8")
 }
 
 // -- unreadable is not empty: the history read refuses what it cannot answer --
@@ -897,7 +915,7 @@ async fn external_history_counts_a_row_it_cannot_decode() {
             .expect("seed a row into the operator partition");
     }
 
-    let Json(body) = external_history(
+    let response = external_history(
         State(state.clone()),
         AuthIdentity::test_new(Identity::Operator),
         Path(root),
@@ -909,8 +927,13 @@ async fn external_history_counts_a_row_it_cannot_decode() {
     )
     .await
     .expect("a readable store answers");
-    assert_eq!(body.rows.len(), 1, "the decodable row still rides the page");
-    assert_eq!(body.undecodable, 1, "the undecodable row is counted");
+    let body = json_body(response).await;
+    assert_eq!(
+        body["rows"].as_array().map(Vec::len),
+        Some(1),
+        "the decodable row still rides the page"
+    );
+    assert_eq!(body["undecodable"], 1, "the undecodable row is counted");
 }
 
 /// A limit of zero asks for a window that cannot hold anything. Refused like
@@ -943,4 +966,158 @@ async fn external_history_refuses_a_zero_limit() {
     .await
     .expect_err("a zero-row window has no answer");
     assert_eq!(err.status, 400, "unusable query: {}", err.message);
+}
+
+// -- the one-row read: a quote names a row, and a row that is not there is an
+// error rather than an empty answer --
+
+/// `{row}` answers that one row, rendered as the block every other
+/// history read prints. The CLI's `kallip lesche read --quote <id>` prints it
+/// verbatim, so the shape here is the shape an agent reads back.
+#[tokio::test]
+async fn a_quote_read_answers_the_one_row_it_names() {
+    let state = make_state();
+    install_inbox_store(&state).await;
+    let (db, _frames, _dir) = install_projector(&state).await;
+    let root = AgentId::random();
+    let (entry, _rx) = make_entry_with_rx(None, "root".into());
+    state
+        .registry
+        .write()
+        .await
+        .register_root(root.clone(), RegistryEntry::Live(entry))
+        .unwrap();
+    let (first, _) = crate::relay::chat_history::append(
+        &db,
+        None,
+        None,
+        "inbound",
+        "the quoted row",
+        None,
+        None,
+    )
+    .await
+    .expect("seed the quoted row");
+    crate::relay::chat_history::append(&db, None, None, "outbound", "a later row", None, None)
+        .await
+        .expect("seed a later row");
+
+    let response = external_history_row(
+        State(state.clone()),
+        AuthIdentity::test_new(Identity::Operator),
+        Path((root.clone(), first)),
+    )
+    .await
+    .expect("the named row is in this conversation");
+    let body = text_body(response).await;
+    assert!(
+        body.starts_with(&format!("[seq={first} ")),
+        "the block names the row that was asked for: {body}"
+    );
+    assert!(
+        body.contains("the quoted row"),
+        "the body is the row: {body}"
+    );
+    assert!(
+        !body.contains("a later row"),
+        "one row means one row: {body}"
+    );
+}
+
+/// The read spans this tagma's conversations: a reference handed to the agent
+/// in a relay user's conversation is read back by the same command, so the row
+/// is answerable whichever partition holds it.
+#[tokio::test]
+async fn a_quote_read_reaches_the_row_of_a_relay_partition() {
+    let state = make_state();
+    install_inbox_store(&state).await;
+    let (db, _frames, _dir) = install_projector(&state).await;
+    let root = AgentId::random();
+    let (entry, _rx) = make_entry_with_rx(None, "root".into());
+    state
+        .registry
+        .write()
+        .await
+        .register_root(root.clone(), RegistryEntry::Live(entry))
+        .unwrap();
+    let (row, _) = crate::relay::chat_history::append(
+        &db,
+        Some("peer-1"),
+        Some("alice"),
+        "inbound",
+        "spoken by a relay user",
+        None,
+        None,
+    )
+    .await
+    .expect("seed a row in the peer partition");
+
+    let response = external_history_row(
+        State(state.clone()),
+        AuthIdentity::test_new(Identity::Operator),
+        Path((root.clone(), row)),
+    )
+    .await
+    .expect("the peer partition's row is still this agent's own conversation");
+    let body = text_body(response).await;
+    assert!(
+        body.contains("spoken by a relay user") && body.contains("alice"),
+        "the row renders with its author: {body}"
+    );
+}
+
+/// A row id no row holds is a verdict, not an empty page: the CLI would print
+/// silence, and silence reads as an empty message.
+#[tokio::test]
+async fn a_quote_read_of_a_missing_row_is_an_error() {
+    let state = make_state();
+    install_inbox_store(&state).await;
+    let (_db, _frames, _dir) = install_projector(&state).await;
+    let root = AgentId::random();
+    let (entry, _rx) = make_entry_with_rx(None, "root".into());
+    state
+        .registry
+        .write()
+        .await
+        .register_root(root.clone(), RegistryEntry::Live(entry))
+        .unwrap();
+
+    let err = external_history_row(
+        State(state.clone()),
+        AuthIdentity::test_new(Identity::Operator),
+        Path((root.clone(), 404)),
+    )
+    .await
+    .expect_err("no row holds that id");
+    assert_eq!(
+        err.status, 404,
+        "a missing row is a verdict: {}",
+        err.message
+    );
+}
+
+/// A row id names one row, so an id that names no row -- zero included -- is
+/// refused rather than answered with silence.
+#[tokio::test]
+async fn a_quote_read_refuses_a_row_id_below_one() {
+    let state = make_state();
+    install_inbox_store(&state).await;
+    let (_db, _frames, _dir) = install_projector(&state).await;
+    let root = AgentId::random();
+    let (entry, _rx) = make_entry_with_rx(None, "root".into());
+    state
+        .registry
+        .write()
+        .await
+        .register_root(root.clone(), RegistryEntry::Live(entry))
+        .unwrap();
+
+    let err = external_history_row(
+        State(state.clone()),
+        AuthIdentity::test_new(Identity::Operator),
+        Path((root.clone(), 0)),
+    )
+    .await
+    .expect_err("no row sits below the first one");
+    assert_eq!(err.status, 400, "unusable row id: {}", err.message);
 }

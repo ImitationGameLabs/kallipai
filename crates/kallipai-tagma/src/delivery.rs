@@ -8,6 +8,7 @@
 use kallipai_archeion_common::ids::ParticipantKind;
 use kallipai_common::agentid::AgentId;
 use kallipai_common::protocol::{ApiError, DeliveryMode, MessageResponse};
+use kallipai_common::readback::QuoteLog;
 use kallipai_lesche_common::message::Participant;
 use tracing::{error, info, warn};
 
@@ -15,7 +16,9 @@ use crate::lifecycle::{
     SpawnArgs, WorkspaceAcquireFailure, abort_agent, inject_identity_env, resolve_root_agent,
     try_acquire_workspace_lock,
 };
-use crate::messaging::{MessageSender, SenderRelation, format_incoming, sanitize_sender};
+use crate::messaging::{
+    MessageSender, Quote, QuoteView, SenderRelation, format_incoming, sanitize_sender, sender_label,
+};
 use crate::state::{RegistryEntry, SharedState};
 
 /// What the busy branch of `enqueue_prompt` may inject into a live agent's
@@ -120,6 +123,39 @@ pub struct OutgoingMessage<'a> {
     pub quote: Option<i64>,
 }
 
+/// Read the 1:1 row a message answers, in the partition the message arrived in.
+///
+/// `author` labels a row the peer wrote -- the same form the message's own
+/// header names that peer -- while a row this agent wrote is labelled as the
+/// reader's own, because the reader is the author. `None` is the honest answer
+/// for a partition that holds no such row (never stored here, or aged out by
+/// retention): the render then says the row could not be read instead of
+/// inventing a summary.
+async fn read_bilateral_quote(
+    state: &SharedState,
+    peer: Option<&Participant>,
+    position: i64,
+    author: &str,
+) -> Option<QuoteView> {
+    let projector = state.external.get()?;
+    let partition = peer.map(|peer| peer.id.as_ref().to_string());
+    match projector.read_quote(partition.as_deref(), position).await {
+        Ok(Some(row)) => Some(QuoteView {
+            author: if row.direction == "outbound" {
+                String::from("你")
+            } else {
+                author.to_owned()
+            },
+            text: row.text,
+        }),
+        Ok(None) => None,
+        Err(e) => {
+            warn!(position, "quoted row read failed: {e:#}");
+            None
+        }
+    }
+}
+
 /// Deliver `message` to agent `id` as `identity`, attaching the `[From: ...]`
 /// header, enqueuing on the live prompt channel, and reactivating a dead agent.
 /// The HTTP `send_message` handler and the in-process relay share this single
@@ -181,7 +217,23 @@ pub async fn deliver_message(
         }
     };
     info!(receiver = %id, sender = ?header_sender, relation = ?relation, "delivering message");
-    let envelope = format_incoming(&header_sender, relation, message.quote, message.text);
+    // The row this message answers is that conversation's own: read it in the
+    // partition the message arrived in, so the summary and the author come from
+    // this conversation's history and a message cannot pull a row out of
+    // another. A read that fails degrades the reference, never the message.
+    let quote = match message.quote.filter(|position| *position > 0) {
+        Some(position) => {
+            let author = sender_label(&header_sender, relation);
+            let view = read_bilateral_quote(state, sender.as_ref(), position, &author).await;
+            Some(Quote {
+                position,
+                target: QuoteLog::Bilateral,
+                view,
+            })
+        }
+        None => None,
+    };
+    let envelope = format_incoming(&header_sender, relation, quote.as_ref(), message.text);
 
     let response = enqueue_prompt(
         state,

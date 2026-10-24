@@ -427,20 +427,34 @@ async fn main() -> Result<()> {
                 // The target check runs for every read; each target assembles
                 // its own page.
                 reject_backward_cursor_at_non_room(&args)?;
-                let text = match (&args.room, &args.tagma) {
-                    (Some(room), _) => {
+                let text = match (&args.room, &args.tagma, &args.session) {
+                    (Some(room), _, _) => {
                         client
                             .read_room_messages(&id, room, room_read_query(&args)?)
                             .await?
                     }
-                    (_, Some(peer)) => {
+                    (_, Some(peer), _) => {
                         client
                             .read_direct_session_messages(&id, peer, direct_read_query(&args))
                             .await?
                     }
-                    // clap enforces exactly-one (`required_unless_present` +
-                    // `conflicts_with`), so this arm is unreachable via the CLI.
-                    (None, None) => anyhow::bail!("--room or --tagma is required"),
+                    (_, _, Some(session)) => {
+                        client
+                            .read_direct_session_by_id_messages(
+                                &id,
+                                session,
+                                direct_read_query(&args),
+                            )
+                            .await?
+                    }
+                    // No target: a bare `--quote` names one row of the bilateral
+                    // 1:1 -- the form a 1:1 message's read-back command spells.
+                    // clap ties every other combination to a target, so the arm
+                    // below is the 1:1 read.
+                    (None, None, None) => match args.quote {
+                        Some(quote) => client.read_quote(&id, quote).await?,
+                        None => anyhow::bail!("--room, --tagma, --session or --quote is required"),
+                    },
                 };
                 // A `--quote` read shows exactly the row it names: the page
                 // fields above are how the row is fetched; this is the verdict
@@ -1577,6 +1591,113 @@ mod tests {
         }
     }
 
+    /// Parse a rendered read-back command, the way an agent pastes it: the
+    /// tokens after `kallip lesche read` are the flags, and the parser is the
+    /// one the CLI runs. A reference whose command the parser rejects is a
+    /// command nobody can run, which is what this catches.
+    fn parse_read_command(command: &str) -> args::lesche::ReadArgs {
+        let tokens: Vec<&str> = command.split_whitespace().collect();
+        assert_eq!(
+            &tokens[..3],
+            ["kallip", "lesche", "read"],
+            "a read-back command opens with the subcommand it runs: {command}"
+        );
+        parsed_read(&tokens[3..])
+    }
+
+    /// The three faces' read-back commands are accepted by this CLI, and each
+    /// one lands on the log it names.
+    #[test]
+    fn every_rendered_read_back_command_runs() {
+        use kallipai_common::readback::QuoteLog;
+
+        let room = parse_read_command(&QuoteLog::Room("ops").read_command(7));
+        assert_eq!(room.room.as_deref(), Some("ops"));
+        assert_eq!(room.quote, Some(7));
+        assert_eq!(room.session, None);
+
+        let direct = parse_read_command(&QuoteLog::Direct("3f2a").read_command(7));
+        assert_eq!(direct.session.as_deref(), Some("3f2a"));
+        assert_eq!(direct.quote, Some(7));
+        assert_eq!(direct.room, None);
+        assert_eq!(direct.tagma, None);
+
+        let bilateral = parse_read_command(&QuoteLog::Bilateral.read_command(42));
+        assert_eq!(bilateral.quote, Some(42));
+        assert_eq!(bilateral.room, None);
+        assert_eq!(bilateral.tagma, None);
+        assert_eq!(bilateral.session, None);
+    }
+
+    /// A bare `--quote` is the bilateral 1:1 read: no target flag, one row.
+    #[test]
+    fn a_bare_quote_names_the_bilateral_row() {
+        let args = parsed_read(&["--quote", "9"]);
+        assert_eq!(args.quote, Some(9));
+        assert_eq!(args.room, None);
+        assert_eq!(args.tagma, None);
+        assert_eq!(args.session, None);
+    }
+
+    /// A session-addressed read names that session's log, then asks it for a
+    /// page or for one row -- the two shapes a room read has, and never beside
+    /// another target.
+    #[test]
+    fn a_session_read_names_its_log_and_asks_for_a_page_or_a_row() {
+        let row = parsed_read(&["--session", "sess-1", "--quote", "7"]);
+        assert_eq!(row.session.as_deref(), Some("sess-1"));
+        assert_eq!(row.quote, Some(7));
+        let query = direct_read_query(&row);
+        assert_eq!(
+            query.after_seq,
+            Some(6),
+            "the quoted row, reached from below"
+        );
+        assert_eq!(query.limit, Some(1));
+
+        let page = parsed_read(&["--session", "sess-1", "--after", "3"]);
+        assert_eq!(page.session.as_deref(), Some("sess-1"));
+        assert_eq!(page.quote, None);
+        let query = direct_read_query(&page);
+        assert_eq!(
+            query.after_seq,
+            Some(3),
+            "a page read passes the caller's cursor through"
+        );
+        assert_eq!(query.limit, None);
+
+        assert!(
+            Cli::try_parse_from([
+                "kallip",
+                "lesche",
+                "read",
+                "--session",
+                "sess-1",
+                "--quote",
+                "7",
+                "--room",
+                "ops"
+            ])
+            .is_err(),
+            "a read names one log"
+        );
+        assert!(
+            Cli::try_parse_from([
+                "kallip",
+                "lesche",
+                "read",
+                "--session",
+                "sess-1",
+                "--quote",
+                "7",
+                "--tagma",
+                "peer"
+            ])
+            .is_err(),
+            "a read names one log"
+        );
+    }
+
     /// Parse a `lesche send` invocation the same way.
     fn parsed_send(extra: &[&str]) -> args::lesche::SendArgs {
         let mut argv = vec!["kallip", "lesche", "send"];
@@ -1698,6 +1819,7 @@ mod tests {
         let args = args::lesche::ReadArgs {
             room: Some("ops".to_owned()),
             tagma: None,
+            session: None,
             after_seq: None,
             before_seq: None,
             quote: Some(i64::MAX),

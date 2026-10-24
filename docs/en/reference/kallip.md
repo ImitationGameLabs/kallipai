@@ -325,17 +325,26 @@ room with `--room`, or a peer tagma's direct session with `--tagma`:
 ```bash
 kallip lesche send [--room <ROOM>] [--tagma <TAGMA>] [--quote <SEQ>] [--mention <PARTICIPANT-ID>]...
 kallip lesche rooms
-kallip lesche read (--room <ROOM> | --tagma <TAGMA>) [--after <N>] [--before <N>] [--quote <SEQ>] [--limit <N>]
+kallip lesche read (--room <ROOM> | --tagma <TAGMA> | --session <SESSION> | --quote <ID>) [--after <N>] [--before <N>] [--limit <N>]
 kallip lesche sessions
 ```
 
 `rooms` lists the rooms this tagma has joined; `read` replays a
 conversation's history -- forward from a sequence position (`--after`),
 backward from one (`--before`, rooms only), or the single row a reply names
-(`--quote`, room and direct reads). `send --quote <SEQ>` points the message
-at that row (room and direct sends). `sessions` lists every
-addressable surface (user 1:1, joined rooms, direct sessions) in one
-view. Attachments must live in a workspace the peer can read.
+(`--quote`). A quote rides a room read, a direct-session read addressed by
+the session id (`--session`, the value an inbound header spells as `direct
+<session>`), or no target at all: a bare `--quote <ID>` reads one row of the
+bilateral 1:1. `send --quote <SEQ>` points the message at that row (room and
+direct sends). `sessions` lists every addressable surface (user 1:1, joined
+rooms, direct sessions) in one view. Attachments must live in a workspace the
+peer can read.
+
+A delivered message that answers another one names its reference under the
+`[From: ...]` header: who wrote that row, a one-line summary of it (at most 256
+characters, cut with `…`), and the `kallip lesche read` command that prints the
+whole row. A row the history no longer holds is stated (`引用消息未能取回`) and
+the command is still given; the message itself is always delivered.
 `send --mention <ID>` (repeatable) names members of that room: the id alone
 crosses the wire (the roster resolves the label at render time), the flag is
 a room-send one, and a name the room does not hold is refused, not dropped.

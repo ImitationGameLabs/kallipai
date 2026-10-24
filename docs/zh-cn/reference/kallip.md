@@ -232,11 +232,11 @@ kallip inbox clear [--all]        # 默认只清已处理，--all 清全部
 ```bash
 kallip lesche send [--room <ROOM>] [--tagma <TAGMA>] [--quote <SEQ>] [--mention <PARTICIPANT-ID>]...
 kallip lesche rooms
-kallip lesche read (--room <ROOM> | --tagma <TAGMA>) [--after <N>] [--before <N>] [--quote <SEQ>] [--limit <N>]
+kallip lesche read (--room <ROOM> | --tagma <TAGMA> | --session <SESSION> | --quote <ID>) [--after <N>] [--before <N>] [--limit <N>]
 kallip lesche sessions
 ```
 
-`rooms` 列出本 tagma 已加入的群聊；`read` 读更晚的一页（`--after`）、读更早的一页（`--before`），或用 `--quote` 只取某条回复指的那一行（`--before` 仅限群聊；`--quote` 群聊或直连都可读）；`send --quote <SEQ>` 把消息指向那一行（群聊或直连）；`sessions` 一次列出全部可寻址面（用户一对一、已加入群聊、直连会话）。附件必须放在对端可读的 workspace 里。`send --mention <ID>`（可重复）点名该群聊的成员：线上只传 id（显示名由名册在渲染时解析），该旗标仅群聊可用，成员不在该群聊名册里则拒发而不是静默丢弃。成员资格由 tagma 判定——在 agent 发送路径上按该群聊名册判定；CLI 本身只拒绝把该旗标用在非群聊发送上，浏览器端只校验 id 的形状与数量上限，那条路径上的 id 由 lesche 原样转发。用户端把消息按 Markdown 渲染。
+`rooms` 列出本 tagma 已加入的群聊；`read` 读更晚的一页（`--after`）、读更早的一页（`--before`），或用 `--quote` 只取某条回复指的那一行（`--before` 仅限群聊；`--quote` 可搭群聊、用会话 id 寻址的直连读（`--session`，入站消息头里的 `direct <session>` 就是它），或不带任何目标——裸 `--quote <ID>` 读的是一对一会话里的那一行）；`send --quote <SEQ>` 把消息指向那一行（群聊或直连）；`sessions` 一次列出全部可寻址面（用户一对一、已加入群聊、直连会话）。附件必须放在对端可读的 workspace 里。`send --mention <ID>`（可重复）点名该群聊的成员：线上只传 id（显示名由名册在渲染时解析），该旗标仅群聊可用，成员不在该群聊名册里则拒发而不是静默丢弃。成员资格由 tagma 判定——在 agent 发送路径上按该群聊名册判定；CLI 本身只拒绝把该旗标用在非群聊发送上，浏览器端只校验 id 的形状与数量上限，那条路径上的 id 由 lesche 原样转发。用户端把消息按 Markdown 渲染。引用了另一条消息的投递，会在 `[From: ...]` 头下面写出这条引用：谁写的、一行摘要（至多 256 字符，截断处标 `…`），以及能取回整行的 `kallip lesche read` 指令。历史里已经取不到那一行时写明 `引用消息未能取回` 并照样给出指令，消息本身照常送达。
 这层判定有两处限制，都是取舍。其一，判定用的是轮询最新取回的那份名册，成员变动要等下一次轮询（约一分钟）才反映——这段时间里刚被移出群聊的人仍可能被点名放行。其二，rooms 列表答不上来这个群聊的名册时——拉取失败，或拉回来了但答案里没有这个群聊——本条发送的点名不经判定就照常发出：信封 POST 遇 503 会退避重试，rooms GET 没有这样的重试。
 
 ### `policy`：检视 agent 权限

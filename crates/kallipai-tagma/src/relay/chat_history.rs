@@ -390,6 +390,40 @@ pub(crate) async fn read_before(
     Ok(rows.into_iter().map(history_row_from_model).collect())
 }
 
+/// Read one stored row by id inside a peer partition; `None` when that
+/// partition holds no such row.
+///
+/// The partition is part of the lookup rather than a filter applied after it: a
+/// quote names a row in one conversation's own log, so a message delivered in
+/// one conversation can never be answered with a row of another.
+pub(crate) async fn read_by_id(
+    db: &Db,
+    user_id: Option<&str>,
+    id: i64,
+) -> Result<Option<HistoryRow>> {
+    let row = by_peer(Entity::find(), user_id)
+        .filter(Column::Id.eq(id))
+        .one(db)
+        .await
+        .context("read chat_history by id")?;
+    Ok(row.map(history_row_from_model))
+}
+
+/// Read one stored row by id from whichever partition holds it.
+///
+/// Every row here belongs to this tagma's own root conversation with a peer, so
+/// an id is answerable across partitions for the agent's own read-back of a
+/// quote (`kallip lesche read --quote <id>`). A read that serves one
+/// conversation's message to its peer uses [`read_by_id`], which keeps the
+/// partition inside the lookup.
+pub(crate) async fn read_by_id_any_partition(db: &Db, id: i64) -> Result<Option<HistoryRow>> {
+    let row = Entity::find_by_id(id)
+        .one(db)
+        .await
+        .context("read chat_history by id")?;
+    Ok(row.map(history_row_from_model))
+}
+
 /// Map a sea-orm `Model` into the decoded-read [`HistoryRow`] shape.
 fn history_row_from_model(m: Model) -> HistoryRow {
     HistoryRow {
@@ -956,5 +990,63 @@ mod tests {
         assert_eq!(rows.len(), 1, "the upgraded store keeps the row");
         assert_eq!(rows[0].text, "before the upgrade");
         assert_eq!(rows[0].quote, None, "a row from before the column has none");
+    }
+
+    #[tokio::test]
+    async fn read_by_id_stays_inside_the_partition() {
+        // A quote names a row of one conversation's log, so the partition is
+        // part of the lookup: the same id read against another partition finds
+        // nothing rather than that conversation's neighbour.
+        let (db, _d) = open_tmp().await;
+        let operator_row = ap(&db, None, "inbound", "from the operator").await;
+        let peer_row = ap(&db, Some("u1"), "inbound", "from alice").await;
+
+        let found = read_by_id(&db, None, operator_row).await.unwrap();
+        assert_eq!(
+            found.map(|row| row.text),
+            Some("from the operator".to_string())
+        );
+        assert!(
+            read_by_id(&db, None, peer_row).await.unwrap().is_none(),
+            "another partition's row is not this conversation's history"
+        );
+        assert!(
+            read_by_id(&db, Some("u2"), operator_row)
+                .await
+                .unwrap()
+                .is_none(),
+            "an unknown partition holds nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_by_id_any_partition_finds_the_row_wherever_it_lives() {
+        // The agent's own read-back of a quote it was handed: the id answers
+        // across the partitions this tagma stores, in whichever one holds it.
+        let (db, _d) = open_tmp().await;
+        let operator_row = ap(&db, None, "inbound", "operator side").await;
+        let peer_row = ap(&db, Some("u1"), "inbound", "peer side").await;
+
+        assert_eq!(
+            read_by_id_any_partition(&db, operator_row)
+                .await
+                .unwrap()
+                .map(|row| row.text),
+            Some("operator side".to_string())
+        );
+        assert_eq!(
+            read_by_id_any_partition(&db, peer_row)
+                .await
+                .unwrap()
+                .map(|row| row.text),
+            Some("peer side".to_string())
+        );
+        assert!(
+            read_by_id_any_partition(&db, peer_row + 1_000)
+                .await
+                .unwrap()
+                .is_none(),
+            "an id no row holds answers nothing"
+        );
     }
 }

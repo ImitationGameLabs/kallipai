@@ -14,9 +14,10 @@ use kallipai_common::agentid::AgentId;
 use kallipai_common::protocol::DeliveryMode;
 
 use crate::lifecycle::SpawnArgs;
+use crate::relay::chat_history;
 use crate::state::{AgentEntry, RegistryEntry, SharedState};
 use crate::test_helpers::{
-    install_inbox_store, make_entry_with_rx, make_state, make_state_with_spawn,
+    install_inbox_store, install_projector, make_entry_with_rx, make_state, make_state_with_spawn,
 };
 
 #[derive(Default)]
@@ -760,4 +761,155 @@ async fn three_producers_share_channel_fifo_and_capacity() {
         seen[2]
     );
     assert_eq!(seen[3], "filler 0");
+}
+
+/// A live agent whose prompt receiver the caller reads from. The message text
+/// these tests assert on is the injected prompt, so the receiver is the seam.
+async fn live_agent(state: &SharedState) -> (AgentId, tokio::sync::mpsc::Receiver<String>) {
+    let id = AgentId::random();
+    let (entry, rx) = make_entry_with_rx(None, format!("agent-{id}"));
+    state
+        .registry
+        .write()
+        .await
+        .register(id.clone(), RegistryEntry::Live(entry));
+    state.duty.set(id.clone(), crate::duty::DutyStatus::OnDuty);
+    (id, rx)
+}
+
+/// A 1:1 message that answers an earlier row carries the reference beneath its
+/// header: who wrote that row, a one-line summary of it, and the command that
+/// prints it whole. The position itself stays in the header.
+#[tokio::test]
+async fn a_one_to_one_quote_renders_its_author_summary_and_read_back_command() {
+    let state = make_state();
+    install_inbox_store(&state).await;
+    let (db, _frames, _dir) = install_projector(&state).await;
+    let (id, mut rx) = live_agent(&state).await;
+    let (quoted, _) =
+        chat_history::append(&db, None, None, "inbound", "the quoted text", None, None)
+            .await
+            .expect("append the quoted row");
+
+    crate::delivery::deliver_message(
+        &state,
+        crate::auth::Identity::Operator,
+        None,
+        &id,
+        crate::delivery::OutgoingMessage {
+            text: "the answer",
+            attachment: None,
+            quote: Some(quoted),
+        },
+        false,
+    )
+    .await
+    .expect("delivery succeeds");
+
+    let notice = rx.try_recv().expect("the prompt was injected");
+    assert!(
+        notice.contains(&format!("[From: operator | quote={quoted}]")),
+        "the position stays in the header: {notice}"
+    );
+    assert!(
+        notice.contains(&format!(
+            "\n引用：operator 说：「the quoted text」\n（引用原文整行可用以下命令取回：kallip lesche read --quote {quoted}）\n"
+        )),
+        "the reference names the author, the summary, and the command: {notice}"
+    );
+    assert!(
+        notice.ends_with("the answer"),
+        "the body follows the reference: {notice}"
+    );
+}
+
+/// A row the conversation does not hold is said out loud, with the command
+/// still there: the position is a fact about the message, and the read-back is
+/// how the reader learns the rest. The message itself is delivered unchanged.
+#[tokio::test]
+async fn an_unreadable_quote_says_so_and_still_hands_over_the_command() {
+    let state = make_state();
+    install_inbox_store(&state).await;
+    let (_db, _frames, _dir) = install_projector(&state).await;
+    let (id, mut rx) = live_agent(&state).await;
+
+    crate::delivery::deliver_message(
+        &state,
+        crate::auth::Identity::Operator,
+        None,
+        &id,
+        crate::delivery::OutgoingMessage {
+            text: "the answer",
+            attachment: None,
+            quote: Some(404),
+        },
+        false,
+    )
+    .await
+    .expect("delivery succeeds");
+
+    let notice = rx.try_recv().expect("the prompt was injected");
+    assert!(
+        notice.contains("[From: operator | quote=404]"),
+        "the position is kept: {notice}"
+    );
+    assert!(
+        notice.contains("\n引用消息未能取回\n"),
+        "an unreadable row is stated, not invented: {notice}"
+    );
+    assert!(
+        notice.contains("引用原文整行可用以下命令取回：kallip lesche read --quote 404）"),
+        "the command is still given: {notice}"
+    );
+    assert!(
+        notice.ends_with("the answer"),
+        "the message is delivered unchanged: {notice}"
+    );
+}
+
+/// A quote is read in the conversation it arrived in: a row that lives in
+/// another peer's partition is not this conversation's history, so the
+/// reference reports it as unreadable rather than reaching across.
+#[tokio::test]
+async fn a_quote_cannot_reach_a_row_of_another_partition() {
+    let state = make_state();
+    install_inbox_store(&state).await;
+    let (db, _frames, _dir) = install_projector(&state).await;
+    let (id, mut rx) = live_agent(&state).await;
+    let (elsewhere, _) = chat_history::append(
+        &db,
+        Some("peer-1"),
+        Some("alice"),
+        "inbound",
+        "spoken in another conversation",
+        None,
+        None,
+    )
+    .await
+    .expect("append the foreign row");
+
+    crate::delivery::deliver_message(
+        &state,
+        crate::auth::Identity::Operator,
+        None,
+        &id,
+        crate::delivery::OutgoingMessage {
+            text: "the answer",
+            attachment: None,
+            quote: Some(elsewhere),
+        },
+        false,
+    )
+    .await
+    .expect("delivery succeeds");
+
+    let notice = rx.try_recv().expect("the prompt was injected");
+    assert!(
+        !notice.contains("spoken in another conversation"),
+        "another conversation's row is not quoted: {notice}"
+    );
+    assert!(
+        notice.contains("\n引用消息未能取回\n"),
+        "the reference reports the row as unreadable: {notice}"
+    );
 }

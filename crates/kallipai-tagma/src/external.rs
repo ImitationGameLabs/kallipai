@@ -34,6 +34,7 @@ use kallipai_common::protocol::SseEvent;
 use kallipai_common::protocol::agent::FileAttachment;
 use kallipai_lesche_common::event::UnreadSnapshot;
 use kallipai_lesche_common::message::{HistoryEntry, Participant, TagmaReply};
+use time::OffsetDateTime;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{Mutex, broadcast};
 use tokio_util::sync::CancellationToken;
@@ -480,6 +481,65 @@ impl ExternalProjector {
         }) {
             debug!(site = "record_inbound", seq, "authored frame published");
         }
+    }
+
+    /// Read one stored row by id, scoped to a partition (`None` is the
+    /// operator's). `Ok(None)` says that partition holds no such row -- never
+    /// written there, or aged out by retention -- which a caller reports as an
+    /// unreadable reference rather than as an empty answer.
+    pub(crate) async fn read_quote(
+        &self,
+        user_id: Option<&str>,
+        id: i64,
+    ) -> Result<Option<chat_history::HistoryRow>, HistoryReadError> {
+        let Some(db) = self.inner.history.clone() else {
+            return Ok(None);
+        };
+        chat_history::read_by_id(&db, user_id, id)
+            .await
+            .map_err(|e| {
+                error!("quoted row read failed: {e:#}");
+                HistoryReadError::Store(e)
+            })
+    }
+
+    /// The block a `kallip lesche read --quote <id>` prints: the stored row that
+    /// id names, rendered like every other history block (the header from
+    /// [`crate::messaging::block_header`], the body beneath it).
+    ///
+    /// The read spans this tagma's partitions because the command reads back a
+    /// quote the root agent itself was handed, and those references are drawn
+    /// from whichever conversation delivered them. `Ok(None)` says no row holds
+    /// that id, which the route answers as an error: an empty render would read
+    /// as an empty conversation.
+    pub(crate) async fn read_quote_block(
+        &self,
+        id: i64,
+    ) -> Result<Option<String>, HistoryReadError> {
+        let Some(db) = self.inner.history.clone() else {
+            return Ok(None);
+        };
+        let row = chat_history::read_by_id_any_partition(&db, id)
+            .await
+            .map_err(|e| {
+                error!("quoted row read failed: {e:#}");
+                HistoryReadError::Store(e)
+            })?;
+        Ok(row.map(|row| {
+            let sender = resolve_sender(&row, &self.agent_sender());
+            let at = OffsetDateTime::from_unix_timestamp(row.created_at)
+                .unwrap_or(OffsetDateTime::UNIX_EPOCH);
+            let header = crate::messaging::block_header(
+                row.id,
+                sender.kind.as_str(),
+                sender.id.as_ref(),
+                &sender.handle,
+                at,
+                row.quote,
+                None,
+            );
+            format!("{header}\n{}\n", row.text)
+        }))
     }
 
     /// Read a history window for one peer partition as decoded entries (each a

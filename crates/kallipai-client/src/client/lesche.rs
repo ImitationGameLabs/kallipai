@@ -195,6 +195,72 @@ impl TagmaClient {
             .context("failed to read direct session history body")
     }
 
+    /// Read a direct session's history addressed by the session id itself
+    /// (`GET /agents/{id}/lesche/sessions/{session}/messages`).
+    ///
+    /// The agent's `kallip lesche read --session <session>` subcommand calls
+    /// this. The id is the one an inbound header already spells (`direct
+    /// <session>`), so no peer pair is derived here: the command printed in a
+    /// delivered message names the log it came from, verbatim. Returns the raw
+    /// text body (one bracketed block per message), NOT JSON.
+    pub async fn read_direct_session_by_id_messages(
+        &self,
+        id: &AgentId,
+        session: &str,
+        query: DirectReadQuery,
+    ) -> Result<String> {
+        let mut params = Vec::new();
+        if let Some(a) = query.after_seq {
+            params.push(("after_seq", a.to_string()));
+        }
+        if let Some(l) = query.limit {
+            params.push(("limit", l.to_string()));
+        }
+        let response = self
+            .with_auth(
+                self.inner
+                    .http
+                    .get(self.url(&format!("/agents/{id}/lesche/sessions/{session}/messages")))
+                    .query(&params),
+            )
+            .send()
+            .await
+            .context("failed to read direct session history")?;
+        if !response.status().is_success() {
+            return Err(super::error_from_response(response).await);
+        }
+        response
+            .text()
+            .await
+            .context("failed to read direct session history body")
+    }
+
+    /// Read the bilateral 1:1 row one id names (`GET
+    /// /agents/{id}/external/history/{row}`).
+    ///
+    /// The agent's `kallip lesche read --quote <id>` subcommand calls this: a
+    /// bare read names the 1:1 conversation, and the tagma renders that row as
+    /// the same bracketed block the other surfaces print. A row the history does
+    /// not hold is the route's error, never an empty body.
+    pub async fn read_quote(&self, id: &AgentId, quote: i64) -> Result<String> {
+        let response = self
+            .with_auth(
+                self.inner
+                    .http
+                    .get(self.url(&format!("/agents/{id}/external/history/{quote}"))),
+            )
+            .send()
+            .await
+            .context("failed to read the quoted row")?;
+        if !response.status().is_success() {
+            return Err(super::error_from_response(response).await);
+        }
+        response
+            .text()
+            .await
+            .context("failed to read the quoted row body")
+    }
+
     /// List every addressable surface (bilateral + rooms + direct sessions,
     /// `GET /agents/{id}/lesche/sessions`). The agent's `kallip lesche
     /// sessions` subcommand calls this.

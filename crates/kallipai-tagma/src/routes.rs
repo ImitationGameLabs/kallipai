@@ -86,6 +86,10 @@ pub fn router() -> Router<SharedState> {
             axum::routing::get(lesche::list_lesche_sessions),
         )
         .route(
+            "/agents/{id}/lesche/sessions/{session}/messages",
+            axum::routing::get(lesche::read_direct_session_messages_by_id),
+        )
+        .route(
             "/agents/{id}/events",
             axum::routing::get(message::sse_events),
         )
@@ -96,6 +100,10 @@ pub fn router() -> Router<SharedState> {
         .route(
             "/agents/{id}/external/history",
             axum::routing::get(message::external_history),
+        )
+        .route(
+            "/agents/{id}/external/history/{row}",
+            axum::routing::get(message::external_history_row),
         )
         .route("/agents/{id}", axum::routing::delete(agent::remove_agent))
         .route(

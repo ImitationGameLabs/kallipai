@@ -9,6 +9,7 @@ pub mod message;
 pub mod policy;
 pub mod polis;
 pub mod protocol;
+pub mod readback;
 pub mod retry;
 pub mod secret_file;
 pub mod timefmt;
