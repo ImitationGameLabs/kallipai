@@ -1745,8 +1745,9 @@ mod tests {
     }
 
     /// A position is an ordinal in the log, so a negative one is no direction
-    /// at all. Both reads answer it here: the lesche would read it as "from the
-    /// start", and this hop would surface that answer as an upstream fault.
+    /// at all. Both reads answer it here, and the room query is refused on
+    /// either cursor: the lesche would read a negative one as "from the start",
+    /// and this hop would surface that answer as an upstream fault.
     #[tokio::test]
     async fn a_negative_position_is_refused_by_both_reads() {
         let state = make_state();
@@ -1772,19 +1773,31 @@ mod tests {
         .expect_err("a negative position is not a page direction");
         assert_eq!(direct.status, 400, "bad request, not an unavailable relay");
 
-        let room = read_room_messages(
-            State(state),
-            AuthIdentity::test_new(Identity::Agent { id: id.clone() }),
-            Path((id, "00000000-0000-0000-0000-000000000aa1".to_string())),
-            Query(LescheHistoryQuery {
+        for query in [
+            LescheHistoryQuery {
                 after_seq: Some(-1),
                 before_seq: None,
                 limit: None,
-            }),
-        )
-        .await
-        .expect_err("a negative position is not a page direction");
-        assert_eq!(room.status, 400, "bad request, not an unavailable relay");
+            },
+            LescheHistoryQuery {
+                after_seq: None,
+                before_seq: Some(-1),
+                limit: None,
+            },
+        ] {
+            let room = read_room_messages(
+                State(state.clone()),
+                AuthIdentity::test_new(Identity::Agent { id: id.clone() }),
+                Path((
+                    id.clone(),
+                    "00000000-0000-0000-0000-000000000aa1".to_string(),
+                )),
+                Query(query),
+            )
+            .await
+            .expect_err("a negative position is not a page direction");
+            assert_eq!(room.status, 400, "bad request, not an unavailable relay");
+        }
     }
 
     /// The unified session list with no relays and no projector returns an
