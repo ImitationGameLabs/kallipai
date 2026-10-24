@@ -261,7 +261,7 @@ pub struct QuoteView {
 ///
 /// The two no-row cases stay apart because they say different things. A log
 /// that holds no row at the position is a fact about the history; a read that
-/// failed is a fact about the read -- a fetch that did not answer, a payload
+/// failed is a fact about the read -- a fetch that was refused, a payload
 /// that did not decode, a budget that ran out -- so the row may well be there
 /// while its body never arrived. Both keep the command that prints the row.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -307,7 +307,7 @@ impl Quote<'_> {
     /// The first line names who wrote the row and a bounded summary of what it
     /// says. When the read produced no row it states which of the two things
     /// happened instead: the log holds no row at that position (`the quoted row
-    /// is not in that log`), or the read did not answer (`the quoted row could
+    /// is not in that log`), or the read failed (`the quoted row could
     /// not be read back`). One is a fact about the history, the other a fact
     /// about the read. A second line carries the command that prints the whole
     /// row, and it is printed whenever something is left to fetch: the summary
