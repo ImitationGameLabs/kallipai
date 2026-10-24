@@ -15,6 +15,7 @@ use kallipai_lesche_common::message::Participant;
 use kallipai_lesche_common::rooms::{MemberId, RoomId};
 use std::num::NonZeroUsize;
 use time::OffsetDateTime;
+use unicode_segmentation::UnicodeSegmentation;
 
 /// Sanitize a [`Participant`]'s handle. The agent handle is tagma-controlled
 /// (not advisory) but sanitizing is harmless and keeps one rule. Used at ingest
@@ -227,13 +228,16 @@ pub(crate) fn quote_segment(quote: Option<i64>) -> Option<String> {
         .filter(|id| *id > 0)
         .map(|id| format!(" | quote={id}"))
 }
-/// The body cap for a quote summary, in characters (see `summarize`).
+/// The body cap for a quote summary, in grapheme clusters (see `summarize`).
 ///
-/// 256 characters is roughly two Chinese sentences or forty English words:
-/// enough to recognise what a message answers, short enough that the reference
-/// never pushes the body out of view. The cap bounds the body alone: a body
-/// that had to be cut carries one more character, an added `…`.
-pub const QUOTE_SUMMARY_MAX_CHARS: usize = 256;
+/// A grapheme cluster is what a reader sees as one character -- a base letter
+/// with its accents, a flag, an emoji -- so a cap counted in clusters never
+/// cuts one of them in half. 256 clusters is roughly two Chinese sentences or
+/// forty English words: enough to recognise what a message answers, short
+/// enough that the reference never pushes the body out of view. The cap bounds
+/// the body alone: a body that had to be cut carries one more cluster, an added
+/// `…`.
+pub const QUOTE_SUMMARY_MAX_GRAPHEMES: usize = 256;
 
 /// The row a message answers, as the delivery seam made it readable: who wrote
 /// it and what it says.
@@ -337,9 +341,9 @@ pub fn relay_author(kind: &str, id: &str, handle: &str) -> String {
     }
 }
 
-/// Shorten a quoted body to one line of at most [`QUOTE_SUMMARY_MAX_CHARS`]
-/// characters of body, plus one `…` added when the body had to be cut; the flag
-/// says whether that cut happened. A cut summary is why the read-back command is
+/// Shorten a quoted body to one line of at most [`QUOTE_SUMMARY_MAX_GRAPHEMES`]
+/// grapheme clusters of body, plus one `…` added when the body had to be cut;
+/// the flag says whether that cut happened. A cut summary is why the read-back command is
 /// worth printing beside it, and a body that fits is why it is not.
 ///
 /// One line is what keeps the reference from being read as the message body:
@@ -362,8 +366,14 @@ fn summarize(text: &str) -> (String, bool) {
         })
         .collect();
     let collapsed = flattened.split_whitespace().collect::<Vec<_>>().join(" ");
-    let cut = collapsed.chars().count() > QUOTE_SUMMARY_MAX_CHARS;
-    let mut out: String = collapsed.chars().take(QUOTE_SUMMARY_MAX_CHARS).collect();
+    // Counted in clusters, not code points: a combining sequence or a flag is
+    // one character to the reader, and cutting between its code points would
+    // spell a different one.
+    let cut = collapsed.graphemes(true).count() > QUOTE_SUMMARY_MAX_GRAPHEMES;
+    let mut out: String = collapsed
+        .graphemes(true)
+        .take(QUOTE_SUMMARY_MAX_GRAPHEMES)
+        .collect();
     if cut {
         out.push('…');
     }
@@ -1202,19 +1212,57 @@ mod tests {
 
     #[test]
     fn summary_caps_at_the_max_and_marks_what_it_left_out() {
-        let long = "字".repeat(QUOTE_SUMMARY_MAX_CHARS + 10);
+        let long = "字".repeat(QUOTE_SUMMARY_MAX_GRAPHEMES + 10);
         let summary = summarize(&long).0;
         assert_eq!(
             summary.chars().count(),
-            QUOTE_SUMMARY_MAX_CHARS + 1,
+            QUOTE_SUMMARY_MAX_GRAPHEMES + 1,
             "the cut is marked on top of the cap"
         );
         assert!(summary.ends_with('…'), "a truncated summary says so");
-        let fits = "字".repeat(QUOTE_SUMMARY_MAX_CHARS);
+        let fits = "字".repeat(QUOTE_SUMMARY_MAX_GRAPHEMES);
         assert_eq!(
             summarize(&fits).0,
             fits,
             "a body that fits carries no marker"
+        );
+    }
+
+    #[test]
+    fn summary_cuts_between_clusters_instead_of_inside_one() {
+        // A base letter and its combining accent are one cluster: a cut at a
+        // code point would leave the accent adrift, spelling a different
+        // letter. The cap counts clusters, so the last one stays whole.
+        let combining = "e\u{301}".repeat(QUOTE_SUMMARY_MAX_GRAPHEMES + 44);
+        let summary = summarize(&combining).0;
+        assert!(summary.ends_with('…'), "a truncated summary says so");
+        let body = summary.trim_end_matches('…');
+        assert_eq!(
+            body.graphemes(true).count(),
+            QUOTE_SUMMARY_MAX_GRAPHEMES,
+            "the cap counts clusters, not code points"
+        );
+        assert_eq!(
+            body.graphemes(true).next_back(),
+            Some("e\u{301}"),
+            "the cut landed between two clusters"
+        );
+    }
+
+    #[test]
+    fn summary_keeps_a_multi_point_cluster_whole_or_leaves_it_out() {
+        // A flag is two code points and one cluster. The cap lands exactly on
+        // it here: the cluster fits whole, and one more character before it
+        // would leave it out whole -- never half a flag.
+        let flag = "\u{1F1EF}\u{1F1F5}";
+        let fits = format!("{}{flag}", "a".repeat(QUOTE_SUMMARY_MAX_GRAPHEMES - 1));
+        assert_eq!(summarize(&fits).0, fits, "a body that fits is kept");
+        let past = format!("{}{flag}", "a".repeat(QUOTE_SUMMARY_MAX_GRAPHEMES));
+        let summary = summarize(&past).0;
+        assert!(summary.ends_with('…'), "a truncated summary says so");
+        assert!(
+            !summary.contains('\u{1F1EF}'),
+            "the cluster is left out whole, never cut in half"
         );
     }
 
@@ -1324,7 +1372,7 @@ mod tests {
             target: QuoteLog::Room(room.as_ref()),
             view: Some(QuoteView {
                 author: String::from("user admin"),
-                text: "字".repeat(QUOTE_SUMMARY_MAX_CHARS + 1),
+                text: "字".repeat(QUOTE_SUMMARY_MAX_GRAPHEMES + 1),
             }),
         };
         let rendered = quote.lines();

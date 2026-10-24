@@ -342,7 +342,7 @@ peer can read.
 
 A delivered message that answers another one names its reference under the
 `[From: ...]` header: who wrote that row and a one-line summary of it (at most
-256 characters of body, with one `…` added when it is cut). The
+256 grapheme clusters of body, with one `…` added when it is cut). The
 `kallip lesche read` command that prints the whole row follows whenever the
 first line is not the whole row -- the summary was cut, the row could not be
 read back, or it holds no text. The message itself is always delivered. The
