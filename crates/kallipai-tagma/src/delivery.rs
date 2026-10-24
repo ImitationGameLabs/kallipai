@@ -17,7 +17,8 @@ use crate::lifecycle::{
     try_acquire_workspace_lock,
 };
 use crate::messaging::{
-    MessageSender, Quote, QuoteView, SenderRelation, format_incoming, sanitize_sender, sender_label,
+    MessageSender, Quote, QuoteRead, QuoteView, SenderRelation, format_incoming, sanitize_sender,
+    sender_label,
 };
 use crate::state::{RegistryEntry, SharedState};
 
@@ -137,28 +138,31 @@ pub struct OutgoingMessage<'a> {
 ///
 /// `author` labels a row the peer wrote -- the same form the message's own
 /// header names that peer -- while a row this agent wrote is labelled as the
-/// reader's own, because the reader is the author. `None` is the honest answer
-/// for a partition that holds no such row (never stored here, or aged out by
-/// retention): the render then says the row could not be read instead of
-/// inventing a summary.
+/// reader's own, because the reader is the author.
 ///
-/// The read is bounded by [`QUOTE_READ_TIMEOUT`]: a reference that
-/// takes too long says it could not be read, and the message is delivered on
-/// time regardless.
+/// A partition that holds no such row (never stored here, or aged out by
+/// retention) is [`QuoteRead::Absent`]: the read answered, and its answer is
+/// that the history is missing that row. A read with nothing behind it -- no
+/// projector to ask, a projector that failed, or one that outlasted
+/// [`QUOTE_READ_TIMEOUT`] -- is [`QuoteRead::Failed`]: this seam learns nothing
+/// about the row either way. Neither case invents a summary, and the message
+/// arrives on time regardless.
 async fn read_bilateral_quote(
     state: &SharedState,
     peer: Option<&Participant>,
     position: i64,
     author: &str,
-) -> Option<QuoteView> {
-    let projector = state.external.get()?;
+) -> QuoteRead {
+    let Some(projector) = state.external.get() else {
+        return QuoteRead::Failed;
+    };
     let partition = peer.map(|peer| peer.id.as_ref().to_string());
 
     // The reference is an aid and the message is the cargo: a projector that
     // stalls past the budget costs the reference line, never the delivery.
     let read = async {
         match projector.read_quote(partition.as_deref(), position).await {
-            Ok(Some(row)) => Some(QuoteView {
+            Ok(Some(row)) => QuoteRead::Found(QuoteView {
                 author: if row.direction == "outbound" {
                     String::from("you")
                 } else {
@@ -166,10 +170,10 @@ async fn read_bilateral_quote(
                 },
                 text: row.text,
             }),
-            Ok(None) => None,
+            Ok(None) => QuoteRead::Absent,
             Err(e) => {
                 warn!(position, "quoted row read failed: {e:#}");
-                None
+                QuoteRead::Failed
             }
         }
     };
@@ -177,18 +181,18 @@ async fn read_bilateral_quote(
 }
 
 /// Run one reference read under [`QUOTE_READ_TIMEOUT`]: a read that does not
-/// answer in time produces no reference, and the render says so in as many
-/// words. Split from the read itself so the budget is testable without a
-/// projector that can be made to stall.
-async fn within_quote_budget<F>(position: i64, read: F) -> Option<QuoteView>
+/// answer in time produces no reference, and the render states the failure in
+/// as many words. Split from the read itself so the budget is testable without
+/// a projector that can be made to stall.
+async fn within_quote_budget<F>(position: i64, read: F) -> QuoteRead
 where
-    F: std::future::Future<Output = Option<QuoteView>>,
+    F: std::future::Future<Output = QuoteRead>,
 {
     match tokio::time::timeout(QUOTE_READ_TIMEOUT, read).await {
-        Ok(view) => view,
+        Ok(read) => read,
         Err(_) => {
             warn!(position, "quoted row read timed out");
-            None
+            QuoteRead::Failed
         }
     }
 }
@@ -282,11 +286,11 @@ pub async fn deliver_message(
     let quote = match message.quote.filter(|position| *position > 0) {
         Some(position) if renders_quote => {
             let author = sender_label(&header_sender, relation);
-            let view = read_bilateral_quote(state, sender.as_ref(), position, &author).await;
+            let read = read_bilateral_quote(state, sender.as_ref(), position, &author).await;
             Some(Quote {
                 position,
                 target: QuoteLog::Bilateral,
-                view,
+                read,
             })
         }
         _ => None,

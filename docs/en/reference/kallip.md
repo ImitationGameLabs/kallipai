@@ -344,15 +344,23 @@ A delivered message that answers another one names its reference under the
 `[From: ...]` header: who wrote that row and a one-line summary of it (at most
 256 grapheme clusters of body, with one `…` added when it is cut). The
 `kallip lesche read` command that prints the whole row follows whenever the
-first line is not the whole row -- the summary was cut, the row could not be
-read back, or it holds no text. The message itself is always delivered. The
-reference goes only to a reader that can read the row it names: today the root
-agent on the 1:1 (that transcript is root's own, and the command answers 403
-for anyone else) and the receiving agent on a relay surface. The `| quote=<SEQ>`
-segment of the header goes only where the reference does. A row that holds no
-text renders as `replying to <author>: (no text on that row)` and still carries
-the command: what a row holds besides its text is not visible to the seam that
-renders the reference.
+first line is not the whole row -- the summary was cut, the read produced no
+row, or it holds no text. The message itself is always delivered.
+
+When the read produces no row, the first line says which of the two things
+happened, and the command that prints the whole row follows either way.
+`the quoted row is not in that log` is a fact about the history: that surface's
+own log holds no row at the position. `the quoted row could not be read back`
+is a fact about the read: a relay fetch that failed or ran out of its budget,
+or a 1:1 seam with no history store to ask, leaves the row's existence unknown.
+
+The reference goes only to a reader that can read the row it names: today the
+root agent on the 1:1 (that transcript is root's own, and the command answers
+403 for anyone else) and the receiving agent on a relay surface. The
+`| quote=<SEQ>` segment of the header goes only where the reference does. A row
+that holds no text renders as `replying to <author>: (no text on that row)` and
+still carries the command: what a row holds besides its text is not visible to
+the seam that renders the reference.
 `send --mention <ID>` (repeatable) names members of that room: the id alone
 crosses the wire (the roster resolves the label at render time), the flag is
 a room-send one, and a name the room does not hold is refused, not dropped.

@@ -14,16 +14,38 @@
 use kallipai_lesche_common::rooms::MemberId;
 
 use crate::delivery::QUOTE_READ_TIMEOUT;
+use crate::messaging::QuoteRead;
 
 use super::*;
 
 // Why a one-row read produced no row. Each case is stated in the log on its
-// own: which one it was is what tells a failed fetch apart from a page that
-// landed beside the position, or a row whose payload no longer decodes.
+// own: which one it was is what tells a fetch that failed apart from a page
+// that landed beside the position, or a row whose payload no longer decodes.
 const QUOTE_READ_FETCH_FAILED: &str = "the page fetch failed";
 const QUOTE_READ_ROW_MISSING: &str = "the fetched page did not hold that row";
 const QUOTE_READ_DECODE_FAILED: &str = "the row did not decode";
 const QUOTE_READ_POSITION_OUT_OF_RANGE: &str = "the position leaves no page to fetch";
+const QUOTE_READ_ANSWERED_NO_ROW: &str = "the surface answered that it holds no such row";
+
+/// A read that produced no row to render, in the two shapes the reference tells
+/// apart: an absence (this surface's log holds no such row, so the history is
+/// what is missing) and a failure (the read did not answer, so the row's
+/// existence is unknown). The reason rides along for the log alone -- the
+/// rendered reference states the shape, never the reason.
+enum NoRow {
+    Absent(&'static str),
+    Failed(&'static str),
+}
+
+/// A failed fetch, in those same two shapes: a lesche answering 404 is telling
+/// this reader it has no such row to read (an unknown room or session, a
+/// non-member), while any other failure left the read without an answer.
+fn no_row_of_fetch(err: &anyhow::Error) -> NoRow {
+    match err.downcast_ref::<kallipai_lesche_client::LescheHttpError>() {
+        Some(http) if http.status.as_u16() == 404 => NoRow::Absent(QUOTE_READ_ANSWERED_NO_ROW),
+        _ => NoRow::Failed(QUOTE_READ_FETCH_FAILED),
+    }
+}
 
 /// The reference a fetched row renders as: that row's relay-authenticated
 /// sender and its text. Both surfaces hand back those same two facts, so
@@ -122,8 +144,11 @@ impl RelayHandle {
         // log holds, not what the payload claims to answer. A missing or slow
         // read degrades the reference line alone -- the message is delivered
         // either way.
-        let quote_view = match quote.filter(|position| *position > 0) {
-            Some(position) => self.read_quoted_row(surface, position).await,
+        let quote_ref = match quote.filter(|position| *position > 0) {
+            Some(position) => Some(crate::messaging::QuoteRef {
+                position,
+                read: self.read_quoted_row(surface, position).await,
+            }),
             None => None,
         };
         let inbound = crate::messaging::RelayInbound {
@@ -132,8 +157,7 @@ impl RelayHandle {
             sender_id: &sender_id,
             sender_handle: &sender.handle,
             text: &text,
-            quote,
-            quote_view,
+            quote: quote_ref,
             mentions,
         };
         if let Err(e) =
@@ -160,6 +184,14 @@ impl RelayHandle {
     /// -- the same treatment the bilateral read gives its own failures, so a
     /// reference that cannot be rendered never vanishes without a trace.
     ///
+    /// The two no-row shapes stay apart. A log that holds no row at the
+    /// position -- a page beside it, a position with no page to fetch, or a
+    /// lesche answering 404, its word that this reader has no such row -- is
+    /// [`QuoteRead::Absent`]. A fetch that broke, a payload that no longer
+    /// decodes, or a read past the budget is [`QuoteRead::Failed`]. The first
+    /// says the history is missing that row; the second says nothing about the
+    /// row at all.
+    ///
     /// Both surfaces number rows from 1 and callers pass only positive
     /// positions; each branch still states what it does with a position that
     /// leaves no page to fetch (a room's page would run past what the log
@@ -169,7 +201,7 @@ impl RelayHandle {
         &self,
         surface: crate::messaging::Surface<'_>,
         position: i64,
-    ) -> Option<crate::messaging::QuoteView> {
+    ) -> QuoteRead {
         let client = self.lesche_client();
         let read = async move {
             match surface {
@@ -184,23 +216,23 @@ impl RelayHandle {
                                 before_seq: Some(
                                     position
                                         .checked_add(1)
-                                        .ok_or(QUOTE_READ_POSITION_OUT_OF_RANGE)?,
+                                        .ok_or(NoRow::Absent(QUOTE_READ_POSITION_OUT_OF_RANGE))?,
                                 ),
                                 limit: Some(1),
                             },
                         )
                         .await
-                        .map_err(|_| QUOTE_READ_FETCH_FAILED)?;
+                        .map_err(|e| no_row_of_fetch(&e))?;
                     let row = rows
                         .into_iter()
                         .find(|row| row.seq == position)
-                        .ok_or(QUOTE_READ_ROW_MISSING)?;
+                        .ok_or(NoRow::Absent(QUOTE_READ_ROW_MISSING))?;
                     let message: RoomMessage = serde_json::from_slice(&row.ciphertext.0)
-                        .map_err(|_| QUOTE_READ_DECODE_FAILED)?;
-                    Ok::<crate::messaging::QuoteView, &'static str>(quote_view_of(
+                        .map_err(|_| NoRow::Failed(QUOTE_READ_DECODE_FAILED))?;
+                    Ok::<QuoteRead, NoRow>(QuoteRead::Found(quote_view_of(
                         &row.sender,
                         message.text,
-                    ))
+                    )))
                 }
                 crate::messaging::Surface::Direct(session) => {
                     // A direct log is read forward only, so the row at
@@ -209,39 +241,46 @@ impl RelayHandle {
                     let after_seq = position
                         .checked_sub(1)
                         .filter(|after| *after >= 0)
-                        .ok_or(QUOTE_READ_POSITION_OUT_OF_RANGE)?;
+                        .ok_or(NoRow::Absent(QUOTE_READ_POSITION_OUT_OF_RANGE))?;
                     let rows = client
                         .fetch_direct_messages(session, Some(after_seq), Some(1))
                         .await
-                        .map_err(|_| QUOTE_READ_FETCH_FAILED)?;
+                        .map_err(|e| no_row_of_fetch(&e))?;
                     let row = rows
                         .into_iter()
                         .find(|row| row.seq == position)
-                        .ok_or(QUOTE_READ_ROW_MISSING)?;
+                        .ok_or(NoRow::Absent(QUOTE_READ_ROW_MISSING))?;
                     let message: DirectMessage = serde_json::from_slice(&row.ciphertext.0)
-                        .map_err(|_| QUOTE_READ_DECODE_FAILED)?;
-                    Ok::<crate::messaging::QuoteView, &'static str>(quote_view_of(
+                        .map_err(|_| NoRow::Failed(QUOTE_READ_DECODE_FAILED))?;
+                    Ok::<QuoteRead, NoRow>(QuoteRead::Found(quote_view_of(
                         &row.sender,
                         message.text,
-                    ))
+                    )))
                 }
             }
         };
         match tokio::time::timeout(QUOTE_READ_TIMEOUT, read).await {
-            Ok(Ok(view)) => Some(view),
-            Ok(Err(reason)) => {
+            Ok(Ok(read)) => read,
+            Ok(Err(NoRow::Absent(reason))) => {
+                warn!(
+                    surface = surface.label(),
+                    position, reason, "quoted row read found no row"
+                );
+                QuoteRead::Absent
+            }
+            Ok(Err(NoRow::Failed(reason))) => {
                 warn!(
                     surface = surface.label(),
                     position, reason, "quoted row read failed"
                 );
-                None
+                QuoteRead::Failed
             }
             Err(_) => {
                 warn!(
                     surface = surface.label(),
                     position, "quoted row read timed out"
                 );
-                None
+                QuoteRead::Failed
             }
         }
     }
@@ -592,11 +631,13 @@ mod tests {
             .mount(&server)
             .await;
 
-        let view = handle(&server.uri())
+        let read = handle(&server.uri())
             .read_quoted_row(Surface::Room(&room), 7)
-            .await
-            .expect("the row renders");
+            .await;
 
+        let QuoteRead::Found(view) = read else {
+            panic!("the row renders: {read:?}");
+        };
         assert_eq!(view.text, "hello from the room");
         assert!(
             view.author.contains("peer-handle"),
@@ -618,11 +659,14 @@ mod tests {
             .mount(&server)
             .await;
 
-        let view = handle(&server.uri())
+        let read = handle(&server.uri())
             .read_quoted_row(Surface::Room(&room), 7)
             .await;
 
-        assert!(view.is_none(), "a neighbouring row is not that row");
+        assert!(
+            matches!(read, QuoteRead::Absent),
+            "a neighbouring row is not that row: {read:?}"
+        );
     }
 
     /// A fetch that outlasts the budget renders no reference: the row never
@@ -643,13 +687,13 @@ mod tests {
             .mount(&server)
             .await;
 
-        let view = handle(&server.uri())
+        let read = handle(&server.uri())
             .read_quoted_row(Surface::Room(&room), 7)
             .await;
 
         assert!(
-            view.is_none(),
-            "a fetch past the budget renders no reference"
+            matches!(read, QuoteRead::Failed),
+            "a fetch past the budget renders no reference: {read:?}"
         );
     }
 
@@ -671,11 +715,13 @@ mod tests {
             .mount(&server)
             .await;
 
-        let view = handle(&server.uri())
+        let read = handle(&server.uri())
             .read_quoted_row(Surface::Direct(&session), 7)
-            .await
-            .expect("the row renders");
+            .await;
 
+        let QuoteRead::Found(view) = read else {
+            panic!("the row renders: {read:?}");
+        };
         assert_eq!(view.text, "hello in private");
         let requests = server.received_requests().await.expect("requests recorded");
         assert_eq!(
@@ -697,11 +743,36 @@ mod tests {
             .mount(&server)
             .await;
 
-        let view = handle(&server.uri())
+        let read = handle(&server.uri())
             .read_quoted_row(Surface::Room(&room), 7)
             .await;
 
-        assert!(view.is_none(), "an unreadable page is no reference");
+        assert!(
+            matches!(read, QuoteRead::Failed),
+            "an unanswered fetch is no reference: {read:?}"
+        );
+    }
+
+    /// A surface that answers for a row the log never held is an absence, not
+    /// a failure: the read learns the row is gone rather than unanswered.
+    #[tokio::test]
+    async fn a_row_the_surface_reports_missing_is_an_absence() {
+        let server = MockServer::start().await;
+        let room = RoomId::from("room-1".to_string());
+        Mock::given(method("GET"))
+            .and(path("/rooms/room-1/messages"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        let read = handle(&server.uri())
+            .read_quoted_row(Surface::Room(&room), 7)
+            .await;
+
+        assert!(
+            matches!(read, QuoteRead::Absent),
+            "a row the surface reports missing is no row: {read:?}"
+        );
     }
 
     /// A row whose payload no longer decodes is not a reference either: the
@@ -717,11 +788,14 @@ mod tests {
             .mount(&server)
             .await;
 
-        let view = handle(&server.uri())
+        let read = handle(&server.uri())
             .read_quoted_row(Surface::Room(&room), 7)
             .await;
 
-        assert!(view.is_none(), "an undecodable row is no reference");
+        assert!(
+            matches!(read, QuoteRead::Failed),
+            "an undecodable row is no reference: {read:?}"
+        );
     }
 
     /// A room position whose page would run past what the log can hold has no
@@ -731,11 +805,14 @@ mod tests {
         let server = MockServer::start().await;
         let room = RoomId::from("room-1".to_string());
 
-        let view = handle(&server.uri())
+        let read = handle(&server.uri())
             .read_quoted_row(Surface::Room(&room), i64::MAX)
             .await;
 
-        assert!(view.is_none());
+        assert!(
+            matches!(read, QuoteRead::Absent),
+            "no page above the position holds no row: {read:?}"
+        );
         let requests = server.received_requests().await.expect("requests recorded");
         assert!(
             requests.is_empty(),
@@ -750,11 +827,14 @@ mod tests {
         let server = MockServer::start().await;
         let session = DirectSessionId::from("session-1".to_string());
 
-        let view = handle(&server.uri())
+        let read = handle(&server.uri())
             .read_quoted_row(Surface::Direct(&session), 0)
             .await;
 
-        assert!(view.is_none());
+        assert!(
+            matches!(read, QuoteRead::Absent),
+            "no page below the position holds no row: {read:?}"
+        );
         let requests = server.received_requests().await.expect("requests recorded");
         assert!(
             requests.is_empty(),

@@ -825,7 +825,7 @@ async fn a_one_to_one_quote_renders_its_author_summary_and_read_back_command() {
 /// still there: the position is a fact about the message, and the read-back is
 /// how the reader learns the rest. The message itself is delivered unchanged.
 #[tokio::test]
-async fn an_unreadable_quote_says_so_and_still_hands_over_the_command() {
+async fn an_absent_quote_says_so_and_still_hands_over_the_command() {
     let state = make_state();
     install_inbox_store(&state).await;
     let (_db, _frames, _dir) = install_projector(&state).await;
@@ -852,8 +852,8 @@ async fn an_unreadable_quote_says_so_and_still_hands_over_the_command() {
         "the position is kept: {notice}"
     );
     assert!(
-        notice.contains("\nthe quoted row could not be read back\n"),
-        "an unreadable row is stated, not invented: {notice}"
+        notice.contains("\nthe quoted row is not in that log\n"),
+        "an absent row is stated, not invented: {notice}"
     );
     assert!(
         notice.contains("(print that row with: kallip lesche read --quote 404)"),
@@ -867,7 +867,7 @@ async fn an_unreadable_quote_says_so_and_still_hands_over_the_command() {
 
 /// A quote is read in the conversation it arrived in: a row that lives in
 /// another peer's partition is not this conversation's history, so the
-/// reference reports it as unreadable rather than reaching across.
+/// reference reports it as absent rather than reaching across.
 #[tokio::test]
 async fn a_quote_cannot_reach_a_row_of_another_partition() {
     let state = make_state();
@@ -907,8 +907,8 @@ async fn a_quote_cannot_reach_a_row_of_another_partition() {
         "another conversation's row is not quoted: {notice}"
     );
     assert!(
-        notice.contains("\nthe quoted row could not be read back\n"),
-        "the reference reports the row as unreadable: {notice}"
+        notice.contains("\nthe quoted row is not in that log\n"),
+        "the reference reports the row as absent: {notice}"
     );
 }
 
@@ -1017,10 +1017,13 @@ async fn a_reader_that_cannot_read_the_log_gets_no_reference() {
 /// hanging it.
 #[tokio::test(start_paused = true)]
 async fn a_stalled_quote_read_gives_up_the_reference() {
-    let stalled = std::future::pending::<Option<crate::messaging::QuoteView>>();
+    let stalled = std::future::pending::<crate::messaging::QuoteRead>();
     let read = super::within_quote_budget(7, stalled);
     let outcome = tokio::time::timeout(std::time::Duration::from_secs(10), read)
         .await
         .expect("the seam returns instead of holding the message");
-    assert!(outcome.is_none(), "a stalled read renders no reference");
+    assert!(
+        matches!(outcome, crate::messaging::QuoteRead::Failed),
+        "a stalled read renders no reference: {outcome:?}"
+    );
 }
