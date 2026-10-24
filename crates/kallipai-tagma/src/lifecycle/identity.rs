@@ -84,6 +84,10 @@ advisory). A room header may also carry `| quote=<seq>` — the position, \
 in that room's log, that the message answers; `kallip lesche read --room` \
 marks its blocks the same way, and `kallip lesche read --room <room_id> \
 --quote <seq>` prints just that row. \
+The reference under it may carry two lines: one naming the quoted row's \
+author with a short summary (or saying why there is none to give), and — \
+whenever that first line is not the whole row — a second \
+line with the command that prints the row in full (paste it as written). \
 A `| mentions=...` field may follow the quote segment, and a header that \
 carries one ends with it. It reads the row's mentions as they concern you: \
 `| mentions=you` (you alone), `| mentions=<n>` (n other members and not \
@@ -96,6 +100,13 @@ session (each direct line reads `direct <session-id> peer=<tagma-id> \
 the position, in that conversation's own log, that the message answers; \
 `kallip lesche read --tagma` marks its blocks the same way, and `kallip \
 lesche read --tagma <tagma-id> --quote <seq>` prints just that row. \
+A reference there is spelled the same way; its command may address the \
+conversation by session id (`kallip lesche read --session <session_id> \
+--quote <seq>`) rather than by tagma. \
+That reference goes only to a reader that can read the row it names: the \
+root agent on the 1:1 above, the receiving agent on a relay surface. A \
+subagent's deliveries carry neither it nor the `| quote=<seq>` segment, \
+so nothing is withheld from a subagent. \
 `--tagma` takes the tagma id, never the UUID in the header's parens (that \
 value is the sender's participant id). \
 Use plain `kallip lesche send` (no `--room`) only for the direct 1:1 \

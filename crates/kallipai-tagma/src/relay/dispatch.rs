@@ -13,22 +13,34 @@
 
 use kallipai_lesche_common::rooms::MemberId;
 
+use crate::delivery::QUOTE_READ_TIMEOUT;
+
 use super::*;
 
-/// How long the delivery seam spends reading back the row a relay-surface
-/// message answers, for the whole read (fetch included).
-///
-/// The reference is an aid, the message is the cargo: past this budget the
-/// reference says it could not be read, and the message is delivered on time
-/// regardless.
-const QUOTE_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 // Why a one-row read produced no row. Each case is stated in the log on its
 // own: which one it was is what tells a failed fetch apart from a page that
 // landed beside the position, or a row whose payload no longer decodes.
 const QUOTE_READ_FETCH_FAILED: &str = "the page fetch failed";
 const QUOTE_READ_ROW_MISSING: &str = "the fetched page did not hold that row";
 const QUOTE_READ_DECODE_FAILED: &str = "the row did not decode";
-const QUOTE_READ_POSITION_OVERFLOW: &str = "the position has no page above it";
+const QUOTE_READ_POSITION_OUT_OF_RANGE: &str = "the position leaves no page to fetch";
+
+/// The reference a fetched row renders as: that row's relay-authenticated
+/// sender and its text. Both surfaces hand back those same two facts, so
+/// the view is built here once instead of in each fetch branch.
+fn quote_view_of(
+    sender: &kallipai_lesche_common::message::Participant,
+    text: String,
+) -> crate::messaging::QuoteView {
+    crate::messaging::QuoteView {
+        author: crate::messaging::relay_author(
+            sender.kind.as_str(),
+            sender.id.as_ref(),
+            &sender.handle,
+        ),
+        text,
+    }
+}
 
 impl RelayHandle {
     /// Dispatch a plaintext relay-surface message (room or direct session) to
@@ -147,6 +159,12 @@ impl RelayHandle {
     /// A read that produces no row logs why, with the surface and the position
     /// -- the same treatment the bilateral read gives its own failures, so a
     /// reference that cannot be rendered never vanishes without a trace.
+    ///
+    /// Both surfaces number rows from 1 and callers pass only positive
+    /// positions; each branch still states what it does with a position that
+    /// leaves no page to fetch (a room's page would run past what the log
+    /// holds, a direct log has no page below its first row) rather than
+    /// trusting the caller to have held that precondition.
     async fn read_quoted_row(
         &self,
         surface: crate::messaging::Surface<'_>,
@@ -166,7 +184,7 @@ impl RelayHandle {
                                 before_seq: Some(
                                     position
                                         .checked_add(1)
-                                        .ok_or(QUOTE_READ_POSITION_OVERFLOW)?,
+                                        .ok_or(QUOTE_READ_POSITION_OUT_OF_RANGE)?,
                                 ),
                                 limit: Some(1),
                             },
@@ -179,20 +197,21 @@ impl RelayHandle {
                         .ok_or(QUOTE_READ_ROW_MISSING)?;
                     let message: RoomMessage = serde_json::from_slice(&row.ciphertext.0)
                         .map_err(|_| QUOTE_READ_DECODE_FAILED)?;
-                    Ok::<crate::messaging::QuoteView, &'static str>(crate::messaging::QuoteView {
-                        author: crate::messaging::relay_author(
-                            row.sender.kind.as_str(),
-                            row.sender.id.as_ref(),
-                            &row.sender.handle,
-                        ),
-                        text: message.text,
-                    })
+                    Ok::<crate::messaging::QuoteView, &'static str>(quote_view_of(
+                        &row.sender,
+                        message.text,
+                    ))
                 }
                 crate::messaging::Surface::Direct(session) => {
                     // A direct log is read forward only, so the row at
-                    // `position` is reached from one below it.
+                    // `position` sits one page below it; a position with no
+                    // page below it has no row, and the read says so.
+                    let after_seq = position
+                        .checked_sub(1)
+                        .filter(|after| *after >= 0)
+                        .ok_or(QUOTE_READ_POSITION_OUT_OF_RANGE)?;
                     let rows = client
-                        .fetch_direct_messages(session, Some(position - 1), Some(1))
+                        .fetch_direct_messages(session, Some(after_seq), Some(1))
                         .await
                         .map_err(|_| QUOTE_READ_FETCH_FAILED)?;
                     let row = rows
@@ -201,14 +220,10 @@ impl RelayHandle {
                         .ok_or(QUOTE_READ_ROW_MISSING)?;
                     let message: DirectMessage = serde_json::from_slice(&row.ciphertext.0)
                         .map_err(|_| QUOTE_READ_DECODE_FAILED)?;
-                    Ok::<crate::messaging::QuoteView, &'static str>(crate::messaging::QuoteView {
-                        author: crate::messaging::relay_author(
-                            row.sender.kind.as_str(),
-                            row.sender.id.as_ref(),
-                            &row.sender.handle,
-                        ),
-                        text: message.text,
-                    })
+                    Ok::<crate::messaging::QuoteView, &'static str>(quote_view_of(
+                        &row.sender,
+                        message.text,
+                    ))
                 }
             }
         };
@@ -490,5 +505,260 @@ impl RelayHandle {
             round.cancel();
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kallipai_lesche_common::direct::DirectMessage;
+    use wiremock::matchers::{method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// A handle whose lesche client points at `base`. These tests exercise the
+    /// one-row read alone, so the rest of `Inner` stays inert: no state (a
+    /// dangling `Weak`), no pumps, nothing spawned.
+    fn handle(base: &str) -> RelayHandle {
+        RelayHandle::new(
+            LescheClient::builder(base, "tok")
+                .build()
+                .expect("lesche client"),
+            "test".to_string(),
+            TagmaId::from("tagma".to_string()),
+            "Tagma".into(),
+            DeviceKey::generate(),
+            AgentId::from("root".to_string()),
+            std::sync::Weak::new(),
+        )
+    }
+
+    /// One stored room row in the shape `GET /rooms/{room}/messages` returns:
+    /// the plaintext `RoomMessage` JSON rides the row's ciphertext field.
+    fn room_row(seq: i64, handle: &str, payload: &[u8]) -> serde_json::Value {
+        serde_json::json!({
+            "seq": seq,
+            "sender": {"id": "p-tagma-peer", "kind": "agent", "handle": handle},
+            "epoch": 1,
+            "ciphertext": serde_json::to_value(Ciphertext(payload.to_vec())).expect("ciphertext"),
+            "created_at": "2026-08-02T00:00:00Z",
+        })
+    }
+
+    /// The same row on a direct session, whose stored view carries no epoch.
+    fn direct_row(seq: i64, handle: &str, payload: &[u8]) -> serde_json::Value {
+        serde_json::json!({
+            "seq": seq,
+            "sender": {"id": "p-tagma-peer", "kind": "agent", "handle": handle},
+            "ciphertext": serde_json::to_value(Ciphertext(payload.to_vec())).expect("ciphertext"),
+            "created_at": "2026-08-02T00:00:00Z",
+        })
+    }
+
+    fn room_payload(text: &str) -> Vec<u8> {
+        serde_json::to_vec(&RoomMessage {
+            text: text.to_string(),
+            attachment: None,
+            quote: None,
+            mentions: Vec::new(),
+        })
+        .expect("room payload")
+    }
+
+    fn direct_payload(text: &str) -> Vec<u8> {
+        serde_json::to_vec(&DirectMessage {
+            text: text.to_string(),
+            attachment: None,
+            quote: None,
+        })
+        .expect("direct payload")
+    }
+
+    /// The row the position names is the reference: its text, and an author
+    /// read off that row's own sender.
+    #[tokio::test]
+    async fn a_room_quote_renders_the_row_the_position_names() {
+        let server = MockServer::start().await;
+        let room = RoomId::from("room-1".to_string());
+        let body = serde_json::json!([room_row(
+            7,
+            "peer-handle",
+            &room_payload("hello from the room")
+        )]);
+        Mock::given(method("GET"))
+            .and(path("/rooms/room-1/messages"))
+            .and(query_param("before_seq", "8"))
+            .and(query_param("limit", "1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(&server)
+            .await;
+
+        let view = handle(&server.uri())
+            .read_quoted_row(Surface::Room(&room), 7)
+            .await
+            .expect("the row renders");
+
+        assert_eq!(view.text, "hello from the room");
+        assert!(
+            view.author.contains("peer-handle"),
+            "the author names that row's sender: {}",
+            view.author
+        );
+    }
+
+    /// A page that landed on the neighbouring row is not the row asked for: the
+    /// read reports no reference instead of pinning the wrong text.
+    #[tokio::test]
+    async fn a_page_beside_the_position_renders_no_reference() {
+        let server = MockServer::start().await;
+        let room = RoomId::from("room-1".to_string());
+        let body = serde_json::json!([room_row(6, "peer-handle", &room_payload("the row above"))]);
+        Mock::given(method("GET"))
+            .and(path("/rooms/room-1/messages"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(&server)
+            .await;
+
+        let view = handle(&server.uri())
+            .read_quoted_row(Surface::Room(&room), 7)
+            .await;
+
+        assert!(view.is_none(), "a neighbouring row is not that row");
+    }
+
+    /// A fetch that outlasts the budget renders no reference: the row never
+    /// arrives, so the reference says it could not be read while the message
+    /// itself still goes out.
+    #[tokio::test]
+    async fn a_slow_fetch_gives_up_the_reference() {
+        let server = MockServer::start().await;
+        let room = RoomId::from("room-1".to_string());
+        let body = serde_json::json!([room_row(7, "peer-handle", &room_payload("late row"))]);
+        Mock::given(method("GET"))
+            .and(path("/rooms/room-1/messages"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_delay(std::time::Duration::from_secs(3))
+                    .set_body_json(body),
+            )
+            .mount(&server)
+            .await;
+
+        let view = handle(&server.uri())
+            .read_quoted_row(Surface::Room(&room), 7)
+            .await;
+
+        assert!(
+            view.is_none(),
+            "a fetch past the budget renders no reference"
+        );
+    }
+
+    /// A direct log reads forward, so the row at the position is reached from
+    /// one below it: one page, one row, the position asked for.
+    #[tokio::test]
+    async fn a_direct_quote_reads_forward_from_the_row_below() {
+        let server = MockServer::start().await;
+        let session = DirectSessionId::from("session-1".to_string());
+        let body = serde_json::json!([direct_row(
+            7,
+            "peer-handle",
+            &direct_payload("hello in private")
+        )]);
+        Mock::given(method("GET"))
+            .and(path("/direct-sessions/session-1/messages"))
+            .and(query_param("limit", "1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(&server)
+            .await;
+
+        let view = handle(&server.uri())
+            .read_quoted_row(Surface::Direct(&session), 7)
+            .await
+            .expect("the row renders");
+
+        assert_eq!(view.text, "hello in private");
+        let requests = server.received_requests().await.expect("requests recorded");
+        assert_eq!(
+            requests[0].url.query(),
+            Some("after_seq=6&limit=1"),
+            "one forward page from the row below: {}",
+            requests[0].url
+        );
+    }
+
+    /// A surface that refuses the page costs the reference, never the message.
+    #[tokio::test]
+    async fn a_failed_fetch_renders_no_reference() {
+        let server = MockServer::start().await;
+        let room = RoomId::from("room-1".to_string());
+        Mock::given(method("GET"))
+            .and(path("/rooms/room-1/messages"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+
+        let view = handle(&server.uri())
+            .read_quoted_row(Surface::Room(&room), 7)
+            .await;
+
+        assert!(view.is_none(), "an unreadable page is no reference");
+    }
+
+    /// A row whose payload no longer decodes is not a reference either: the
+    /// read would rather say nothing than render bytes it cannot read.
+    #[tokio::test]
+    async fn a_row_whose_payload_does_not_decode_renders_no_reference() {
+        let server = MockServer::start().await;
+        let room = RoomId::from("room-1".to_string());
+        let body = serde_json::json!([room_row(7, "peer-handle", b"not a message")]);
+        Mock::given(method("GET"))
+            .and(path("/rooms/room-1/messages"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(&server)
+            .await;
+
+        let view = handle(&server.uri())
+            .read_quoted_row(Surface::Room(&room), 7)
+            .await;
+
+        assert!(view.is_none(), "an undecodable row is no reference");
+    }
+
+    /// A room position whose page would run past what the log can hold has no
+    /// row to fetch: the read says so without asking the surface.
+    #[tokio::test]
+    async fn a_room_position_with_no_page_above_it_is_not_fetched() {
+        let server = MockServer::start().await;
+        let room = RoomId::from("room-1".to_string());
+
+        let view = handle(&server.uri())
+            .read_quoted_row(Surface::Room(&room), i64::MAX)
+            .await;
+
+        assert!(view.is_none());
+        let requests = server.received_requests().await.expect("requests recorded");
+        assert!(
+            requests.is_empty(),
+            "no request for a position with no page: {requests:?}"
+        );
+    }
+
+    /// A direct position with no page below it has no row to reach: the read
+    /// says so instead of asking the surface for a page below the first row.
+    #[tokio::test]
+    async fn a_direct_position_with_no_page_below_it_is_not_fetched() {
+        let server = MockServer::start().await;
+        let session = DirectSessionId::from("session-1".to_string());
+
+        let view = handle(&server.uri())
+            .read_quoted_row(Surface::Direct(&session), 0)
+            .await;
+
+        assert!(view.is_none());
+        let requests = server.received_requests().await.expect("requests recorded");
+        assert!(
+            requests.is_empty(),
+            "no request for a position with no page: {requests:?}"
+        );
     }
 }

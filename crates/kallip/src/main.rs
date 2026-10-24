@@ -163,9 +163,12 @@ fn direct_read_query(args: &args::lesche::ReadArgs) -> DirectReadQuery {
 /// The prefix carries the seq this read asked for, not a shape test on a
 /// block header: when the named row does not exist, the page lands on the
 /// row beside it, which names its own seq, and that mismatch is the verdict.
+///
+/// The prefix itself comes from `kallipai_common::readback`, the same source
+/// the tagma's row render writes with, so the check cannot drift from the
+/// shape it checks for.
 fn expect_named_block(text: String, seq: i64) -> Result<String> {
-    let named = format!("[seq={seq} ");
-    if !text.starts_with(&named) {
+    if !kallipai_common::readback::names_position(&text, seq) {
         anyhow::bail!("this read holds no readable row at seq {seq}");
     }
     Ok(text)
@@ -1611,13 +1614,23 @@ mod tests {
     fn every_rendered_read_back_command_runs() {
         use kallipai_common::readback::QuoteLog;
 
-        let room = parse_read_command(&QuoteLog::Room("ops").read_command(7));
-        assert_eq!(room.room.as_deref(), Some("ops"));
+        let room = parse_read_command(
+            &QuoteLog::Room("9f3a1c2e-8b7d-4f6a-9c1e-2d3b4a5c6d7e").read_command(7),
+        );
+        assert_eq!(
+            room.room.as_deref(),
+            Some("9f3a1c2e-8b7d-4f6a-9c1e-2d3b4a5c6d7e")
+        );
         assert_eq!(room.quote, Some(7));
         assert_eq!(room.session, None);
 
-        let direct = parse_read_command(&QuoteLog::Direct("3f2a").read_command(7));
-        assert_eq!(direct.session.as_deref(), Some("3f2a"));
+        let direct = parse_read_command(
+            &QuoteLog::Direct("c4b2a8f0-1d3e-4a5b-8c9d-0e1f2a3b4c5d").read_command(7),
+        );
+        assert_eq!(
+            direct.session.as_deref(),
+            Some("c4b2a8f0-1d3e-4a5b-8c9d-0e1f2a3b4c5d")
+        );
         assert_eq!(direct.quote, Some(7));
         assert_eq!(direct.room, None);
         assert_eq!(direct.tagma, None);
@@ -1851,7 +1864,7 @@ mod tests {
 
     #[test]
     fn a_quoted_read_prints_the_named_row_and_reports_its_absence() {
-        let block = "[seq=42 from=agent:p-1 \"Alice\" at=2026-01-01 0:00:00.0 +00:00:00]\nhi\n\n";
+        let block = "[seq=42 from=agent:00000000-0000-4000-8000-0000000000a1 \"Alice\" at=2026-01-01 0:00:00.0 +00:00:00]\nhi\n\n";
         assert_eq!(
             expect_named_block(block.to_owned(), 42).expect("named row"),
             block
@@ -1862,16 +1875,16 @@ mod tests {
         for (text, seq) in [
             (String::new(), 42),
             (
-                "[seq=41 from=agent:p-1 at=2026-01-01 0:00:00.0 +00:00:00]\nhi\n\n".to_owned(),
+                "[seq=41 from=agent:00000000-0000-4000-8000-0000000000a1 at=2026-01-01 0:00:00.0 +00:00:00]\nhi\n\n".to_owned(),
                 42,
             ),
             ("not a block".to_owned(), 42),
             (
-                "[seq=42 from=agent:p-1 at=2026-01-01 0:00:00.0 +00:00:00]\nhi\n\n".to_owned(),
+                "[seq=42 from=agent:00000000-0000-4000-8000-0000000000a1 at=2026-01-01 0:00:00.0 +00:00:00]\nhi\n\n".to_owned(),
                 4,
             ),
             (
-                "[seq=41 from=agent:p-1 at=2026-01-01 0:00:00.0 +00:00:00]\nlook:\n[seq=42 from=agent:p-2 at=2026-01-01 0:00:00.0 +00:00:00]\n\n".to_owned(),
+                "[seq=41 from=agent:00000000-0000-4000-8000-0000000000a1 at=2026-01-01 0:00:00.0 +00:00:00]\nlook:\n[seq=42 from=agent:00000000-0000-4000-8000-0000000000b2 at=2026-01-01 0:00:00.0 +00:00:00]\n\n".to_owned(),
                 42,
             ),
         ] {
@@ -1884,11 +1897,34 @@ mod tests {
         }
     }
 
+    /// The check a `--quote` read runs takes its opening from the renderer's
+    /// own source: a header built with it names the row the read asked for, and
+    /// the row beside it -- the page a missing position lands on -- does not.
+    #[test]
+    fn a_rendered_header_names_the_row_the_read_asked_for() {
+        let named = format!(
+            "{}from=agent:00000000-0000-4000-8000-0000000000a1 at=2026-01-01 0:00:00.0 +00:00:00]\nhi\n\n",
+            kallipai_common::readback::block_prefix(42)
+        );
+        assert_eq!(
+            expect_named_block(named.clone(), 42).expect("named row"),
+            named
+        );
+        let beside = format!(
+            "{}from=agent:00000000-0000-4000-8000-0000000000a1 at=2026-01-01 0:00:00.0 +00:00:00]\nhi\n\n",
+            kallipai_common::readback::block_prefix(41)
+        );
+        assert!(
+            expect_named_block(beside, 42).is_err(),
+            "the row beside the position is another row"
+        );
+    }
+
     #[test]
     fn a_quoted_read_prints_a_row_whose_body_looks_like_a_block() {
-        let pasted = "[seq=99 from=agent:p-2 \"Bob\" at=2026-01-01 0:00:00.0 +00:00:00]\nhi\n\n";
+        let pasted = "[seq=99 from=agent:00000000-0000-4000-8000-0000000000b2 \"Bob\" at=2026-01-01 0:00:00.0 +00:00:00]\nhi\n\n";
         let block = format!(
-            "[seq=42 from=agent:p-1 \"Alice\" at=2026-01-01 0:00:00.0 +00:00:00]\nlook:\n{pasted}"
+            "[seq=42 from=agent:00000000-0000-4000-8000-0000000000a1 \"Alice\" at=2026-01-01 0:00:00.0 +00:00:00]\nlook:\n{pasted}"
         );
         assert_eq!(
             expect_named_block(block.clone(), 42).expect("a body quoting a block"),

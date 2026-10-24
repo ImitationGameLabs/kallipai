@@ -255,7 +255,7 @@ pub async fn external_history_row(
 ) -> Result<axum::response::Response, ApiError> {
     let projector = external_projector(&state, &id).await?;
     if row <= 0 {
-        return Err(ApiError::bad_request("quote must be a positive row id"));
+        return Err(ApiError::bad_request("row id must be positive"));
     }
     let block = projector
         .read_quote_block(row)
@@ -264,7 +264,7 @@ pub async fn external_history_row(
     match block {
         Some(text) => Ok(text.into_response()),
         None => Err(ApiError::not_found(format!(
-            "this conversation holds no row {row}"
+            "no row {row} in this agent's history"
         ))),
     }
 }

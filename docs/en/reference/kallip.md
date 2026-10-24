@@ -341,10 +341,18 @@ rooms, direct sessions) in one view. Attachments must live in a workspace the
 peer can read.
 
 A delivered message that answers another one names its reference under the
-`[From: ...]` header: who wrote that row, a one-line summary of it (at most 256
-characters, cut with `…`), and the `kallip lesche read` command that prints the
-whole row. A row the history no longer holds is stated (`引用消息未能取回`) and
-the command is still given; the message itself is always delivered.
+`[From: ...]` header: who wrote that row and a one-line summary of it (at most
+256 characters of body, with one `…` added when it is cut). The
+`kallip lesche read` command that prints the whole row follows whenever the
+first line is not the whole row -- the summary was cut, the row could not be
+read back, or it holds no text. The message itself is always delivered. The
+reference goes only to a reader that can read the row it names: today the root
+agent on the 1:1 (that transcript is root's own, and the command answers 403
+for anyone else) and the receiving agent on a relay surface. The `| quote=<SEQ>`
+segment of the header goes only where the reference does. A row that holds no
+text renders as `replying to <author>: (no text on that row)` and still carries
+the command: what a row holds besides its text is not visible to the seam that
+renders the reference.
 `send --mention <ID>` (repeatable) names members of that room: the id alone
 crosses the wire (the roster resolves the label at render time), the flag is
 a room-send one, and a name the room does not hold is refused, not dropped.

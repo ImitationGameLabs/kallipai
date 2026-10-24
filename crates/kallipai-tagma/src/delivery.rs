@@ -21,6 +21,16 @@ use crate::messaging::{
 };
 use crate::state::{RegistryEntry, SharedState};
 
+/// How long the delivery seams spend reading back the row a message answers,
+/// for the whole read (a relay fetch included).
+///
+/// The reference is an aid and the message is the cargo: a projector or relay
+/// that stalls past this budget costs the reference line, never the delivery.
+/// Both seams read under this one value. They do not share the code that gives
+/// up on a read: the bilateral seam wraps its read in `within_quote_budget`,
+/// while the relay seam holds its own timeout and logs its own reason.
+pub(crate) const QUOTE_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// What the busy branch of `enqueue_prompt` may inject into a live agent's
 /// prompt channel. Peer direct messages inject the full message payload
 /// unless the sender deferred; every other caller (relay surfaces, task
@@ -131,6 +141,10 @@ pub struct OutgoingMessage<'a> {
 /// for a partition that holds no such row (never stored here, or aged out by
 /// retention): the render then says the row could not be read instead of
 /// inventing a summary.
+///
+/// The read is bounded by [`QUOTE_READ_TIMEOUT`]: a reference that
+/// takes too long says it could not be read, and the message is delivered on
+/// time regardless.
 async fn read_bilateral_quote(
     state: &SharedState,
     peer: Option<&Participant>,
@@ -139,18 +153,41 @@ async fn read_bilateral_quote(
 ) -> Option<QuoteView> {
     let projector = state.external.get()?;
     let partition = peer.map(|peer| peer.id.as_ref().to_string());
-    match projector.read_quote(partition.as_deref(), position).await {
-        Ok(Some(row)) => Some(QuoteView {
-            author: if row.direction == "outbound" {
-                String::from("你")
-            } else {
-                author.to_owned()
-            },
-            text: row.text,
-        }),
-        Ok(None) => None,
-        Err(e) => {
-            warn!(position, "quoted row read failed: {e:#}");
+
+    // The reference is an aid and the message is the cargo: a projector that
+    // stalls past the budget costs the reference line, never the delivery.
+    let read = async {
+        match projector.read_quote(partition.as_deref(), position).await {
+            Ok(Some(row)) => Some(QuoteView {
+                author: if row.direction == "outbound" {
+                    String::from("you")
+                } else {
+                    author.to_owned()
+                },
+                text: row.text,
+            }),
+            Ok(None) => None,
+            Err(e) => {
+                warn!(position, "quoted row read failed: {e:#}");
+                None
+            }
+        }
+    };
+    within_quote_budget(position, read).await
+}
+
+/// Run one reference read under [`QUOTE_READ_TIMEOUT`]: a read that does not
+/// answer in time produces no reference, and the render says so in as many
+/// words. Split from the read itself so the budget is testable without a
+/// projector that can be made to stall.
+async fn within_quote_budget<F>(position: i64, read: F) -> Option<QuoteView>
+where
+    F: std::future::Future<Output = Option<QuoteView>>,
+{
+    match tokio::time::timeout(QUOTE_READ_TIMEOUT, read).await {
+        Ok(view) => view,
+        Err(_) => {
+            warn!(position, "quoted row read timed out");
             None
         }
     }
@@ -216,13 +253,34 @@ pub async fn deliver_message(
             }
         }
     };
+
+    // The transcript a reference is read from is the operator partition, which
+    // is this agent's own only when it is root. Computed here because the
+    // decision below reads it.
+    let is_root = {
+        let registry = state.registry.read().await;
+        registry
+            .root_agent()
+            .is_some_and(|(root_id, _)| root_id == id)
+    };
     info!(receiver = %id, sender = ?header_sender, relation = ?relation, "delivering message");
     // The row this message answers is that conversation's own: read it in the
-    // partition the message arrived in, so the summary and the author come from
-    // this conversation's history and a message cannot pull a row out of
-    // another. A read that fails degrades the reference, never the message.
+    // partition the message arrived in, so a message cannot pull a row out of
+    // another. The text is that history read; the author is not -- it is the
+    // arriving message's authenticated sender, and a row this agent wrote
+    // renders as the reader's own (`you`). A read that fails degrades the
+    // reference, never the message.
+    //
+    // The reference goes only to a reader that can read the row it names: a
+    // reader who cannot would be handed a command that answers 403. On this
+    // seam that is the root agent -- root is the one reader whose transcript
+    // holds the operator partition (`record_inbound` writes it for root +
+    // operator alone), and an inter-agent row never lands there at all. The
+    // stored value keeps the id either way -- the header segment goes only
+    // where the reference does.
+    let renders_quote = is_root && matches!(relation, SenderRelation::Operator);
     let quote = match message.quote.filter(|position| *position > 0) {
-        Some(position) => {
+        Some(position) if renders_quote => {
             let author = sender_label(&header_sender, relation);
             let view = read_bilateral_quote(state, sender.as_ref(), position, &author).await;
             Some(Quote {
@@ -231,7 +289,7 @@ pub async fn deliver_message(
                 view,
             })
         }
-        None => None,
+        _ => None,
     };
     let envelope = format_incoming(&header_sender, relation, quote.as_ref(), message.text);
 
@@ -254,12 +312,6 @@ pub async fn deliver_message(
     // (the frontend re-sends refused messages). Recording still wins
     // the race that matters — an agent reply needs an LLM round-trip —
     // and the crash window shrinks to the ms between accept and append.
-    let is_root = {
-        let registry = state.registry.read().await;
-        registry
-            .root_agent()
-            .is_some_and(|(root_id, _)| root_id == id)
-    };
     if is_root
         && matches!(relation, SenderRelation::Operator)
         && let Some(projector) = state.external.get()

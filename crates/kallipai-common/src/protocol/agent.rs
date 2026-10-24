@@ -577,9 +577,11 @@ pub struct MessageRequest {
     /// keep bodies without one byte-identical.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub defer: bool,
-    /// The 1:1 history row id this message quotes, when the sender answered
-    /// one. Absent from the historical wire shape; serde default + skip keep
-    /// bodies without one byte-identical.
+    /// The position in the 1:1 history this message answers, when the sender
+    /// answered one. Only an operator message to the root agent renders it as a
+    /// reference: a quote on any other pair is accepted and ignored, and the
+    /// header then carries no `| quote=` segment. Absent from the historical
+    /// wire shape; serde default + skip keep bodies without one byte-identical.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quote: Option<i64>,
 }

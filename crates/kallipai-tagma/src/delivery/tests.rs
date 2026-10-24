@@ -812,10 +812,8 @@ async fn a_one_to_one_quote_renders_its_author_summary_and_read_back_command() {
         "the position stays in the header: {notice}"
     );
     assert!(
-        notice.contains(&format!(
-            "\n引用：operator 说：「the quoted text」\n（引用原文整行可用以下命令取回：kallip lesche read --quote {quoted}）\n"
-        )),
-        "the reference names the author, the summary, and the command: {notice}"
+        notice.contains("\nreplying to operator: 「the quoted text」\n"),
+        "the reference names the author and the summary: {notice}"
     );
     assert!(
         notice.ends_with("the answer"),
@@ -854,11 +852,11 @@ async fn an_unreadable_quote_says_so_and_still_hands_over_the_command() {
         "the position is kept: {notice}"
     );
     assert!(
-        notice.contains("\n引用消息未能取回\n"),
+        notice.contains("\nthe quoted row could not be read back\n"),
         "an unreadable row is stated, not invented: {notice}"
     );
     assert!(
-        notice.contains("引用原文整行可用以下命令取回：kallip lesche read --quote 404）"),
+        notice.contains("(print that row with: kallip lesche read --quote 404)"),
         "the command is still given: {notice}"
     );
     assert!(
@@ -909,7 +907,120 @@ async fn a_quote_cannot_reach_a_row_of_another_partition() {
         "another conversation's row is not quoted: {notice}"
     );
     assert!(
-        notice.contains("\n引用消息未能取回\n"),
+        notice.contains("\nthe quoted row could not be read back\n"),
         "the reference reports the row as unreadable: {notice}"
     );
+}
+
+/// A quoted row this agent wrote is the reader's own line, so the reference
+/// names the reader rather than the peer the delivered message came from.
+#[tokio::test]
+async fn a_quoted_row_of_this_agents_own_reads_as_you() {
+    let state = make_state();
+    install_inbox_store(&state).await;
+    let (db, _frames, _dir) = install_projector(&state).await;
+    let (id, mut rx) = live_agent(&state).await;
+    let (mine, _) = chat_history::append(&db, None, None, "outbound", "my own line", None, None)
+        .await
+        .expect("append the row this agent wrote");
+
+    crate::delivery::deliver_message(
+        &state,
+        crate::auth::Identity::Operator,
+        None,
+        &id,
+        crate::delivery::OutgoingMessage {
+            text: "the answer",
+            attachment: None,
+            quote: Some(mine),
+        },
+        false,
+    )
+    .await
+    .expect("delivery succeeds");
+
+    let notice = rx.try_recv().expect("the prompt was injected");
+    assert!(
+        notice.contains("\nreplying to you: 「my own line」\n"),
+        "the reader is the author of its own row: {notice}"
+    );
+    assert!(
+        notice.ends_with("the answer"),
+        "the body follows the reference: {notice}"
+    );
+}
+
+/// A reader other than root receives no reference line, and no position
+/// segment either: the transcript a reference is read from is root's alone, so
+/// the command would answer 403 for everyone else. The message still arrives.
+#[tokio::test]
+async fn a_reader_that_cannot_read_the_log_gets_no_reference() {
+    let state = make_state();
+    install_inbox_store(&state).await;
+    let (db, _frames, _dir) = install_projector(&state).await;
+    let root = AgentId::random();
+    let (root_entry, _root_rx) = make_entry_with_rx(None, format!("agent-{root}"));
+    state
+        .registry
+        .write()
+        .await
+        .register(root.clone(), RegistryEntry::Live(root_entry));
+
+    let child = AgentId::random();
+    let (entry, mut rx) = make_entry_with_rx(Some(root.clone()), format!("agent-{child}"));
+    state
+        .registry
+        .write()
+        .await
+        .register(child.clone(), RegistryEntry::Live(entry));
+    state
+        .duty
+        .set(child.clone(), crate::duty::DutyStatus::OnDuty);
+    let (quoted, _) =
+        chat_history::append(&db, None, None, "inbound", "the quoted text", None, None)
+            .await
+            .expect("append the quoted row");
+
+    crate::delivery::deliver_message(
+        &state,
+        crate::auth::Identity::Operator,
+        None,
+        &child,
+        crate::delivery::OutgoingMessage {
+            text: "the answer",
+            attachment: None,
+            quote: Some(quoted),
+        },
+        false,
+    )
+    .await
+    .expect("delivery succeeds");
+
+    let notice = rx.try_recv().expect("the prompt was injected");
+    assert!(
+        !notice.contains("replying to "),
+        "no reference for a reader that cannot read the log: {notice}"
+    );
+    assert!(
+        !notice.contains("quote="),
+        "the position segment goes only where the reference does: {notice}"
+    );
+    assert!(
+        notice.ends_with("the answer"),
+        "the message is delivered unchanged: {notice}"
+    );
+}
+
+/// The budget is what keeps a stalled read from costing the delivery: a read
+/// that never answers renders no reference instead of holding the seam. The
+/// outer timeout is the guard -- an unbudgeted read fails this test rather than
+/// hanging it.
+#[tokio::test(start_paused = true)]
+async fn a_stalled_quote_read_gives_up_the_reference() {
+    let stalled = std::future::pending::<Option<crate::messaging::QuoteView>>();
+    let read = super::within_quote_budget(7, stalled);
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(10), read)
+        .await
+        .expect("the seam returns instead of holding the message");
+    assert!(outcome.is_none(), "a stalled read renders no reference");
 }

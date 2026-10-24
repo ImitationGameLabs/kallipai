@@ -724,6 +724,10 @@ pub async fn read_direct_session_messages(
     Query(q): Query<DirectHistoryQuery>,
 ) -> Result<Response, ApiError> {
     require_root_self_or_operator(&state, auth.identity(), &id).await?;
+    // The query's own format is answered first: a malformed one is this
+    // request's fault whether or not a relay happens to be installed, and a
+    // missing relay would blame the wrong party.
+    let json = direct_read_format(&q)?;
     // TagmaId parses leniently (an opaque id string); an unknown peer
     // surfaces from the lesche history read as a 404, not a 400.
     let peer = TagmaId::from(peer_str);
@@ -733,7 +737,7 @@ pub async fn read_direct_session_messages(
         ));
     };
     let session = DirectSessionId::for_pair(first.tagma_id(), &peer);
-    read_direct_session(&state, &session, q).await
+    read_direct_session(&state, &session, q, json).await
 }
 
 /// `GET /agents/{id}/lesche/sessions/{session}/messages` -- the same read
@@ -752,7 +756,27 @@ pub async fn read_direct_session_messages_by_id(
     Query(q): Query<DirectHistoryQuery>,
 ) -> Result<Response, ApiError> {
     require_root_self_or_operator(&state, auth.identity(), &id).await?;
-    read_direct_session(&state, &DirectSessionId::from(session), q).await
+    // Same answer as the pair-addressed route: the format is the query's own
+    // to get wrong, before anything is looked up.
+    let json = direct_read_format(&q)?;
+    read_direct_session(&state, &DirectSessionId::from(session), q, json).await
+}
+
+/// Whether the query asks for the json variant, and the one refusal a format
+/// can earn.
+///
+/// Only `json` is accepted: a future format must not silently mean the text
+/// render. Both entry points ask this before they resolve a relay, so a
+/// malformed query is answered as such rather than as a relay that happens to
+/// be missing.
+fn direct_read_format(q: &DirectHistoryQuery) -> Result<bool, ApiError> {
+    match q.format.as_deref() {
+        None => Ok(false),
+        Some("json") => Ok(true),
+        Some(other) => Err(ApiError::bad_request(format!(
+            "unsupported format: {other} (only json)"
+        ))),
+    }
 }
 
 /// The shared body of both direct-session reads: the relay that owns the
@@ -761,18 +785,8 @@ async fn read_direct_session(
     state: &SharedState,
     session: &DirectSessionId,
     q: DirectHistoryQuery,
+    json: bool,
 ) -> Result<Response, ApiError> {
-    // Only `json` is accepted: a future format must not silently mean the
-    // text render.
-    let json = match q.format.as_deref() {
-        None => false,
-        Some("json") => true,
-        Some(other) => {
-            return Err(ApiError::bad_request(format!(
-                "unsupported format: {other} (only json)"
-            )));
-        }
-    };
     let client = {
         let Some(owner) = state.direct_sessions.owner_of(session).await else {
             return Err(ApiError::unavailable(
@@ -1615,6 +1629,69 @@ mod tests {
             "expected 503 unavailable, got {}",
             err.status
         );
+    }
+
+    /// The format is the query's own to get wrong, so a malformed one is 400
+    /// even with no relay installed: a 503 would blame a party that has not
+    /// been reached yet.
+    #[tokio::test]
+    async fn a_bad_format_is_refused_before_the_relay_lookup() {
+        let state = make_state();
+        let id = AgentId::random();
+        let entry = make_entry(None, "tok".to_string());
+        state
+            .registry
+            .write()
+            .await
+            .register(id.clone(), RegistryEntry::Live(entry));
+
+        let err = read_direct_session_messages(
+            State(state),
+            AuthIdentity::test_new(Identity::Agent { id: id.clone() }),
+            Path((id, "tagma-b".to_string())),
+            Query(DirectHistoryQuery {
+                after_seq: None,
+                limit: None,
+                format: Some("xml".to_string()),
+            }),
+        )
+        .await
+        .expect_err("a format the route does not serve is 400");
+
+        assert_eq!(
+            err.status, 400,
+            "a bad format is the request's fault, not a missing relay: {}",
+            err.status
+        );
+    }
+
+    /// The session-addressed route answers the same way: which route spelled
+    /// the log does not change who got the format wrong.
+    #[tokio::test]
+    async fn a_bad_format_is_refused_on_the_session_addressed_read_too() {
+        let state = make_state();
+        let id = AgentId::random();
+        let entry = make_entry(None, "tok".to_string());
+        state
+            .registry
+            .write()
+            .await
+            .register(id.clone(), RegistryEntry::Live(entry));
+
+        let err = read_direct_session_messages_by_id(
+            State(state),
+            AuthIdentity::test_new(Identity::Agent { id: id.clone() }),
+            Path((id, "sess-1".to_string())),
+            Query(DirectHistoryQuery {
+                after_seq: None,
+                limit: None,
+                format: Some("xml".to_string()),
+            }),
+        )
+        .await
+        .expect_err("a format the route does not serve is 400");
+
+        assert_eq!(err.status, 400, "bad request, not a missing relay");
     }
 
     /// The unified session list with no relays and no projector returns an

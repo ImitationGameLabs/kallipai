@@ -413,9 +413,9 @@ pub(crate) async fn read_by_id(
 ///
 /// Every row here belongs to this tagma's own root conversation with a peer, so
 /// an id is answerable across partitions for the agent's own read-back of a
-/// quote (`kallip lesche read --quote <id>`). A read that serves one
-/// conversation's message to its peer uses [`read_by_id`], which keeps the
-/// partition inside the lookup.
+/// quote (`kallip lesche read --quote <id>`). This is the agent reading its own
+/// history, never a read served to the peer: the peer-facing read is
+/// [`read_by_id`], which keeps the partition inside the lookup.
 pub(crate) async fn read_by_id_any_partition(db: &Db, id: i64) -> Result<Option<HistoryRow>> {
     let row = Entity::find_by_id(id)
         .one(db)
