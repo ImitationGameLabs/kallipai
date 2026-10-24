@@ -28,21 +28,26 @@ const QUOTE_READ_POSITION_OUT_OF_RANGE: &str = "the position leaves no page to f
 const QUOTE_READ_ANSWERED_NO_ROW: &str = "the surface answered that it holds no such row";
 
 /// A read that produced no row to render, in the two shapes the reference tells
-/// apart: an absence (this surface's log holds no such row, so the history is
-/// what is missing) and a failure (the read did not answer, so the row's
-/// existence is unknown). The reason rides along for the log alone -- the
-/// rendered reference states the shape, never the reason.
+/// apart. An absence means the read answered and its answer is that the log
+/// holds no row there: the page came back without that row, the position leaves
+/// no page to fetch, or the 1:1 store holds no such row. A failure means the
+/// read did not hand the row back -- the fetch failed, the payload did not
+/// decode, the budget ran out, or the surface answered for a log it will not
+/// show this reader -- so the row may well be there while its body never
+/// arrived. The reason rides along for the log alone: the rendered reference
+/// states the shape, never the reason.
 enum NoRow {
     Absent(&'static str),
     Failed(&'static str),
 }
 
-/// A failed fetch, in those same two shapes: a lesche answering 404 is telling
-/// this reader it has no such row to read (an unknown room or session, a
-/// non-member), while any other failure left the read without an answer.
+/// A failed fetch, which is always a failure and never an absence: a lesche
+/// answering 404 says no more than that it will not show this reader the row it
+/// asked for (an unknown room or session, or a reader who is not a member), so
+/// that answer does not establish that the log holds no such row.
 fn no_row_of_fetch(err: &anyhow::Error) -> NoRow {
     match err.downcast_ref::<kallipai_lesche_client::LescheHttpError>() {
-        Some(http) if http.status.as_u16() == 404 => NoRow::Absent(QUOTE_READ_ANSWERED_NO_ROW),
+        Some(http) if http.status.as_u16() == 404 => NoRow::Failed(QUOTE_READ_ANSWERED_NO_ROW),
         _ => NoRow::Failed(QUOTE_READ_FETCH_FAILED),
     }
 }
@@ -753,10 +758,11 @@ mod tests {
         );
     }
 
-    /// A surface that answers for a row the log never held is an absence, not
-    /// a failure: the read learns the row is gone rather than unanswered.
+    /// A 404 withholds the row instead of refuting it: the lesche answers it for
+    /// an unknown room or session and for a reader who is not a member alike, so
+    /// the read learns nothing about whether the row is there.
     #[tokio::test]
-    async fn a_row_the_surface_reports_missing_is_an_absence() {
+    async fn a_surface_that_will_not_show_the_row_leaves_it_unread() {
         let server = MockServer::start().await;
         let room = RoomId::from("room-1".to_string());
         Mock::given(method("GET"))
@@ -770,8 +776,30 @@ mod tests {
             .await;
 
         assert!(
-            matches!(read, QuoteRead::Absent),
-            "a row the surface reports missing is no row: {read:?}"
+            matches!(read, QuoteRead::Failed),
+            "a 404 withholds the row rather than refuting it: {read:?}"
+        );
+    }
+
+    /// The direct surface classifies a 404 the same way: the answer withholds
+    /// the row, so the read failed instead of finding the log empty.
+    #[tokio::test]
+    async fn a_direct_surface_that_will_not_show_the_row_leaves_it_unread() {
+        let server = MockServer::start().await;
+        let session = DirectSessionId::from("session-1".to_string());
+        Mock::given(method("GET"))
+            .and(path("/direct-sessions/session-1/messages"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        let read = handle(&server.uri())
+            .read_quoted_row(Surface::Direct(&session), 7)
+            .await;
+
+        assert!(
+            matches!(read, QuoteRead::Failed),
+            "a 404 withholds the row rather than refuting it: {read:?}"
         );
     }
 

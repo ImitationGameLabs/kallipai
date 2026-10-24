@@ -257,19 +257,20 @@ pub struct QuoteView {
 }
 
 /// What reading a quoted position produced: the row itself, the surface's own
-/// answer that it holds no row there, or a read that never answered.
+/// answer that it holds no row there, or a read that did not hand the row back.
 ///
 /// The two no-row cases stay apart because they say different things. A log
 /// that holds no row at the position is a fact about the history; a read that
-/// failed or ran out of its budget is a fact about the read, and leaves the
-/// row's existence unknown. Both keep the command that prints the row.
+/// failed is a fact about the read -- a fetch that did not answer, a payload
+/// that did not decode, a budget that ran out -- so the row may well be there
+/// while its body never arrived. Both keep the command that prints the row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QuoteRead {
     /// The read produced the row.
     Found(QuoteView),
     /// The surface's own log holds no row at that position.
     Absent,
-    /// The read did not answer: nothing is known about the row.
+    /// The read did not hand the row back, so no body came of it.
     Failed,
 }
 
@@ -615,9 +616,10 @@ impl Surface<'_> {
 /// Decoded in `relay::dispatch` -- the one place a surface row's quoted seq
 /// is still in hand -- and consumed by the render in `delivery`. It carries
 /// the surface word (`surface`), the body (`text`), the answered position
-/// (`quote`), and the attribution in its two halves: `sender_id`, authoritative
-/// (the lesche validated it against the authed principal), and the advisory pair
-/// `sender_kind` / `sender_handle`, which the envelope `Participant` supplies.
+/// together with what reading it produced (`quote`), and the attribution in its
+/// two halves: `sender_id`, authoritative (the lesche validated it against the
+/// authed principal), and the advisory pair `sender_kind` / `sender_handle`,
+/// which the envelope `Participant` supplies.
 ///
 /// It is not a borrow of that `Participant` plus extras: the authoritative id
 /// and the advisory `Participant::id` are different values, and one struct

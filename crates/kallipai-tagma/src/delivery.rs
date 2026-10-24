@@ -142,11 +142,11 @@ pub struct OutgoingMessage<'a> {
 ///
 /// A partition that holds no such row (never stored here, or aged out by
 /// retention) is [`QuoteRead::Absent`]: the read answered, and its answer is
-/// that the history is missing that row. A read with nothing behind it -- no
-/// projector to ask, a projector that failed, or one that outlasted
-/// [`QUOTE_READ_TIMEOUT`] -- is [`QuoteRead::Failed`]: this seam learns nothing
-/// about the row either way. Neither case invents a summary, and the message
-/// arrives on time regardless.
+/// that the history is missing that row. A read that did not hand the row back
+/// -- no projector to ask, a projector that failed, or one that outlasted
+/// [`QUOTE_READ_TIMEOUT`] -- is [`QuoteRead::Failed`]: this seam has no body for
+/// the row, and says nothing about whether the row is there. Neither case
+/// invents a summary, and the message arrives on time regardless.
 async fn read_bilateral_quote(
     state: &SharedState,
     peer: Option<&Participant>,

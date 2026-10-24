@@ -865,6 +865,44 @@ async fn an_absent_quote_says_so_and_still_hands_over_the_command() {
     );
 }
 
+/// A seam with no projector behind it has nothing to ask, so the reference
+/// says the row could not be read back and keeps the command that prints it.
+#[tokio::test]
+async fn a_seam_with_no_projector_cannot_read_the_row_back() {
+    let state = make_state();
+    install_inbox_store(&state).await;
+    let (id, mut rx) = live_agent(&state).await;
+
+    crate::delivery::deliver_message(
+        &state,
+        crate::auth::Identity::Operator,
+        None,
+        &id,
+        crate::delivery::OutgoingMessage {
+            text: "the answer",
+            attachment: None,
+            quote: Some(404),
+        },
+        false,
+    )
+    .await
+    .expect("delivery succeeds");
+
+    let notice = rx.try_recv().expect("the prompt was injected");
+    assert!(
+        notice.contains("\nthe quoted row could not be read back\n"),
+        "a read with nothing behind it says so: {notice}"
+    );
+    assert!(
+        notice.contains("(print that row with: kallip lesche read --quote 404)"),
+        "the command is still given: {notice}"
+    );
+    assert!(
+        notice.ends_with("the answer"),
+        "the message is delivered unchanged: {notice}"
+    );
+}
+
 /// A quote is read in the conversation it arrived in: a row that lives in
 /// another peer's partition is not this conversation's history, so the
 /// reference reports it as absent rather than reaching across.

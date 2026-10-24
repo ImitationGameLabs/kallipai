@@ -349,10 +349,14 @@ row, or it holds no text. The message itself is always delivered.
 
 When the read produces no row, the first line says which of the two things
 happened, and the command that prints the whole row follows either way.
-`the quoted row is not in that log` is a fact about the history: that surface's
-own log holds no row at the position. `the quoted row could not be read back`
-is a fact about the read: a relay fetch that failed or ran out of its budget,
-or a 1:1 seam with no history store to ask, leaves the row's existence unknown.
+`the quoted row is not in that log` is a fact about the history: the page that
+came back did not hold that row, the position leaves no page to fetch, or the
+1:1 history store holds no such row. `the quoted row could not be read back` is
+a fact about the read: the fetch failed, the payload did not decode, the budget
+ran out, or the 1:1 seam has no history store to ask. A failed fetch covers a
+surface that answers 404, which it returns for an unknown room or session and
+for a reader who is not a member alike, so that answer says nothing about
+whether the row is there: the row may be, and its body still never arrived.
 
 The reference goes only to a reader that can read the row it names: today the
 root agent on the 1:1 (that transcript is root's own, and the command answers
