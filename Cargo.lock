@@ -2667,7 +2667,7 @@ dependencies = [
 [[package]]
 name = "just-anthropic"
 version = "0.1.0"
-source = "git+https://github.com/ImitationGameLabs/just-agent-libs.git?rev=72a5226#72a522670f17fef4a01096c80b93239ca82c8443"
+source = "git+https://github.com/ImitationGameLabs/just-agent-libs.git?rev=1bb5365f47a2145e5829030e5c41225417cba9f6#1bb5365f47a2145e5829030e5c41225417cba9f6"
 dependencies = [
  "futures-core",
  "just-common",
@@ -2679,7 +2679,7 @@ dependencies = [
 [[package]]
 name = "just-common"
 version = "0.2.0"
-source = "git+https://github.com/ImitationGameLabs/just-agent-libs.git?rev=72a5226#72a522670f17fef4a01096c80b93239ca82c8443"
+source = "git+https://github.com/ImitationGameLabs/just-agent-libs.git?rev=1bb5365f47a2145e5829030e5c41225417cba9f6#1bb5365f47a2145e5829030e5c41225417cba9f6"
 dependencies = [
  "async-stream",
  "futures-core",
@@ -2696,7 +2696,7 @@ dependencies = [
 [[package]]
 name = "just-deepseek"
 version = "0.2.0"
-source = "git+https://github.com/ImitationGameLabs/just-agent-libs.git?rev=72a5226#72a522670f17fef4a01096c80b93239ca82c8443"
+source = "git+https://github.com/ImitationGameLabs/just-agent-libs.git?rev=1bb5365f47a2145e5829030e5c41225417cba9f6#1bb5365f47a2145e5829030e5c41225417cba9f6"
 dependencies = [
  "futures-core",
  "just-common",
@@ -2708,7 +2708,7 @@ dependencies = [
 [[package]]
 name = "just-llm-client"
 version = "0.2.0"
-source = "git+https://github.com/ImitationGameLabs/just-agent-libs.git?rev=72a5226#72a522670f17fef4a01096c80b93239ca82c8443"
+source = "git+https://github.com/ImitationGameLabs/just-agent-libs.git?rev=1bb5365f47a2145e5829030e5c41225417cba9f6#1bb5365f47a2145e5829030e5c41225417cba9f6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2729,7 +2729,7 @@ dependencies = [
 [[package]]
 name = "just-openai-compat"
 version = "0.2.0"
-source = "git+https://github.com/ImitationGameLabs/just-agent-libs.git?rev=72a5226#72a522670f17fef4a01096c80b93239ca82c8443"
+source = "git+https://github.com/ImitationGameLabs/just-agent-libs.git?rev=1bb5365f47a2145e5829030e5c41225417cba9f6#1bb5365f47a2145e5829030e5c41225417cba9f6"
 dependencies = [
  "futures-core",
  "just-common",
@@ -2741,7 +2741,7 @@ dependencies = [
 [[package]]
 name = "just-openai-responses"
 version = "0.1.0"
-source = "git+https://github.com/ImitationGameLabs/just-agent-libs.git?rev=72a5226#72a522670f17fef4a01096c80b93239ca82c8443"
+source = "git+https://github.com/ImitationGameLabs/just-agent-libs.git?rev=1bb5365f47a2145e5829030e5c41225417cba9f6#1bb5365f47a2145e5829030e5c41225417cba9f6"
 dependencies = [
  "futures-core",
  "just-common",
@@ -4970,6 +4970,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-util",
+ "h2",
  "http",
  "http-body",
  "http-body-util",

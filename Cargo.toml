@@ -45,7 +45,7 @@ license = "MIT"
 name = "kallipai"
 
 [workspace.dependencies]
-just-llm-client = { git = "https://github.com/ImitationGameLabs/just-agent-libs.git", rev = "72a5226", features = [
+just-llm-client = { git = "https://github.com/ImitationGameLabs/just-agent-libs.git", rev = "1bb5365f47a2145e5829030e5c41225417cba9f6", features = [
   "full",
 ] }
 
