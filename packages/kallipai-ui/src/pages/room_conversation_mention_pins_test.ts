@@ -106,8 +106,8 @@ Deno.test(
 Deno.test("the page renders the quoting affordances on each row", () => {
   const src = flat(source(PAGE));
   assert(
-    src.includes("<RowQuoteAffordance"),
-    "the shared quote button and its menu",
+    src.includes("<MessageRow"),
+    "the shared row draws the bubble with its quote button and menu",
   );
   assert(
     src.includes("menuOpen={rowActions.isMenuOpen(line)}"),

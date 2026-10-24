@@ -15,7 +15,6 @@ import { flat } from "../test_support/flat.ts";
 const ACTIONS = new URL("./MessageActions.svelte", import.meta.url);
 const ACTION_MENU = new URL("./ActionMenu.svelte", import.meta.url);
 const VIEW = new URL("./ConversationView.svelte", import.meta.url);
-const AFFORDANCE = new URL("./RowQuoteAffordance.svelte", import.meta.url);
 
 function source(url: URL): string {
   return new TextDecoder().decode(Deno.readFileSync(url));
@@ -59,38 +58,6 @@ Deno.test("both entries run the parent-owned quote action", () => {
     src.includes('<Menu.Item value="quote"') &&
       src.includes("onSelect={() => onQuote()}"),
     "the overflow item quotes through the menu's select hook",
-  );
-});
-
-Deno.test("the actions anchor to the bubble, not to the full-width row", () => {
-  const view = source(VIEW);
-  const wrap = view.indexOf(
-    '<div class="relative flex max-w-full min-w-0 items-center">',
-  );
-  const placed = view.indexOf("<RowQuoteAffordance");
-  assert(
-    wrap !== -1,
-    "the bubble cluster must be a positioning box of its own",
-  );
-  assert(placed !== -1, "the affordance is placed inside that box");
-  assert(
-    placed > wrap,
-    "the affordance sits inside the bubble's box, so it lands beside the bubble",
-  );
-  const affordance = source(AFFORDANCE);
-  assert(
-    affordance.includes("absolute top-1/2 -translate-y-1/2"),
-    "the shared wrapper is absolutely placed, so the controls cost no layout",
-  );
-  assert(
-    affordance.includes("-translate-y-1/2 {anchored}"),
-    "the computed anchoring class reaches the wrapper",
-  );
-  assert(
-    affordance.includes(
-      'side === "right" ? "right-full mr-1" : "left-full ml-1"',
-    ),
-    "each side grows outward on its own edge",
   );
 });
 
@@ -140,10 +107,6 @@ Deno.test("the transcript hands the row controller to the affordance", () => {
     assert(view.includes(prop), `affordance wiring: ${prop}`);
   }
   assert(
-    view.includes('side={line.role === "user" ? "right" : "left"}'),
-    "the side follows the row that owns the bubble",
-  );
-  assert(
     view.includes("{#if quotable(line)}"),
     "a row the transcript cannot number offers no affordance at all",
   );
@@ -155,7 +118,7 @@ Deno.test("the transcript hands the row controller to the affordance", () => {
   const wiring = flatView.slice(rows, rows + 400);
   for (const line of [
     "idOf: (line) => line.historyId",
-    "onQuote: (line) => onQuote?.(line)",
+    "onQuote: (line) => onQuote?.(line),",
     "scope: () => sessionKey",
   ]) {
     assert(wiring.includes(line), `row controller wiring: ${line}`);

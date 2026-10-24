@@ -1,8 +1,8 @@
 <script lang="ts">
-  // The quote affordance a transcript places beside a bubble: the direct quote
+  // The quote control a transcript places beside a bubble: the direct quote
   // button and the overflow menu carrying the same action, in one wrapper both
-  // surfaces share. Only the side differs between them, and only the row that
-  // draws the bubble knows it. The open flag and the action stay the parent's,
+  // surfaces share. Only the side differs between them, and the surface that
+  // draws the bubble decides it. The open flag and the action stay the parent's,
   // because one menu can be open per transcript.
   import MessageActions from "./MessageActions.svelte";
 

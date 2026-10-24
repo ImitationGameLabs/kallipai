@@ -47,6 +47,7 @@
   import MemberRow from "../components/rooms/MemberRow.svelte";
   import MentionPicker from "../components/rooms/MentionPicker.svelte";
   import MentionChips from "../components/MentionChips.svelte";
+  import MessageRow from "../components/MessageRow.svelte";
   import RowQuoteAffordance from "../components/RowQuoteAffordance.svelte";
   import QuoteBar from "../components/QuoteBar.svelte";
   import SenderIdentity from "../components/rooms/SenderIdentity.svelte";
@@ -470,6 +471,17 @@
               line.senderHandle,
               line.senderTagmaId,
             )}
+            {#snippet beside()}
+              {#if quotable(line)}
+                <RowQuoteAffordance
+                  side={line.mine ? "right" : "left"}
+                  menuOpen={rowActions.isMenuOpen(line)}
+                  onMenuOpenChange={(open) =>
+                    rowActions.setMenuOpen(line, open)}
+                  onQuote={() => rowActions.quote(line)}
+                />
+              {/if}
+            {/snippet}
             <!-- Pointer handlers only arm the long-press menu; keyboard users
                  reach the same menu from the row actions button. -->
             <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -497,22 +509,25 @@
                   {href}
                 />
               </span>
-              <MessageBubble
-                text={line.text}
-                markdown={line.senderKind === "agent"}
-                mine={line.mine}
-                {pending}
-                bare={pending}
-                pin={togglePin}
-                quote={q}
-                quoteDescribedBy={quoteTarget === undefined
-                  ? undefined
-                  : roomRowAnchorId(quoteTarget)}
-                mentions={chips}
-                onQuoteClick={quoteTarget === undefined
-                  ? undefined
-                  : () => reveal.jump(quoteTarget)}
-              />
+              <MessageRow mine={line.mine}>
+                <MessageBubble
+                  {beside}
+                  text={line.text}
+                  markdown={line.senderKind === "agent"}
+                  mine={line.mine}
+                  {pending}
+                  bare={pending}
+                  pin={togglePin}
+                  quote={q}
+                  quoteDescribedBy={quoteTarget === undefined
+                    ? undefined
+                    : roomRowAnchorId(quoteTarget)}
+                  mentions={chips}
+                  onQuoteClick={quoteTarget === undefined
+                    ? undefined
+                    : () => reveal.jump(quoteTarget)}
+                />
+              </MessageRow>
               {#if line.mine && pending && !line.failed}
                 <span
                   class="text-xs opacity-50 animate-pulse"
@@ -531,15 +546,6 @@
                       .catch(() => {});
                   }}>{common_retry()}</button
                 >
-              {/if}
-              {#if quotable(line)}
-                <RowQuoteAffordance
-                  side={line.mine ? "right" : "left"}
-                  menuOpen={rowActions.isMenuOpen(line)}
-                  onMenuOpenChange={(open) =>
-                    rowActions.setMenuOpen(line, open)}
-                  onQuote={() => rowActions.quote(line)}
-                />
               {/if}
             </div>
           {/each}

@@ -7,6 +7,7 @@
   // inside its own flex column.
   import Composer from "./Composer.svelte";
   import MessageBubble from "./MessageBubble.svelte";
+  import MessageRow from "./MessageRow.svelte";
   import RowQuoteAffordance from "./RowQuoteAffordance.svelte";
   import ScrollToBottomButton from "./ScrollToBottomButton.svelte";
   import { RotateCcw } from "@lucide/svelte";
@@ -113,7 +114,7 @@
     onCancelQuote?: () => void;
     /** Quoting entry points (the message's quote button, its overflow menu,
      *  and a long press on touch). Present, each confirmed line can be quoted;
-     *  absent, no row renders an affordance and older callers are unchanged. */
+     *  absent, no row renders a quote control and older callers are unchanged. */
     onQuote?: (line: ConversationLine) => void;
     /** Resolve a line's quote id against what the page knows (the loaded
      *  transcript, or a peeked outcome). Called per render, so the page's
@@ -350,6 +351,16 @@
             : undefined}
         {@const quotedLabelId =
           quoteTarget !== undefined ? `msg-a11y-${quoteTarget}` : undefined}
+        {#snippet beside()}
+          {#if quotable(line)}
+            <RowQuoteAffordance
+              side={line.role === "user" ? "right" : "left"}
+              menuOpen={rowActions.isMenuOpen(line)}
+              onMenuOpenChange={(open) => rowActions.setMenuOpen(line, open)}
+              onQuote={() => rowActions.quote(line)}
+            />
+          {/if}
+        {/snippet}
         {#if m?.dateDivider}
           <div
             class="self-center text-xs opacity-50 my-2 text-center max-w-[80%]"
@@ -391,16 +402,14 @@
                 >{line.sender.handle}</span
               >
             {/if}
-            <!-- The bubble is its own positioning box: the row spans the
-                 column, so anchoring the actions to it pinned them to the
-                 transcript edge instead of beside the bubble. -->
-            <div class="relative flex max-w-full min-w-0 items-center">
+            <!-- The row is the bubble's only width cap and its alignment; the
+                 quote control rides in through the bubble, so it anchors to the
+                 bubble instead of at the transcript edge. -->
+            <MessageRow mine={line.role === "user"}>
               {#if line.role === "user" && line.status === "failed"}
                 <!-- Failed lines are transient: outline + copy always, retry
                    button only where the page wires a handler, pin/copy never. -->
-                <div
-                  class="flex flex-row items-center gap-1.5 self-end max-w-[80%]"
-                >
+                <div class="flex flex-row items-center gap-1.5 self-end">
                   {#if onRetry}
                     <button
                       type="button"
@@ -412,6 +421,7 @@
                     </button>
                   {/if}
                   <MessageBubble
+                    {beside}
                     text={line.text}
                     mine
                     bare
@@ -429,6 +439,7 @@
                 </div>
               {:else}
                 <MessageBubble
+                  {beside}
                   text={line.text}
                   markdown={line.role === "assistant"}
                   mine={line.role === "user"}
@@ -443,16 +454,7 @@
                   onQuoteRetry={quoteRetry}
                 />
               {/if}
-              {#if quotable(line)}
-                <RowQuoteAffordance
-                  side={line.role === "user" ? "right" : "left"}
-                  menuOpen={rowActions.isMenuOpen(line)}
-                  onMenuOpenChange={(open) =>
-                    rowActions.setMenuOpen(line, open)}
-                  onQuote={() => rowActions.quote(line)}
-                />
-              {/if}
-            </div>
+            </MessageRow>
             {#if line.role === "user" && line.status === "sending"}
               <span
                 class="text-xs opacity-50 animate-pulse"

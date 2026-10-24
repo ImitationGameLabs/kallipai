@@ -9,6 +9,7 @@ import { flat } from "../test_support/flat.ts";
 
 const PAGE = new URL("./ChannelChatPage.svelte", import.meta.url);
 const VIEW = new URL("../components/ConversationView.svelte", import.meta.url);
+const QUOTES = new URL("../lib/quotes.svelte.ts", import.meta.url);
 
 function source(url: URL): string {
   return new TextDecoder().decode(Deno.readFileSync(url));
@@ -55,7 +56,7 @@ Deno.test("a leaf with neither capability is refused quoting", () => {
 
 Deno.test("one send spends one quote id", () => {
   const src = flat(source(PAGE));
-  const arming = src.indexOf("const quoteId = quotes.quoted ?? undefined;");
+  const arming = src.indexOf("const quoteId = quotes.sendQuote();");
   assert(arming !== -1, "the submit captures the armed id up front");
   const after = src.slice(arming, arming + 200);
   assert(
@@ -70,6 +71,15 @@ Deno.test("one send spends one quote id", () => {
   assert(
     src.includes("{ attachment: att }"),
     "attachment-only follow-ups carry no quote",
+  );
+});
+Deno.test("the armed id has no second way out of the controller", () => {
+  const src = source(QUOTES);
+  // The real regression is a second outlet put back beside the send: an
+  // accessor a caller can read instead of going through sendQuote().
+  assert(
+    !/get quoted\b/u.test(src),
+    "no second accessor for the id a send carries",
   );
 });
 

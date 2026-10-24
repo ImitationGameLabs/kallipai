@@ -4,6 +4,17 @@
 // transcript.svelte.ts -- the view forwards and reads, the state machine lives
 // here, out of the channel transcript's render body.
 //
+// One record holds the whole quoting decision -- the row id a send carries and
+// the view the strip draws -- and one judgement reads it: the record counts
+// only while its own conversation is the live one, and the strip and the send
+// ask that same question. One question, one answer: a strip outliving its
+// conversation would draw a quote the send refuses, and the mirror shape --
+// hiding the strip while still sending the id -- is the split this record
+// exists to prevent. own() is the entry the arm and the send share, and it
+// drops the record on a swap; the judgement carries the same fact for reads
+// that land before it runs, which a render may do. cancel() only clears, so
+// it does not pass through own().
+//
 // Three facts shape the probe:
 //   - a relay content frame carries no request id (the tagma pump stamps rows,
 //     it does not answer a request), so two relay probes in flight cannot be
@@ -34,16 +45,18 @@ export interface QuotesOptions {
 }
 
 export interface Quotes {
-  /** The row id armed for quoting, or null. */
-  readonly quoted: number | null;
   /** What the composer's quote bar draws for the armed id: the author and
    *  preview the line had when it was armed, so the strip does not flicker as
-   *  the window slides. Undefined once the page has swapped conversations. */
+   *  the window slides. Undefined when nothing is armed. */
   readonly quotedView: QuoteView | undefined;
   /** Arm a line, replacing whatever was armed. */
   quote(line: ConversationLine): void;
   /** Disarm. */
   cancel(): void;
+  /** The id the next send quotes, or undefined. The only way out of this
+   *  controller: it reconciles with the live conversation first, so a send
+   *  after a swap carries nothing rather than the previous page's row. */
+  sendQuote(): number | undefined;
   /** What a row's quote block draws for `id`. Undefined means the peek has not
    *  answered yet: the block renders nothing rather than guessing. */
   resolve(id: number): QuoteView | undefined;
@@ -55,10 +68,17 @@ export interface Quotes {
 }
 
 export function createQuotes(options: QuotesOptions): Quotes {
-  let quoted = $state<number | null>(null);
-  // The bar draws the line it was armed from, not whatever the window holds
-  // later: a quote outlives its row scrolling out of the loaded window.
-  let armedView = $state<QuoteView | null>(null);
+  // One record for the whole decision: the id a send carries and the view
+  // the bar draws. The bar shows the line it was armed from, not whatever
+  // the window holds later -- a quote outlives its row scrolling out of the
+  // loaded window -- and the send reads the same record, so the strip and
+  // the outgoing message cannot disagree about it. `owner` is the
+  // conversation the id belongs to; a row id means nothing in another one.
+  let armed = $state<{
+    id: number;
+    view: QuoteView;
+    owner: ConversationBase | undefined;
+  } | null>(null);
   // Answers by quoted id. In-flight probes live in the same table as
   // "pending", so the guard in sync() is one lookup and a re-run of the
   // calling effect cannot duplicate a request.
@@ -80,10 +100,19 @@ export function createQuotes(options: QuotesOptions): Quotes {
     const conv = options.conversation();
     if (conv === owner) return conv;
     owner = conv;
-    quoted = null;
-    armedView = null;
+    armed = null;
     peeked = {};
     return conv;
+  }
+
+  /** The armed record while it still belongs to the live conversation. The
+   *  strip and the send both read THIS, so neither can answer for a
+   *  conversation the other has already left: a swap empties the strip as
+   *  soon as it lands, not at the next controller call. */
+  function armedNow(): { id: number; view: QuoteView } | null {
+    const record = armed;
+    if (record === null) return null;
+    return record.owner === options.conversation() ? record : null;
   }
 
   function resolve(id: number): QuoteView | undefined {
@@ -115,24 +144,26 @@ export function createQuotes(options: QuotesOptions): Quotes {
   }
 
   return {
-    get quoted() {
-      return quoted;
-    },
     get quotedView() {
-      // The bar draws the arming snapshot; the check below only reads, so a
-      // swapped page cannot show the previous conversation's line, not even
-      // for one frame before the next call clears the arming.
-      if (owner !== options.conversation()) return undefined;
-      return armedView ?? undefined;
+      return armedNow()?.view;
     },
     quote(line) {
-      own();
-      quoted = line.historyId;
-      armedView = quoteViewOfLine(line);
+      const conv = own();
+      armed = {
+        id: line.historyId,
+        view: quoteViewOfLine(line),
+        owner: conv,
+      };
     },
     cancel() {
-      quoted = null;
-      armedView = null;
+      armed = null;
+    },
+    sendQuote() {
+      // Same judgement the strip was drawn with, so the two cannot disagree.
+      // own() first: it also drops answers belonging to the conversation the
+      // reader left.
+      own();
+      return armedNow()?.id;
     },
     resolve,
     retry(id) {

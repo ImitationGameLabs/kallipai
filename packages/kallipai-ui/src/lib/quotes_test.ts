@@ -45,10 +45,10 @@ Deno.test("an armed line draws the quote bar from the loaded window", () => {
   ];
   const conv = stub(lines, noPeek);
   const quotes = createQuotes({ conversation: () => conv });
-  assertEquals(quotes.quoted, null);
+  assertEquals(quotes.sendQuote(), undefined);
   assertEquals(quotes.quotedView, undefined);
   quotes.quote(lines[0]!);
-  assertEquals(quotes.quoted, 3);
+  assertEquals(quotes.sendQuote(), 3);
   assertEquals(quotes.quotedView, {
     status: "found",
     author: "ada",
@@ -56,7 +56,7 @@ Deno.test("an armed line draws the quote bar from the loaded window", () => {
     preview: "first",
   });
   quotes.cancel();
-  assertEquals(quotes.quoted, null);
+  assertEquals(quotes.sendQuote(), undefined);
   assertEquals(quotes.quotedView, undefined);
 });
 
@@ -181,7 +181,11 @@ Deno.test(
     conv = stub(second, peek);
     quotes.sync();
 
-    assertEquals(quotes.quoted, null, "row ids do not survive the transcript");
+    assertEquals(
+      quotes.sendQuote(),
+      undefined,
+      "row ids do not survive the transcript",
+    );
     assertEquals(quotes.quotedView, undefined);
     assertEquals(quotes.resolve(2), undefined, "the old answer went with it");
   },
@@ -211,29 +215,59 @@ Deno.test(
     quotes.sync();
     await settle();
 
-    assertEquals(quotes.quoted, 3, "the strip stays armed");
+    assertEquals(quotes.sendQuote(), 3, "the strip stays armed");
     assertEquals(quotes.quotedView?.author, "ada");
     assertEquals(quotes.quotedView?.preview, "quoted body");
   },
 );
 
-Deno.test("a swapped conversation hides the strip before the next call", () => {
-  const armed = line({
-    historyId: 3,
-    text: "quoted body",
-    sender: { kind: "agent", id: "a", handle: "ada" },
-  });
-  let conv = stub([armed], () => Promise.resolve("deleted"));
-  const quotes = createQuotes({ conversation: () => conv });
-  quotes.quote(armed);
-  assertEquals(quotes.quotedView?.author, "ada");
+Deno.test(
+  "a swapped conversation empties the strip and the next send together",
+  () => {
+    const armed = line({
+      historyId: 3,
+      text: "quoted body",
+      sender: { kind: "agent", id: "a", handle: "ada" },
+    });
+    let conv = stub([armed], () => Promise.resolve("deleted"));
+    const quotes = createQuotes({ conversation: () => conv });
+    quotes.quote(armed);
+    assertEquals(quotes.quotedView?.author, "ada");
+    assertEquals(quotes.sendQuote(), 3, "the strip and the send agree");
 
-  // No sync() in between: the getter itself must not draw the old line.
-  conv = stub([line({ historyId: 41, text: "elsewhere" })], () =>
-    Promise.resolve("deleted"),
-  );
-  assertEquals(quotes.quotedView, undefined);
-});
+    conv = stub([line({ historyId: 41, text: "elsewhere" })], () =>
+      Promise.resolve("deleted"),
+    );
+    // What the page's content effect runs on a swap; under the $state shim
+    // the effect body is the same call, so this is its next run.
+    quotes.sync();
+
+    assertEquals(quotes.quotedView, undefined, "nothing stays drawn");
+    assertEquals(quotes.sendQuote(), undefined, "and nothing can be sent");
+  },
+);
+
+Deno.test(
+  "a send reconciles with the live conversation before answering",
+  () => {
+    const armed = line({
+      historyId: 3,
+      text: "quoted body",
+      sender: { kind: "agent", id: "a", handle: "ada" },
+    });
+    let conv = stub([armed], () => Promise.resolve("deleted"));
+    const quotes = createQuotes({ conversation: () => conv });
+    quotes.quote(armed);
+
+    // The route swapped and no effect has run yet: the send must not reach
+    // back into the previous page's row.
+    conv = stub([line({ historyId: 41, text: "elsewhere" })], () =>
+      Promise.resolve("deleted"),
+    );
+    assertEquals(quotes.sendQuote(), undefined, "no id crosses the swap");
+    assertEquals(quotes.quotedView, undefined, "the entry cleared the strip");
+  },
+);
 
 Deno.test(
   "a probe answered after the page swapped writes nothing",
@@ -264,3 +298,23 @@ Deno.test(
     );
   },
 );
+
+Deno.test("a swap empties the strip before any controller call runs", () => {
+  const armedLine = line({
+    historyId: 3,
+    text: "quoted body",
+    sender: { kind: "agent", id: "a", handle: "ada" },
+  });
+  let conv = stub([armedLine], () => Promise.resolve("deleted"));
+  const quotes = createQuotes({ conversation: () => conv });
+  quotes.quote(armedLine);
+  assertEquals(quotes.quotedView?.author, "ada");
+
+  // The route swapped; nothing has called into the controller since. The
+  // strip must not draw what a send would refuse.
+  conv = stub([line({ historyId: 41, text: "elsewhere" })], () =>
+    Promise.resolve("deleted"),
+  );
+  assertEquals(quotes.quotedView, undefined, "the strip followed the swap");
+  assertEquals(quotes.sendQuote(), undefined, "and the send agrees");
+});

@@ -245,15 +245,16 @@ Deno.test("the page hands each controller its own room", () => {
   );
 });
 
-Deno.test("the affordance is drawn only for a row the room can quote", () => {
+Deno.test("the quote control is drawn only for a quotable row", () => {
   const src = flat(source(PAGE));
   assert(
     src.includes("{#if quotable(line)}"),
     "an optimistic or failed row offers no quote entry",
   );
+  assert(src.includes("mine={line.mine}"), "the row learns whose bubble it is");
   assert(
     src.includes('side={line.mine ? "right" : "left"}'),
-    "the side follows the row that drew this bubble",
+    "and the quote control takes its side from the same fact",
   );
 });
 

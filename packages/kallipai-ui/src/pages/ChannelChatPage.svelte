@@ -278,7 +278,7 @@
       // One send carries one quote: the first message, the one the text
       // rides. Captured up front and cleared here, so a second submit
       // cannot inherit the strip the user already spent.
-      const quoteId = quotes.quoted ?? undefined;
+      const quoteId = quotes.sendQuote();
       quotes.cancel();
       // One message per ready file; the composer text rides the first and
       // the rest go out attachment-only (an empty text with an attachment
