@@ -91,7 +91,7 @@ pub struct BootConfig {
 /// health route is the precedent).
 pub fn router(state: AppState) -> Router {
     let cors = cors_layer(&state.config.cors_origins);
-    Router::new()
+    let app = Router::new()
         .route(
             "/",
             axum::routing::put(api::put::put_file).get(api::list::list_files),
@@ -109,7 +109,8 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/health", axum::routing::get(api::health))
         .with_state(state)
-        .layer(cors)
+        .layer(cors);
+    kallipai_common::telemetry::with_server_span(app)
 }
 
 /// The CORS gate for browser callers: the browser face `app.<domain>` calls

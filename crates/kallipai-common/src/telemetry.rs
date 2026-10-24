@@ -232,6 +232,64 @@ pub fn init_service_telemetry(filter: &EnvFilter, service: &str, dir: Option<&Pa
     guard
 }
 
+/// The route name a request gets when it matched no route at all.
+#[cfg(feature = "axum")]
+const UNMATCHED_ROUTE: &str = "unmatched";
+
+/// The server span for one request: the method and the route template as the
+/// name (`GET /v1/files/{id}`), the OpenTelemetry HTTP attributes as fields.
+///
+/// The name deliberately avoids the raw path: an id in a span name scatters one
+/// endpoint across a thousand names and defeats aggregation. The status is
+/// recorded once the response exists, and a server-side failure also carries an
+/// error type and the failed status, so a trace can be filtered for them.
+///
+/// Mount it with [`with_server_span`]; the platform services mount this one
+/// layer, so a trace reads the same whichever service answered.
+#[cfg(feature = "axum")]
+pub async fn server_span(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use opentelemetry::trace::Status;
+    use tracing::Instrument as _;
+    use tracing_opentelemetry::OpenTelemetrySpanExt as _;
+
+    let route = request
+        .extensions()
+        .get::<axum::extract::MatchedPath>()
+        .map_or(UNMATCHED_ROUTE, axum::extract::MatchedPath::as_str);
+    let method = request.method().clone();
+    let name = format!("{method} {route}");
+    let span = tracing::info_span!(
+        "request",
+        otel.name = %name,
+        otel.kind = "server",
+        http.request.method = %method,
+        http.route = %route,
+        http.response.status_code = tracing::field::Empty,
+        error.type = tracing::field::Empty,
+    );
+    let response = next.run(request).instrument(span.clone()).await;
+    let status = response.status();
+    span.record("http.response.status_code", status.as_u16());
+    if status.is_server_error() {
+        span.record("error.type", format!("http_{}", status.as_u16()));
+        span.set_status(Status::error(status.to_string()));
+    }
+    response
+}
+
+/// Put [`server_span`] on a finished router, outermost, so the span covers the
+/// layers inside it (body limit, CORS, CSRF) as well as the handler.
+#[cfg(feature = "axum")]
+pub fn with_server_span<S>(router: axum::Router<S>) -> axum::Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
+    router.layer(axum::middleware::from_fn(server_span))
+}
+
 /// Build the OTLP layer and the provider behind it: export over HTTP, the
 /// sampler from the configuration, one resource naming the service.
 fn build_export_layer(
@@ -544,5 +602,135 @@ mod tests {
             1,
             "a collector that stays down must not log a line per export"
         );
+    }
+
+    /// Witnesses the opening fields of every span and every later recording, so
+    /// a middleware's span can be read back without an exporter.
+    #[cfg(feature = "axum")]
+    #[derive(Clone, Default)]
+    struct SpanFields(Arc<Mutex<Vec<(String, String)>>>);
+
+    #[cfg(feature = "axum")]
+    #[derive(Default)]
+    struct FieldVisitor(Vec<(String, String)>);
+
+    #[cfg(feature = "axum")]
+    impl tracing::field::Visit for FieldVisitor {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            let value = format!("{value:?}");
+            self.0.push((field.name().to_string(), value));
+        }
+
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            self.0.push((field.name().to_string(), value.to_string()));
+        }
+    }
+
+    #[cfg(feature = "axum")]
+    impl SpanFields {
+        fn absorb(&self, record: impl FnOnce(&mut FieldVisitor)) {
+            let mut visitor = FieldVisitor::default();
+            record(&mut visitor);
+            self.0.lock().unwrap().extend(visitor.0);
+        }
+
+        /// The last value recorded under `name`, whether at span open or later.
+        fn get(&self, name: &str) -> Option<String> {
+            self.0
+                .lock()
+                .unwrap()
+                .iter()
+                .rev()
+                .find(|(field, _)| field == name)
+                .map(|(_, value)| value.clone())
+        }
+    }
+
+    #[cfg(feature = "axum")]
+    impl<S: tracing::Subscriber> Layer<S> for SpanFields {
+        fn on_new_span(
+            &self,
+            attrs: &tracing::span::Attributes<'_>,
+            _id: &tracing::Id,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            self.absorb(|visitor| attrs.record(visitor));
+        }
+
+        fn on_record(
+            &self,
+            _id: &tracing::Id,
+            values: &tracing::span::Record<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            self.absorb(|visitor| values.record(visitor));
+        }
+    }
+
+    /// Drive one request through the span layer and return the status plus the
+    /// fields the span ended up carrying.
+    #[cfg(feature = "axum")]
+    async fn drive(app: axum::Router, uri: &str) -> (axum::http::StatusCode, SpanFields) {
+        use tower::ServiceExt as _;
+
+        let fields = SpanFields::default();
+        let subscriber = tracing_subscriber::registry().with(fields.clone());
+        let _subscribed = tracing::subscriber::set_default(subscriber);
+        let request = axum::http::Request::builder()
+            .uri(uri)
+            .body(axum::body::Body::empty())
+            .expect("a well-formed request");
+        let response = with_server_span(app)
+            .oneshot(request)
+            .await
+            .expect("the router answers");
+        (response.status(), fields)
+    }
+
+    #[cfg(feature = "axum")]
+    #[tokio::test]
+    async fn a_request_span_names_the_route_and_records_its_status() {
+        let app = axum::Router::new().route("/files/{id}", axum::routing::get(|| async { "ok" }));
+        let (status, fields) = drive(app, "/files/abc").await;
+        assert_eq!(status, axum::http::StatusCode::OK);
+        assert_eq!(fields.get("otel.name").as_deref(), Some("GET /files/{id}"));
+        assert_eq!(fields.get("otel.kind").as_deref(), Some("server"));
+        assert_eq!(fields.get("http.request.method").as_deref(), Some("GET"));
+        assert_eq!(fields.get("http.route").as_deref(), Some("/files/{id}"));
+        assert_eq!(
+            fields.get("http.response.status_code").as_deref(),
+            Some("200")
+        );
+        assert_eq!(
+            fields.get("error.type"),
+            None,
+            "an answered request is not an error"
+        );
+    }
+
+    #[cfg(feature = "axum")]
+    #[tokio::test]
+    async fn a_request_that_matched_no_route_is_named_unmatched() {
+        let app = axum::Router::new().fallback(|| async { "no such path" });
+        let (status, fields) = drive(app, "/nowhere/at/all").await;
+        assert_eq!(status, axum::http::StatusCode::OK);
+        assert_eq!(fields.get("otel.name").as_deref(), Some("GET unmatched"));
+        assert_eq!(fields.get("http.route").as_deref(), Some("unmatched"));
+    }
+
+    #[cfg(feature = "axum")]
+    #[tokio::test]
+    async fn a_server_side_failure_carries_its_error_type() {
+        let app = axum::Router::new().route(
+            "/boom",
+            axum::routing::get(|| async { axum::http::StatusCode::INTERNAL_SERVER_ERROR }),
+        );
+        let (status, fields) = drive(app, "/boom").await;
+        assert_eq!(status, axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            fields.get("http.response.status_code").as_deref(),
+            Some("500")
+        );
+        assert_eq!(fields.get("error.type").as_deref(), Some("http_500"));
     }
 }

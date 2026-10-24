@@ -53,7 +53,11 @@ async fn main() -> Result<()> {
     // behavior, so container and dev forms are untouched.
     let log_dir =
         kallipai_common::logging::parse_log_dir(std::env::var("KALLIPAI_ARCHEION_LOG_DIR").ok());
-    kallipai_common::logging::init_service_logging(&filter, "archeion", log_dir.as_deref());
+
+    // Spans export when OTEL_EXPORTER_OTLP_ENDPOINT says where; the guard
+    // lives to the end of main so the exporter flushes on the way out.
+    let _telemetry =
+        kallipai_common::telemetry::init_service_telemetry(&filter, "archeion", log_dir.as_deref());
 
     // Admin token lifecycle: an operator-provided token is a pinned asset and
     // stays where the operator put it; a generated one is provisioned into
@@ -245,14 +249,14 @@ async fn main() -> Result<()> {
         });
     }
 
-    // Outermost layers: body limit, then CORS (explicit allowlist, never Any),
-    // then request tracing.
+    // Layer order, outermost first: the request span mounted below by
+    // `with_server_span`, then CORS (explicit allowlist, never Any), then the body limit.
     let app = app
         .layer(axum::extract::DefaultBodyLimit::max(
             state.limits.max_body_size_bytes,
         ))
-        .layer(routes::cors_layer(&args.cors_origins))
-        .layer(tower_http::trace::TraceLayer::new_for_http());
+        .layer(routes::cors_layer(&args.cors_origins));
+    let app = kallipai_common::telemetry::with_server_span(app);
 
     let listener = tokio::net::TcpListener::bind(&args.listen_addr)
         .await

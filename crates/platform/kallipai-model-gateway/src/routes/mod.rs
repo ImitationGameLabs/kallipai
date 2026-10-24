@@ -30,7 +30,7 @@ pub use kallipai_common::protocol::ApiError;
 /// payloads are small JSON, and axum's default 2 MiB cap is more than
 /// enough (the 8 MiB forwarding cap is data-plane only).
 pub fn management_plane_router(state: AppState, cors_origins: &str) -> Router {
-    Router::new()
+    let app = Router::new()
         .nest("/admin", crate::management::router())
         .nest("/user", crate::management::user_routes::router())
         // The distribution reads: the tagma-bearer-authenticated, secret-free
@@ -58,7 +58,8 @@ pub fn management_plane_router(state: AppState, cors_origins: &str) -> Router {
         // the CORS layer: preflights answer before it, and its own
         // GET/HEAD/OPTIONS exemption keeps the distribution reads untouched.
         .layer(axum::middleware::from_fn(crate::management::csrf_guard))
-        .layer(cors_layer(cors_origins))
+        .layer(cors_layer(cors_origins));
+    kallipai_common::telemetry::with_server_span(app)
 }
 
 /// GET /health: no authentication, on purpose -- compose healthcheck, the

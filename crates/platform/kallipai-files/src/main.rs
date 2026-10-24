@@ -28,7 +28,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // behavior, so container and dev forms are untouched.
     let log_dir =
         kallipai_common::logging::parse_log_dir(std::env::var("KALLIPAI_FILES_LOG_DIR").ok());
-    kallipai_common::logging::init_service_logging(&filter, "files", log_dir.as_deref());
+
+    // Spans export when OTEL_EXPORTER_OTLP_ENDPOINT says where; the guard
+    // lives to the end of main so the exporter flushes on the way out.
+    let _telemetry =
+        kallipai_common::telemetry::init_service_telemetry(&filter, "files", log_dir.as_deref());
 
     let config = FilesConfig {
         max_body_bytes: args.max_body_size_mb * 1024 * 1024,

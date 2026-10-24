@@ -10,7 +10,11 @@ name = "kallipai-model-gateway"
 path = "src/main.rs"
 
 [dependencies]
-kallipai-common = { workspace = true, features = ["axum", "logging"] }
+kallipai-common = { workspace = true, features = [
+  "axum",
+  "logging",
+  "telemetry",
+] }
 kallipai-archeion-common = { workspace = true }
 kallipai-db-helper = { workspace = true }
 cookie = { workspace = true }

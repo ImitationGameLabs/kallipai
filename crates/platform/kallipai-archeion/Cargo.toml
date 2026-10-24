@@ -6,7 +6,11 @@ version.workspace = true
 license.workspace = true
 
 [dependencies]
-kallipai-common = { workspace = true, features = ["axum", "logging"] }
+kallipai-common = { workspace = true, features = [
+  "axum",
+  "logging",
+  "telemetry",
+] }
 kallipai-archeion-common = { workspace = true }
 kallipai-db-helper = { workspace = true }
 anyhow = { workspace = true }

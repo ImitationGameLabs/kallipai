@@ -49,7 +49,11 @@ async fn main() -> Result<()> {
     // behavior, so container and dev forms are untouched.
     let log_dir =
         kallipai_common::logging::parse_log_dir(std::env::var("KALLIPAI_LESCHE_LOG_DIR").ok());
-    kallipai_common::logging::init_service_logging(&filter, "lesche", log_dir.as_deref());
+
+    // Spans export when OTEL_EXPORTER_OTLP_ENDPOINT says where; the guard
+    // lives to the end of main so the exporter flushes on the way out.
+    let _telemetry =
+        kallipai_common::telemetry::init_service_telemetry(&filter, "lesche", log_dir.as_deref());
 
     // The registry is reached only through the HTTP ControlPlane client. There
     // is intentionally no auth cache: long-lived connections (agent SSE,
@@ -86,8 +90,8 @@ async fn main() -> Result<()> {
     let v1 =
         routes::router(conv_state.clone()).layer(axum::middleware::from_fn(middleware::csrf_guard));
 
-    // Outermost layers: body limit, then CORS (explicit allowlist, never Any),
-    // then request tracing. Mirrors the archeion's layer order.
+    // Layer order, outermost first: the request span mounted below by
+    // `with_server_span`, then CORS (explicit allowlist, never Any), then the body limit.
     let app = Router::new()
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
@@ -95,16 +99,8 @@ async fn main() -> Result<()> {
         .layer(axum::extract::DefaultBodyLimit::max(body_size_bytes(
             args.max_body_size_kb,
         )))
-        .layer(routes::cors_layer(&args.cors_origins))
-        // INFO-level request spans: the failure line must carry the
-        // method/uri to be triageable (the default DEBUG span is filtered
-        // out by the info log level, which is exactly why the in-the-wild
-        // 503s had no target path in the logs).
-        .layer(
-            tower_http::trace::TraceLayer::new_for_http().make_span_with(
-                tower_http::trace::DefaultMakeSpan::new().level(tracing::Level::INFO),
-            ),
-        );
+        .layer(routes::cors_layer(&args.cors_origins));
+    let app = kallipai_common::telemetry::with_server_span(app);
 
     let listener = tokio::net::TcpListener::bind(&args.listen_addr)
         .await

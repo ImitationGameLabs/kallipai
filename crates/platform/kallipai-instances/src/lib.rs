@@ -35,8 +35,10 @@ pub fn build_router(state: AppState) -> Router {
     // Layered last so the guard also wraps the fallback: a Router layer
     // only covers routes registered before it, and unknown paths must
     // meet the same Host check as the API.
-    app.layer(from_fn_with_state(state.clone(), guard::host_guard))
-        .with_state(state)
+    let app = app
+        .layer(from_fn_with_state(state.clone(), guard::host_guard))
+        .with_state(state);
+    kallipai_common::telemetry::with_server_span(app)
 }
 
 /// Anything off the API is a plain 404.
