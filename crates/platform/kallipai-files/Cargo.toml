@@ -22,11 +22,7 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 kallipai-archeion-common = { workspace = true }
 kallipai-blob-store = { workspace = true }
-kallipai-common = { workspace = true, features = [
-  "axum",
-  "logging",
-  "telemetry",
-] }
+kallipai-common = { workspace = true, features = ["axum", "telemetry"] }
 axum = { workspace = true }
 tokio-util = { workspace = true, features = ["io"] }
 futures-util = { workspace = true }

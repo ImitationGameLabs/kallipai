@@ -57,8 +57,7 @@ async fn main() -> Result<()> {
         std::env::var("KALLIPAI_MODEL_GATEWAY_LOG_DIR").ok(),
     );
 
-    // Spans export when OTEL_EXPORTER_OTLP_ENDPOINT says where; the guard
-    // lives to the end of main so the exporter flushes on the way out.
+    // Hold the guard to the end of main so the queue flushes on the way out.
     let _telemetry = kallipai_common::telemetry::init_service_telemetry(
         &filter,
         "model-gateway",

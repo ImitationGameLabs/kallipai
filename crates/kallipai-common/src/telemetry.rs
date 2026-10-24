@@ -13,6 +13,12 @@
 //! a collector that is down costs spans, never latency. The first failed
 //! export says so once on the log channel and then stays quiet.
 //!
+//! A dropped span leaves no trace of its own: the SDK counts drops but reports
+//! them only through its internal logs, which this crate leaves off, so a
+//! deployment notices loss from the collector's intake and not from here. The
+//! export layer shares the event filter, so `RUST_LOG=warn` quiets traces
+//! along with events.
+//!
 //! A setup that cannot be built at all (a malformed endpoint, say) degrades:
 //! one stderr line, tracing stays local, the service starts. Telemetry is not
 //! load-bearing the way an event file channel is, so it does not take the
@@ -23,6 +29,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use opentelemetry::KeyValue;
+use opentelemetry::propagation::Extractor;
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry_otlp::{SpanExporter as OtlpExporter, WithExportConfig as _};
 use opentelemetry_sdk::Resource;
@@ -40,7 +48,7 @@ use tracing_subscriber::registry::Registry;
 
 use crate::logging;
 
-/// Where the collector listens, OTLP over HTTP.
+/// The collector's OTLP/HTTP base URL; the traces path is appended.
 pub const ENDPOINT_VAR: &str = "OTEL_EXPORTER_OTLP_ENDPOINT";
 /// The sampler override; absent means parent-based always-on.
 pub const SAMPLER_VAR: &str = "OTEL_TRACES_SAMPLER";
@@ -54,9 +62,12 @@ const BATCH_SIZE: usize = 512;
 /// How often a batch leaves, quiet traffic or not.
 const SCHEDULED_DELAY: Duration = Duration::from_secs(5);
 /// Upper bound on one export call, so a stalled collector cannot pin the queue.
-const EXPORT_TIMEOUT: Duration = Duration::from_secs(10);
-/// How long a shutdown may spend flushing.
-const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+const EXPORT_TIMEOUT: Duration = Duration::from_secs(3);
+/// Passed to `shutdown_with_timeout`, which the SDK ignores: a shutdown flushes
+/// and then waits for one more export, so the real bound is about twice
+/// `EXPORT_TIMEOUT` -- six seconds, inside the ten a container stop allows
+/// before the process is killed.
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(6);
 
 /// The export configuration: where spans go and which sampler decides.
 #[derive(Debug, Clone, PartialEq)]
@@ -66,7 +77,9 @@ pub struct Config {
 }
 
 impl Config {
-    /// The collector endpoint, verbatim from the environment.
+    /// The collector base URL, verbatim from the environment. The
+    /// specification defines `OTEL_EXPORTER_OTLP_ENDPOINT` as a base, and the
+    /// traces path is resolved from it before the exporter is built.
     pub fn endpoint(&self) -> &str {
         &self.endpoint
     }
@@ -98,7 +111,13 @@ impl SamplerSpec {
     /// Parse the variable's value; an unknown name or a ratio that does not
     /// parse yields `None`, and the caller keeps the default.
     fn parse(name: &str, arg: Option<&str>) -> Option<Self> {
-        let ratio = || arg.and_then(|raw| raw.trim().parse::<f64>().ok());
+        // A ratio outside [0, 1] or not a number would pin sampling on or off
+        // for good, so such a value counts as unparseable and the caller keeps
+        // its default.
+        let ratio = || {
+            arg.and_then(|raw| raw.trim().parse::<f64>().ok())
+                .filter(|value| value.is_finite() && (0.0..=1.0).contains(value))
+        };
         match name.trim().to_ascii_lowercase().as_str() {
             "always_on" => Some(Self::AlwaysOn),
             "always_off" => Some(Self::AlwaysOff),
@@ -151,8 +170,31 @@ pub fn config_from_env() -> Option<Config> {
     config_from_lookup(|key| std::env::var(key).ok())
 }
 
+/// The traces URL to post to, resolved from the configured base.
+///
+/// The SDK appends the signal path only to the endpoint it reads from the
+/// environment itself; a value handed to `with_endpoint` is taken as final. A
+/// base -- no path at all, or a bare `/` -- therefore gains `/v1/traces` here,
+/// and a configured value that already names a path is kept as written.
+fn traces_endpoint(base: &str) -> String {
+    let authority = match base.find("://") {
+        Some(sep) => &base[sep + 3..],
+        None => base,
+    };
+    let path = authority.find('/').map_or("", |at| &authority[at..]);
+    if path.is_empty() || path == "/" {
+        format!("{}/v1/traces", base.trim_end_matches('/'))
+    } else {
+        base.to_string()
+    }
+}
+
 /// Holds the tracer provider for the life of the process and flushes the
 /// queue once on the way out. Inert when nothing is exported.
+///
+/// Bind it (`let _telemetry = ...`): a bare statement drops it on the spot and
+/// shuts the exporter down against a process that keeps recording spans.
+#[must_use = "dropping the guard shuts the exporter down at the end of the statement"]
 pub struct Guard {
     provider: Option<SdkTracerProvider>,
 }
@@ -186,7 +228,7 @@ impl Drop for Guard {
 /// exporter alive. With a configuration the OTLP layer sits under the event
 /// layers; without one this is the plain logging stack. A configuration whose
 /// exporter cannot be built logs one line and falls back to the plain stack.
-pub fn service_layers<W>(
+pub(crate) fn service_layers<W>(
     config: Option<&Config>,
     filter: &EnvFilter,
     service: &str,
@@ -196,7 +238,26 @@ pub fn service_layers<W>(
 where
     W: for<'a> tracing_subscriber::fmt::MakeWriter<'a> + Send + Sync + 'static,
 {
-    let (extra, guard) = export_layer(config, filter, service);
+    service_layers_with_exporter(otlp_exporter, config, filter, service, dir, stdout)
+}
+
+/// The same composition with the exporter construction injected: `open`
+/// receives the resolved traces endpoint and returns the exporter to batch.
+/// Tests use it to watch a span leave through the composed stack.
+fn service_layers_with_exporter<W, E, F>(
+    open: F,
+    config: Option<&Config>,
+    filter: &EnvFilter,
+    service: &str,
+    dir: Option<&Path>,
+    stdout: W,
+) -> (impl tracing::Subscriber, Guard)
+where
+    W: for<'a> tracing_subscriber::fmt::MakeWriter<'a> + Send + Sync + 'static,
+    E: SpanExporter + 'static,
+    F: FnOnce(&str) -> Result<E, String>,
+{
+    let (extra, guard) = export_layer_with(open, config, filter, service);
     let subscriber = logging::service_layers_with(filter, service, dir, stdout, extra);
     (subscriber, guard)
 }
@@ -206,6 +267,10 @@ where
 /// rule and a panic hook that have no place in the shared bootstrap, so it
 /// composes its registry itself and takes only this layer.
 ///
+/// Building this layer publishes the process-wide tracer provider and the W3C
+/// propagator with it, so a service that mounts it can inject its context into
+/// an outgoing call and adopt one from an incoming one without a second call.
+///
 /// `None` with an inert guard means nothing is exported: no endpoint is set,
 /// or the exporter could not be built (one stderr line, tracing stays local).
 pub fn export_layer(
@@ -213,16 +278,35 @@ pub fn export_layer(
     filter: &EnvFilter,
     service: &str,
 ) -> (Option<Box<dyn Layer<Registry> + Send + Sync>>, Guard) {
+    export_layer_with(otlp_exporter, config, filter, service)
+}
+
+/// [`export_layer`] with the exporter construction injected, so the assembly
+/// can be exercised without a collector.
+fn export_layer_with<E, F>(
+    open: F,
+    config: Option<&Config>,
+    filter: &EnvFilter,
+    service: &str,
+) -> (Option<Box<dyn Layer<Registry> + Send + Sync>>, Guard)
+where
+    E: SpanExporter + 'static,
+    F: FnOnce(&str) -> Result<E, String>,
+{
     let Some(config) = config else {
         return (None, Guard::inert());
     };
-    match build_export_layer(config, service, filter) {
-        Ok((layer, provider)) => (
-            Some(layer),
-            Guard {
-                provider: Some(provider),
-            },
-        ),
+    match build_export_layer_with(open, config, filter, service) {
+        Ok((layer, provider)) => {
+            opentelemetry::global::set_text_map_propagator(TraceContextPropagator::new());
+            opentelemetry::global::set_tracer_provider(provider.clone());
+            (
+                Some(layer),
+                Guard {
+                    provider: Some(provider),
+                },
+            )
+        }
         Err(error) => {
             eprintln!(
                 "kallipai: {service} telemetry export disabled ({error}); tracing stays local"
@@ -232,39 +316,47 @@ pub fn export_layer(
     }
 }
 
-/// Publish the guard's provider as the process-wide one, with the W3C
-/// propagator, so the spans a service records and the context its clients
-/// inject belong to the same trace. Inert when nothing is exported.
-pub fn install_globals(guard: &Guard) {
-    if let Some(provider) = guard.provider.as_ref() {
-        opentelemetry::global::set_text_map_propagator(TraceContextPropagator::new());
-        opentelemetry::global::set_tracer_provider(provider.clone());
-    }
-}
-
 /// Install the process-wide subscriber and, when an endpoint is configured,
-/// the OTLP exporter that feeds it. Returns the guard; hold it for the life
-/// of the process so the queue is flushed on the way out.
+/// the OTLP exporter that feeds it, publishing the process-wide tracer
+/// provider and the W3C propagator with it. Returns the guard; hold it for
+/// the life of the process so the queue is flushed on the way out.
 pub fn init_service_telemetry(filter: &EnvFilter, service: &str, dir: Option<&Path>) -> Guard {
     let config = config_from_env();
     let (subscriber, guard) =
         service_layers(config.as_ref(), filter, service, dir, std::io::stdout);
-    install_globals(&guard);
     subscriber.try_init().ok();
     guard
 }
+
+/// The span kind a server request declares; a `Display` value renders into the
+/// log prefix unquoted, which a string literal does not.
+#[cfg(feature = "axum")]
+const SERVER_SPAN_KIND: &str = "server";
 
 /// The route name a request gets when it matched no route at all.
 #[cfg(feature = "axum")]
 const UNMATCHED_ROUTE: &str = "unmatched";
 
 /// The server span for one request: the method and the route template as the
-/// name (`GET /v1/files/{id}`), the OpenTelemetry HTTP attributes as fields.
+/// name (`GET /v1/files/{id}`), the OpenTelemetry HTTP attributes on the span.
 ///
 /// The name deliberately avoids the raw path: an id in a span name scatters one
-/// endpoint across a thousand names and defeats aggregation. The status is
+/// endpoint across a thousand names and defeats aggregation. The path still
+/// travels as `url.path`, capped at 256 characters, so a trace
+/// can answer "which room" without a name nothing can aggregate. The status is
 /// recorded once the response exists, and a server-side failure also carries an
 /// error type and the failed status, so a trace can be filtered for them.
+///
+/// Only `otel.name` and `otel.kind` are tracing fields: those two render into
+/// the prefix of every event inside the request, and the rest is worth nothing
+/// there. Everything else is a span attribute, which costs the log no space.
+///
+/// The span ends when the response head exists. For a streaming body (SSE, a
+/// download) the duration is time to the first byte rather than the transfer,
+/// and a body that fails mid-stream is not recorded as an error on the span.
+///
+/// A request that arrives with a W3C `traceparent` adopts it as its parent, so
+/// one trace spans the services a call crosses.
 ///
 /// Mount it with [`with_server_span`]; every axum router mounts this one layer,
 /// so a trace reads the same whichever service answered.
@@ -282,28 +374,68 @@ pub async fn server_span(
         .get::<axum::extract::MatchedPath>()
         .map_or(UNMATCHED_ROUTE, axum::extract::MatchedPath::as_str);
     let method = request.method().clone();
+    let path = request.uri().path().to_string();
     let name = format!("{method} {route}");
     let span = tracing::info_span!(
         "request",
         otel.name = %name,
-        otel.kind = "server",
-        http.request.method = %method,
-        http.route = %route,
-        http.response.status_code = tracing::field::Empty,
-        error.type = tracing::field::Empty,
+        otel.kind = %SERVER_SPAN_KIND,
     );
+    // The parent travels with the request; adopting it before the span is
+    // entered is what lets the OpenTelemetry layer build the span under it.
+    let parent = opentelemetry::global::get_text_map_propagator(|propagator| {
+        propagator.extract(&HeaderCarrier(request.headers()))
+    });
+    // A span the OpenTelemetry layer does not own cannot take a parent; it then
+    // stays a root, which is what a request without a caller's context is.
+    let _ = span.set_parent(parent);
+    span.set_attribute("http.request.method", method.as_str().to_string());
+    span.set_attribute("http.route", route.to_string());
+    span.set_attribute("url.path", capped(&path, URL_PATH_LIMIT).to_string());
     let response = next.run(request).instrument(span.clone()).await;
     let status = response.status();
-    span.record("http.response.status_code", status.as_u16());
+    span.set_attribute("http.response.status_code", i64::from(status.as_u16()));
     if status.is_server_error() {
-        span.record("error.type", format!("http_{}", status.as_u16()));
+        span.set_attribute("error.type", format!("http_{}", status.as_u16()));
         span.set_status(Status::error(status.to_string()));
     }
     response
 }
 
+/// The request headers as a propagator sees them.
+#[cfg(feature = "axum")]
+struct HeaderCarrier<'a>(&'a axum::http::HeaderMap);
+
+#[cfg(feature = "axum")]
+impl Extractor for HeaderCarrier<'_> {
+    fn get(&self, key: &str) -> Option<&str> {
+        self.0.get(key).and_then(|value| value.to_str().ok())
+    }
+
+    fn keys(&self) -> Vec<&str> {
+        self.0.keys().map(axum::http::HeaderName::as_str).collect()
+    }
+}
+
+/// Cap for `url.path`. A path is caller data, and a deeply nested one must not
+/// grow every span it lands on; truncation keeps whole characters.
+#[cfg(feature = "axum")]
+const URL_PATH_LIMIT: usize = 256;
+
+#[cfg(feature = "axum")]
+fn capped(value: &str, limit: usize) -> &str {
+    match value.char_indices().nth(limit) {
+        Some((at, _)) => &value[..at],
+        None => value,
+    }
+}
+
 /// Put [`server_span`] on a finished router, outermost, so the span covers the
 /// layers inside it (body limit, CORS, CSRF) as well as the handler.
+///
+/// Whoever finishes assembling the router mounts it, which for some services
+/// is `main` and for others the module that builds and serves the router. A new
+/// service gets its span from one call at its own assembly point.
 #[cfg(feature = "axum")]
 pub fn with_server_span<S>(router: axum::Router<S>) -> axum::Router<S>
 where
@@ -313,18 +445,21 @@ where
 }
 
 /// Build the OTLP layer and the provider behind it: export over HTTP, the
-/// sampler from the configuration, one resource naming the service.
-fn build_export_layer(
+/// sampler from the configuration, one resource naming the service and the
+/// namespace it belongs to. `with_service_name` overrides
+/// `OTEL_SERVICE_NAME`, so the service argument is where a rename happens and
+/// the environment cannot set the name behind its back.
+fn build_export_layer_with<E, F>(
+    open: F,
     config: &Config,
-    service: &str,
     filter: &EnvFilter,
-) -> Result<(Box<dyn Layer<Registry> + Send + Sync>, SdkTracerProvider), String> {
-    let exporter = OtlpExporter::builder()
-        .with_http()
-        .with_endpoint(config.endpoint())
-        .with_timeout(EXPORT_TIMEOUT)
-        .build()
-        .map_err(|error| error.to_string())?;
+    service: &str,
+) -> Result<(Box<dyn Layer<Registry> + Send + Sync>, SdkTracerProvider), String>
+where
+    E: SpanExporter + 'static,
+    F: FnOnce(&str) -> Result<E, String>,
+{
+    let exporter = open(&traces_endpoint(config.endpoint()))?;
     let batch = BatchConfigBuilder::default()
         .with_max_queue_size(QUEUE_SIZE)
         .with_max_export_batch_size(BATCH_SIZE)
@@ -345,6 +480,7 @@ fn build_export_layer(
         .with_resource(
             Resource::builder()
                 .with_service_name(service.to_string())
+                .with_attribute(KeyValue::new("service.namespace", "kallipai"))
                 .build(),
         )
         .with_span_processor(processor)
@@ -355,6 +491,16 @@ fn build_export_layer(
         .with_filter(filter.clone())
         .boxed();
     Ok((layer, provider))
+}
+
+/// The OTLP/HTTP exporter for a resolved traces endpoint.
+fn otlp_exporter(endpoint: &str) -> Result<OtlpExporter, String> {
+    OtlpExporter::builder()
+        .with_http()
+        .with_endpoint(endpoint)
+        .with_timeout(EXPORT_TIMEOUT)
+        .build()
+        .map_err(|error| error.to_string())
 }
 
 /// Wraps the exporter so an unreachable collector says so once. Every failed
@@ -385,6 +531,12 @@ impl<E: SpanExporter> SpanExporter for HintOnceExporter<E> {
 
     fn shutdown_with_timeout(&self, timeout: Duration) -> OTelSdkResult {
         self.inner.shutdown_with_timeout(timeout)
+    }
+
+    // The resource reaches an exporter through this call and nowhere else: a
+    // wrapper that swallows it exports spans without the service name.
+    fn set_resource(&mut self, resource: &Resource) {
+        self.inner.set_resource(resource);
     }
 }
 
@@ -438,12 +590,16 @@ mod tests {
         }
     }
 
-    fn lookup(pairs: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> Option<String> {
+    fn lookup(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+        let pairs: Vec<(String, String)> = pairs
+            .iter()
+            .map(|(name, value)| ((*name).to_string(), (*value).to_string()))
+            .collect();
         move |key| {
             pairs
                 .iter()
-                .find(|(name, _)| *name == key)
-                .map(|(_, value)| (*value).to_string())
+                .find(|(name, _)| name == key)
+                .map(|(_, value)| value.clone())
         }
     }
 
@@ -522,7 +678,7 @@ mod tests {
 
     #[test]
     fn a_config_keeps_the_log_line_and_adds_the_export_layer() {
-        let dead = config("http://127.0.0.1:1/v1/traces");
+        let dead = config("http://127.0.0.1:1");
         let enabled_out = Captured::default();
         let (subscriber, mut guardian) = service_layers(
             Some(&dead),
@@ -555,27 +711,24 @@ mod tests {
     }
 
     #[test]
-    fn a_dead_collector_does_not_slow_the_caller() {
+    fn a_refused_export_does_not_reach_the_caller() {
         let captured = Captured::default();
-        let dead = config("http://127.0.0.1:1/v1/traces");
-        let (subscriber, guardian) = service_layers(
+        let dead = config("http://127.0.0.1:1");
+        let (subscriber, mut guardian) = service_layers(
             Some(&dead),
             &test_filter(),
             "archeion",
             None,
             captured.clone(),
         );
-        let started = std::time::Instant::now();
         tracing::subscriber::with_default(subscriber, || {
             for _ in 0..500 {
                 tracing::info_span!("request").in_scope(|| {});
             }
         });
-        let elapsed = started.elapsed();
-        drop(guardian);
         assert!(
-            elapsed < Duration::from_secs(2),
-            "emitting spans must not wait on the exporter, took {elapsed:?}"
+            guardian.shutdown(),
+            "the guard owns the provider whether or not the collector answers"
         );
     }
 
@@ -711,23 +864,27 @@ mod tests {
 
     #[cfg(feature = "axum")]
     #[tokio::test]
-    async fn a_request_span_names_the_route_and_records_its_status() {
+    async fn the_request_span_declares_its_name_and_kind_and_nothing_else() {
         let app = axum::Router::new().route("/files/{id}", axum::routing::get(|| async { "ok" }));
         let (status, fields) = drive(app, "/files/abc").await;
         assert_eq!(status, axum::http::StatusCode::OK);
         assert_eq!(fields.get("otel.name").as_deref(), Some("GET /files/{id}"));
         assert_eq!(fields.get("otel.kind").as_deref(), Some("server"));
-        assert_eq!(fields.get("http.request.method").as_deref(), Some("GET"));
-        assert_eq!(fields.get("http.route").as_deref(), Some("/files/{id}"));
-        assert_eq!(
-            fields.get("http.response.status_code").as_deref(),
-            Some("200")
-        );
-        assert_eq!(
-            fields.get("error.type"),
-            None,
-            "an answered request is not an error"
-        );
+        // Every other fact is a span attribute: a tracing field is rendered into
+        // the prefix of each event inside the request, where it only crowds.
+        for absent in [
+            "http.request.method",
+            "http.route",
+            "url.path",
+            "http.response.status_code",
+            "error.type",
+        ] {
+            assert_eq!(
+                fields.get(absent),
+                None,
+                "{absent} must not be a tracing field"
+            );
+        }
     }
 
     #[cfg(feature = "axum")]
@@ -737,23 +894,6 @@ mod tests {
         let (status, fields) = drive(app, "/nowhere/at/all").await;
         assert_eq!(status, axum::http::StatusCode::OK);
         assert_eq!(fields.get("otel.name").as_deref(), Some("GET unmatched"));
-        assert_eq!(fields.get("http.route").as_deref(), Some("unmatched"));
-    }
-
-    #[cfg(feature = "axum")]
-    #[tokio::test]
-    async fn a_server_side_failure_carries_its_error_type() {
-        let app = axum::Router::new().route(
-            "/boom",
-            axum::routing::get(|| async { axum::http::StatusCode::INTERNAL_SERVER_ERROR }),
-        );
-        let (status, fields) = drive(app, "/boom").await;
-        assert_eq!(status, axum::http::StatusCode::INTERNAL_SERVER_ERROR);
-        assert_eq!(
-            fields.get("http.response.status_code").as_deref(),
-            Some("500")
-        );
-        assert_eq!(fields.get("error.type").as_deref(), Some("http_500"));
     }
 
     #[test]
@@ -765,12 +905,338 @@ mod tests {
 
     #[test]
     fn export_layer_carries_the_layer_and_the_guard_when_configured() {
-        let dead = config("http://127.0.0.1:1/v1/traces");
+        let dead = config("http://127.0.0.1:1");
         let (layer, mut guard) = export_layer(Some(&dead), &test_filter(), "tagma");
         assert!(
             layer.is_some(),
             "a configured service exports through this layer"
         );
+        let carries_tracecontext = opentelemetry::global::get_text_map_propagator(|propagator| {
+            propagator.fields().any(|field| field == "traceparent")
+        });
+        assert!(
+            carries_tracecontext,
+            "the export layer publishes the W3C propagator"
+        );
         assert!(guard.shutdown(), "a configured guard owns a provider");
+    }
+
+    #[test]
+    fn a_base_endpoint_gets_the_traces_path_and_a_named_one_is_kept() {
+        assert_eq!(
+            traces_endpoint("http://collector:4318"),
+            "http://collector:4318/v1/traces"
+        );
+        assert_eq!(
+            traces_endpoint("http://collector:4318/"),
+            "http://collector:4318/v1/traces"
+        );
+        assert_eq!(
+            traces_endpoint("http://collector:4318/v1/traces"),
+            "http://collector:4318/v1/traces"
+        );
+        assert_eq!(
+            traces_endpoint("https://otel.example.com/otlp"),
+            "https://otel.example.com/otlp"
+        );
+    }
+
+    #[test]
+    fn an_out_of_range_ratio_keeps_the_default_sampler() {
+        for ratio in ["1.5", "-1", "NaN", "inf"] {
+            let config = config_from_lookup(lookup(&[
+                (ENDPOINT_VAR, "http://collector:4318"),
+                (SAMPLER_VAR, "parentbased_traceidratio"),
+                (SAMPLER_ARG_VAR, ratio),
+            ]))
+            .expect("a set endpoint yields a configuration");
+            assert_eq!(
+                config.sampler(),
+                SamplerSpec::ParentBasedAlwaysOn,
+                "a ratio of {ratio} must not pin sampling either way"
+            );
+        }
+        let config = config_from_lookup(lookup(&[
+            (ENDPOINT_VAR, "http://collector:4318"),
+            (SAMPLER_VAR, "parentbased_traceidratio"),
+            (SAMPLER_ARG_VAR, "0.25"),
+        ]))
+        .expect("a set endpoint yields a configuration");
+        assert_eq!(config.sampler(), SamplerSpec::ParentBasedTraceIdRatio(0.25));
+    }
+
+    /// The far side of an export: the spans the SDK handed to an exporter, and
+    /// the resource it named them with.
+    #[derive(Clone, Debug, Default)]
+    struct RecordingExporter {
+        spans: Arc<Mutex<Vec<SpanData>>>,
+        resource: Arc<Mutex<Option<Resource>>>,
+    }
+
+    impl SpanExporter for RecordingExporter {
+        async fn export(&self, batch: Vec<SpanData>) -> OTelSdkResult {
+            self.spans.lock().unwrap().extend(batch);
+            Ok(())
+        }
+
+        fn set_resource(&mut self, resource: &Resource) {
+            *self.resource.lock().unwrap() = Some(resource.clone());
+        }
+    }
+
+    /// What one request left behind at the export boundary.
+    struct Exported {
+        spans: Vec<SpanData>,
+        resource: Option<Resource>,
+    }
+
+    #[cfg(feature = "axum")]
+    fn request_for(uri: &str, headers: &[(&str, &str)]) -> axum::http::Request<axum::body::Body> {
+        let mut builder = axum::http::Request::builder().uri(uri);
+        for (name, value) in headers {
+            builder = builder.header(*name, *value);
+        }
+        builder
+            .body(axum::body::Body::empty())
+            .expect("a well-formed request")
+    }
+
+    fn attribute(span: &SpanData, key: &str) -> Option<String> {
+        span.attributes
+            .iter()
+            .find(|pair| pair.key.as_str() == key)
+            .map(|pair| pair.value.to_string())
+    }
+
+    fn resource_attribute(exported: &Exported, name: &str) -> Option<String> {
+        let key = opentelemetry::Key::new(name.to_string());
+        exported
+            .resource
+            .as_ref()
+            .and_then(|resource| resource.get(&key))
+            .map(|value| value.to_string())
+    }
+
+    /// Drive one request through the whole stack -- event layers, span layer and
+    /// a recording exporter -- and hand back what crossed the export boundary.
+    #[cfg(feature = "axum")]
+    async fn exported_spans(
+        app: axum::Router,
+        request: axum::http::Request<axum::body::Body>,
+        configured: &str,
+        expected_endpoint: &str,
+    ) -> Exported {
+        use tower::ServiceExt as _;
+
+        let recording = RecordingExporter::default();
+        let handed = recording.clone();
+        let expected = expected_endpoint.to_string();
+        let config = config(configured);
+        let (subscriber, mut guard) = service_layers_with_exporter(
+            move |endpoint: &str| {
+                assert_eq!(
+                    endpoint, expected,
+                    "the exporter is built for the resolved traces URL"
+                );
+                Ok(handed)
+            },
+            Some(&config),
+            &test_filter(),
+            "archeion",
+            None,
+            Captured::default(),
+        );
+        {
+            let _subscribed = tracing::subscriber::set_default(subscriber);
+            let response = with_server_span(app)
+                .oneshot(request)
+                .await
+                .expect("the router answers");
+            assert!(
+                response.status().is_success() || response.status().is_server_error(),
+                "the request completed inside the composed stack"
+            );
+        }
+        assert!(guard.shutdown(), "a configured guard owns a provider");
+        Exported {
+            spans: recording.spans.lock().unwrap().clone(),
+            resource: recording.resource.lock().unwrap().clone(),
+        }
+    }
+
+    #[cfg(feature = "axum")]
+    #[test]
+    fn a_long_path_is_capped_for_the_span_attribute() {
+        let short = "/files/abc";
+        assert_eq!(capped(short, URL_PATH_LIMIT), short);
+
+        let long = format!("/files/{}", "a".repeat(URL_PATH_LIMIT * 2));
+        let capped_long = capped(&long, URL_PATH_LIMIT);
+        assert_eq!(capped_long.chars().count(), URL_PATH_LIMIT);
+        assert!(long.starts_with(capped_long), "the prefix is what is kept");
+    }
+
+    #[cfg(feature = "axum")]
+    #[tokio::test]
+    async fn a_request_span_reaches_the_exporter() {
+        let app = axum::Router::new().route("/files/{id}", axum::routing::get(|| async { "ok" }));
+        let exported = exported_spans(
+            app,
+            request_for("/files/abc", &[]),
+            "http://collector:4318",
+            "http://collector:4318/v1/traces",
+        )
+        .await;
+
+        assert_eq!(exported.spans.len(), 1, "one request, one exported span");
+        let span = &exported.spans[0];
+        assert_eq!(span.name, "GET /files/{id}");
+        assert_eq!(span.span_kind, opentelemetry::trace::SpanKind::Server);
+        assert_eq!(
+            attribute(span, "http.request.method").as_deref(),
+            Some("GET")
+        );
+        assert_eq!(
+            attribute(span, "http.route").as_deref(),
+            Some("/files/{id}")
+        );
+        assert_eq!(attribute(span, "url.path").as_deref(), Some("/files/abc"));
+        assert_eq!(
+            attribute(span, "http.response.status_code").as_deref(),
+            Some("200")
+        );
+        assert_eq!(
+            attribute(span, "error.type"),
+            None,
+            "an answered request is not an error"
+        );
+        assert_eq!(
+            resource_attribute(&exported, "service.name").as_deref(),
+            Some("archeion")
+        );
+        assert_eq!(
+            resource_attribute(&exported, "service.namespace").as_deref(),
+            Some("kallipai")
+        );
+        assert_eq!(span.status, opentelemetry::trace::Status::Unset);
+    }
+
+    #[cfg(feature = "axum")]
+    #[tokio::test]
+    async fn a_failed_request_reaches_the_exporter_as_an_error() {
+        let app = axum::Router::new().route(
+            "/boom",
+            axum::routing::get(|| async { axum::http::StatusCode::INTERNAL_SERVER_ERROR }),
+        );
+        let exported = exported_spans(
+            app,
+            request_for("/boom", &[]),
+            "http://collector:4318/v1/traces",
+            "http://collector:4318/v1/traces",
+        )
+        .await;
+
+        let span = exported
+            .spans
+            .first()
+            .expect("the failed request produced one span");
+        assert_eq!(
+            attribute(span, "http.response.status_code").as_deref(),
+            Some("500")
+        );
+        assert_eq!(attribute(span, "error.type").as_deref(), Some("http_500"));
+        assert!(matches!(
+            span.status,
+            opentelemetry::trace::Status::Error { .. }
+        ));
+    }
+
+    #[cfg(feature = "axum")]
+    #[tokio::test]
+    async fn a_traceparent_header_becomes_the_parent_of_the_request_span() {
+        let app = axum::Router::new().route("/files/{id}", axum::routing::get(|| async { "ok" }));
+        let exported = exported_spans(
+            app.clone(),
+            request_for(
+                "/files/abc",
+                &[(
+                    "traceparent",
+                    "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01",
+                )],
+            ),
+            "http://collector:4318",
+            "http://collector:4318/v1/traces",
+        )
+        .await;
+
+        let span = exported
+            .spans
+            .first()
+            .expect("the traced request produced one span");
+        assert_eq!(
+            span.span_context.trace_id(),
+            opentelemetry::trace::TraceId::from_hex("0af7651916cd43dd8448eb211c80319c")
+                .expect("a trace id")
+        );
+        assert_eq!(
+            span.parent_span_id,
+            opentelemetry::trace::SpanId::from_hex("b7ad6b7169203331").expect("a span id")
+        );
+
+        let exported = exported_spans(
+            app,
+            request_for("/files/abc", &[]),
+            "http://collector:4318",
+            "http://collector:4318/v1/traces",
+        )
+        .await;
+        let span = exported
+            .spans
+            .first()
+            .expect("the plain request produced one span");
+        assert_eq!(
+            span.parent_span_id,
+            opentelemetry::trace::SpanId::INVALID,
+            "without the header the span starts a trace"
+        );
+    }
+
+    #[cfg(feature = "axum")]
+    #[tokio::test]
+    async fn the_log_line_inside_a_request_carries_the_span_name_and_kind() {
+        use tower::ServiceExt as _;
+
+        let out = Captured::default();
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(out.clone())
+                .with_ansi(false),
+        );
+        let app = axum::Router::new().route(
+            "/files/{id}",
+            axum::routing::get(|| async {
+                tracing::info!("inside the handler");
+            }),
+        );
+        {
+            let _subscribed = tracing::subscriber::set_default(subscriber);
+            let response = with_server_span(app)
+                .oneshot(request_for("/files/abc", &[]))
+                .await
+                .expect("the router answers");
+            assert_eq!(response.status(), axum::http::StatusCode::OK);
+        }
+
+        let rendered = text(&out);
+        assert!(
+            rendered.contains("request{otel.name=GET /files/{id} otel.kind=server}"),
+            "the prefix names the request and nothing else: {rendered}"
+        );
+        for absent in ["http.route", "url.path", "http.request.method"] {
+            assert!(
+                !rendered.contains(absent),
+                "{absent} belongs to the span, not to the log line: {rendered}"
+            );
+        }
     }
 }

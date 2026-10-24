@@ -37,7 +37,8 @@ async fn main() -> Result<()> {
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
 
     // The shared bootstrap: the same subscriber shape as the platform
-    // services, plus the span export layer when an endpoint is configured.
+    // services, plus the span export layer when an endpoint is configured. No
+    // log directory: this daemon writes to stdout only.
     let _telemetry =
         kallipai_common::telemetry::init_service_telemetry(&filter, "cron-daemon", None);
 

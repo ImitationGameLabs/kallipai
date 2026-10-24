@@ -13,11 +13,7 @@ path = "src/main.rs"
 kallipai-archeion-common = { workspace = true }
 kallipai-keryx-common = { workspace = true }
 kallipai-lesche-common = { workspace = true }
-kallipai-common = { workspace = true, features = [
-  "axum",
-  "logging",
-  "telemetry",
-] }
+kallipai-common = { workspace = true, features = ["axum", "telemetry"] }
 axum = { workspace = true }
 uuid = { workspace = true }
 tokio = { workspace = true }

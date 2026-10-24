@@ -716,14 +716,15 @@ fn logs_target() -> Result<std::path::PathBuf> {
 ///
 /// When `OTEL_EXPORTER_OTLP_ENDPOINT` is set the same registry also carries
 /// the span export layer, so this process is traced like the services on the
-/// shared bootstrap; the returned guard flushes it on the way out.
+/// shared bootstrap, and building it publishes the process-wide tracer provider
+/// and the W3C propagator; the returned guard flushes the queue on exit. The
+/// variable and the log file prefix also build on.
 pub fn init_logging(filter: &tracing_subscriber::EnvFilter) -> kallipai_common::telemetry::Guard {
     use tracing_subscriber::prelude::*;
 
     let config = kallipai_common::telemetry::config_from_env();
     let (export, telemetry) =
         kallipai_common::telemetry::export_layer(config.as_ref(), filter, "tagma");
-    kallipai_common::telemetry::install_globals(&telemetry);
 
     let stderr_layer = || {
         tracing_subscriber::fmt::layer()
@@ -754,6 +755,8 @@ pub fn init_logging(filter: &tracing_subscriber::EnvFilter) -> kallipai_common::
                 }
                 let appender = tracing_appender::rolling::Builder::new()
                     .rotation(tracing_appender::rolling::Rotation::DAILY)
+                    // A role name, not the service name: the daemon's instance
+                    // log listing finds these files by the `instance` prefix.
                     .filename_prefix("instance")
                     .filename_suffix("log")
                     .max_log_files(7)
