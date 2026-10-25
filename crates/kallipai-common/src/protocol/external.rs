@@ -20,7 +20,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::sse::FailoverChainExhaustion;
+use super::sse::{FailoverChainExhaustion, was_waiting_is_false};
 
 /// A deliberately authored message — conversation content that crosses the
 /// E2EE boundary and is durably logged.
@@ -51,9 +51,18 @@ pub enum SignalEvent {
     /// The agent yielded control (presence: "idle"). Content-less: a reply no
     /// longer rides the terminal event. The task parks, awaiting input.
     Idle,
-    /// The running round was interrupted, or a parked wait/retry was cancelled
-    /// without running one. The agent stays alive and settles idle.
-    Interrupted,
+    /// A cancel landed on the agent while it stayed alive: either a running
+    /// round was aborted, or an armed wait/retry was cancelled without running
+    /// one. The agent stays alive and settles idle.
+    ///
+    /// `was_waiting` says where it landed: `true` means an armed wait or retry
+    /// timer was cancelled, so no round was running.
+    /// Omitted when `false` and absent on payloads serialized before the field
+    /// existed, so a client built before it keeps the shape it always decoded.
+    Interrupted {
+        #[serde(default, skip_serializing_if = "was_waiting_is_false")]
+        was_waiting: bool,
+    },
     /// The agent's lifecycle ended; terminal.
     Cancelled,
     /// The tagma exhausted its token budget mid-turn.
@@ -105,7 +114,10 @@ mod tests {
     fn signal_unit_variants_bytes() {
         round_trip(&SignalEvent::Busy, r#"{"type":"busy"}"#);
         round_trip(&SignalEvent::Idle, r#"{"type":"idle"}"#);
-        round_trip(&SignalEvent::Interrupted, r#"{"type":"interrupted"}"#);
+        round_trip(
+            &SignalEvent::Interrupted { was_waiting: false },
+            r#"{"type":"interrupted"}"#,
+        );
         round_trip(&SignalEvent::Cancelled, r#"{"type":"cancelled"}"#);
         round_trip(
             &SignalEvent::MaxRoundsExceeded,
@@ -137,6 +149,16 @@ mod tests {
             },
             r#"{"type":"failover_chain_exhausted","reason":"noFailoverConfigured","detail":"d"}"#,
         );
+        // The park shape adds the flag; the round shape keeps the bytes it
+        // always had, so a client built before the field existed decodes it
+        // unchanged.
+        round_trip(
+            &SignalEvent::Interrupted { was_waiting: true },
+            r#"{"type":"interrupted","was_waiting":true}"#,
+        );
+        let legacy: SignalEvent =
+            serde_json::from_str(r#"{"type":"interrupted"}"#).expect("pre-field shape decodes");
+        assert_eq!(legacy, SignalEvent::Interrupted { was_waiting: false });
     }
 
     #[test]

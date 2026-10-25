@@ -101,6 +101,13 @@ pub struct QuotaBlockedInfo {
     pub detail: String,
 }
 
+/// `skip_serializing_if` helper for [`SseEvent::Interrupted`]'s `was_waiting`
+/// flag: `false` is the shape from before the field existed, so it stays off
+/// the wire and a round interrupt keeps its exact bytes.
+pub(crate) fn was_waiting_is_false(was_waiting: &bool) -> bool {
+    !*was_waiting
+}
+
 /// Wire-format event for SSE transport (tagma to client).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
@@ -179,11 +186,18 @@ pub enum SseEvent {
         reason: String,
     },
     Cancelled,
-    /// A cancel landed on the agent while the task stayed alive:
-    /// a running round was aborted, or a wait/retry park was cancelled without
-    /// running one. Either way the task settles `Idle`; who asked for the cancel
-    /// is not part of this event. Distinct from `Cancelled`, which ends the task.
-    Interrupted,
+    /// A cancel landed on the agent while the task stayed alive.
+    ///
+    /// `was_waiting` says where it landed: `true` means an armed wait or retry
+    /// timer was cancelled, so no round was in flight;
+    /// `false` means a round in flight. Omitted when `false`, and absent on
+    /// payloads serialized before the field existed, so a round interrupt
+    /// keeps the exact bytes it always had. Distinct from `Cancelled`, which
+    /// ends the task.
+    Interrupted {
+        #[serde(default, skip_serializing_if = "was_waiting_is_false")]
+        was_waiting: bool,
+    },
     TokenBudgetExceeded {
         consumed: u64,
         budget: u64,
@@ -226,7 +240,7 @@ impl SseEvent {
                 | Self::MaxRoundsExceeded
                 | Self::Error { .. }
                 | Self::Cancelled
-                | Self::Interrupted
+                | Self::Interrupted { .. }
                 | Self::TokenBudgetExceeded { .. }
                 | Self::FailoverChainExhausted { .. }
                 | Self::QuotaBlocked(..)
@@ -290,7 +304,7 @@ mod tests {
                 | SseEvent::MaxRoundsExceeded
                 | SseEvent::Error { .. }
                 | SseEvent::Cancelled
-                | SseEvent::Interrupted
+                | SseEvent::Interrupted { .. }
                 | SseEvent::TokenBudgetExceeded { .. }
                 | SseEvent::FailoverChainExhausted { .. }
                 | SseEvent::QuotaBlocked(..) => {
@@ -353,7 +367,7 @@ mod tests {
             reason: String::new(),
         },
         SseEvent::Cancelled,
-        SseEvent::Interrupted,
+        SseEvent::Interrupted { was_waiting: false },
         SseEvent::TokenBudgetExceeded {
             consumed: 0,
             budget: 0,
@@ -477,6 +491,34 @@ mod tests {
             } => {}
             other => panic!("wrong variant: {other:?}"),
         }
+    }
+    /// `was_waiting` rides `interrupted` only when the interrupt landed on an
+    /// armed timer: `false` omits the field entirely, which is the shape
+    /// serialized before the field existed, while `true` adds it. Pinning both
+    /// directions keeps already-deployed clients decoding the round shape
+    /// unchanged and makes the armed-timer shape a stable contract.
+    #[test]
+    fn interrupted_was_waiting_roundtrip_and_legacy_shape() {
+        let armed_timer =
+            serde_json::to_value(SseEvent::Interrupted { was_waiting: true }).expect("serializes");
+        assert_eq!(
+            armed_timer,
+            serde_json::json!({"type": "interrupted", "was_waiting": true})
+        );
+
+        let round =
+            serde_json::to_value(SseEvent::Interrupted { was_waiting: false }).expect("serializes");
+        assert_eq!(round, serde_json::json!({"type": "interrupted"}));
+
+        // Payloads written before the field existed carry no `was_waiting` and
+        // must still decode, as the round shape.
+        let legacy = serde_json::json!({"type": "interrupted"});
+        let back: SseEvent = serde_json::from_value(legacy).expect("the pre-field shape parses");
+        assert!(matches!(back, SseEvent::Interrupted { was_waiting: false }));
+
+        let armed = serde_json::json!({"type": "interrupted", "was_waiting": true});
+        let back: SseEvent = serde_json::from_value(armed).expect("roundtrips");
+        assert!(matches!(back, SseEvent::Interrupted { was_waiting: true }));
     }
 
     /// The enums embedded in the wire shape carry their own contract: their

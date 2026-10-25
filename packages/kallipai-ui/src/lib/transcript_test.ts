@@ -19,6 +19,7 @@ import {
   nextPendingSeq,
   replaceLineId,
   retryLine,
+  signalSystemLine,
   sendFailed,
   withUserLine,
 } from "./transcript.ts";
@@ -301,6 +302,36 @@ Deno.test("interrupted / cancelled signals produce system lines + idle", () => {
   assertEquals(intr.lines[0]!.role, "system");
   assertEquals(signal({ type: "cancelled" }).status, "idle");
 });
+
+Deno.test(
+  "a park interrupt and a round interrupt tell the user different things",
+  () => {
+    const round = signal({ type: "interrupted" }, 2);
+    const park = signal({ type: "interrupted", was_waiting: true }, 3);
+    assertEquals(round.lines[0]!.text, "Turn interrupted.");
+    assertEquals(park.lines[0]!.text, "Stopped waiting.");
+    // Both land the conversation on idle; only the sentence differs.
+    assertEquals(round.status, "idle");
+    assertEquals(park.status, "idle");
+  },
+);
+
+Deno.test(
+  "a signal this build does not know leaves the transcript alone",
+  () => {
+    const before = signal({ type: "busy" });
+    const unknown = {
+      type: "signal_from_a_newer_tagma",
+    } as unknown as SignalEvent;
+    const after = applySignal(before, unknown, 4);
+    assertEquals(after, before);
+    // The deep compare only bites if the default branch starts building a new
+    // state and changes it; it sees neither an in-place rewrite of the state
+    // it is handed, nor the line builder, whose answer this branch discards.
+    // The builder gets its own ask below.
+    assertEquals(signalSystemLine(unknown), null);
+  },
+);
 
 Deno.test(
   "token_budget_exceeded / max_rounds / failover signals set error + system",

@@ -296,9 +296,10 @@ impl RelayHandle {
     /// `execute_op` calls), which also publishes the stamped `UserMessage` frame
     /// the pump forwards — so the app dedups its optimistic user line off that
     /// frame, not this ack. The `MessageAccepted` reply therefore carries
-    /// `history_id = 0`. `Interrupt` carries no content and is not stored — its
-    /// visible effect is the agent's outbound `Interrupted` event, which the
-    /// pump already forwards.
+    /// `history_id = 0`. `Interrupt` carries no content and is not stored; its
+    /// visible effect is the agent's outbound interrupt event (`Interrupted`, or
+    /// `WaitCancelled` when it landed on a parked wait), which the pump already
+    /// forwards.
     pub(super) async fn handle_agent_op(
         &self,
         trace: &kallipai_archeion_common::ids::TraceId,

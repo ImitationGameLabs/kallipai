@@ -227,9 +227,9 @@ where
                     eprintln!("cancelled");
                     RunExit::Cancelled
                 }
-                // The round was interrupted; the tagma-side agent stays alive, but this
-                // one-shot run is over. Treat like Cancelled.
-                SseEvent::Interrupted => {
+                // The round was interrupted, or an armed wait was cancelled; the
+                // tagma-side agent stays alive, but this one-shot run is over.
+                SseEvent::Interrupted { .. } => {
                     eprintln!("interrupted");
                     RunExit::Cancelled
                 }
@@ -343,7 +343,7 @@ where
             | SseEvent::Waiting { .. }
             | SseEvent::Error { .. }
             | SseEvent::Cancelled
-            | SseEvent::Interrupted
+            | SseEvent::Interrupted { .. }
             | SseEvent::TokenBudgetExceeded { .. }
             | SseEvent::FailoverChainExhausted { .. }
             | SseEvent::QuotaBlocked(..) => {

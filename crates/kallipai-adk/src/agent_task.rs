@@ -674,7 +674,9 @@ pub async fn agent_task(
                     )
                 {
                     ctx.end_cancelled_park();
-                    agent_tx.send(AgentEvent::Interrupted).await.ok();
+                    // The park form of an interrupt: no round was running, so the
+                    // event says the wait ended rather than a turn was cut short.
+                    agent_tx.send(AgentEvent::WaitCancelled).await.ok();
                     // The cancel owns this wake: falling through would let the
                     // merged permits pull a message and start a round the
                     // interrupt was meant to prevent. Wake the loop once more

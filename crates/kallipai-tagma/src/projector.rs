@@ -36,7 +36,9 @@ pub(crate) fn project_external(sse: &SseEvent) -> (Option<AuthoredEvent>, Option
         SseEvent::Error { message } => Some(SignalEvent::Error {
             message: message.clone(),
         }),
-        SseEvent::Interrupted => Some(SignalEvent::Interrupted),
+        SseEvent::Interrupted { was_waiting } => Some(SignalEvent::Interrupted {
+            was_waiting: *was_waiting,
+        }),
         SseEvent::Cancelled => Some(SignalEvent::Cancelled),
         SseEvent::TokenBudgetExceeded { consumed, budget } => {
             Some(SignalEvent::TokenBudgetExceeded {
@@ -89,8 +91,14 @@ mod tests {
             (None, Some(SignalEvent::Busy))
         ));
         assert!(matches!(
-            project_external(&SseEvent::Interrupted),
-            (None, Some(SignalEvent::Interrupted))
+            project_external(&SseEvent::Interrupted { was_waiting: true }),
+            (None, Some(SignalEvent::Interrupted { was_waiting: true }))
+        ));
+        // The round shape carries the flag cleared; the signal vocabulary
+        // mirrors it so the surfaces can tell the two landings apart.
+        assert!(matches!(
+            project_external(&SseEvent::Interrupted { was_waiting: false }),
+            (None, Some(SignalEvent::Interrupted { was_waiting: false }))
         ));
         assert!(matches!(
             project_external(&SseEvent::Cancelled),

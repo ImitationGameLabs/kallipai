@@ -72,7 +72,10 @@ export type SignalEvent =
   | { readonly type: "idle" }
   | { readonly type: "busy" }
   | { readonly type: "error"; readonly message: string }
-  | { readonly type: "interrupted" }
+  /** Where the interrupt landed: `true` means an armed wait or retry timer was
+   * cancelled with no round in flight; absent means a round in flight was
+   * aborted, which is what every tagma serialized before the flag existed. */
+  | { readonly type: "interrupted"; readonly was_waiting?: boolean }
   | { readonly type: "cancelled" }
   | {
       readonly type: "token_budget_exceeded";

@@ -36,10 +36,11 @@ pub struct BridgeCells {
 /// then observes `recv() == None` and exits.
 ///
 /// **Interrupt** does *not* close the channel: it cancels the current round
-/// token (or, for a park on a wait/retry, drops that fuse instead), so the
-/// task settles with `Interrupted` and returns to its outer loop — the bridge
-/// forwards `Interrupted` (setting state `IDLE`) and keeps looping. The agent
-/// is still alive either way.
+/// token, or drops the fuse of a park on a wait/retry without running a
+/// round. The task settles with `Interrupted` in the first case and
+/// `WaitCancelled` in the second, and returns to its outer loop either way;
+/// the bridge forwards both (setting state `IDLE`) and keeps looping. The
+/// agent stays alive in both cases.
 ///
 /// The `cancel` token is a secondary, *forced* exit for tagma-wide shutdown: it
 /// preempts the bridge even if the agent task is mid-operation. It is the
@@ -153,6 +154,7 @@ pub async fn bridge_task(
                                 let (new_state, parked_reason, retry_info) = match ev {
                                     AgentEvent::Idle
                                     | AgentEvent::Cancelled
+                                    | AgentEvent::WaitCancelled
                                     | AgentEvent::Interrupted => (AgentState::IDLE, None, None),
                                     AgentEvent::Waiting { .. } => (AgentState::WAITING, None, None),
                                     // The budget gate re-arms a waiting timer
@@ -262,12 +264,13 @@ pub async fn bridge_task(
                                         "hit the per-request tool-round limit and parked.".to_string(),
                                         notice,
                                     )),
-                                    // Cancelled and Interrupted come from a cancel issued
-                                    // outside the subagent: whoever issued it already knows, so
-                                    // no superior notice is due. TokenBudgetExceeded re-arms a
-                                    // wait the operator already observes, likewise without a
-                                    // notice. The state mark above is still linearized with
-                                    // everyone else's snapshot.
+                                    // Cancelled and the two interrupt shapes come from a cancel
+                                    // issued outside the subagent: whoever issued it
+                                    // already knows, so no superior notice is due.
+                                    // TokenBudgetExceeded re-arms a wait the operator
+                                    // already observes, likewise without a notice. The
+                                    // state mark above is still linearized with everyone
+                                    // else's snapshot.
                                     _ => None,
                                 };
                             }
@@ -418,7 +421,8 @@ fn convert_event(event: AgentEvent) -> Option<SseEvent> {
         }),
         AgentEvent::QuotaBlocked(info) => Some(SseEvent::QuotaBlocked(info)),
         AgentEvent::Cancelled => Some(SseEvent::Cancelled),
-        AgentEvent::Interrupted => Some(SseEvent::Interrupted),
+        AgentEvent::Interrupted => Some(SseEvent::Interrupted { was_waiting: false }),
+        AgentEvent::WaitCancelled => Some(SseEvent::Interrupted { was_waiting: true }),
         AgentEvent::TokenBudgetExceeded { consumed, budget } => {
             Some(SseEvent::TokenBudgetExceeded { consumed, budget })
         }

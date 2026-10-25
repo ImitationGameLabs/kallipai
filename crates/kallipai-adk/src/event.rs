@@ -86,13 +86,16 @@ pub enum AgentEvent {
         id: String,
     },
     Cancelled,
-    /// A cancel landed on the agent while the task stayed alive:
-    /// either the running round was aborted, or a park armed on a wait/retry
-    /// timer was cancelled without running one. Either way the task settles
-    /// `Idle` and returns to the outer loop for the next prompt; who asked for
-    /// the cancel is not part of this event. Distinct from `Cancelled`, which
-    /// ends the task.
+    /// A cancel landed on the agent's running round and aborted it. The task
+    /// settles `Idle` and returns to the outer loop for the next prompt; who
+    /// asked for the cancel is not part of this event. Distinct from
+    /// `Cancelled`, which ends the task.
     Interrupted,
+    /// A cancel ended an armed wait or retry timer. The task settles `Idle`,
+    /// exactly as it does after
+    /// [`Interrupted`](Self::Interrupted); the difference is that no round was
+    /// in flight, so the surfaces must not report a cut-short turn.
+    WaitCancelled,
     TokenBudgetExceeded {
         consumed: u64,
         budget: u64,
@@ -136,6 +139,7 @@ impl AgentEvent {
                 | Self::Error(_)
                 | Self::Cancelled
                 | Self::Interrupted
+                | Self::WaitCancelled
                 | Self::TokenBudgetExceeded { .. }
                 | Self::FailoverChainExhausted { .. }
                 | Self::QuotaBlocked(..)
@@ -178,6 +182,7 @@ mod tests {
                 | AgentEvent::Error(_)
                 | AgentEvent::Cancelled
                 | AgentEvent::Interrupted
+                | AgentEvent::WaitCancelled
                 | AgentEvent::TokenBudgetExceeded { .. }
                 | AgentEvent::FailoverChainExhausted { .. }
                 | AgentEvent::QuotaBlocked(..) => {
@@ -235,6 +240,7 @@ mod tests {
         AgentEvent::ApprovalCancelled { id: String::new() },
         AgentEvent::Cancelled,
         AgentEvent::Interrupted,
+        AgentEvent::WaitCancelled,
         AgentEvent::TokenBudgetExceeded {
             consumed: 0,
             budget: 0,
@@ -261,7 +267,7 @@ mod tests {
     /// empty/zero values; semantics live in the classification snapshot.
     #[test]
     fn schema_snapshot() {
-        assert_eq!(SAMPLES.len(), 23, "variant count drifted — extend SAMPLES");
+        assert_eq!(SAMPLES.len(), 24, "variant count drifted — extend SAMPLES");
         let expected: &[&str] = &[
             "Reasoning(\"\")",
             "AssistantContent(\"\")",
@@ -283,6 +289,7 @@ mod tests {
             "ApprovalCancelled { id: \"\" }",
             "Cancelled",
             "Interrupted",
+            "WaitCancelled",
             "TokenBudgetExceeded { consumed: 0, budget: 0 }",
             "FailoverChainExhausted { reason: NoFailoverConfigured, detail: \"\", transient_retry: None }",
             "QuotaBlocked(QuotaBlockedInfo { profile: \"\", reset: Some(0), detail: \"\" })",

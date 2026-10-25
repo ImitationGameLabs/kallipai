@@ -1,6 +1,7 @@
 {
   "$schema": "https://inlang.com/schema/message-format",
   "signal_turn_interrupted": "回合已中断。",
+  "signal_wait_cancelled": "已停止等待。",
   "signal_turn_cancelled": "回合已取消。",
   "signal_token_budget_line": "Token 预算已超限（已消耗 {consumed}/{budget}）。",
   "signal_max_rounds_line": "工具轮数已达上限。",

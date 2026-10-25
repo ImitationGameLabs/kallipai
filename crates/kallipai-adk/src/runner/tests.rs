@@ -32,6 +32,31 @@ fn no_cancel() -> CancellationToken {
     CancellationToken::new()
 }
 
+/// Drain `rx` until `WaitCancelled`, failing if the park form ever arrives as a
+/// round interrupt or the fuse never fires. `what` names the park under test, so
+/// a failure says which one.
+async fn expect_wait_cancelled(rx: &mut tokio::sync::mpsc::Receiver<AgentEvent>, what: &str) {
+    let mut seen = false;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::time::Instant::now() < deadline && !seen {
+        if let Ok(Some(event)) =
+            tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv()).await
+        {
+            // The park form of the interrupt: no round was in flight, so the
+            // event must say the wait ended and never claim a cut-short turn.
+            assert!(
+                !matches!(event, AgentEvent::Interrupted),
+                "{what}: a cancelled park must not report a round interrupt: {event:?}"
+            );
+            seen = matches!(event, AgentEvent::WaitCancelled);
+        }
+    }
+    assert!(
+        seen,
+        "{what}: the cancel must settle the agent with WaitCancelled"
+    );
+}
+
 // --- synthesize_unanswered_results unit tests ---
 
 fn result_ids(msgs: &[TurnMessage]) -> Vec<&str> {
@@ -987,7 +1012,7 @@ async fn wait_timer_elapse_injects_system_turn_and_reruns() {
 }
 
 /// Full-loop pin of the interrupt-on-a-park form: the cancel drops the armed
-/// fuse and settles the agent with `Interrupted` without running a round — and
+/// fuse and settles the agent with `WaitCancelled` without running a round, and
 /// the old timer, when it reaches its deadline, must not inject its turn
 /// either.
 #[tokio::test]
@@ -1027,19 +1052,7 @@ async fn interrupt_cancels_the_armed_wait_and_the_fuse_stays_dead() {
     // reads, then wake the loop.
     crate::agent_task::request_park_cancel(&park_epoch, &park_cancel, &notify);
 
-    let mut interrupted = false;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    while std::time::Instant::now() < deadline && !interrupted {
-        if let Ok(Some(AgentEvent::Interrupted)) =
-            tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv()).await
-        {
-            interrupted = true;
-        }
-    }
-    assert!(
-        interrupted,
-        "the cancel must settle the agent with Interrupted"
-    );
+    expect_wait_cancelled(&mut rx, "break(wait) fuse").await;
     assert!(
         wait_until.lock().unwrap().is_none(),
         "a cancelled park must leave no fuse armed"
@@ -1172,7 +1185,7 @@ async fn a_cancel_stamped_mid_round_never_cancels_the_next_park() {
     assert!(
         !events
             .iter()
-            .any(|event| matches!(event, AgentEvent::Interrupted)),
+            .any(|event| matches!(event, AgentEvent::Interrupted | AgentEvent::WaitCancelled)),
         "a stale cancel must not interrupt the new park: {events:?}"
     );
     let until = *wait_until.lock().unwrap();
@@ -1236,19 +1249,8 @@ async fn a_cancel_on_the_retry_fuse_clears_the_retry_and_its_count() {
     );
 
     crate::agent_task::request_park_cancel(&park_epoch, &park_cancel, &notify);
-    let mut interrupted = false;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    while std::time::Instant::now() < deadline && !interrupted {
-        if let Ok(Some(AgentEvent::Interrupted)) =
-            tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv()).await
-        {
-            interrupted = true;
-        }
-    }
-    assert!(
-        interrupted,
-        "the cancel must settle the agent with Interrupted"
-    );
+
+    expect_wait_cancelled(&mut rx, "retry fuse").await;
     assert!(
         retry_at.lock().unwrap().is_none(),
         "a cancelled retry park must leave no fuse armed"
@@ -1340,19 +1342,7 @@ async fn a_cancel_does_not_swallow_the_reset_riding_the_same_wake() {
     });
     crate::agent_task::request_park_cancel(&park_epoch, &park_cancel, &notify);
 
-    let mut interrupted = false;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    while std::time::Instant::now() < deadline && !interrupted {
-        if let Ok(Some(AgentEvent::Interrupted)) =
-            tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv()).await
-        {
-            interrupted = true;
-        }
-    }
-    assert!(
-        interrupted,
-        "the cancel must settle the agent with Interrupted"
-    );
+    expect_wait_cancelled(&mut rx, "reset-riding wake").await;
     assert!(
         reset_cell.lock().unwrap().is_none(),
         "the reset riding the same wake must be applied, not postponed"
@@ -1425,19 +1415,7 @@ async fn a_cancel_still_serves_a_message_that_rode_the_same_wake() {
     pull_flag.store(true, Ordering::SeqCst);
     crate::agent_task::request_park_cancel(&park_epoch, &park_cancel, &notify);
 
-    let mut interrupted = false;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    while std::time::Instant::now() < deadline && !interrupted {
-        if let Ok(Some(AgentEvent::Interrupted)) =
-            tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv()).await
-        {
-            interrupted = true;
-        }
-    }
-    assert!(
-        interrupted,
-        "the cancel must settle the agent with Interrupted"
-    );
+    expect_wait_cancelled(&mut rx, "message-riding wake").await;
 
     // The message that rode the same permit must still be served: its text
     // lands in the store when a round records the user turn.

@@ -7,7 +7,7 @@ use kallipai_adk::event::AgentEvent;
 use kallipai_common::agentid::AgentId;
 use kallipai_common::policy::{ExecPolicy, PolicyPreset};
 use kallipai_common::protocol::{
-    AgentState, FailoverChainExhaustion, SseEvent, TransientRetryInfo,
+    AgentState, FailoverChainExhaustion, QuotaBlockedInfo, SseEvent, TransientRetryInfo,
 };
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
@@ -242,7 +242,7 @@ async fn bridge_interrupted_keeps_looping() {
     let mut saw_idle = false;
     while !(saw_interrupted && saw_idle) {
         match tokio::time::timeout(Duration::from_millis(200), events_rx.recv()).await {
-            Ok(Ok(SseEvent::Interrupted)) => saw_interrupted = true,
+            Ok(Ok(SseEvent::Interrupted { was_waiting: false })) => saw_interrupted = true,
             Ok(Ok(SseEvent::Idle)) => saw_idle = true,
             Ok(Ok(_)) => {}
             Ok(Err(_)) => break, // channel closed
@@ -253,6 +253,44 @@ async fn bridge_interrupted_keeps_looping() {
     assert!(
         saw_idle,
         "Idle was not forwarded — bridge did not keep looping after Interrupted"
+    );
+    assert_eq!(state.load(Ordering::Relaxed), AgentState::IDLE);
+    drop(agent_tx);
+}
+
+/// The park form of an interrupt reaches the wire with its flag set, and the
+/// state side lands exactly where a round interrupt lands: IDLE, task alive.
+#[tokio::test]
+async fn bridge_wait_cancelled_forwards_was_waiting() {
+    let (agent_tx, agent_rx) = tokio::sync::mpsc::channel::<AgentEvent>(16);
+    let (events_tx, mut events_rx) = broadcast::channel::<SseEvent>(16);
+    let cancel = CancellationToken::new();
+    let state = Arc::new(AtomicU8::new(AgentState::BUSY));
+
+    let _bridge = tokio::spawn(super::bridge_task(
+        AgentId::random(),
+        agent_rx,
+        events_tx,
+        cancel,
+        BridgeCells {
+            state: state.clone(),
+            state_since: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            activity: Arc::new(std::sync::Mutex::new(String::new())),
+            parked: Arc::new(std::sync::Mutex::new(None)),
+            retrying: Arc::new(std::sync::Mutex::new(None)),
+        },
+        make_state(),
+    ));
+
+    agent_tx.send(AgentEvent::WaitCancelled).await.unwrap();
+
+    let forwarded = tokio::time::timeout(Duration::from_millis(200), events_rx.recv())
+        .await
+        .expect("the bridge must forward the park interrupt")
+        .expect("the broadcast channel stays open");
+    assert!(
+        matches!(forwarded, SseEvent::Interrupted { was_waiting: true }),
+        "the park interrupt must reach the wire with was_waiting set: {forwarded:?}"
     );
     assert_eq!(state.load(Ordering::Relaxed), AgentState::IDLE);
     drop(agent_tx);
@@ -1090,12 +1128,17 @@ async fn missing_superior_yields_no_target() {
 /// non-terminal event may map to `None`. The per-side exhaustive snapshots
 /// (runtime `event.rs`, common `sse.rs`) each pin only their own side — this
 /// test is the mechanical link that makes the mirror obligation real. The
-/// `len()` assert is a count nail: a new variant added without extending the
-/// table below fails here instead of silently escaping parity coverage.
+/// `len()` assert catches the table being extended or trimmed; the
+/// distinctness check catches a row swapped for a copy of another row, which
+/// leaves both the count and the surviving variant's verdict in place while
+/// dropping a variant from coverage. A new variant is stopped earlier, by
+/// `convert_event`'s exhaustive match.
 #[test]
 fn convert_event_preserves_terminal_parity() {
-    assert_eq!(all_agent_events().len(), 21);
-    for ev in all_agent_events() {
+    let events = all_agent_events();
+    assert_eq!(events.len(), 24);
+    assert_variants_are_distinct(&events);
+    for ev in events {
         let debug = format!("{ev:?}");
         let terminal = ev.is_terminal();
         match super::convert_event(ev) {
@@ -1107,6 +1150,32 @@ fn convert_event_preserves_terminal_parity() {
             None => assert!(!terminal, "terminal event {debug} bridged to None"),
         }
     }
+}
+
+/// The count nail above catches the table gaining or losing a row; this one
+/// catches a row swapped for a copy of another row, which leaves both the
+/// count and the surviving variant's verdict in place while quietly dropping
+/// a variant from coverage.
+fn assert_variants_are_distinct(events: &[AgentEvent]) {
+    let names: Vec<String> = events
+        .iter()
+        .map(|ev| {
+            let debug = format!("{ev:?}");
+            debug
+                .split(['(', ' '])
+                .next()
+                .unwrap_or_default()
+                .to_owned()
+        })
+        .collect();
+    let mut unique = names.clone();
+    unique.sort();
+    unique.dedup();
+    assert_eq!(
+        unique.len(),
+        names.len(),
+        "the table repeats a variant: {names:?}"
+    );
 }
 
 /// One instance of every `AgentEvent` variant, for the parity test above
@@ -1128,6 +1197,7 @@ fn all_agent_events() -> Vec<AgentEvent> {
         },
         AgentEvent::ToolResult(String::new()),
         AgentEvent::Idle,
+        AgentEvent::Waiting { timeout_secs: 0 },
         AgentEvent::MaxRoundsExceeded,
         AgentEvent::Error(String::new()),
         AgentEvent::Status(String::new()),
@@ -1159,6 +1229,7 @@ fn all_agent_events() -> Vec<AgentEvent> {
         AgentEvent::ApprovalCancelled { id: String::new() },
         AgentEvent::Cancelled,
         AgentEvent::Interrupted,
+        AgentEvent::WaitCancelled,
         AgentEvent::TokenBudgetExceeded {
             consumed: 0,
             budget: 0,
@@ -1168,6 +1239,11 @@ fn all_agent_events() -> Vec<AgentEvent> {
             detail: String::new(),
             transient_retry: None,
         },
+        AgentEvent::QuotaBlocked(QuotaBlockedInfo {
+            profile: String::new(),
+            reset: Some(0),
+            detail: String::new(),
+        }),
     ]
 }
 

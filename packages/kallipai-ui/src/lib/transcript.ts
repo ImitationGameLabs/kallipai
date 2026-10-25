@@ -39,6 +39,7 @@ import {
   signal_token_budget_line,
   signal_turn_cancelled,
   signal_turn_interrupted,
+  signal_wait_cancelled,
 } from "../paraglide/messages.js";
 
 type ConversationRole = "user" | "assistant" | "system";
@@ -290,12 +291,19 @@ export function mergeHistoryLines(
 /** The human-readable system line a signal produces, or `null` if it is
  * content-less (a pure status transition like `busy`/`idle`). Signal-produced
  * lines are transient (not cached, not replayed). */
-function signalSystemLine(signal: SignalEvent): { text: string } | null {
+export function signalSystemLine(signal: SignalEvent): { text: string } | null {
   switch (signal.type) {
     case "error":
       return { text: signal.message };
     case "interrupted":
-      return { text: signal_turn_interrupted() };
+      // One signal, two landings: a round was cut short, or an armed wait
+      // was cancelled.
+      return {
+        text:
+          signal.was_waiting === true
+            ? signal_wait_cancelled()
+            : signal_turn_interrupted(),
+      };
     case "cancelled":
       return { text: signal_turn_cancelled() };
     case "token_budget_exceeded":
@@ -317,13 +325,21 @@ function signalSystemLine(signal: SignalEvent): { text: string } | null {
     case "busy":
     case "idle":
       return null;
+    default: {
+      // An unknown signal produces no line: one unreadable signal must not
+      // cost the conversation its transcript, and the `never` narrowing
+      // fails the build first if a variant lands unclassified.
+      const _exhaustive: never = signal;
+      return null;
+    }
   }
 }
 
 /** Apply one runtime signal to the transcript. `lineId` is the store-assigned
- * synthetic id for any system line this signal produces. Pure; returns a new
- * state. Status transitions (busy/idle) and terminal/error system lines all
- * arrive here — they no longer ride the encrypted envelope. */
+ * synthetic id for any system line this signal produces. Pure; a signal this
+ * build does not know comes back as the state it was given, untouched. Status
+ * transitions (busy/idle) and terminal/error system lines all arrive here —
+ * they no longer ride the encrypted envelope. */
 export function applySignal(
   state: ConversationTranscript,
   signal: SignalEvent,
@@ -364,6 +380,14 @@ export function applySignal(
         status: "error",
         error: signal_failover_error(),
       };
+    default: {
+      // Leave the transcript exactly as it stands: a signal from a newer
+      // tagma says nothing this build can render, dropping the state would
+      // take the conversation down with it, and the `never` narrowing fails
+      // the build first if a variant lands unclassified.
+      const _exhaustive: never = signal;
+      return state;
+    }
   }
 }
 
