@@ -32,7 +32,7 @@ impl LlmTool for ContextStatusTool {
         "Report the agent's current context window usage: how many tokens are \
          consumed by pinned items and conversation turns, and which turns are \
          the largest. Use this to decide whether to evict turns with context_evict \
-         (providing a summary to preserve key facts) before the automatic \
+         (which keeps the newest turns and summarizes the rest) before the automatic \
          compaction triggers, and to see which single turn dominates the window."
     }
 

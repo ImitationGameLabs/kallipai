@@ -140,8 +140,21 @@ pub enum MaxToolRounds {
 pub const DELEGATION_CARVE_OUT: &str = "carve_out";
 pub const DELEGATION_FULL_HANDOFF: &str = "full_handoff";
 
+/// Whether `ratio` is a usable share of the effective budget for the manual
+/// eviction's keep window: finite, greater than zero, and at most one.
+///
+/// One predicate for every entry point that can carry the value — the tagma's
+/// env knob, its per-spawn setter and the CLI's request builder — so a value
+/// one path rejects is never silently accepted by another. Finiteness is part
+/// of the bound because JSON has no non-finite number: such a value would
+/// serialize as `null` and read back as "unset", turning the flag into a
+/// silent no-op.
+pub fn context_keep_tokens_ratio_in_range(ratio: f64) -> bool {
+    ratio.is_finite() && ratio > 0.0 && ratio <= 1.0
+}
+
 /// Request body for creating a new agent instance.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CreateAgentRequest {
     /// Required working directory. Rejected if absent (never silently defaulted).
     pub workspace_root: String,
@@ -166,6 +179,18 @@ pub struct CreateAgentRequest {
     /// - `Some(MaxToolRounds::Limited(N))` → explicit limit.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tool_rounds: Option<MaxToolRounds>,
+    /// Override how many conversation turns a manual `context_evict` keeps for
+    /// this agent. `None` follows the tagma default
+    /// (`KALLIPAI_CONTEXT_KEEP_TURNS`); `Some(0)` is legal and keeps none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_keep_turns: Option<usize>,
+    /// Override the share of the effective budget that keep window may spend
+    /// for this agent. `None` follows the tagma default
+    /// (`KALLIPAI_CONTEXT_KEEP_TOKENS_RATIO`); a value outside `(0, 1]` is
+    /// rejected — a zero share would keep nothing while reporting a token-cap
+    /// degradation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_keep_tokens_ratio: Option<f64>,
     /// Profile set the subagent resolves against, by exact name. Required:
     /// the spawn rejects unknown names (the error lists the available
     /// ones), so a binding never lands on the record by accident.

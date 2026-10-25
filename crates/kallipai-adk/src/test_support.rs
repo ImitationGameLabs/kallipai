@@ -82,6 +82,8 @@ pub(crate) fn test_config() -> AgentConfig {
         skills: vec![],
         retry_policy: RetryPolicy::default(),
         pinned_budget_ratio: 0.25,
+        context_keep_turns: 20,
+        context_keep_tokens_ratio: 0.15,
         context_thresholds: vec![50, 80],
         token_budget_warnings: vec![80, 95],
         agent_id: None,
@@ -133,6 +135,7 @@ pub(crate) async fn ctx_from_source(
         let mut guard = store.lock().await;
         guard.set_tool_definitions(executor.tool_definitions());
         guard.set_pinned_budget(config.pinned_budget());
+        guard.set_eviction_caps(config.eviction_caps());
     }
     AgentContext {
         conversation: client.conversation(),
@@ -306,18 +309,20 @@ pub(crate) async fn ctx_with_mock(
 /// together exceeds the effective budget.
 pub(crate) const FAILURE_PIN_WINDOW: usize = 40_000;
 
-/// Shrink `ctx`'s window to `window` and re-sync the store's pinned-budget guard —
-/// the first two of the three steps `acquisition::failover::reapply_window` applies on
-/// failover. The third, `mark_needs_full_estimate`, is deliberately omitted: these
-/// tests feed the gates `total_estimated_tokens`, a plain per-turn sum that never
-/// consults the anchor flag the marker guards. Lets a test build an over-budget
-/// store from small turns instead of the 600K-char wedge turn.
+/// Shrink `ctx`'s window to `window` and re-install the two values a window move
+/// touches — the pinned layer's capacity and the manual eviction's caps —
+/// mirroring `acquisition::failover::reapply_window`, minus the
+/// `mark_needs_full_estimate` call that helper also makes: these tests feed the
+/// gates `total_estimated_tokens`, a plain per-turn sum that never consults the
+/// anchor flag the marker guards. Lets a test build an over-budget store from
+/// small turns instead of the 600K-char wedge turn.
 pub(crate) async fn set_context_window(ctx: &mut AgentContext, window: usize) {
     ctx.config
         .set_context_window(window)
         .expect("the test window must satisfy the budget invariants");
-    let budget = ctx.config.pinned_budget();
-    ctx.store.lock().await.set_pinned_budget(budget);
+    let mut store = ctx.store.lock().await;
+    store.set_pinned_budget(ctx.config.pinned_budget());
+    store.set_eviction_caps(ctx.config.eviction_caps());
 }
 
 /// A user turn sized for [`FAILURE_PIN_WINDOW`]: the 20_000-char literal below

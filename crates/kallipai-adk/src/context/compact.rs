@@ -698,7 +698,10 @@ async fn stop_compaction(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::context::CONTEXT_SUMMARY_HEADER;
+    use crate::context::{
+        CONTEXT_SUMMARY_HEADER, CONTEXT_SUMMARY_RANGE_MARKER, KeepCaps, TurnId, plan_keep_window,
+        summary_record_with_range,
+    };
     use crate::history::{HistoryRecord, HistoryWriter};
     use crate::retry::RetryPolicy;
     use crate::retry::decision::TransientKind;
@@ -1166,6 +1169,58 @@ mod tests {
         assert_eq!(
             carried["role"], "user",
             "the carried summary is injected context, not a model turn"
+        );
+    }
+
+    /// The range line an eviction wrote never reaches the summarizer: it stated
+    /// the store at that moment, so a carried summary has to say something new
+    /// instead of restating a boundary the model would then repeat.
+    #[tokio::test]
+    async fn the_summarizer_never_receives_the_eviction_range_line() {
+        let (ctx, server) = summary_ctx().await;
+        {
+            let mut s = ctx.store.lock().await;
+            let range =
+                plan_keep_window(&[(TurnId(1), 10), (TurnId(2), 10)], KeepCaps::new(1, 1_000))
+                    .range
+                    .expect("the plan condenses the older turn");
+            s.replace_pin(
+                CONTEXT_SUMMARY_LABEL,
+                summary_record_with_range("earlier work", &range),
+            )
+            .expect("the summary fits the pinned budget");
+            s.push_turn(vec![tool_result_msg(oversized_content(), "w0")]);
+        }
+
+        let outcome = summarize_and_evict(&ctx).await.unwrap();
+        assert!(
+            matches!(outcome, CompactOutcome::Compacted),
+            "precondition: the window must compact"
+        );
+
+        let requests = server.received_requests().await.unwrap_or_default();
+        assert_eq!(requests.len(), 1, "one compaction pass, one request");
+        let body = String::from_utf8_lossy(&requests[0].body);
+        assert!(
+            body.contains("earlier work"),
+            "the carried text still reaches the summarizer: {body}"
+        );
+        assert!(
+            !body.contains(CONTEXT_SUMMARY_RANGE_MARKER),
+            "the range line must not reach the model: {body}"
+        );
+
+        let guard = ctx.store.lock().await;
+        let text = guard
+            .turns()
+            .iter()
+            .find(|t| t.is_pinned() && t.label() == Some(CONTEXT_SUMMARY_LABEL))
+            .and_then(|t| t.messages.first())
+            .map(message_text)
+            .unwrap_or_default();
+        assert!(
+            !text.contains(CONTEXT_SUMMARY_RANGE_MARKER),
+            "compaction writes no range line: {text}"
         );
     }
 

@@ -64,6 +64,13 @@ pub(crate) const RETRY_DELAY_SECS_LIMIT: u64 = 3_600;
 /// 24h covers leave-it-overnight operations.
 pub(crate) const RETRY_TIMEOUT_SECS_LIMIT: u64 = 86_400;
 pub(crate) const DEFAULT_PINNED_BUDGET_RATIO: f64 = 0.25;
+/// Conversation turns a manual eviction keeps: the newest window an agent
+/// carries forward when it condenses its context. 0 is legal and means the
+/// whole conversation goes.
+pub(crate) const DEFAULT_CONTEXT_KEEP_TURNS: usize = 20;
+/// Share of the effective budget that window may spend, so the cap follows
+/// the active context window instead of hard-coding an absolute.
+pub(crate) const DEFAULT_CONTEXT_KEEP_TOKENS_RATIO: f64 = 0.15;
 pub(crate) const DEFAULT_CONTEXT_THRESHOLDS: &[u8] = &[50, 60, 70, 80];
 pub(crate) const DEFAULT_TOKEN_BUDGET_WARNINGS: &[u8] = &[80, 95];
 

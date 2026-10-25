@@ -43,6 +43,16 @@ pub(crate) struct SpawnArgs {
     /// full-handoff child exists.
     #[arg(long)]
     pub full_handoff: bool,
+    /// Keep this many newest turns when a manual context eviction runs for
+    /// this agent; `0` keeps only the summary. Omitted follows the tagma
+    /// default.
+    #[arg(long, value_name = "TURNS")]
+    pub context_keep_turns: Option<usize>,
+    /// Share of the effective context budget a manual context eviction may
+    /// keep, above 0 and at most 1. Omitted follows the tagma default; the
+    /// spawn is refused when the value is out of range.
+    #[arg(long, value_name = "SHARE")]
+    pub context_keep_tokens_ratio: Option<f64>,
 }
 
 #[derive(Args)]

@@ -11,7 +11,7 @@ Your context window is finite. Unlike traditional agents where compaction is a h
 
 - `context_status` — check pinned items, turn count, remaining tokens
 - `context_pin` / `context_unpin` — pin/unpin labeled content (survives eviction)
-- `context_evict` — evict all turns, replacing them with a summary you write
+- `context_evict` — keep the newest turns, condense the older ones into a summary you write
 - `context_pin_last` — pin your most recent tool result by reference (a file you just read, a command output). Read the file first in a prior turn, then pin its tool result here (label: `skill:<name>`); for content you compose yourself use `context_pin`
 
 ## Check Before You Act
@@ -61,7 +61,7 @@ A threshold warning is a reminder to be mindful, not a trigger to panic.
 
 Don't let automatic compaction decide what to keep. When you feel context getting heavy, **evict proactively** with a well-written summary:
 
-The summary you provide to `context_evict` is pinned as `context_summary`. It becomes your working memory. Write it as if you'll have nothing else — because after eviction, you nearly don't.
+The summary you provide to `context_evict` is pinned as `context_summary`, and it replaces the summary an earlier eviction pinned — carry that one's facts into the new text. The tool states the range it covers: the boundary turn and how many newest turns follow in full. Everything the window did not keep lives only in your text, and the surviving turns are what you can still read verbatim: write the summary for the evicted stretch, not as a second copy of what is still there. An eviction is a retention rule, not a budget guarantee: the window is kept for being newest, so the context can still sit above a warning threshold afterwards.
 
 For the dimensions and quality criteria that make an eviction summary reliable,
 see `what-to-preserve` — it defines what must survive (task, decisions and

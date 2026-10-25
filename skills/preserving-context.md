@@ -62,9 +62,10 @@ Done when:
 
 ## Key behaviors to remember
 
-- **Pin before evict, not after.** Pins survive eviction; turns do not —
-  writing the summary into a turn and then evicting loses it, because the
-  turn is exactly what gets evicted.
+- **Pin before evict, not after.** Pins survive eviction; turns do not, beyond
+  the newest window the tool keeps. A summary written into a turn rides that
+  window: it may survive this eviction as the newest turn, and the next
+  eviction condenses it away — the pin is the only copy nothing summarizes.
 - **The checklist is the safety net.** Structured categories (the
   dimensions from `what-to-preserve`) catch more than freeform
   summarization, because a category marked empty is a conscious

@@ -1,4 +1,5 @@
 use super::*;
+use crate::context::{AgenticContext as _, KeepCaps};
 use crate::test_support::{TurnMessage, tool_calls_msg, tool_result_msg, user_msg};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -716,6 +717,13 @@ async fn switch_takes_effect_next_request_and_resets_failover_chain() {
     };
     let sets = std::collections::BTreeMap::from([("fresh".to_string(), fresh.clone())]);
     let registry = Arc::new(ProfileRegistry::new(sets, wiremock_source(map)).unwrap());
+    // Stale values: the reset must re-install both from the fresh set, not
+    // leave the store on what it held before the switch.
+    {
+        let mut store = ctx.store.lock().await;
+        store.set_pinned_budget(1);
+        store.set_eviction_caps(KeepCaps::new(0, 0));
+    }
     *ctx.pending_profile_reset.lock().unwrap() = Some(ProfileReset {
         set: fresh,
         registry,
@@ -735,6 +743,19 @@ async fn switch_takes_effect_next_request_and_resets_failover_chain() {
     assert_eq!(snapshot.profile_id, "q0");
     // The cell is drained — a second wake must not re-apply.
     assert!(ctx.pending_profile_reset.lock().unwrap().is_none());
+    {
+        let store = ctx.store.lock().await;
+        assert_eq!(
+            store.eviction_caps(),
+            ctx.config.eviction_caps(),
+            "the reset re-installs the caps for the fresh window"
+        );
+        assert_eq!(
+            store.pinned_budget(),
+            ctx.config.pinned_budget(),
+            "and the pinned layer's capacity with them"
+        );
+    }
 }
 
 /// A pending profile reset swaps the endpoint, so a stop the pre-loop pass

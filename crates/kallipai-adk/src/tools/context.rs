@@ -25,7 +25,11 @@ use tokio::sync::Mutex;
 use crate::context::AgenticContext;
 
 /// Creates context management tools sharing the same backing store.
-pub fn context_tool_set(
+///
+/// The store carries the eviction's keep caps, so `context_evict` reads them
+/// per call; they come from the agent's configuration, and the model cannot
+/// move them from a tool call.
+pub(crate) fn context_tool_set(
     ctx: Arc<Mutex<dyn AgenticContext>>,
     exec_policy: Arc<RwLock<ExecPolicy>>,
 ) -> Vec<Box<dyn just_llm_client::tools::LlmTool>> {

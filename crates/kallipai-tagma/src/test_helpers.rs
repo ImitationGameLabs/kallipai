@@ -103,6 +103,8 @@ fn make_entry_inner(
         skills: vec![],
         retry_policy: RetryPolicy::default(),
         pinned_budget_ratio: 0.25,
+        context_keep_turns: 20,
+        context_keep_tokens_ratio: 0.15,
         context_thresholds: vec![50, 80],
         token_budget_warnings: vec![80, 95],
         agent_id: None,

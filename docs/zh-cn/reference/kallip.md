@@ -72,6 +72,7 @@ kallip subagent <subcommand> [args]
 - `subagent remove` / `subagent interrupt` 授权**任意祖先**（`require_superior`），所以这里“直接 subagent”的表述只是 CLI 便利，不是服务端限制。
 - `subagent spawn` 要求 `--workspace-root`、`--profile-set` 与 `--permission-class`；未知的 profile set 名称在 spawn 时被拒。`--role` 对每次 subagent 创建都要求非空。
 - `subagent spawn --permission-class {normal,guest}` 显式**降级** subagent 的 FS 访问等级，使其低于父级自身等级（如 `normal` 父级创建只读 `guest` 评审者）。高于父级等级的取值被 tagma 以 `403` 拒绝。该标志必填。被授予的等级可由 `kallip`/`GET /agents/{id}/permissions` 查看。
+- `subagent spawn --context-keep-turns <TURNS>` 与 `--context-keep-tokens-ratio <SHARE>` 设定该 subagent 自己的手动上下文驱逐窗口（`context_evict`）：保留多少最新轮次、这些轮次最多占用有效预算的比例。两者都可选，缺省跟随 tagma 的 `KALLIPAI_CONTEXT_KEEP_TURNS`/`KALLIPAI_CONTEXT_KEEP_TOKENS_RATIO`。`TURNS` 可为 `0`（只留摘要）；`SHARE` 须大于 0 且不超过 1。CLI 在发送前就拒掉其他取值（含 `NaN` 与无穷大，因为 JSON 不承载非有限数），直接构造的请求携带这类取值则以 `400` 拒绝。
 - `subagent workspace`（两个动词）保留给 **operator 或 root 代理**；忙碌中，或仍有活跃子代理的代理会被拒绝。细节与前缀缓存说明见下方小节。
 
 ```bash

@@ -22,6 +22,7 @@ mod summarize;
 mod tokens;
 mod turn;
 mod warnings;
+mod window;
 
 pub use compose::{
     FetchedImage, IngestImage, ReassemblyReport, compose_context, ingest_message,
@@ -51,6 +52,8 @@ pub(crate) use compact::{
 };
 pub(crate) use estimate::estimate_context_tokens;
 pub(crate) use warnings::{check_progressive_warnings, check_token_budget_warnings};
+pub use window::KeepCaps;
+pub(crate) use window::{KeepWindow, SummaryRange, plan_keep_window};
 
 /// Label of the pinned summary that compaction and eviction both maintain.
 pub(crate) const CONTEXT_SUMMARY_LABEL: &str = "context_summary";
@@ -61,13 +64,38 @@ pub(crate) const CONTEXT_SUMMARY_LABEL: &str = "context_summary";
 pub(crate) const CONTEXT_SUMMARY_HEADER: &str =
     "[context summary — earlier turns condensed, not a request]";
 
-/// The body of a summary record: `text` without the canonical header.
+/// Opens the range line a manual eviction writes ahead of its summary text.
+///
+/// The marker is that line's seam, and [`summary_body`] searches for it only in
+/// a record that already carries the canonical header above: the range line
+/// exists only inside a summary this module wrapped. Text that carries no
+/// header comes back whole, whatever it opens with. A text that has been
+/// wrapped by [`summary_record`] cannot be told apart from ours: its opening
+/// marker is peeled like a range line — the cost of keying on position rather
+/// than provenance.
+///
+/// Only [`summary_record_with_range`] writes a marker; auto-compaction always
+/// uses the plain [`summary_record`].
+pub(crate) const CONTEXT_SUMMARY_RANGE_MARKER: &str = "[evicted window]";
+
+/// The body of a summary record: `text` without the canonical header and
+/// without the range line an eviction left behind it.
 ///
 /// Re-wrapping goes through here, so a text that already carries the header is
-/// fronted exactly once instead of once per round.
+/// fronted exactly once instead of once per round. The range is peeled only
+/// from a record that carries that header, because only this module writes
+/// one: text without the header comes back whole, whatever it opens with. The
+/// range was a fact about the store at the moment of one eviction, and a consumer
+/// that carries the summary elsewhere must not read it as current.
 pub(crate) fn summary_body(text: &str) -> &str {
-    match text.strip_prefix(CONTEXT_SUMMARY_HEADER) {
-        Some(rest) => rest.trim_start_matches('\n'),
+    let Some(rest) = text.strip_prefix(CONTEXT_SUMMARY_HEADER) else {
+        return text;
+    };
+    let text = rest.trim_start_matches('\n');
+    // The range line is a paragraph of its own, marked where it starts: the
+    // body is whatever follows the blank line that closes it.
+    match text.strip_prefix(CONTEXT_SUMMARY_RANGE_MARKER) {
+        Some(rest) => rest.split_once("\n\n").map_or("", |(_, body)| body),
         None => text,
     }
 }
@@ -79,6 +107,21 @@ pub(crate) fn summary_body(text: &str) -> &str {
 pub(crate) fn summary_record(text: impl AsRef<str>) -> Message {
     Message::user(format!(
         "{CONTEXT_SUMMARY_HEADER}\n\n{}",
+        summary_body(text.as_ref())
+    ))
+}
+
+/// Builds the summary record for `text` with the range it covers stated
+/// ahead of it: which turns it now stands for and which ones survived.
+///
+/// Manual eviction keeps a newest window (see [`window`]), so its summary is
+/// not a stand-in for the whole conversation. Auto-compaction keeps the plain
+/// [`summary_record`]: its window is budget-driven, not a keep rule, and a
+/// range it did not compute would be a stale claim.
+pub(crate) fn summary_record_with_range(text: impl AsRef<str>, range: &SummaryRange) -> Message {
+    Message::user(format!(
+        "{CONTEXT_SUMMARY_HEADER}\n\n{CONTEXT_SUMMARY_RANGE_MARKER} {}\n\n{}",
+        range.line(),
         summary_body(text.as_ref())
     ))
 }
@@ -140,6 +183,70 @@ mod tests {
             twice.content(),
             "re-wrapping an already headed summary must not repeat the header"
         );
+    }
+
+    /// A range as one eviction would compute it, over three turns of which the
+    /// newest two survive.
+    fn planned_range() -> SummaryRange {
+        let convo = [(TurnId(7), 10), (TurnId(8), 10), (TurnId(9), 10)];
+        plan_keep_window(&convo, KeepCaps::new(2, 1_000))
+            .range
+            .expect("the plan condenses the oldest turn")
+    }
+
+    /// The range line sits between the header and the model's own text, marked
+    /// where it starts, and it names the surviving turns rather than restating
+    /// the wording.
+    #[test]
+    fn summary_record_with_range_states_the_window_ahead_of_the_text() {
+        let message = summary_record_with_range("earlier work", &planned_range());
+        let text = message.content().unwrap_or_default();
+        assert!(text.starts_with(CONTEXT_SUMMARY_HEADER));
+        assert!(
+            text.contains(CONTEXT_SUMMARY_RANGE_MARKER),
+            "the line is marked where it starts: {text}"
+        );
+        assert!(text.contains("#8"), "the first surviving turn: {text}");
+        assert!(text.ends_with("earlier work"), "the model text stays last");
+    }
+
+    /// Carrying a summary elsewhere drops the range with it: the line described
+    /// one eviction's store state, and the carrier is about to state its own.
+    #[test]
+    fn summary_body_strips_the_range_line_with_the_header() {
+        let marked = summary_record_with_range("earlier work", &planned_range());
+        let text = marked.content().unwrap_or_default();
+        assert_eq!(summary_body(text), "earlier work");
+        let carried = summary_record(text)
+            .content()
+            .unwrap_or_default()
+            .to_owned();
+        assert_eq!(
+            carried,
+            format!("{CONTEXT_SUMMARY_HEADER}\n\nearlier work"),
+            "a plain record carries no range"
+        );
+    }
+
+    /// The strip belongs to this module's seam, not to the model's words: a text
+    /// that opens with the marker without carrying the header is returned whole.
+    #[test]
+    fn a_body_that_opens_with_the_marker_without_the_header_is_not_ours_to_strip() {
+        for text in [
+            "[evicted window] the first line is the model's\n\nand so is this",
+            "[evicted window] a single paragraph",
+        ] {
+            assert_eq!(summary_body(text), text, "no header, so nothing to peel");
+            let carried = summary_record(text)
+                .content()
+                .unwrap_or_default()
+                .to_owned();
+            assert_eq!(
+                carried,
+                format!("{CONTEXT_SUMMARY_HEADER}\n\n{text}"),
+                "the model's own opening line survives the carry"
+            );
+        }
     }
 
     #[test]

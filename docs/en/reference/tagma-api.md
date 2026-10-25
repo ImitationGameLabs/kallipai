@@ -125,6 +125,8 @@ Auth: operator or direct supervisor. See [Authentication and authorization](auth
   "role": "string — short display label, e.g. \"researcher\" (required, non-empty)",
   "description": "string — longer prose, what this agent is for (optional)",
   "max_tool_rounds": "null — use tagma default (see below)",
+  "context_keep_turns": "null — use tagma default (see below)",
+  "context_keep_tokens_ratio": "null — use tagma default (see below)",
   "profile_set": "string — required: profile set name (exact match)",
   "permission_class": "string — required: \"normal\" / \"guest\" (see below)"
 }
@@ -148,6 +150,16 @@ To force unlimited rounds (bounded only by token budget):
 ```
 
 `Limited` values must be > 0; `Limited(0)` returns 400.
+
+**`context_keep_turns` / `context_keep_tokens_ratio`**: override the manual
+`context_evict` keep window for this agent: how many conversation turns an
+eviction keeps, and the share of the effective budget those turns may spend.
+Omit either to use the tagma default (`KALLIPAI_CONTEXT_KEEP_TURNS` /
+`KALLIPAI_CONTEXT_KEEP_TOKENS_RATIO`). `"context_keep_turns": 0` is legal and
+keeps no turn, so the whole conversation is condensed. The share must be
+greater than 0 and at most 1; any other value returns `400 Bad Request`. Like
+`max_tool_rounds`, the override is not part of the persisted agent record: a
+restored agent takes the tagma default again.
 
 **`profile_set`**: the profile set the subagent resolves against, by exact
 name. Required: an unknown name is rejected with `400 Bad Request`

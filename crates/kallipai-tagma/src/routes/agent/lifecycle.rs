@@ -66,6 +66,19 @@ pub async fn create_agent(
             }
         }
     }
+    // The keep-window overrides follow the `max_tool_rounds` shape: a value in
+    // the request wins for this agent, an omitted one keeps what the process
+    // env loaded. The turn cap has no invalid value (`0` means "keep none");
+    // the ratio's bound is the env knob's, and an out-of-range value rejects
+    // the spawn instead of silently running with an unreachable window.
+    if let Some(turns) = req.context_keep_turns {
+        config.set_context_keep_turns(turns);
+    }
+    if let Some(ratio) = req.context_keep_tokens_ratio {
+        config
+            .set_context_keep_tokens_ratio(ratio)
+            .map_err(|e| ApiError::bad_request(e.to_string()))?;
+    }
     config.role = req.role.clone();
     config.description = req.description.clone();
     config.delegation_mode = req

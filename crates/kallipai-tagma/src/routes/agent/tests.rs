@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use super::lifecycle::{MAX_ACTIVITY_CHARS, truncate_chars};
 use super::permissions::resolve_granted_class;
@@ -9,11 +11,12 @@ use crate::lifecycle::{
     EstablishLockFailure, compose_system_prompt, establish_workspace_lock, inject_identity_env,
     meta_skill_content, resolve_root_agent,
 };
+use crate::state::AgentEntry;
 use crate::state::AgentState;
 use crate::state::RegistryEntry;
 use crate::test_helpers::{
     add_faulted_root, add_faulted_sub, add_root, add_sub, make_entry, make_entry_with_rx,
-    make_state,
+    make_state, make_state_with_spawn,
 };
 use axum::extract::{Path, Query, State};
 use kallipai_adk::config::PermissionProfile;
@@ -905,6 +908,8 @@ async fn create_agent_rejects_duplicate_role() {
             role: "scout".into(),
             description: String::new(),
             max_tool_rounds: None,
+            context_keep_turns: None,
+            context_keep_tokens_ratio: None,
             profile_set: "default".into(),
             permission_class: "normal".into(),
             delegation_mode: None,
@@ -956,6 +961,8 @@ async fn create_agent_rejects_unknown_set_name() {
             role: "scout".into(),
             description: String::new(),
             max_tool_rounds: None,
+            context_keep_turns: None,
+            context_keep_tokens_ratio: None,
             profile_set: "missing".into(),
             permission_class: "normal".into(),
             delegation_mode: None,
@@ -976,6 +983,179 @@ async fn create_agent_rejects_unknown_set_name() {
         err.message.contains("default"),
         "lists the available sets: {}",
         err.message
+    );
+}
+
+/// A spawn stub that records the configuration each spawn is handed and counts
+/// the calls, so a request's effect on that configuration is observable without
+/// booting a runtime.
+fn recording_spawn(
+    seen: Arc<Mutex<Vec<AgentConfig>>>,
+    calls: Arc<AtomicUsize>,
+) -> crate::lifecycle::SpawnFn {
+    Arc::new(move |args: crate::lifecycle::SpawnArgs| {
+        calls.fetch_add(1, Ordering::Relaxed);
+        seen.lock().unwrap().push(args.config.clone());
+        let (entry, _rx) = make_entry_with_rx(None, "stub-token".to_string());
+        let AgentEntry {
+            identity, agent, ..
+        } = entry;
+        Box::pin(async move { Ok((agent, identity)) })
+    })
+}
+
+/// The keep-window overrides a spawn request carries reach the configuration
+/// the runtime is handed, which is what the agent's tool dispatch derives its
+/// window from. The spawn itself is stubbed: the assertion is on that config.
+#[tokio::test]
+async fn create_agent_applies_keep_window_overrides() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let state = make_state_with_spawn(recording_spawn(seen.clone(), calls.clone()));
+    let sup = AgentId::random();
+    {
+        let mut reg = state.registry.write().await;
+        add_root(&mut reg, &sup);
+    }
+    let ws = ws_dir("child-keep-override");
+
+    let resp = super::create_agent(
+        State(state.clone()),
+        AuthIdentity::test_new(Identity::Operator),
+        axum::Json(kallipai_common::protocol::CreateAgentRequest {
+            workspace_root: ws.to_string_lossy().into(),
+            skills: vec![],
+            prompt: None,
+            created_by: Some(sup),
+            role: "keeper".into(),
+            description: String::new(),
+            max_tool_rounds: None,
+            context_keep_turns: Some(3),
+            context_keep_tokens_ratio: Some(0.5),
+            profile_set: "default".into(),
+            permission_class: "normal".into(),
+            delegation_mode: None,
+        }),
+    )
+    .await;
+    match resp {
+        Ok(_) => {}
+        Err(e) => panic!("the spawn is accepted: {} ({})", e.status, e.message),
+    }
+
+    let config = seen
+        .lock()
+        .unwrap()
+        .pop()
+        .expect("the stubbed spawn received a config");
+    assert_eq!(config.context_keep_turns, 3, "the request's turn cap wins");
+    assert_eq!(
+        config.context_keep_tokens_ratio, 0.5,
+        "the request's token share wins"
+    );
+}
+
+/// An omitted override leaves the process-wide setting in place: the config the
+/// spawn receives carries what the environment loaded.
+#[tokio::test]
+async fn create_agent_without_overrides_keeps_the_loaded_keep_config() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let state = make_state_with_spawn(recording_spawn(seen.clone(), calls.clone()));
+    let sup = AgentId::random();
+    {
+        let mut reg = state.registry.write().await;
+        add_root(&mut reg, &sup);
+    }
+    let ws = ws_dir("child-keep-default");
+
+    let resp = super::create_agent(
+        State(state.clone()),
+        AuthIdentity::test_new(Identity::Operator),
+        axum::Json(kallipai_common::protocol::CreateAgentRequest {
+            workspace_root: ws.to_string_lossy().into(),
+            skills: vec![],
+            prompt: None,
+            created_by: Some(sup),
+            role: "keeper".into(),
+            description: String::new(),
+            max_tool_rounds: None,
+            profile_set: "default".into(),
+            permission_class: "normal".into(),
+            delegation_mode: None,
+            context_keep_turns: None,
+            context_keep_tokens_ratio: None,
+        }),
+    )
+    .await;
+    match resp {
+        Ok(_) => {}
+        Err(e) => panic!("the spawn is accepted: {} ({})", e.status, e.message),
+    }
+
+    let loaded = AgentConfig::load(None, Vec::new(), Some(ws.to_path_buf()))
+        .expect("the same load the handler runs");
+    let config = seen
+        .lock()
+        .unwrap()
+        .pop()
+        .expect("the stubbed spawn received a config");
+    assert_eq!(config.context_keep_turns, loaded.context_keep_turns);
+    assert_eq!(
+        config.context_keep_tokens_ratio,
+        loaded.context_keep_tokens_ratio
+    );
+}
+
+/// A token share outside `(0, 1]` rejects the spawn with 400 before anything is
+/// written: the request never reaches the spawn, so no agent is left half-made.
+#[tokio::test]
+async fn create_agent_rejects_an_out_of_range_keep_share() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let state = make_state_with_spawn(recording_spawn(seen.clone(), calls.clone()));
+    let sup = AgentId::random();
+    {
+        let mut reg = state.registry.write().await;
+        add_root(&mut reg, &sup);
+    }
+    let ws = ws_dir("child-keep-invalid");
+
+    for ratio in [0.0, 1.5, -0.5] {
+        let resp = super::create_agent(
+            State(state.clone()),
+            AuthIdentity::test_new(Identity::Operator),
+            axum::Json(kallipai_common::protocol::CreateAgentRequest {
+                workspace_root: ws.to_string_lossy().into(),
+                skills: vec![],
+                prompt: None,
+                created_by: Some(sup.clone()),
+                role: "keeper".into(),
+                description: String::new(),
+                max_tool_rounds: None,
+                context_keep_turns: None,
+                context_keep_tokens_ratio: Some(ratio),
+                profile_set: "default".into(),
+                permission_class: "normal".into(),
+                delegation_mode: None,
+            }),
+        )
+        .await;
+        let err = match resp {
+            Ok(_) => panic!("the share {ratio} is accepted"),
+            Err(e) => e,
+        };
+        assert_eq!(err.status, 400, "the share {ratio} is a client error");
+        assert!(
+            err.message.contains("context_keep_tokens_ratio"),
+            "the message names the field: {}",
+            err.message
+        );
+    }
+    assert_eq!(
+        calls.load(Ordering::Relaxed),
+        0,
+        "a rejected request never reaches the spawn"
     );
 }
 

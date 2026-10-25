@@ -40,13 +40,13 @@ through tools:
 | ---------------- | -------------------------------------------------------------------------- |
 | `context_pin`    | Mark content as essential — pinned items survive eviction                  |
 | `context_unpin`  | Remove the pin, allowing the content to be evicted again                   |
-| `context_evict`  | Evict all turns, replacing them with a summary pinned as `context_summary` |
+| `context_evict`  | Keep the newest turns, condense the rest into a pinned summary             |
 | `context_status` | Inspect current token usage and pinned items                               |
 
 To make this concrete: context compaction maps directly to `context_evict` —
 the agent writes a summary preserving key facts, and the tool atomically pins
-the summary and evicts all turns. Compaction is not a hidden heuristic but an
-explicit agent action.
+the summary and evicts every turn the keep window did not retain. Compaction
+is not a hidden heuristic but an explicit agent action.
 
 We openly acknowledge that this approach is **unproven** — it may or may not
 outperform traditional summarization-only context strategies. But it enables

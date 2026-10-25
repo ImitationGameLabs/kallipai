@@ -48,7 +48,7 @@ pub(crate) async fn check_progressive_warnings(
     let msg = format!(
         "[system]\nContext usage is at {}% ({} / {} tokens). \
          Use context_status to review current turns, then context_evict with a \
-         summary to evict all turns while preserving key facts.",
+         summary to condense the older turns while preserving key facts.",
         threshold,
         effective_budget * threshold as usize / 100,
         effective_budget

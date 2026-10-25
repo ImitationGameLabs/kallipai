@@ -193,7 +193,8 @@ pub(super) async fn step_failover(
 /// **before** `advance_to` (which is forward-only and cannot roll back), so the agent is never
 /// left with the client swapped to a model whose window can't serve the budget. On a successful
 /// build + feasible window it commits the advance, swaps the client, re-applies the new profile's
-/// context window, re-syncs the pinned-budget guard, and compacts the carried context if it now
+/// context window, re-syncs the pinned budget and the eviction caps, and
+/// compacts the carried context if it now
 /// exceeds the (possibly smaller) window. The (possibly recomputed) `messages` return via
 /// [`FailoverOutcome::Advanced`] so the caller rebinds its round-local.
 ///
@@ -368,14 +369,16 @@ pub(crate) async fn advance_failover(
 }
 
 /// Re-apply the active profile's declared context window to the config and re-sync the store's
-/// pinned-budget guard. Called after a failover advance swaps to a profile that may declare a
+/// window-derived pinned-budget guard along with the manual eviction's caps. Called after
+/// a failover advance swaps to a profile that may declare a
 /// different window (within-set heterogeneous windows are supported).
 ///
 /// The window was already pre-checked feasible in `advance_failover` (before the commit), so
 /// `set_context_window` is expected to succeed here. The `warn!`-and-keep-prior branch stays as
 /// defense-in-depth: if an invariant somehow still fails post-commit, keeping the prior window is
 /// safer than `?`-propagating into a half-applied state (index advanced, window stale). The
-/// pinned-budget re-sync + `mark_needs_full_estimate` are unconditional and idempotent.
+/// store re-sync (pinned budget and caps) + `mark_needs_full_estimate` are
+/// unconditional and idempotent.
 async fn reapply_window(ctx: &mut AgentContext, from: &str) {
     let new_window = ctx.failover.current_profile().max_context_window;
     if let Err(err) = ctx.config.set_context_window(new_window) {
@@ -390,5 +393,6 @@ async fn reapply_window(ctx: &mut AgentContext, from: &str) {
     // full estimate on the next gate until a response re-anchors.
     let mut store = ctx.store.lock().await;
     store.set_pinned_budget(ctx.config.pinned_budget());
+    store.set_eviction_caps(ctx.config.eviction_caps());
     store.mark_needs_full_estimate();
 }

@@ -632,7 +632,7 @@ pub async fn agent_task(
                     .unwrap_or_else(|e| e.into_inner())
                     .is_some();
                 if has_reset {
-                    apply_pending_profile_reset(&mut ctx);
+                    apply_pending_profile_reset(&mut ctx).await;
                 }
 
                 // Parked guard (design guard matrix: notify events buffer,
@@ -769,7 +769,7 @@ async fn terminate_cancelled(ctx: &AgentContext, agent_tx: &tokio::sync::mpsc::S
 /// top of each `run_and_report` wake-up, and once in the notify arm when a
 /// pending reset is detected. On error, logs and continues on prior config —
 /// the cell is cleared regardless so a bad reset does not retry forever.
-fn apply_pending_profile_reset(ctx: &mut AgentContext) {
+async fn apply_pending_profile_reset(ctx: &mut AgentContext) {
     let reset = ctx
         .pending_profile_reset
         .lock()
@@ -796,6 +796,14 @@ fn apply_pending_profile_reset(ctx: &mut AgentContext) {
                     window = new_window,
                     "profile reset: failed to re-apply context window, keeping prior: {e:#}"
                 );
+            }
+            // Moved or not — the re-apply may have failed and left the old window —
+            // the two values a window move re-installs go back under one lock: the
+            // pinned layer's capacity and the manual eviction's caps.
+            {
+                let mut store = ctx.store.lock().await;
+                store.set_pinned_budget(ctx.config.pinned_budget());
+                store.set_eviction_caps(ctx.config.eviction_caps());
             }
             tracing::info!("agent profile reset applied");
         }
@@ -855,7 +863,7 @@ pub async fn run_and_report(
         ctx.compaction.restart(timefmt::now_epoch());
     }
     // Drain any pending profile reset before starting the round loop.
-    apply_pending_profile_reset(ctx);
+    apply_pending_profile_reset(ctx).await;
     // This entry owns the lifecycle move: the wake is served from here on, so
     // the agent is Running for its span and a refusal below parks it over the
     // table's legal Running -> Parked edge; no other state enters Parked.

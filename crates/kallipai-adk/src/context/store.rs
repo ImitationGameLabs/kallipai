@@ -9,6 +9,7 @@ use kallipai_common::context::{ContextUsage, CumulativeUsage};
 
 use kallipai_common::retry::{RETRY_LOG_KEEP, RetryRecord};
 
+use super::KeepCaps;
 use super::manifest::{FORMAT_VERSION, ManifestDoc, PinRecord, PinsDoc};
 use super::tokens::estimate_message_tokens;
 use super::turn::{Turn, TurnId, TurnKind};
@@ -54,6 +55,16 @@ pub trait AgenticContext: Send + Sync {
     fn pinned_labels(&self) -> Vec<String>;
     /// Return a snapshot of current context layer breakdown.
     fn usage_snapshot(&self) -> ContextUsage;
+    /// Conversation (non-pinned) turns as `(id, estimated_tokens)`, oldest
+    /// first — the input a keep-window plan scans. Pinned turns are excluded
+    /// here for the same reason [`Self::evict_turns`] never drains them: they
+    /// are persistent context, not conversation.
+    fn conversation_turn_sizes(&self) -> Vec<(TurnId, usize)>;
+    /// The two caps a manual eviction keeps within, as the store carries them.
+    /// They mirror the agent's active configuration and are re-installed
+    /// wherever the active window moves, so a tool call reads the current pair
+    /// rather than a copy taken when it was built.
+    fn eviction_caps(&self) -> KeepCaps;
     /// Evict the oldest `count` conversation (non-pinned) turns. Returns actual count evicted.
     fn evict_turns(&mut self, count: usize) -> EvictResult;
     /// Reset context-window progressive warning state. Called after compaction
@@ -146,6 +157,10 @@ pub struct ContextStore {
     /// Maximum tokens for the pinned layer. 0 = no limit.
     #[serde(skip)]
     pinned_token_budget: usize,
+    /// The caps a manual eviction keeps within. Derived from the active
+    /// window like the pinned budget, and re-installed at the same points.
+    #[serde(skip)]
+    eviction_caps: KeepCaps,
     /// Highest warning threshold already fired for this agent. Not persisted.
     #[serde(skip)]
     highest_warned_pct: Option<u8>,
@@ -246,6 +261,17 @@ impl AgenticContext for ContextStore {
                 largest
             },
         }
+    }
+    fn conversation_turn_sizes(&self) -> Vec<(TurnId, usize)> {
+        self.turns
+            .iter()
+            .filter(|t| !t.is_pinned())
+            .map(|t| (t.id, t.estimated_tokens))
+            .collect()
+    }
+
+    fn eviction_caps(&self) -> KeepCaps {
+        self.eviction_caps
     }
 
     fn evict_turns(&mut self, count: usize) -> EvictResult {
@@ -378,6 +404,7 @@ impl ContextStore {
             next_turn_id: 0,
             retry_log: Vec::new(),
             pinned_token_budget: 0,
+            eviction_caps: KeepCaps::default(),
             highest_warned_pct: None,
             highest_budget_warned_pct: None,
             injected_turn_ids: HashSet::new(),
@@ -650,15 +677,29 @@ impl ContextStore {
         store.retry_log = manifest.retry_log.clone();
         store
     }
-    /// Set the pinned token budget. Called at agent setup and re-synced on within-set failover
-    /// (see `acquisition::failover::reapply_window`).
+    /// Set the pinned token budget. Same derivation rule as [`Self::set_eviction_caps`]:
+    /// both derive from the active configuration and are re-installed where the
+    /// window moves (spawn, failover `reapply_window`, profile reset).
     pub fn set_pinned_budget(&mut self, budget: usize) {
         self.pinned_token_budget = budget;
+    }
+    /// Install the caps a manual eviction keeps within. Same derivation rule as
+    /// [`Self::set_pinned_budget`]: both derive from the active configuration and are
+    /// re-installed where the window moves (spawn, failover `reapply_window`,
+    /// profile reset).
+    pub fn set_eviction_caps(&mut self, caps: KeepCaps) {
+        self.eviction_caps = caps;
     }
 
     /// Sum estimated tokens across all pinned turns (reads the cached `estimated_tokens`).
     pub fn pinned_tokens_total(&self) -> usize {
         self.pinned_turns().map(|t| t.estimated_tokens).sum()
+    }
+    /// The capacity the pinned layer guards: the share of the window that pins
+    /// may occupy. Test-only: read back by the assertions that watch the install points.
+    #[cfg(test)]
+    pub(crate) fn pinned_budget(&self) -> usize {
+        self.pinned_token_budget
     }
 
     /// Total estimated tokens across all turns (pinned + conversation).

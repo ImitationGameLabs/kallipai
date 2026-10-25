@@ -110,6 +110,15 @@ Scoping notes (server-enforced):
   parent spawning a read-only `guest` reviewer). The tagma rejects a value
   above the parent's class with `403`. The flag is required. The granted class
   is shown by `kallip`/`GET /agents/{id}/permissions`.
+- `subagent spawn --context-keep-turns <TURNS>` and
+  `--context-keep-tokens-ratio <SHARE>` set that subagent's own manual
+  context-eviction window (`context_evict`): how many newest turns
+  survive, and what share of the effective budget they may use. Both are
+  optional and default to the tagma's `KALLIPAI_CONTEXT_KEEP_TURNS` and
+  `KALLIPAI_CONTEXT_KEEP_TOKENS_RATIO`. `TURNS` may be `0` (summary only);
+  `SHARE` must be above 0 and at most 1. The CLI refuses any other share —
+  `NaN` and infinities included, since JSON carries no non-finite number —
+  before sending, and a direct request carrying one is refused with `400`.
 - `subagent workspace` (both verbs) is reserved for the **operator or the
   root agent**; a busy agent, or one that still has live subagents, is
   refused. Details and the cache note are below the examples.

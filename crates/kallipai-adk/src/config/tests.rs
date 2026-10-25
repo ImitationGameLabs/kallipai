@@ -134,6 +134,8 @@ fn set_context_window_leaves_field_unchanged_on_validation_failure() {
         skills: vec![],
         retry_policy: RetryPolicy::default(),
         pinned_budget_ratio: 0.25,
+        context_keep_turns: 20,
+        context_keep_tokens_ratio: 0.15,
         context_thresholds: vec![50, 80],
         token_budget_warnings: vec![80, 95],
         agent_id: None,
@@ -176,6 +178,8 @@ fn try_context_window_validates_without_mutating() {
         skills: vec![],
         retry_policy: RetryPolicy::default(),
         pinned_budget_ratio: 0.25,
+        context_keep_turns: 20,
+        context_keep_tokens_ratio: 0.15,
         context_thresholds: vec![50, 80],
         token_budget_warnings: vec![80, 95],
         agent_id: None,
@@ -218,6 +222,8 @@ fn pinned_budget_matches_effective_times_ratio() {
         skills: vec![],
         retry_policy: RetryPolicy::default(),
         pinned_budget_ratio: 0.25,
+        context_keep_turns: 20,
+        context_keep_tokens_ratio: 0.15,
         context_thresholds: vec![50, 80],
         token_budget_warnings: vec![80, 95],
         agent_id: None,
@@ -392,6 +398,97 @@ fn a_zero_base_delay_fails_the_load() {
             "the message names the knob and the bound: {err}"
         );
     });
+}
+
+/// One past each bound must be a fatal misconfiguration, not a slow panic or a
+/// window that silently condenses everything; the top of the range is the whole
+/// budget. The floor itself is a separate rule: a legal share never rounds the
+/// cap down to zero (see the sibling test below).
+#[test]
+#[serial]
+fn keep_tokens_ratio_is_a_fraction_above_zero() {
+    temp_env::with_vars(
+        [("KALLIPAI_CONTEXT_KEEP_TOKENS_RATIO", Some("1.0"))],
+        || {
+            let cfg =
+                AgentConfig::load(None, Vec::new(), None).expect("the top of the range loads");
+            assert_eq!(cfg.context_keep_tokens_ratio, 1.0);
+            assert_eq!(
+                cfg.context_keep_tokens(),
+                cfg.effective_budget(),
+                "a full share spends the whole effective budget"
+            );
+        },
+    );
+    temp_env::with_vars(
+        [("KALLIPAI_CONTEXT_KEEP_TOKENS_RATIO", Some("0.5"))],
+        || {
+            let cfg = AgentConfig::load(None, Vec::new(), None).expect("a half share loads");
+            assert_eq!(cfg.context_keep_tokens(), cfg.effective_budget() / 2);
+        },
+    );
+    for value in ["0", "0.0", "1.5"] {
+        temp_env::with_vars(
+            [("KALLIPAI_CONTEXT_KEEP_TOKENS_RATIO", Some(value))],
+            || {
+                assert!(
+                    AgentConfig::load(None, Vec::new(), None).is_err(),
+                    "KALLIPAI_CONTEXT_KEEP_TOKENS_RATIO={value} must be rejected"
+                );
+            },
+        );
+    }
+}
+
+/// A legal share that lands under one token still yields a one-token cap: the
+/// floor keeps that promise, and without it the cap would read as zero width.
+#[test]
+#[serial]
+fn a_legal_share_never_rounds_the_cap_down_to_zero() {
+    temp_env::with_vars(
+        [("KALLIPAI_CONTEXT_KEEP_TOKENS_RATIO", Some("0.000000001"))],
+        || {
+            let cfg = AgentConfig::load(None, Vec::new(), None).expect("a tiny share loads");
+            assert_eq!(
+                cfg.context_keep_tokens(),
+                1,
+                "the cap bottoms out at one token"
+            );
+        },
+    );
+}
+
+/// The per-spawn setters are the only per-agent path into the keep knobs: the
+/// turn cap takes any value (`0` keeps none), and the share validates before
+/// mutating, so a rejected spawn cannot leave a half-applied window behind.
+#[test]
+fn keep_overrides_accept_what_a_spawn_request_may_carry() {
+    let mut cfg = AgentConfig::default();
+    cfg.set_context_keep_turns(0);
+    assert_eq!(cfg.context_keep_turns, 0, "zero turns is a legal request");
+    cfg.set_context_keep_turns(7);
+    assert_eq!(cfg.context_keep_turns, 7);
+
+    cfg.set_context_keep_tokens_ratio(1.0)
+        .expect("the whole budget is in range");
+    assert_eq!(cfg.context_keep_tokens_ratio, 1.0);
+    cfg.set_context_keep_tokens_ratio(0.5)
+        .expect("half is in range");
+    assert_eq!(cfg.context_keep_tokens(), cfg.effective_budget() / 2);
+
+    for value in [0.0, -0.5, 1.5, f64::NAN] {
+        let err = cfg
+            .set_context_keep_tokens_ratio(value)
+            .expect_err("an out-of-range share must be rejected");
+        assert!(
+            err.to_string().contains("context_keep_tokens_ratio"),
+            "the message names the field: {err}"
+        );
+        assert_eq!(
+            cfg.context_keep_tokens_ratio, 0.5,
+            "a rejected share leaves the loaded value untouched"
+        );
+    }
 }
 
 /// A pair of individually legal values that contradict each other must fail

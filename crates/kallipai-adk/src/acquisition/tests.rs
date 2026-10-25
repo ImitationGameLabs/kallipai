@@ -6,6 +6,7 @@ use super::stream::fatal_provider_status;
 
 use super::*;
 use crate::agent_task::AgentContext;
+use crate::context::{AgenticContext as _, KeepCaps};
 use crate::event::AgentOutcome;
 use crate::failover::FailoverOutcome;
 use anyhow::Error;
@@ -2396,6 +2397,14 @@ async fn the_advance_arm_records_the_class_and_clears_the_ledger_for_the_new_end
     assert!(matches!(gated, BudgetAction::Proceed));
     assert_eq!(ctx.compaction.attempts(), 1);
 
+    // A stale install: the advance must leave the store on the target window's
+    // derivation, not on whatever it held before the switch.
+    ctx.store
+        .lock()
+        .await
+        .set_eviction_caps(KeepCaps::new(0, 0));
+    ctx.store.lock().await.set_pinned_budget(1);
+
     let outcome = advance_failover(
         &mut ctx,
         prior_messages.clone(),
@@ -2411,6 +2420,16 @@ async fn the_advance_arm_records_the_class_and_clears_the_ledger_for_the_new_end
     assert_eq!(
         messages, prior_messages,
         "the prior window is sent unchanged"
+    );
+    assert_eq!(
+        ctx.store.lock().await.eviction_caps(),
+        ctx.config.eviction_caps(),
+        "the advance re-installs the caps for the new window"
+    );
+    assert_eq!(
+        ctx.store.lock().await.pinned_budget(),
+        ctx.config.pinned_budget(),
+        "the advance re-installs the pinned budget the new window derives"
     );
     assert_eq!(
         ctx.compaction.attempts(),

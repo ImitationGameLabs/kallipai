@@ -87,6 +87,43 @@ fn prompt_from_stdin_text(text: String) -> Option<String> {
     (!text.trim().is_empty()).then_some(text)
 }
 
+/// Build the spawn request from parsed `subagent spawn` arguments, so each
+/// flag maps to one wire field in a single place the tests can reach.
+///
+/// The keep share is checked here, before serde sees it: the wire form is JSON,
+/// which has no non-finite number, so `NaN` or an infinity would be written as
+/// `null`, read back as "unset", and leave the flag silently ignored. The env
+/// knob refuses the same values, and both ask one predicate for the bound.
+fn spawn_request(
+    args: args::subagent::SpawnArgs,
+    prompt: Option<String>,
+    created_by: AgentId,
+) -> Result<kallipai_common::protocol::CreateAgentRequest> {
+    if let Some(share) = args.context_keep_tokens_ratio
+        && !kallipai_common::protocol::context_keep_tokens_ratio_in_range(share)
+    {
+        anyhow::bail!(
+            "--context-keep-tokens-ratio must be greater than 0 and at most 1 (got {share})"
+        );
+    }
+    Ok(kallipai_common::protocol::CreateAgentRequest {
+        workspace_root: args.workspace_root,
+        skills: args.skills,
+        prompt,
+        created_by: Some(created_by),
+        role: args.role.unwrap_or_default(),
+        description: args.description.unwrap_or_default(),
+        max_tool_rounds: None,
+        context_keep_turns: args.context_keep_turns,
+        context_keep_tokens_ratio: args.context_keep_tokens_ratio,
+        profile_set: args.profile_set,
+        permission_class: args.permission_class,
+        delegation_mode: args
+            .full_handoff
+            .then(|| kallipai_common::protocol::DELEGATION_FULL_HANDOFF.to_owned()),
+    })
+}
+
 /// Refuse a backward cursor at a target that has no such rows. `--before`
 /// names a position in a room's log and asks for the page ending below it;
 /// a direct-session read takes a forward cursor only (`after_seq` and
@@ -491,22 +528,8 @@ async fn main() -> Result<()> {
                     // stdin means none (`prompt_from_stdin_text`); the text is passed
                     // through verbatim.
                     let prompt = prompt_from_stdin_text(read_text_stdin()?);
-                    let id = client
-                        .spawn(kallipai_common::protocol::CreateAgentRequest {
-                            workspace_root: args.workspace_root,
-                            skills: args.skills,
-                            prompt,
-                            created_by: Some(current),
-                            role: args.role.unwrap_or_default(),
-                            description: args.description.unwrap_or_default(),
-                            max_tool_rounds: None,
-                            profile_set: args.profile_set,
-                            permission_class: args.permission_class,
-                            delegation_mode: args.full_handoff.then(|| {
-                                kallipai_common::protocol::DELEGATION_FULL_HANDOFF.to_owned()
-                            }),
-                        })
-                        .await?;
+                    let request = spawn_request(args, prompt, current)?;
+                    let id = client.spawn(request).await?;
                     println!("{id}");
                 }
                 SubagentCommand::List => {
@@ -1303,6 +1326,122 @@ mod tests {
             prompt_from_stdin_text(" explore \n".into()).as_deref(),
             Some(" explore \n")
         );
+    }
+    /// The request the parsed flags must produce, field for field, so a flag
+    /// landing in the wrong field cannot pass by pinning three of them.
+    fn expected_request(
+        created_by: AgentId,
+        context_keep_turns: Option<usize>,
+        context_keep_tokens_ratio: Option<f64>,
+    ) -> kallipai_common::protocol::CreateAgentRequest {
+        kallipai_common::protocol::CreateAgentRequest {
+            workspace_root: "/tmp/ws".to_owned(),
+            skills: Vec::new(),
+            prompt: None,
+            created_by: Some(created_by),
+            role: String::new(),
+            description: String::new(),
+            max_tool_rounds: None,
+            context_keep_turns,
+            context_keep_tokens_ratio,
+            profile_set: "primary".to_owned(),
+            permission_class: "guest".to_owned(),
+            delegation_mode: None,
+        }
+    }
+
+    #[test]
+    fn spawn_keep_flags_reach_the_create_request() {
+        let cli = Cli::try_parse_from([
+            "kallip",
+            "subagent",
+            "spawn",
+            "--workspace-root",
+            "/tmp/ws",
+            "--profile-set",
+            "primary",
+            "--permission-class",
+            "guest",
+            "--context-keep-turns",
+            "3",
+            "--context-keep-tokens-ratio",
+            "0.5",
+        ])
+        .expect("parses");
+        let created_by = ROOM.parse::<AgentId>().expect("agent id");
+        let request = match cli.command.expect("command") {
+            Commands::Subagent(SubagentCommand::Spawn(args)) => {
+                spawn_request(args, None, created_by.clone()).expect("the flags are valid")
+            }
+            _ => panic!("expected subagent spawn"),
+        };
+        assert_eq!(
+            request,
+            expected_request(created_by, Some(3), Some(0.5)),
+            "each flag lands in its own field and nothing else moves"
+        );
+    }
+
+    #[test]
+    fn spawn_without_keep_flags_leaves_the_defaults() {
+        let cli = Cli::try_parse_from([
+            "kallip",
+            "subagent",
+            "spawn",
+            "--workspace-root",
+            "/tmp/ws",
+            "--profile-set",
+            "primary",
+            "--permission-class",
+            "guest",
+        ])
+        .expect("parses");
+        let created_by = ROOM.parse::<AgentId>().expect("agent id");
+        let request = match cli.command.expect("command") {
+            Commands::Subagent(SubagentCommand::Spawn(args)) => {
+                spawn_request(args, None, created_by.clone()).expect("the flags are valid")
+            }
+            _ => panic!("expected subagent spawn"),
+        };
+        assert_eq!(
+            request,
+            expected_request(created_by, None, None),
+            "an absent flag leaves its field unset and moves nothing else"
+        );
+    }
+
+    /// A share the wire cannot carry is refused here: JSON writes a non-finite
+    /// `f64` as `null`, which the tagma would read back as "unset".
+    #[test]
+    fn an_unusable_keep_share_is_refused_before_the_wire() {
+        let created_by = ROOM.parse::<AgentId>().expect("agent id");
+        for share in ["0", "-0.5", "1.5", "NaN", "inf"] {
+            let flag = format!("--context-keep-tokens-ratio={share}");
+            let cli = Cli::try_parse_from([
+                "kallip",
+                "subagent",
+                "spawn",
+                "--workspace-root",
+                "/tmp/ws",
+                "--profile-set",
+                "primary",
+                "--permission-class",
+                "guest",
+                &flag,
+            ])
+            .expect("clap parses any f64 the flag spells");
+            let err = match cli.command.expect("command") {
+                Commands::Subagent(SubagentCommand::Spawn(args)) => {
+                    spawn_request(args, None, created_by.clone())
+                        .expect_err("the share is out of range")
+                }
+                _ => panic!("expected subagent spawn"),
+            };
+            assert!(
+                err.to_string().contains("--context-keep-tokens-ratio"),
+                "{share}: {err}"
+            );
+        }
     }
 
     #[test]

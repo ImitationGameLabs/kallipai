@@ -202,10 +202,13 @@ pub(crate) async fn spawn_agent(mut args: SpawnArgs) -> anyhow::Result<(Agent, A
     );
     let tool_defs = executor.tool_definitions();
     args.store.lock().await.set_tool_definitions(tool_defs);
-    args.store
-        .lock()
-        .await
-        .set_pinned_budget(args.config.pinned_budget());
+    {
+        // Both values come from the active configuration and both are read by code
+        // that shares only the store, so they are installed together.
+        let mut store = args.store.lock().await;
+        store.set_pinned_budget(args.config.pinned_budget());
+        store.set_eviction_caps(args.config.eviction_caps());
+    }
     let summarizer = ContextSummarizer::new(args.config.summary_max_tokens);
 
     let token_budget = args.shared_state.token_budget.clone();

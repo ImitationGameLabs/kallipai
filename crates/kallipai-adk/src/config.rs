@@ -4,19 +4,22 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 
+use crate::context::KeepCaps;
 use crate::env_util::{DEFAULT_CONTEXT_WINDOW_TOKENS, parse_env, parse_env_list};
 use crate::retry::decision::{RETRY_JITTER_MAX, backoff_schedule};
 use crate::retry::{RetryPolicy, max_sends};
 use kallipai_common::AgentId;
+use kallipai_common::protocol;
 
 mod defaults;
 use defaults::{
-    CALL_WORST_ASSUMED, DEFAULT_CONTEXT_THRESHOLDS, DEFAULT_MAX_HEARTBEAT_ROUNDS,
-    DEFAULT_MAX_RETRIES, DEFAULT_MAX_TOOL_ROUNDS, DEFAULT_MAX_TRANSIENT_RETRIES,
-    DEFAULT_OUTPUT_RESERVE_TOKENS, DEFAULT_PINNED_BUDGET_RATIO, DEFAULT_RETRY_BASE_DELAY_SECS,
-    DEFAULT_RETRY_MAX_DELAY_SECS, DEFAULT_RETRY_TIMEOUT_SECS, DEFAULT_SUMMARY_MAX_TOKENS,
-    DEFAULT_SYSTEM_PROMPT, DEFAULT_TOKEN_BUDGET_WARNINGS, DEFAULT_TOOL_TIMEOUT_SECS,
-    MAX_RETRIES_LIMIT, RETRY_DELAY_SECS_LIMIT, RETRY_TIMEOUT_SECS_LIMIT,
+    CALL_WORST_ASSUMED, DEFAULT_CONTEXT_KEEP_TOKENS_RATIO, DEFAULT_CONTEXT_KEEP_TURNS,
+    DEFAULT_CONTEXT_THRESHOLDS, DEFAULT_MAX_HEARTBEAT_ROUNDS, DEFAULT_MAX_RETRIES,
+    DEFAULT_MAX_TOOL_ROUNDS, DEFAULT_MAX_TRANSIENT_RETRIES, DEFAULT_OUTPUT_RESERVE_TOKENS,
+    DEFAULT_PINNED_BUDGET_RATIO, DEFAULT_RETRY_BASE_DELAY_SECS, DEFAULT_RETRY_MAX_DELAY_SECS,
+    DEFAULT_RETRY_TIMEOUT_SECS, DEFAULT_SUMMARY_MAX_TOKENS, DEFAULT_SYSTEM_PROMPT,
+    DEFAULT_TOKEN_BUDGET_WARNINGS, DEFAULT_TOOL_TIMEOUT_SECS, MAX_RETRIES_LIMIT,
+    RETRY_DELAY_SECS_LIMIT, RETRY_TIMEOUT_SECS_LIMIT,
 };
 pub(crate) use defaults::{
     DEFAULT_MESSAGE_FULL_TOKENS, DEFAULT_TOOL_RESULT_FULL_TOKENS,
@@ -54,6 +57,13 @@ pub struct AgentConfig {
     pub skills: Vec<String>,
     pub retry_policy: RetryPolicy,
     pub pinned_budget_ratio: f64,
+    /// Conversation turns a manual eviction keeps. `0` means none: the whole
+    /// conversation goes.
+    pub context_keep_turns: usize,
+    /// Share of the effective budget those turns may spend, derived into
+    /// [`Self::context_keep_tokens`] so a profile that swaps the window moves
+    /// the cap with it instead of pinning an absolute.
+    pub context_keep_tokens_ratio: f64,
     pub context_thresholds: Vec<u8>,
     /// Thresholds (as percentages 1-99) at which to warn the LLM about
     /// approaching token budget exhaustion.
@@ -113,6 +123,8 @@ impl Default for AgentConfig {
             skills: Vec::new(),
             retry_policy: RetryPolicy::default(),
             pinned_budget_ratio: DEFAULT_PINNED_BUDGET_RATIO,
+            context_keep_turns: DEFAULT_CONTEXT_KEEP_TURNS,
+            context_keep_tokens_ratio: DEFAULT_CONTEXT_KEEP_TOKENS_RATIO,
             context_thresholds: DEFAULT_CONTEXT_THRESHOLDS.to_vec(),
             token_budget_warnings: DEFAULT_TOKEN_BUDGET_WARNINGS.to_vec(),
             agent_id: None,
@@ -170,6 +182,10 @@ impl AgentConfig {
 
         let pinned_budget_ratio = parse_env::<f64>("KALLIPAI_PINNED_BUDGET_RATIO")?
             .unwrap_or(DEFAULT_PINNED_BUDGET_RATIO);
+        let context_keep_turns = parse_env::<usize>("KALLIPAI_CONTEXT_KEEP_TURNS")?
+            .unwrap_or(DEFAULT_CONTEXT_KEEP_TURNS);
+        let context_keep_tokens_ratio = parse_env::<f64>("KALLIPAI_CONTEXT_KEEP_TOKENS_RATIO")?
+            .unwrap_or(DEFAULT_CONTEXT_KEEP_TOKENS_RATIO);
         let context_thresholds = parse_env_list::<u8>("KALLIPAI_CONTEXT_THRESHOLDS")?
             .unwrap_or_else(|| DEFAULT_CONTEXT_THRESHOLDS.to_vec());
         let token_budget_warnings = parse_env_list::<u8>("KALLIPAI_TOKEN_BUDGET_WARNINGS")?
@@ -272,6 +288,9 @@ impl AgentConfig {
         if !(0.0..1.0).contains(&pinned_budget_ratio) {
             bail!("KALLIPAI_PINNED_BUDGET_RATIO must be between 0.0 and 1.0 (exclusive)");
         }
+        if !protocol::context_keep_tokens_ratio_in_range(context_keep_tokens_ratio) {
+            bail!("KALLIPAI_CONTEXT_KEEP_TOKENS_RATIO must be greater than 0.0 and at most 1.0");
+        }
         check_context_budget(
             context_window_tokens,
             output_reserve_tokens,
@@ -318,6 +337,8 @@ impl AgentConfig {
             skills,
             retry_policy,
             pinned_budget_ratio,
+            context_keep_turns,
+            context_keep_tokens_ratio,
             context_thresholds,
             token_budget_warnings,
             agent_id: None,
@@ -358,6 +379,18 @@ impl AgentConfig {
         (self.effective_budget() as f64 * self.pinned_budget_ratio) as usize
     }
 
+    /// Keep-window size in tokens: the slice of
+    /// [`effective_budget`](Self::effective_budget) a manual eviction may carry
+    /// forward in the newest turns. Derived, so it follows the active window.
+    ///
+    /// Never rounds down to zero: a positive share must produce a positive cap,
+    /// or a legal ratio would behave like the zero share the checks reject. The
+    /// floor only bites on budgets a few tokens wide, where any real turn
+    /// exceeds the cap anyway and the eviction reports the token cap.
+    pub fn context_keep_tokens(&self) -> usize {
+        ((self.effective_budget() as f64 * self.context_keep_tokens_ratio) as usize).max(1)
+    }
+
     /// Tail-recovery budget: the token slice a manifest-loss rebuild may spend
     /// rehydrating conversation turns from the history tail (see
     /// `persistence::rebuild_window_from_tail`). A quarter of the effective
@@ -376,6 +409,38 @@ impl AgentConfig {
         if value > 0 {
             self.max_tool_rounds = value;
         }
+    }
+
+    /// Override the keep window's turn cap with a per-spawn value.
+    ///
+    /// Takes precedence over the default and the env var; `0` is a legal
+    /// request (the caller wants every turn condensed) and is applied as given.
+    pub fn set_context_keep_turns(&mut self, turns: usize) {
+        self.context_keep_turns = turns;
+    }
+
+    /// Override the keep window's token share with a per-spawn value.
+    ///
+    /// Validates **before** mutating, so a caller that treats `Err` as "reject
+    /// the spawn" leaves the loaded value untouched. The bound is the same as
+    /// the env knob's: a zero share would keep nothing and report a token-cap
+    /// degradation, so it is out of range rather than a legal extreme.
+    pub fn set_context_keep_tokens_ratio(&mut self, ratio: f64) -> Result<()> {
+        if !protocol::context_keep_tokens_ratio_in_range(ratio) {
+            bail!("context_keep_tokens_ratio must be greater than 0.0 and at most 1.0");
+        }
+        self.context_keep_tokens_ratio = ratio;
+        Ok(())
+    }
+
+    /// The two caps a manual eviction keeps within: the configured turn count
+    /// and the token slice of the effective budget.
+    ///
+    /// The one derivation point: the spawn installs this pair into the store,
+    /// and every later window move (failover reapply, profile reset) installs it
+    /// again, so a tool call always sees the caps the active configuration implies.
+    pub fn eviction_caps(&self) -> KeepCaps {
+        KeepCaps::new(self.context_keep_turns, self.context_keep_tokens())
     }
 
     /// Install `tokens` as the active context window after validating the window-dependent budget
