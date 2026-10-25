@@ -20,6 +20,7 @@ telemetry = [
   "dep:reqwest",
   "dep:reqwest-middleware",
 ]
+test-support = ["telemetry"]
 
 [dependencies]
 axum = { workspace = true, optional = true }

@@ -178,6 +178,8 @@ face every 30 seconds.
 The trace stack rides it too: `otelcol` takes OTLP on `127.0.0.1:4318` and
 forwards to `tempo`, and `grafana` serves the UI on `127.0.0.1:3001`, clear of
 the dev tagma's 3000. `kallipai-telemetry-prune` only prints; `--apply` deletes.
+What a request traces, and how to read one:
+[Traces (OpenTelemetry)](observability.md).
 
 Dev is fronted by Caddy (see the one-time setup above): the browser loads the
 web app at `https://app.kallipai.lan` and calls the platform at

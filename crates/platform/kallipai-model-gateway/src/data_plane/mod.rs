@@ -21,6 +21,21 @@
 //! - `logging`: the terminal phase -- the single point every forwarded
 //!   request is counted at, and where the in-flight gauge decrements.
 //!
+//! The phases that answer and account run inside one request span:
+//! `request_filter` opens it before anything answers and runs the body that
+//! answers under it; `upstream_request_filter`, `response_filter` and
+//! `upstream_response_filter` re-enter it for their own body; `logging`
+//! records the terminal status and outcome on it. A refusal, a health probe
+//! and a forwarded request each land in one span, so a call this process
+//! makes while serving one -- the identity check -- is its child instead of
+//! a trace of its own. The store work sea-orm emits is traced at trace
+//! level, so it hangs under this span too when `RUST_LOG` lets that level
+//! through.
+//!
+//! The connection callbacks -- `upstream_peer`, `connected_to_upstream` and
+//! `fail_to_connect` -- stay outside the span: they resolve the peer or
+//! record dial instruments, and no span is opened for a dial.
+//!
 //! The business layer keeps speaking axum types: the routing module
 //! (`routes`) runs the 4xx gates as `ApiError`s, and `wire` bridges
 //! the rendered responses to the session. Forwarded traffic never
@@ -38,11 +53,13 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use axum::response::IntoResponse;
+use kallipai_common::telemetry;
 use pingora::Result;
 use pingora::http::{RequestHeader, ResponseHeader};
 use pingora::prelude::{HttpPeer, Server};
 use pingora::protocols::Digest;
 use pingora::proxy::{ProxyHttp, Session, http_proxy_service};
+use tracing::Instrument as _;
 
 pub use context::{GatewayCtx, Route};
 
@@ -105,77 +122,14 @@ impl GatewayProxy {
             }
         }
     }
-}
-
-/// The request's `Origin` header, the CORS policy's discriminator.
-fn request_origin(session: &Session) -> Option<String> {
-    session
-        .req_header()
-        .headers
-        .get(axum::http::header::ORIGIN)
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_owned)
-}
-
-/// Spawn the data plane on its own thread (pingora drives its own
-/// runtime there) so the caller's tokio runtime keeps serving the axum
-/// management face in the same process.
-///
-/// The socket is probe-bound on the caller's thread first: pingora
-/// binds inside its own `run_forever`, on the spawned thread, where a
-/// failure would surface as nothing louder than a background panic
-/// while the caller's log already claims the port. A taken port or a
-/// bad address therefore returns as the caller's error. The probe
-/// drops before pingora binds for real; the window between the two
-/// binds is the accepted race.
-pub fn spawn_data_plane(
-    listen: String,
-    state: AppState,
-    cors_origins: String,
-) -> std::io::Result<std::thread::JoinHandle<()>> {
-    drop(std::net::TcpListener::bind(&listen)?);
-    std::thread::Builder::new()
-        .name("data-plane-pingora".to_string())
-        .spawn(move || {
-            let mut server = Server::new(None).expect("pingora server");
-            server.bootstrap();
-            let mut service = http_proxy_service(
-                &server.configuration,
-                GatewayProxy {
-                    state,
-                    cors: wire::CorsPolicy::parse(&cors_origins),
-                },
-            );
-            service.add_tcp(&listen);
-            server.add_service(service);
-            server.run_forever();
-        })
-}
-
-#[async_trait]
-impl ProxyHttp for GatewayProxy {
-    type CTX = GatewayCtx;
-
-    fn new_ctx(&self) -> Self::CTX {
-        GatewayCtx {
-            route: Route::NotFound,
-            selection: None,
-            tagma_id: None,
-            t0: None,
-            t1: None,
-            pending_outcome: None,
-            pending_reason: None,
-            pending_detail: None,
-            upstream_status: None,
-            connected: false,
-        }
-    }
-
-    async fn request_filter(&self, session: &mut Session, ctx: &mut Self::CTX) -> Result<bool> {
-        let method = session.req_header().method.clone();
-        let path = session.req_header().uri.path().to_owned();
-        let origin = request_origin(session);
-
+    /// The request proper, run inside the request span: the CORS
+    /// preflight, the routing table, and the Forward branch.
+    async fn answer_request(
+        &self,
+        session: &mut Session,
+        ctx: &mut GatewayCtx,
+        origin: Option<String>,
+    ) -> Result<bool> {
         // The CORS preflight: the browser's probe, answered before any routing.
         if wire::is_cors_preflight(session) {
             return wire::respond_axum(
@@ -186,8 +140,6 @@ impl ProxyHttp for GatewayProxy {
             )
             .await;
         }
-
-        ctx.route = routes::route_of(&method, &path);
         match ctx.route {
             // The management namespace is a 404 on this plane, bare
             // prefix included: the axum face owns it on its own listener,
@@ -263,25 +215,12 @@ impl ProxyHttp for GatewayProxy {
         }
     }
 
-    async fn upstream_peer(
+    /// The upstream rewrite: the wire path, the header surgery and the
+    /// credential stamp.
+    async fn rewrite_upstream(
         &self,
-        _session: &mut Session,
-        ctx: &mut Self::CTX,
-    ) -> Result<Box<HttpPeer>> {
-        // The selection already resolved the dial target; there is
-        // nothing left to look up.
-        let selection = ctx
-            .selection
-            .as_ref()
-            .expect("a forwarded request always has a selection");
-        Ok(Box::new(selection.peer.clone()))
-    }
-
-    async fn upstream_request_filter(
-        &self,
-        _session: &mut Session,
         upstream_request: &mut RequestHeader,
-        ctx: &mut Self::CTX,
+        ctx: &mut GatewayCtx,
     ) -> Result<()> {
         let selection = ctx
             .selection
@@ -342,25 +281,12 @@ impl ProxyHttp for GatewayProxy {
         Ok(())
     }
 
-    async fn response_filter(
+    /// The first upstream header: t1, the status line, and the two
+    /// observations the terminal phase classifies from.
+    async fn observe_upstream_response(
         &self,
-        session: &mut Session,
-        upstream_response: &mut ResponseHeader,
-        _ctx: &mut Self::CTX,
-    ) -> Result<()> {
-        // The CORS response headers for the caller's origin: the same
-        // allowlist policy the bridge answers use.
-        for (name, value) in self.cors.headers(request_origin(session).as_deref()) {
-            upstream_response.insert_header(name, value)?;
-        }
-        Ok(())
-    }
-
-    async fn upstream_response_filter(
-        &self,
-        _session: &mut Session,
-        upstream_response: &mut ResponseHeader,
-        ctx: &mut Self::CTX,
+        upstream_response: &ResponseHeader,
+        ctx: &mut GatewayCtx,
     ) -> Result<()> {
         // The first upstream header: t1 and the upstream status line,
         // both staged for the terminal classification. The first-header
@@ -380,6 +306,216 @@ impl ProxyHttp for GatewayProxy {
             );
         }
         Ok(())
+    }
+
+    /// The terminal record: the span's status for every route, and the
+    /// forwarded traffic's outcome, failure line and instruments.
+    async fn finish_request(
+        &self,
+        session: &mut Session,
+        e: Option<&pingora::Error>,
+        ctx: &mut GatewayCtx,
+    ) {
+        let span = ctx.phase_span();
+        // The status every answer carried, forwarded or not: a refusal
+        // and a health probe have a response too, and a trace needs
+        // their outcome as much as a forwarded request's.
+        if let Some(response) = session.response_written() {
+            telemetry::record_response(&span, response.status.as_u16());
+        }
+        // The single terminal record point: every forwarded request is
+        // counted here exactly once, from whatever the phases before
+        // staged (the derivation lives in [`terminal_outcome`]).
+        let Route::Forward(endpoint) = ctx.route else {
+            return;
+        };
+        let outcome = terminal_outcome(
+            ctx.pending_outcome.take(),
+            e,
+            ctx.connected,
+            ctx.upstream_status,
+        );
+        telemetry::record_attribute(&span, "gateway.outcome", outcome.as_str());
+        self.state.metrics.record_forward(endpoint, outcome);
+        // The failure line: one structured record per failed forward,
+        // carrying the attribution the counters carry.
+        log_forward_failure(
+            endpoint,
+            outcome,
+            ctx,
+            e,
+            ctx.t0.map(|t0| Instant::now().duration_since(t0)),
+        );
+        // The attribution the terminal record carries -- the upstream
+        // label the metrics carry too -- and the instruments: the
+        // in-flight gauge pairs with its selection-time increment, and
+        // the end-to-end duration is a forwarded-traffic histogram
+        // (instant gate rejections would drown the long tail it exists
+        // to show).
+        if let Some(selection) = ctx.selection.as_ref() {
+            telemetry::record_attribute(&span, "upstream.authority", selection.authority.clone());
+            telemetry::record_attribute(&span, "upstream.api_family", selection.api_family.clone());
+            self.state.metrics.dec_in_flight();
+            if let Some(t0) = ctx.t0 {
+                self.state
+                    .metrics
+                    .observe_forward_duration(endpoint, Instant::now().duration_since(t0));
+            }
+        }
+    }
+
+    /// The CORS headers the caller's origin is allowed: the same allowlist
+    /// policy the bridge answers use.
+    async fn apply_cors_headers(
+        &self,
+        session: &Session,
+        upstream_response: &mut ResponseHeader,
+    ) -> Result<()> {
+        for (name, value) in self.cors.headers(request_origin(session).as_deref()) {
+            upstream_response.insert_header(name, value)?;
+        }
+        Ok(())
+    }
+}
+
+/// The request's `Origin` header, the CORS policy's discriminator.
+fn request_origin(session: &Session) -> Option<String> {
+    session
+        .req_header()
+        .headers
+        .get(axum::http::header::ORIGIN)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned)
+}
+
+/// Spawn the data plane on its own thread (pingora drives its own
+/// runtime there) so the caller's tokio runtime keeps serving the axum
+/// management face in the same process.
+///
+/// The socket is probe-bound on the caller's thread first: pingora
+/// binds inside its own `run_forever`, on the spawned thread, where a
+/// failure would surface as nothing louder than a background panic
+/// while the caller's log already claims the port. A taken port or a
+/// bad address therefore returns as the caller's error. The probe
+/// drops before pingora binds for real; the window between the two
+/// binds is the accepted race.
+pub fn spawn_data_plane(
+    listen: String,
+    state: AppState,
+    cors_origins: String,
+) -> std::io::Result<std::thread::JoinHandle<()>> {
+    drop(std::net::TcpListener::bind(&listen)?);
+    std::thread::Builder::new()
+        .name("data-plane-pingora".to_string())
+        .spawn(move || {
+            let mut server = Server::new(None).expect("pingora server");
+            server.bootstrap();
+            let mut service = http_proxy_service(
+                &server.configuration,
+                GatewayProxy {
+                    state,
+                    cors: wire::CorsPolicy::parse(&cors_origins),
+                },
+            );
+            service.add_tcp(&listen);
+            server.add_service(service);
+            server.run_forever();
+        })
+}
+
+#[async_trait]
+impl ProxyHttp for GatewayProxy {
+    type CTX = GatewayCtx;
+
+    fn new_ctx(&self) -> Self::CTX {
+        GatewayCtx {
+            route: Route::NotFound,
+            span: None,
+            selection: None,
+            tagma_id: None,
+            t0: None,
+            t1: None,
+            pending_outcome: None,
+            pending_reason: None,
+            pending_detail: None,
+            upstream_status: None,
+            connected: false,
+        }
+    }
+
+    async fn request_filter(&self, session: &mut Session, ctx: &mut Self::CTX) -> Result<bool> {
+        let method = session.req_header().method.clone();
+        let path = session.req_header().uri.path().to_owned();
+        // The route is a pure function of the method and the path, so it
+        // is decided before anything answers and stored on the context: the
+        // span names it, except a preflight, which names itself; every later
+        // phase reads the same value back.
+        let route = routes::route_of(&method, &path);
+        ctx.route = route;
+        // A preflight is an OPTIONS probe at a path whose method is POST,
+        // so it is no routed path: it labels itself instead of borrowing
+        // the 405 its method would key.
+        let label = if wire::is_cors_preflight(session) {
+            "preflight"
+        } else {
+            route.label()
+        };
+        let span =
+            telemetry::request_span(method.as_str(), label, &path, &session.req_header().headers);
+        ctx.span = Some(span.clone());
+        self.answer_request(session, ctx, request_origin(session))
+            .instrument(span)
+            .await
+    }
+
+    async fn upstream_peer(
+        &self,
+        _session: &mut Session,
+        ctx: &mut Self::CTX,
+    ) -> Result<Box<HttpPeer>> {
+        // The selection already resolved the dial target; there is
+        // nothing left to look up.
+        let selection = ctx
+            .selection
+            .as_ref()
+            .expect("a forwarded request always has a selection");
+        Ok(Box::new(selection.peer.clone()))
+    }
+
+    async fn upstream_request_filter(
+        &self,
+        _session: &mut Session,
+        upstream_request: &mut RequestHeader,
+        ctx: &mut Self::CTX,
+    ) -> Result<()> {
+        let span = ctx.phase_span();
+        self.rewrite_upstream(upstream_request, ctx)
+            .instrument(span)
+            .await
+    }
+
+    async fn response_filter(
+        &self,
+        session: &mut Session,
+        upstream_response: &mut ResponseHeader,
+        ctx: &mut Self::CTX,
+    ) -> Result<()> {
+        let span = ctx.phase_span();
+        self.apply_cors_headers(session, upstream_response)
+            .instrument(span)
+            .await
+    }
+
+    async fn upstream_response_filter(
+        &self,
+        _session: &mut Session,
+        upstream_response: &mut ResponseHeader,
+        ctx: &mut Self::CTX,
+    ) -> Result<()> {
+        let span = ctx.phase_span();
+        self.observe_upstream_response(upstream_response, ctx)
+            .instrument(span)
+            .await
     }
 
     async fn connected_to_upstream(
@@ -436,44 +572,12 @@ impl ProxyHttp for GatewayProxy {
 
     async fn logging(
         &self,
-        _session: &mut Session,
+        session: &mut Session,
         e: Option<&pingora::Error>,
         ctx: &mut Self::CTX,
     ) {
-        // The single terminal record point: every forwarded request is
-        // counted here exactly once, from whatever the phases before
-        // staged (the derivation lives in [`terminal_outcome`]).
-        let Route::Forward(endpoint) = ctx.route else {
-            return;
-        };
-        let outcome = terminal_outcome(
-            ctx.pending_outcome.take(),
-            e,
-            ctx.connected,
-            ctx.upstream_status,
-        );
-        self.state.metrics.record_forward(endpoint, outcome);
-        // The failure line: one structured record per failed forward,
-        // carrying the attribution the counters carry.
-        log_forward_failure(
-            endpoint,
-            outcome,
-            ctx,
-            e,
-            ctx.t0.map(|t0| Instant::now().duration_since(t0)),
-        );
-        // The forwarded-traffic instruments: the in-flight gauge pairs
-        // with its selection-time increment, and the end-to-end
-        // duration is a forwarded-traffic histogram (instant gate
-        // rejections would drown the long tail it exists to show).
-        if ctx.selection.is_some() {
-            self.state.metrics.dec_in_flight();
-            if let Some(t0) = ctx.t0 {
-                self.state
-                    .metrics
-                    .observe_forward_duration(endpoint, Instant::now().duration_since(t0));
-            }
-        }
+        let span = ctx.phase_span();
+        self.finish_request(session, e, ctx).instrument(span).await
     }
 }
 

@@ -358,60 +358,49 @@ pub fn init_service_telemetry(filter: &EnvFilter, service: &str, dir: Option<&Pa
 
 /// The span kind a server request declares; a `Display` value renders into the
 /// log prefix unquoted, which a string literal does not.
-#[cfg(feature = "axum")]
 const SERVER_SPAN_KIND: &str = "server";
 
 /// The route name a request gets when it matched no route at all.
 #[cfg(feature = "axum")]
 const UNMATCHED_ROUTE: &str = "unmatched";
 
-/// The server span for one request: the method and the route template as the
-/// name (`GET /v1/files/{id}`), the OpenTelemetry HTTP attributes on the span.
+/// The parent an inbound request inherits: the W3C `traceparent` it carries,
+/// or an empty context when it carries none.
+fn parent_from_headers(headers: &http::HeaderMap) -> opentelemetry::Context {
+    opentelemetry::global::get_text_map_propagator(|propagator| {
+        propagator.extract(&HeaderCarrier(headers))
+    })
+}
+
+/// The server span for one request: its name is the method and the route
+/// label, its attributes are the OpenTelemetry HTTP ones.
 ///
-/// The name deliberately avoids the raw path: an id in a span name scatters one
-/// endpoint across a thousand names and defeats aggregation. The path still
-/// travels as `url.path`, capped at 256 characters, so a trace
-/// can answer "which room" without a name nothing can aggregate. The status is
-/// recorded once the response exists, and a server-side failure also carries an
-/// error type and the failed status, so a trace can be filtered for them.
-///
-/// A 4xx response only records `http.response.status_code`: for a server span the
-/// semantic conventions reserve the error status and `error.type` for a 5xx. A
-/// client span reads the same code as its own failure, so the halves differ.
+/// The name deliberately avoids the raw path: an id in a span name scatters
+/// one endpoint across a thousand names and defeats aggregation. The path
+/// travels as `url.path` instead, capped at 256 characters, so a trace can
+/// still say which room a call was for without a name nothing can aggregate.
 ///
 /// Only `otel.name` and `otel.kind` are tracing fields: those two render into
-/// the prefix of every event inside the request, and the rest is worth nothing
-/// there. Everything else is a span attribute, which costs the log no space.
+/// the prefix of every event inside the request, and the rest is worth
+/// nothing there. Everything else is a span attribute, which costs the log
+/// no space.
 ///
-/// Absent a handoff, the span ends when the response head exists. For a
-/// streaming body (SSE, a download) the duration is time to the first byte
-/// rather than the transfer, and a body that fails mid-stream is not recorded
-/// as an error on the span.
+/// Both faces name the span `request`, and so does the client span a call
+/// makes (see [`http_client`]): `otel.kind` and `otel.name` are what tell
+/// them apart, and both fields are in the log prefix either way.
 ///
-/// A handler that hands the span's handle to a task outliving the response
-/// keeps the span open until that task ends, so such a route's duration
-/// covers that work as well.
-///
-/// A request that arrives with a W3C `traceparent` adopts it as its parent, so
-/// one trace spans the services a call crosses.
-///
-/// Mount it with [`with_server_span`]; every axum router mounts this one layer,
-/// so a trace reads the same whichever service answered.
-#[cfg(feature = "axum")]
-pub async fn server_span(
-    request: axum::extract::Request,
-    next: axum::middleware::Next,
-) -> axum::response::Response {
-    use opentelemetry::trace::Status;
-    use tracing::Instrument as _;
+/// A span the OpenTelemetry layer does not own cannot take a parent; it then
+/// stays a root, which is what a request without a caller's context is. When
+/// the request carries a W3C `traceparent`, it becomes the span's parent,
+/// so one trace spans the services a call crosses.
+pub fn request_span(
+    method: &str,
+    route: &str,
+    path: &str,
+    headers: &http::HeaderMap,
+) -> tracing::Span {
     use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 
-    let route = request
-        .extensions()
-        .get::<axum::extract::MatchedPath>()
-        .map_or(UNMATCHED_ROUTE, axum::extract::MatchedPath::as_str);
-    let method = request.method().clone();
-    let path = request.uri().path().to_string();
     let name = format!("{method} {route}");
     let span = tracing::info_span!(
         "request",
@@ -420,37 +409,97 @@ pub async fn server_span(
     );
     // The parent travels with the request; adopting it before the span is
     // entered is what lets the OpenTelemetry layer build the span under it.
-    let parent = opentelemetry::global::get_text_map_propagator(|propagator| {
-        propagator.extract(&HeaderCarrier(request.headers()))
-    });
-    // A span the OpenTelemetry layer does not own cannot take a parent; it then
-    // stays a root, which is what a request without a caller's context is.
-    let _ = span.set_parent(parent);
-    span.set_attribute("http.request.method", method.as_str().to_string());
+    // The result is dropped: with no OTLP endpoint set, no OpenTelemetry
+    // layer is in the subscriber, so there is no span to parent and the call
+    // reports `LayerNotFound` -- the ordinary case, not a fault. `AlreadyStarted`
+    // is not expected either: the parent is set before the span enters a
+    // context, and a span that has entered one cannot be reparented. Move that
+    // order and the cross-service trace assertions fail.
+    let _ = span.set_parent(parent_from_headers(headers));
+    span.set_attribute("http.request.method", method.to_string());
     span.set_attribute("http.route", route.to_string());
-    span.set_attribute("url.path", capped(&path, URL_PATH_LIMIT).to_string());
-    let response = next.run(request).instrument(span.clone()).await;
-    let status = response.status();
-    span.set_attribute("http.response.status_code", i64::from(status.as_u16()));
-    if status.is_server_error() {
-        span.set_attribute("error.type", format!("http_{}", status.as_u16()));
+    span.set_attribute("url.path", capped(path, URL_PATH_LIMIT).to_string());
+    span
+}
+
+/// The status the response carried, recorded on the span that served it. A
+/// server-side failure also names an error type and fails the status.
+pub fn record_response(span: &tracing::Span, status: u16) {
+    use opentelemetry::trace::Status;
+    use tracing_opentelemetry::OpenTelemetrySpanExt as _;
+
+    span.set_attribute("http.response.status_code", i64::from(status));
+    if (500..600).contains(&status) {
+        span.set_attribute("error.type", format!("http_{status}"));
         span.set_status(Status::error(status.to_string()));
     }
+}
+
+/// One attribute of a face's own vocabulary, on a span built elsewhere.
+///
+/// The callers do not depend on `tracing-opentelemetry`, and a span takes no
+/// attribute without that trait in scope: this shell keeps the dependency
+/// in this crate instead of in every crate that records one.
+pub fn record_attribute(span: &tracing::Span, key: &str, value: impl Into<String>) {
+    use tracing_opentelemetry::OpenTelemetrySpanExt as _;
+
+    span.set_attribute(key.to_string(), value.into());
+}
+
+/// The server span for one request, as axum middleware: mount it with
+/// [`with_server_span`], and every axum router mounts this one layer, so a
+/// trace reads the same whichever service answered.
+///
+/// It adds the routing: the matched template (`GET /v1/files/{id}`) becomes
+/// the route part of the span's name, or `unmatched` when nothing matched.
+/// The name and the attributes are [`request_span`]'s.
+///
+/// The status is recorded once the response exists, and a server-side
+/// failure also carries an error type and the failed status, so a trace can
+/// be filtered for them.
+///
+/// A 4xx response only records `http.response.status_code`: the semantic
+/// conventions reserve the error status and `error.type` for a 5xx on a
+/// server span. A client span reads the same code as its own failure, so
+/// the halves differ.
+///
+/// Absent a handoff, the span ends when the response head exists. For a
+/// streaming body (SSE, a download) the duration is time to the first byte
+/// rather than the transfer, and a body that fails mid-stream is not
+/// recorded as an error on the span.
+///
+/// A handler that hands the span's handle to a task outliving the response
+/// keeps the span open until that task ends, so such a route's duration
+/// covers that work as well.
+#[cfg(feature = "axum")]
+pub async fn server_span(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use tracing::Instrument as _;
+
+    let route = request
+        .extensions()
+        .get::<axum::extract::MatchedPath>()
+        .map_or(UNMATCHED_ROUTE, axum::extract::MatchedPath::as_str);
+    let method = request.method().clone();
+    let path = request.uri().path().to_string();
+    let span = request_span(method.as_str(), route, &path, request.headers());
+    let response = next.run(request).instrument(span.clone()).await;
+    record_response(&span, response.status().as_u16());
     response
 }
 
 /// The request headers as a propagator sees them.
-#[cfg(feature = "axum")]
-struct HeaderCarrier<'a>(&'a axum::http::HeaderMap);
+struct HeaderCarrier<'a>(&'a http::HeaderMap);
 
-#[cfg(feature = "axum")]
 impl Extractor for HeaderCarrier<'_> {
     fn get(&self, key: &str) -> Option<&str> {
         self.0.get(key).and_then(|value| value.to_str().ok())
     }
 
     fn keys(&self) -> Vec<&str> {
-        self.0.keys().map(axum::http::HeaderName::as_str).collect()
+        self.0.keys().map(http::HeaderName::as_str).collect()
     }
 }
 
@@ -1165,24 +1214,10 @@ mod tests {
         assert_eq!(config.sampler(), SamplerSpec::ParentBasedTraceIdRatio(0.25));
     }
 
-    /// The far side of an export: the spans the SDK handed to an exporter, and
-    /// the resource it named them with.
-    #[derive(Clone, Debug, Default)]
-    struct RecordingExporter {
-        spans: Arc<Mutex<Vec<SpanData>>>,
-        resource: Arc<Mutex<Option<Resource>>>,
-    }
-
-    impl SpanExporter for RecordingExporter {
-        async fn export(&self, batch: Vec<SpanData>) -> OTelSdkResult {
-            self.spans.lock().unwrap().extend(batch);
-            Ok(())
-        }
-
-        fn set_resource(&mut self, resource: &Resource) {
-            *self.resource.lock().unwrap() = Some(resource.clone());
-        }
-    }
+    // The exporter and its readers live in [`super::test_observability`]: one
+    // implementation, shared with a dependent crate that reads the same
+    // boundary. What stays here is the assembly of the production stack.
+    use super::test_observability::RecordingExporter;
 
     /// What one request left behind at the export boundary.
     struct Exported {
@@ -1259,8 +1294,8 @@ mod tests {
         }
         assert!(guard.shutdown(), "a configured guard owns a provider");
         Exported {
-            spans: recording.spans.lock().unwrap().clone(),
-            resource: recording.resource.lock().unwrap().clone(),
+            spans: recording.batches(),
+            resource: recording.resource(),
         }
     }
 
@@ -1399,6 +1434,80 @@ mod tests {
             opentelemetry::trace::SpanId::INVALID,
             "without the header the span starts a trace"
         );
+    }
+    /// The parent read itself, asserted where it lives: both faces call it,
+    /// and a break here would cost every face its trace linkage.
+    mod parent_adoption {
+        use super::super::parent_from_headers;
+        use opentelemetry::trace::{SpanId, TraceContextExt as _, TraceId};
+
+        const TRACE: &str = "0af7651916cd43dd8448eb211c80319c";
+        const SPAN: &str = "b7ad6b7169203331";
+
+        fn headers(value: &str) -> http::HeaderMap {
+            let mut headers = http::HeaderMap::new();
+            headers.insert(
+                "traceparent",
+                value.parse().expect("a header value the test wrote"),
+            );
+            headers
+        }
+
+        #[test]
+        fn a_traceparent_header_names_the_parent_verbatim() {
+            // The read goes through the process-wide propagator the bootstrap
+            // publishes; a test publishes it too, so this assertion does not
+            // depend on another test in the binary having done so.
+            opentelemetry::global::set_text_map_propagator(
+                opentelemetry_sdk::propagation::TraceContextPropagator::new(),
+            );
+
+            let context = parent_from_headers(&headers(&format!("00-{TRACE}-{SPAN}-01")));
+            let span = context.span();
+            let span_context = span.span_context();
+            assert!(span_context.is_valid(), "an adopted context is a valid one");
+            assert_eq!(
+                span_context.trace_id(),
+                TraceId::from_hex(TRACE).expect("a trace id")
+            );
+            assert_eq!(
+                span_context.span_id(),
+                SpanId::from_hex(SPAN).expect("a span id")
+            );
+        }
+
+        #[test]
+        fn no_header_leaves_the_context_empty() {
+            let context = parent_from_headers(&http::HeaderMap::new());
+            assert!(
+                !context.span().span_context().is_valid(),
+                "no caller context, no parent"
+            );
+        }
+
+        #[test]
+        fn a_malformed_header_is_ignored_rather_than_panicking() {
+            opentelemetry::global::set_text_map_propagator(
+                opentelemetry_sdk::propagation::TraceContextPropagator::new(),
+            );
+
+            for value in [
+                "",
+                "garbage",
+                "00-xyz-123-01",
+                "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331",
+                "01-0af7651916cd43dd8448eb211c80319c-0000000000000000-01",
+                "00-00000000000000000000000000000000-b7ad6b7169203331-01",
+                "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01-extra",
+                "ff-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01",
+            ] {
+                let context = parent_from_headers(&headers(value));
+                assert!(
+                    !context.span().span_context().is_valid(),
+                    "{value:?} names no parent"
+                );
+            }
+        }
     }
 
     #[cfg(feature = "axum")]
@@ -1583,7 +1692,7 @@ mod tests {
             "the caller's trace id travels in the header"
         );
 
-        let spans = recording.spans.lock().unwrap().clone();
+        let spans = recording.batches();
         let client_span = span_of_kind(&spans, SpanKind::Client);
         assert_eq!(client_span.name, "GET /files/abc");
         assert_eq!(
@@ -1661,7 +1770,7 @@ mod tests {
         served.abort();
         assert!(guard.shutdown(), "a configured guard owns a provider");
 
-        let spans = recording.spans.lock().unwrap().clone();
+        let spans = recording.batches();
         let client_span = span_of_kind(&spans, SpanKind::Client);
         assert_eq!(
             client_span.parent_span_id,
@@ -1731,7 +1840,7 @@ mod tests {
         served.abort();
         assert!(guard.shutdown(), "a configured guard owns a provider");
 
-        let spans = recording.spans.lock().unwrap().clone();
+        let spans = recording.batches();
         let client_span = span_of_kind(&spans, SpanKind::Client);
         assert_eq!(
             attribute(client_span, "http.response.status_code").as_deref(),
@@ -1768,7 +1877,7 @@ mod tests {
         }
         assert!(guard.shutdown(), "a configured guard owns a provider");
 
-        let spans = recording.spans.lock().unwrap().clone();
+        let spans = recording.batches();
         let client_span = span_of_kind(&spans, SpanKind::Client);
         let recorded = attribute(client_span, "error.type").expect("a failed call names its type");
         assert_eq!(
@@ -1819,7 +1928,7 @@ mod tests {
         }
         assert!(guard.shutdown(), "a configured guard owns a provider");
 
-        let spans = recording.spans.lock().unwrap().clone();
+        let spans = recording.batches();
         let client_span = span_of_kind(&spans, SpanKind::Client);
         assert_eq!(
             attribute(client_span, "error.type").as_deref(),
@@ -1860,7 +1969,7 @@ mod tests {
         served.abort();
         assert!(guard.shutdown(), "a configured guard owns a provider");
 
-        let spans = recording.spans.lock().unwrap().clone();
+        let spans = recording.batches();
         let client_span = span_of_kind(&spans, SpanKind::Client);
         assert_eq!(
             attribute(client_span, "error.type").as_deref(),
@@ -1908,7 +2017,7 @@ mod tests {
         served.abort();
         assert!(guard.shutdown(), "a configured guard owns a provider");
 
-        let spans = recording.spans.lock().unwrap().clone();
+        let spans = recording.batches();
         let client_span = span_of_kind(&spans, SpanKind::Client);
         assert_eq!(
             attribute(client_span, "url.path").as_deref(),
@@ -1925,6 +2034,215 @@ mod tests {
                 !pair.value.as_str().contains("secret"),
                 "no attribute value carries the query: {pair:?}"
             );
+        }
+    }
+}
+
+/// The export boundary, for tests: spans leave through a recorder kept in
+/// memory instead of a collector, and a test reads them back as plain values.
+///
+/// Present in this crate's own tests and in a dependent crate whose
+/// dev-dependencies turn on `test-support`; a build that enables neither
+/// does not contain it. It is not a service API.
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_observability {
+    use std::collections::BTreeMap;
+    use std::sync::{Arc, Mutex};
+
+    use opentelemetry::KeyValue;
+    use opentelemetry::trace::TracerProvider as _;
+    use opentelemetry::trace::{SpanKind, Status};
+    use opentelemetry_sdk::Resource;
+    use opentelemetry_sdk::error::OTelSdkResult;
+    use opentelemetry_sdk::propagation::TraceContextPropagator;
+    use opentelemetry_sdk::trace::{SdkTracer, SdkTracerProvider, SpanData, SpanExporter};
+    use tracing_subscriber::Layer;
+    use tracing_subscriber::registry::Registry;
+
+    /// One span as the export boundary shows it, in plain values: a test
+    /// asserts on these instead of on OpenTelemetry types.
+    #[derive(Clone, Debug)]
+    pub struct ObservedSpan {
+        /// The span name: the method and the route for a server span.
+        pub name: String,
+        /// `server`, `client`, `producer`, `consumer` or `internal`.
+        pub kind: &'static str,
+        /// The trace the span belongs to, as the exporter names it.
+        pub trace_id: String,
+        /// This span's own id.
+        pub span_id: String,
+        /// The span it hangs under, or `None` when it is a root.
+        pub parent_span_id: Option<String>,
+        /// `unset`, `ok`, or `error: <description>`.
+        pub status: String,
+        /// Every attribute the span carries, rendered.
+        pub attributes: BTreeMap<String, String>,
+    }
+
+    impl ObservedSpan {
+        /// One attribute's rendered value.
+        pub fn attribute(&self, key: &str) -> Option<&str> {
+            self.attributes.get(key).map(String::as_str)
+        }
+    }
+
+    /// The far side of an export: the spans the SDK handed to an exporter.
+    #[derive(Clone, Debug, Default)]
+    pub(crate) struct RecordingExporter {
+        spans: Arc<Mutex<Vec<SpanData>>>,
+        resource: Arc<Mutex<Option<Resource>>>,
+    }
+
+    impl RecordingExporter {
+        /// The spans exported so far, as plain values.
+        pub fn observed(&self) -> Vec<ObservedSpan> {
+            self.spans
+                .lock()
+                .unwrap()
+                .iter()
+                .map(ObservedSpan::from)
+                .collect()
+        }
+
+        /// The spans as the SDK handed them over.
+        #[cfg(test)]
+        pub(crate) fn batches(&self) -> Vec<SpanData> {
+            self.spans.lock().unwrap().clone()
+        }
+
+        /// The resource the exporter was given.
+        #[cfg(test)]
+        pub(crate) fn resource(&self) -> Option<Resource> {
+            self.resource.lock().unwrap().clone()
+        }
+    }
+
+    impl SpanExporter for RecordingExporter {
+        async fn export(&self, batch: Vec<SpanData>) -> OTelSdkResult {
+            self.spans.lock().unwrap().extend(batch);
+            Ok(())
+        }
+
+        fn set_resource(&mut self, resource: &Resource) {
+            *self.resource.lock().unwrap() = Some(resource.clone());
+        }
+    }
+
+    impl From<&SpanData> for ObservedSpan {
+        fn from(span: &SpanData) -> Self {
+            let mut attributes = BTreeMap::new();
+            for pair in &span.attributes {
+                attributes.insert(pair.key.as_str().to_string(), pair.value.to_string());
+            }
+            Self {
+                name: span.name.to_string(),
+                kind: match span.span_kind {
+                    SpanKind::Client => "client",
+                    SpanKind::Server => "server",
+                    SpanKind::Producer => "producer",
+                    SpanKind::Consumer => "consumer",
+                    SpanKind::Internal => "internal",
+                },
+                trace_id: span.span_context.trace_id().to_string(),
+                span_id: span.span_context.span_id().to_string(),
+                parent_span_id: (span.parent_span_id != opentelemetry::trace::SpanId::INVALID)
+                    .then(|| span.parent_span_id.to_string()),
+                status: match &span.status {
+                    Status::Unset => "unset".to_string(),
+                    Status::Ok => "ok".to_string(),
+                    Status::Error { description } => format!("error: {description}"),
+                },
+                attributes,
+            }
+        }
+    }
+
+    /// A recorder wired to a provider that exports each span as it ends, so a
+    /// test reads what the process published instead of waiting on a batch.
+    ///
+    /// Building it publishes the process-wide W3C propagator and the tracer
+    /// provider -- the two things the service bootstrap publishes -- so a call
+    /// made under an installed layer injects and adopts context the way it does
+    /// in a service. One recorder per process: the last one built owns the
+    /// process-wide handles.
+    pub struct Recorder {
+        exporter: RecordingExporter,
+        tracer: SdkTracer,
+    }
+
+    impl Recorder {
+        /// A recorder that names its spans with `service`.
+        pub fn new(service: &str) -> Self {
+            let exporter = RecordingExporter::default();
+            let provider = SdkTracerProvider::builder()
+                .with_simple_exporter(exporter.clone())
+                .with_resource(
+                    Resource::builder()
+                        .with_service_name(service.to_string())
+                        .with_attribute(KeyValue::new(
+                            "service.namespace",
+                            super::RESOURCE_NAMESPACE,
+                        ))
+                        .build(),
+                )
+                .build();
+            let tracer = provider.tracer(service.to_string());
+            opentelemetry::global::set_text_map_propagator(TraceContextPropagator::new());
+            opentelemetry::global::set_tracer_provider(provider.clone());
+            Self { exporter, tracer }
+        }
+
+        /// The layer that hands spans to this recorder's exporter.
+        pub fn layer(&self) -> Box<dyn Layer<Registry> + Send + Sync> {
+            tracing_opentelemetry::layer()
+                .with_tracer(self.tracer.clone())
+                .boxed()
+        }
+
+        /// The spans exported so far, as plain values.
+        pub fn observed(&self) -> Vec<ObservedSpan> {
+            self.exporter.observed()
+        }
+    }
+
+    #[cfg(test)]
+    mod recorder_tests {
+        use super::*;
+        use tracing_subscriber::prelude::*;
+
+        /// The recorder reads back what a span published: the layer converts
+        /// the tracing span, and the exporter hands it over as plain values.
+        #[test]
+        fn a_recorder_reads_back_the_span_a_test_opens() {
+            let recorder = Recorder::new("a-test-service");
+            let subscriber = tracing_subscriber::registry().with(recorder.layer());
+            let spans = {
+                let _subscribed = tracing::subscriber::set_default(subscriber);
+                let probe = tracing::info_span!("probe", answer = 42);
+                let entered = probe.enter();
+                let inner = tracing::info_span!("inner");
+                drop(inner);
+                drop(entered);
+                drop(probe);
+                recorder.observed()
+            };
+            assert_eq!(spans.len(), 2, "the probe and its inner span: {spans:#?}");
+            let probe = spans
+                .iter()
+                .find(|span| span.name == "probe")
+                .expect("the named span");
+            assert_eq!(probe.kind, "internal");
+            assert_eq!(probe.attribute("answer"), Some("42"));
+            assert_eq!(probe.parent_span_id, None);
+            let inner = spans
+                .iter()
+                .find(|span| span.name == "inner")
+                .expect("the inner span");
+            assert_eq!(
+                inner.parent_span_id.as_deref(),
+                Some(probe.span_id.as_str())
+            );
+            assert_eq!(inner.trace_id, probe.trace_id);
         }
     }
 }

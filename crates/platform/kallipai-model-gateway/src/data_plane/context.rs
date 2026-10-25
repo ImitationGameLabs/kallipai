@@ -20,6 +20,27 @@ pub enum Route {
     MethodNotAllowed,
 }
 
+impl Route {
+    /// The route label a request span carries as `http.route`: a
+    /// cardinality-bounded name, never the concrete path. The entry
+    /// paths are these, not the wire paths an `Endpoint` names.
+    ///
+    /// A CORS preflight is not one of these: an OPTIONS probe at a path whose
+    /// method is POST would key the 405, so `request_filter` covers it apart
+    /// and names the span `preflight` instead of asking for a label here.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Forward(dialect::Endpoint::ChatCompletions) => "/chat/completions",
+            Self::Forward(dialect::Endpoint::Responses) => "/responses",
+            Self::Forward(dialect::Endpoint::Messages) => "/messages",
+            Self::Health => "/health",
+            Self::Admin => "/admin/*",
+            Self::NotFound => "unmatched",
+            Self::MethodNotAllowed => "method_not_allowed",
+        }
+    }
+}
+
 /// The selection outcome: the profile the request rides and the pieces
 /// the later phases need: the peer, the credential, and the rewrite
 /// inputs (the base path and the authority for the Host header).
@@ -66,6 +87,11 @@ impl InternalFailureReason {
 
 pub struct GatewayCtx {
     pub route: Route,
+    /// The span the request runs inside, opened at the top of
+    /// `request_filter`: every later phase is instrumented with it,
+    /// so a call this gateway makes lands under the request that
+    /// caused it instead of opening a trace of its own.
+    pub span: Option<tracing::Span>,
     pub selection: Option<Selection>,
     /// The authenticated tagma, staged at the identity gate: the
     /// terminal failure line names the caller behind a failure.
@@ -94,4 +120,19 @@ pub struct GatewayCtx {
     /// for this request: the discriminator between a connect
     /// error and an upstream error at the terminal phase.
     pub connected: bool,
+}
+
+impl GatewayCtx {
+    /// The request span, or a disabled one: instrumenting a phase with it
+    /// does nothing.
+    ///
+    /// The invariant behind it: `request_filter` is the first phase of a
+    /// request and stores the span before anything answers, so every later
+    /// phase finds one. The fallback hands out a disabled span rather than
+    /// panicking, which leaves the invariant a statement the code makes
+    /// rather than one an `expect` enforces -- and no caller in the tree
+    /// walks in without it today.
+    pub fn phase_span(&self) -> tracing::Span {
+        self.span.clone().unwrap_or_else(tracing::Span::none)
+    }
 }

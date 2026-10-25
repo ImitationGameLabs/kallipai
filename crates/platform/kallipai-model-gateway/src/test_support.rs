@@ -13,6 +13,8 @@ use testcontainers_modules::testcontainers::{ImageExt, ReuseDirective};
 use tokio::sync::OnceCell;
 use tracing_subscriber::prelude::*;
 
+pub(crate) use kallipai_common::telemetry::test_observability::{ObservedSpan, Recorder};
+
 use crate::db::Db;
 
 /// The canonical test tagma bearer: the mock verifier admits it as the
@@ -758,6 +760,17 @@ impl Write for MutexGuardWriter<'_> {
     }
 }
 
+/// The recorder the data-plane span assertions read: built once, beside the
+/// line capture, because the process gets one global subscriber.
+static RECORDER: std::sync::OnceLock<Recorder> = std::sync::OnceLock::new();
+
+/// The spans the process exported so far, as a collector would see them:
+/// names, kinds, trace and span ids, parents, status and attributes.
+pub(crate) fn global_spans() -> Vec<ObservedSpan> {
+    global_capture();
+    RECORDER.get().map(Recorder::observed).unwrap_or_default()
+}
+
 /// The process-global capture the end-to-end line assertions read: the
 /// terminal phase writes from pingora's own thread, so the thread-local
 /// guard the unit tests use would miss it. Installed once for the whole
@@ -765,13 +778,20 @@ impl Write for MutexGuardWriter<'_> {
 /// panic, so the next end-to-end test calls this rather than installing a
 /// subscriber of its own. Every test's lines land in the one buffer, so
 /// an assertion selects its line with a needle only that test produces.
+///
+/// The same subscriber carries the span recorder, for the same reason: a
+/// span a phase opens or a client call makes leaves through it, and the
+/// span assertions read what crossed that boundary.
 pub(crate) fn global_capture() -> std::sync::Arc<std::sync::Mutex<Vec<u8>>> {
     static LINES: std::sync::OnceLock<std::sync::Arc<std::sync::Mutex<Vec<u8>>>> =
         std::sync::OnceLock::new();
     LINES
         .get_or_init(|| {
             let lines = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-            let subscriber = tracing_subscriber::registry().with(
+            let recorder = Recorder::new("model-gateway");
+            // The span layer goes on first: its type is erased against the
+            // bare registry, and the event layer stacks on top of it.
+            let subscriber = tracing_subscriber::registry().with(recorder.layer()).with(
                 tracing_subscriber::fmt::layer()
                     .with_ansi(false)
                     .with_writer(SharedBuf(lines.clone()))
@@ -782,6 +802,7 @@ pub(crate) fn global_capture() -> std::sync::Arc<std::sync::Mutex<Vec<u8>>> {
             // never found its line; aborting here would take the whole
             // binary down from whichever test installed second.
             let _ = tracing::subscriber::set_global_default(subscriber);
+            let _ = RECORDER.set(recorder);
             lines
         })
         .clone()

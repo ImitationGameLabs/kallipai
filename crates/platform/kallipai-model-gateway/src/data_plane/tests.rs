@@ -11,7 +11,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use super::spawn_data_plane;
 use crate::state::AppState;
-use crate::test_support::{TEST_TAGMA_BEARER, UPSTREAM_KEY, migrated_test_db};
+use crate::test_support::{ObservedSpan, TEST_TAGMA_BEARER, UPSTREAM_KEY, migrated_test_db};
 
 /// One scratch port per test: the suite runs in one process and the
 /// ports are handed out from a private, colliding-with-nothing range.
@@ -1185,9 +1185,12 @@ async fn anthropic_stream_passes_through() {
 /// The scratch faces: health answers unauthenticated (compose
 /// healthcheck has no credentials), the whole /admin family is a 404 on
 /// the public port (bare prefix included), a known path with the wrong
-/// method is a 405, and an unknown path is a plain 404.
+/// method is a 405, and an unknown path is a plain 404. None of the five is
+/// routed to a generation endpoint, so none carries a gateway outcome or an
+/// upstream attribute.
 #[tokio::test]
 async fn health_admin_and_error_faces_answer_without_an_upstream() {
+    crate::test_support::global_capture();
     let db = migrated_test_db().await;
     let base = spawn_plane(db).await;
 
@@ -1213,6 +1216,54 @@ async fn health_admin_and_error_faces_answer_without_an_upstream() {
 
     let unknown = get_data_plane(&base, "/no/such/path", None).await;
     assert_eq!(unknown.status(), axum::http::StatusCode::NOT_FOUND);
+
+    let paths = [
+        "/health",
+        "/admin/keys",
+        "/admin",
+        "/chat/completions",
+        "/no/such/path",
+    ];
+    let spans = await_spans(|spans| {
+        paths.iter().all(|path| {
+            spans.iter().any(|span| {
+                span.kind == "server"
+                    && span.attribute("http.request.method") == Some("GET")
+                    && span.attribute("url.path") == Some(*path)
+            })
+        })
+    })
+    .await;
+    for path in paths {
+        let span = spans
+            .iter()
+            .find(|span| {
+                span.kind == "server"
+                    && span.attribute("http.request.method") == Some("GET")
+                    && span.attribute("url.path") == Some(path)
+            })
+            .unwrap_or_else(|| panic!("no GET server span for {path}"));
+        assert_eq!(
+            span.attribute("http.route"),
+            Some(super::routes::route_of(&axum::http::Method::GET, path).label()),
+            "the route label of GET {path} comes from Route::label"
+        );
+        assert_eq!(
+            span.attribute("gateway.outcome"),
+            None,
+            "no outcome on GET {path}"
+        );
+        assert_eq!(
+            span.attribute("upstream.authority"),
+            None,
+            "no authority on GET {path}"
+        );
+        assert_eq!(
+            span.attribute("upstream.api_family"),
+            None,
+            "no family on GET {path}"
+        );
+    }
 }
 
 /// The CORS preflight: the browser's probe (OPTIONS + Origin + the
@@ -1222,6 +1273,7 @@ async fn health_admin_and_error_faces_answer_without_an_upstream() {
 /// headers at all.
 #[tokio::test]
 async fn cors_preflight_is_answered_with_the_cors_headers() {
+    crate::test_support::global_capture();
     let db = migrated_test_db().await;
     let addr = next_addr();
     let origin = "https://app.example";
@@ -1281,6 +1333,28 @@ async fn cors_preflight_is_answered_with_the_cors_headers() {
             .get("access-control-allow-origin")
             .is_none()
     );
+
+    // The probe is a request like any other: it leaves one server span, and
+    // the label is the one thing that says what it was.
+    let spans = await_spans(|spans| {
+        spans
+            .iter()
+            .any(|span| span.attribute("http.route") == Some("preflight"))
+    })
+    .await;
+    let probe = spans
+        .iter()
+        .find(|span| span.attribute("http.route") == Some("preflight"))
+        .unwrap_or_else(|| panic!("the probe left no span labelled preflight: {spans:#?}"));
+    // Answered before the routing decision is used and before a credential is
+    // looked up, so the outcome and the upstream fields are absent, as the
+    // docs say.
+    assert_eq!(probe.kind, "server");
+    assert_eq!(probe.attribute("http.request.method"), Some("OPTIONS"));
+    assert_eq!(probe.attribute("http.response.status_code"), Some("200"));
+    assert_eq!(probe.attribute("gateway.outcome"), None);
+    assert_eq!(probe.attribute("upstream.authority"), None);
+    assert_eq!(probe.attribute("upstream.api_family"), None);
 }
 
 /// The declared-body bound answers a 413 through the bridge, so the
@@ -1503,4 +1577,242 @@ async fn seed_selection(db: &crate::db::Db) {
         .exec(db)
         .await
         .expect("anchor the default set");
+}
+
+/// A fake archeion on loopback: `verify-bearer` names a tagma this fixture
+/// never enrolls, and `enrollment-lookup` gives the collapsed 404, so a
+/// request through the real verifier ends at the bare 401 the data plane
+/// answers an identity it cannot resolve. Both calls leave through
+/// `telemetry::http_client`, which is where the client spans come from.
+async fn spawn_fake_archeion() -> String {
+    use axum::Json;
+    use axum::routing::post;
+
+    let app = axum::Router::new()
+        .route(
+            "/internal/verify-bearer",
+            post(|Json(_body): Json<serde_json::Value>| async {
+                Json(serde_json::json!({
+                    "principal": {"kind": "tagma", "tagma_id": "tagma-unenrolled"}
+                }))
+            }),
+        )
+        .route(
+            "/internal/enrollment-lookup",
+            post(|| async { axum::http::StatusCode::NOT_FOUND }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("a loopback port");
+    let addr = listener.local_addr().expect("the bound address");
+    tokio::spawn(async move {
+        axum::serve(listener, app)
+            .await
+            .expect("the fake archeion serves");
+    });
+    format!("http://{addr}")
+}
+
+/// The spans the process exported, waited for: the terminal phase and the
+/// exporter race with the client seeing its answer.
+async fn await_spans<F>(ready: F) -> Vec<ObservedSpan>
+where
+    F: Fn(&[ObservedSpan]) -> bool,
+{
+    for _ in 0..200 {
+        let spans = crate::test_support::global_spans();
+        if ready(&spans) {
+            return spans;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    crate::test_support::global_spans()
+}
+
+/// The honest 401 path, traced: the archeion check a rejected request causes
+/// hangs under the span of that request. With no data-plane span the check is
+/// the root of a trace of its own, and the trace cannot say which request it
+/// answered -- the debt this assertion exists to keep paid.
+#[tokio::test]
+async fn the_archeion_check_of_a_rejected_request_hangs_under_its_request_span() {
+    // Installed before the first request: the process gets one subscriber, and
+    // a span opened before it is installed is exported nowhere.
+    crate::test_support::global_capture();
+    let db = migrated_test_db().await;
+    let archeion = spawn_fake_archeion().await;
+    let addr = next_addr();
+    let state = AppState {
+        db,
+        public_base_url: "http://gw.test:7501".to_string(),
+        management: crate::management::AdminAuth::Platform(std::sync::Arc::new(
+            crate::management::ArcheionVerifier::new(archeion, "internal-token".to_string()),
+        )),
+        identity_cache: std::sync::Arc::new(crate::secret::IdentityCache::default()),
+        metrics: crate::metrics::Metrics::private(),
+    };
+    spawn_data_plane(addr.clone(), state, String::new()).expect("spawn data plane");
+    wait_for_listener(&addr);
+
+    let response = reqwest::Client::new()
+        .post(format!("http://{addr}/messages"))
+        .bearer_auth("a-bearer-nobody-enrolled")
+        .header("content-type", "application/json")
+        .body("{}")
+        .send()
+        .await
+        .expect("the plane answers");
+    assert_eq!(response.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+    // Only this fixture wires the real verifier, so the checks into the fake
+    // archeion are the ones this request caused.
+    let spans = await_spans(|spans| {
+        let checks: Vec<&ObservedSpan> = spans
+            .iter()
+            .filter(|span| span.name.starts_with("POST /internal/"))
+            .collect();
+        // The request span ends with the terminal phase, after the checks
+        // it caused have ended, so the wait covers both halves of the pair.
+        !checks.is_empty()
+            && checks.iter().all(|check| {
+                spans
+                    .iter()
+                    .any(|span| Some(span.span_id.as_str()) == check.parent_span_id.as_deref())
+            })
+    })
+    .await;
+    let checks: Vec<&ObservedSpan> = spans
+        .iter()
+        .filter(|span| span.name.starts_with("POST /internal/"))
+        .collect();
+    assert!(
+        !checks.is_empty(),
+        "the verifier's calls left client spans: {spans:#?}"
+    );
+    for check in checks {
+        let parent = spans
+            .iter()
+            .find(|span| Some(span.span_id.as_str()) == check.parent_span_id.as_deref());
+        let parent = parent.unwrap_or_else(|| {
+            panic!("the check {check:#?} is a root: no span carries its parent id, in {spans:#?}")
+        });
+        assert_eq!(
+            parent.kind, "server",
+            "the check hangs under the request span: {check:#?} under {parent:#?}"
+        );
+        assert_eq!(parent.attribute("url.path"), Some("/messages"));
+        assert_eq!(check.trace_id, parent.trace_id);
+        assert_eq!(parent.attribute("http.route"), Some("/messages"));
+        assert_eq!(parent.attribute("http.request.method"), Some("POST"));
+        assert_eq!(parent.attribute("http.response.status_code"), Some("401"));
+        assert_eq!(parent.attribute("gateway.outcome"), Some("gated_auth"));
+        assert!(
+            parent.parent_span_id.is_none(),
+            "no caller context travels: the request span is a root"
+        );
+    }
+}
+
+/// The one server span of a trace the test minted: the trace id is the
+/// selector, so concurrent tests in this binary cannot collide with it.
+async fn await_server_span(trace: &str) -> ObservedSpan {
+    let spans = await_spans(|spans| {
+        spans
+            .iter()
+            .any(|span| span.trace_id == trace && span.kind == "server")
+    })
+    .await;
+    let found = spans
+        .iter()
+        .find(|span| span.trace_id == trace && span.kind == "server");
+    match found {
+        Some(span) => span.clone(),
+        None => panic!("no server span in trace {trace}: {spans:#?}"),
+    }
+}
+
+/// A caller's W3C context is adopted rather than dropped: the request span
+/// continues that trace and hangs under the caller's span, so one trace
+/// covers the hop into the gateway. The health probe is the cheapest route
+/// that answers without an identity or an upstream.
+#[tokio::test]
+async fn an_incoming_traceparent_becomes_the_request_spans_parent() {
+    crate::test_support::global_capture();
+    let db = migrated_test_db().await;
+    let base = spawn_plane(db).await;
+    let trace = "4bf92f3577b34da6a3ce929d0e0e4736";
+    let caller_span = "00f067aa0ba902b7";
+
+    let response = reqwest::Client::new()
+        .get(format!("{base}/health"))
+        .header("traceparent", format!("00-{trace}-{caller_span}-01"))
+        .send()
+        .await
+        .expect("the health probe answers");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+
+    let span = await_server_span(trace).await;
+    assert_eq!(span.parent_span_id.as_deref(), Some(caller_span));
+    assert_eq!(span.name, "GET /health");
+    assert_eq!(span.attribute("http.route"), Some("/health"));
+    assert_eq!(span.attribute("http.request.method"), Some("GET"));
+    assert_eq!(span.attribute("url.path"), Some("/health"));
+    assert_eq!(span.attribute("http.response.status_code"), Some("200"));
+    assert_eq!(span.attribute("error.type"), None, "a 2xx names no error");
+    assert_eq!(
+        span.attribute("gateway.outcome"),
+        None,
+        "a health probe takes no credential: no outcome"
+    );
+    assert_eq!(
+        span.attribute("upstream.authority"),
+        None,
+        "nothing was selected for a probe: no authority"
+    );
+    assert_eq!(span.status, "unset");
+}
+
+/// The unreachable-upstream path, traced: the answer the client sees and the
+/// failure the span names are one event. Nothing listens on port 1, so the
+/// dial fails and no upstream ever speaks.
+#[tokio::test]
+async fn a_forward_to_an_unreachable_upstream_is_a_failed_server_span() {
+    crate::test_support::global_capture();
+    let db = migrated_test_db().await;
+    crate::test_support::seed_registry(&db, "http://127.0.0.1:1").await;
+    let base = spawn_plane(db).await;
+    let trace = "11111111111111111111111111111111";
+    let caller_span = "2222222222222222";
+
+    let response = post_generation(
+        &base,
+        "/chat/completions",
+        TEST_TAGMA_BEARER,
+        Some("p1"),
+        r#"{"model":"deepseek-chat","messages":[{"role":"user","content":"hi"}]}"#,
+        &[("traceparent", &format!("00-{trace}-{caller_span}-01"))],
+    )
+    .await;
+    assert_eq!(response.status(), reqwest::StatusCode::BAD_GATEWAY);
+
+    let span = await_server_span(trace).await;
+    assert_eq!(span.name, "POST /chat/completions");
+    assert_eq!(span.attribute("http.route"), Some("/chat/completions"));
+    assert_eq!(span.attribute("http.response.status_code"), Some("502"));
+    assert_eq!(span.attribute("error.type"), Some("http_502"));
+    assert_eq!(span.attribute("gateway.outcome"), Some("connect_error"));
+    assert_eq!(
+        span.attribute("upstream.authority"),
+        Some("127.0.0.1:1"),
+        "the authority the selection took from the base URL"
+    );
+    assert_eq!(
+        span.attribute("upstream.api_family"),
+        Some("deepseek"),
+        "the registry family of the selected provider"
+    );
+    assert_eq!(span.parent_span_id.as_deref(), Some(caller_span));
+    assert!(
+        span.status.starts_with("error"),
+        "a 5xx fails the span: {span:#?}"
+    );
 }

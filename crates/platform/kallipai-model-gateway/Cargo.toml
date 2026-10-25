@@ -45,3 +45,7 @@ just-llm-client = { workspace = true }
 testcontainers = { workspace = true, features = ["reusable-containers"] }
 testcontainers-modules = { workspace = true }
 tempfile = { workspace = true }
+# The export boundary a data-plane test reads: the recorder lives in the
+# shared crate, so the test build turns on its test-support feature instead
+# of carrying a second OpenTelemetry pipeline of its own.
+kallipai-common = { workspace = true, features = ["axum", "telemetry", "test-support"] }

@@ -101,6 +101,7 @@ fn the_failure_line_omits_the_fields_a_gate_never_staged() {
         pending_detail: None,
         upstream_status: None,
         connected: false,
+        span: None,
     };
     log_forward_failure(
         Endpoint::Responses,
@@ -259,6 +260,7 @@ fn forwarding_ctx() -> GatewayCtx {
         pending_detail: None,
         upstream_status: None,
         connected: false,
+        span: None,
     }
 }
 
