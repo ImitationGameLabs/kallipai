@@ -62,10 +62,20 @@ let
 
   # Tagma port override (mirrors the bindOverride pattern). Unset -> 3000
   # (the existing default). Set via env or .env (direnv sources it into the
-  # arion process) to run the tagma on a different port:
-  #   KALLIPAI_TAGMA_PORT=3001 arion -f compose/dev/tagma.nix up -d
+  # arion process) to run the tagma on a different port (3001 belongs to the
+  # dev stack's grafana, so pick another):
+  #   KALLIPAI_TAGMA_PORT=3002 arion -f compose/dev/tagma.nix up -d
   tagmaPortRaw = builtins.getEnv "KALLIPAI_TAGMA_PORT";
   tagmaPort = if tagmaPortRaw == "" then "3000" else tagmaPortRaw;
+
+  # The dev collector's OTLP/HTTP port, as published on the host by the
+  # observability stack (compose/dev/polis.nix, KALLIPAI_ARION_OTLP_PORT).
+  # Both services here run on the host network, so they reach the collector
+  # on loopback. Both get the endpoint below unconditionally; removing that
+  # line is what leaves the exporter uninstalled.
+  obsDefaults = (import ../../nix/obs-stack.nix { inherit lib; }).defaults;
+  otlpPortRaw = builtins.getEnv "KALLIPAI_ARION_OTLP_PORT";
+  otlpPort = if otlpPortRaw == "" then obsDefaults.otlpHTTP else otlpPortRaw;
 in
 {
   config = {
@@ -155,6 +165,7 @@ in
         # Rootless or userns-remap deployments remain the preferred shapes.
         KALLIPAI_TAGMA_ACCEPT_UNSAFE_RUN_AS_ROOT = "1";
         RUST_LOG = "info";
+        OTEL_EXPORTER_OTLP_ENDPOINT = "http://127.0.0.1:${otlpPort}";
       };
     };
 
@@ -188,6 +199,11 @@ in
         # KALLIPAI_AUTH_TOKEN (= tagma operator secret) comes from .env — used for
         # delivery; management requests carry each caller's own agent token.
         RUST_LOG = "info";
+        # The exported service name is the literal the binary passes to
+        # init_service_telemetry -- "cron-daemon", not "cron"
+        # (crates/time/kallipai-cron-daemon/src/main.rs). OTEL_SERVICE_NAME
+        # cannot override it, so it is not set anywhere.
+        OTEL_EXPORTER_OTLP_ENDPOINT = "http://127.0.0.1:${otlpPort}";
       };
     };
   };

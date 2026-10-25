@@ -3448,6 +3448,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "kallipai-telemetry-prune"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "kallipai-testkit",
+]
+
+[[package]]
 name = "kallipai-testkit"
 version = "0.1.0"
 dependencies = [

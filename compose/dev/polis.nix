@@ -199,12 +199,61 @@ let
         static_configs:
           - targets: ["gateway:7500"]
   '';
+
+  # The observability stack, as a pure function (nix/obs-stack.nix) so it
+  # is checkable without arion. Data lands under telemetryRoot on the host,
+  # never in a named volume, so `arion down -v` cannot take it;
+  # kallipai-telemetry-prune bounds it at 5 GiB / 72h. Host ports follow the
+  # same KALLIPAI_ARION_* override pattern as the services above.
+  obs = import ../../nix/obs-stack.nix { inherit lib; };
+  telemetryRoot = obs.telemetryRoot {
+    xdgDataHome = builtins.getEnv "XDG_DATA_HOME";
+    home = builtins.getEnv "HOME";
+  };
+  obsStack = obs.mkStack {
+    inherit pkgs;
+    root = telemetryRoot;
+    # The defaults live in nix/obs-stack.nix so this file and
+    # compose/dev/tagma.nix cannot drift apart on the collector's address.
+    ports = {
+      otlpHTTP = envOrDefault "KALLIPAI_ARION_OTLP_PORT" obs.defaults.otlpHTTP;
+      otelHealth = envOrDefault "KALLIPAI_ARION_OTEL_HEALTH_PORT" obs.defaults.otelHealth;
+      tempo = envOrDefault "KALLIPAI_ARION_TEMPO_PORT" obs.defaults.tempo;
+      grafana = envOrDefault "KALLIPAI_ARION_GRAFANA_PORT" obs.defaults.grafana;
+    };
+  };
+  # A service's tracing target: the collector by service name, over the
+  # compose network. OTEL_EXPORTER_OTLP_ENDPOINT unset means no exporter is
+  # installed at all, which is the code's own opt-in.
+  #
+  # The service name is deliberately not configurable: each binary passes its
+  # own name to init_service_telemetry, and `with_service_name` overrides
+  # OTEL_SERVICE_NAME (crates/kallipai-common/src/telemetry.rs), so setting it
+  # here would be dead configuration that only looks like a knob.
+  # The port comes off the built stack, not the module-level default table: a
+  # caller that overrides the container ports must move this endpoint with them.
+  otelEndpoint = "http://otelcol:${obsStack.containerPorts.otlpHTTP}";
 in
 {
   imports = [ ./files.nix ];
 
   config = {
     project.name = projectName;
+
+    # The observability stack (collector, tempo, grafana) from nix/obs-stack.nix:
+    # see that file for what it starts, where the data lands and how to clear
+    # it. Bound one service at a time, with the log cap folded in: this attrset
+    # also assigns `services.<name>.*` paths, and Nix refuses a plain
+    # `services = ...` next to those ("attribute already defined" at parse).
+    services.otelcol = obsStack.services.otelcol // {
+      out.service.logging = logLimits;
+    };
+    services.tempo = obsStack.services.tempo // {
+      out.service.logging = logLimits;
+    };
+    services.grafana = obsStack.services.grafana // {
+      out.service.logging = logLimits;
+    };
 
     # The files service's CORS gate: the browser (app origin) talks to
     # api.<devDomain> cross-origin for uploads/downloads; allowlist the
@@ -240,6 +289,9 @@ in
     services.gateway-postgres.out.service.logging = logLimits;
     services.gateway.out.service.logging = logLimits;
     services.prometheus.out.service.logging = logLimits;
+
+    # The stack's own containers are capped like the rest -- folded into the
+    # three assignments above, where it cannot collide with them.
     # Dev-only hardcoded creds (prod reads them from .env).
     services.archeion-postgres = {
       service.image = "postgres:17.5";
@@ -348,6 +400,7 @@ in
       ]
       ++ cacert;
       service.environment = {
+        OTEL_EXPORTER_OTLP_ENDPOINT = otelEndpoint;
         PATH = "${workspace}/bin";
         KALLIPAI_ARCHEION_ADDR = "0.0.0.0:7100";
         KALLIPAI_ARCHEION_DATABASE_URL = "postgres://kallipai:kallipai@archeion-postgres:5432/kallipai";
@@ -425,6 +478,7 @@ in
       ]
       ++ cacert;
       service.environment = {
+        OTEL_EXPORTER_OTLP_ENDPOINT = otelEndpoint;
         KALLIPAI_LESCHE_ADDR = "0.0.0.0:7200";
         KALLIPAI_LESCHE_DATABASE_URL = "postgres://kallipai:kallipai@lesche-postgres:5432/kallipai";
         KALLIPAI_LESCHE_ARCHEION_INTERNAL_URL = "http://archeion:7100";
@@ -458,6 +512,7 @@ in
       ]
       ++ cacert;
       service.environment = {
+        OTEL_EXPORTER_OTLP_ENDPOINT = otelEndpoint;
         KALLIPAI_KERYX_ADDR = "0.0.0.0:7210";
         KALLIPAI_KERYX_ARCHEION_INTERNAL_URL = "http://archeion:7100";
         # Read the archeion-provisioned internal secret (shared volume).
@@ -503,6 +558,7 @@ in
       ]
       ++ cacert;
       service.environment = {
+        OTEL_EXPORTER_OTLP_ENDPOINT = otelEndpoint;
         PATH = "${workspace}/bin";
         KALLIPAI_INSTANCES_ADDR = "0.0.0.0:7300";
         # The mounted host dir carries the daemon's socket; it points
@@ -547,6 +603,7 @@ in
       ]
       ++ cacert;
       service.environment = {
+        OTEL_EXPORTER_OTLP_ENDPOINT = otelEndpoint;
         PATH = "${workspace}/bin";
         KALLIPAI_MODEL_GATEWAY_ADDR = "0.0.0.0:7501";
         KALLIPAI_MODEL_GATEWAY_MANAGEMENT_ADDR = "0.0.0.0:7500";
@@ -577,5 +634,15 @@ in
         "${prometheusConfig}:/etc/prometheus/prometheus.yml:ro"
       ];
     };
+
+    # Tracing for the platform services: the collector is reachable by service
+    # name on the compose network. Setting the endpoint in each service's own
+    # environment block is the whole opt-in (the code installs no exporter
+    # without it); the exported service names are the literals each binary
+    # passes, unprefixed because the same string names the log file.
+    #
+    # files' environment literal lives in ./files.nix, so its endpoint is the
+    # one key added here rather than written inline with the rest.
+    services.files.service.environment.OTEL_EXPORTER_OTLP_ENDPOINT = otelEndpoint;
   };
 }

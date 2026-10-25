@@ -170,6 +170,9 @@
             kallipai-daemon-spawn = builds.daemon-spawn;
             kallipai-instances = builds.instances;
             kallipai-model-gateway = builds.model-gateway;
+            # Retention for the local telemetry stack's data directory (the
+            # dev compose's collector/tempo/grafana): see nix/obs-stack.nix.
+            kallipai-telemetry-prune = builds.telemetry-prune;
             # The FHS distribution tarball builds on the pinned 22.11
             kallipai-tarball = import ./nix/packages/tarball.nix {
               # Tool-side pkgs (patchelf/gnutar) from the main line; the

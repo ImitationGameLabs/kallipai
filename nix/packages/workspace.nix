@@ -145,4 +145,8 @@ in
   # shell-out deps). Its own deployment unit -- see
   # services.kallipai.polis.model-gateway in nixos-modules.nix.
   model-gateway = buildCrate "cargo build --release -p kallipai-model-gateway";
+  # The local telemetry stack's retention tool (bin + lib): bounds the data
+  # directory the dev compose mounts, so the trace store cannot grow without
+  # limit. See nix/obs-stack.nix for the stack it serves.
+  telemetry-prune = buildCrate "cargo build --release -p kallipai-telemetry-prune";
 }

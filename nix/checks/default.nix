@@ -115,4 +115,45 @@ in
         project
         ;
     })."${project}-nixos-module-eval";
+
+  # The compose files are Nix modules that only `arion up` evaluates, and
+  # arion is not a flake input -- so nothing here would notice a file that no
+  # longer parses. Parsing needs no arion and no evaluation, and it catches the
+  # class of defect that reads fine but cannot be loaded (`services = x;` next
+  # to `services.<name>.y = z;` is a parse error, not a merge). The dummy store
+  # keeps the parser from touching a store this build must not write.
+  "${project}-compose-parse" =
+    pkgs.runCommand "${project}-compose-parse"
+      {
+        nativeBuildInputs = [ pkgs.nix ];
+        files = [
+          ../../compose/dev/polis.nix
+          ../../compose/dev/tagma.nix
+          ../../compose/dev/files.nix
+          ../../compose/dev/test.nix
+          ../../compose/prod/polis.nix
+          ../../compose/prod/tagma.nix
+          ../../arion-compose.nix
+          ../../arion-pkgs.nix
+        ];
+      }
+      ''
+        for file in $files; do
+          nix-instantiate --store dummy:// --parse "$file" > /dev/null
+        done
+        mkdir -p $out
+        echo "every compose file parses" > $out/parse.txt
+      '';
+
+  # The local observability stack's expression (nix/obs-stack.nix): arion is
+  # not an input, so the stack is a pure function and this check is the
+  # only place its shape is proven without starting anything.
+  "${project}-obs-stack-eval" =
+    (import ./obs-stack.nix {
+      inherit
+        pkgs
+        lib
+        project
+        ;
+    })."${project}-obs-stack-eval";
 }

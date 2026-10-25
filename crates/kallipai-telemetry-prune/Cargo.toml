@@ -1,0 +1,13 @@
+[package]
+name = "kallipai-telemetry-prune"
+description = "Keep the local telemetry stack's data directory bounded: delete the oldest tempo blocks and wal segments first"
+edition = "2024"
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true }
+
+[dev-dependencies]
+kallipai-testkit = { workspace = true }

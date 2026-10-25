@@ -33,6 +33,7 @@ members = [
   "crates/kallipai-blob-store",
   "crates/kallipai-db-helper",
   "crates/kallipai-testkit",
+  "crates/kallipai-telemetry-prune",
 ]
 
 resolver = "3"
