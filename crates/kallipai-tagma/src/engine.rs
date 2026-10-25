@@ -239,8 +239,10 @@ fn recompute_start_after_end(cs: &mut CycleState, now: OffsetDateTime) {
 // Phase executor
 // ---------------------------------------------------------------------------
 
-/// Cancel the current round token for an agent (if any). Mirrors the logic
-/// in `interrupt_agent` but without auth checks — the engine is internal.
+/// Cancel the current round token for an agent (if any). The round form only:
+/// an armed park (a `break(wait)` fuse or a transient retry) keeps its own
+/// deadline and fires on it without this function. No auth checks — the
+/// engine is internal.
 async fn interrupt_round(state: &SharedState, id: &AgentId) {
     let round_cancel = {
         let registry = state.registry.read().await;

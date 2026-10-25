@@ -10,9 +10,9 @@ use anyhow::{Context, Result};
 use just_llm_client::JsonEventStream;
 use kallipai_common::agentid::AgentId;
 use kallipai_common::protocol::{
-    AgentSummary, CreateAgentRequest, CreateAgentResponse, ListAgentsResponse,
-    ProfileSetUpdateRequest, RelocateRequest, Relocated, SseEvent, UpdateActivityRequest,
-    UpdateAgentMetadataRequest,
+    AgentSummary, CreateAgentRequest, CreateAgentResponse, InterruptOutcome, InterruptResponse,
+    ListAgentsResponse, ProfileSetUpdateRequest, RelocateRequest, Relocated, SseEvent,
+    UpdateActivityRequest, UpdateAgentMetadataRequest,
 };
 
 impl TagmaClient {
@@ -198,21 +198,24 @@ impl TagmaClient {
         Ok(())
     }
 
-    /// Interrupt the current agent operation gracefully.
+    /// Interrupt the current agent operation gracefully, reporting which form
+    /// the tagma took: an aborted round or a cancelled wake.
     /// Requires superior-level auth if the tagma enforces it.
-    pub async fn interrupt_agent(&self, id: &AgentId) -> Result<()> {
-        self.ensure_success(
-            self.with_auth(
-                self.inner
-                    .http
-                    .post(self.url(&format!("/agents/{id}/interrupt"))),
+    pub async fn interrupt_agent(&self, id: &AgentId) -> Result<InterruptOutcome> {
+        let response: InterruptResponse = self
+            .handle_response(
+                self.with_auth(
+                    self.inner
+                        .http
+                        .post(self.url(&format!("/agents/{id}/interrupt"))),
+                )
+                .send()
+                .await
+                .context("failed to connect to tagma")?,
+                "failed to parse response",
             )
-            .send()
-            .await
-            .context("failed to connect to tagma")?,
-        )
-        .await?;
-        Ok(())
+            .await?;
+        Ok(response.outcome)
     }
     /// Get a raw SSE event stream for the given agent.
     pub async fn event_stream(&self, id: &AgentId) -> Result<JsonEventStream<SseEvent>> {

@@ -61,7 +61,7 @@ kallip subagent <subcommand> [args]
 | `subagent spawn`          | 创建直接 subagent（必填标志见下文说明）。                        |
 | `subagent list`           | 列出当前 agent 的直接 subagent。                         |
 | `subagent remove <ID>`    | 移除直接 subagent。                                   |
-| `subagent interrupt <ID>` | 中断直接 subagent 当前操作。                              |
+| `subagent interrupt <ID>` | 中断直接 subagent：中止正在跑的一轮，或取消它停泊中的等待/重试。 |
 | `subagent metadata <ID>`  | 更新直接 subagent 的 role/description。                |
 | `subagent workspace relocate <ID> <PATH>` | 把子代理的 workspace 迁到已备好的目录。 |
 | `subagent workspace mv <ID> <PATH>` | 先停泊代理，再搬 workspace 目录本身。 |

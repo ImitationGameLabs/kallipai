@@ -286,18 +286,42 @@ Status: `204 No Content`
 
 #### `POST /agents/{id}/interrupt`: Interrupt Agent
 
-Aborts the agent's current round: the agent stays alive and returns to idle, ready
-for the next prompt. If the agent is already idle this is a no-op. Use `DELETE` to
-remove the agent entirely.
+Takes one of two forms, chosen by what the agent is doing:
+
+- a round is running: that round is aborted. The agent stays alive and
+  returns to idle; queued work (an inbox message, an approval) may start a
+  fresh round right away;
+- the agent is parked on a wake (a `break(wait)` fuse or a chain-transient
+  retry): that wait is cancelled rather than woken. The fuse is dropped, the
+  agent settles idle, and no round runs of its own, neither now nor when the
+  old timer would have fired. A message arriving later still wakes it.
+
+An idle agent, or one parked for operator action, has nothing to interrupt:
+the call is a clean no-op. Use `DELETE` to remove the agent entirely.
 
 Auth: operator or superior. See [Authentication and authorization](auth.md).
 
 Status: `202 Accepted`
 
-| Code | Condition                          |
-| ---- | ---------------------------------- |
-| 403  | Not a superior of the target agent |
-| 404  | Agent not found                    |
+##### Response
+
+```json
+{
+  "outcome": "wait_cancelled"
+}
+```
+
+`outcome` is `round_interrupted`, `wait_cancelled`, or `nothing`. It reports
+what the tagma observed and handed to the agent's loop, not a confirmation
+that the loop acted on it: the observed state is the bridge-written mirror,
+so an interrupt landing just as the target leaves that state is handed over
+and then found stale — nothing happens.
+
+| Code | Condition                                    |
+| ---- | -------------------------------------------- |
+| 403  | Not a superior of the target agent           |
+| 404  | Agent not found                              |
+| 409  | Agent is faulted; nothing to interrupt       |
 
 #### `POST /agents/{id}/message`: Send Message
 
@@ -1165,7 +1189,7 @@ varies: `idle`/`interrupted` return to idle, `waiting` parks on a wake timer,
 `tokenBudgetExceeded` re-arms the wait timer as a recovery probe, an armed
 `failoverChainExhausted` enters a retrying backoff, and the unarmed/error/max-rounds
 outcomes park the agent (the next incoming message auto-wakes it). Only `cancelled`
-(a lifecycle cancel from remove / tagma shutdown) ends the stream.
+(a lifecycle cancel) ends the stream.
 
 | `type`                   | Fields                                                                                                                                                                                          | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------                                                            | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------                                                                                                                 |
@@ -1174,9 +1198,9 @@ outcomes park the agent (the next incoming message auto-wakes it). Only `cancell
 | `error`                  | `message: string`                                                                                                                                                                               | Turn failed with a fatal error; the agent parks (a message auto-wakes it)                                                                                                                                                                                                                                                                                                                                                                                         |
 | `failoverChainExhausted` | `reason: "noFailoverConfigured" \| "allBackupsExhausted" \| "allCandidatesUnbuildable" \| "allCandidatesInfeasible", detail: string, transient_retry: { attempt, max_attempts, retry_in_secs }` | Within-set failover chain exhausted: every profile in the set is unavailable; `reason` distinguishes the cause (`allCandidatesInfeasible` = every candidate's declared window violated the budget shape; tune `KALLIPAI_SUMMARY_MAX_TOKENS` / `KALLIPAI_PINNED_BUDGET_RATIO` or raise the window), `detail` is the original trigger. With `transient_retry` present the agent enters a retrying backoff (the timer re-runs the original prompt); absent, it parks |
 | `waiting`                | `timeout_secs: u64`                                                                                                                                                                             | Turn ended on `break(wait)`; the agent parks on a wake timer; the timer expiring or any external event resumes it                                                                                                                                                                                                                                                                                                                                                 |
-| `interrupted`            | _(none)_                                                                                                                                                                                        | Round aborted via interrupt; agent stays alive and idle                                                                                                                                                                                                                                                                                                                                                                                                           |
-| `tokenBudgetExceeded`    | `consumed: u64, budget: u64`                                                                                                                                                                    | Token budget hit; the agent parks on a re-armed wait timer as a zero-cost recovery probe (waiting, not idle) until the budget is raised                                                                                                                                                                                                                                                                                                                           |
-| `cancelled`              | _(none)_                                                                                                                                                                                        | Lifecycle cancel (remove / shutdown): agent stops, stream ends                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `interrupted`            | _(none)_                                                                                                                                                                                        | A cancel landed on the agent while the task stayed alive: a running round was aborted, or a wait/retry park was cancelled without running one; the agent stays alive and settles idle. Who asked for the cancel is not part of this event                                                                                                                                                                                                                          |
+| `tokenBudgetExceeded`    | `consumed: u64, budget: u64`                                                                                                                                                                    | Token budget hit; the agent parks on a re-armed wait timer as a zero-cost recovery probe (waiting, not idle); raising the budget does not by itself wake it — the next probe wake re-checks                                                                                                                                                                                                                                                                                                                           |
+| `cancelled`              | _(none)_                                                                                                                                                                                        | The agent's lifecycle ended: it stops and the stream ends                                                                                                                                                                                                                                                                                                                                                                                                         |
 
 #### State and Notifications
 

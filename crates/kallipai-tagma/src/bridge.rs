@@ -35,10 +35,11 @@ pub struct BridgeCells {
 /// emits its terminal `Cancelled` event on the way out, the bridge forwards it,
 /// then observes `recv() == None` and exits.
 ///
-/// **Interrupt** does *not* close the channel: it cancels only the current round
-/// token, so the task aborts the round, emits `Interrupted`, and returns to its
-/// outer loop — the bridge forwards `Interrupted` (setting state `IDLE`) and keeps
-/// looping. The agent is still alive.
+/// **Interrupt** does *not* close the channel: it cancels the current round
+/// token (or, for a park on a wait/retry, drops that fuse instead), so the
+/// task settles with `Interrupted` and returns to its outer loop — the bridge
+/// forwards `Interrupted` (setting state `IDLE`) and keeps looping. The agent
+/// is still alive either way.
 ///
 /// The `cancel` token is a secondary, *forced* exit for tagma-wide shutdown: it
 /// preempts the bridge even if the agent task is mid-operation. It is the
@@ -261,10 +262,11 @@ pub async fn bridge_task(
                                         "hit the per-request tool-round limit and parked.".to_string(),
                                         notice,
                                     )),
-                                    // Cancelled / Interrupted are operator-initiated;
-                                    // TokenBudgetExceeded re-arms a wait the operator
-                                    // already observes: no superior notification, but
-                                    // the state mark above is still linearized with
+                                    // Cancelled and Interrupted come from a cancel issued
+                                    // outside the subagent: whoever issued it already knows, so
+                                    // no superior notice is due. TokenBudgetExceeded re-arms a
+                                    // wait the operator already observes, likewise without a
+                                    // notice. The state mark above is still linearized with
                                     // everyone else's snapshot.
                                     _ => None,
                                 };

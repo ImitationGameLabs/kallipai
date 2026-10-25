@@ -90,7 +90,7 @@ all go through here.
 | `subagent spawn`          | Spawn a direct subagent (required flags below).  |
 | `subagent list`           | List the current agent's direct subagents.       |
 | `subagent remove <ID>`    | Remove a direct subagent.                        |
-| `subagent interrupt <ID>` | Interrupt a direct subagent's current operation. |
+| `subagent interrupt <ID>` | Abort a direct subagent's running round, or cancel the wait/retry it is parked on. |
 | `subagent metadata <ID>`  | Update a direct subagent's role/description.     |
 | `subagent workspace relocate <ID> <PATH>` | Move a subagent's workspace to a prepared directory. |
 | `subagent workspace mv <ID> <PATH>` | Park the agent, then move the workspace directory itself. |

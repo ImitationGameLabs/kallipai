@@ -179,8 +179,10 @@ pub enum SseEvent {
         reason: String,
     },
     Cancelled,
-    /// The current round was interrupted; the agent stays alive and idle, ready for the
-    /// next prompt. Distinct from `Cancelled`, which is terminal (remove/shutdown).
+    /// A cancel landed on the agent while the task stayed alive:
+    /// a running round was aborted, or a wait/retry park was cancelled without
+    /// running one. Either way the task settles `Idle`; who asked for the cancel
+    /// is not part of this event. Distinct from `Cancelled`, which ends the task.
     Interrupted,
     TokenBudgetExceeded {
         consumed: u64,

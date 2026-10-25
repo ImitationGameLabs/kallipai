@@ -154,7 +154,9 @@ pub async fn delete_profile_set(
                 registry.get(&r.id).is_some_and(|e| e.as_live().is_some())
             };
             if is_live {
-                crate::routes::agent::interrupt_core(&state, &r.id).await?;
+                // The sweep only needs the interrupt delivered; which form
+                // it took is the route's answer to a caller, not this one's.
+                let _ = crate::routes::agent::interrupt_core(&state, &r.id).await?;
             }
         }
         // The interrupt-to-persist window can admit a new binding —

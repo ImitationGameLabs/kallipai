@@ -456,12 +456,12 @@ pub async fn remove_agent(
             return Err(ApiError::not_found("agent not found"));
         };
         // Live agents must be quiescent-ish and have no subagents: busy is
-        // the only rejected state (interrupt aborts the in-flight round;
-        // removal then succeeds). Waiting/retrying park in the outer loop
-        // with no round token to interrupt, so removal — whose lifecycle
-        // cancel is honored in every state — is their deterministic exit,
-        // not a dead-end 409 pointing at a no-op interrupt. Faulted agents
-        // skip the state check; the no-subagents check still applies.
+        // the only rejected state — a running round is stopped through the
+        // interrupt route first. Waiting/retrying need no such step: both
+        // are parked in the outer loop, and `teardown_agent`'s lifecycle
+        // cancel is honored in every state, so removal ends them on its own.
+        // Faulted agents skip the state check; the no-subagents check still
+        // applies.
         if let Some(live) = entry.as_live()
             && live.agent.get_state() == AgentState::Busy
         {

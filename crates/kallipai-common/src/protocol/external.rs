@@ -51,9 +51,10 @@ pub enum SignalEvent {
     /// The agent yielded control (presence: "idle"). Content-less: a reply no
     /// longer rides the terminal event. The task parks, awaiting input.
     Idle,
-    /// The in-flight turn was interrupted.
+    /// The running round was interrupted, or a parked wait/retry was cancelled
+    /// without running one. The agent stays alive and settles idle.
     Interrupted,
-    /// The in-flight turn was cancelled (terminal).
+    /// The agent's lifecycle ended; terminal.
     Cancelled,
     /// The tagma exhausted its token budget mid-turn.
     TokenBudgetExceeded { consumed: u64, budget: u64 },

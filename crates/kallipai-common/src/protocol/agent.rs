@@ -651,6 +651,37 @@ pub enum DeliveryMode {
     Deferred,
     Buffered,
 }
+
+/// What an interrupt did, as reported in the 202 body of
+/// `POST /agents/{id}/interrupt`.
+///
+/// The outcome reports what the tagma observed and handed to the target's
+/// loop, not proof that the loop acted on it: the observed state is the
+/// bridge-written mirror, so an interrupt landing just as the target leaves
+/// that state is handed over and then found stale — nothing happens.
+///
+/// * `round_interrupted`: a round was running; its token was cancelled.
+/// * `wait_cancelled`: the target was parked on a wake (a `break(wait)` fuse
+///   or a chain-transient retry). The fuse is dropped and the agent settles
+///   idle without running a round of its own.
+/// * `nothing`: nothing to interrupt — idle, parked for an operator action,
+///   or a round whose token slot was already empty while the mirror still
+///   said busy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InterruptOutcome {
+    RoundInterrupted,
+    WaitCancelled,
+    Nothing,
+}
+
+/// The interrupt 202 body: the outcome, in a wrapper a later form can grow
+/// into without breaking the wire shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InterruptResponse {
+    pub outcome: InterruptOutcome,
+}
+
 /// Request body for ingesting an attachment into an agent's live context:
 /// the tagma fetches the media bytes from the files service, assembles the
 /// multimodal message, and records the turn (sidecar refs plus the live
@@ -941,5 +972,21 @@ mod tests {
 
         let without = ParkedReason::QuotaBlocked(info(None)).to_string();
         assert!(without.contains("no usable resumption time"), "{without}");
+    }
+
+    /// The interrupt 202 body is a wrapper around a snake_case outcome; the
+    /// client parses this exact shape, so pin the bytes.
+    #[test]
+    fn interrupt_response_wire_bytes_are_pinned() {
+        let body = super::InterruptResponse {
+            outcome: super::InterruptOutcome::WaitCancelled,
+        };
+        assert_eq!(
+            serde_json::to_string(&body).unwrap(),
+            "{\"outcome\":\"wait_cancelled\"}"
+        );
+        let back: super::InterruptResponse =
+            serde_json::from_str("{\"outcome\":\"nothing\"}").unwrap();
+        assert_eq!(back.outcome, super::InterruptOutcome::Nothing);
     }
 }

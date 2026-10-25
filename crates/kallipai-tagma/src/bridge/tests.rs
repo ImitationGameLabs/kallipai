@@ -894,7 +894,7 @@ async fn bridge_dispatches_max_rounds_to_superior() {
 }
 
 /// `Interrupted` parks the agent but must NOT notify the superior
-/// (operator-initiated; the interrupter already knows).
+/// (the cancel came from outside the subagent, so no superior notice is due).
 #[tokio::test]
 async fn bridge_interrupted_does_not_notify_superior() {
     let state = make_state();

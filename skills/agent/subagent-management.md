@@ -89,11 +89,18 @@ instead of trying to fix it yourself.
 
 ## Cleanup
 
-`kallip subagent interrupt <ID>` cancels a busy subagent's current round but
-keeps it alive; `kallip subagent remove <ID>` removes it (the agent must be
-idle or faulted, with no active subagents of its own). Always clean up test
-subagents after use. Removed agents are archived (not deleted), and their
-workspace dirlocks are released.
+`kallip subagent interrupt <ID>` stops what a subagent is doing without
+killing it. The reply says what the tagma handed over, not proof the loop acted
+on it: a running round is aborted, or a wait/retry park is cancelled — the fuse
+is dropped, so the subagent settles idle and the old timer never fires a round
+of its own. Work already queued (an inbox message, an approval) is still served
+rather than dropped, so it may start a fresh round right away; a message sent
+afterwards wakes it too. An idle or hard-parked subagent has nothing to
+interrupt (the CLI says so), and a faulted one is refused.
+`kallip subagent remove <ID>` removes it (the agent must be idle or faulted,
+with no active subagents of its own). Always clean up test subagents after
+use. Removed agents are archived (not deleted), and their workspace dirlocks
+are released.
 
 ### Faulted agents (restore failure)
 
@@ -107,7 +114,7 @@ messages or prompts. This is not an error — clean them up with `remove`.
 
 - If you are at depth 2-3, then the ceiling is Guest regardless (you cannot spawn Normal), because a child's class cannot exceed its tier ceiling.
 - If you are at depth 0-1 and the work is untrusted or must not see secrets, then spawn Guest (`--permission-class guest`), because Guests are workspace-read-only with secrets hidden under a tmpfs overlay; otherwise spawn Normal, because it can write within its workspace and hold a dirlock.
-- If the subagent is busy and you only want to cancel the current round, then `interrupt`, because it keeps the agent alive for reuse. If it is idle/faulted and you are done, then `remove`, because it archives the agent and releases its workspace dirlock.
+- If the subagent is busy or parked on a wait and you only want to stop what it is doing, then `interrupt`, because it keeps the agent alive for reuse. If it is idle/faulted and you are done, then `remove`, because it archives the agent and releases its workspace dirlock.
 
 *Avoid:* pointing `--workspace-root` at a sibling of your workspace, because the tagma rejects siblings with 403 — it must be a subdirectory within your workspace.
 

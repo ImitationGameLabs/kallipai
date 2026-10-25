@@ -548,9 +548,10 @@ pub struct Agent {
     pub bridge_handle: JoinHandle<()>,
     pub store: Arc<Mutex<ContextStore>>,
     pub cancel: CancellationToken,
-    /// The current round's cancellation token, reachable by `interrupt_agent`. `Some` only
-    /// while a round is running; cancelling it aborts the round without terminating the
-    /// task. Shared (same `Arc`) with the agent task's `AgentContext::round_cancel`.
+    /// The current round's cancellation token, reachable by the tagma's interrupt
+    /// path. `Some` only while a round is running; cancelling it aborts the round
+    /// without terminating the task. Shared (same `Arc`) with the agent task's
+    /// `AgentContext::round_cancel`.
     pub round_cancel: Arc<std::sync::Mutex<Option<RoundToken>>>,
     /// Wake signal triggered by external events (e.g. approval notifications).
     /// The agent task awaits this in the outer loop; callers signal via `notify_one()`.
@@ -589,6 +590,15 @@ pub struct Agent {
     /// Pending profile-reset cell shared with the agent task's `AgentContext`.
     /// The apply route writes here; the agent drains it on its next wake-up.
     pub pending_profile_reset: Arc<std::sync::Mutex<Option<kallipai_adk::ProfileReset>>>,
+    /// Generation of the park the agent is currently sleeping on, shared
+    /// (same `Arc`) with the agent task's `AgentContext::park_epoch`. The
+    /// runtime bumps it when it arms a wait/retry fuse; the interrupt route
+    /// reads it to stamp the cancel cell with the park it observed.
+    pub park_epoch: Arc<AtomicU64>,
+    /// Park-cancel cell shared with `AgentContext::park_cancel`: the
+    /// interrupt route writes the epoch it read and notifies; the agent's
+    /// notify arm drains it and cancels only that park.
+    pub park_cancel: Arc<std::sync::Mutex<Option<u64>>>,
     /// Parked snapshot, written by the bridge at a parking terminal event and
     /// cleared on any non-parked terminal. Shared (same `Arc`) with the bridge
     /// task; read by the delivery gate's auto-wake (kick turn text) and the status surfaces.

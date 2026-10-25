@@ -18,11 +18,11 @@ pub use agent::{
     AgentUsageStats, AttachmentIngestLocalResponse, AttachmentIngestRequest,
     AttachmentIngestResponse, BACKGROUND_TASK_LIST_MAX, BgTaskView, CreateAgentRequest,
     CreateAgentResponse, DELEGATION_CARVE_OUT, DELEGATION_FULL_HANDOFF, DeleteSetResponse,
-    DeliveryMode, DutyStatus, ListAgentsQuery, ListAgentsResponse, LockState, MaxToolRounds,
-    MessageRequest, MessageResponse, Modality, ParkedReason, ProfileSetUpdateRequest,
-    RelocateRequest, Relocated, SetDefaultRequest, SetReference, TagmaUsageTotals,
-    UpdateActivityRequest, UpdateAgentMetadataRequest, WorkspaceRootUpdateRequest,
-    WorkspaceRootUpdated, context_keep_tokens_ratio_in_range,
+    DeliveryMode, DutyStatus, InterruptOutcome, InterruptResponse, ListAgentsQuery,
+    ListAgentsResponse, LockState, MaxToolRounds, MessageRequest, MessageResponse, Modality,
+    ParkedReason, ProfileSetUpdateRequest, RelocateRequest, Relocated, SetDefaultRequest,
+    SetReference, TagmaUsageTotals, UpdateActivityRequest, UpdateAgentMetadataRequest,
+    WorkspaceRootUpdateRequest, WorkspaceRootUpdated, context_keep_tokens_ratio_in_range,
 };
 pub use approval::{
     ApprovalDecisionBody, ApprovalEntry, ListApprovalsQuery, ListApprovalsResponse,

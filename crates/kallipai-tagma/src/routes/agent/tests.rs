@@ -19,10 +19,11 @@ use crate::test_helpers::{
     make_state, make_state_with_spawn,
 };
 use axum::extract::{Path, Query, State};
+use kallipai_adk::agent_task::RoundToken;
 use kallipai_adk::config::PermissionProfile;
 use kallipai_adk::config::{AgentConfig, DelegationMode, PermissionClass};
 use kallipai_common::agentid::AgentId;
-use kallipai_common::protocol::ListAgentsQuery;
+use kallipai_common::protocol::{InterruptOutcome, ListAgentsQuery};
 
 #[test]
 fn truncate_keeps_short_strings() {
@@ -724,41 +725,154 @@ async fn remove_rejects_busy_but_allows_waiting_retrying() {
     }
 }
 
-/// Interrupting a waiting/retrying agent (parked in the outer loop, no
-/// round token) enqueues an interrupt turn — the kick pattern — instead of
-/// being a silent no-op; the prompt arm drops both fuses on wake.
+/// Interrupting an agent parked on a wake (waiting or retrying, no round
+/// token) drops that park: the 202 body says so, and no prompt turn is
+/// enqueued — the wake is cancelled, not started.
 #[tokio::test]
-async fn interrupt_waiting_enqueues_turn_not_noop() {
+async fn interrupt_waiting_cancels_the_wake() {
+    for u8_state in [
+        crate::state::AgentState::WAITING,
+        crate::state::AgentState::RETRYING,
+    ] {
+        let state = make_state();
+        let root = AgentId::random();
+        let child = AgentId::random();
+        let (prompt_tx, mut prompt_rx) = tokio::sync::mpsc::channel::<String>(4);
+        {
+            let mut reg = state.registry.write().await;
+            add_root(&mut reg, &root);
+            add_sub(&mut reg, &child, &root);
+            let live = reg.get_mut(&child).unwrap().as_live_mut().unwrap();
+            live.agent
+                .state
+                .store(u8_state, std::sync::atomic::Ordering::Relaxed);
+            // A generation the route cannot guess at: the cell must carry
+            // exactly what the route read, not a literal zero or offset.
+            live.agent
+                .park_epoch
+                .store(7, std::sync::atomic::Ordering::SeqCst);
+            live.agent.prompt_tx = prompt_tx;
+        }
+        let (status, axum::Json(body)) = interrupt_agent(
+            State(state.clone()),
+            AuthIdentity::test_new(Identity::Operator),
+            Path(child.clone()),
+        )
+        .await
+        .expect("interrupt on a parked wake is accepted");
+        assert_eq!(status, axum::http::StatusCode::ACCEPTED);
+        assert_eq!(
+            body.outcome,
+            InterruptOutcome::WaitCancelled,
+            "state {u8_state}"
+        );
+        let (park_cancel, notify) = {
+            let reg = state.registry.read().await;
+            let live = reg.get(&child).unwrap().as_live().unwrap();
+            (live.agent.park_cancel.clone(), live.agent.notify.clone())
+        };
+        assert_eq!(
+            *park_cancel.lock().unwrap(),
+            Some(7),
+            "the cell must carry the generation the route read (state {u8_state})"
+        );
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), notify.notified())
+                .await
+                .is_ok(),
+            "the route must wake the loop it stamped the cell for (state {u8_state})"
+        );
+        assert!(
+            prompt_rx.try_recv().is_err(),
+            "a cancelled wake must enqueue no prompt turn (state {u8_state})"
+        );
+    }
+}
+
+/// An idle agent has nothing to interrupt: 202 with `nothing`, and no
+/// prompt turn either.
+#[tokio::test]
+async fn interrupt_idle_reports_nothing() {
     let state = make_state();
     let root = AgentId::random();
-    let child = AgentId::random();
-    let (prompt_tx, mut prompt_rx) = tokio::sync::mpsc::channel::<String>(4);
     {
         let mut reg = state.registry.write().await;
         add_root(&mut reg, &root);
-        add_sub(&mut reg, &child, &root);
-        let live = reg.get_mut(&child).unwrap().as_live_mut().unwrap();
+    }
+    let (status, axum::Json(body)) = interrupt_agent(
+        State(state),
+        AuthIdentity::test_new(Identity::Operator),
+        Path(root),
+    )
+    .await
+    .expect("interrupt on an idle agent is accepted");
+    assert_eq!(status, axum::http::StatusCode::ACCEPTED);
+    assert_eq!(body.outcome, InterruptOutcome::Nothing);
+}
+
+/// A running round keeps the original form: the published round token is
+/// cancelled, and the answer names that form.
+#[tokio::test]
+async fn interrupt_busy_cancels_the_round_token() {
+    let state = make_state();
+    let root = AgentId::random();
+    let round = {
+        let mut reg = state.registry.write().await;
+        add_root(&mut reg, &root);
+        let live = reg.get_mut(&root).unwrap().as_live_mut().unwrap();
+        live.agent.state.store(
+            crate::state::AgentState::BUSY,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        let round = RoundToken::new(&live.agent.cancel);
+        *live.agent.round_cancel.lock().unwrap() = Some(round.clone());
+        round
+    };
+    let (status, axum::Json(body)) = interrupt_agent(
+        State(state),
+        AuthIdentity::test_new(Identity::Operator),
+        Path(root),
+    )
+    .await
+    .expect("interrupt on a busy agent is accepted");
+    assert_eq!(status, axum::http::StatusCode::ACCEPTED);
+    assert_eq!(body.outcome, InterruptOutcome::RoundInterrupted);
+    assert!(
+        round.handle().is_cancelled(),
+        "the round token must be cancelled"
+    );
+}
+
+/// The round token outranks the mirror: a bridge-written `Waiting` that has
+/// not caught up with a started round must not cost that round its cancel.
+#[tokio::test]
+async fn interrupt_takes_the_round_token_before_the_mirror() {
+    let state = make_state();
+    let root = AgentId::random();
+    let round = {
+        let mut reg = state.registry.write().await;
+        add_root(&mut reg, &root);
+        let live = reg.get_mut(&root).unwrap().as_live_mut().unwrap();
         live.agent.state.store(
             crate::state::AgentState::WAITING,
             std::sync::atomic::Ordering::Relaxed,
         );
-        live.agent.prompt_tx = prompt_tx;
-    }
-    let status = interrupt_agent(
+        let round = RoundToken::new(&live.agent.cancel);
+        *live.agent.round_cancel.lock().unwrap() = Some(round.clone());
+        round
+    };
+    let (status, axum::Json(body)) = interrupt_agent(
         State(state),
         AuthIdentity::test_new(Identity::Operator),
-        Path(child),
+        Path(root),
     )
     .await
-    .expect("interrupt on a waiting agent is accepted");
+    .expect("an interrupt on a lagging mirror is accepted");
     assert_eq!(status, axum::http::StatusCode::ACCEPTED);
-    let turn = tokio::time::timeout(std::time::Duration::from_millis(500), prompt_rx.recv())
-        .await
-        .expect("interrupt turn must be enqueued")
-        .expect("prompt channel open");
+    assert_eq!(body.outcome, InterruptOutcome::RoundInterrupted);
     assert!(
-        turn.contains("[system]") && turn.contains("interrupted"),
-        "the interrupt turn must tell the agent it was interrupted: {turn}"
+        round.handle().is_cancelled(),
+        "the in-flight round is cancelled although the mirror says waiting"
     );
 }
 

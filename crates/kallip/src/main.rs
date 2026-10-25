@@ -31,7 +31,9 @@ use kallipai_client::profile::{ProfileConfig, ProfileSet};
 use kallipai_client::types::LescheSessionEntry;
 use kallipai_common::agentid::AgentId;
 use kallipai_common::policy::{ExecDecision, ExecOverride};
-use kallipai_common::protocol::{BACKGROUND_TASK_LIST_MAX, BgTaskView, ProfileSetUpdateRequest};
+use kallipai_common::protocol::{
+    BACKGROUND_TASK_LIST_MAX, BgTaskView, InterruptOutcome, ProfileSetUpdateRequest,
+};
 use kallipai_common::timefmt;
 use kallipai_common::tokens::parse_token_amount;
 use uuid::Uuid;
@@ -543,8 +545,21 @@ async fn main() -> Result<()> {
                 }
                 SubagentCommand::Interrupt(args) => {
                     let id = client.resolve_agent_ref(args.id.as_ref()).await?;
-                    client.interrupt_agent(&id).await?;
-                    println!("Agent {id} interrupted.");
+                    match client.interrupt_agent(&id).await? {
+                        InterruptOutcome::RoundInterrupted => {
+                            println!("Agent {id}: the running round was aborted.");
+                        }
+                        InterruptOutcome::WaitCancelled => {
+                            println!(
+                                "Agent {id}: the interrupt was handed to the armed wait; if it was still current, the agent settles idle unless work is queued."
+                            );
+                        }
+                        InterruptOutcome::Nothing => {
+                            println!(
+                                "Agent {id}: nothing to interrupt; the tagma saw no running round and no armed wait."
+                            );
+                        }
+                    }
                 }
                 SubagentCommand::Metadata(args) => {
                     let id = client.resolve_agent_ref(args.id.as_ref()).await?;

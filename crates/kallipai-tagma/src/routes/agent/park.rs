@@ -1,11 +1,13 @@
 //! Parking and resume: deactivation, restore from the inactive area,
 //! and interrupts.
 
+use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
+use kallipai_adk::agent_task::request_park_cancel;
 use kallipai_adk::persistence;
 use kallipai_common::agentid::AgentId;
-use kallipai_common::protocol::ApiError;
+use kallipai_common::protocol::{ApiError, InterruptOutcome, InterruptResponse};
 
 use super::lifecycle::{ensure_workspace_dir, teardown_agent};
 use crate::state::{AgentState, SharedState};
@@ -232,19 +234,37 @@ pub(crate) async fn restore_boot(
     }
 }
 
-/// Cancel the target's current round (or kick it out of a parked wait) — the
-/// shared core of `POST /agents/{id}/interrupt` and the set-removal sweep.
+/// Hand an interrupt to the target — the shared core of
+/// `POST /agents/{id}/interrupt` and the set-removal sweep.
 /// The caller has already passed its own authorization check.
 ///
-/// Interrupt = cancel the current round only (the task stays alive and returns
-/// to its outer loop). A clean no-op when the agent is idle (no round to
-/// abort); Err only when the agent is faulted (nothing to interrupt) or its
-/// prompt queue is full.
-pub(crate) async fn interrupt_core(state: &SharedState, id: &AgentId) -> Result<(), ApiError> {
-    // Clone the shared slot Arc under the registry read-lock, then release it
-    // before touching the inner std Mutex — so the async registry guard is
-    // never held across the (sync) round-cancel lock.
-    let (round_cancel, parked_interrupt) = {
+/// Two forms, taken in this order:
+///
+/// * a round is running (its token is published) — cancel it; the round
+///   aborts and the task stays alive in its outer loop. The token decides
+///   first and wins over the mirror, so a lagging mirror cannot cost a real
+///   round its cancel;
+/// * otherwise the agent may be parked on a wake (a `break(wait)` fuse or a
+///   chain-transient retry) — cancel that park instead of waking it: the
+///   fuse is dropped, the agent settles idle, and no round runs of its own —
+///   now nor when the old timer would have fired.
+///
+/// Anything else (idle, parked for an operator action) is a clean no-op;
+/// `Err` is a missing agent (404) or a faulted one (409, nothing to
+/// interrupt).
+///
+/// The answer reports what this call observed and handed over, not that
+/// the loop acted on it: the state read is the bridge-written mirror, so an
+/// interrupt landing as the target leaves that state is handed over and
+/// then found stale — nothing happens.
+pub(crate) async fn interrupt_core(
+    state: &SharedState,
+    id: &AgentId,
+) -> Result<InterruptOutcome, ApiError> {
+    // Clone the shared handles under the registry read-lock, then release
+    // it before touching any inner std Mutex — so the async registry guard
+    // is never held across the sync locks below.
+    let (round_cancel, park_epoch, park_cancel, notify, observed) = {
         let registry = state.registry.read().await;
         let Some(entry) = registry.get(id) else {
             return Err(ApiError::not_found("agent not found"));
@@ -254,48 +274,55 @@ pub(crate) async fn interrupt_core(state: &SharedState, id: &AgentId) -> Result<
             .ok_or_else(|| ApiError::conflict("agent is faulted; nothing to interrupt"))?;
         (
             live.agent.round_cancel.clone(),
-            // Waiting/retrying park in the outer loop with no round token
-            // to cancel — a bare interrupt would be a silent no-op. Enqueue
-            // an interrupt turn instead (the kick pattern): the prompt arm
-            // clears both fuses and the agent decides how to land.
-            matches!(
-                live.agent.get_state(),
-                AgentState::Waiting | AgentState::Retrying
-            )
-            .then(|| live.agent.prompt_tx.clone()),
+            live.agent.park_epoch.clone(),
+            live.agent.park_cancel.clone(),
+            live.agent.notify.clone(),
+            live.agent.get_state(),
         )
     };
-    if let Some(round) = round_cancel
+    // A published token means a round is in flight, whatever the
+    // bridge-written mirror still says: the token decides first, so a lagging
+    // mirror cannot cost a real round its cancel.
+    let round = round_cancel
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .clone()
-    {
+        .clone();
+    if let Some(round) = round {
         tracing::info!(id = %id, "interrupting an in-flight round");
         round.cancel();
+        return Ok(InterruptOutcome::RoundInterrupted);
     }
-    if let Some(prompt_tx) = parked_interrupt {
-        if prompt_tx
-            .try_send("[system] you were interrupted while parked in the outer loop (waiting or retrying). The wait/retry fuse was dropped; finish with break, or continue if the interruption was unintended.".to_string())
-            .is_err()
-        {
-            tracing::warn!(id = %id, "interrupt refused: the prompt queue is full");
-            return Err(ApiError::conflict("agent prompt queue is full"));
-        }
-        tracing::info!(id = %id, "interrupting a parked wait (waiting or retrying); kick turn enqueued");
+    if matches!(observed, AgentState::Waiting | AgentState::Retrying) {
+        // Stamp the cell with the generation this observation names and
+        // wake the loop; the notify arm drains it and cancels only if that
+        // park is still the one.
+        let epoch = request_park_cancel(&park_epoch, &park_cancel, &notify);
+        tracing::info!(
+            id = %id,
+            park_epoch = epoch,
+            "interrupting an armed wait; the cancel is handed to the agent task"
+        );
+        return Ok(InterruptOutcome::WaitCancelled);
     }
-    Ok(())
+    // Nothing to hand over: idle, parked for an operator action, or a round
+    // that ended between the two reads. Faulted never lands here — `as_live`
+    // above already answered 409.
+    Ok(InterruptOutcome::Nothing)
 }
 
 /// Interrupt the current agent operation without deleting it.
+///
+/// Answers 202 with what was handed over — see [`InterruptOutcome`] — so
+/// the caller can tell an aborted round from a dropped wait.
 pub async fn interrupt_agent(
     State(state): State<SharedState>,
     auth: crate::auth::AuthIdentity,
     Path(id): Path<AgentId>,
-) -> Result<StatusCode, ApiError> {
+) -> Result<(StatusCode, Json<InterruptResponse>), ApiError> {
     {
         let registry = state.registry.read().await;
         registry.require_superior(auth.identity(), &id)?;
     }
-    interrupt_core(&state, &id).await?;
-    Ok(StatusCode::ACCEPTED)
+    let outcome = interrupt_core(&state, &id).await?;
+    Ok((StatusCode::ACCEPTED, Json(InterruptResponse { outcome })))
 }

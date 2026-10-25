@@ -6,7 +6,7 @@
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use anyhow::Context;
@@ -15,7 +15,7 @@ use just_llm_client::types::generation::{GenerationRequest, Message, ToolCall, U
 /// The test-facing message element type. Re-pointed to the generation face by the
 /// just-agent-libs migration; test signatures never name the upstream type.
 pub(crate) type TurnMessage = Message;
-use just_llm_client::{LlmBackend, ToolDispatcher};
+use just_llm_client::{LlmBackend, LlmTool, ToolDispatcher};
 use kallipai_common::facts::{
     Block, BlockedFact, Claim, FactView, ProfilePacing, claim_window, is_active,
 };
@@ -105,6 +105,20 @@ pub(crate) async fn ctx_from_source(
     source: Arc<dyn BackendSource>,
     retry_policy: RetryPolicy,
 ) -> AgentContext {
+    ctx_from_source_with_tools(profiles, source, retry_policy, Vec::new()).await
+}
+
+/// [`ctx_from_source`], plus test-only tools registered on the dispatcher
+/// before the context is built. A tool that parks its `call` in a gate is how
+/// a test holds a round mid-flight without racing a sleep; the store's tool
+/// definitions are snapshotted from the executor, so the extra tools travel
+/// with it.
+pub(crate) async fn ctx_from_source_with_tools(
+    profiles: Vec<Profile>,
+    source: Arc<dyn BackendSource>,
+    retry_policy: RetryPolicy,
+    extra_tools: Vec<Box<dyn LlmTool>>,
+) -> AgentContext {
     let mut config = test_config();
     config.retry_policy = retry_policy;
     let set = ProfileSet {
@@ -121,8 +135,12 @@ pub(crate) async fn ctx_from_source(
         .expect("active profile is buildable");
     let store = Arc::new(tokio::sync::Mutex::new(ContextStore::new()));
     let approvals = Arc::new(tokio::sync::Mutex::new(ApprovalStore::new()));
+    let mut dispatcher = ToolDispatcher::new();
+    dispatcher
+        .add_tools(extra_tools)
+        .expect("test tools register without a name clash");
     let executor = AuthorizedToolExecutor::new(
-        ToolDispatcher::new(),
+        dispatcher,
         AgentPolicy::new(
             Arc::new(RwLock::new(kallipai_common::policy::ExecPolicy::default())),
             kallipai_common::policy::PolicyPreset::Default,
@@ -167,6 +185,8 @@ pub(crate) async fn ctx_from_source(
         usage_stats: crate::usage_stats::UsageStats::default(),
         profile_pacing: None,
         pending_profile_reset: Arc::new(std::sync::Mutex::new(None)),
+        park_epoch: Arc::new(AtomicU64::new(0)),
+        park_cancel: Arc::new(std::sync::Mutex::new(None)),
         message_puller: None,
         persist_failures: Default::default(),
         gateway_signals: None,
@@ -842,5 +862,48 @@ impl ProfilePacing for RecordingPacing {
 
     fn snapshot(&self, _now: u64) -> Vec<FactView> {
         Vec::new()
+    }
+}
+
+/// A test-only [`LlmTool`] that holds the round inside the call: `entered`
+/// fires on the way in, and `call` returns only once `release` fires. A test
+/// that awaits `entered` knows the round is genuinely in flight — a
+/// construction, not a sleep — which is what a test of a mid-round race
+/// needs. The agent policy lets every non-`bash_exec` tool through, so no
+/// rule has to be configured for it.
+pub(crate) struct GatedTool {
+    name: String,
+    pub(crate) entered: Arc<tokio::sync::Notify>,
+    pub(crate) release: Arc<tokio::sync::Notify>,
+}
+
+impl GatedTool {
+    pub(crate) fn new(name: &str) -> Self {
+        Self {
+            name: name.to_owned(),
+            entered: Arc::new(tokio::sync::Notify::new()),
+            release: Arc::new(tokio::sync::Notify::new()),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl LlmTool for GatedTool {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn description(&self) -> &str {
+        "Hold the round here until the test lets it go."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({ "type": "object", "properties": {} })
+    }
+
+    async fn call(&self, _args_json: &str) -> anyhow::Result<String> {
+        self.entered.notify_one();
+        self.release.notified().await;
+        Ok("released".to_owned())
     }
 }

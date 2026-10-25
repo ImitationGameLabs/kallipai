@@ -22,8 +22,8 @@ use crate::profile::{BackendSource, ProfileRegistry, ProfileSet};
 use crate::retry::AttemptOrigin;
 use crate::runner::BreakUntil;
 use crate::test_support::{
-    FAILURE_PIN_WINDOW, MapSource, ctx_from_source, make_ctx, profile, seed_over_budget_store,
-    set_context_window,
+    FAILURE_PIN_WINDOW, GatedTool, MapSource, ctx_from_source, ctx_from_source_with_tools,
+    make_ctx, profile, seed_over_budget_store, set_context_window,
 };
 use crate::tool_execution::{run_tool_bounded, synthesize_unanswered_results};
 use crate::tools::DEFAULT_BREAK_TIMEOUT_SECS;
@@ -983,6 +983,484 @@ async fn wait_timer_elapse_injects_system_turn_and_reruns() {
     assert!(
         requests >= 2,
         "no round ran after the injection ({requests} requests)"
+    );
+}
+
+/// Full-loop pin of the interrupt-on-a-park form: the cancel drops the armed
+/// fuse and settles the agent with `Interrupted` without running a round — and
+/// the old timer, when it reaches its deadline, must not inject its turn
+/// either.
+#[tokio::test]
+async fn interrupt_cancels_the_armed_wait_and_the_fuse_stays_dead() {
+    let server = MockServer::start().await;
+    mount_break_args_stream(&server, "{\"timeout_secs\":1}").await;
+
+    let mut map = HashMap::new();
+    map.insert("ep1".into(), wiremock_backend(&server.uri()));
+    let profiles = vec![profile("p1", "ep1", 500_000)];
+    let ctx = ctx_from_source(profiles, wiremock_source(map), fast_policy()).await;
+    let store = ctx.store.clone();
+    let wait_until = ctx.wait_until.clone();
+    let park_epoch = ctx.park_epoch.clone();
+    let park_cancel = ctx.park_cancel.clone();
+    let notify = ctx.notify.clone();
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentEvent>(256);
+    let (ptx, prompt_rx) = tokio::sync::mpsc::channel::<String>(16);
+    let handle = tokio::spawn(crate::agent_task::agent_task(ctx, None, prompt_rx, tx));
+    ptx.send("go".into()).await.unwrap();
+
+    // The round ends in break(wait, 1s): the park is armed and mirrored.
+    let armed = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if let Ok(Some(AgentEvent::Waiting { .. })) =
+                tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv()).await
+            {
+                return;
+            }
+        }
+    })
+    .await;
+    assert!(armed.is_ok(), "the round must park on the wait fuse");
+
+    // The same producer the interrupt route calls: stamp the generation it
+    // reads, then wake the loop.
+    crate::agent_task::request_park_cancel(&park_epoch, &park_cancel, &notify);
+
+    let mut interrupted = false;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::time::Instant::now() < deadline && !interrupted {
+        if let Ok(Some(AgentEvent::Interrupted)) =
+            tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv()).await
+        {
+            interrupted = true;
+        }
+    }
+    assert!(
+        interrupted,
+        "the cancel must settle the agent with Interrupted"
+    );
+    assert!(
+        wait_until.lock().unwrap().is_none(),
+        "a cancelled park must leave no fuse armed"
+    );
+
+    // Sleep well past the old 1s fuse: no injected turn may land, and no
+    // second model call may run.
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    {
+        let guard = store.lock().await;
+        let injected = guard
+            .turns()
+            .iter()
+            .flat_map(|turn| &turn.messages)
+            .any(|m| {
+                m.content()
+                    .map(|text| text.contains("wait timer elapsed"))
+                    .unwrap_or(false)
+            });
+        assert!(!injected, "the dropped fuse must not inject its turn");
+    }
+    assert_eq!(
+        server.received_requests().await.unwrap().len(),
+        1,
+        "the cancel must not start a round"
+    );
+    handle.abort();
+}
+
+/// The park generation's reason to exist. A cancel stamped while a round is
+/// in flight names the park that round is about to leave behind, not the one
+/// it is about to arm: the cell must die on the mismatch instead of cancelling
+/// a wait nobody interrupted.
+///
+/// The round is held inside a gated tool, so the stamp provably happens mid-
+/// round (the test awaits the tool's entry signal) rather than by timing.
+#[tokio::test]
+async fn a_cancel_stamped_mid_round_never_cancels_the_next_park() {
+    let server = MockServer::start().await;
+    let gate = GatedTool::new("hold");
+    let entered = gate.entered.clone();
+    let release = gate.release.clone();
+    let _gated = Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_raw(
+                    tool_call_sse_body("hold", "{}").into_bytes(),
+                    "text/event-stream",
+                ),
+        )
+        .up_to_n_times(1)
+        .mount_as_scoped(&server)
+        .await;
+    mount_break_args_stream(&server, "{\"timeout_secs\":30}").await;
+
+    let mut map = HashMap::new();
+    map.insert("ep1".into(), wiremock_backend(&server.uri()));
+    let profiles = vec![profile("p1", "ep1", 500_000)];
+    let mut ctx = ctx_from_source_with_tools(
+        profiles,
+        wiremock_source(map),
+        fast_policy(),
+        vec![Box::new(gate)],
+    )
+    .await;
+    // Room for the tool round plus the round that parks: the fixture's
+    // default budget is a single tool round.
+    ctx.config.max_tool_rounds = 4;
+    let wait_until = ctx.wait_until.clone();
+    let park_epoch = ctx.park_epoch.clone();
+    let park_cancel = ctx.park_cancel.clone();
+    let notify = ctx.notify.clone();
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentEvent>(256);
+    let (ptx, prompt_rx) = tokio::sync::mpsc::channel::<String>(16);
+    let handle = tokio::spawn(crate::agent_task::agent_task(ctx, None, prompt_rx, tx));
+    ptx.send("go".into()).await.unwrap();
+
+    // Provably mid-round: the round is inside the gated tool's call.
+    tokio::time::timeout(std::time::Duration::from_secs(10), entered.notified())
+        .await
+        .expect("the round must reach the gated tool");
+    crate::agent_task::request_park_cancel(&park_epoch, &park_cancel, &notify);
+    release.notify_one();
+
+    // The round finishes in break(wait, 30s) and mirrors the new park.
+    let mut seen = Vec::new();
+    let parked = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let Ok(Some(event)) =
+                tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv()).await
+            else {
+                continue;
+            };
+            let waiting = matches!(event, AgentEvent::Waiting { .. });
+            seen.push(event);
+            if waiting {
+                return;
+            }
+        }
+    })
+    .await;
+    assert!(
+        parked.is_ok(),
+        "the round must re-park on the wait fuse: {seen:?}"
+    );
+
+    // The notify arm drains the cell unconditionally: once it is gone, the
+    // verdict on this stamp is already decided.
+    let drained = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if park_cancel.lock().unwrap().is_none() {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    assert!(drained.is_ok(), "the notify arm must drain the cancel cell");
+    // The branch that follows the drain runs immediately; this window only
+    // has to be wide enough for that to become observable.
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    let mut events = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        events.push(event);
+    }
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::Interrupted)),
+        "a stale cancel must not interrupt the new park: {events:?}"
+    );
+    let until = *wait_until.lock().unwrap();
+    assert!(
+        until
+            .is_some_and(|deadline| deadline
+                > tokio::time::Instant::now() + std::time::Duration::from_secs(10)),
+        "the new park must still be armed well into the future: {until:?}"
+    );
+    handle.abort();
+}
+
+/// Cancelling a park on the retry fuse: the transient park is dropped, its
+/// fuse and its failure count go with it, and the cancelled deadline runs no
+/// round of its own.
+#[tokio::test]
+async fn a_cancel_on_the_retry_fuse_clears_the_retry_and_its_count() {
+    let server = MockServer::start().await;
+    mount_status(&server, 500).await;
+
+    let mut map = HashMap::new();
+    map.insert("ep1".into(), wiremock_backend(&server.uri()));
+    let mut ctx = ctx_from_source(
+        vec![profile("p1", "ep1", 500_000)],
+        wiremock_source(map),
+        fast_policy(),
+    )
+    .await;
+    // One failed request per round, and a backoff long enough to cancel the
+    // park before its fuse fires.
+    ctx.config.max_transient_retries = 2;
+    ctx.config.retry_policy.max_retries = 0;
+    ctx.config.retry_policy.base_delay = std::time::Duration::from_secs(2);
+    ctx.config.retry_policy.max_delay = std::time::Duration::from_secs(2);
+    let retry_at = ctx.retry_at.clone();
+    let park_epoch = ctx.park_epoch.clone();
+    let park_cancel = ctx.park_cancel.clone();
+    let notify = ctx.notify.clone();
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentEvent>(256);
+    let (ptx, prompt_rx) = tokio::sync::mpsc::channel::<String>(16);
+    let handle = tokio::spawn(crate::agent_task::agent_task(ctx, None, prompt_rx, tx));
+    ptx.send("go".into()).await.unwrap();
+
+    // The chain fails: the terminal event carries the armed retry (attempt 1).
+    let mut attempt = None;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::time::Instant::now() < deadline && attempt.is_none() {
+        if let Ok(Some(AgentEvent::FailoverChainExhausted {
+            transient_retry: Some(info),
+            ..
+        })) = tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv()).await
+        {
+            attempt = Some(info.attempt);
+        }
+    }
+    assert_eq!(attempt, Some(1), "the first transient failure arms retry 1");
+    assert!(
+        retry_at.lock().unwrap().is_some(),
+        "the retry fuse must be armed before the cancel"
+    );
+
+    crate::agent_task::request_park_cancel(&park_epoch, &park_cancel, &notify);
+    let mut interrupted = false;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::time::Instant::now() < deadline && !interrupted {
+        if let Ok(Some(AgentEvent::Interrupted)) =
+            tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv()).await
+        {
+            interrupted = true;
+        }
+    }
+    assert!(
+        interrupted,
+        "the cancel must settle the agent with Interrupted"
+    );
+    assert!(
+        retry_at.lock().unwrap().is_none(),
+        "a cancelled retry park must leave no fuse armed"
+    );
+
+    // The cancelled fuse runs no round when its deadline passes.
+    let before = server.received_requests().await.unwrap().len();
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    let after = server.received_requests().await.unwrap().len();
+    assert_eq!(
+        before, after,
+        "the cancelled retry fuse must not start a round of its own"
+    );
+
+    // The count started over: the next failure arms attempt 1 again.
+    ptx.send("again".into()).await.unwrap();
+    let mut next_attempt = None;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::time::Instant::now() < deadline && next_attempt.is_none() {
+        if let Ok(Some(AgentEvent::FailoverChainExhausted {
+            transient_retry: Some(info),
+            ..
+        })) = tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv()).await
+        {
+            next_attempt = Some(info.attempt);
+        }
+    }
+    assert_eq!(
+        next_attempt,
+        Some(1),
+        "a later failure counts from zero after the cancel"
+    );
+    handle.abort();
+}
+
+/// A wake carrying both a profile reset and a park-cancel applies the reset:
+/// the notify arm drains the reset ahead of ending the wake on the cancel,
+/// so the order here is what keeps the reset from being deferred to a
+/// later wake. The cancel still settles the agent and still starts no round.
+#[tokio::test]
+async fn a_cancel_does_not_swallow_the_reset_riding_the_same_wake() {
+    let server = MockServer::start().await;
+    mount_break_stream(&server).await; // break with `{}` → default wait
+
+    let mut map = HashMap::new();
+    map.insert("ep1".into(), wiremock_backend(&server.uri()));
+    let profiles = vec![profile("p1", "ep1", 500_000)];
+    let ctx = ctx_from_source(profiles, wiremock_source(map.clone()), fast_policy()).await;
+    let wait_until = ctx.wait_until.clone();
+    let park_epoch = ctx.park_epoch.clone();
+    let park_cancel = ctx.park_cancel.clone();
+    let notify = ctx.notify.clone();
+    let reset_cell = ctx.pending_profile_reset.clone();
+
+    // The pending reset the tagma would write: a one-profile "fresh" set.
+    let fresh = ProfileSet {
+        name: "fresh".into(),
+        description: None,
+        profiles: vec![profile("q0", "ep1", 500_000)],
+    };
+    let sets = std::collections::BTreeMap::from([("fresh".to_string(), fresh.clone())]);
+    let registry = Arc::new(ProfileRegistry::new(sets, wiremock_source(map)).unwrap());
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentEvent>(256);
+    let (ptx, prompt_rx) = tokio::sync::mpsc::channel::<String>(16);
+    let handle = tokio::spawn(crate::agent_task::agent_task(ctx, None, prompt_rx, tx));
+    ptx.send("go".into()).await.unwrap();
+
+    // Park on the wait fuse first, then queue both requests for one wake.
+    let armed = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if let Ok(Some(AgentEvent::Waiting { .. })) =
+                tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv()).await
+            {
+                return;
+            }
+        }
+    })
+    .await;
+    assert!(armed.is_ok(), "the round must park on the wait fuse");
+    assert!(
+        wait_until.lock().unwrap().is_some(),
+        "the fuse must be armed"
+    );
+
+    *reset_cell.lock().unwrap() = Some(ProfileReset {
+        set: fresh,
+        registry,
+    });
+    crate::agent_task::request_park_cancel(&park_epoch, &park_cancel, &notify);
+
+    let mut interrupted = false;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::time::Instant::now() < deadline && !interrupted {
+        if let Ok(Some(AgentEvent::Interrupted)) =
+            tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv()).await
+        {
+            interrupted = true;
+        }
+    }
+    assert!(
+        interrupted,
+        "the cancel must settle the agent with Interrupted"
+    );
+    assert!(
+        reset_cell.lock().unwrap().is_none(),
+        "the reset riding the same wake must be applied, not postponed"
+    );
+    assert!(
+        wait_until.lock().unwrap().is_none(),
+        "a cancelled park must leave no fuse armed"
+    );
+    handle.abort();
+}
+
+/// A cancel owns its wake but not the rest of the queue: the loop is woken
+/// once more, so an inbox message that rode the same permit still gets its
+/// own round instead of waiting for an external event that may never come.
+#[tokio::test]
+async fn a_cancel_still_serves_a_message_that_rode_the_same_wake() {
+    use crate::agent_task::MessagePuller;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct StubPuller(Arc<AtomicBool>);
+    #[async_trait::async_trait]
+    impl MessagePuller for StubPuller {
+        async fn pull_undelivered(&self) -> Option<String> {
+            if self.0.swap(false, Ordering::SeqCst) {
+                Some("message riding the cancelled wake".to_string())
+            } else {
+                None
+            }
+        }
+    }
+
+    let server = MockServer::start().await;
+    mount_break_stream(&server).await; // break with `{}` → default wait
+
+    let mut map = HashMap::new();
+    map.insert("ep1".into(), wiremock_backend(&server.uri()));
+    let profiles = vec![profile("p1", "ep1", 500_000)];
+    let mut ctx = ctx_from_source(profiles, wiremock_source(map), fast_policy()).await;
+    let pull_flag = Arc::new(AtomicBool::new(false));
+    ctx.message_puller = Some(Arc::new(StubPuller(pull_flag.clone())));
+    let wait_until = ctx.wait_until.clone();
+    let park_epoch = ctx.park_epoch.clone();
+    let park_cancel = ctx.park_cancel.clone();
+    let notify = ctx.notify.clone();
+    let store = ctx.store.clone();
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentEvent>(256);
+    let (ptx, prompt_rx) = tokio::sync::mpsc::channel::<String>(16);
+    let handle = tokio::spawn(crate::agent_task::agent_task(ctx, None, prompt_rx, tx));
+    ptx.send("go".into()).await.unwrap();
+
+    // Park on the wait fuse first, then let the cancel take that wake.
+    let armed = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if let Ok(Some(AgentEvent::Waiting { .. })) =
+                tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv()).await
+            {
+                return;
+            }
+        }
+    })
+    .await;
+    assert!(armed.is_ok(), "the round must park on the wait fuse");
+    assert!(
+        wait_until.lock().unwrap().is_some(),
+        "the fuse must be armed"
+    );
+
+    // The message lands in the same wake the cancel owns.
+    pull_flag.store(true, Ordering::SeqCst);
+    crate::agent_task::request_park_cancel(&park_epoch, &park_cancel, &notify);
+
+    let mut interrupted = false;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::time::Instant::now() < deadline && !interrupted {
+        if let Ok(Some(AgentEvent::Interrupted)) =
+            tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv()).await
+        {
+            interrupted = true;
+        }
+    }
+    assert!(
+        interrupted,
+        "the cancel must settle the agent with Interrupted"
+    );
+
+    // The message that rode the same permit must still be served: its text
+    // lands in the store when a round records the user turn.
+    let served = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let guard = store.lock().await;
+            let found = guard.turns().iter().flat_map(|t| &t.messages).any(|m| {
+                m.content()
+                    .map(|t| t.contains("message riding the cancelled wake"))
+                    .unwrap_or(false)
+            });
+            drop(guard);
+            if found {
+                return true;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    })
+    .await;
+    handle.abort();
+    assert!(
+        served.unwrap_or(false),
+        "a message riding the cancelled wake must still get its own round"
     );
 }
 

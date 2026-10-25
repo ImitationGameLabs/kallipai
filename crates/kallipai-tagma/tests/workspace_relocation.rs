@@ -529,11 +529,11 @@ async fn interrupt(
     (status, body)
 }
 
-/// A full prompt queue cannot take the interrupt's kick turn: the refusal is
-/// explicit, and the queue is left as it was.
+/// An interrupt that lands on an armed park writes nothing to the prompt
+/// queue, so a queue that is already full stays exactly as it was.
 #[tokio::test]
 #[serial]
-async fn interrupt_refuses_when_the_prompt_queue_is_full() {
+async fn interrupt_leaves_a_full_prompt_queue_untouched() {
     install_roots();
     let state = make_state();
     let sup = AgentId::random();
@@ -560,12 +560,13 @@ async fn interrupt_refuses_when_the_prompt_queue_is_full() {
     }
 
     let (status, body) = interrupt(&state, &full, "tok-sup").await;
-    assert_eq!(status, StatusCode::CONFLICT, "body: {body}");
+    assert_eq!(status, StatusCode::ACCEPTED, "body: {body}");
+    assert_eq!(body["outcome"], "wait_cancelled", "body: {body}");
     let queued: Vec<String> = std::iter::from_fn(|| full_rx.try_recv().ok()).collect();
     assert_eq!(
         queued.len(),
         16,
-        "the refused turn must not displace a queued one: {queued:?}"
+        "the cancel must not consume a queued turn: {queued:?}"
     );
 }
 

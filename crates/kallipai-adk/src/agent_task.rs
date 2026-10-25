@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use tokio::sync::{Mutex, Notify};
 use tokio_util::sync::CancellationToken;
@@ -35,10 +35,10 @@ use kallipai_shell::spill::{self, MESSAGE_SPILL, spill_root};
 const PERSIST_FAILURES_WARN_AFTER: u32 = 3;
 
 /// A cancellation token scoped to a single round, always a child of the agent's lifecycle
-/// token ([`AgentContext::cancel`]). Cancelled by `interrupt_agent` to abort the current
-/// round without terminating the task.
+/// token ([`AgentContext::cancel`]). The tagma interrupts a round by cancelling it,
+/// which aborts that round without terminating the task.
 ///
-/// Because it is a child, a lifecycle cancel (remove / tagma shutdown) propagates to it —
+/// Because it is a child, a lifecycle cancel propagates to it —
 /// so **lifecycle-cancelled ⟹ round-cancelled**. The converse (round cancelled but
 /// lifecycle not) is exactly what distinguishes an interrupt from a lifecycle cancel. This
 /// holds iff the token is always minted via [`RoundToken::new`] from the lifecycle token;
@@ -52,7 +52,7 @@ impl RoundToken {
         Self(lifecycle.child_token())
     }
 
-    /// Cancel this round. Called by `interrupt_agent`.
+    /// Cancel this round: the tagma interrupts a running round.
     pub fn cancel(&self) {
         self.0.cancel();
     }
@@ -72,7 +72,7 @@ impl RoundToken {
 /// lifecycle token — see [`RoundToken`].
 #[derive(Debug, PartialEq, Eq)]
 enum CancelKind {
-    /// The lifecycle token was cancelled (remove / shutdown) → terminate the task.
+    /// The lifecycle token was cancelled → terminate the task.
     Lifecycle,
     /// Only the round token was cancelled (interrupt) → keep the task alive.
     Interrupt,
@@ -139,8 +139,8 @@ pub struct AgentContext {
     pub history: Option<HistoryWriter>,
     /// Cancellation signal for graceful interruption.
     pub cancel: CancellationToken,
-    /// The current round's cancellation token, reachable by `interrupt_agent`. `Some` only
-    /// while a round is running. See [`RoundToken`].
+    /// The current round's cancellation token, reachable by the tagma's
+    /// interrupt path. `Some` only while a round is running. See [`RoundToken`].
     pub round_cancel: Arc<std::sync::Mutex<Option<RoundToken>>>,
     /// Wake signal triggered by external events (e.g. approval notifications).
     /// The agent task awaits this in the outer loop; callers signal via `notify_one()`.
@@ -211,12 +211,30 @@ pub struct AgentContext {
     /// tests), which reads as no facts at all — every read is fail-open.
     pub profile_pacing: Option<Arc<dyn kallipai_common::facts::ProfilePacing>>,
     /// Pending profile-reset cell: the tagma's apply handler writes a
-    /// [`ProfileReset`](crate::failover::ProfileReset) here; the agent task drains it at the top of
-    /// [`run_and_report`] and rebuilds its failover state + client. Shared
-    /// (same `Arc`) with the tagma `Agent` struct so the apply route can write
-    /// to it without reaching into adk internals. `None` when no reset is
-    /// pending.
+    /// [`ProfileReset`](crate::failover::ProfileReset) here; the agent task
+    /// drains it in the notify arm and at the top of [`run_and_report`],
+    /// rebuilding its failover state + client. Shared (same `Arc`) with the
+    /// tagma `Agent` struct so the apply route can write to it without
+    /// reaching into adk internals. `None` when no reset is pending.
     pub pending_profile_reset: Arc<std::sync::Mutex<Option<crate::failover::ProfileReset>>>,
+    /// Generation counter of the armed park (a `break(wait)` fuse, a
+    /// budget-probe re-arm, or a chain-transient retry). Bumped by
+    /// `AgentContext::arm_park` — the single place a wake park is armed —
+    /// so every park publishes its generation before the caller settles the
+    /// mirrored state: a mirror saying `Waiting`/`Retrying` therefore always
+    /// names a park whose epoch is already out. A generation rather than a due
+    /// time: a due time sits in `wait_until` or `retry_at`, both cleared to
+    /// `None`, so its absence cannot be told from no park at all; the
+    /// generation is always there and one bump covers all three arm sites.
+    /// Shared (same `Arc`) with the tagma `Agent`, where the interrupt route
+    /// reads it.
+    pub park_epoch: Arc<AtomicU64>,
+    /// Pending park-cancel cell: the interrupt route stamps it with the
+    /// epoch it read and calls `notify_one`; the notify arm drains it right
+    /// after the reset and cancels only the park that stamp names. Same
+    /// shape as `pending_profile_reset`: a handler writes, the loop drains.
+    /// Shared (same `Arc`) with the tagma `Agent`.
+    pub park_cancel: Arc<std::sync::Mutex<Option<u64>>>,
     /// Inbox message puller. Injected by the tagma so the runtime can pull
     /// undelivered direct messages on a notify wake without depending on the
     /// tagma crate. `None` for test contexts and agents without an inbox.
@@ -499,7 +517,7 @@ pub(crate) fn cap_external_message(text: &str, inbox_backed: bool) -> String {
 /// kept, where the full original lives, and the resend-in-parts advice.
 /// Inbox-backed entrances add an inbox-copy pointer; the prompt-channel
 /// drain keeps it off. The drain sees bare lines without producer context:
-/// its rowless producers (notices, kicks, parked interrupts) are short
+/// its rowless producers (notices, kicks) are short
 /// texts that never reach the cap, and its heavy producer (peer
 /// injections) does have an inbox row — so off can only under-claim,
 /// never over-claim.
@@ -612,7 +630,7 @@ pub async fn agent_task(
                     None => break,
                 }
             }
-            // Lifecycle cancel (remove / tagma shutdown): terminate the task.
+            // Lifecycle cancel: terminate the task.
             // Per-agent interrupt never reaches here — it cancels only the current
             // round token inside `run_and_report`, not the lifecycle token.
             _ = ctx.cancel.cancelled() => {
@@ -621,18 +639,50 @@ pub async fn agent_task(
                 break;
             }
             _ = ctx.notify.notified() => {
-                // Three producers share this Notify: inbox message delivery,
-                // approval notifications, and the profile-apply handler (which
-                // writes a pending-reset cell then calls notify_one). Because
-                // Notify coalesces permits (at most 1 stored), a single wake may
-                // carry work from multiple producers — evaluate ALL sequentially.
-                let has_reset = ctx
+                // Four producers share this Notify: inbox message delivery,
+                // approval notifications, the profile-apply handler, and the
+                // interrupt route (which write a cell then call notify_one —
+                // a reset cell and a park-cancel cell, both drained here).
+                // Notify coalesces permits (at most 1 stored), so one wake may
+                // carry work from several producers. The reset is applied
+                // first: it is memory-only (no round runs), and a wake that
+                // ends in a park-cancel must not postpone it to a later wake.
+                if ctx
                     .pending_profile_reset
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
-                    .is_some();
-                if has_reset {
+                    .is_some()
+                {
                     apply_pending_profile_reset(&mut ctx).await;
+                }
+                // Park-cancel cell next: drained unconditionally, so a
+                // request can never outlive the wake it rode in on. It
+                // applies only to the park it names — the stamp must still
+                // be the current generation and the authoritative lifecycle
+                // must still be a wake park — and anything else is dropped
+                // where it stands.
+                let park_cancel = ctx
+                    .park_cancel
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .take();
+                if let Some(stamp) = park_cancel
+                    && stamp == ctx.park_epoch.load(Ordering::SeqCst)
+                    && matches!(
+                        *ctx.lifecycle.lock().unwrap_or_else(|e| e.into_inner()),
+                        LifecycleState::Waiting { .. } | LifecycleState::Retrying { .. }
+                    )
+                {
+                    ctx.end_cancelled_park();
+                    agent_tx.send(AgentEvent::Interrupted).await.ok();
+                    // The cancel owns this wake: falling through would let the
+                    // merged permits pull a message and start a round the
+                    // interrupt was meant to prevent. Wake the loop once more
+                    // instead: with the cell drained, the fuses cleared and the
+                    // agent idle, that wake serves work that rode the same
+                    // permit (an inbox message, an approval) or sleeps.
+                    ctx.notify.notify_one();
+                    continue;
                 }
 
                 // Parked guard (design guard matrix: notify events buffer,
@@ -757,7 +807,7 @@ pub async fn agent_task(
 
 /// Persist context + approval state and emit the terminal [`AgentEvent::Cancelled`].
 ///
-/// The single exit path for a lifecycle cancel (remove / tagma shutdown), shared by the
+/// The single exit path for a lifecycle cancel, shared by the
 /// outer-loop cancel arm (idle) and `run_and_report`'s mid-round lifecycle-cancel branch.
 async fn terminate_cancelled(ctx: &AgentContext, agent_tx: &tokio::sync::mpsc::Sender<AgentEvent>) {
     ctx.persist().await;
@@ -841,8 +891,8 @@ pub enum WakeDisposition {
 /// (or a non-deliberate park reason) returns.
 ///
 /// Owns the round-token lifecycle per iteration: mints a fresh child of the
-/// lifecycle token, publishes it into `ctx.round_cancel` (so `interrupt_agent` can
-/// reach it), runs the round, then clears the slot. It returns
+/// lifecycle token, publishes it into `ctx.round_cancel` (so the tagma's interrupt
+/// path can reach it), runs the round, then clears the slot. It returns
 /// [`WakeDisposition::Terminated`] only on a lifecycle cancel (the task should
 /// terminate); every other outcome keeps the task alive.
 pub async fn run_and_report(
@@ -900,8 +950,8 @@ pub async fn run_and_report(
     let mut no_progress: u32 = 0;
     loop {
         let round = RoundToken::new(&ctx.cancel);
-        // Publish the round token for the duration of this round so `interrupt_agent`
-        // can cancel it. `Some` only while the round is in flight.
+        // Publish the round token for the duration of this round so the tagma's
+        // interrupt path can cancel it. `Some` only while the round is in flight.
         *ctx.round_cancel.lock().unwrap_or_else(|e| e.into_inner()) = Some(round.clone());
 
         agent_tx.send(AgentEvent::Busy).await.ok();
@@ -923,13 +973,8 @@ pub async fn run_and_report(
                         agent_tx.send(AgentEvent::Idle).await.ok();
                     }
                     runner::BreakUntil::Wait { timeout_secs } => {
-                        let deadline = arm_wait_timer(ctx, timeout_secs);
-                        ctx.settle(
-                            LifecycleState::Waiting {
-                                until: deadline.into_std(),
-                            },
-                            "break(wait)",
-                        );
+                        let park = ctx.arm_park(ParkArm::Wait { timeout_secs });
+                        ctx.settle_park(park, "break(wait)");
                         agent_tx
                             .send(AgentEvent::Waiting { timeout_secs })
                             .await
@@ -990,30 +1035,23 @@ pub async fn run_and_report(
                 // the bridge can mark RETRYING (not PARKED) without flicker.
                 ctx.transient_fails = ctx.transient_fails.saturating_add(1);
                 let armed = ctx.transient_fails <= ctx.config.max_transient_retries;
-                let retry_deadline = armed.then(|| schedule_transient_retry(ctx));
+                let retry_park = armed.then(|| ctx.arm_park(ParkArm::Retry));
                 agent_tx
                     .send(AgentEvent::FailoverChainExhausted {
                         reason,
                         detail,
-                        transient_retry: retry_deadline.map(|(_, delay_secs)| TransientRetryInfo {
-                            attempt: ctx.transient_fails,
-                            max_attempts: ctx.config.max_transient_retries,
-                            retry_in_secs: delay_secs,
+                        transient_retry: retry_park.as_ref().and_then(|park| {
+                            park.retry_in_secs.map(|retry_in_secs| TransientRetryInfo {
+                                attempt: ctx.transient_fails,
+                                max_attempts: ctx.config.max_transient_retries,
+                                retry_in_secs,
+                            })
                         }),
                     })
                     .await
                     .ok();
-                match retry_deadline {
-                    Some((deadline, _)) => {
-                        ctx.settle(
-                            LifecycleState::Retrying {
-                                attempt: ctx.transient_fails,
-                                max_attempts: ctx.config.max_transient_retries,
-                                retry_at: deadline.into_std(),
-                            },
-                            "transient retry armed",
-                        );
-                    }
+                match retry_park {
+                    Some(park) => ctx.settle_park(park, "transient retry armed"),
                     None => {
                         ctx.settle(
                             LifecycleState::Parked {
@@ -1058,19 +1096,19 @@ pub async fn run_and_report(
                 // timer rather than parking: the next timer wake re-checks
                 // the budget before any LLM call (the round gate runs
                 // first), so the armed fuse doubles as a zero-cost
-                // budget-recovery probe.
+                // budget-recovery probe. The fused arm and the mirrored state
+                // go through `arm_park`/`settle_park` like the other two park
+                // paths: the Waiting state must never name a park whose
+                // generation is still unpublished.
                 ctx.transient_fails = 0;
+                let park = ctx.arm_park(ParkArm::Wait {
+                    timeout_secs: DEFAULT_BREAK_TIMEOUT_SECS,
+                });
+                ctx.settle_park(park, "budget probe re-arm");
                 agent_tx
                     .send(AgentEvent::TokenBudgetExceeded { consumed, budget })
                     .await
                     .ok();
-                let deadline = arm_wait_timer(ctx, DEFAULT_BREAK_TIMEOUT_SECS);
-                ctx.settle(
-                    LifecycleState::Waiting {
-                        until: deadline.into_std(),
-                    },
-                    "budget probe re-arm",
-                );
                 return WakeDisposition::Ran;
             }
             Ok(runner::RoundOutcome::Park(AgentOutcome::MaxRoundsExceeded)) => {
@@ -1111,6 +1149,98 @@ pub async fn run_and_report(
             }
         }
     }
+}
+
+/// Which fuse a wake park arms: `break(wait)` and the budget-probe re-arm
+/// share one timer; a chain-transient retry has its own fuse and backoff.
+pub(crate) enum ParkArm {
+    Wait { timeout_secs: u64 },
+    Retry,
+}
+
+/// An armed park together with the state it mirrors. Only
+/// [`AgentContext::arm_park`] produces one, and it also publishes the
+/// generation a cancel has to name to reach this park.
+#[must_use]
+pub(crate) struct ArmedPark {
+    next: LifecycleState,
+    /// Backoff a `Retry` park announces to its caller; `None` on a `Wait`
+    /// park, whose deadline is already inside `next`.
+    retry_in_secs: Option<f64>,
+}
+
+impl AgentContext {
+    /// End the parked episode a cancel names: drop every wake fuse, reset
+    /// the transient-failure count, and settle idle. Memory-only — no round
+    /// runs here; the caller still keeps this wake from pulling work.
+    fn end_cancelled_park(&mut self) {
+        clear_wait_timer(self);
+        clear_transient_retry(self);
+        clear_pacing_wake(self);
+        // A park cancel ended this episode, so a later unrelated transient
+        // failure counts from zero instead of inheriting these parks.
+        self.transient_fails = 0;
+        self.settle(LifecycleState::Idle, "park cancel");
+    }
+
+    /// Arm one wake fuse and publish this park's generation, returning the
+    /// state the caller must mirror. Both halves live in this one place: a
+    /// mirrored park whose generation was never published is invisible to
+    /// the cancel route, so the bump cannot be a call-site duty.
+    fn arm_park(&mut self, arm: ParkArm) -> ArmedPark {
+        let (next, retry_in_secs) = match arm {
+            ParkArm::Wait { timeout_secs } => {
+                let deadline = arm_wait_timer(self, timeout_secs);
+                (
+                    LifecycleState::Waiting {
+                        until: deadline.into_std(),
+                    },
+                    None,
+                )
+            }
+            ParkArm::Retry => {
+                let (deadline, delay_secs) = schedule_transient_retry(self);
+                (
+                    LifecycleState::Retrying {
+                        attempt: self.transient_fails,
+                        max_attempts: self.config.max_transient_retries,
+                        retry_at: deadline.into_std(),
+                    },
+                    Some(delay_secs),
+                )
+            }
+        };
+        self.park_epoch.fetch_add(1, Ordering::SeqCst);
+        ArmedPark {
+            next,
+            retry_in_secs,
+        }
+    }
+
+    /// Mirror the state an armed park names. The only way to publish a wake
+    /// park, so the generation and the mirror cannot come apart.
+    fn settle_park(&self, armed: ArmedPark, cause: &'static str) {
+        self.settle(armed.next, cause);
+    }
+}
+
+/// Hand a park-cancel to the agent task: stamp the cell with the generation
+/// this call reads, then wake the loop. The order matters — a wake that
+/// arrives before the stamp would drain an empty cell and lose the request
+/// silently; the generation keeps a request from reaching a later park, it
+/// cannot recover one the loop never saw. The loop still decides at drain
+/// time whether the park it finds is the one named here, so a stale request
+/// is dropped instead of cancelling the next park. Returns the stamped
+/// generation, for the caller's log line and its tests.
+pub fn request_park_cancel(
+    park_epoch: &Arc<AtomicU64>,
+    park_cancel: &Arc<std::sync::Mutex<Option<u64>>>,
+    notify: &Arc<tokio::sync::Notify>,
+) -> u64 {
+    let epoch = park_epoch.load(Ordering::SeqCst);
+    *park_cancel.lock().unwrap_or_else(|e| e.into_inner()) = Some(epoch);
+    notify.notify_one();
+    epoch
 }
 
 /// The synthetic user turn injected after a bare-assistant round, nudging the
@@ -1280,6 +1410,50 @@ fn pacing_wake_due(ctx: &AgentContext) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A cancelled park drops every fuse and settles idle in one place: the
+    /// bridge mirror is event-driven, so only `ctx.lifecycle` proves the
+    /// cancel landed on the authoritative state.
+    #[tokio::test]
+    async fn a_cancelled_park_settles_idle_and_clears_the_fuses() {
+        let mut ctx = crate::test_support::make_ctx(
+            vec![crate::test_support::profile("test", "ep1", 4096)],
+            &["ep1"],
+        )
+        .await;
+        ctx.settle(LifecycleState::Running, "test round");
+        let park = ctx.arm_park(ParkArm::Wait { timeout_secs: 30 });
+        ctx.settle_park(park, "test park");
+        ctx.transient_fails = 2;
+        *ctx.pacing_wake_at.lock().unwrap() = Some(tokio::time::Instant::now());
+        assert!(
+            matches!(
+                *ctx.lifecycle.lock().unwrap(),
+                LifecycleState::Waiting { .. }
+            ),
+            "the park must mirror as waiting before the cancel"
+        );
+
+        ctx.end_cancelled_park();
+
+        assert!(
+            matches!(*ctx.lifecycle.lock().unwrap(), LifecycleState::Idle),
+            "a cancel must settle the authoritative state to idle"
+        );
+        assert!(
+            ctx.wait_until.lock().unwrap().is_none(),
+            "a cancelled park must leave no fuse armed"
+        );
+        assert!(
+            ctx.retry_at.lock().unwrap().is_none(),
+            "a cancelled park must leave no retry armed"
+        );
+        assert!(
+            ctx.pacing_wake_at.lock().unwrap().is_none(),
+            "a cancelled park must leave no pacing wake armed"
+        );
+        assert_eq!(ctx.transient_fails, 0, "the episode's count starts over");
+    }
 
     /// The message-entry guard cuts an oversized external message to a
     /// banner-topped slice and spills the full original; the spill equality
@@ -1466,7 +1640,7 @@ mod tests {
         assert!(!lifecycle.is_cancelled());
         assert_eq!(CancelKind::classify(&lifecycle), CancelKind::Interrupt);
 
-        // Lifecycle cancel (remove / shutdown): propagates to the round token (child).
+        // Lifecycle cancel: propagates to the round token (child).
         let lifecycle = CancellationToken::new();
         let round = RoundToken::new(&lifecycle);
         lifecycle.cancel();

@@ -46,7 +46,7 @@ async fn interrupt_cancels_round_not_lifecycle() {
     // Simulate a round in flight: publish the round token into the slot.
     *entry.agent.round_cancel.lock().unwrap() = Some(round.clone());
 
-    // Mirror `interrupt_agent`'s logic: cancel the slot's token, not the lifecycle.
+    // Mirror the route's round form: cancel the slot's token, not the lifecycle.
     if let Some(rc) = entry.agent.round_cancel.lock().unwrap().clone() {
         rc.cancel();
     }

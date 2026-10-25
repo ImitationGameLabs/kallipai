@@ -7,7 +7,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::OnceLock;
-use std::sync::atomic::AtomicU8;
+use std::sync::atomic::{AtomicU8, AtomicU64};
 
 use ctor::ctor;
 use kallipai_adk::approval::ApprovalStore;
@@ -144,6 +144,8 @@ fn make_entry_inner(
             exec_gate: kallipai_adk::ExecGate::new(),
             bg_tasks: Arc::new(std::sync::Mutex::new(Vec::new())),
             pending_profile_reset: Arc::new(std::sync::Mutex::new(None)),
+            park_epoch: Arc::new(AtomicU64::new(0)),
+            park_cancel: Arc::new(std::sync::Mutex::new(None)),
             profile_snapshot: Arc::new(std::sync::Mutex::new(
                 kallipai_adk::ProfileSnapshot::default(),
             )),

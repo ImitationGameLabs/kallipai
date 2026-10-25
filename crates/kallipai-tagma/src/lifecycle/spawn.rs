@@ -99,7 +99,7 @@ pub(crate) async fn spawn_agent(mut args: SpawnArgs) -> anyhow::Result<(Agent, A
     // `notify` so the approval arm's guard stays the sole authority for approval wakes).
     let retry_notify = Arc::new(Notify::new());
     // Round-scoped interrupt slot: `Some` only while a round runs. Shared with the agent
-    // task so `interrupt_agent` can cancel the current round without terminating the task.
+    // task so the tagma's interrupt path can cancel the current round without terminating the task.
     let round_cancel: Arc<std::sync::Mutex<Option<kallipai_adk::agent_task::RoundToken>>> =
         Arc::new(std::sync::Mutex::new(None));
 
@@ -215,6 +215,11 @@ pub(crate) async fn spawn_agent(mut args: SpawnArgs) -> anyhow::Result<(Agent, A
     let usage_stats = args.shared_state.usage_stats.clone();
 
     let pending_profile_reset = Arc::new(std::sync::Mutex::new(None));
+    // Park generation + cancel cell: shared by value with the runtime (the
+    // runtime bumps the epoch when it arms a fuse, the interrupt route reads
+    // the epoch and writes the cell), exactly as `pending_profile_reset` is.
+    let park_epoch = Arc::new(AtomicU64::new(0));
+    let park_cancel: Arc<std::sync::Mutex<Option<u64>>> = Arc::new(std::sync::Mutex::new(None));
     // The active-profile snapshot cell: created here so both holders share
     // one Arc — the runtime's FailoverState writes it (spawn seeds the
     // active profile), the tagma's Agent reads it for status surfaces.
@@ -275,6 +280,8 @@ pub(crate) async fn spawn_agent(mut args: SpawnArgs) -> anyhow::Result<(Agent, A
         usage_stats: usage_stats.clone(),
         profile_pacing: Some(args.shared_state.profile_pacing.clone()),
         pending_profile_reset: pending_profile_reset.clone(),
+        park_epoch: park_epoch.clone(),
+        park_cancel: park_cancel.clone(),
         message_puller,
         persist_failures: Default::default(),
         gateway_signals: args.shared_state.gateway_signals.clone(),
@@ -338,6 +345,8 @@ pub(crate) async fn spawn_agent(mut args: SpawnArgs) -> anyhow::Result<(Agent, A
             exec_gate,
             bg_tasks,
             pending_profile_reset,
+            park_epoch,
+            park_cancel,
             profile_snapshot,
             parked,
             retrying,

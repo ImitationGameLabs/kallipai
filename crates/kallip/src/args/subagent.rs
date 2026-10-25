@@ -90,7 +90,10 @@ pub(crate) enum SubagentCommand {
     List,
     /// Remove a direct subagent
     Remove(IdArgs),
-    /// Interrupt a direct subagent's current operation
+    /// Interrupt a direct subagent: abort its running round, or cancel the
+    /// wait/retry it is parked on. Cancelling a wait leaves it idle with no
+    /// round of its own; an idle or hard-parked agent has nothing to
+    /// interrupt, and a faulted one is refused.
     Interrupt(IdArgs),
     /// Update a direct subagent's role and/or description
     Metadata(MetadataArgs),

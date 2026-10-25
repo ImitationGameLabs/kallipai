@@ -527,9 +527,10 @@ impl RelayHandle {
         }
     }
 
-    /// Cancel the root agent's current round (interrupt), mirroring the
-    /// `interrupt_agent` route in-process. No auth needed — the relay is the
-    /// trusted operator-equivalent.
+    /// Cancel the root agent's current round (interrupt). The round form only —
+    /// an armed park is the HTTP interrupt route's to cancel, not this
+    /// in-process path's. No auth needed — the relay is the trusted
+    /// operator-equivalent.
     async fn interrupt_root(&self, state: &SharedState) -> Result<()> {
         let round_cancel = {
             let registry = state.registry.read().await;
