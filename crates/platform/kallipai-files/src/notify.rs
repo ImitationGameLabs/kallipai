@@ -8,6 +8,7 @@
 
 use std::time::Duration;
 
+use kallipai_common::telemetry;
 use serde_json::json;
 
 /// The push contract the send transaction depends on, so tests can record
@@ -32,7 +33,7 @@ pub trait NotifyPusher: Send + Sync {
 pub struct LescheNotifyClient {
     base: String,
     token: String,
-    http: reqwest::Client,
+    http: telemetry::HttpClient,
 }
 
 /// The per-call timeout for an internal push. Same 10s contract as the
@@ -51,9 +52,7 @@ impl LescheNotifyClient {
         Some(Self {
             base: base.trim_end_matches('/').to_owned(),
             token,
-            http: reqwest::Client::builder()
-                .timeout(NOTIFY_TIMEOUT)
-                .build()
+            http: telemetry::http_client(reqwest::Client::builder().timeout(NOTIFY_TIMEOUT))
                 .ok()?,
         })
     }

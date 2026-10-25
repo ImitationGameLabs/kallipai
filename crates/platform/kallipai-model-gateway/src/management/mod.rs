@@ -59,6 +59,7 @@ use kallipai_archeion_common::internal_api::{
 use kallipai_archeion_common::principal::Principal;
 use kallipai_common::auth_header::extract_bearer_token;
 use kallipai_common::protocol::{ApiError, Modality};
+use kallipai_common::telemetry;
 
 use crate::state::AppState;
 
@@ -112,7 +113,7 @@ pub struct ArcheionVerifier {
     /// Shared secret matching the archeion's provisioned internal token
     /// (the value in KALLIPAI_MODEL_GATEWAY_INTERNAL_TOKEN_FILE).
     internal_token: String,
-    http: reqwest::Client,
+    http: telemetry::HttpClient,
     /// The TTL cache under the ownership gates: the enrollment answer
     /// per tagma, stale-while-error (see [`EnrollmentCache`]).
     enrollment_cache: EnrollmentCache,
@@ -120,9 +121,7 @@ pub struct ArcheionVerifier {
 
 impl ArcheionVerifier {
     pub fn new(base_url: String, internal_token: String) -> Self {
-        let http = reqwest::Client::builder()
-            .timeout(INTERNAL_TIMEOUT)
-            .build()
+        let http = telemetry::http_client(reqwest::Client::builder().timeout(INTERNAL_TIMEOUT))
             .expect("build reqwest client");
         Self {
             enrollment_cache: EnrollmentCache::default(),

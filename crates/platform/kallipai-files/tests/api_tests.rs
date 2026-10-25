@@ -1029,6 +1029,153 @@ async fn send_pushes_the_delivery_event_once() {
     assert_eq!(*size, 7);
 }
 
+// --- the delivery push runs inside the request span ---
+
+/// One recorded span: the thread that made it, its name, and its id.
+type RecordedSpan = (std::thread::ThreadId, &'static str, u64);
+
+#[derive(Clone, Default)]
+struct SpanLog(std::sync::Arc<std::sync::Mutex<Vec<RecordedSpan>>>);
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for SpanLog {
+    fn on_new_span(
+        &self,
+        attrs: &tracing::span::Attributes<'_>,
+        id: &tracing::span::Id,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        self.0.lock().unwrap().push((
+            std::thread::current().id(),
+            attrs.metadata().name(),
+            id.into_u64(),
+        ));
+    }
+}
+
+/// The recorder, installed once per test process.
+///
+/// The dispatch has to be the global one: `tracing` caches a callsite's
+/// interest from whichever subscriber is global, so a thread-local default
+/// leaves the request span disabled as soon as another test reached that
+/// callsite first. Recorded entries carry the creating thread and are read
+/// from an index taken by the test, so a test reads only the spans it made.
+///
+/// This installs the process-wide default and cannot be revoked: a second
+/// global installer anywhere in this test binary panics, so share this one.
+///
+/// The subscriber it installs carries an `fmt` layer writing to `std::io::sink`:
+/// the log output of every other test in this binary goes there too, unseen.
+static SPANS: std::sync::OnceLock<SpanLog> = std::sync::OnceLock::new();
+
+fn span_recorder() -> SpanLog {
+    use tracing_subscriber::layer::SubscriberExt as _;
+    SPANS
+        .get_or_init(|| {
+            let log = SpanLog::default();
+            let subscriber = tracing_subscriber::fmt()
+                .with_writer(std::io::sink)
+                .finish()
+                .with(log.clone());
+            tracing::subscriber::set_global_default(subscriber).expect("install the span recorder");
+            log
+        })
+        .clone()
+}
+
+/// Every time the push was called: the span current then, when one was.
+type SeenSpan = std::sync::Arc<std::sync::Mutex<Vec<Option<(u64, &'static str)>>>>;
+
+/// Records the ambient span at the moment the push arrives.
+struct SpanSpy(SeenSpan);
+
+#[async_trait::async_trait]
+impl kallipai_files::notify::NotifyPusher for SpanSpy {
+    async fn file_delivered(
+        &self,
+        _to_user: &str,
+        _record_id: uuid::Uuid,
+        _path: &str,
+        _from: &str,
+        _name: &str,
+        _size: u64,
+    ) {
+        let current = tracing::Span::current();
+        let seen = current.id().map(|id| {
+            let name = current.metadata().map_or("", |meta| meta.name());
+            (id.into_u64(), name)
+        });
+        self.0.lock().unwrap().push(seen);
+    }
+}
+
+/// The push runs on a task of its own, but a delivery event belongs to the
+/// request that caused it: the task must run inside the request's server
+/// span. The recorder knows the request span, the spy knows the span it was
+/// called in, and the two have to name the same id -- a fresh span wrapped
+/// around the push would leave a span current and still fail here.
+///
+/// Premises: the current-thread runtime and an in-process oneshot. On a
+/// multi-thread runtime the request could be polled elsewhere, and the thread
+/// filter would then hide the very span this test looks for.
+#[tokio::test]
+async fn the_delivery_push_runs_inside_the_request_span() {
+    let seen: SeenSpan = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let spy = SpanSpy(seen.clone());
+    let blob_dir = tempfile::TempDir::new().expect("blob dir");
+    let blob_root = blob_dir.path().to_path_buf();
+    let world = TestWorld::with_parts(
+        kallipai_files::LocalBackend::arc(&blob_root),
+        blob_root,
+        1024 * 1024,
+        blob_dir,
+        Some(std::sync::Arc::new(spy) as _),
+    )
+    .await;
+    let (source, _blob_id) = put_ok(
+        &world,
+        cookie_for(&world, 1),
+        &user1_shared(&world, "span.txt"),
+        b"for you",
+    )
+    .await;
+    let log = span_recorder();
+    let here = std::thread::current().id();
+    let started = log.0.lock().unwrap().len();
+    let response = send(
+        &world,
+        cookie_for(&world, 1),
+        &source,
+        serde_json::json!({ "to_user": world.user2.to_string() }),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    wait_for("the delivery push to land", || {
+        !seen.lock().unwrap().is_empty()
+    })
+    .await;
+    let pushes = seen.lock().unwrap();
+    assert_eq!(pushes.len(), 1, "one push for one delivery");
+    let seen_span = pushes[0].expect("the push must run inside a span");
+    let request_spans: Vec<u64> = log.0.lock().unwrap()[started..]
+        .iter()
+        .filter(|(thread, name, _)| *thread == here && *name == "request")
+        .map(|(_, _, id)| *id)
+        .collect();
+    assert_eq!(
+        request_spans.len(),
+        1,
+        "one request span was created, the push saw {seen_span:?}"
+    );
+    assert_eq!(
+        seen_span.1, "request",
+        "the push must run in the server span, not a span of its own"
+    );
+    assert_eq!(
+        seen_span.0, request_spans[0],
+        "the push must join the request span, not open one"
+    );
+}
+
 /// A lesche that answers `delivered: false` (recipient offline) gets its
 /// single request, and the client returns without error and without a
 /// retry -- the delivery itself is already committed (the compensation

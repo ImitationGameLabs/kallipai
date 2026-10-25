@@ -27,6 +27,7 @@ use kallipai_archeion_common::internal_api::{
     VerifySessionRequest, VerifySessionResponse,
 };
 use kallipai_archeion_common::principal::Principal;
+use kallipai_common::telemetry;
 
 /// Per-call timeout for an `/internal/*` round-trip. These are tiny JSON
 /// request/response pairs against a same-host registry; a 10s ceiling is a
@@ -41,7 +42,7 @@ pub struct HttpControlPlane {
     base_url: String,
     /// Plaintext shared secret sent as `Authorization: Bearer <token>`.
     token: String,
-    http: reqwest::Client,
+    http: telemetry::HttpClient,
 }
 
 impl HttpControlPlane {
@@ -49,9 +50,7 @@ impl HttpControlPlane {
     /// secret that must match the archeion's provisioned internal token (the
     /// value in KALLIPAI_POLIS_INTERNAL_TOKEN_FILE).
     pub fn new(base_url: String, token: String) -> Self {
-        let http = reqwest::Client::builder()
-            .timeout(INTERNAL_TIMEOUT)
-            .build()
+        let http = telemetry::http_client(reqwest::Client::builder().timeout(INTERNAL_TIMEOUT))
             .expect("build reqwest client");
         Self {
             base_url,

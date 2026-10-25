@@ -118,13 +118,18 @@ where
 /// it; production passes `std::io::stdout`.
 /// An extra layer (telemetry) sits under the event layers when given: it is
 /// built for the bare registry, so it wraps that, not the composed stack.
+///
+/// `use<W>` names the captures precisely: without it the elided lifetimes of
+/// the borrowed parameters are captured too, and the subscriber is no longer
+/// `'static`, which `set_default` and `Dispatch::new` both require. Only `W`
+/// has to outlive the call.
 pub(crate) fn service_layers_with<W>(
     filter: &tracing_subscriber::EnvFilter,
     service: &str,
     dir: Option<&Path>,
     stdout: W,
     extra: Option<Box<dyn tracing_subscriber::Layer<tracing_subscriber::Registry> + Send + Sync>>,
-) -> impl tracing::Subscriber
+) -> impl tracing::Subscriber + use<W>
 where
     W: for<'a> tracing_subscriber::fmt::MakeWriter<'a> + Send + Sync + 'static,
 {
@@ -161,6 +166,10 @@ where
 
 /// Compose the plain logging stack: `service_layers_with` without an extra
 /// layer.
+///
+/// No `use<W>`: the type returned here is the one `service_layers_with` hands
+/// back, which its own `use<W>` already makes `'static` -- and it has to be,
+/// since `init_service_logging` passes it straight to `try_init`.
 pub(crate) fn service_layers<W>(
     filter: &tracing_subscriber::EnvFilter,
     service: &str,

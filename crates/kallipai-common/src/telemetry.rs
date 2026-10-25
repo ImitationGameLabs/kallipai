@@ -16,8 +16,9 @@
 //! A dropped span leaves no trace of its own: the SDK counts drops but reports
 //! them only through its internal logs, which this crate leaves off, so a
 //! deployment notices loss from the collector's intake and not from here. The
-//! export layer shares the event filter, so `RUST_LOG=warn` quiets traces
-//! along with events.
+//! export layer shares the event filter, so `RUST_LOG=warn` filters the spans
+//! out with the events; a call whose span never existed injects nothing, so at
+//! that level the chain is cut rather than quiet.
 //!
 //! A setup that cannot be built at all (a malformed endpoint, say) degrades:
 //! one stderr line, tracing stays local, the service starts. Telemetry is not
@@ -41,6 +42,7 @@ use opentelemetry_sdk::trace::span_processor_with_async_runtime::BatchSpanProces
 use opentelemetry_sdk::trace::{
     BatchConfigBuilder, Sampler, SdkTracerProvider, SpanData, SpanExporter,
 };
+use reqwest_middleware::{ClientWithMiddleware, Middleware, Next};
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::Layer;
 use tracing_subscriber::prelude::*;
@@ -264,6 +266,8 @@ where
 /// The same composition with the exporter construction injected: `open`
 /// receives the resolved traces endpoint and returns the exporter to batch.
 /// Tests use it to watch a span leave through the composed stack.
+/// The returned subscriber borrows nothing: the captures are precise, so a
+/// caller may hold it as `'static`, which `set_default` wants.
 fn service_layers_with_exporter<W, E, F>(
     open: F,
     config: Option<&Config>,
@@ -271,7 +275,7 @@ fn service_layers_with_exporter<W, E, F>(
     service: &str,
     dir: Option<&Path>,
     stdout: W,
-) -> (impl tracing::Subscriber, Guard)
+) -> (impl tracing::Subscriber + use<W, E, F>, Guard)
 where
     W: for<'a> tracing_subscriber::fmt::MakeWriter<'a> + Send + Sync + 'static,
     E: SpanExporter + 'static,
@@ -371,16 +375,22 @@ const UNMATCHED_ROUTE: &str = "unmatched";
 /// recorded once the response exists, and a server-side failure also carries an
 /// error type and the failed status, so a trace can be filtered for them.
 ///
-/// A 4xx response only records `http.response.status_code`; the semantic
-/// conventions reserve the error status and `error.type` for a 5xx.
+/// A 4xx response only records `http.response.status_code`: for a server span the
+/// semantic conventions reserve the error status and `error.type` for a 5xx. A
+/// client span reads the same code as its own failure, so the halves differ.
 ///
 /// Only `otel.name` and `otel.kind` are tracing fields: those two render into
 /// the prefix of every event inside the request, and the rest is worth nothing
 /// there. Everything else is a span attribute, which costs the log no space.
 ///
-/// The span ends when the response head exists. For a streaming body (SSE, a
-/// download) the duration is time to the first byte rather than the transfer,
-/// and a body that fails mid-stream is not recorded as an error on the span.
+/// Absent a handoff, the span ends when the response head exists. For a
+/// streaming body (SSE, a download) the duration is time to the first byte
+/// rather than the transfer, and a body that fails mid-stream is not recorded
+/// as an error on the span.
+///
+/// A handler that hands the span's handle to a task outliving the response
+/// keeps the span open until that task ends, so such a route's duration
+/// covers that work as well.
 ///
 /// A request that arrives with a W3C `traceparent` adopts it as its parent, so
 /// one trace spans the services a call crosses.
@@ -446,10 +456,8 @@ impl Extractor for HeaderCarrier<'_> {
 
 /// Cap for `url.path`. A path is caller data, and a deeply nested one must not
 /// grow every span it lands on; truncation keeps whole characters.
-#[cfg(feature = "axum")]
 const URL_PATH_LIMIT: usize = 256;
 
-#[cfg(feature = "axum")]
 fn capped(value: &str, limit: usize) -> &str {
     match value.char_indices().nth(limit) {
         Some((at, _)) => &value[..at],
@@ -469,6 +477,145 @@ where
     S: Clone + Send + Sync + 'static,
 {
     router.layer(axum::middleware::from_fn(server_span))
+}
+
+/// The span kind an outgoing call declares; a `Display` value renders into the
+/// log prefix unquoted, which a string literal does not.
+const CLIENT_SPAN_KIND: &str = "client";
+
+/// The client a service stores for the calls it makes to another service.
+///
+/// The alias is the seam: these fields are built by [`http_client`], and a bare
+/// `reqwest::Client` does not go into one. A bypass remains -- the middleware
+/// client's `From`/`Default` -- but it takes spelling out, so dropping the
+/// propagation is a decision a reader of the call site sees.
+pub type HttpClient = ClientWithMiddleware;
+
+/// Build a client whose every call belongs to a trace.
+///
+/// The builder is the caller's -- timeouts and pool settings stay where they
+/// are -- and this adds the one middleware that propagates. A client that the
+/// builder cannot build comes back as the builder's own error.
+///
+/// Each call opens a `client` span under the span the caller is in, or as the
+/// root of a new trace when the caller is in none, and injects that span's
+/// context into the request headers with the process-wide W3C propagator: the
+/// service that answers continues the same trace instead of starting a second
+/// one. The name is the method and the capped path; the span records the
+/// method, the path and the response status.
+///
+/// A response that failed (4xx or 5xx) also records `error.type` as
+/// `http_<code>` and sets an error status. A call that never got a response
+/// records `error.type` alone and puts the same word in the status: `timeout`
+/// for a call that ran out of time, `transport` for any other failure below
+/// the middleware chain, `middleware` for a failure inside it. No header,
+/// body, query or message text reaches a span.
+///
+/// The span ends when the response head exists, so a body that fails to arrive
+/// or to decode afterwards is the caller's error: the span shows a call that
+/// succeeded.
+///
+/// A request that never went on the wire -- a URL the builder refuses, a body
+/// that will not serialize -- is named `transport` too: this vocabulary has no
+/// finer word for it.
+///
+/// Redirects are reqwest's own business, below the middleware: `traceparent`
+/// travels on the copied headers to whatever a redirect points at, which is
+/// what a trace wants. No redirect policy is set; these callers post to fixed
+/// service paths.
+///
+/// The name carries the path because a client call has no route template to
+/// aggregate on, which is the opposite of the server side's reasoning.
+pub fn http_client(builder: reqwest::ClientBuilder) -> Result<HttpClient, reqwest::Error> {
+    let client = builder.build()?;
+    Ok(reqwest_middleware::ClientBuilder::new(client)
+        .with(TracePropagation)
+        .build())
+}
+
+/// Carries one call's context out with the request, and its outcome back onto
+/// the span opened for it.
+#[derive(Debug, Clone, Copy)]
+struct TracePropagation;
+
+#[async_trait::async_trait]
+impl Middleware for TracePropagation {
+    async fn handle(
+        &self,
+        mut request: reqwest::Request,
+        extensions: &mut http::Extensions,
+        next: Next<'_>,
+    ) -> Result<reqwest::Response, reqwest_middleware::Error> {
+        use opentelemetry::trace::Status;
+        use tracing::Instrument as _;
+        use tracing_opentelemetry::OpenTelemetrySpanExt as _;
+
+        let url_path = capped(request.url().path(), URL_PATH_LIMIT).to_string();
+        let method = request.method().clone();
+        let name = format!("{method} {url_path}");
+        let span = tracing::info_span!(
+            "request",
+            otel.name = %name,
+            otel.kind = %CLIENT_SPAN_KIND,
+        );
+        // The parent comes from the layer: it adopts the current span's OTel context.
+        span.set_attribute("http.request.method", method.as_str().to_string());
+        span.set_attribute("url.path", url_path);
+        // Reading the context builds the span if it is still a builder, so the
+        // headers carry this call's own span id and not the caller's.
+        let context = span.context();
+        {
+            let mut injector = HeaderInjector(request.headers_mut());
+            opentelemetry::global::get_text_map_propagator(|propagator| {
+                propagator.inject_context(&context, &mut injector);
+            });
+        }
+        let result = next.run(request, extensions).instrument(span.clone()).await;
+        match &result {
+            Ok(response) => {
+                let status = response.status();
+                span.set_attribute("http.response.status_code", i64::from(status.as_u16()));
+                if status.is_client_error() || status.is_server_error() {
+                    span.set_attribute("error.type", format!("http_{}", status.as_u16()));
+                    span.set_status(Status::error(status.to_string()));
+                }
+            }
+            Err(error) => {
+                let kind = failure_type(error);
+                span.set_attribute("error.type", kind);
+                span.set_status(Status::error(kind));
+            }
+        }
+        result
+    }
+}
+
+/// What a failed call names as `error.type` and as its status: the shape of
+/// the failure, never its text. A failure inside the middleware chain is
+/// named apart from the failures below it, so a middleware bug is not a
+/// network fault in the trace.
+fn failure_type(error: &reqwest_middleware::Error) -> &'static str {
+    match error {
+        reqwest_middleware::Error::Middleware(_) => "middleware",
+        reqwest_middleware::Error::Reqwest(error) if error.is_timeout() => "timeout",
+        reqwest_middleware::Error::Reqwest(_) => "transport",
+    }
+}
+
+/// The request headers as the propagator writes them. A name or a value the
+/// header map cannot hold is dropped: carrying the context is worth a header,
+/// never a failed call.
+struct HeaderInjector<'a>(&'a mut reqwest::header::HeaderMap);
+
+impl opentelemetry::propagation::Injector for HeaderInjector<'_> {
+    fn set(&mut self, key: &str, value: String) {
+        if let (Ok(name), Ok(value)) = (
+            reqwest::header::HeaderName::from_bytes(key.as_bytes()),
+            reqwest::header::HeaderValue::from_str(&value),
+        ) {
+            self.0.insert(name, value);
+        }
+    }
 }
 
 /// Build the OTLP layer and the provider behind it: export over HTTP, the
@@ -1289,6 +1436,494 @@ mod tests {
             assert!(
                 !rendered.contains(absent),
                 "{absent} belongs to the span, not to the log line: {rendered}"
+            );
+        }
+    }
+
+    /// A real service on loopback: an axum router under the request span, the
+    /// status its one route answers with, and the `traceparent` the handler saw.
+    /// The subscriber is installed thread-locally (`set_default`) and the
+    /// spawned service runs on the same single-threaded runtime, so its span is
+    /// visible; a multi-threaded flavor would put it out of sight and fail here
+    /// for the wrong reason.
+    #[cfg(feature = "axum")]
+    async fn service_on_loopback(
+        route: &'static str,
+        status: axum::http::StatusCode,
+    ) -> (
+        std::net::SocketAddr,
+        tokio::task::JoinHandle<()>,
+        Arc<Mutex<Option<String>>>,
+    ) {
+        let seen = Arc::new(Mutex::new(None));
+        let recorded = seen.clone();
+        let app = with_server_span(axum::Router::new().route(
+            route,
+            axum::routing::get(move |headers: axum::http::HeaderMap| {
+                let recorded = recorded.clone();
+                async move {
+                    *recorded.lock().unwrap() = headers
+                        .get("traceparent")
+                        .and_then(|value| value.to_str().ok())
+                        .map(str::to_string);
+                    status
+                }
+            }),
+        ));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("a loopback port");
+        let addr = listener.local_addr().expect("the bound address");
+        let served = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("the service serves");
+        });
+        (addr, served, seen)
+    }
+
+    /// A port with nothing behind it: bound, then closed.
+    #[cfg(feature = "axum")]
+    async fn closed_port() -> std::net::SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("a loopback port");
+        let addr = listener.local_addr().expect("the bound address");
+        drop(listener);
+        addr
+    }
+
+    /// A listener that accepts the call and never answers: only the client's
+    /// own timeout can end it.
+    #[cfg(feature = "axum")]
+    async fn a_peer_that_never_answers() -> std::net::SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("a loopback port");
+        let addr = listener.local_addr().expect("the bound address");
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((stream, _)) = listener.accept().await {
+                held.push(stream);
+            }
+        });
+        addr
+    }
+
+    /// The one span of a kind among the exported spans.
+    #[cfg(feature = "axum")]
+    fn span_of_kind(spans: &[SpanData], kind: opentelemetry::trace::SpanKind) -> &SpanData {
+        spans
+            .iter()
+            .find(|span| span.span_kind == kind)
+            .unwrap_or_else(|| panic!("the call left one {kind:?} span, not: {spans:?}"))
+    }
+
+    /// The observing stack a test installs: a subscriber that exports into a
+    /// recording exporter, the guard that owns what it published, and the
+    /// exporter whose spans the test reads afterwards.
+    #[cfg(feature = "axum")]
+    fn recording_telemetry() -> (
+        impl tracing::Subscriber + Send + Sync + 'static,
+        Guard,
+        RecordingExporter,
+    ) {
+        let recording = RecordingExporter::default();
+        let handed = recording.clone();
+        let config = config("http://collector:4318");
+        let filter = test_filter();
+        let (subscriber, guard) = service_layers_with_exporter(
+            move |_endpoint: &str| Ok(handed),
+            Some(&config),
+            &filter,
+            "archeion",
+            None,
+            Captured::default(),
+        );
+        (subscriber, guard, recording)
+    }
+
+    #[cfg(feature = "axum")]
+    #[tokio::test]
+    async fn one_trace_spans_two_services() {
+        use opentelemetry::trace::{SpanKind, TraceContextExt as _};
+        use tracing::Instrument as _;
+        use tracing_opentelemetry::OpenTelemetrySpanExt as _;
+
+        let (addr, served, seen) =
+            service_on_loopback("/files/abc", axum::http::StatusCode::OK).await;
+        let (subscriber, mut guard, recording) = recording_telemetry();
+        let client = http_client(reqwest::Client::builder()).expect("a client");
+        // The root span is built by the layer, so its context exists only
+        // while the subscriber is installed: the call joins it from there.
+        let root_span_context = {
+            let _subscribed = tracing::subscriber::set_default(subscriber);
+            let root = tracing::info_span!("root");
+            let root_context = root.context();
+            let span_context = root_context.span().span_context().clone();
+            let response = async { client.get(format!("http://{addr}/files/abc")).send().await }
+                .instrument(root.clone())
+                .await
+                .expect("the service answers");
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+            span_context
+        };
+        served.abort();
+        assert!(guard.shutdown(), "a configured guard owns a provider");
+
+        let traceparent = seen
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("the header travelled with the call");
+        let parts: Vec<&str> = traceparent.split('-').collect();
+        assert_eq!(
+            parts[1],
+            root_span_context.trace_id().to_string(),
+            "the caller's trace id travels in the header"
+        );
+
+        let spans = recording.spans.lock().unwrap().clone();
+        let client_span = span_of_kind(&spans, SpanKind::Client);
+        assert_eq!(client_span.name, "GET /files/abc");
+        assert_eq!(
+            attribute(client_span, "url.path").as_deref(),
+            Some("/files/abc"),
+            "the attribute carries the path alone"
+        );
+
+        assert_eq!(parts[2], client_span.span_context.span_id().to_string());
+        assert_eq!(
+            client_span.span_context.trace_id(),
+            root_span_context.trace_id()
+        );
+        assert_eq!(client_span.parent_span_id, root_span_context.span_id());
+        // The layer stamps its own bookkeeping on every span it builds; what
+        // the call adds is the closed set below, and nothing that carries
+        // caller data such as a header, a body, a query or a message.
+        const BOOKKEEPING: [&str; 8] = [
+            "busy_ns",
+            "code.file.path",
+            "code.line.number",
+            "code.module.name",
+            "idle_ns",
+            "target",
+            "thread.id",
+            "thread.name",
+        ];
+        let mut recorded: Vec<&str> = client_span
+            .attributes
+            .iter()
+            .map(|pair| pair.key.as_str())
+            .filter(|key| !BOOKKEEPING.contains(key))
+            .collect();
+        recorded.sort_unstable();
+        assert_eq!(
+            recorded,
+            [
+                "http.request.method",
+                "http.response.status_code",
+                "url.path"
+            ],
+            "the client span records the call and nothing else"
+        );
+
+        let server_span = span_of_kind(&spans, SpanKind::Server);
+        assert_eq!(
+            server_span.span_context.trace_id(),
+            root_span_context.trace_id()
+        );
+        assert_eq!(
+            server_span.parent_span_id,
+            client_span.span_context.span_id(),
+            "the service answered inside the span of the call"
+        );
+    }
+
+    #[cfg(feature = "axum")]
+    #[tokio::test]
+    async fn a_call_outside_every_span_opens_one() {
+        use opentelemetry::trace::{SpanId, SpanKind};
+
+        // A caller outside every span: the call opens the trace it joins.
+        let (addr, served, seen) = service_on_loopback("/ping", axum::http::StatusCode::OK).await;
+        let (subscriber, mut guard, recording) = recording_telemetry();
+        {
+            let _subscribed = tracing::subscriber::set_default(subscriber);
+            let client = http_client(reqwest::Client::builder()).expect("a client");
+            let response = client
+                .get(format!("http://{addr}/ping"))
+                .send()
+                .await
+                .expect("the service answers");
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+        }
+        served.abort();
+        assert!(guard.shutdown(), "a configured guard owns a provider");
+
+        let spans = recording.spans.lock().unwrap().clone();
+        let client_span = span_of_kind(&spans, SpanKind::Client);
+        assert_eq!(
+            client_span.parent_span_id,
+            SpanId::INVALID,
+            "a call made outside every span starts the trace"
+        );
+        let traceparent = seen
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("the header still travels");
+        let parts: Vec<&str> = traceparent.split('-').collect();
+        assert_eq!(
+            parts[1],
+            client_span.span_context.trace_id().to_string(),
+            "the header carries the trace the call opened"
+        );
+        let server_span = span_of_kind(&spans, SpanKind::Server);
+        assert_eq!(
+            server_span.parent_span_id,
+            client_span.span_context.span_id()
+        );
+    }
+
+    /// No subscriber at all: nothing to propagate, and the call still works.
+    #[cfg(feature = "axum")]
+    #[tokio::test]
+    async fn without_telemetry_no_header_travels() {
+        let (addr, served, seen) = service_on_loopback("/ping", axum::http::StatusCode::OK).await;
+        let client = http_client(reqwest::Client::builder()).expect("a client");
+        let response = client
+            .get(format!("http://{addr}/ping"))
+            .send()
+            .await
+            .expect("the service answers");
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        served.abort();
+        assert_eq!(
+            seen.lock().unwrap().clone(),
+            None,
+            "without telemetry no header reaches the wire"
+        );
+    }
+
+    #[cfg(feature = "axum")]
+    #[tokio::test]
+    async fn a_failed_call_records_a_type_not_a_text() {
+        use opentelemetry::trace::{SpanKind, Status};
+
+        // An answer that failed: the code and the class, side by side.
+        let (addr, served, _seen) =
+            service_on_loopback("/boom", axum::http::StatusCode::INTERNAL_SERVER_ERROR).await;
+        let (subscriber, mut guard, recording) = recording_telemetry();
+        {
+            let _subscribed = tracing::subscriber::set_default(subscriber);
+            let client = http_client(reqwest::Client::builder()).expect("a client");
+            let response = client
+                .get(format!("http://{addr}/boom"))
+                .send()
+                .await
+                .expect("an answer, however unhappy");
+            assert_eq!(
+                response.status(),
+                reqwest::StatusCode::INTERNAL_SERVER_ERROR
+            );
+        }
+        served.abort();
+        assert!(guard.shutdown(), "a configured guard owns a provider");
+
+        let spans = recording.spans.lock().unwrap().clone();
+        let client_span = span_of_kind(&spans, SpanKind::Client);
+        assert_eq!(
+            attribute(client_span, "http.response.status_code").as_deref(),
+            Some("500")
+        );
+        assert_eq!(
+            attribute(client_span, "error.type").as_deref(),
+            Some("http_500")
+        );
+        match &client_span.status {
+            Status::Error { description } => assert_eq!(
+                description.as_ref(),
+                "500 Internal Server Error",
+                "the status repeats the code's phrase, not the body"
+            ),
+            other => panic!("a failed answer is an error span, not: {other:?}"),
+        }
+
+        // No answer at all: no status to record, one word to name.
+        let closed = closed_port().await;
+        let (subscriber, mut guard, recording) = recording_telemetry();
+        {
+            let _subscribed = tracing::subscriber::set_default(subscriber);
+            let client = http_client(reqwest::Client::builder()).expect("a client");
+            let error = client
+                .get(format!("http://{closed}/"))
+                .send()
+                .await
+                .expect_err("nothing answers on a closed port");
+            assert!(
+                error.is_connect(),
+                "a closed port refuses the connection: {error}"
+            );
+        }
+        assert!(guard.shutdown(), "a configured guard owns a provider");
+
+        let spans = recording.spans.lock().unwrap().clone();
+        let client_span = span_of_kind(&spans, SpanKind::Client);
+        let recorded = attribute(client_span, "error.type").expect("a failed call names its type");
+        assert_eq!(
+            recorded, "transport",
+            "a refused connection is a transport failure, not a class of its own"
+        );
+        assert_eq!(
+            attribute(client_span, "http.response.status_code"),
+            None,
+            "no response, no status"
+        );
+        match &client_span.status {
+            Status::Error { description } => {
+                assert_eq!(
+                    description.as_ref(),
+                    "transport",
+                    "the status carries the class, not the request"
+                );
+                assert!(
+                    !description.contains("http"),
+                    "no URL or path reaches the status: {description}"
+                );
+            }
+            other => panic!("a call that never completed is an error span, not: {other:?}"),
+        }
+    }
+
+    /// A call the caller's own timeout ends: the peer takes the connection and
+    /// never answers, so the wait is what fails.
+    #[cfg(feature = "axum")]
+    #[tokio::test]
+    async fn a_call_that_runs_out_of_time_names_the_timeout() {
+        use opentelemetry::trace::{SpanKind, Status};
+
+        let addr = a_peer_that_never_answers().await;
+        let (subscriber, mut guard, recording) = recording_telemetry();
+        {
+            let _subscribed = tracing::subscriber::set_default(subscriber);
+            let client = http_client(
+                reqwest::Client::builder().timeout(std::time::Duration::from_millis(200)),
+            )
+            .expect("a client");
+            client
+                .get(format!("http://{addr}/slow"))
+                .send()
+                .await
+                .expect_err("a peer that never answers trips the timeout");
+        }
+        assert!(guard.shutdown(), "a configured guard owns a provider");
+
+        let spans = recording.spans.lock().unwrap().clone();
+        let client_span = span_of_kind(&spans, SpanKind::Client);
+        assert_eq!(
+            attribute(client_span, "error.type").as_deref(),
+            Some("timeout"),
+            "a wait that ran out is named apart from a transport failure"
+        );
+        assert_eq!(
+            attribute(client_span, "http.response.status_code"),
+            None,
+            "no response, no status"
+        );
+        match &client_span.status {
+            Status::Error { description } => assert_eq!(description.as_ref(), "timeout"),
+            other => panic!("a timed-out call is an error span, not: {other:?}"),
+        }
+    }
+
+    /// The rule the two halves break in opposite directions: a client span counts
+    /// a 4xx as its own failure, a server span leaves it to the status code.
+    #[cfg(feature = "axum")]
+    #[tokio::test]
+    async fn a_client_span_reads_a_4xx_as_failed_and_the_server_span_does_not() {
+        use opentelemetry::trace::{SpanKind, Status};
+
+        let (addr, served, _seen) =
+            service_on_loopback("/deny", axum::http::StatusCode::NOT_FOUND).await;
+        let (subscriber, mut guard, recording) = recording_telemetry();
+        {
+            let _subscribed = tracing::subscriber::set_default(subscriber);
+            let client = http_client(reqwest::Client::builder()).expect("a client");
+            let response = client
+                .get(format!("http://{addr}/deny"))
+                .send()
+                .await
+                .expect("an answer, however unhappy");
+            assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND);
+        }
+        served.abort();
+        assert!(guard.shutdown(), "a configured guard owns a provider");
+
+        let spans = recording.spans.lock().unwrap().clone();
+        let client_span = span_of_kind(&spans, SpanKind::Client);
+        assert_eq!(
+            attribute(client_span, "error.type").as_deref(),
+            Some("http_404"),
+            "a client span counts a 4xx as its own failure"
+        );
+        match &client_span.status {
+            Status::Error { description } => assert_eq!(description.as_ref(), "404 Not Found"),
+            other => panic!("a failed call is an error span, not: {other:?}"),
+        }
+
+        let server_span = span_of_kind(&spans, SpanKind::Server);
+        assert_eq!(
+            attribute(server_span, "error.type"),
+            None,
+            "the same 4xx is no error on the server span"
+        );
+        assert!(
+            matches!(&server_span.status, Status::Unset),
+            "and leaves the server status unset: {:?}",
+            server_span.status
+        );
+    }
+
+    /// The query stays off the span: the attribute carries the path alone, the
+    /// name carries nothing, and no value holds what the URL carried.
+    #[cfg(feature = "axum")]
+    #[tokio::test]
+    async fn a_query_string_stays_out_of_the_span() {
+        use opentelemetry::trace::SpanKind;
+
+        let (addr, served, _seen) =
+            service_on_loopback("/files/abc", axum::http::StatusCode::OK).await;
+        let (subscriber, mut guard, recording) = recording_telemetry();
+        {
+            let _subscribed = tracing::subscriber::set_default(subscriber);
+            let client = http_client(reqwest::Client::builder()).expect("a client");
+            let response = client
+                .get(format!("http://{addr}/files/abc?token=secret"))
+                .send()
+                .await
+                .expect("the service answers");
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+        }
+        served.abort();
+        assert!(guard.shutdown(), "a configured guard owns a provider");
+
+        let spans = recording.spans.lock().unwrap().clone();
+        let client_span = span_of_kind(&spans, SpanKind::Client);
+        assert_eq!(
+            attribute(client_span, "url.path").as_deref(),
+            Some("/files/abc"),
+            "the attribute carries the path the query hangs off, not the query"
+        );
+        assert!(
+            !client_span.name.contains('?'),
+            "the name carries no query: {}",
+            client_span.name
+        );
+        for pair in &client_span.attributes {
+            assert!(
+                !pair.value.as_str().contains("secret"),
+                "no attribute value carries the query: {pair:?}"
             );
         }
     }

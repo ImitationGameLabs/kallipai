@@ -2944,16 +2944,20 @@ name = "kallipai-common"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axum",
  "base64 0.22.1",
  "futures-core",
  "getrandom 0.4.2",
+ "http",
  "jiff",
  "kallipai-testkit",
  "log",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
+ "reqwest",
+ "reqwest-middleware",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -5090,6 +5094,21 @@ dependencies = [
  "wasm-bindgen-futures",
  "wasm-streams",
  "web-sys",
+]
+
+[[package]]
+name = "reqwest-middleware"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "07bc3f1384cffa4f274dad2d4ddd73aed32fed8f786d96c6be8aa4e5fd3c3b58"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "http",
+ "reqwest",
+ "serde",
+ "thiserror 2.0.18",
+ "tower-service",
 ]
 
 [[package]]

@@ -104,6 +104,7 @@ reqwest = { version = "0.13.2", default-features = false, features = [
   "rustls",
   "stream",
 ] }
+reqwest-middleware = { version = "=0.5.2", features = ["json"] }
 bincode = "1"
 bytes = "1"
 serde = { version = "1.0.228", features = ["derive"] }

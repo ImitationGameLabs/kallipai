@@ -18,6 +18,7 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
+use tracing::Instrument as _;
 use uuid::Uuid;
 
 use crate::acl::{self, Action};
@@ -119,11 +120,21 @@ pub async fn send_file(
         let path = landing.path.clone();
         let from = landing.from.clone();
         let name = filename.clone();
-        tokio::spawn(async move {
-            notify
-                .file_delivered(&to_user, record_id, &path, &from, &name, size as u64)
-                .await;
-        });
+        // The push runs on its own task but is still part of the request: the
+        // current span is captured here and re-entered there, so a subscriber
+        // sees the delivery event inside the server span, not a fresh trace.
+        // The task outlives the response and the span closes with it; see
+        // `server_span` for the reason. That extra time is bounded here by the
+        // production notify client's per-call timeout (`NOTIFY_TIMEOUT`).
+        let push_span = tracing::Span::current();
+        tokio::spawn(
+            async move {
+                notify
+                    .file_delivered(&to_user, record_id, &path, &from, &name, size as u64)
+                    .await;
+            }
+            .instrument(push_span),
+        );
     }
     Ok((
         StatusCode::CREATED,

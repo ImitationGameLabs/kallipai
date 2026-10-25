@@ -15,6 +15,10 @@ telemetry = [
   "dep:opentelemetry_sdk",
   "dep:opentelemetry-otlp",
   "dep:tracing-opentelemetry",
+  "dep:async-trait",
+  "dep:http",
+  "dep:reqwest",
+  "dep:reqwest-middleware",
 ]
 
 [dependencies]
@@ -35,6 +39,10 @@ opentelemetry = { workspace = true, optional = true }
 opentelemetry_sdk = { workspace = true, optional = true }
 opentelemetry-otlp = { workspace = true, optional = true }
 tracing-opentelemetry = { workspace = true, optional = true }
+async-trait = { workspace = true, optional = true }
+http = { workspace = true, optional = true }
+reqwest = { workspace = true, optional = true }
+reqwest-middleware = { workspace = true, optional = true }
 uuid = { workspace = true }
 base64 = { workspace = true }
 getrandom = { workspace = true }
@@ -42,7 +50,7 @@ sha2 = { workspace = true }
 subtle = { workspace = true }
 
 [dev-dependencies]
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["net"] }
 tower = { workspace = true }
 kallipai-testkit = { workspace = true }
 # The `log` bridge guard test (tests/log_bridge.rs) drives the real `log`

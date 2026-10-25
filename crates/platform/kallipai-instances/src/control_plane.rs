@@ -12,6 +12,7 @@ use kallipai_archeion_common::internal_api::{
     VerifyBearerRequest, VerifyBearerResponse, VerifySessionRequest,
 };
 use kallipai_archeion_common::principal::Principal;
+use kallipai_common::telemetry;
 
 /// Per-call timeout: a tiny JSON round trip against a local archeion; 10s is a
 /// generous backstop, matching the lesche's client.
@@ -46,14 +47,12 @@ pub struct ArcheionVerifier {
     /// Shared secret matching the archeion's provisioned internal token (the
     /// value in KALLIPAI_POLIS_INTERNAL_TOKEN_FILE).
     internal_token: String,
-    http: reqwest::Client,
+    http: telemetry::HttpClient,
 }
 
 impl ArcheionVerifier {
     pub fn new(base_url: String, internal_token: String) -> Self {
-        let http = reqwest::Client::builder()
-            .timeout(INTERNAL_TIMEOUT)
-            .build()
+        let http = telemetry::http_client(reqwest::Client::builder().timeout(INTERNAL_TIMEOUT))
             .expect("build reqwest client");
         Self {
             base_url,
