@@ -1983,6 +1983,8 @@ mod tests {
     /// delivery gate's auto-wake) exits Parked via the prompt arm, and the
     /// post-round drain then pulls the buffered inbox message into its own
     /// round — the deterministic kick→un-park→drain delivery chain.
+    /// Each step is waited for on a budget of its own: a round that runs
+    /// long must not spend the time the drain needs.
     #[tokio::test]
     async fn kick_turn_unparks_then_drains_inbox_message() {
         use std::sync::atomic::{AtomicBool, Ordering};
@@ -2029,6 +2031,24 @@ mod tests {
         .await
         .expect("kick send");
 
+        // Step one: the kick round runs to its end. A terminal event is
+        // the fact that the round happened, and waiting for it on its own
+        // budget keeps a slow round from spending the drain's time. The
+        // event itself is kept: the Some/None split tells a failed drain
+        // apart from a channel that closed, and the variant names the
+        // ending when the drain misses.
+        let step_one = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while let Some(event) = rx.recv().await {
+                if event.is_terminal() {
+                    return Some(event);
+                }
+            }
+            None
+        })
+        .await;
+
+        // Step two: the post-round drain pulls the buffered message into a
+        // round of its own. It lands in the store, so poll for it there.
         let found = tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
                 let guard = store.lock().await;
@@ -2056,8 +2076,20 @@ mod tests {
         cancel.cancel();
         let _ = rx.recv().await;
         handle.abort();
-        let (kick_at, msg_at) =
-            found.expect("kick round must run and the drain must deliver the message");
+        // Read the waits' outcomes here, after the teardown: a spent
+        // budget has to leave the task stopped, not running behind a
+        // panic that skipped the cancel.
+        let terminal = step_one.expect("the kick round must end inside its own budget");
+        assert!(
+            terminal.is_some(),
+            "the event channel closed before the kick round ended"
+        );
+        let (kick_at, msg_at) = found.unwrap_or_else(|elapsed| {
+            panic!(
+                "kick round must run and the drain must deliver the message \
+                 within {elapsed}: the round ended on {terminal:?}"
+            )
+        });
         assert!(
             kick_at < msg_at,
             "the kick round runs first; the drained message is its own later turn"

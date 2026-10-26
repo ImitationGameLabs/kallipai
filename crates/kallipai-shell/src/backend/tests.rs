@@ -1553,8 +1553,10 @@ async fn background_tasks_start_in_the_agent_working_directory() {
         .build()
         .await
         .unwrap();
+    // The `touch` leads on purpose: the witness written next is the
+    // script's last write, and the wait below keys on it.
     let id = backend
-        .spawn_background("pwd -P > started-in.txt; touch bg-relative.txt; sleep 30")
+        .spawn_background("touch bg-relative.txt; pwd -P > started-in.txt; sleep 30")
         .await
         .unwrap();
     assert_eq!(
@@ -1563,14 +1565,28 @@ async fn background_tasks_start_in_the_agent_working_directory() {
         "the recorded cwd is where the task starts"
     );
 
+    // The witness is the task's last write before it sleeps: once this
+    // file carries the directory, the `touch` before it is already on
+    // disk, so the wait covers the write the assertions read, not just
+    // the file's creation. That rests on two things: the shell creates
+    // the empty file when it opens the redirection, ahead of the text
+    // landing, and `pwd -P` writes it in one pass. Waiting for the file
+    // rather than for the expected path is deliberate -- a wrong cwd has
+    // to read as the assert_eq difference below, not as a spent wait.
     let witness = agent_dir.join("started-in.txt");
     for _ in 0..50 {
-        if witness.exists() {
+        if std::fs::read_to_string(&witness).is_ok_and(|s| !s.trim().is_empty()) {
             break;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    let started_in = std::fs::read_to_string(&witness).unwrap();
+    let started_in = std::fs::read_to_string(&witness).unwrap_or_else(|error| {
+        panic!("the witness was never written inside the wait ({error}): {witness:?}")
+    });
+    assert!(
+        !started_in.trim().is_empty(),
+        "the witness holds the task's pwd, not the redirect's empty file"
+    );
     assert_eq!(
         started_in.trim(),
         agent_dir.display().to_string(),

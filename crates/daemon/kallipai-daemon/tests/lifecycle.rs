@@ -693,7 +693,7 @@ fn start_rejects_when_stale_runtime_names_a_live_pid() {
 
 /// A manually booted (daemon-less) tagma is legal — it just has to name
 /// itself. With KALLIPAI_TAGMA_SLUG set it derives its data root under the fake
-/// XDG data home and publishes runtime.json there unconditionally:
+/// XDG data home and publishes runtime.json there with no daemon involved:
 /// every boot owns an instance dir. A successful
 /// TCP connect proves the boot got past identity resolution.
 #[test]
@@ -738,11 +738,25 @@ fn manual_boot_with_slug_publishes_runtime_json() {
         }
         std::thread::sleep(Duration::from_millis(100));
     }
+    // A listening socket means the boot got past identity resolution;
+    // the instance record is written after the listener is up, and the
+    // kill below must not race that write. A boot that never listened
+    // writes nothing there, so a wait would be waiting on a record this
+    // run cannot produce; the connect assertion below owns that failure.
+    let runtime_json = instance_dir.join("runtime.json");
+    if connected {
+        for _ in 0..50 {
+            if runtime_json.exists() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
     let _ = tagma.kill();
     let _ = tagma.wait();
     assert!(connected, "manual tagma never listened on {port}");
     assert!(
-        instance_dir.join("runtime.json").exists(),
+        runtime_json.exists(),
         "a slug-named boot publishes runtime.json into its instance dir"
     );
 }

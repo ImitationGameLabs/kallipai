@@ -58,40 +58,64 @@ fn shim(dir: &Path, body: &str) -> PathBuf {
     path
 }
 
-/// Run the harvest against a just-written shim. Exec of a file
-/// whose write handle closed microseconds ago races the kernel's
-/// deferred release of that handle: ETXTBSY with no writer left
-/// holding the path (the same probe-verified window behind
-/// adopt's fake-tagma retry: filesystem-independent, and it
-/// fires without any concurrent writer). The window is
-/// transient and every legitimate outcome is stable, so a
-/// bounded retry reruns the whole call.
-/// The 10-attempt bound is this helper's own conservative
-/// ceiling (its callers assert elapsed time); adopt's fake
-/// tagma picks 50 for the same window.
+/// Upper bound on how long a just-written shim is given to become
+/// execable, and the interval spent waiting for it. Each caller's
+/// whole-call assertion must fit this window plus one poll, its own
+/// timeout and the reap that follows: 3.05s + 0.5s inside a 5s bound
+/// leaves ~1.45s, and 3.05s + 2.2s inside a 6s bound leaves ~0.75s,
+/// the thinnest. A per-call latency assertion measures one call with
+/// the retry waits excluded, so this window never reaches it.
+const SHIM_EXEC_WINDOW: Duration = Duration::from_secs(3);
+/// The gap between probes: the "one poll" the window doc charges a bound with.
+const SHIM_EXEC_POLL: Duration = Duration::from_millis(50);
+
+/// Run the harvest against a just-written shim, reporting the outcome
+/// with the wall-clock time the answering call took: retries that only
+/// waited are excluded, so a caller asserting a call's latency measures
+/// the call, not this helper's patience.
+///
+/// Exec of a file whose write handle closed microseconds ago races the
+/// kernel's deferred release of that handle: ETXTBSY with no writer left
+/// holding the path (the same probe-verified window behind adopt's
+/// fake-tagma retry: filesystem-independent, and it fires without any
+/// concurrent writer). The window closes on its own schedule, so the
+/// waiting is bounded by wall clock, not by an attempt count -- a count
+/// caps the wait at an arbitrary fraction of the window. Every
+/// legitimate outcome is stable, so only ETXTBSY is retried, and the
+/// bound is generous because a loaded host stretches the window. Running
+/// past it means the window never closed: the panic carries the number
+/// of calls made and the time spent.
 fn harvest_shim(
     bash: &Path,
     seed: &HarvestSeed,
     timeout: Duration,
     run_as: Option<(u32, u32)>,
-) -> Result<Vec<(String, String)>, HarvestError> {
-    for _ in 0..10 {
-        match harvest_login_env(bash, seed, timeout, run_as) {
-            // Spawn(String) flattens the io error to text, so
-            // match the message: the process never setlocale(3)s,
-            // glibc/musl wording is stable, and a missed match
-            // degrades into the test's explicit assertion
-            // failure, not a silent flake.
+) -> (Result<Vec<(String, String)>, HarvestError>, Duration) {
+    let start = Instant::now();
+    let mut attempts = 0u32;
+    loop {
+        let call = Instant::now();
+        let outcome = harvest_login_env(bash, seed, timeout, run_as);
+        let call_elapsed = call.elapsed();
+        attempts += 1;
+        match outcome {
+            // Spawn(String) flattens the io error to text, so match the
+            // message: the process never setlocale(3)s, glibc/musl
+            // wording is stable, and a missed match degrades into the
+            // test's explicit assertion failure, not a silent flake.
             Err(HarvestError::Spawn(message)) if message.contains("Text file busy") => {
-                std::thread::sleep(std::time::Duration::from_millis(100));
+                if start.elapsed() >= SHIM_EXEC_WINDOW {
+                    panic!(
+                        "harvest shim never became execable: {attempts} attempts, {:?}: {}",
+                        start.elapsed(),
+                        bash.display()
+                    );
+                }
+                std::thread::sleep(SHIM_EXEC_POLL);
             }
-            outcome => return outcome,
+            outcome => return (outcome, call_elapsed),
         }
     }
-    panic!(
-        "harvest shim still ETXTBSY after 10 attempts: {}",
-        bash.display()
-    );
 }
 
 fn tempdir() -> tempfile::TempDir {
@@ -227,8 +251,8 @@ fn harvest_shell_failure_maps_to_exit_error() {
     };
     let dir = tempdir();
     let bash = shim(dir.path(), "exit 3");
-    let error =
-        harvest_shim(&bash, &HarvestSeed::default(), HARVEST_TEST_BUDGET, None).unwrap_err();
+    let (outcome, _) = harvest_shim(&bash, &HarvestSeed::default(), HARVEST_TEST_BUDGET, None);
+    let error = outcome.unwrap_err();
     assert!(matches!(error, HarvestError::Exit(_)));
 }
 
@@ -239,19 +263,66 @@ fn harvest_timeout_kills_the_shell_and_returns_promptly() {
         return;
     };
     let dir = tempdir();
-    let bash = shim(dir.path(), "while :; do :; done");
+    // The shim publishes its own pid before it wedges: asserting that a
+    // timeout kills the shell needs a pid to look for. The harvest execs
+    // this script directly, so bash runs it as a script, not a login
+    // session: `-l`, `-c` and `env -0` arrive as positional arguments, so
+    // no profile chain runs. The first statement is therefore milliseconds
+    // away from the spawn, which is why publishing the pid ahead of the
+    // wedge fits inside the harvest budget.
+    let pid_file = dir.path().join("shell.pid");
+    let bash = shim(
+        dir.path(),
+        &format!("echo $$ > '{}'; while :; do :; done", pid_file.display()),
+    );
     let start = Instant::now();
-    let error = harvest_shim(
+    let (outcome, call_elapsed) = harvest_shim(
         &bash,
         &HarvestSeed::default(),
         Duration::from_millis(300),
         None,
-    )
-    .unwrap_err();
-    assert!(matches!(error, HarvestError::Timeout));
+    );
+    let error = outcome.unwrap_err();
+    assert!(matches!(error, HarvestError::Timeout), "got {error:?}");
+    // The measured call is the one that timed out: waiting for the shim
+    // to become execable is bounded separately and must not show up here.
+    assert!(
+        call_elapsed < Duration::from_secs(3),
+        "the timed-out call returned promptly: {call_elapsed:?}"
+    );
     assert!(
         start.elapsed() < Duration::from_secs(5),
         "returned promptly"
+    );
+    let pid_text = std::fs::read_to_string(&pid_file).unwrap_or_else(|error| {
+        panic!(
+            "no pid file after the timeout ({error}): the shell never \
+             reached its first statement, or the write did not land"
+        )
+    });
+    let pid: i32 = pid_text
+        .trim()
+        .parse()
+        .unwrap_or_else(|error| panic!("the pid file holds no pid ({error}): {pid_text:?}"));
+    // SAFETY: signal 0 probes pid existence without delivering a signal.
+    let probe = unsafe { libc::kill(pid, 0) };
+    // errno answers only for a failed call: on a zero return what it holds
+    // is not a value this code may trust, so it is read only where the probe
+    // failed.
+    let probe_error = (probe == -1).then(std::io::Error::last_os_error);
+    // A reaped pid answers ESRCH. EPERM means the pid is alive and owned
+    // elsewhere, so folding it into "reaped" would pass over a shell that
+    // is still running.
+    assert!(
+        probe_error
+            .as_ref()
+            .is_some_and(|error| error.raw_os_error() == Some(libc::ESRCH)),
+        "the timed-out shell {pid} was reaped, not left running: kill returned \
+         {probe}{}",
+        match &probe_error {
+            Some(error) => format!(" ({error})"),
+            None => String::new(),
+        }
     );
 }
 
@@ -1233,13 +1304,13 @@ fn harvest_background_pipe_holder_is_bounded() {
     let dir = tempdir();
     let wedge = shim(dir.path(), "read -t 10 x < /dev/zero & exit 0");
     let start = Instant::now();
-    let error = harvest_shim(
+    let (outcome, _) = harvest_shim(
         &wedge,
         &HarvestSeed::default(),
         Duration::from_millis(300),
         None,
-    )
-    .unwrap_err();
+    );
+    let error = outcome.unwrap_err();
     assert!(matches!(error, HarvestError::Timeout), "got {error:?}");
     assert!(start.elapsed() < Duration::from_secs(5), "bounded wait");
 }
@@ -1259,13 +1330,13 @@ fn harvest_stream_cap_is_enforced_while_reading() {
         "while :; do printf 'A%.0s' {1..4096}; done & exit 0",
     );
     let start = Instant::now();
-    let error = harvest_shim(
+    let (outcome, _) = harvest_shim(
         &spammer,
         &HarvestSeed::default(),
         Duration::from_secs(2),
         None,
-    )
-    .unwrap_err();
+    );
+    let error = outcome.unwrap_err();
     assert!(
         matches!(error, HarvestError::TooLarge | HarvestError::Timeout),
         "got {error:?}"
