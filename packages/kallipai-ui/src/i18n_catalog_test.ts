@@ -36,6 +36,7 @@ const FILES = [
   "manage_gateway",
   "manage_schedules",
   "manage_tasks",
+  "manage_turns",
   "manage_instances",
   "user_gateway",
   "panorama",
@@ -237,6 +238,14 @@ const loaders: Record<string, Loader> = {
     import("../i18n/project.inlang/messages/zh/manage_tasks.json", {
       with: { type: "json" },
     }).then((m) => m.default as Record<string, string>),
+  "en|manage_turns": () =>
+    import("../i18n/project.inlang/messages/en/manage_turns.json", {
+      with: { type: "json" },
+    }).then((m) => m.default as Record<string, string>),
+  "zh|manage_turns": () =>
+    import("../i18n/project.inlang/messages/zh/manage_turns.json", {
+      with: { type: "json" },
+    }).then((m) => m.default as Record<string, string>),
   "zh|manage_instances": () =>
     import("../i18n/project.inlang/messages/zh/manage_instances.json", {
       with: { type: "json" },
@@ -363,6 +372,7 @@ const PREFIXES = new Set([
   "manage_schedules",
   "manage_instances",
   "manage_tasks",
+  "manage_turns",
   "manage_gateway",
   "user_gateway",
   "panorama",
@@ -433,6 +443,7 @@ const PREFIX_FILES: Record<string, string> = {
   manage_schedules: "manage_schedules",
   manage_instances: "manage_instances",
   manage_tasks: "manage_tasks",
+  manage_turns: "manage_turns",
   manage_gateway: "manage_gateway",
   user_gateway: "user_gateway",
   panorama: "panorama",

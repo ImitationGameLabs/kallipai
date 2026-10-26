@@ -767,3 +767,162 @@ export interface TaskListQuery {
   readonly limit?: number;
   readonly offset?: number;
 }
+
+// --- turn history: the paged read face over an agent's turn log ---
+//
+// Mirrors kallipai-common `protocol::turns` on the response side, field for
+// field (serde snake_case); the request side lives on the two client methods,
+// so `CallBodyQuery`'s `limit` has no counterpart here. An agent's append-only
+// turn log stays the single source of truth: these shapes are a projection
+// computed on demand, never a second store. Every response carries
+// `schema_version`, so a client refuses a face whose fields changed meaning
+// instead of misreading it.
+//
+// Counters on the wire are Rust `u64`/`usize`, carried here as `number`:
+// turn ids and text lengths sit far below `Number.MAX_SAFE_INTEGER`. A face
+// ever crossing that bound would need `string` parsing instead.
+
+/** One page of turns, newest first. */
+export interface TurnsPage {
+  readonly schema_version: number;
+  readonly rows: readonly TurnRow[];
+  /** Unreadable log lines skipped while building this page. */
+  readonly bad_lines: number;
+  /** Cursor for the next (older) page; absent when the log is exhausted. */
+  readonly next_cursor?: string;
+  /** True when the byte cap, not the row limit, ended the page early. */
+  readonly page_truncated: boolean;
+}
+
+/** One turn as the read face shows it. The model-round facts are nested and
+ * optional: a record no model round produced (a prompt, a heartbeat) has no
+ * profile, no usage and no clock. */
+export interface TurnRow {
+  readonly turn_id: number;
+  /** The record's own timestamp, RFC 3339 as the log wrote it. */
+  readonly at: string;
+  readonly profile?: TurnProfile;
+  readonly usage?: TurnUsageView;
+  readonly elapsed_ms?: number;
+  /** Tool calls the round's assistant messages carried, in model order. */
+  readonly calls: readonly CallRow[];
+  readonly messages: readonly MessageRow[];
+}
+
+/** Which profile served a round; the names mirror the log's attempt block
+ * one for one. */
+export interface TurnProfile {
+  readonly profile_set: string;
+  readonly profile_id: string;
+  readonly provider: string;
+  readonly model: string;
+  /** The profile's declared effort as its provider names it; absent when
+   * the profile declares none. */
+  readonly effort?: string;
+}
+
+/** One round's token accounting. A counter the backend did not report reads
+ * zero; an absent block means no backend reported usage at all. */
+export interface TurnUsageView {
+  readonly prompt: number;
+  readonly completion: number;
+  readonly cache_read: number;
+  readonly cache_write: number;
+  readonly reasoning: number;
+}
+
+/** One tool call and what it returned: the metadata a list is triaged by.
+ * The text itself is a separate range read (`CallBody`) -- a turn row never
+ * carries tool output. */
+export interface CallRow {
+  /** Position of the call within the round, from zero. */
+  readonly call_index: number;
+  readonly call_id: string;
+  readonly name: string;
+  /** The arguments as the model sent them, shortened to 400 characters;
+   * the face carries no flag for that cut. */
+  readonly args: string;
+  /** False when the call never produced a readable result. */
+  readonly ok: boolean;
+  /** Present when the tool asked for approval; the call may then have no
+   * result in this round at all. */
+  readonly pending_approval?: boolean;
+  /** Byte size of the result's stdout in the record, spill paths included. */
+  readonly stdout_bytes?: number;
+  /** Byte size of the result's stderr, the same way. */
+  readonly stderr_bytes?: number;
+  /** Lines in the merged stream, counted as `str::lines` counts them. */
+  readonly stdout_lines?: number;
+  /** Lines on stderr, counted the same way. */
+  readonly stderr_lines?: number;
+  /** The tool's exit status, when it has one. */
+  readonly exit_code?: number;
+  /** Whether the tool hit its own time bound. */
+  readonly timed_out?: boolean;
+  /** Whether the tool's own output was cut before it was returned. */
+  readonly truncated: boolean;
+  /** The first line of the error, shortened -- the fact a list is scanned
+   * for. */
+  readonly first_error_line?: string;
+}
+
+/** One message of a turn. A page carries shape only (`chars`, flags); a turn
+ * detail carries the shortened text too, and with it the shortened reasoning
+ * text. */
+export interface MessageRow {
+  readonly role: string;
+  /** Characters in the message text as the record holds it: counted before
+   * any spill path is reclaimed and before any shortening. */
+  readonly chars: number;
+  /** Whether the message carried reasoning content. */
+  readonly has_reasoning: boolean;
+  /** Whether `text` was shortened to 400 characters. */
+  readonly truncated: boolean;
+  /** The shortened, cleaned text; absent on a page. */
+  readonly text?: string;
+  /** The shortened, cleaned reasoning text; absent on a page and absent
+   * when the record kept a reasoning flag with nothing to show: no text,
+   * or a text that is blank throughout. Detail-only. */
+  readonly reasoning?: string;
+  /** Whether `reasoning` was shortened. Absent unless true, so a page
+   * carries not a byte more. */
+  readonly reasoning_truncated?: boolean;
+}
+
+/** One turn, text included (`GET /agents/{id}/turns/{turn}`). */
+export interface TurnDetail {
+  readonly schema_version: number;
+  readonly turn: TurnRow;
+}
+
+/** A byte range of one call's text. Ranges walk the cleaned text: a spill
+ * path is reclaimed first, so every offset addresses what a reader
+ * receives. */
+export interface CallBody {
+  readonly schema_version: number;
+  readonly turn_id: number;
+  readonly call_index: number;
+  readonly call_id: string;
+  readonly name: string;
+  /** Byte offset this range starts at, in the cleaned text. */
+  readonly offset: number;
+  /** Length of the whole cleaned text in bytes. */
+  readonly total_bytes: number;
+  /** The range asked for, widened to the next character boundary when a
+   * character straddles the limit. */
+  readonly text: string;
+  /** True when this range stops before the end of the cleaned text. */
+  readonly truncated: boolean;
+  /** Offset to ask for next; absent at the end. */
+  readonly next_offset?: number;
+  /** Spill paths replaced in the whole cleaned text, not in this range. */
+  readonly reclaimed: number;
+}
+
+/** Query of `GET /agents/{id}/turns`. `before` is an opaque cursor taken
+ * from a previous page's `next_cursor`; `day` pins one UTC day file. */
+export interface TurnQuery {
+  readonly day?: string;
+  readonly before?: string;
+  readonly limit?: number;
+}

@@ -9,6 +9,7 @@ import type {
   AgentStatusResponse,
   BudgetResponse,
   BudgetUpdateRequest,
+  CallBody,
   DeleteSetResponse,
   DirectMessageRow,
   ExternalHistoryResponse,
@@ -30,6 +31,9 @@ import type {
   TaskListPage,
   TaskListQuery,
   TaskNoteRequest,
+  TurnDetail,
+  TurnQuery,
+  TurnsPage,
   UpdateAgentMetadataRequest,
   UpdateDutyRequest,
   WireAgentSummary,
@@ -460,5 +464,44 @@ export class TagmaClient {
       method: "PUT",
       body: JSON.stringify({ timezone }),
     });
+  }
+
+  // --- management: turn history ---
+
+  /** GET /agents/{id}/turns -- one page of an agent's turn log, newest
+   * first. `before` is the previous page's `next_cursor` (older); absent
+   * when the log is exhausted. */
+  turns(id: string, query?: TurnQuery): Promise<TurnsPage> {
+    const params = new URLSearchParams();
+    if (query?.day) params.set("day", query.day);
+    if (query?.before) params.set("before", query.before);
+    if (query?.limit !== undefined) params.set("limit", String(query.limit));
+    const qs = params.toString();
+    return this.json<TurnsPage>(
+      `/agents/${encodeURIComponent(id)}/turns${qs ? `?${qs}` : ""}`,
+    );
+  }
+
+  /** GET /agents/{id}/turns/{turn} -- one turn, its messages carrying the
+   * shortened text and reasoning text a page leaves out. */
+  turn(id: string, turnId: number): Promise<TurnDetail> {
+    return this.json<TurnDetail>(
+      `/agents/${encodeURIComponent(id)}/turns/${turnId}`,
+    );
+  }
+
+  /** GET /agents/{id}/turns/{turn}/calls/{index}/body -- one byte range of
+   * a call's stored text. Omit `offset` for the first range; follow
+   * `next_offset` for the next one. */
+  callBody(
+    id: string,
+    turnId: number,
+    callIndex: number,
+    offset?: number,
+  ): Promise<CallBody> {
+    const qs = offset === undefined ? "" : `?offset=${offset}`;
+    return this.json<CallBody>(
+      `/agents/${encodeURIComponent(id)}/turns/${turnId}/calls/${callIndex}/body${qs}`,
+    );
   }
 }

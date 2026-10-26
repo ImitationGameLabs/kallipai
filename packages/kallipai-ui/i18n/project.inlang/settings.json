@@ -30,6 +30,7 @@
       "./project.inlang/messages/{locale}/manage_gateway.json",
       "./project.inlang/messages/{locale}/manage_schedules.json",
       "./project.inlang/messages/{locale}/manage_tasks.json",
+      "./project.inlang/messages/{locale}/manage_turns.json",
       "./project.inlang/messages/{locale}/manage_instances.json",
       "./project.inlang/messages/{locale}/user_gateway.json",
       "./project.inlang/messages/{locale}/files.json",

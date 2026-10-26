@@ -19,6 +19,7 @@ import type {
   AgentStatusResponse,
   BudgetResponse,
   BudgetUpdateRequest,
+  CallBody,
   DeleteSetResponse,
   ListAgentsManagementResponse,
   ListAgentsQuery,
@@ -36,6 +37,9 @@ import type {
   TaskListPage,
   TaskListQuery,
   TaskNoteRequest,
+  TurnDetail,
+  TurnQuery,
+  TurnsPage,
   UpdateAgentMetadataRequest,
   UpdateDutyRequest,
   WorkSchedule,
@@ -93,6 +97,14 @@ export interface ManagementBackend {
   exportAllTasks(): Promise<TaskExport[]>;
   getTimezone(): Promise<{ timezone: string | null }>;
   putTimezone(timezone: string | null): Promise<{ timezone: string | null }>;
+  turns(id: string, query?: TurnQuery): Promise<TurnsPage>;
+  turn(id: string, turnId: number): Promise<TurnDetail>;
+  callBody(
+    id: string,
+    turnId: number,
+    callIndex: number,
+    offset?: number,
+  ): Promise<CallBody>;
 }
 
 // --- OfflineBackend (wraps TagmaClient) ---
@@ -204,6 +216,15 @@ export class OfflineBackend implements ManagementBackend {
   }
   putTimezone(timezone: string | null) {
     return this.client.putTimezone(timezone);
+  }
+  turns(id: string, query?: TurnQuery) {
+    return this.client.turns(id, query);
+  }
+  turn(id: string, turnId: number) {
+    return this.client.turn(id, turnId);
+  }
+  callBody(id: string, turnId: number, callIndex: number, offset?: number) {
+    return this.client.callBody(id, turnId, callIndex, offset);
   }
 }
 
@@ -399,6 +420,42 @@ export class OnlineBackend implements ManagementBackend {
   ): Promise<void> {
     const result = await this.rest.manage(this.agent, method, path, body);
     if (result.status >= 400) throw parseError(result.status, result.body);
+  }
+
+  /** The turn family is text: its three reads carry session content, so the
+   * plaintext manage frame enumerates none of them and they ride the E2E
+   * envelope instead. The channel's shared deadline covers a page read. */
+  private async envelopeGet<T>(path: string): Promise<T> {
+    if (!this.envelope) {
+      throw new Error("turn history reads require an E2E envelope channel");
+    }
+    const result = await this.envelope.manage("GET", path);
+    if (result.status >= 400) throw parseError(result.status, result.body);
+    return result.body as T;
+  }
+
+  turns(id: string, query?: TurnQuery) {
+    const params = new URLSearchParams();
+    if (query?.day) params.set("day", query.day);
+    if (query?.before) params.set("before", query.before);
+    if (query?.limit !== undefined) params.set("limit", String(query.limit));
+    const qs = params.toString();
+    return this.envelopeGet<TurnsPage>(
+      `/agents/${encodeURIComponent(id)}/turns${qs ? `?${qs}` : ""}`,
+    );
+  }
+
+  turn(id: string, turnId: number) {
+    return this.envelopeGet<TurnDetail>(
+      `/agents/${encodeURIComponent(id)}/turns/${turnId}`,
+    );
+  }
+
+  callBody(id: string, turnId: number, callIndex: number, offset?: number) {
+    const qs = offset === undefined ? "" : `?offset=${offset}`;
+    return this.envelopeGet<CallBody>(
+      `/agents/${encodeURIComponent(id)}/turns/${turnId}/calls/${callIndex}/body${qs}`,
+    );
   }
 
   getBudget() {

@@ -24,6 +24,7 @@
   import AgentStatusCard from "../../components/manage/AgentStatusCard.svelte";
   import AgentUsageCard from "../../components/manage/AgentUsageCard.svelte";
   import RetryListCard from "../../components/manage/RetryListCard.svelte";
+  import TurnHistoryCard from "../../components/manage/TurnHistoryCard.svelte";
 
   import {
     common_edit,
@@ -341,6 +342,7 @@
       {#if status.recent_retries.length > 0}
         <RetryListCard {status} />
       {/if}
+      <TurnHistoryCard {id} {backend} />
     {/if}
 
     {#if agent}
