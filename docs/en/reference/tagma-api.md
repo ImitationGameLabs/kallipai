@@ -837,6 +837,24 @@ the tail, with `truncated` marking the cut). A tool message carries the
 result record the log stored for that call, cut the same way; the full text
 is the call-body read below.
 
+On a message that carried reasoning, `messages[].reasoning` carries its text
+shortened by the same rule, `messages[].reasoning_truncated` marking the cut.
+A record that kept the flag but no text, or a text that is blank
+throughout, has `has_reasoning: true` and no `reasoning` key at all; a
+page leaves `reasoning` out, so its rows keep the shape shown above.
+
+```json
+{
+  "role": "assistant",
+  "chars": 9000,
+  "has_reasoning": true,
+  "truncated": true,
+  "text": "head of the text … tail of the text",
+  "reasoning": "head of the reasoning … tail of the reasoning",
+  "reasoning_truncated": true
+}
+```
+
 #### `GET /agents/{id}/turns/{turn_id}/calls/{call_index}/body`: One Call's Text
 
 Query: `offset` (byte offset into the cleaned text) and `limit` (default

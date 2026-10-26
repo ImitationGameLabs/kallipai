@@ -542,18 +542,22 @@ fn project_messages(messages: &[Message], with_text: bool) -> Vec<MessageRow> {
         .map(|message| {
             let raw = message_text(message);
             let chars = raw.chars().count();
-            let (text, truncated) = if with_text {
-                let (cut, truncated) = cut_text(&scrub_spills(&raw).0);
-                (Some(cut), truncated)
-            } else {
-                (None, false)
-            };
+            // Both text fields read through one rule, so they cannot drift:
+            // a page carries neither, the detail face carries both.
+            // A reasoning text with nothing to show is no text: a record
+            // that kept an empty or all-blank string would otherwise open
+            // a fold with nothing in it.
+            let reasoning_raw = reasoning_text(message).filter(|held| !held.trim().is_empty());
+            let (reasoning, reasoning_truncated) = text_face(reasoning_raw, with_text);
+            let (text, truncated) = text_face(Some(&raw), with_text);
             MessageRow {
                 role: message.role().to_owned(),
                 chars,
                 has_reasoning: message.reasoning().is_some(),
                 truncated,
                 text,
+                reasoning,
+                reasoning_truncated,
             }
         })
         .collect()
@@ -575,6 +579,26 @@ fn message_text(message: &Message) -> String {
         }
     }
     joined
+}
+
+/// A message's reasoning text as the record holds it; absent when the
+/// record kept the flag but no text.
+fn reasoning_text(message: &Message) -> Option<&str> {
+    message
+        .reasoning()
+        .and_then(|reasoning| reasoning.text.as_deref())
+}
+
+/// The text face of a field: cleaned, then shortened to its ends; a page
+/// carries neither.
+fn text_face(raw: Option<&str>, with_text: bool) -> (Option<String>, bool) {
+    match raw {
+        Some(raw) if with_text => {
+            let (cut, truncated) = cut_text(&scrub_spills(raw).0);
+            (Some(cut), truncated)
+        }
+        _ => (None, false),
+    }
 }
 
 /// Shorten a text to [`TEXT_CUT_CHARS`] characters, keeping both ends: the

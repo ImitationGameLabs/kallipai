@@ -188,7 +188,8 @@ pub struct CallRow {
 /// One message of a turn.
 ///
 /// A page carries shape only (`chars`, flags) because a page of full text
-/// would be unbounded; a turn detail carries the shortened text too.
+/// would be unbounded; a turn detail carries the shortened text too, and
+/// with it the shortened reasoning text.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MessageRow {
     pub role: String,
@@ -202,6 +203,16 @@ pub struct MessageRow {
     /// The shortened, cleaned text; absent on a page.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
+    /// The shortened, cleaned reasoning text; absent on a page and absent
+    /// when the record kept a reasoning flag with nothing to show: no text,
+    /// or a text that is blank throughout. Detail-only: a page leaves it
+    /// out so each row keeps its shape.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<String>,
+    /// Whether `reasoning` was shortened to [`TEXT_CUT_CHARS`]. Absent
+    /// unless it is true, so a page carries not a byte more than before.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reasoning_truncated: bool,
 }
 
 /// One turn, text included.

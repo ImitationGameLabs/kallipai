@@ -5,7 +5,7 @@ use std::path::Path;
 
 use super::*;
 use crate::history::{TurnAttempt, TurnUsage};
-use just_llm_client::types::generation::Message;
+use just_llm_client::types::generation::{Message, Reasoning};
 use tempfile::TempDir;
 
 /// A spill path in the shape the shell leaves in a stored banner.
@@ -1245,4 +1245,135 @@ fn a_page_stopped_by_its_row_limit_or_by_the_log_end_is_not_truncated() {
     assert_eq!(ids(&whole_log), vec![3, 2, 1]);
     assert!(!whole_log.page_truncated, "the log ended inside the page");
     assert!(whole_log.next_cursor.is_none(), "nothing follows");
+}
+
+/// The reasoning text is a detail-face fact: a page reports the flag, one
+/// turn hands back the shortened text, and a record holding only the
+/// redacted marker reports the flag with no text at all.
+#[test]
+fn the_detail_face_carries_the_shortened_reasoning_text() {
+    let dir = agent_dir();
+    let long = "r".repeat(TEXT_CUT_CHARS + 20);
+    let held = Message::assistant_tool_calls(
+        Some("done".to_owned()),
+        Vec::new(),
+        Some(Reasoning {
+            text: Some(long),
+            ..Reasoning::default()
+        }),
+    );
+    let marker_only = Message::assistant_tool_calls(
+        None,
+        Vec::new(),
+        Some(Reasoning {
+            redacted: Some("cipher".to_owned()),
+            ..Reasoning::default()
+        }),
+    );
+    append(
+        dir.path(),
+        "2026-10-01",
+        &[record(
+            "2026-10-01T10:00:00Z",
+            1,
+            vec![held, marker_only],
+            None,
+        )],
+    );
+
+    let detail = read_turn(dir.path(), 1).unwrap();
+    let rows = &detail.turn.messages;
+    let text = rows[0].reasoning.as_deref().unwrap();
+    assert!(rows[0].reasoning_truncated, "the long text was shortened");
+    assert!(text.contains(" … "), "both ends survive: {text}");
+    assert_eq!(text.chars().count(), TEXT_CUT_CHARS + 3);
+    assert!(rows[1].has_reasoning, "the marker alone is still reasoning");
+    assert!(rows[1].reasoning.is_none(), "no text was stored");
+    assert!(!rows[1].reasoning_truncated, "nothing was shortened");
+
+    let listed = read_turns_page(dir.path(), &query(Some("2026-10-01"), None, Some(10))).unwrap();
+    assert_eq!(ids(&listed), vec![1]);
+    for row in &listed.rows[0].messages {
+        assert!(row.has_reasoning, "the flag survives the page");
+        assert!(row.reasoning.is_none(), "a page carries the flag alone");
+        assert!(!row.reasoning_truncated, "a page reports no shortening");
+        let encoded = serde_json::to_string(row).unwrap();
+        assert!(
+            !encoded.contains("reasoning_truncated"),
+            "the flag leaves no trace on a page: {encoded}"
+        );
+        assert!(
+            !encoded.contains("\"reasoning\":"),
+            "no reasoning text on the wire: {encoded}"
+        );
+    }
+}
+
+/// A reasoning block whose text is empty or all blanks reports the flag
+/// with no text: a fold that opens on nothing is a rendering fault, not a
+/// fact, and whitespace is nothing to show.
+#[test]
+fn an_empty_reasoning_text_reads_as_no_text() {
+    let dir = agent_dir();
+    let blank = Message::assistant_tool_calls(
+        None,
+        Vec::new(),
+        Some(Reasoning {
+            text: Some(String::new()),
+            ..Reasoning::default()
+        }),
+    );
+    let spaces = Message::assistant_tool_calls(
+        None,
+        Vec::new(),
+        Some(Reasoning {
+            text: Some(" \n\t ".to_owned()),
+            ..Reasoning::default()
+        }),
+    );
+    let padded = Message::assistant_tool_calls(
+        None,
+        Vec::new(),
+        Some(Reasoning {
+            text: Some(" because ".to_owned()),
+            ..Reasoning::default()
+        }),
+    );
+    let inner = Message::assistant_tool_calls(
+        None,
+        Vec::new(),
+        Some(Reasoning {
+            text: Some("first\n\nsecond".to_owned()),
+            ..Reasoning::default()
+        }),
+    );
+    append(
+        dir.path(),
+        "2026-10-01",
+        &[record(
+            "2026-10-01T10:00:00Z",
+            1,
+            vec![blank, spaces, padded, inner],
+            None,
+        )],
+    );
+
+    let detail = read_turn(dir.path(), 1).unwrap();
+    let rows = &detail.turn.messages;
+    assert_eq!(rows.len(), 4, "all four shapes were read");
+    for row in &rows[..2] {
+        assert!(row.has_reasoning, "the record kept a reasoning block");
+        assert!(row.reasoning.is_none(), "a blank text is no text");
+        assert!(!row.reasoning_truncated, "nothing was shortened");
+    }
+    assert_eq!(
+        rows[2].reasoning.as_deref(),
+        Some(" because "),
+        "padding around a text is still a text"
+    );
+    assert_eq!(
+        rows[3].reasoning.as_deref(),
+        Some("first\n\nsecond"),
+        "a blank line inside a text is still a text"
+    );
 }

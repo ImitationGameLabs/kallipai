@@ -738,6 +738,8 @@ mod tests {
             has_reasoning: false,
             truncated: false,
             text: Some("hello".to_string()),
+            reasoning: None,
+            reasoning_truncated: false,
         }
     }
 
