@@ -482,15 +482,14 @@ pub(crate) async fn enqueue_prompt(
 
     // Auto-wake gate (parked): the message is durable in the inbox above,
     // so it carries the wake warrant — enqueue the kick [system] turn and
-    // the prompt arm's post-round drain pulls the message once the kick
-    // round un-parks the agent (the kick text itself carries no message
-    // body). Notify-class events stay buffered: transient signals carry
-    // no warrant (guard matrix). Falls through on a raced un-park (the
-    // state moved under the lock re-check — an ordinary race) so the
-    // liveness path below delivers normally.
-    // A wake the modality gate refuses runs no round, so that drain
-    // never runs for it: the message stays undelivered for a wake that
-    // can serve it.
+    // the post-round drain pulls the message if that round leaves the agent
+    // awake (the kick text itself carries no message body). Notify-class
+    // events stay buffered: transient signals carry no warrant (guard
+    // matrix). Falls through on a raced un-park (the state moved under the
+    // lock re-check — an ordinary race) so the liveness path below delivers
+    // normally.
+    // A kick round that ends held drains nothing, so the message stays in the
+    // inbox for a later wake.
     enum ParkedWake {
         Kick(String, tokio::sync::mpsc::Sender<String>),
         ParkedWithoutReason,

@@ -15,7 +15,7 @@ use wiremock::{
 };
 
 use crate::acquisition::advance_failover;
-use crate::agent_task::{RoundToken, WakeDisposition, run_and_report};
+use crate::agent_task::{RoundToken, WakeDisposition, run_and_report, wake_and_drain};
 use crate::failover::{FailoverOutcome, ProfileReset};
 use crate::policy::ToolCallOutcome;
 use crate::profile::{BackendSource, ProfileRegistry, ProfileSet};
@@ -1876,6 +1876,288 @@ async fn budget_probe_fuse_fire_skips_injection() {
     );
     let requests = server.received_requests().await.unwrap().len();
     assert_eq!(requests, 0, "the probe path must stay LLM-free");
+}
+
+/// A round the budget gate held delivers nothing; the probe wake that finds
+/// the budget restored serves the buffered message. Nothing but the restored
+/// budget and the expired fuse happens between the two, so the pull can only
+/// come from that later wake.
+#[tokio::test]
+async fn a_budget_refused_wake_is_served_by_the_probe_wake() {
+    use crate::agent_task::MessagePuller;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    struct CountingPuller {
+        calls: Arc<AtomicUsize>,
+        pending: Arc<AtomicBool>,
+    }
+    #[async_trait::async_trait]
+    impl MessagePuller for CountingPuller {
+        async fn pull_undelivered(&self) -> Option<String> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            if self.pending.swap(false, Ordering::SeqCst) {
+                Some("message while parked".to_string())
+            } else {
+                None
+            }
+        }
+    }
+
+    let server = MockServer::start().await;
+    mount_ok_stream(&server, "done").await;
+    let mut map = HashMap::new();
+    map.insert("ep1".into(), wiremock_backend(&server.uri()));
+    let mut ctx = ctx_from_source(
+        vec![profile("p1", "ep1", 500_000)],
+        wiremock_source(map),
+        fast_policy(),
+    )
+    .await;
+    // One answer per wake: a bare reply idles instead of looping.
+    ctx.config.max_heartbeat_rounds = 0;
+    ctx.token_budget.set_remaining(0);
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    ctx.message_puller = Some(Arc::new(CountingPuller {
+        calls: calls.clone(),
+        pending: Arc::new(AtomicBool::new(true)),
+    }));
+    let budget = ctx.token_budget.clone();
+    let store = ctx.store.clone();
+    let wait_until = ctx.wait_until.clone();
+    let wait_notify = ctx.wait_notify.clone();
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentEvent>(256);
+    let (ptx, prompt_rx) = tokio::sync::mpsc::channel::<String>(16);
+    let handle = tokio::spawn(crate::agent_task::agent_task(ctx, None, prompt_rx, tx));
+    ptx.send("go".into()).await.unwrap();
+
+    // Front half: the gate refuses the wake, so the buffered message stays
+    // buffered. The event is sent inside the wake and the drain decision is
+    // taken after it returns; on the default current-thread runtime nothing
+    // runs in between, so the counts read here are final.
+    let mut blocked = false;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while std::time::Instant::now() < deadline && !blocked {
+        if let Ok(Some(AgentEvent::TokenBudgetExceeded { .. })) =
+            tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv()).await
+        {
+            blocked = true;
+        }
+    }
+    assert!(blocked, "the first wake must be refused by the budget gate");
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "a refused wake must not drain the inbox"
+    );
+    assert!(
+        !turn_text_recorded(&store, "message while parked").await,
+        "the refused wake leaves the message for a wake that can serve it"
+    );
+
+    // Only the restored budget and the expired fuse: no new message, no
+    // approval, no external prompt.
+    budget.set_remaining(500_000);
+    *wait_until.lock().unwrap() = Some(tokio::time::Instant::now());
+    wait_notify.notify_one();
+
+    let served = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while !turn_text_recorded(&store, "message while parked").await {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    })
+    .await;
+    handle.abort();
+
+    served.expect("the probe wake must deliver the buffered message");
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "the probe wake pulls the buffered message once"
+    );
+    let requests = server.received_requests().await.unwrap_or_default();
+    let answered = requests
+        .iter()
+        .any(|r| String::from_utf8_lossy(&r.body).contains("message while parked"));
+    assert!(
+        answered,
+        "a round must answer with the delivered message in its request"
+    );
+}
+
+/// A puller that always reports one buffered message, so a drain that should not
+/// have happened shows up as a pull count.
+struct AlwaysPendingPuller {
+    calls: Arc<std::sync::atomic::AtomicUsize>,
+    message: String,
+}
+
+#[async_trait::async_trait]
+impl crate::agent_task::MessagePuller for AlwaysPendingPuller {
+    async fn pull_undelivered(&self) -> Option<String> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Some(self.message.clone())
+    }
+}
+
+/// Whether a turn carrying `needle` reached the context history.
+async fn turn_text_recorded(
+    store: &tokio::sync::Mutex<crate::context::ContextStore>,
+    needle: &str,
+) -> bool {
+    let guard = store.lock().await;
+    guard
+        .turns()
+        .iter()
+        .flat_map(|turn| &turn.messages)
+        .any(|m| m.content().is_some_and(|content| content.contains(needle)))
+}
+
+/// The budget arm reports its round held whichever shape its verdict takes, so
+/// the verdict — not whether a send went out — is what the drain reads.
+#[tokio::test]
+async fn the_budget_arm_holds_the_wake() {
+    let server = MockServer::start().await;
+    mount_ok_stream(&server, "done").await;
+    let mut map = HashMap::new();
+    map.insert("ep1".into(), wiremock_backend(&server.uri()));
+    let mut ctx = ctx_from_source(
+        vec![profile("p1", "ep1", 500_000)],
+        wiremock_source(map),
+        fast_policy(),
+    )
+    .await;
+    ctx.config.max_heartbeat_rounds = 0;
+    ctx.token_budget.set_remaining(0);
+
+    let (tx, _rx) = tokio::sync::mpsc::channel::<AgentEvent>(64);
+    let (_ptx, mut prompt_rx) = tokio::sync::mpsc::channel::<String>(16);
+    assert_eq!(
+        run_and_report(&mut ctx, &tx, &mut prompt_rx, AttemptOrigin::External).await,
+        WakeDisposition::Held,
+        "a budget-exceeded round holds the wake"
+    );
+}
+
+/// The chain-exhausted arm arms the retry fuse and is held: draining there would
+/// spend the next attempt before its backoff and charge the transient count
+/// twice.
+#[tokio::test]
+async fn a_chain_exhausted_wake_does_not_drain() {
+    let server = MockServer::start().await;
+    mount_status(&server, 500).await;
+    let mut map = HashMap::new();
+    map.insert("ep1".into(), wiremock_backend(&server.uri()));
+    let mut ctx = ctx_from_source(
+        vec![profile("p1", "ep1", 500_000)],
+        wiremock_source(map),
+        fast_policy(),
+    )
+    .await;
+    ctx.config.max_heartbeat_rounds = 0;
+    ctx.config.max_transient_retries = 2;
+    ctx.config.retry_policy.max_retries = 0;
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    ctx.message_puller = Some(Arc::new(AlwaysPendingPuller {
+        calls: calls.clone(),
+        message: "message while the chain is down".to_string(),
+    }));
+    let store = ctx.store.clone();
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentEvent>(64);
+    let (_ptx, mut prompt_rx) = tokio::sync::mpsc::channel::<String>(16);
+    assert_eq!(
+        wake_and_drain(&mut ctx, &tx, &mut prompt_rx, AttemptOrigin::External).await,
+        WakeDisposition::Held,
+        "a chain-exhausted wake is held"
+    );
+    assert_eq!(
+        calls.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "a held wake must not drain the inbox"
+    );
+    assert_eq!(ctx.transient_fails, 1, "one failure, one count");
+    let mut exhausted = 0;
+    while let Ok(event) = rx.try_recv() {
+        if matches!(event, AgentEvent::FailoverChainExhausted { .. }) {
+            exhausted += 1;
+        }
+    }
+    assert_eq!(exhausted, 1, "the drain must not add a second attempt");
+    assert_eq!(
+        server.received_requests().await.unwrap_or_default().len(),
+        1,
+        "one attempt reached the endpoint, not two"
+    );
+    assert!(
+        !turn_text_recorded(&store, "message while the chain is down").await,
+        "the buffered message stays out of the history"
+    );
+}
+
+/// A pacing stop before the request is built holds the round: the message
+/// buffered for it waits for the pacing wake, the one that can serve it.
+#[tokio::test]
+async fn a_paced_wake_that_stopped_before_a_request_does_not_drain() {
+    use kallipai_common::facts::{Block, BlockKind};
+
+    let server = MockServer::start().await;
+    mount_ok_stream(&server, "done").await;
+    let mut map = HashMap::new();
+    map.insert("ep1".into(), wiremock_backend(&server.uri()));
+    let mut ctx = ctx_from_source(
+        vec![profile("p1", "ep1", 500_000)],
+        wiremock_source(map),
+        fast_policy(),
+    )
+    .await;
+    ctx.config.max_heartbeat_rounds = 0;
+    let pacing = Arc::new(crate::test_support::RecordingPacing::default());
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    pacing.seed(
+        "p1",
+        Block {
+            kind: BlockKind::Quota,
+            until: None,
+            detail: "429 quota".to_string(),
+            status: Some(429),
+            recorded_at: now,
+        },
+    );
+    ctx.profile_pacing = Some(pacing);
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    ctx.message_puller = Some(Arc::new(AlwaysPendingPuller {
+        calls: calls.clone(),
+        message: "message while paced".to_string(),
+    }));
+    let store = ctx.store.clone();
+
+    let (tx, _rx) = tokio::sync::mpsc::channel::<AgentEvent>(64);
+    let (_ptx, mut prompt_rx) = tokio::sync::mpsc::channel::<String>(16);
+    // A timer origin: an external wake would force the pacing window open.
+    assert_eq!(
+        wake_and_drain(&mut ctx, &tx, &mut prompt_rx, AttemptOrigin::System).await,
+        WakeDisposition::Held,
+        "a wake the pacing gate stopped is held"
+    );
+    assert_eq!(
+        calls.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "a held wake must not drain the inbox"
+    );
+    assert_eq!(
+        server.received_requests().await.unwrap_or_default().len(),
+        0,
+        "the pacing gate stopped the round before any request"
+    );
+    assert!(
+        !turn_text_recorded(&store, "message while paced").await,
+        "the buffered message stays out of the history"
+    );
 }
 
 // --- interjection entry cap ---

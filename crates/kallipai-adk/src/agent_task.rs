@@ -617,10 +617,9 @@ pub async fn agent_task(
             return;
         }
         ctx.record_turn(vec![Message::user(&p)]).await;
-        let disposition =
-            run_and_report(&mut ctx, &agent_tx, &mut prompt_rx, AttemptOrigin::External).await;
-        if disposition == WakeDisposition::Terminated {
-            return;
+        match wake_and_drain(&mut ctx, &agent_tx, &mut prompt_rx, AttemptOrigin::External).await {
+            WakeDisposition::Terminated => return,
+            WakeDisposition::Awake | WakeDisposition::Held => {}
         }
     }
 
@@ -639,40 +638,16 @@ pub async fn agent_task(
                         clear_wait_timer(&ctx);
                         clear_pacing_wake(&ctx);
                         ctx.record_message_turn(&text).await;
-                        let disposition = run_and_report(
+                        match wake_and_drain(
                             &mut ctx,
                             &agent_tx,
                             &mut prompt_rx,
                             AttemptOrigin::External,
                         )
-                        .await;
-                        if disposition == WakeDisposition::Terminated {
-                            break;
-                        }
-                        // Post-round inbox drain: a kick round un-parks the
-                        // agent, so messages that arrived while parked (or
-                        // during the round) are pulled now instead of waiting
-                        // for the next notify — the parked guard consumes
-                        // notify permits, so notify alone never delivers them.
-                        // pull_undelivered is an atomic drain; a racing notify
-                        // arm simply finds nothing left to pull. Gated on the wake
-                        // having run a round: a refused wake delivers nothing, so
-                        // its buffered message waits for a wake that can serve it.
-                        if disposition == WakeDisposition::Ran
-                            && let Some(ref puller) = ctx.message_puller
-                            && let Some(msg) = puller.pull_undelivered().await
+                        .await
                         {
-                            ctx.record_message_turn(&msg).await;
-                            let disposition = run_and_report(
-                                &mut ctx,
-                                &agent_tx,
-                                &mut prompt_rx,
-                                AttemptOrigin::External,
-                            )
-                            .await;
-                            if disposition == WakeDisposition::Terminated {
-                                break;
-                            }
+                            WakeDisposition::Terminated => break,
+                            WakeDisposition::Awake | WakeDisposition::Held => {}
                         }
                     }
                     None => break,
@@ -740,7 +715,7 @@ pub async fn agent_task(
                 // turn (auto-wake on message arrival) is the sole exit from
                 // Parked; a bare notify must not run a round the agent never
                 // consented to (the kick turn tells the agent why it parked;
-                // the message itself waits in the inbox for the prompt arm's
+                // the message itself waits in the inbox for the wake's
                 // post-round drain).
                 // The reset cell was applied above — memory-only, no round
                 // runs — so a later kick runs on the fresh client.
@@ -772,15 +747,11 @@ pub async fn agent_task(
                     clear_transient_retry(&ctx);
                     clear_wait_timer(&ctx);
                     clear_pacing_wake(&ctx);
-                    let disposition = run_and_report(
-                        &mut ctx,
-                        &agent_tx,
-                        &mut prompt_rx,
-                        AttemptOrigin::External,
-                    )
-                    .await;
-                    if disposition == WakeDisposition::Terminated {
-                        break;
+                    match wake_and_drain(&mut ctx, &agent_tx, &mut prompt_rx, AttemptOrigin::External)
+                        .await
+                    {
+                        WakeDisposition::Terminated => break,
+                        WakeDisposition::Awake | WakeDisposition::Held => {}
                     }
                 }
             }
@@ -791,15 +762,11 @@ pub async fn agent_task(
             _ = ctx.retry_notify.notified() => {
                 if transient_retry_due(&ctx) {
                     clear_transient_retry(&ctx);
-                    let disposition = run_and_report(
-                        &mut ctx,
-                        &agent_tx,
-                        &mut prompt_rx,
-                        AttemptOrigin::System,
-                    )
-                    .await;
-                    if disposition == WakeDisposition::Terminated {
-                        break;
+                    match wake_and_drain(&mut ctx, &agent_tx, &mut prompt_rx, AttemptOrigin::System)
+                        .await
+                    {
+                        WakeDisposition::Terminated => break,
+                        WakeDisposition::Awake | WakeDisposition::Held => {}
                     }
                 }
             }
@@ -820,15 +787,11 @@ pub async fn agent_task(
                         ctx.record_turn(vec![Message::user(wait_elapsed_text(armed_secs))])
                             .await;
                     }
-                    let disposition = run_and_report(
-                        &mut ctx,
-                        &agent_tx,
-                        &mut prompt_rx,
-                        AttemptOrigin::System,
-                    )
-                    .await;
-                    if disposition == WakeDisposition::Terminated {
-                        break;
+                    match wake_and_drain(&mut ctx, &agent_tx, &mut prompt_rx, AttemptOrigin::System)
+                        .await
+                    {
+                        WakeDisposition::Terminated => break,
+                        WakeDisposition::Awake | WakeDisposition::Held => {}
                     }
                 }
             }
@@ -839,15 +802,11 @@ pub async fn agent_task(
             _ = ctx.pacing_notify.notified() => {
                 if pacing_wake_due(&ctx) {
                     clear_pacing_wake(&ctx);
-                    let disposition = run_and_report(
-                        &mut ctx,
-                        &agent_tx,
-                        &mut prompt_rx,
-                        AttemptOrigin::System,
-                    )
-                    .await;
-                    if disposition == WakeDisposition::Terminated {
-                        break;
+                    match wake_and_drain(&mut ctx, &agent_tx, &mut prompt_rx, AttemptOrigin::System)
+                        .await
+                    {
+                        WakeDisposition::Terminated => break,
+                        WakeDisposition::Awake | WakeDisposition::Held => {}
                     }
                 }
             }
@@ -913,21 +872,42 @@ async fn apply_pending_profile_reset(ctx: &mut AgentContext) {
     }
 }
 
-/// How the wake ended, as the outer loop needs to read it: `Ran` means the
-/// wake passed every pre-loop gate and entered the round loop, `NotRun` means a
-/// pre-loop gate refused it (today only the wake modality gate), and
-/// `Terminated` means the run must end (a lifecycle cancel mid-round).
+/// How the wake ended, as the outer loop needs to read it.
+///
+/// No value here is read back off the lifecycle state: each is declared where
+/// the wake ends, because one state can serve two endings (`break(wait)` sits
+/// in `Waiting` and still ends awake). `Awake` says the wake left nothing
+/// holding the loop: no hard park, no armed backoff. It does not promise the next
+/// round gets through — a gate can stop it, and that round ends `Held` on its
+/// own. `Held` says something the wake must wait out holds the loop: a hard
+/// park, a gate that re-checks itself (the wake modality gate, the token
+/// budget, the pacing table), or the backoff this wake armed itself.
+/// `Terminated` is a lifecycle cancel.
 ///
 /// The split matters because a round's aftermath is not free: the post-round
-/// inbox drain delivers buffered messages into a round, so a wake that never ran
-/// one must not drain.
+/// inbox drain delivers buffered messages into a round, so the drain runs only
+/// after the wake's first round, and only when that round ended awake. A wake
+/// that ran two rounds reports the second one's verdict; the notify arm pulls
+/// before its round, so its own verdict cannot gate the pull.
+///
+/// One boundary keeps each value a verdict about the wake, not a reading of
+/// the task's state, and is worth naming:
+///
+/// - `Terminated` never follows from the task being parked. A fatal error, a
+///   stopped compaction, the modality gate, a quota block and the max-rounds
+///   cap settle a `Parked` state; the budget-probe gate instead settles
+///   `Waiting` with a re-armed timer. Either way the task stays alive (a kick
+///   or an external prompt still wakes it); only a lifecycle cancel ends it.
 #[must_use]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WakeDisposition {
-    /// The wake entered the round loop (whatever its rounds then decided).
-    Ran,
-    /// A pre-loop gate refused the wake: no round started.
-    NotRun,
+    /// The wake left nothing holding the loop: no hard park, no armed backoff.
+    /// A rest fuse the agent chose is not a backoff, so `break(wait)` lands here.
+    Awake,
+    /// Something the wake must wait out holds the loop: a hard park, a gate that
+    /// re-checks itself, or the backoff this wake armed. `break(wait)` is not
+    /// this — that fuse is rest the agent chose, not a wait the wake owes.
+    Held,
     /// A lifecycle cancel ended the run: the task terminates.
     Terminated,
 }
@@ -995,7 +975,7 @@ pub async fn run_and_report(
             },
             "modality gate",
         );
-        return WakeDisposition::NotRun;
+        return WakeDisposition::Held;
     }
     let mut no_progress: u32 = 0;
     loop {
@@ -1031,7 +1011,7 @@ pub async fn run_and_report(
                             .ok();
                     }
                 }
-                return WakeDisposition::Ran;
+                return WakeDisposition::Awake;
             }
             Ok(runner::RoundOutcome::BareAssistant {
                 content,
@@ -1046,7 +1026,7 @@ pub async fn run_and_report(
                     // Self-monologue guardrail: force-idle instead of looping forever.
                     ctx.settle(LifecycleState::Idle, "heartbeat limit");
                     agent_tx.send(AgentEvent::Idle).await.ok();
-                    return WakeDisposition::Ran;
+                    return WakeDisposition::Awake;
                 }
                 ctx.record_turn_with_attempt(
                     vec![assistant_message(Some(content), Vec::new(), &reasoning)],
@@ -1068,10 +1048,16 @@ pub async fn run_and_report(
                         return WakeDisposition::Terminated;
                     }
                     // Only the round token was cancelled (interrupt) → keep living.
+                    // An interrupt cancels this round, not the queue: a buffered
+                    // message is work already queued for it, so the round
+                    // ends awake, and the drain after a first round serves it. The
+                    // park form (no round in flight) takes the other route: it
+                    // wakes the loop once more instead of falling through to the
+                    // drain.
                     CancelKind::Interrupt => {
                         agent_tx.send(AgentEvent::Interrupted).await.ok();
                         ctx.settle(LifecycleState::Idle, "interrupt");
-                        return WakeDisposition::Ran;
+                        return WakeDisposition::Awake;
                     }
                 }
             }
@@ -1115,7 +1101,10 @@ pub async fn run_and_report(
                         );
                     }
                 }
-                return WakeDisposition::Ran;
+                // The retry fuse is a backoff this wake armed, so the wake is
+                // held: draining now would spend the next attempt without the
+                // backoff and charge the transient count twice.
+                return WakeDisposition::Held;
             }
             Ok(runner::RoundOutcome::Park(AgentOutcome::QuotaBlocked(info))) => {
                 // A quota or payment block: park with the structured reason and
@@ -1138,7 +1127,7 @@ pub async fn run_and_report(
                     },
                     "quota blocked",
                 );
-                return WakeDisposition::Ran;
+                return WakeDisposition::Held;
             }
             Ok(runner::RoundOutcome::Park(AgentOutcome::TokenBudgetExceeded {
                 consumed,
@@ -1162,7 +1151,11 @@ pub async fn run_and_report(
                     .send(AgentEvent::TokenBudgetExceeded { consumed, budget })
                     .await
                     .ok();
-                return WakeDisposition::Ran;
+                // The budget gate holds the wake in either shape its verdict
+                // takes — a pre-call reading, or a response already consumed and
+                // charged — and it re-checks itself on the next probe wake, so
+                // the buffered inbox message stays in the inbox.
+                return WakeDisposition::Held;
             }
             Ok(runner::RoundOutcome::Park(AgentOutcome::MaxRoundsExceeded)) => {
                 ctx.transient_fails = 0;
@@ -1174,7 +1167,7 @@ pub async fn run_and_report(
                     "max rounds",
                 );
                 agent_tx.send(AgentEvent::MaxRoundsExceeded).await.ok();
-                return WakeDisposition::Ran;
+                return WakeDisposition::Held;
             }
             Ok(runner::RoundOutcome::Park(AgentOutcome::Idle)) => {
                 // Not produced by the round loop today (only Break/BareAssistant/Park
@@ -1182,7 +1175,7 @@ pub async fn run_and_report(
                 ctx.transient_fails = 0;
                 ctx.settle(LifecycleState::Idle, "park(idle)");
                 agent_tx.send(AgentEvent::Idle).await.ok();
-                return WakeDisposition::Ran;
+                return WakeDisposition::Awake;
             }
             Err(e) => {
                 // Permanent (Fatal) error — park and surface; the operator acts.
@@ -1198,10 +1191,53 @@ pub async fn run_and_report(
                     "fatal error",
                 );
                 agent_tx.send(AgentEvent::Error(rendered)).await.ok();
-                return WakeDisposition::Ran;
+                // A fatal park holds the wake: a drained round would meet the
+                // same gate and report the failure twice.
+                return WakeDisposition::Held;
             }
         }
     }
+}
+
+/// Run one wake and, when its first round ended awake, deliver what the inbox
+/// buffered into one more round.
+///
+/// A first round that ended awake has left the agent free to run another
+/// round — the kick round is the case that called for this — so messages
+/// that arrived while parked (or during the round) are pulled here instead
+/// of waiting for the next notify: the parked guard consumes notify
+/// permits, so notify alone never delivers them while the agent stays
+/// parked. `pull_undelivered` is an atomic drain, so a racing notify arm
+/// simply finds nothing left to pull. Only a round that ended awake
+/// delivers here; any other verdict leaves its buffered message in the
+/// inbox.
+///
+/// The second round runs as `External`: the pulled message is new work from
+/// outside, so it forces the pacing window open rather than obeying a record
+/// this agent's own episode wrote.
+///
+/// One layer only: a message that arrives during the second round waits for the
+/// next wake. Both rounds read the same [`WakeDisposition`] contract, so a
+/// second-round `Held` never delivers a third message.
+///
+/// Six entrances reach it: the task's first prompt, a prompt message, the notify
+/// wake (inbox pull and approvals), and the three timer fuses (retry, wait,
+/// pacing).
+pub(crate) async fn wake_and_drain(
+    ctx: &mut AgentContext,
+    agent_tx: &tokio::sync::mpsc::Sender<AgentEvent>,
+    prompt_rx: &mut tokio::sync::mpsc::Receiver<String>,
+    origin: AttemptOrigin,
+) -> WakeDisposition {
+    let disposition = run_and_report(ctx, agent_tx, prompt_rx, origin).await;
+    if disposition == WakeDisposition::Awake
+        && let Some(ref puller) = ctx.message_puller
+        && let Some(msg) = puller.pull_undelivered().await
+    {
+        ctx.record_message_turn(&msg).await;
+        return run_and_report(ctx, agent_tx, prompt_rx, AttemptOrigin::External).await;
+    }
+    disposition
 }
 
 /// Which fuse a wake park arms: `break(wait)` and the budget-probe re-arm
@@ -1807,6 +1843,23 @@ mod tests {
         assert!(found.unwrap_or(false), "inbox message should drive a round");
     }
 
+    /// Mount a short SSE stream under the loopback mock's failing default, so a
+    /// wake's round really sends and finishes: the drain tests need a round that
+    /// ends awake, not one that parks on the placeholder key's 401.
+    async fn mount_streaming_ok(server: &wiremock::MockServer) {
+        let stream = "data: {\"id\":\"s\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n";
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/chat/completions"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_raw(stream.as_bytes().to_vec(), "text/event-stream"),
+            )
+            .with_priority(1)
+            .mount(server)
+            .await;
+    }
+
     /// A peer notice that arrives as the outer loop takes the prompt arm is
     /// recorded, and the post-round pull still brings the message body —
     /// the race-window guarantee that a notice is never lost even when it
@@ -1827,12 +1880,13 @@ mod tests {
             }
         }
         // Loopback mock, as in the prompt twin: this poll waits on the notify turn.
-        let (mut ctx, _server) = crate::test_support::ctx_with_mock(
+        let (mut ctx, server) = crate::test_support::ctx_with_mock(
             vec![crate::test_support::profile("test", "ep1", 4096)],
             &["ep1"],
             crate::test_support::PLACEHOLDER_KEY_STATUS,
         )
         .await;
+        mount_streaming_ok(&server).await;
 
         let flag = Arc::new(AtomicBool::new(true));
         ctx.message_puller = Some(Arc::new(StubPuller(flag.clone())));
@@ -2052,12 +2106,13 @@ mod tests {
             }
         }
         // Loopback mock: the drain shows up only if the round finishes in the budget.
-        let (mut ctx, _server) = crate::test_support::ctx_with_mock(
+        let (mut ctx, server) = crate::test_support::ctx_with_mock(
             vec![crate::test_support::profile("test", "ep1", 4096)],
             &["ep1"],
             crate::test_support::PLACEHOLDER_KEY_STATUS,
         )
         .await;
+        mount_streaming_ok(&server).await;
 
         *ctx.lifecycle.lock().unwrap_or_else(|e| e.into_inner()) = LifecycleState::Parked {
             reason: ParkedReason::FatalError {
@@ -3066,10 +3121,10 @@ mod tests {
 
         let (tx, _rx) = tokio::sync::mpsc::channel::<AgentEvent>(256);
         let (_prompt_tx, mut prompt_rx) = tokio::sync::mpsc::channel::<String>(16);
-        assert_ne!(
+        assert_eq!(
             run_and_report(&mut ctx, &tx, &mut prompt_rx, AttemptOrigin::External).await,
-            WakeDisposition::Terminated,
-            "a stop parks the round instead of terminating the task"
+            WakeDisposition::Held,
+            "a stop parks the round: the wake is held, so nothing drains"
         );
 
         assert_eq!(
@@ -3152,7 +3207,7 @@ mod tests {
 
         assert_eq!(
             run_and_report(&mut ctx, &tx, &mut prompt_rx, AttemptOrigin::System).await,
-            WakeDisposition::NotRun,
+            WakeDisposition::Held,
             "{from}: a blocked wake parks instead of starting a round"
         );
         let parked = ctx
