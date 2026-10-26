@@ -291,6 +291,28 @@ kallip team lock-rebuild [--dir <DIR>]
 
 `status` 显示三方比对（声明 vs 锁 vs 实时注册表），每个 role 一行，附 converge 的判定。`converge` 先规划、预检再执行收敛；结构性问题会整批拒绝，applied 与 aborted 结果都会写锁。`lock-rebuild` 以实况重建锁归档，列出每个被恢复的停泊 agent。
 
+### `turns`：读取 agent 的回合历史
+
+```bash
+kallip turns list <AGENT> [--day <YYYY-MM-DD>] [--before <CURSOR>] [--limit <N>]
+    [--fields <NAMES>] [--tools] [--json]
+kallip turns show <AGENT> <TURN> [--call <N> [--body [--offset <N>] [--limit <N>]]]
+    [--json]
+kallip turns export <AGENT> [--day <YYYY-MM-DD>] [--limit <N>] [--pages <N>] [--out <FILE>]
+```
+
+回合历史的一切答案都由 tagma 按需从它本就保存的日志算出，CLI 自己不打开任何历史文件：`list` 取一页（新的在前），`show` 取单个回合的消息与调用行，`--call N --body` 取该次调用正文的一个字节区间。
+
+| 子命令 | 用途 |
+| --- | --- |
+| `turns list` | 一页回合（新的在前）；`--fields` 选列，`--tools` 在每回合下展开该回合的调用（名称、结局与退出码），`--json` 按 tagma 返回的原样输出 |
+| `turns show` | 单个回合的消息与调用行；`--call N` 收窄到一次调用，`--call N --body` 取该次调用的正文，`--json` 交出 tagma 对该回合、该次调用或该段正文的原文档 |
+| `turns export` | 最多走 `--pages` 页（默认 20），输出一份 JSON 文档：manifest 加各页原样 |
+
+游标是不透明的：把 `next_cursor` 逐字节填回 `--before`，排序键归 tagma 所有。`turns export` 始终有界，manifest 里的 `stopped_by` 说明这一趟是走完了日志（`end`）还是碰到了页数上限（`pages`），`next_cursor` 与 `limit` 给出续跑点。页里从不带工具输出：正文靠 `--call N --body` 按区间读，区间提示一律走 stderr，字节可以直接进管道。
+
+表格与文本这两面在 `schema_version` 与本程序读的版本不一致时拒绝渲染，改过含义的字段不会静默印成 `-`；`--json` 把 tagma 的文档逐字节交出（本程序不认识的字段与版本一并给出），`turns export` 的每个页体同样照原样保留。走查中若后一页换了 `schema_version`，导出即停：一份文档不混两个视图。`profile` 列只印 provider 与 model，`turns show` 另外给出 profile set、profile id 与 effort。`usage` 列先印 `prompt→completion`；`cache:<read>/<write>` 在任一侧非零时整对印出（为 0 的一侧仍留在对里），`reason:<tokens>` 非零时接在后面。`turns show` 把五个计数印在同一行、各自带名，为 0 也照印。
+
 ### 用法模式
 
 #### 把工作委托给 subagent

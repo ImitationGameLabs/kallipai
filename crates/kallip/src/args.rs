@@ -69,6 +69,10 @@ pub enum Commands {
     /// inspect the three-way status, and maintain the lock archive.
     #[command(subcommand)]
     Team(TeamCommand),
+    /// Read an agent's turn history: the paged log, one turn, and one call's
+    /// text, computed by the tagma from the log on demand.
+    #[command(subcommand)]
+    Turns(TurnsCommand),
 }
 
 pub(crate) mod agent;
@@ -84,6 +88,7 @@ pub(crate) mod skill;
 pub(crate) mod subagent;
 pub(crate) mod task;
 pub(crate) mod team;
+pub(crate) mod turns;
 use self::{
     agent::{AgentCommand, AgentDirCommand},
     approval::ApprovalCommand,
@@ -98,4 +103,5 @@ use self::{
     subagent::SubagentCommand,
     task::TaskCommand,
     team::TeamCommand,
+    turns::TurnsCommand,
 };

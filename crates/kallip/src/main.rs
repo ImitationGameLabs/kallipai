@@ -6,6 +6,7 @@ mod reference;
 mod skill;
 mod task;
 mod team;
+mod turns;
 
 use anyhow::Result;
 use args::{
@@ -829,6 +830,7 @@ async fn main() -> Result<()> {
         Commands::Image(cmd) => image::run_image(&client, &cmd).await?,
         Commands::Task(cmd) => task::run_task(&client, &cmd).await?,
         Commands::Team(cmd) => team::run_team(&client, &cmd).await?,
+        Commands::Turns(cmd) => turns::run_turns(&client, &cmd).await?,
     }
     Ok(())
 }

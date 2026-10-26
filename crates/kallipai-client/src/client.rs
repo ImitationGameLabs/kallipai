@@ -13,6 +13,7 @@ mod settings;
 mod status;
 mod task;
 mod team;
+mod turns;
 pub use kallipai_common::protocol::TaskExport;
 pub use lesche::{DirectReadQuery, MessageDelivery, RoomReadQuery};
 
@@ -80,6 +81,12 @@ impl TagmaClient {
         format!("{}{path}", self.inner.base_url)
     }
 
+    /// The tagma's HTTP root this client talks to, without a trailing
+    /// slash: the identity an export manifest records.
+    pub fn base_url(&self) -> &str {
+        &self.inner.base_url
+    }
+
     /// Set Authorization: Bearer <token> if an auth token is configured.
     fn with_auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         if let Some(ref token) = self.inner.auth_token {
@@ -104,8 +111,9 @@ impl TagmaClient {
         response.json().await.context(context_msg)
     }
 
-    /// Send request, parse structured JSON error on non-2xx, return raw
-    /// response (for SSE streams that need the body as-is).
+    /// Send request, parse structured JSON error on non-2xx, return the raw
+    /// response for callers that need the body as-is: SSE streams,
+    /// fire-and-forget writes, widened documents, and opaque payloads.
     async fn ensure_success(&self, response: reqwest::Response) -> Result<reqwest::Response> {
         if !response.status().is_success() {
             return Err(error_from_response(response).await);

@@ -91,6 +91,17 @@ fn render_leaf(out: &mut String, leaf: &Command, group_path: &[&str]) {
             out.push_str(&format!("- {}\n", render_arg(arg)));
         }
     }
+    // The examples a leaf declares are part of its syntax story: print them
+    // under the arguments, in the code block shape a reference wants.
+    let after = leaf
+        .get_after_help()
+        .or_else(|| leaf.get_after_long_help())
+        .map(|text| text.to_string());
+    if let Some(after) = after {
+        out.push_str("\n```\n");
+        out.push_str(after.trim_end());
+        out.push_str("\n```\n");
+    }
     out.push('\n');
 }
 
@@ -207,6 +218,10 @@ mod tests {
             "kallip inbox summary",
             "kallip inbox done",
             "kallip inbox clear",
+            // turns
+            "kallip turns list",
+            "kallip turns show",
+            "kallip turns export",
         ];
         for leaf in leaves {
             assert!(
@@ -240,6 +255,41 @@ mod tests {
                     "leaf heading must carry a description: {line}"
                 );
             }
+        }
+    }
+
+    /// Examples ride the reference the same way they ride `--help`: a leaf
+    /// that declares them prints them, a leaf that declares none adds nothing.
+    #[test]
+    fn render_leaf_prints_examples_only_when_declared() {
+        let with_examples = Command::new("demo")
+            .about("demo leaf")
+            .arg(Arg::new("target"))
+            .after_help("Examples:\n  kallip demo target");
+        let mut rendered = String::new();
+        render_leaf(&mut rendered, &with_examples, &["group"]);
+        assert!(
+            rendered.contains("```\nExamples:\n  kallip demo target\n```"),
+            "{rendered}"
+        );
+
+        let without_examples = Command::new("plain").about("plain leaf");
+        let mut rendered = String::new();
+        render_leaf(&mut rendered, &without_examples, &["group"]);
+        assert!(!rendered.contains("```"), "{rendered}");
+    }
+
+    /// The turns family carries its examples into the reference, so the two
+    /// surfaces read the same.
+    #[test]
+    fn render_carries_the_turns_examples() {
+        let out = render();
+        for example in [
+            "kallip turns list my-agent",
+            "kallip turns show my-agent 142 --call 1 --body",
+            "kallip turns export my-agent --out turns.json",
+        ] {
+            assert!(out.contains(example), "reference is missing {example}");
         }
     }
 }
