@@ -10,7 +10,10 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use anyhow::Context;
-use just_llm_client::types::generation::{GenerationRequest, Message, ToolCall, Usage};
+use just_llm_client::types::generation::{
+    CompletionTokensDetails, GenerationRequest, Message, ReasoningEffort, ToolCall, ToolCallDelta,
+    Usage,
+};
 
 /// The test-facing message element type. Re-pointed to the generation face by the
 /// just-agent-libs migration; test signatures never name the upstream type.
@@ -63,6 +66,20 @@ pub(crate) fn profile(id: &str, provider: &str, window: usize) -> Profile {
         store: None,
         effort: None,
         modalities: Profile::default_modalities(),
+    }
+}
+
+/// [`profile`] with a declared reasoning effort, for the tests that pin what a
+/// round records about the level it asked for.
+pub(crate) fn profile_with_effort(
+    id: &str,
+    provider: &str,
+    window: usize,
+    effort: ReasoningEffort,
+) -> Profile {
+    Profile {
+        effort: Some(effort),
+        ..profile(id, provider, window)
     }
 }
 
@@ -459,11 +476,38 @@ pub(crate) fn usage_with_completion(prompt_tokens: u32, completion_tokens: u32) 
     }
 }
 
+/// A [`Usage`] carrying every counter a provider can report, including the two
+/// optional cache counts and the nested reasoning detail.
+pub(crate) fn usage_with_every_counter(
+    prompt_tokens: u32,
+    completion_tokens: u32,
+    cache_read_tokens: u32,
+    cache_write_tokens: u32,
+    reasoning_tokens: u32,
+) -> Usage {
+    Usage {
+        prompt_tokens,
+        completion_tokens,
+        cache_read_tokens: Some(cache_read_tokens),
+        cache_write_tokens: Some(cache_write_tokens),
+        total_tokens: prompt_tokens + completion_tokens,
+        completion_tokens_details: Some(CompletionTokensDetails {
+            reasoning_tokens: Some(reasoning_tokens),
+        }),
+    }
+}
+
 /// One queued stream answer: plain events, events followed by a mid-stream drop,
 /// a stream that never yields (for cancel tests), or events followed by a counted
 /// end of the stream (for drain tests).
 enum CannedStream {
     Events(Vec<just_llm_client::types::generation::GenerationEvent>),
+    /// Plain events, but only after `delay`: a test that pins a wall-clock
+    /// reading needs a round whose model call occupies real time.
+    Slow {
+        delay: std::time::Duration,
+        events: Vec<just_llm_client::types::generation::GenerationEvent>,
+    },
     /// The wire shape of a stream that dies mid-way: some events, then the transport
     /// error.
     Drop {
@@ -579,6 +623,56 @@ impl RecordingBackend {
                     response_id: Some(response_id.to_owned()),
                 },
             ]));
+    }
+
+    /// One text delta, a usage event, then `End` — the wire shape of a backend
+    /// that reports token accounting for the response.
+    pub(crate) fn queue_stream_with_usage(&self, response_id: &str, usage: Usage) {
+        self.streams
+            .lock()
+            .unwrap()
+            .push_back(CannedStream::Events(vec![
+                just_llm_client::types::generation::GenerationEvent::Text {
+                    delta: "a".to_owned(),
+                },
+                just_llm_client::types::generation::GenerationEvent::Usage { usage },
+                just_llm_client::types::generation::GenerationEvent::End {
+                    finish_reason: None,
+                    response_id: Some(response_id.to_owned()),
+                },
+            ]));
+    }
+
+    /// A tool call, a usage event, then `End` — the wire shape of a round that
+    /// asks for a tool instead of answering. `delay` holds the answer back so a
+    /// test can pin the wall clock a round records.
+    pub(crate) fn queue_tool_call(
+        &self,
+        tool: &str,
+        arguments: &str,
+        usage: Usage,
+        delay: Option<std::time::Duration>,
+    ) {
+        let events = vec![
+            just_llm_client::types::generation::GenerationEvent::ToolCall {
+                delta: ToolCallDelta {
+                    index: Some(0),
+                    id: Some("call-1".to_owned()),
+                    name: Some(tool.to_owned()),
+                    arguments: Some(arguments.to_owned()),
+                },
+            },
+            just_llm_client::types::generation::GenerationEvent::Usage { usage },
+            just_llm_client::types::generation::GenerationEvent::End {
+                finish_reason: Some(just_llm_client::types::generation::FinishReason::ToolCalls),
+                response_id: Some("r-tool".to_owned()),
+            },
+        ];
+        let canned = match delay {
+            Some(delay) => CannedStream::Slow { delay, events },
+            None => CannedStream::Events(events),
+        };
+        self.streams.lock().unwrap().push_back(canned);
     }
 
     /// Queue an error that surfaces from `prepare_streaming` itself (pre-stream).
@@ -709,6 +803,19 @@ impl LlmBackend for RecordingBackend {
                     .into_iter()
                     .map(Ok::<_, just_llm_client::TransportError>),
             )),
+            CannedStream::Slow { delay, events } => {
+                let head = futures_util::stream::once(async move {
+                    tokio::time::sleep(delay).await;
+                });
+                Box::pin(futures_util::StreamExt::flat_map(head, move |()| {
+                    futures_util::stream::iter(
+                        events
+                            .clone()
+                            .into_iter()
+                            .map(Ok::<_, just_llm_client::TransportError>),
+                    )
+                }))
+            }
             CannedStream::Drop { events, error } => Box::pin(futures_util::stream::iter(
                 events
                     .into_iter()

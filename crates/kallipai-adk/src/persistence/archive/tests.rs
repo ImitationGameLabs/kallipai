@@ -36,6 +36,7 @@ fn archive_moves_dir_and_preserves_contents() {
                 RecordKind::Turn,
                 None,
                 &[],
+                None,
             )
             .unwrap();
         // A context.json carrying non-zero cumulative usage.

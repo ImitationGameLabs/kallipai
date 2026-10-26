@@ -7,7 +7,7 @@
 //! and failover driving live in [`crate::acquisition`]; the [`crate::failover::FailoverState`]
 //! state machine stays pure in its own module.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
 use tokio_util::sync::CancellationToken;
@@ -21,6 +21,7 @@ use crate::approval::format_approval_notifications;
 use crate::budget_gate::{BudgetAction, enforce_post_stream_budget, enforce_pre_call_budget};
 use crate::context::{compose_context, estimate_context_tokens};
 use crate::event::{AgentEvent, AgentOutcome};
+use crate::history::TurnAttempt;
 use crate::tool_execution::{ToolExecResult, execute_tool_calls};
 use just_llm_client::types::generation::Message;
 
@@ -50,9 +51,17 @@ pub(crate) enum RoundOutcome {
     /// re-loops, or force-idles via the no-progress guardrail. The assistant turn
     /// is **not** recorded yet; the outer loop records it (then the heartbeat) only
     /// when it decides to continue.
+    ///
     /// `reasoning` is the model's own thinking for this turn: the outer loop
     /// records it with the message so a later request can pass it back.
-    BareAssistant { content: String, reasoning: String },
+    /// `attempt` is what served the round — the profile in flight, the usage the
+    /// backend reported and the round clock — recorded on the same turn so the
+    /// log carries the model face, not just its words.
+    BareAssistant {
+        content: String,
+        reasoning: String,
+        attempt: Box<TurnAttempt>,
+    },
     /// Park now and surface this outcome (chain exhausted / cancelled / budget / max rounds).
     /// Distinct from `Break`: these are non-deliberate park reasons, each surfacing its
     /// own event so the operator keeps the signal.
@@ -90,6 +99,9 @@ async fn run_rounds(
     let tool_timeout = Duration::from_secs(ctx.config.tool_timeout_secs);
 
     for round in 0..ctx.config.max_tool_rounds {
+        // The round clock the history record carries: from here to the response
+        // being consumed, tool execution excluded.
+        let round_start = Instant::now();
         // A tool round is a new execution: its sends get a fresh budget and deadline.
         // This is the only per-round reset of the ledger; the prompt entry does not
         // seed one, so a round never inherits the previous round's sends.
@@ -182,6 +194,15 @@ async fn run_rounds(
             BudgetAction::Fail(error) => return Err(error),
         }
 
+        // Snapshot what served this round before the response moves into tool
+        // execution: the profile in flight and the usage are gone after that
+        // move; the round clock is already running.
+        let attempt = ctx.turn_attempt(
+            round,
+            consumed.usage.as_ref(),
+            round_start.elapsed().as_millis() as u64,
+        );
+
         // -- Bare assistant response (no tool calls): the agent did not call `break`,
         //    so this does NOT terminate the run. Surface the content to the outer
         //    loop, which injects a heartbeat prompt and re-loops (or force-idles via
@@ -193,6 +214,7 @@ async fn run_rounds(
             return Ok(RoundOutcome::BareAssistant {
                 content: consumed.content,
                 reasoning: consumed.reasoning,
+                attempt: Box::new(attempt),
             });
         }
 
@@ -204,14 +226,14 @@ async fn run_rounds(
             ToolExecResult::Break(msgs, until) => {
                 // `break` parks as Idle, but the calls preceding it in this round
                 // still produced real work — record it before yielding.
-                ctx.record_turn(msgs).await;
+                ctx.record_turn_with_attempt(msgs, attempt).await;
                 ctx.persist().await;
                 return Ok(RoundOutcome::Break(until));
             }
             ToolExecResult::Messages(msgs) => msgs,
         };
 
-        ctx.record_turn(turn_messages).await;
+        ctx.record_turn_with_attempt(turn_messages, attempt).await;
         ctx.persist().await;
     }
 

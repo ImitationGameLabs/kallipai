@@ -345,6 +345,7 @@ impl AgentContext {
     }
 
     /// Fire-and-forget append to history. Logs a warning on failure.
+    #[allow(clippy::too_many_arguments)] // forwards the record's own shape unchanged
     pub(crate) fn append_history(
         &self,
         turn_id: Option<u64>,
@@ -353,6 +354,7 @@ impl AgentContext {
         kind: RecordKind,
         event: Option<crate::history::SystemEvent>,
         attachments: &[crate::history::AttachmentRef],
+        attempt: Option<&crate::history::TurnAttempt>,
     ) {
         if let Some(ref history) = self.history
             && let Err(e) = history.append(
@@ -362,6 +364,7 @@ impl AgentContext {
                 kind,
                 event,
                 attachments,
+                attempt,
             )
         {
             tracing::warn!(turn_id = ?turn_id, "history write failed: {e:#}");
@@ -371,18 +374,43 @@ impl AgentContext {
     /// Record a turn to both the context store and the append-only history log.
     /// Returns the assigned `TurnId`.
     pub async fn record_turn(&self, messages: Vec<Message>) -> TurnId {
-        self.record_turn_with_attachments(messages, Vec::new())
-            .await
+        self.record_turn_entry(messages, Vec::new(), None).await
     }
 
     /// The attachment-carrying form of [`Self::record_turn`] — the frozen
     /// recording contract: the image read path fills `attachments` (and
     /// the message parts); this signature does not change again.
-    /// `record_turn` delegates here with none.
+    /// `record_turn` reaches `record_turn_entry` with no attachments; this form
+    /// is the only one that carries them.
     pub async fn record_turn_with_attachments(
         &self,
         messages: Vec<Message>,
         attachments: Vec<crate::history::AttachmentRef>,
+    ) -> TurnId {
+        self.record_turn_entry(messages, attachments, None).await
+    }
+
+    /// A turn a model round produced: the same recording path, carrying what
+    /// served it (profile, round, usage, elapsed) into the history record.
+    /// A sibling of [`Self::record_turn_with_attachments`] rather than another
+    /// parameter: that signature is frozen, and an image turn is not a model
+    /// round, so there is no attempt to carry.
+    pub async fn record_turn_with_attempt(
+        &self,
+        messages: Vec<Message>,
+        attempt: crate::history::TurnAttempt,
+    ) -> TurnId {
+        self.record_turn_entry(messages, Vec::new(), Some(attempt))
+            .await
+    }
+
+    /// The one recording path behind every turn entry point: push into the
+    /// context store, then append to history with whatever produced it.
+    async fn record_turn_entry(
+        &self,
+        messages: Vec<Message>,
+        attachments: Vec<crate::history::AttachmentRef>,
+        attempt: Option<crate::history::TurnAttempt>,
     ) -> TurnId {
         let (turn_id, estimated_tokens) = {
             let mut guard = self.store.lock().await;
@@ -395,8 +423,35 @@ impl AgentContext {
             RecordKind::Turn,
             None,
             &attachments,
+            attempt.as_ref(),
         );
         turn_id
+    }
+
+    /// What served one round, in the shape a turn record carries it: the
+    /// profile in flight (after any failover advance), the round index, the
+    /// response usage flattened to the five counters, and the round clock.
+    /// Built here so the round loop and the outer loop cannot drift apart.
+    pub(crate) fn turn_attempt(
+        &self,
+        round: usize,
+        usage: Option<&just_llm_client::types::generation::Usage>,
+        elapsed_ms: u64,
+    ) -> crate::history::TurnAttempt {
+        let profile = self.failover.current_profile();
+        crate::history::TurnAttempt {
+            profile_set: self.failover.set().name.clone(),
+            profile_id: profile.id.clone(),
+            provider: profile.endpoint.clone(),
+            model: profile.model.clone(),
+            effort: profile
+                .effort
+                .as_ref()
+                .and_then(crate::history::effort_name),
+            round,
+            usage: usage.map(crate::history::TurnUsage::from_usage),
+            elapsed_ms,
+        }
     }
 
     /// Record an external message turn (user prompt, peer or relay
@@ -985,7 +1040,11 @@ pub async fn run_and_report(
                 }
                 return WakeDisposition::Ran;
             }
-            Ok(runner::RoundOutcome::BareAssistant { content, reasoning }) => {
+            Ok(runner::RoundOutcome::BareAssistant {
+                content,
+                reasoning,
+                attempt,
+            }) => {
                 // No `break`, no tool calls — heartbeat and continue. Reset the
                 // transient-retry counter (a real response is progress).
                 ctx.transient_fails = 0;
@@ -996,11 +1055,10 @@ pub async fn run_and_report(
                     agent_tx.send(AgentEvent::Idle).await.ok();
                     return WakeDisposition::Ran;
                 }
-                ctx.record_turn(vec![assistant_message(
-                    Some(content),
-                    Vec::new(),
-                    &reasoning,
-                )])
+                ctx.record_turn_with_attempt(
+                    vec![assistant_message(Some(content), Vec::new(), &reasoning)],
+                    *attempt,
+                )
                 .await;
                 ctx.record_turn(vec![Message::user(HEARTBEAT_TEXT)]).await;
                 continue;
@@ -2717,6 +2775,215 @@ mod tests {
         );
     }
 
+    /// A model round records what served it: the profile identity, the round
+    /// index, the response usage and the round clock ride the history line, so
+    /// reading the log back needs no second source.
+    #[tokio::test]
+    async fn a_model_round_records_the_attempt_that_served_it() {
+        use crate::test_support::{
+            MapSource, RecordingBackend, ctx_from_source, profile, usage_with_completion, user_msg,
+        };
+        use just_llm_client::LlmBackend;
+
+        let backend = RecordingBackend::new();
+        let source = Arc::new(MapSource(std::collections::HashMap::from([(
+            "p1".to_string(),
+            backend.clone() as Arc<dyn LlmBackend>,
+        )])));
+        let mut ctx = ctx_from_source(
+            vec![profile("a", "p1", 100_000)],
+            source,
+            crate::retry::RetryPolicy::default(),
+        )
+        .await;
+        for _ in 0..=ctx.config.max_heartbeat_rounds {
+            backend.queue_stream_with_usage("r1", usage_with_completion(120, 30));
+        }
+        let dir = tempfile::tempdir().unwrap();
+        ctx.history = Some(HistoryWriter::new(dir.path().to_owned()));
+        ctx.record_turn(vec![user_msg("q1")]).await;
+        let (tx, _rx) = tokio::sync::mpsc::channel::<AgentEvent>(64);
+        let (_prompt_tx, mut prompt_rx) = tokio::sync::mpsc::channel::<String>(16);
+
+        let _ = run_and_report(&mut ctx, &tx, &mut prompt_rx, AttemptOrigin::System).await;
+
+        let records = history_records(dir.path());
+        let wanted = crate::history::RecordKind::Turn;
+        let served = records
+            .iter()
+            .find(|r| r.kind == wanted && r.attempt.is_some())
+            .expect("the model round's turn carries an attempt");
+        let attempt = served.attempt.as_ref().unwrap();
+        assert_eq!(attempt.profile_set, "default");
+        assert_eq!(attempt.profile_id, "a");
+        assert_eq!(attempt.provider, "p1");
+        assert_eq!(attempt.model, "a-model");
+        assert_eq!(attempt.effort, None);
+        assert_eq!(attempt.round, 0);
+        let usage = attempt.usage.expect("the response reported usage");
+        assert_eq!(usage.prompt, 120);
+        assert_eq!(usage.completion, 30);
+        assert!(
+            records
+                .iter()
+                .any(|r| r.kind == wanted && r.attempt.is_none()),
+            "the prompt before the round carries no attempt"
+        );
+    }
+
+    /// A backend that reports no usage leaves the attempt in place and its
+    /// usage absent: an unreported counter is not a reported zero.
+    #[tokio::test]
+    async fn a_round_without_reported_usage_keeps_the_attempt_but_no_usage() {
+        use crate::test_support::{
+            MapSource, RecordingBackend, ctx_from_source, profile, user_msg,
+        };
+        use just_llm_client::LlmBackend;
+
+        let backend = RecordingBackend::new();
+        let source = Arc::new(MapSource(std::collections::HashMap::from([(
+            "p1".to_string(),
+            backend.clone() as Arc<dyn LlmBackend>,
+        )])));
+        let mut ctx = ctx_from_source(
+            vec![profile("a", "p1", 100_000)],
+            source,
+            crate::retry::RetryPolicy::default(),
+        )
+        .await;
+        // One answer per round: the heartbeat limit force-idles the wake, so the
+        // queue never runs dry mid-test.
+        for _ in 0..=ctx.config.max_heartbeat_rounds {
+            backend.queue_stream("r1");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        ctx.history = Some(HistoryWriter::new(dir.path().to_owned()));
+        ctx.record_turn(vec![user_msg("q1")]).await;
+        let (tx, _rx) = tokio::sync::mpsc::channel::<AgentEvent>(64);
+        let (_prompt_tx, mut prompt_rx) = tokio::sync::mpsc::channel::<String>(16);
+
+        let _ = run_and_report(&mut ctx, &tx, &mut prompt_rx, AttemptOrigin::System).await;
+
+        let records = history_records(dir.path());
+        let wanted = crate::history::RecordKind::Turn;
+        let served = records
+            .iter()
+            .find(|r| r.kind == wanted && r.attempt.is_some())
+            .expect("the model round's turn carries an attempt");
+        let attempt = served.attempt.as_ref().unwrap();
+        assert_eq!(attempt.round, 0);
+        assert_eq!(
+            attempt.usage, None,
+            "a backend that reported nothing must not be recorded as a zero"
+        );
+    }
+
+    /// The tool round writes its record after the tool ran, so its facts have to
+    /// be taken before it: the attempt names the profile the round asked, the
+    /// counters the backend reported, the round index, and a clock that stops
+    /// before the tool starts.
+    #[tokio::test]
+    async fn a_tool_round_records_the_attempt_before_the_tool_runs() {
+        use crate::test_support::{
+            GatedTool, MapSource, RecordingBackend, ctx_from_source_with_tools,
+            profile_with_effort, usage_with_every_counter, user_msg,
+        };
+        use just_llm_client::LlmBackend;
+
+        const TOOL_HOLD: std::time::Duration = std::time::Duration::from_millis(300);
+
+        let backend = RecordingBackend::new();
+        let gate = GatedTool::new("hold");
+        let entered = gate.entered.clone();
+        let release = gate.release.clone();
+        let source = Arc::new(MapSource(std::collections::HashMap::from([(
+            "p1".to_string(),
+            backend.clone() as Arc<dyn LlmBackend>,
+        )])));
+        let mut ctx = ctx_from_source_with_tools(
+            vec![profile_with_effort(
+                "a",
+                "p1",
+                100_000,
+                just_llm_client::types::generation::ReasoningEffort::High,
+            )],
+            source,
+            crate::retry::RetryPolicy::default(),
+            vec![Box::new(gate)],
+        )
+        .await;
+        // Round 0 asks for the gated tool, round 1 breaks the run.
+        ctx.config.max_tool_rounds = 3;
+        backend.queue_tool_call(
+            "hold",
+            "{}",
+            usage_with_every_counter(11, 5, 3, 2, 1),
+            Some(std::time::Duration::from_millis(60)),
+        );
+        backend.queue_tool_call(
+            "break",
+            "{\"timeout_secs\":30}",
+            usage_with_every_counter(21, 9, 0, 0, 0),
+            None,
+        );
+        let dir = tempfile::tempdir().unwrap();
+        ctx.history = Some(HistoryWriter::new(dir.path().to_owned()));
+        ctx.record_turn(vec![user_msg("q1")]).await;
+        let (tx, _rx) = tokio::sync::mpsc::channel::<AgentEvent>(256);
+        let (_prompt_tx, mut prompt_rx) = tokio::sync::mpsc::channel::<String>(16);
+
+        let handle = tokio::spawn(async move {
+            run_and_report(&mut ctx, &tx, &mut prompt_rx, AttemptOrigin::System).await
+        });
+        // Provably inside the tool: the round cannot have written its record yet.
+        tokio::time::timeout(std::time::Duration::from_secs(10), entered.notified())
+            .await
+            .expect("the round reaches the gated tool");
+        tokio::time::sleep(TOOL_HOLD).await;
+        release.notify_one();
+        let _ = handle.await.expect("the agent run finishes");
+
+        let records = history_records(dir.path());
+        let attempts: Vec<_> = records.iter().filter_map(|r| r.attempt.as_ref()).collect();
+        let tool_round = attempts
+            .iter()
+            .find(|a| a.round == 0)
+            .expect("the tool round carries an attempt");
+        assert_eq!(tool_round.profile_set, "default");
+        assert_eq!(tool_round.profile_id, "a");
+        assert_eq!(tool_round.provider, "p1");
+        assert_eq!(tool_round.model, "a-model");
+        assert_eq!(tool_round.effort.as_deref(), Some("high"));
+        let usage = tool_round.usage.expect("the response reported usage");
+        assert_eq!(
+            (
+                usage.prompt,
+                usage.completion,
+                usage.cache_read,
+                usage.cache_write,
+                usage.reasoning
+            ),
+            (11, 5, 3, 2, 1)
+        );
+        // The model call was held 60 ms and the tool 300 ms: a clock taken after
+        // the tool ran would read past the second number.
+        assert!(
+            tool_round.elapsed_ms >= 40,
+            "the wait on the model belongs to the round: {}",
+            tool_round.elapsed_ms
+        );
+        assert!(
+            tool_round.elapsed_ms < TOOL_HOLD.as_millis() as u64,
+            "the tool's own time does not: {}",
+            tool_round.elapsed_ms
+        );
+        // The round after the tool round records its own index.
+        assert!(
+            attempts.iter().any(|a| a.round == 1),
+            "the break round carries round 1"
+        );
+    }
+
     /// The recorded reasoning reaches the next request itself: a stateless
     /// backend receives the full history, so the second request must carry the
     /// assistant turn with the reasoning the stream sent.
@@ -3034,5 +3301,18 @@ mod tests {
             lines += text.lines().filter(|line| !line.is_empty()).count();
         }
         lines
+    }
+
+    /// Every record the history log holds, in file order.
+    fn history_records(dir: &std::path::Path) -> Vec<crate::history::HistoryRecord> {
+        let mut records = Vec::new();
+        for entry in std::fs::read_dir(dir.join("history")).expect("the history dir exists") {
+            let path = entry.expect("a readable entry").path();
+            let text = std::fs::read_to_string(path).expect("a readable history file");
+            for line in text.lines().filter(|line| !line.is_empty()) {
+                records.push(serde_json::from_str(line).expect("a parsable history line"));
+            }
+        }
+        records
     }
 }

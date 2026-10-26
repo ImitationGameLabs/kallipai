@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use crate::context::{Turn, TurnId, TurnKind};
 use anyhow::Result;
-use just_llm_client::types::generation::Message;
+use just_llm_client::types::generation::{Message, ReasoningEffort, Usage};
 use kallipai_common::protocol::Modality;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
@@ -48,6 +48,103 @@ pub struct AttachmentRef {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub caption: Option<String>,
 }
+
+/// One round's token accounting, normalized to the five counters the
+/// round-history views read.
+///
+/// Providers report usage in their own shapes: the cache counters are
+/// optional and reasoning tokens ride a nested details object. Flattening
+/// happens once, at the write point, so a reader never has to know which
+/// backend wrote a line. A counter the backend did not report is zero, not
+/// absent: zero cache writes and an unreported cache-write counter are the
+/// same operational fact.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TurnUsage {
+    /// Prompt tokens billed for this send.
+    pub prompt: u32,
+    /// Completion tokens the model produced (thinking included where the
+    /// provider counts it that way).
+    pub completion: u32,
+    /// Prompt tokens the provider served from its cache.
+    pub cache_read: u32,
+    /// Prompt tokens the provider wrote into its cache.
+    pub cache_write: u32,
+    /// Completion tokens spent thinking (0 when the provider does not say).
+    pub reasoning: u32,
+}
+
+impl TurnUsage {
+    /// Flatten one response's usage. Absent optional counters become zero.
+    pub fn from_usage(usage: &Usage) -> Self {
+        Self {
+            prompt: usage.prompt_tokens,
+            completion: usage.completion_tokens,
+            cache_read: usage.cache_read_tokens.unwrap_or(0),
+            cache_write: usage.cache_write_tokens.unwrap_or(0),
+            reasoning: usage
+                .completion_tokens_details
+                .as_ref()
+                .and_then(|d| d.reasoning_tokens)
+                .unwrap_or(0),
+        }
+    }
+}
+
+/// What produced a turn: the profile that served it, the round it belongs to,
+/// the response's token accounting and the round's clock.
+///
+/// Recorded on the turn record itself rather than reconstructed later: the
+/// profile in flight, the usage a backend reported and the round's duration
+/// are all gone by the time anybody reads the log. Absent on records written
+/// before the field existed and on every record no model round produced
+/// (prompts, injections, heartbeats, repair rewrites): a reader must treat a
+/// missing attempt as no model turn, not as missing data. A compaction
+/// summary is a model round too -- the summarizer call -- and carries one.
+///
+/// Every field added here from now on must be optional with a default:
+/// the log is append-only, so a required field would make the lines an
+/// older agent wrote unreadable to a newer one.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct TurnAttempt {
+    /// Name of the resolved profile set the agent runs against.
+    pub profile_set: String,
+    /// The profile that served this round (after any failover advance).
+    pub profile_id: String,
+    /// The provider endpoint id that profile connects through.
+    pub provider: String,
+    /// The model id the request asked for.
+    pub model: String,
+    /// The profile's declared effort, as its provider names it: absent when the
+    /// profile declares none. The name is what lands on disk, so an upstream
+    /// rename of the enum cannot make an old line unreadable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    /// Zero-based index of the round within one run of the round loop: a
+    /// heartbeat re-entry restarts it, so one wake can hold several records
+    /// that read 0. A compaction summary reads 0 as a sentinel: it takes
+    /// no round number; the zero marks the summary, and row order places it.
+    pub round: usize,
+    /// The response's usage; absent when the backend reported none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<TurnUsage>,
+    /// Wall clock of the round: from entering the round to the response being
+    /// consumed -- context composition, token estimation, the in-round
+    /// compaction call, any retry or failover wait and the post-stream budget
+    /// check included. Tool execution is not. A compaction summary's record
+    /// spans only its summarizer call, which starts after the window is built.
+    pub elapsed_ms: u64,
+}
+
+/// The provider-facing name of a declared effort level ("high", "xhigh"),
+/// taken from the type's own wire spelling. The record stores the name, so an
+/// upstream rename of the enum cannot make an old line unreadable.
+pub fn effort_name(effort: &ReasoningEffort) -> Option<String> {
+    serde_json::to_value(effort)
+        .ok()?
+        .as_str()
+        .map(ToOwned::to_owned)
+}
+
 /// A single record in the append-only history log.
 ///
 /// Serialized as one NDJSON line. Turn records carry `turn_id`; system records
@@ -83,6 +180,15 @@ pub struct HistoryRecord {
     /// migration) and omitted when empty on write.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<AttachmentRef>,
+
+    /// What produced this turn: the profile that served it, the round it
+    /// belongs to, the response token accounting and the round wall clock.
+    /// `default` is contractual: history lines written before this field
+    /// existed must keep hydrating, and the read side classifies an
+    /// unparseable line as damaged, which a missing optional key must not
+    /// trigger. Omitted on write when absent so the log stays compact.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt: Option<TurnAttempt>,
 }
 
 /// Distinguishes conversation turns from system events in the history log.
@@ -158,6 +264,7 @@ impl HistoryWriter {
     /// intentional — it avoids file-handle lifetime issues across daily
     /// rotation boundaries and is consistent with the `persist()` pattern
     /// used elsewhere.
+    #[allow(clippy::too_many_arguments)] // the record's own shape: one argument per field it writes
     pub fn append(
         &self,
         turn_id: Option<u64>,
@@ -166,6 +273,7 @@ impl HistoryWriter {
         kind: RecordKind,
         event: Option<SystemEvent>,
         attachments: &[AttachmentRef],
+        attempt: Option<&TurnAttempt>,
     ) -> Result<()> {
         let history_dir = ensure_history_dir(&self.agent_dir)?;
         let path = today_path(&history_dir);
@@ -178,6 +286,7 @@ impl HistoryWriter {
             kind,
             event,
             attachments: attachments.to_vec(),
+            attempt: attempt.cloned(),
         };
 
         let mut file = std::fs::OpenOptions::new()
@@ -419,6 +528,7 @@ pub(crate) fn tail_turns_within_budget(
 mod tests {
     use super::*;
     use crate::test_support::{assistant_msg, tool_result_msg, user_msg};
+    use just_llm_client::types::generation::CompletionTokensDetails;
 
     fn tmp_agent_dir() -> tempfile::TempDir {
         tempfile::tempdir().expect("create temp dir")
@@ -431,7 +541,7 @@ mod tests {
 
         let msgs = vec![user_msg("hello, world")];
         writer
-            .append(Some(0), &msgs, 16, RecordKind::Turn, None, &[])
+            .append(Some(0), &msgs, 16, RecordKind::Turn, None, &[], None)
             .unwrap();
 
         // Verify history/ directory was created.
@@ -466,6 +576,7 @@ mod tests {
                 RecordKind::System,
                 Some(SystemEvent::CompactionSummary),
                 &[],
+                None,
             )
             .unwrap();
 
@@ -484,7 +595,15 @@ mod tests {
         let writer = HistoryWriter::new(dir.path().to_owned());
 
         writer
-            .append(Some(0), &[user_msg("a")], 16, RecordKind::Turn, None, &[])
+            .append(
+                Some(0),
+                &[user_msg("a")],
+                16,
+                RecordKind::Turn,
+                None,
+                &[],
+                None,
+            )
             .unwrap();
         writer
             .append(
@@ -494,6 +613,7 @@ mod tests {
                 RecordKind::Turn,
                 None,
                 &[],
+                None,
             )
             .unwrap();
         writer
@@ -504,6 +624,7 @@ mod tests {
                 RecordKind::System,
                 Some(SystemEvent::AgentRestore),
                 &[],
+                None,
             )
             .unwrap();
 
@@ -537,7 +658,15 @@ mod tests {
 
         let writer = HistoryWriter::new(dir.path().to_owned());
         writer
-            .append(Some(0), &[user_msg("x")], 16, RecordKind::Turn, None, &[])
+            .append(
+                Some(0),
+                &[user_msg("x")],
+                16,
+                RecordKind::Turn,
+                None,
+                &[],
+                None,
+            )
             .unwrap();
 
         // Now it exists.
@@ -552,7 +681,7 @@ mod tests {
         // Tool result with embedded newlines — must NOT break NDJSON line boundary.
         let msgs = vec![tool_result_msg("line1\nline2\nline3", "call_1")];
         writer
-            .append(Some(0), &msgs, 32, RecordKind::Turn, None, &[])
+            .append(Some(0), &msgs, 32, RecordKind::Turn, None, &[], None)
             .unwrap();
 
         let ndjson_path = today_path(&dir.path().join("history"));
@@ -588,6 +717,7 @@ mod tests {
             kind: RecordKind::Turn,
             event: None,
             attachments: Vec::new(),
+            attempt: None,
         })
         .unwrap()
     }
@@ -601,6 +731,7 @@ mod tests {
             kind: RecordKind::System,
             event: Some(SystemEvent::AgentRestore),
             attachments: Vec::new(),
+            attempt: None,
         })
         .unwrap()
     }
@@ -614,6 +745,7 @@ mod tests {
             kind: RecordKind::Turn,
             event: None,
             attachments: Vec::new(),
+            attempt: None,
         })
         .unwrap()
     }
@@ -820,6 +952,7 @@ mod tests {
             kind: RecordKind::Turn,
             event: None,
             attachments: vec![attachment(Modality::Image, 7)],
+            attempt: None,
         };
         let line = serde_json::to_string(&rec).unwrap();
         let back: HistoryRecord = serde_json::from_str(&line).unwrap();
@@ -871,6 +1004,7 @@ mod tests {
             kind: RecordKind::System,
             event: Some(invalidated_event(7, 3)),
             attachments: vec![],
+            attempt: None,
         };
         let line = serde_json::to_string(&rec).unwrap();
         assert!(line.contains("reference_invalidated"), "got: {line}");
@@ -905,6 +1039,7 @@ mod tests {
                 RecordKind::Turn,
                 None,
                 &[attachment(Modality::Image, 1)],
+                None,
             )
             .unwrap();
         writer
@@ -915,6 +1050,7 @@ mod tests {
                 RecordKind::Turn,
                 None,
                 &[attachment(Modality::Image, 2)],
+                None,
             )
             .unwrap();
         writer
@@ -925,6 +1061,7 @@ mod tests {
                 RecordKind::Turn,
                 None,
                 &[attachment(Modality::Image, 5)],
+                None,
             )
             .unwrap();
 
@@ -933,5 +1070,143 @@ mod tests {
         assert_eq!(report.sidecar[&9], vec![attachment(Modality::Image, 5)]);
         let seven = turns.iter().find(|t| t.id.0 == 7).unwrap();
         assert_eq!(seven.messages[0].content(), Some("newest"));
+    }
+
+    /// A line written before the attempt field existed still hydrates: the key
+    /// is absent rather than null, and absence must read as no model turn.
+    #[test]
+    fn an_old_line_without_attempt_reads_as_no_model_turn() {
+        let json = r#"{"datetime":"2026-06-08T12:00:00Z","turn_id":5,"messages":[{"role":"user","content":"x"}],"estimated_tokens":16}"#;
+        let record: HistoryRecord = serde_json::from_str(json).unwrap();
+        assert!(record.attempt.is_none());
+    }
+
+    /// What a round records survives the round trip: a reader of the log sees
+    /// the profile, the round, the flattened usage and the clock as written.
+    #[test]
+    fn attempt_roundtrips_profile_usage_and_clock() {
+        let dir = tmp_agent_dir();
+        let writer = HistoryWriter::new(dir.path().to_owned());
+        let attempt = TurnAttempt {
+            profile_set: "default".to_owned(),
+            profile_id: "a".to_owned(),
+            provider: "p1".to_owned(),
+            model: "a-model".to_owned(),
+            effort: Some("high".to_owned()),
+            round: 2,
+            usage: Some(TurnUsage {
+                prompt: 120,
+                completion: 30,
+                cache_read: 80,
+                cache_write: 40,
+                reasoning: 7,
+            }),
+            elapsed_ms: 1234,
+        };
+        writer
+            .append(
+                Some(0),
+                &[user_msg("hello")],
+                16,
+                RecordKind::Turn,
+                None,
+                &[],
+                Some(&attempt),
+            )
+            .unwrap();
+
+        let line = std::fs::read_to_string(today_path(&dir.path().join("history"))).unwrap();
+        let record: HistoryRecord = serde_json::from_str(line.trim()).unwrap();
+        assert_eq!(record.attempt, Some(attempt));
+        assert!(
+            line.contains("\"high\""),
+            "the effort level travels: {line}"
+        );
+    }
+
+    /// Every optional counter is read on its own: a backend that reports the
+    /// cache and reasoning counters keeps them in their own columns, and one
+    /// that reports none lands where a reported zero lands.
+    #[test]
+    fn from_usage_flattens_each_counter_by_its_own_name() {
+        let bare = Usage {
+            prompt_tokens: 10,
+            completion_tokens: 4,
+            total_tokens: 14,
+            cache_read_tokens: None,
+            cache_write_tokens: None,
+            completion_tokens_details: None,
+        };
+        assert_eq!(
+            TurnUsage::from_usage(&bare),
+            TurnUsage {
+                prompt: 10,
+                completion: 4,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0
+            }
+        );
+
+        let full = Usage {
+            prompt_tokens: 10,
+            completion_tokens: 4,
+            total_tokens: 14,
+            cache_read_tokens: Some(7),
+            cache_write_tokens: Some(3),
+            completion_tokens_details: Some(CompletionTokensDetails {
+                reasoning_tokens: Some(2),
+            }),
+        };
+        assert_eq!(
+            TurnUsage::from_usage(&full),
+            TurnUsage {
+                prompt: 10,
+                completion: 4,
+                cache_read: 7,
+                cache_write: 3,
+                reasoning: 2
+            }
+        );
+
+        let zeros = Usage {
+            cache_read_tokens: Some(0),
+            cache_write_tokens: Some(0),
+            completion_tokens_details: Some(CompletionTokensDetails {
+                reasoning_tokens: Some(0),
+            }),
+            ..full.clone()
+        };
+        assert_eq!(
+            TurnUsage::from_usage(&zeros),
+            TurnUsage {
+                prompt: 10,
+                completion: 4,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0
+            }
+        );
+    }
+
+    /// A record no model round produced omits the key entirely: the log stays
+    /// compact, and an absent attempt stays distinct from a null one.
+    #[test]
+    fn a_record_without_an_attempt_omits_the_key() {
+        let dir = tmp_agent_dir();
+        let writer = HistoryWriter::new(dir.path().to_owned());
+        writer
+            .append(
+                Some(0),
+                &[user_msg("x")],
+                16,
+                RecordKind::Turn,
+                None,
+                &[],
+                None,
+            )
+            .unwrap();
+        let line = std::fs::read_to_string(today_path(&dir.path().join("history"))).unwrap();
+        assert!(!line.contains("attempt"), "the key is omitted: {line}");
     }
 }

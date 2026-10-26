@@ -592,6 +592,7 @@ mod tests {
                     blob_id: blob_id.to_owned(),
                     caption: Some("caption".to_owned()),
                 }],
+                None,
             )
             .unwrap();
     }

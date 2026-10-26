@@ -104,6 +104,7 @@ pub fn repair_agent_context(
                 crate::history::RecordKind::Turn,
                 None,
                 &[],
+                None,
             )
             .with_context(|| format!("appending repaired turn {} to history", turn.id.0))?;
     }

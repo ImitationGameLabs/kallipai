@@ -23,6 +23,10 @@ pub struct UsageEntry {
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
     pub cache_read_tokens: u64,
+    /// Prompt tokens written into the provider cache, when it reports them.
+    pub cache_write_tokens: u64,
+    /// Completion tokens spent thinking, when the provider reports them.
+    pub reasoning_tokens: u64,
 }
 
 impl UsageEntry {
@@ -43,6 +47,10 @@ pub struct UsageTotals {
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
     pub cache_read_tokens: u64,
+    /// Prompt tokens written into the provider cache, when it reports them.
+    pub cache_write_tokens: u64,
+    /// Completion tokens spent thinking, when the provider reports them.
+    pub reasoning_tokens: u64,
 }
 
 impl UsageTotals {
@@ -75,12 +83,22 @@ impl UsageStats {
     /// Missing cache-read attribution (`cache_read_tokens: None`) counts as
     /// zero reads, not as a failed record: the hit ratio then simply reads
     /// lower for providers that do not report the field.
+    ///
+    /// The cache-write and reasoning counters follow the same rule: a
+    /// backend that does not report them contributes zero, never a
+    /// dropped record.
     pub fn record(&self, agent_id: &AgentId, usage: &Usage) {
         let mut entries = self.entries.lock().expect("usage stats map poisoned");
         let entry = entries.entry(agent_id.clone()).or_default();
-        entry.prompt_tokens += u64::from(usage.prompt_tokens);
-        entry.completion_tokens += u64::from(usage.completion_tokens);
-        entry.cache_read_tokens += usage.cache_read_tokens.map_or(0, u64::from);
+        // This write point takes its five counters from the history rule, so
+        // the totals here match what a history line carries. The store
+        // layouts keep their own manual flattening.
+        let flat = crate::history::TurnUsage::from_usage(usage);
+        entry.prompt_tokens += u64::from(flat.prompt);
+        entry.completion_tokens += u64::from(flat.completion);
+        entry.cache_read_tokens += u64::from(flat.cache_read);
+        entry.cache_write_tokens += u64::from(flat.cache_write);
+        entry.reasoning_tokens += u64::from(flat.reasoning);
     }
 
     /// This agent's single-launch totals, or `None` if it recorded nothing.
@@ -101,6 +119,8 @@ impl UsageStats {
                 prompt_tokens: t.prompt_tokens + e.prompt_tokens,
                 completion_tokens: t.completion_tokens + e.completion_tokens,
                 cache_read_tokens: t.cache_read_tokens + e.cache_read_tokens,
+                cache_write_tokens: t.cache_write_tokens + e.cache_write_tokens,
+                reasoning_tokens: t.reasoning_tokens + e.reasoning_tokens,
             })
     }
 }
@@ -108,15 +128,28 @@ impl UsageStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use just_llm_client::types::generation::CompletionTokensDetails;
 
     fn usage(prompt: u32, completion: u32, cache_read: Option<u32>) -> Usage {
+        usage_full(prompt, completion, cache_read, None, None)
+    }
+
+    fn usage_full(
+        prompt: u32,
+        completion: u32,
+        cache_read: Option<u32>,
+        cache_write: Option<u32>,
+        reasoning: Option<u32>,
+    ) -> Usage {
         Usage {
             completion_tokens: completion,
             prompt_tokens: prompt,
             cache_read_tokens: cache_read,
-            cache_write_tokens: None,
+            cache_write_tokens: cache_write,
             total_tokens: prompt + completion,
-            completion_tokens_details: None,
+            completion_tokens_details: reasoning.map(|tokens| CompletionTokensDetails {
+                reasoning_tokens: Some(tokens),
+            }),
         }
     }
 
@@ -176,5 +209,26 @@ mod tests {
         stats.record(&AgentId::random(), &usage(100, 1, None));
         let rate = stats.totals().cache_hit_rate();
         assert!((rate - 0.9).abs() < 1e-9);
+    }
+
+    #[test]
+    fn record_keeps_cache_write_and_reasoning_counters() {
+        // The accounting point is where a reported counter would otherwise be
+        // lost for good: a status read sees what the response carried.
+        let stats = UsageStats::default();
+        let a = AgentId::random();
+        stats.record(&a, &usage_full(100, 10, Some(80), Some(40), Some(7)));
+        stats.record(&a, &usage_full(50, 5, None, None, None));
+
+        let entry = stats.agent(a).expect("recorded");
+        assert_eq!(entry.cache_write_tokens, 40);
+        assert_eq!(
+            entry.reasoning_tokens, 7,
+            "an unreported counter counts zero"
+        );
+
+        let totals = stats.totals();
+        assert_eq!(totals.cache_write_tokens, 40);
+        assert_eq!(totals.reasoning_tokens, 7);
     }
 }

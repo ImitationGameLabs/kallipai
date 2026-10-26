@@ -6,7 +6,7 @@
 //! [`note_compaction_failure`] — the one recorder the gate, the pre-loop wrapper and the
 //! failover-advance arm share — into a [`CompactionVerdict`].
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use just_llm_client::BackendError;
@@ -169,6 +169,7 @@ pub(crate) async fn summarize_and_evict(ctx: &AgentContext) -> Result<CompactOut
         };
 
         // LLM call — lock released during this potentially long await.
+        let summarize_start = Instant::now();
         let (result, usage) = ctx
             .summarizer
             .summarize(
@@ -205,10 +206,16 @@ pub(crate) async fn summarize_and_evict(ctx: &AgentContext) -> Result<CompactOut
             );
         }
 
-        // Record compaction event in history.
+        // Record compaction event in history: the summarizer call is a model round
+        // like any other, so the record carries what served it and what it cost.
         // The record reuses the pinned record's shape, so history and the
         // context show one injection form.
         let summary_msg = vec![summary_record(&result.text)];
+        let attempt = ctx.turn_attempt(
+            0,
+            usage.as_ref(),
+            summarize_start.elapsed().as_millis() as u64,
+        );
         ctx.append_history(
             None,
             &summary_msg,
@@ -216,6 +223,7 @@ pub(crate) async fn summarize_and_evict(ctx: &AgentContext) -> Result<CompactOut
             RecordKind::System,
             Some(SystemEvent::CompactionSummary),
             &[],
+            Some(&attempt),
         );
 
         // Accumulate usage from the summarization LLM call WITHOUT re-anchoring: the summarizer
@@ -686,6 +694,7 @@ async fn stop_compaction(
             detail,
         }),
         &[],
+        None,
     );
     CompactionVerdict::Stop {
         message: format!(
@@ -1122,6 +1131,27 @@ mod tests {
             record.messages[0].content(),
             message.content(),
             "the history line records the same injected form as the pin"
+        );
+        let attempt = record
+            .attempt
+            .as_ref()
+            .expect("the summarizer call is a model round");
+        assert_eq!(attempt.round, 0);
+        assert_eq!(
+            attempt.profile_id.as_str(),
+            ctx.failover.current_profile().id.as_str(),
+            "the summary is attributed to the profile that served it"
+        );
+        assert_eq!(
+            attempt.usage,
+            Some(crate::history::TurnUsage {
+                prompt: 1,
+                completion: 1,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+            }),
+            "the summary carries the summarizer call's cost"
         );
     }
 

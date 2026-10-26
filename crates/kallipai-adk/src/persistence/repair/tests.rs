@@ -40,7 +40,15 @@ fn pairing_damaged_dir() -> (TempDir, Vec<TurnMessage>, u64) {
     let (turn_id, _) = store.push_turn(damaged.clone());
     let history = HistoryWriter::new(dir.path().to_path_buf());
     history
-        .append(Some(turn_id.0), &damaged, 8, RecordKind::Turn, None, &[])
+        .append(
+            Some(turn_id.0),
+            &damaged,
+            8,
+            RecordKind::Turn,
+            None,
+            &[],
+            None,
+        )
         .unwrap();
     persist_context(&store, dir.path()).unwrap();
     (dir, damaged, turn_id.0)

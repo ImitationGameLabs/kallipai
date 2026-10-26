@@ -359,6 +359,7 @@ async fn record_ingest(
             RecordKind::Turn,
             None,
             &attachments,
+            None,
         )
     {
         tracing::warn!(turn_id = turn_id.0, "history write failed: {e:#}");

@@ -61,7 +61,7 @@ pub fn wreckable_dir(oldest_damaged: bool) -> (TempDir, ContextStore) {
     for msgs in histories {
         let (id, _) = store.push_turn(msgs.clone());
         history
-            .append(Some(id.0), &msgs, 8, RecordKind::Turn, None, &[])
+            .append(Some(id.0), &msgs, 8, RecordKind::Turn, None, &[], None)
             .unwrap();
     }
     store.accumulate_usage(&crate::test_support::usage(1000));
@@ -83,7 +83,15 @@ pub fn wreckable_dir(oldest_damaged: bool) -> (TempDir, ContextStore) {
     let (churn_id, _) = store.push_turn(churn.clone());
     let history = HistoryWriter::new(dir.path().to_path_buf());
     history
-        .append(Some(churn_id.0), &churn, 8, RecordKind::Turn, None, &[])
+        .append(
+            Some(churn_id.0),
+            &churn,
+            8,
+            RecordKind::Turn,
+            None,
+            &[],
+            None,
+        )
         .unwrap();
     persist_context(&store, dir.path()).unwrap();
     (dir, store)
@@ -140,6 +148,7 @@ pub fn write_legacy(
                     RecordKind::Turn,
                     None,
                     &[],
+                    None,
                 )
                 .unwrap();
         }

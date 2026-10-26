@@ -263,6 +263,7 @@ pub fn restore_agent(
             crate::history::RecordKind::System,
             Some(crate::history::SystemEvent::AgentRestore),
             &[],
+            None,
         ) {
             tracing::warn!("history restore record failed: {e:#}");
         }

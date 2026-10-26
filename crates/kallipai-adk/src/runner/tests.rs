@@ -2121,7 +2121,9 @@ async fn bare_assistant_carries_the_streams_reasoning() {
     let (outcome, _events) = run_rounds(&mut ctx).await;
 
     match outcome {
-        Ok(RoundOutcome::BareAssistant { content, reasoning }) => {
+        Ok(RoundOutcome::BareAssistant {
+            content, reasoning, ..
+        }) => {
             assert_eq!(content, "done");
             assert_eq!(
                 reasoning, "weighing it",

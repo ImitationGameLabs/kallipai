@@ -287,6 +287,7 @@ async fn image_ctx(
             blob_id: format!("sha256-{record_id:064x}"),
             caption: Some("chart caption".to_owned()),
         }],
+        None,
     );
     (ctx, dir, record_id)
 }

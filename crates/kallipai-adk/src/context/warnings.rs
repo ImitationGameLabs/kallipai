@@ -65,6 +65,7 @@ pub(crate) async fn check_progressive_warnings(
         RecordKind::Turn,
         None,
         &[],
+        None,
     );
     info!(threshold, "injected context warning");
     true
@@ -119,6 +120,7 @@ pub(crate) async fn check_token_budget_warnings(
         RecordKind::Turn,
         None,
         &[],
+        None,
     );
     info!(
         threshold,

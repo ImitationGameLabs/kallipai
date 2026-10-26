@@ -78,7 +78,15 @@ fn double_corrupt_manifest_rebuilds_from_tail() {
     // The agent task records every turn to history before persisting;
     // mirror that so the rehydrate below finds the fresh turn.
     HistoryWriter::new(dir.path().to_path_buf())
-        .append(Some(fresh_id.0), &fresh, 8, RecordKind::Turn, None, &[])
+        .append(
+            Some(fresh_id.0),
+            &fresh,
+            8,
+            RecordKind::Turn,
+            None,
+            &[],
+            None,
+        )
         .unwrap();
     // The restart notice (pushed by restore) took history_max + 1; the
     // first fresh turn is one past that — neither reuses a historical ID.
@@ -169,6 +177,7 @@ async fn restore_corrects_a_stored_summary_pin_role() {
             RecordKind::Turn,
             None,
             &[],
+            None,
         )
         .unwrap();
     persist_context(&store, dir.path()).unwrap();
