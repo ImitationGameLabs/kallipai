@@ -10,6 +10,7 @@ pub mod skill;
 pub mod sse;
 pub mod task;
 pub mod team;
+pub mod turns;
 
 // Re-export all public types for convenience.
 // Downstream `use kallipai_common::protocol::*` continues to work unchanged.
@@ -45,4 +46,10 @@ pub use team::{
     TeamConvergeResponse, TeamInactiveAgent, TeamInactiveAgentsListing, TeamLockEntry, TeamPlanRow,
     TeamRejection, TeamRejectionKind, TeamRoleStatus, TeamRowOutcome, TeamStatusQuery,
     TeamStatusResponse,
+};
+pub use turns::{
+    CALL_BODY_LIMIT_DEFAULT, CALL_BODY_MAX_BYTES, CallBody, CallBodyQuery, CallRow, MessageRow,
+    SPILL_RECLAIMED, TEXT_CUT_CHARS, TURN_SCHEMA_VERSION, TURNS_PAGE_LIMIT_DEFAULT,
+    TURNS_PAGE_LIMIT_MAX, TURNS_PAGE_MAX_BYTES, TurnDetail, TurnProfile, TurnRow, TurnUsageView,
+    TurnsPage, TurnsQuery,
 };

@@ -171,6 +171,9 @@ fn one_segment<'a>(path: &'a str, prefix: &str) -> Option<&'a str> {
 /// archive, so the router serves no `DELETE /tasks/{id}` for the frame
 /// to admit.
 ///
+/// The turn family is text: its three reads carry session content, so none
+/// of them is enumerated here and they ride the envelope.
+///
 /// Anything not listed is a 404, even though the underlying
 /// manage_router would happily serve it -- fail-closed by construction.
 fn frame_allowed(method: &str, path: &str) -> bool {
@@ -321,6 +324,11 @@ mod manage_rest_tests {
             ("DELETE", "/profiles/sets/main"),
             ("GET", "/messages"),
             ("GET", "/completely/unknown"),
+            // The turn history carries conversation text, so its reads
+            // take the E2E envelope like every other content read.
+            ("GET", "/agents/x/turns"),
+            ("GET", "/agents/x/turns/7"),
+            ("GET", "/agents/x/turns/7/calls/0/body"),
             // The single-segment filter is the removal arm's safety
             // basis: a read on that path, a multi-segment tail, an empty
             // id and a lower-case method all stay off. A trailing slash

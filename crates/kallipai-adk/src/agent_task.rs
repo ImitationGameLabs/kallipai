@@ -438,20 +438,13 @@ impl AgentContext {
         usage: Option<&just_llm_client::types::generation::Usage>,
         elapsed_ms: u64,
     ) -> crate::history::TurnAttempt {
-        let profile = self.failover.current_profile();
-        crate::history::TurnAttempt {
-            profile_set: self.failover.set().name.clone(),
-            profile_id: profile.id.clone(),
-            provider: profile.endpoint.clone(),
-            model: profile.model.clone(),
-            effort: profile
-                .effort
-                .as_ref()
-                .and_then(crate::history::effort_name),
+        crate::history::TurnAttempt::from_profile(
+            &self.failover.set().name,
+            self.failover.current_profile(),
             round,
-            usage: usage.map(crate::history::TurnUsage::from_usage),
+            usage.map(crate::history::TurnUsage::from_usage),
             elapsed_ms,
-        }
+        )
     }
 
     /// Record an external message turn (user prompt, peer or relay

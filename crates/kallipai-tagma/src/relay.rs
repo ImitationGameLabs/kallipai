@@ -23,7 +23,7 @@ mod crypto;
 mod dispatch;
 mod flusher;
 mod kex;
-mod manage;
+pub(crate) mod manage;
 pub(crate) mod ops;
 mod projection_pump;
 mod pump;

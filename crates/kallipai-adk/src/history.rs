@@ -9,11 +9,14 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use crate::context::{Turn, TurnId, TurnKind};
+use crate::profile::Profile;
 use anyhow::Result;
 use just_llm_client::types::generation::{Message, ReasoningEffort, Usage};
 use kallipai_common::protocol::Modality;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
+
+pub mod view;
 
 // ---------------------------------------------------------------------------
 // Record types
@@ -143,6 +146,33 @@ pub fn effort_name(effort: &ReasoningEffort) -> Option<String> {
         .ok()?
         .as_str()
         .map(ToOwned::to_owned)
+}
+
+impl TurnAttempt {
+    /// Build one round's attempt block from the profile that served it.
+    ///
+    /// The profile in flight, the response's usage and the round's clock are
+    /// all gone by the time anybody reads the log, so the write point is the
+    /// only place that can record them — and the only place that knows which
+    /// of the profile's fields belong on a turn.
+    pub fn from_profile(
+        set_name: &str,
+        profile: &Profile,
+        round: usize,
+        usage: Option<TurnUsage>,
+        elapsed_ms: u64,
+    ) -> Self {
+        Self {
+            profile_set: set_name.to_owned(),
+            profile_id: profile.id.clone(),
+            provider: profile.endpoint.clone(),
+            model: profile.model.clone(),
+            effort: profile.effort.as_ref().and_then(effort_name),
+            round,
+            usage,
+            elapsed_ms,
+        }
+    }
 }
 
 /// A single record in the append-only history log.

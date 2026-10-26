@@ -15,6 +15,7 @@ pub(crate) mod profiles;
 pub(crate) mod settings;
 pub(crate) mod task;
 pub(crate) mod team;
+pub(crate) mod turns;
 
 use axum::Router;
 use kallipai_common::protocol::{ListApprovalsQuery, MessageRequest};
@@ -143,6 +144,15 @@ pub fn router() -> Router<SharedState> {
             axum::routing::put(agent::update_activity),
         )
         .route("/agents/{id}/duty", axum::routing::put(agent::update_duty))
+        .route("/agents/{id}/turns", axum::routing::get(turns::list_turns))
+        .route(
+            "/agents/{id}/turns/{turn_id}",
+            axum::routing::get(turns::get_turn),
+        )
+        .route(
+            "/agents/{id}/turns/{turn_id}/calls/{call_index}/body",
+            axum::routing::get(turns::get_call_body),
+        )
         .route(
             "/agents/{id}/inbox",
             axum::routing::get(inbox::list_inbox).delete(inbox::clear_inbox),

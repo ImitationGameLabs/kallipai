@@ -32,7 +32,11 @@ use std::panic::AssertUnwindSafe;
 use std::str::FromStr;
 use tower::ServiceExt;
 use tracing::{error, warn};
-const MAX_RESPONSE_BYTES: usize = 256 * 1024;
+/// The relay's own response cap, applied where the response body is taken:
+/// it bounds the plaintext manage frame and the envelope path alike. A reply
+/// over this many bytes is not carried, and the caller gets a `502` whose
+/// message reads `response body too large`.
+pub(crate) const MAX_RESPONSE_BYTES: usize = 256 * 1024;
 
 /// The management-plane route table: the same handlers and DSL as
 /// [`crate::routes::router`], restricted to the deliberate operator subset.
@@ -48,6 +52,15 @@ fn manage_router() -> Router<SharedState> {
         .route("/agents/{id}/status", get(context::agent_status))
         .route("/agents/{id}/interrupt", post(agent::interrupt_agent))
         .route("/agents/{id}/duty", put(agent::update_duty))
+        .route("/agents/{id}/turns", get(crate::routes::turns::list_turns))
+        .route(
+            "/agents/{id}/turns/{turn_id}",
+            get(crate::routes::turns::get_turn),
+        )
+        .route(
+            "/agents/{id}/turns/{turn_id}/calls/{call_index}/body",
+            get(crate::routes::turns::get_call_body),
+        )
         .route("/agents/{id}/metadata", put(agent::update_metadata))
         .route("/agents/{id}/profile-set", put(agent::update_profile_set))
         .route(
@@ -324,6 +337,11 @@ mod tests {
     use crate::test_helpers::{
         alt_bound_sub, install_projector, make_entry_with_rx, make_state, make_state_two_sets,
     };
+    use just_llm_client::types::generation::{Message, ToolCall};
+    use kallipai_adk::history::{HistoryRecord, RecordKind};
+    use kallipai_common::toolresult::ToolResultEnvelope;
+    use time::OffsetDateTime;
+    use time::format_description::well_known::Rfc3339;
 
     async fn manage_get(state: &SharedState, uri: &str) -> Response {
         let request = Request::builder()
@@ -375,9 +393,11 @@ mod tests {
     }
 
     /// Route-shape nail: every (method, path) row of the management-plane
-    /// table must survive the router's extractors. A Path-shape mismatch
-    /// (route capture count vs extractor arity) is a 500 by axum
-    /// contract.
+    /// table outside the three turn routes must survive the router's
+    /// extractors. A Path-shape mismatch (route capture count vs extractor
+    /// arity) is a 500 by axum contract. The turn routes are left out here: a
+    /// 404 cannot tell a registered route from an absent one, and the
+    /// positive test below covers their registration and shape.
     /// 400/404/405 are legitimate handler outcomes here;
     /// only the 500 shape-rejection fires the assert.
     #[tokio::test]
@@ -418,6 +438,190 @@ mod tests {
                 "path-shape rejection on {method} {path}"
             );
         }
+    }
+
+    /// The turns read face is the one production path these routes have: a
+    /// client holding a session text reaches them only through the
+    /// management router, so the router itself has to answer with rows.
+    #[tokio::test]
+    async fn the_turns_routes_answer_through_the_management_router() {
+        let state = make_state();
+        let dir = tempfile::TempDir::new().unwrap();
+        let history = dir.path().join("history");
+        std::fs::create_dir_all(&history).unwrap();
+        let record = HistoryRecord {
+            datetime: OffsetDateTime::parse("2026-10-01T10:00:00Z", &Rfc3339).unwrap(),
+            turn_id: Some(4),
+            messages: vec![
+                Message::user("hi"),
+                Message::assistant_tool_calls(
+                    None,
+                    vec![ToolCall {
+                        id: "c1".to_owned(),
+                        name: "bash_exec".to_owned(),
+                        arguments: "{}".to_owned(),
+                    }],
+                    None,
+                ),
+                Message::tool(
+                    serde_json::to_string(&ToolResultEnvelope {
+                        ok: true,
+                        tool_name: "bash_exec".to_owned(),
+                        result: Some(serde_json::json!({
+                            "output": "the tool said so",
+                            "exit_code": 0,
+                            "timed_out": false,
+                            "truncated": false,
+                        })),
+                        error: None,
+                        pending_approval: None,
+                        rest: serde_json::Map::new(),
+                    })
+                    .unwrap(),
+                    "c1",
+                ),
+            ],
+            estimated_tokens: 1,
+            kind: RecordKind::Turn,
+            event: None,
+            attachments: Vec::new(),
+            attempt: None,
+        };
+        std::fs::write(
+            history.join("2026-10-01.ndjson"),
+            serde_json::to_string(&record).unwrap() + "\n",
+        )
+        .unwrap();
+        let id = AgentId::random();
+        let (mut entry, _rx) = make_entry_with_rx(None, format!("agent-{id}"));
+        entry.identity.agent_dir = Some(dir.path().to_path_buf());
+        state
+            .registry
+            .write()
+            .await
+            .register(id.clone(), RegistryEntry::Live(entry));
+
+        let page = manage_send(
+            &state,
+            "GET",
+            &format!("/agents/{id}/turns"),
+            Some("peer-1"),
+            None,
+        )
+        .await;
+        assert_eq!(page.status(), StatusCode::OK, "the page route answers");
+        let bytes = axum::body::to_bytes(page.into_body(), MAX_RESPONSE_BYTES)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["rows"][0]["turn_id"], 4, "a row comes back");
+
+        let detail = manage_send(
+            &state,
+            "GET",
+            &format!("/agents/{id}/turns/4"),
+            Some("peer-1"),
+            None,
+        )
+        .await;
+        assert_eq!(detail.status(), StatusCode::OK, "the detail route answers");
+
+        let body = manage_send(
+            &state,
+            "GET",
+            &format!("/agents/{id}/turns/4/calls/0/body"),
+            Some("peer-1"),
+            None,
+        )
+        .await;
+        assert_eq!(body.status(), StatusCode::OK, "the body route answers");
+        let bytes = axum::body::to_bytes(body.into_body(), MAX_RESPONSE_BYTES)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(
+            body["text"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("the tool said so"),
+            "the range carries the tool's own text: {body}"
+        );
+    }
+
+    /// A page row that alone outgrows the relay's response cap: the page cap
+    /// keeps the newest row whatever it weighs, so one turn renders a page over
+    /// the cap, and the relay's extraction fails that read instead of carrying
+    /// it. The router itself answers 200 -- the failure is the relay's.
+    /// An older round in the same file gives the cap loop its drop step: that
+    /// row goes first and the newest one stays, still over the cap.
+    #[tokio::test]
+    async fn a_page_row_past_the_relay_cap_fails_the_read() {
+        let state = make_state();
+        let dir = tempfile::TempDir::new().unwrap();
+        let history = dir.path().join("history");
+        std::fs::create_dir_all(&history).unwrap();
+        let arguments = "x".repeat(400);
+        let calls: Vec<ToolCall> = (0..700u32)
+            .map(|call| ToolCall {
+                id: format!("c{call}"),
+                name: "bash_exec".to_owned(),
+                arguments: arguments.clone(),
+            })
+            .collect();
+        let record = HistoryRecord {
+            datetime: OffsetDateTime::parse("2026-10-01T10:00:00Z", &Rfc3339).unwrap(),
+            turn_id: Some(2),
+            messages: vec![Message::assistant_tool_calls(None, calls, None)],
+            estimated_tokens: 1,
+            kind: RecordKind::Turn,
+            event: None,
+            attachments: Vec::new(),
+            attempt: None,
+        };
+        let mut older = record.clone();
+        older.datetime = OffsetDateTime::parse("2026-10-01T09:00:00Z", &Rfc3339).unwrap();
+        older.turn_id = Some(1);
+        older.messages = vec![Message::user("earlier prompt")];
+        let mut lines = serde_json::to_string(&older).unwrap();
+        lines.push('\n');
+        lines.push_str(&serde_json::to_string(&record).unwrap());
+        lines.push('\n');
+        std::fs::write(history.join("2026-10-01.ndjson"), lines).unwrap();
+        let id = AgentId::random();
+        let (mut entry, _rx) = make_entry_with_rx(None, format!("agent-{id}"));
+        entry.identity.agent_dir = Some(dir.path().to_path_buf());
+        state
+            .registry
+            .write()
+            .await
+            .register(id.clone(), RegistryEntry::Live(entry));
+
+        let page = manage_send(
+            &state,
+            "GET",
+            &format!("/agents/{id}/turns"),
+            Some("peer-1"),
+            None,
+        )
+        .await;
+        assert_eq!(
+            page.status(),
+            StatusCode::OK,
+            "the route renders the row the relay cannot carry"
+        );
+        // The cap lives in the relay's extraction of the response, so this is
+        // the step that has to fail: the page body is over it.
+        let reply = extract_response(page).await;
+        let TagmaReply::ManageResult { status, body, .. } = reply else {
+            unreachable!("extraction always answers a manage result")
+        };
+        assert_eq!(status, 502, "the relay cap fails the page read");
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .is_some_and(|message| !message.is_empty()),
+            "a 502 carries a reason the caller can read: {body}"
+        );
     }
 
     /// The positive seam the shape pin cannot reach: a cursor write through

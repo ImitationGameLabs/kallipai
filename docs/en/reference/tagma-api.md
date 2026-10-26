@@ -78,6 +78,9 @@ single operator comparison additionally uses a constant-time compare.
 | `GET`    | `/agents/{id}/exec-policy`                            | Read the `bash_exec` per-command overrides                                                                      | any                          |
 | `PUT`    | `/agents/{id}/exec-policy`                            | Update the `bash_exec` overrides (strictly monotonic)                                                           | operator / superior          |
 | `GET`    | `/agents/{id}/verify`                                 | Confirm a bearer matches this agent (`204`/`401`)                                                               | any (self-consistent)        |
+| `GET`    | `/agents/{id}/turns`                                  | One page of the agent's turn log (rows carry no message text)                                                    | any                          |
+| `GET`    | `/agents/{id}/turns/{turn_id}`                        | One turn, message text included                                                                                 | any                          |
+| `GET`    | `/agents/{id}/turns/{turn_id}/calls/{call_index}/body` | A byte range of one call's stored result text                                                                   | any                          |
 | `PUT`    | `/profiles/default`                                   | Transfer the default-set marker                                                                                 | operator                     |
 | `DELETE` | `/profiles/sets/{name}`                               | Remove a set (`?force=true` interrupts)                                                                         | operator                     |
 | `GET`    | `/profiles`                                           | Read the profile config (masked)                                                                                | operator                     |
@@ -682,6 +685,179 @@ user-facing message (an operator announcement is a separate concern).
 
 Status: `200 OK` (`{ "ok": true }`); `403` (operator or non-root agent);
 `429` (burst cap); `502` (delivery failure); `503` (no serving path).
+
+### Turn History
+
+The read face over an agent's append-only turn log: what served each model
+round, what it spent, which tools it called, and the text those calls returned.
+The log stays the only store — every answer below is computed from it on
+demand, so none of it can drift from what was recorded.
+
+> A relay client (the web app talking to the tagma through lesche) reads
+> these routes over the E2E envelope channel rather than the plaintext
+> manage frame: a page row, a call body and a detail read carry session
+> text, so the frame allowlist fails them closed with `404 not on the manage
+> frame surface`.
+> Clients reaching the tagma directly (the CLI, a client on the tagma's own
+> host, the Rust client) are unaffected: they speak plain HTTP.
+
+Every text this face takes from the log — tool arguments and error lines on a
+page, message text on a detail read, call bodies — has its spill paths
+reclaimed; the log keeps the text it wrote, and only the body route reports
+how many were replaced.
+
+Auth: any authenticated identity may read any agent's turns, faulted agents
+included (a dead agent's directory outlives its process). An unknown agent, an
+agent with no directory, and an agent with no history log are all `404`.
+
+#### `GET /agents/{id}/turns`: One Page of Turns
+
+Query: `day` (`YYYY-MM-DD`, pins the walk to that UTC day file and is
+not checked for existence), `before` (a `next_cursor` from a previous
+page), `limit` (default 50, clamped to 1..=200).
+
+Rows come newest first, one per turn. A page stops at its row limit or at
+128 KiB of encoded rows, whichever comes first (`page_truncated` says which);
+the newest row is kept even when it alone exceeds the cap, or the cursor could
+never advance. `bad_lines` counts the unreadable log lines the page walked
+past. A day file the process cannot read at all is not in the response: the
+walk skips it, and only the unreadable lines of readable files are counted.
+
+The byte cap is what sets `page_truncated`; a page ended by its row limit
+alone reports false, and so does a page whose single row overran the cap:
+the rule above keeps that row rather than dropping it.
+
+A turn whose page row outgrows the relay's 256 KiB response cap cannot
+travel on the relayed path: the relay fails that read with a `502` whose
+`error.message` reads `response body too large`, rather than carrying it.
+One turn is enough to reach this: the same rule keeps its row whatever it
+weighs. The detail route carries the same row with the message text on
+top, so a turn that heavy fails there too. A heavy tool output alone
+does not: a page row carries no tool result body, only each call's arguments
+and the first line of any error it returned, each cut to 400 characters.
+
+On the relayed path only the body route reaches such a turn, a range of at
+most 64 KiB at a time, and only for a call the caller names. A page that
+failed carries no `call_index` list to pick from, so the caller walks `0`,
+`1`, `2` and so on: an index the turn has no call for answers `404` with a
+message naming the call and the turn.
+
+Once a page is full, the walk goes on only to fill an attempt block, and
+only for a bounded distance. Counting the day file that filled the page as
+one, it reads that file and thirteen older ones: a turn whose repair row
+sits beyond that window reads as having no model round, its row standing as
+the log holds it. A page that never fills walks to the head of the log, and
+no such bound applies.
+
+Paging reads the log as it stands. The cursor is an absolute position in the
+merged log, and which turns sit at or above it is worked out afresh for each
+page: nothing is remembered between requests. So a record at or above a
+reader's cursor is not on a later page, and a correction appended under a
+turn already read does not come back: seeing the revision means reading from
+the first page again. That holds while the clock does not go backwards; a
+correction stamped before the cursor sorts below it, and its turn can then
+appear a second time.
+
+A walk also has to keep one `day` throughout, and changing it costs more
+than a repeat. `day` does not narrow the walk over the merged log; it
+replaces it with one file. So a turn whose newest row sits in another file
+is not recognised as one already passed, and a later page pinned to another
+day can hand that turn back. The other side is silent: the cursor is a
+position, not a resume point inside one file, so a page that ended in 10-18
+and a next page pinned to 10-15 step over 10-17 and 10-16 entirely. Nothing
+here pins the log itself to a moment: there is no snapshot cache behind this
+face.
+
+##### Response
+
+```json
+{
+  "schema_version": 1,
+  "rows": [
+    {
+      "turn_id": 42,
+      "at": "2026-10-24T04:49:02.716800472Z",
+      "profile": {
+        "profile_set": "default",
+        "profile_id": "main",
+        "provider": "openai",
+        "model": "gpt-5",
+        "effort": "high"
+      },
+      "usage": {
+        "prompt": 1000,
+        "completion": 200,
+        "cache_read": 800,
+        "cache_write": 0,
+        "reasoning": 64
+      },
+      "elapsed_ms": 2400,
+      "calls": [
+        {
+          "call_index": 0,
+          "call_id": "call_1",
+          "name": "bash_exec",
+          "args": "{\"command\":\"ls\"}",
+          "ok": true,
+          "stdout_bytes": 512,
+          "stdout_lines": 12,
+          "exit_code": 0,
+          "timed_out": false,
+          "truncated": false
+        }
+      ],
+      "messages": [
+        {"role": "user", "chars": 120, "has_reasoning": false, "truncated": false}
+      ]
+    }
+  ],
+  "bad_lines": 0,
+  "next_cursor": "1792817342716800472|42",
+  "page_truncated": false
+}
+```
+
+`profile`, `usage`, and `elapsed_ms` appear only where a model round was
+recorded — on the row, or on an older row of the same turn within the
+walk above; a prompt or a heartbeat carries none, and a repair rewrite
+carries none of its own, its row showing the folded round instead. A call
+with no readable result, or one whose result is not a tool-result envelope,
+reports `ok: false` and no result facts.
+
+`calls[].stdout_bytes`, `stdout_lines` and the stderr pair measure the
+stream as the record holds it — spill paths included, nothing shortened —
+and a last line with no line end still counts as one. `messages[].chars` is
+the record's own length in the same way, before reclaim and before any cut.
+
+#### `GET /agents/{id}/turns/{turn_id}`: One Turn
+
+The same row with `messages[].text` filled in: each message's own text,
+shortened to about 400 characters (200 from the head, a separator, 200 from
+the tail, with `truncated` marking the cut). A tool message carries the
+result record the log stored for that call, cut the same way; the full text
+is the call-body read below.
+
+#### `GET /agents/{id}/turns/{turn_id}/calls/{call_index}/body`: One Call's Text
+
+Query: `offset` (byte offset into the cleaned text) and `limit` (default
+16 KiB, clamped to 1..=64 KiB). The text is the record the log kept for that
+call — the tool-result JSON the tool answered with, `result.stdout` and its
+siblings included — never the bare stream, and never a file it points at.
+Spill paths are reclaimed before the range is taken, so `offset` addresses
+the text this route returns.
+`total_bytes`, `truncated`, and `next_offset` continue a long result in
+bounded reads; `reclaimed` counts the spill paths replaced in the whole
+cleaned text, not in this range.
+
+A range widens to the next character boundary when a character straddles its
+limit: it may overrun `limit` by up to three bytes rather than come back
+empty. An offset at or past the end of the text returns an empty range.
+
+Reclaiming works on whole path tokens: any token wrapping a
+`/kallipai/<digits>/` marker is replaced, so a genuine path of that shape is
+reclaimed too. A stream the shell had to spill therefore reads as its clipped
+banner with the path replaced by `[temporary stream reclaimed]`: the file is
+temporary, and this face never sends a reader after it.
 
 ### Context & Policy
 
