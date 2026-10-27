@@ -41,24 +41,21 @@ const USAGE: &str = "usage: kallipai-daemon-spawn [--user NAME --uid UID --gid G
 /// three flags travel together or not at all — the user name feeds
 /// initgroups (the full supplementary-group set), uid and gid are the
 /// drop targets.
-#[derive(Debug, Default)]
-struct Privileges {
-    user: Option<String>,
-    uid: Option<u32>,
-    gid: Option<u32>,
-}
-
-impl Privileges {
-    fn specified(&self) -> bool {
-        self.user.is_some() || self.uid.is_some() || self.gid.is_some()
-    }
+#[derive(Debug)]
+enum Privileges {
+    /// Run in place, as the caller's own uid.
+    Inherit,
+    /// Drop to the named user; all three values are present by construction.
+    Drop { user: String, uid: u32, gid: u32 },
 }
 
 /// Consume leading --user/--uid/--gid flags, leaving the positionals.
 /// Unknown flags are a usage error, not positionals: a typoed flag
 /// must not silently become the instance dir.
 fn parse_flags(args: &[String]) -> Result<(Privileges, &[String]), String> {
-    let mut privs = Privileges::default();
+    let mut user = None;
+    let mut uid = None;
+    let mut gid = None;
     let mut rest = args;
     while let Some(flag) = rest.first() {
         let name = match flag.as_str() {
@@ -74,16 +71,16 @@ fn parse_flags(args: &[String]) -> Result<(Privileges, &[String]), String> {
             return Err(format!("flag {name} needs a value"));
         };
         match name {
-            "--user" => privs.user = Some(value.clone()),
+            "--user" => user = Some(value.clone()),
             "--uid" => {
-                privs.uid = Some(
+                uid = Some(
                     value
                         .parse()
                         .map_err(|_| format!("--uid {value:?} is not a number"))?,
                 );
             }
             "--gid" => {
-                privs.gid = Some(
+                gid = Some(
                     value
                         .parse()
                         .map_err(|_| format!("--gid {value:?} is not a number"))?,
@@ -93,10 +90,11 @@ fn parse_flags(args: &[String]) -> Result<(Privileges, &[String]), String> {
         }
         rest = &rest[2..];
     }
-    if privs.specified() && (privs.user.is_none() || privs.uid.is_none() || privs.gid.is_none()) {
-        return Err("--user, --uid and --gid are required together".into());
+    match (user, uid, gid) {
+        (None, None, None) => Ok((Privileges::Inherit, rest)),
+        (Some(user), Some(uid), Some(gid)) => Ok((Privileges::Drop { user, uid, gid }, rest)),
+        _ => Err("--user, --uid and --gid are required together".into()),
     }
-    Ok((privs, rest))
 }
 
 fn main() {
@@ -213,8 +211,8 @@ fn detach_and_exec(
     // Grandchild: drop to the target user (drop-to launches only), then
     // chdir, blank env + execve. Null-terminated argv/envp pointer
     // arrays (the CString values above outlive the call).
-    if privs.specified() {
-        drop_privileges(privs);
+    if let Privileges::Drop { user, uid, gid } = privs {
+        drop_privileges(user, *uid, *gid);
     }
     let mut argv_p: Vec<*const libc::c_char> = argv.iter().map(|c| c.as_ptr()).collect();
     argv_p.push(std::ptr::null());
@@ -238,15 +236,7 @@ fn detach_and_exec(
 /// first; setuid is last and irreversible. Exiting 71 on a failed
 /// drop is the only safe answer — the daemon's pidfile wait turns it
 /// into a rolled-back launch rather than a root-owned instance.
-fn drop_privileges(privs: &Privileges) {
-    let (user, uid, gid) = (
-        privs
-            .user
-            .as_deref()
-            .expect("drop requested without --user"),
-        privs.uid.expect("drop requested without --uid"),
-        privs.gid.expect("drop requested without --gid"),
-    );
+fn drop_privileges(user: &str, uid: u32, gid: u32) {
     let user_c = match CString::new(user) {
         Ok(name) => name,
         Err(_) => {
@@ -298,9 +288,14 @@ mod tests {
             "KALLIPAI_TAGMA_SLUG=i1",
         ]);
         let (privs, rest) = parse_flags(&argv).expect("parses");
-        assert_eq!(privs.user.as_deref(), Some("kallipai-team"));
-        assert_eq!(privs.uid, Some(4242));
-        assert_eq!(privs.gid, Some(4242));
+        match privs {
+            Privileges::Drop { user, uid, gid } => {
+                assert_eq!(user, "kallipai-team");
+                assert_eq!(uid, 4242);
+                assert_eq!(gid, 4242);
+            }
+            Privileges::Inherit => panic!("the flag triple selects the drop form"),
+        }
         assert_eq!(rest, ["/data/i1", "/bin/tagma", "KALLIPAI_TAGMA_SLUG=i1"]);
     }
 
@@ -308,7 +303,7 @@ mod tests {
     fn no_flags_is_the_in_place_grammar() {
         let argv = args(&["/data/i1", "/bin/tagma"]);
         let (privs, rest) = parse_flags(&argv).expect("parses");
-        assert!(!privs.specified());
+        assert!(matches!(privs, Privileges::Inherit));
         assert_eq!(rest, ["/data/i1", "/bin/tagma"]);
     }
 
