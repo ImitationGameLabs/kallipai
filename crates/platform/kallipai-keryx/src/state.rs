@@ -461,7 +461,17 @@ impl Registry {
     /// Outlives the tagma's presence: offline tags keep serving
     /// stale reads from this.
     pub fn projection(&self, tagma: &TagmaId) -> Option<&ProjectionEntry> {
-        self.projections.get(&ParticipantId::for_tagma(tagma))
+        self.projection_for(&ParticipantId::for_tagma(tagma))
+    }
+
+    /// The stored projection for an id the caller already resolved.
+    ///
+    /// An entry point for callers that already hold the id, or resolved it
+    /// outside the guard: they come through here instead of `projection`, so
+    /// no v5 UUID or allocation happens inside their lock. `projection` still
+    /// resolves the id itself and makes no such promise.
+    pub fn projection_for(&self, pid: &ParticipantId) -> Option<&ProjectionEntry> {
+        self.projections.get(pid)
     }
 
     /// Open (or join) the (user, tagma) projection SSE channel. Returns the

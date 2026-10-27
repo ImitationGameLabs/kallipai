@@ -16,6 +16,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use kallipai_archeion_common::ids::{ParticipantId, TagmaId};
 use kallipai_archeion_common::principal::{Principal, require_user};
+use kallipai_lesche_common::event::TagmaStatusPayload;
 use kallipai_lesche_common::projection::{ProjectionDirty, ProjectionSnapshot};
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
@@ -153,10 +154,25 @@ async fn read_agents(
     .into_response()
 }
 
+/// What `/tagmata/{id}/status` serves, resolved under the registry lock and
+/// rendered after it drops. `Presence` carries the cache payload as-is: a
+/// tunnel that has not relayed a status yet still answers (`status: null`)
+/// instead of falling through to the projection or the 404.
+enum StatusFace {
+    Presence(Option<TagmaStatusPayload>),
+    Projection(TagmaStatusPayload),
+    Absent,
+}
+
 /// `GET /tagmata/{id}/status` -- the status face's on-demand full fetch:
 /// the presence cache's latest relayed snapshot, no tagma round-trip.
-/// Owner-gated like the other read planes; an offline tagma falls back
-/// to its stored projection (marked `stale`), mirroring `/agents`.
+/// Owner-gated like the other read planes. Presence wins here: the latest
+/// relayed snapshot is served with `stale: false`; only a tagma with no
+/// presence falls back to its stored projection, marked `stale: true`.
+/// Presence without a relayed status yet still counts as presence: `200`
+/// with `stale: false` and a null status, not the projection.
+/// `/agents` differs: it reads the projection plane alone and uses presence
+/// only to decide the flag.
 async fn read_status(
     State(state): State<SharedConvState>,
     AuthPrincipal(principal): AuthPrincipal,
@@ -166,23 +182,33 @@ async fn read_status(
     if let Err(resp) = require_owner(&principal, &state, &tagma_id) {
         return resp;
     }
-    let registry = state.registry.read().expect("registry lock");
-    if let Some(entry) = registry.presence.get(&ParticipantId::for_tagma(&tagma_id)) {
-        return axum::Json(serde_json::json!({
-            "stale": false,
-            "status": entry.latest_status,
-        }))
-        .into_response();
-    }
-    let entry = match registry.projection(&tagma_id) {
-        Some(p) => p,
-        None => return (StatusCode::NOT_FOUND, "no projection").into_response(),
+    // Resolved before the lock: the v5 UUID and its allocation happen once,
+    // here, so the registry read lock covers the data copy alone.
+    let pid = ParticipantId::for_tagma(&tagma_id);
+    let face = {
+        let registry = state.registry.read().expect("registry lock");
+        if let Some(entry) = registry.presence.get(&pid) {
+            StatusFace::Presence(entry.latest_status)
+        } else {
+            match registry.projection_for(&pid) {
+                Some(p) => StatusFace::Projection(p.snapshot.status),
+                None => StatusFace::Absent,
+            }
+        }
     };
-    axum::Json(serde_json::json!({
-        "stale": true,
-        "status": entry.snapshot.status,
-    }))
-    .into_response()
+    match face {
+        StatusFace::Presence(status) => axum::Json(serde_json::json!({
+            "stale": false,
+            "status": status,
+        }))
+        .into_response(),
+        StatusFace::Projection(status) => axum::Json(serde_json::json!({
+            "stale": true,
+            "status": status,
+        }))
+        .into_response(),
+        StatusFace::Absent => (StatusCode::NOT_FOUND, "no projection").into_response(),
+    }
 }
 
 async fn read_budget(
@@ -881,7 +907,6 @@ mod generation_tests {
         use kallipai_archeion_common::ids::ParticipantId;
         use kallipai_archeion_common::principal::Principal;
         use kallipai_common::protocol::AgentState;
-        use kallipai_lesche_common::event::TagmaStatusPayload;
         let (state, _control) = make_state(60, std::time::Duration::from_secs(2));
         let owner = uid("owner");
         let tagma = TagmaId::from("tagma-1".to_string());
@@ -927,6 +952,32 @@ mod generation_tests {
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
+    /// `GET /tagmata/{id}/status`: presence recorded but no status relayed yet
+    /// (the window between a tunnel's reconnect and its first status POST)
+    /// serves the presence half with a null status, not the projection or 404.
+    #[tokio::test]
+    async fn read_status_serves_presence_without_a_status_yet() {
+        use crate::test_support::{make_state, seed_presence};
+        use kallipai_archeion_common::principal::Principal;
+        let (state, _control) = make_state(60, std::time::Duration::from_secs(2));
+        let owner = uid("owner");
+        let tagma = TagmaId::from("tagma-1".to_string());
+        let (_t_tx, _generation) = seed_presence(&state, &tagma, owner.clone());
+        let response = read_status(
+            State(state),
+            AuthPrincipal(Principal::User(owner)),
+            Path("tagma-1".to_string()),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .expect("body");
+        let text = String::from_utf8(bytes.to_vec()).expect("utf8");
+        assert!(text.contains("\"stale\":false"), "{text:?}");
+        assert!(text.contains("\"status\":null"), "{text:?}");
+    }
+
     /// `GET /tagmata/{id}/status`: with the tunnel gone, the stored
     /// projection still answers -- `stale: true` with the projection's
     /// status counters (the GET contract's offline half).
@@ -935,7 +986,6 @@ mod generation_tests {
         use crate::test_support::{make_state, seed_presence};
         use kallipai_archeion_common::principal::Principal;
         use kallipai_common::protocol::AgentState;
-        use kallipai_lesche_common::event::TagmaStatusPayload;
         use kallipai_lesche_common::projection::ProjectionSnapshot;
         let (state, _control) = make_state(60, std::time::Duration::from_secs(2));
         let owner = uid("owner");

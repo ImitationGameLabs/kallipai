@@ -434,7 +434,7 @@ mod tests {
         assert!(!needs_post(Some(&payload), &payload), "unchanged duplicate");
         let changed = TagmaStatusPayload {
             token_consumed: 1,
-            ..payload.clone()
+            ..payload
         };
         assert!(needs_post(Some(&payload), &changed), "changed payload");
     }

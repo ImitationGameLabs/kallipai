@@ -76,10 +76,10 @@ async fn tagma_topics_roundtrip_preserve_payloads() {
         token_consumed: 1_234,
         token_budget_unlimited: false,
     };
-    bus.publish(StatusSnapshot(status.clone())).unwrap();
+    bus.publish(StatusSnapshot(status)).unwrap();
     bus.publish(ProjectionSnapshot(ProjectionSnapshotPayload {
         agents: Vec::new(),
-        status: status.clone(),
+        status,
         push_seq: 9,
         work_schedule: None,
     }))

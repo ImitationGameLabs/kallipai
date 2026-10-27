@@ -48,12 +48,12 @@ pub(crate) async fn relay_status(
         // the connect flush always serve the freshest relayed values.
         let meaningful = payload.meaningful_transition_from(entry.last_broadcast_status.as_ref());
         if meaningful {
-            entry.last_broadcast_status = Some(payload.clone());
+            entry.last_broadcast_status = Some(payload);
         }
         // Unconditional cache write: the snapshot must land even with no
         // live subscribers, or a reconnect's flush starts from the
         // pre-gap value.
-        entry.latest_status = Some(payload.clone());
+        entry.latest_status = Some(payload);
         let owner = entry.owner.clone();
         (reg.app_stream(&owner), meaningful)
     };
@@ -130,7 +130,7 @@ mod tests {
             .read()
             .unwrap()
             .presence_by_tagma(&tagma)
-            .and_then(|e| e.latest_status.clone())
+            .and_then(|e| e.latest_status)
             .expect("snapshot cached despite no subscribers");
         assert_eq!(cached.subagents_total, 3);
         assert_eq!(cached.subagents_active, 2);

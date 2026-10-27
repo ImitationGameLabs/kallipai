@@ -567,7 +567,7 @@ mod tests {
             token_consumed: 100,
             token_budget_unlimited: false,
         };
-        crate::link::relay_status(&state, tagma.clone(), base.clone())
+        crate::link::relay_status(&state, tagma.clone(), base)
             .await
             .expect("relay ok");
         let first = read_frame(&mut stream).await;
@@ -579,7 +579,7 @@ mod tests {
         // Consumption-only drift: the cache refreshes, no frame fans.
         let drift = TagmaStatusPayload {
             token_consumed: 200,
-            ..base.clone()
+            ..base
         };
         crate::link::relay_status(&state, tagma.clone(), drift)
             .await
@@ -588,7 +588,7 @@ mod tests {
             .read()
             .unwrap()
             .presence_by_tagma(&tagma)
-            .and_then(|e| e.latest_status.clone())
+            .and_then(|e| e.latest_status)
             .expect("cache updated");
         assert_eq!(cached.token_consumed, 200, "cache stays fresh");
         let quiet = tokio::time::timeout(

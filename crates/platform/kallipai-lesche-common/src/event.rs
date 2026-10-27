@@ -171,7 +171,12 @@ pub enum LescheAgentEvent {
 /// lesche asserts it matches the authenticated tagma before rebroadcast
 /// (mirroring `post_envelope`'s `channel_id` check). Field names mirror
 /// the [`LescheEvent::TagmaStatus`] variant; keep them in sync.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// `Copy` is load-bearing: every field is a scalar, so a by-value hand-off
+/// cannot allocate or fail, and the owner's status route relies on that
+/// under its read lock. Adding an owned field means dropping `Copy` and
+/// revisiting those by-value sites -- a compile error, never a silent clone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TagmaStatusPayload {
     pub root_state: AgentState,
     pub subagents_total: u32,
@@ -332,23 +337,23 @@ fn meaningful_transition_follows_broadcast_contract() {
     // First observation is always meaningful.
     assert!(base.meaningful_transition_from(None));
     // The four meaningful legs.
-    let mut root_flip = base.clone();
+    let mut root_flip = base;
     root_flip.root_state = AgentState::Busy;
     assert!(root_flip.meaningful_transition_from(Some(&base)));
-    let mut active_move = base.clone();
+    let mut active_move = base;
     active_move.subagents_active = 2;
     assert!(active_move.meaningful_transition_from(Some(&base)));
-    let mut limit_move = base.clone();
+    let mut limit_move = base;
     limit_move.token_budget = 60_000;
     assert!(limit_move.meaningful_transition_from(Some(&base)));
-    let mut unlimited = base.clone();
+    let mut unlimited = base;
     unlimited.token_budget_unlimited = true;
     assert!(unlimited.meaningful_transition_from(Some(&base)));
     // Consumption drift and roster-size drift are suppressed.
-    let mut consumed_drift = base.clone();
+    let mut consumed_drift = base;
     consumed_drift.token_consumed = 2_000;
     assert!(!consumed_drift.meaningful_transition_from(Some(&base)));
-    let mut roster_drift = base.clone();
+    let mut roster_drift = base;
     roster_drift.subagents_total = 4;
     assert!(!roster_drift.meaningful_transition_from(Some(&base)));
     // Identical payloads are not meaningful.
