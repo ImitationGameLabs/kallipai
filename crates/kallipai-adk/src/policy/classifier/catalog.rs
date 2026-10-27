@@ -496,8 +496,8 @@ fn flags_match(words: &[Node], flags: &[&str]) -> bool {
 }
 
 /// The flag char of a one-char short flag (`-f` → `Some('f')`). Long flags,
-/// clusters, and entries without the dash have none. Counting chars rather
-/// than bytes keeps a two-byte single char from reading as a short flag.
+/// clusters, and entries without the dash have none: the dash is required,
+/// not a byte length.
 fn short_flag_char(flag: &str) -> Option<char> {
     let mut chars = flag.chars();
     match (chars.next(), chars.next(), chars.next()) {
@@ -681,15 +681,16 @@ mod flag_shape_tests {
     }
 
     #[test]
-    fn a_two_byte_single_char_flag_never_matches() {
+    fn a_bare_multi_byte_flag_mismatches_while_its_cluster_matches() {
         assert!(!flags_match(&words("git checkout -×"), &["×"]));
+        assert!(flags_match(&words("git push -f×"), &["-f"]));
         assert!(flags_match(&words("git rebase -fi"), &["-i"]));
     }
 
     #[test]
-    fn the_deny_floor_answers_those_shapes_without_a_panic() {
-        assert!(builtin_deny_reason("git", &words("git config -×")).is_some());
-        assert!(builtin_deny_reason("git", &words("git checkout -×")).is_none());
+    fn the_deny_floor_denies_a_cluster_with_a_multi_byte_char() {
+        assert!(builtin_deny_reason("git", &words("git push -f×")).is_some());
         assert!(builtin_deny_reason("git", &words("git push -fi")).is_some());
+        assert!(builtin_deny_reason("git", &words("git config -×")).is_some());
     }
 }
