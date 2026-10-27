@@ -77,10 +77,12 @@ async fn rotate_admin_token(
     // is not atomic; concurrent rotations could leave the file and memory
     // on different generations. The guard spans the whole sequence.
     let _rotate_guard = state.admin_token_rotate_lock.lock().expect("rotate lock");
-    let minted = MintedToken::generate(crate::token::ADMIN).expect("getrandom failed");
+    let minted = MintedToken::generate(crate::token::ADMIN)
+        .map_err(|e| ApiError::internal(format!("rotating the admin token failed: {e}")))?;
     boot_secrets::write_generated_admin(out_file, minted.secret())
         .map_err(|e| ApiError::internal(format!("rotating the admin token failed: {e}")))?;
-    *state.admin_token_hash.write().expect("admin token lock") = TokenHash::of(minted.secret());
+    let hash = TokenHash::of(minted.secret());
+    *state.admin_token_hash.write().expect("admin token lock") = hash;
     Ok(Json(RotateAdminTokenResponse {
         token: minted.secret().to_owned(),
     }))
