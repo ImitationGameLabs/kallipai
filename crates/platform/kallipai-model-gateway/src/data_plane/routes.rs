@@ -8,6 +8,9 @@
 //! lands a [`Selection`] in the request context; the peer and rewrite
 //! phases read it from there.
 
+use std::net::SocketAddr;
+use std::time::Duration;
+
 use axum::http::{HeaderMap, Method};
 use axum::response::IntoResponse;
 use pingora::prelude::HttpPeer;
@@ -17,13 +20,13 @@ use crate::db;
 pub(crate) use crate::distribution::TagmaIdentity;
 use crate::distribution::visibility;
 use crate::forward::{self, dialect};
-use crate::metrics::ForwardOutcome;
+use crate::metrics::{ForwardOutcome, ResolveErrorClass};
 use crate::registry;
 use crate::routes::ApiError;
 use crate::secret;
 use crate::state::AppState;
 
-use super::context::{InternalFailureReason, Route, Selection};
+use super::context::{FailureReason, Route, Selection};
 
 /// The parsed upstream prefix: the peer parts plus the rewrite
 /// inputs.
@@ -74,6 +77,54 @@ pub(crate) fn parse_endpoint_prefix(prefix: &str) -> Option<ParsedPrefix> {
         port,
         authority: authority.to_owned(),
         base_path,
+    })
+}
+
+/// How long the gateway waits for the resolver: a dead resolver must
+/// not hold a request open, while a slow network resolver must still
+/// land. A resolver answers a name that does not exist with a negative
+/// answer rather than silence, so the bound catches silence alone.
+/// Fixed rather than configurable until an operator asks for a knob.
+const UPSTREAM_RESOLVE_BOUND: Duration = Duration::from_secs(5);
+
+/// What a client reads when the upstream could not be resolved: generic
+/// on purpose, since the host and the resolver's answer belong to the
+/// failure line, not to the caller.
+const UPSTREAM_UNRESOLVED_MESSAGE: &str =
+    "the selected upstream could not be resolved; retry shortly";
+
+/// The retry hint on that answer, in delay-seconds (RFC 9110): long
+/// enough to outlast a resolver hiccup, short enough that a client which
+/// honours it does not back off for a whole outage.
+const UPSTREAM_RETRY_AFTER_SECS: &str = "5";
+
+/// A failed resolution: the error class the metric counts plus the
+/// resolver's own text, which the failure line records.
+#[derive(Debug)]
+struct ResolveFailure {
+    class: ResolveErrorClass,
+    detail: String,
+}
+
+/// Resolve the dial target outside the forwarding worker: the first
+/// address wins, as it did when pingora resolved the name itself, but
+/// the lookup is asynchronous and bounded, and a failure is a value
+/// instead of a panic.
+async fn resolve_dial_target(parsed: &ParsedPrefix) -> Result<SocketAddr, ResolveFailure> {
+    let lookup = tokio::net::lookup_host((parsed.host.as_str(), parsed.port));
+    let answered = tokio::time::timeout(UPSTREAM_RESOLVE_BOUND, lookup)
+        .await
+        .map_err(|_| ResolveFailure {
+            class: ResolveErrorClass::Timeout,
+            detail: format!("the resolver did not answer within {UPSTREAM_RESOLVE_BOUND:?}"),
+        })?;
+    let mut addresses = answered.map_err(|error| ResolveFailure {
+        class: ResolveErrorClass::LookupError,
+        detail: error.to_string(),
+    })?;
+    addresses.next().ok_or_else(|| ResolveFailure {
+        class: ResolveErrorClass::NoAddresses,
+        detail: "the resolver returned no address".to_string(),
     })
 }
 
@@ -128,18 +179,19 @@ pub(crate) async fn authenticate(
 /// One type carries two kinds of content. The three rejection
 /// constructors ([`Self::route`], [`Self::visibility`],
 /// [`Self::parking`]) set neither `reason` nor `detail`; the failure
-/// constructors ([`Self::internal`], [`Self::internal_with_response`])
-/// set both, and each carries its own response: a rendered 500 from
-/// [`Self::internal`], the store mapping's status for
-/// [`Self::internal_with_response`]. The name still says "gate" because
+/// constructors ([`Self::internal`], [`Self::internal_with_response`],
+/// [`Self::unavailable`]) set both, and each carries its own answer:
+/// a rendered 500 from [`Self::internal`], the store mapping's status
+/// for [`Self::internal_with_response`], and a 503 with a `retry-after`
+/// hint from [`Self::unavailable`]. The name still says `gate` because
 /// the selection gates were all this type once; renaming it belongs to
 /// whoever next moves this surface.
 pub(crate) struct GateError {
     pub(crate) outcome: ForwardOutcome,
-    /// The reason category of a gateway-side internal failure, and the
-    /// readable text behind it: the terminal failure line carries both.
+    /// The reason category of a failure the gateway answers itself, and
+    /// the readable text behind it: the failure line carries both.
     /// Invariant: a gate refusal sets neither.
-    pub(crate) reason: Option<InternalFailureReason>,
+    pub(crate) reason: Option<FailureReason>,
     pub(crate) detail: Option<String>,
     response: Box<axum::response::Response>,
 }
@@ -165,7 +217,7 @@ impl GateError {
     /// credentials, unparseable endpoint prefixes. The text names
     /// the object behind the failure -- it is what the client's redacted
     /// 500 hides and what the failure line records.
-    pub(crate) fn internal(reason: InternalFailureReason, detail: impl std::fmt::Display) -> Self {
+    pub(crate) fn internal(reason: FailureReason, detail: impl std::fmt::Display) -> Self {
         let detail = detail.to_string();
         Self::failure(
             ForwardOutcome::InternalError,
@@ -175,11 +227,34 @@ impl GateError {
         )
     }
 
+    /// The upstream could not be resolved: a dependency failed before any
+    /// upstream was reached, so the answer says so -- 503 plus a retry
+    /// hint. Nothing was sent upstream, which is what makes the retry
+    /// side-effect free; the body stays generic while the failure line
+    /// records the resolver's own text. It lands on `resolve_error` rather
+    /// than `internal_error`, because a resolver outage is not the
+    /// gateway's own bug: the run counts the two apart, and the retry
+    /// hint tells the caller what the outcome tells a dashboard.
+    pub(crate) fn unavailable(reason: FailureReason, detail: impl std::fmt::Display) -> Self {
+        let detail = detail.to_string();
+        let mut response = ApiError::unavailable(UPSTREAM_UNRESOLVED_MESSAGE).into_response();
+        response.headers_mut().insert(
+            axum::http::header::RETRY_AFTER,
+            axum::http::HeaderValue::from_static(UPSTREAM_RETRY_AFTER_SECS),
+        );
+        Self::failure(
+            ForwardOutcome::ResolveError,
+            Some(reason),
+            Some(detail),
+            response,
+        )
+    }
+
     /// The same failure where the response comes from the store mapping:
     /// it renders the answer and owns the status it answers with, while
     /// the line still takes the reason and the text.
     pub(crate) fn internal_with_response(
-        reason: InternalFailureReason,
+        reason: FailureReason,
         detail: impl std::fmt::Display,
         error: ApiError,
     ) -> Self {
@@ -197,7 +272,7 @@ impl GateError {
 
     fn failure(
         outcome: ForwardOutcome,
-        reason: Option<InternalFailureReason>,
+        reason: Option<FailureReason>,
         detail: Option<String>,
         response: axum::response::Response,
     ) -> Self {
@@ -226,11 +301,7 @@ impl GateError {
 /// here; it stays for the handlers that write.
 fn store_failure(error: sea_orm::DbErr) -> GateError {
     let detail = db::store_error_detail(&error);
-    GateError::internal_with_response(
-        InternalFailureReason::StoreError,
-        detail,
-        db::map_db_err(error),
-    )
+    GateError::internal_with_response(FailureReason::StoreError, detail, db::map_db_err(error))
 }
 
 /// The forwarding selection: the explicit override, the visibility
@@ -375,23 +446,41 @@ pub(crate) async fn select_route(
         .map_err(store_failure)?
         .ok_or_else(|| {
             GateError::internal(
-                InternalFailureReason::MissingCredential,
+                FailureReason::MissingCredential,
                 format_args!("no provider credential for profile {profile_id}"),
             )
         })?;
     let parsed = parse_endpoint_prefix(credential.endpoint_prefix()).ok_or_else(|| {
         GateError::internal(
-            InternalFailureReason::UnparseableEndpointPrefix,
+            FailureReason::UnparseableEndpointPrefix,
             format_args!("the upstream endpoint prefix for profile {profile_id} does not parse"),
         )
     })?;
     // SNI is the host: the certificate the upstream presents names the
     // host we dialed, and no per-credential SNI field exists.
-    let peer = HttpPeer::new(
-        (parsed.host.as_str(), parsed.port),
-        parsed.tls,
-        parsed.host.clone(),
-    );
+    //
+    // Resolution is the selection's, not the constructor's: `HttpPeer::new`
+    // on a hostname runs a blocking lookup and unwraps it, so a resolver
+    // failure panicked a worker instead of answering the request. The
+    // address resolved here is a `SocketAddr`, whose `ToSocketAddrs` impl
+    // is infallible: no name lookup runs inside the constructor and it
+    // cannot fail.
+    let target = match resolve_dial_target(&parsed).await {
+        Ok(target) => target,
+        Err(failure) => {
+            state
+                .metrics
+                .record_resolution_failure(&parsed.authority, failure.class);
+            return Err(GateError::unavailable(
+                FailureReason::UnresolvedUpstream,
+                format_args!(
+                    "resolving the upstream {} for profile {profile_id} failed: {}",
+                    parsed.authority, failure.detail
+                ),
+            ));
+        }
+    };
+    let peer = HttpPeer::new(target, parsed.tls, parsed.host.clone());
     let auth = dialect::auth_style(&served.family);
     Ok(Selection {
         peer,
@@ -402,4 +491,30 @@ pub(crate) async fn select_route(
         authority: parsed.authority,
         profile_id,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A malformed host fails as a value: a name with a space is
+    /// rejected locally as a malformed name before any query leaves
+    /// the host, so the answer is `lookup_error` without a name server
+    /// having to be reachable.
+    #[tokio::test]
+    async fn a_host_that_cannot_be_a_name_fails_as_a_lookup_error() {
+        let parsed = parse_endpoint_prefix("http://bad host/v1").expect("the prefix parses");
+        let failure = resolve_dial_target(&parsed).await.expect_err("no address");
+        assert_eq!(failure.class, ResolveErrorClass::LookupError);
+        assert!(!failure.detail.is_empty());
+    }
+
+    /// A literal address resolves to itself without a lookup.
+    #[tokio::test]
+    async fn a_literal_address_resolves_to_itself() {
+        let parsed =
+            parse_endpoint_prefix("http://203.0.113.7:8080/v1").expect("the prefix parses");
+        let address = resolve_dial_target(&parsed).await.expect("an address");
+        assert_eq!(address.to_string(), "203.0.113.7:8080");
+    }
 }

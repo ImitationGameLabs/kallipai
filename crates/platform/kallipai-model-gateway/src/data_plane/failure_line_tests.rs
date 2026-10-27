@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use pingora::ErrorType;
 use pingora::prelude::HttpPeer;
 
-use super::context::{InternalFailureReason, Selection};
+use super::context::{FailureReason, Selection};
 use super::{GatewayCtx, Route, failure_level, log_forward_failure, warrants_failure_line};
 use crate::forward::dialect::Endpoint;
 use crate::metrics::ForwardOutcome;
@@ -44,6 +44,7 @@ fn failure_levels_split_the_gates_from_the_forward_failures() {
         ForwardOutcome::ConnectError,
         ForwardOutcome::UpstreamError,
         ForwardOutcome::InternalError,
+        ForwardOutcome::ResolveError,
     ] {
         assert_eq!(
             failure_level(outcome),
@@ -171,17 +172,21 @@ fn the_failure_line_warrants_on_errors_and_gates_only() {
         );
     }
     // The wire-failure class splits at the error: ConnectError carries
-    // one by construction, while a gateway-side internal failure answers
-    // its own 5xx the way the gates do and stages no pingora error --
-    // the outcome alone warrants its line.
+    // one by construction, while a gateway-side failure answers its own
+    // 5xx the way the gates do and stages no pingora error -- the
+    // outcome alone warrants its line, whether the failure is the
+    // gateway's own (internal_error) or a dependency it never reached
+    // (resolve_error).
     assert!(
         !warrants_failure_line(ForwardOutcome::ConnectError, false),
         "a connect failure warrants through its error only"
     );
-    assert!(
-        warrants_failure_line(ForwardOutcome::InternalError, false),
-        "a gateway-side internal failure warrants on the outcome alone"
-    );
+    for outcome in [ForwardOutcome::InternalError, ForwardOutcome::ResolveError] {
+        assert!(
+            warrants_failure_line(outcome, false),
+            "{outcome:?} warrants on the outcome alone"
+        );
+    }
 }
 
 /// A gateway-side internal failure (a store error behind the selection)
@@ -194,7 +199,7 @@ fn the_failure_line_warrants_on_errors_and_gates_only() {
 fn a_gateway_side_internal_failure_names_its_reason_and_text() {
     let (lines, _guard) = capture_lines();
     let mut ctx = forwarding_ctx();
-    ctx.pending_reason = Some(InternalFailureReason::MissingCredential);
+    ctx.pending_reason = Some(FailureReason::MissingCredential);
     ctx.pending_detail = Some("no provider credential for profile p8".to_string());
     log_forward_failure(
         Endpoint::ChatCompletions,
@@ -287,15 +292,16 @@ fn captured(lines: &Arc<Mutex<Vec<u8>>>) -> String {
 }
 
 /// The reason vocabulary the failure line's `reason` field filters on: the
-/// three values are pinned here the way the forward outcome vocabulary is
+/// four values are pinned here the way the forward outcome vocabulary is
 /// pinned beside its enum, so a rename cannot reach the log consumers
 /// with the suite still green.
 #[test]
-fn internal_failure_reason_vocabulary_lock() {
+fn failure_reason_vocabulary_lock() {
     let all = [
-        InternalFailureReason::StoreError,
-        InternalFailureReason::MissingCredential,
-        InternalFailureReason::UnparseableEndpointPrefix,
+        FailureReason::StoreError,
+        FailureReason::MissingCredential,
+        FailureReason::UnparseableEndpointPrefix,
+        FailureReason::UnresolvedUpstream,
     ];
     let rendered: Vec<&str> = all.iter().map(|reason| reason.as_str()).collect();
     assert_eq!(
@@ -304,6 +310,7 @@ fn internal_failure_reason_vocabulary_lock() {
             "store_error",
             "missing_credential",
             "unparseable_endpoint_prefix",
+            "unresolved_upstream",
         ]
     );
 }
@@ -315,21 +322,26 @@ fn internal_failure_reason_vocabulary_lock() {
 /// than the inputs production hands each constructor -- a store failure
 /// reaches the line through `internal_with_response`. One table, so no
 /// constructor listed in it can quietly join the wrong side.
+///
+/// The `unavailable` constructor is the third kind: it stages the reason
+/// and the text like `internal`, but answers as a dependency failure --
+/// 503 with the retry hint -- and lands on its own outcome, so a
+/// resolver outage is not counted as the gateway's own bug.
 #[test]
 fn the_constructors_stage_reason_and_detail_by_kind() {
     use super::routes::GateError;
 
     let internals = [
         (
-            InternalFailureReason::StoreError,
+            FailureReason::StoreError,
             "database error: connection closed",
         ),
         (
-            InternalFailureReason::MissingCredential,
+            FailureReason::MissingCredential,
             "no provider credential for profile p1",
         ),
         (
-            InternalFailureReason::UnparseableEndpointPrefix,
+            FailureReason::UnparseableEndpointPrefix,
             "the upstream endpoint prefix for profile p1 does not parse",
         ),
     ];
@@ -343,6 +355,30 @@ fn the_constructors_stage_reason_and_detail_by_kind() {
             axum::http::StatusCode::INTERNAL_SERVER_ERROR
         );
     }
+
+    // The unresolved-upstream answer is a third kind: gateway-side, but
+    // answered as a dependency failure -- 503 plus a retry hint, with the
+    // same reason-and-text staging the internal 5xx carries.
+    let unresolved = GateError::unavailable(
+        FailureReason::UnresolvedUpstream,
+        "resolving the upstream bad host for profile p1 failed: name not known",
+    );
+    assert_eq!(unresolved.outcome, ForwardOutcome::ResolveError);
+    assert_eq!(unresolved.reason, Some(FailureReason::UnresolvedUpstream));
+    assert!(
+        unresolved.detail.is_some(),
+        "the line carries the resolver's own text"
+    );
+    let response = unresolved.into_response();
+    assert_eq!(
+        response.status(),
+        axum::http::StatusCode::SERVICE_UNAVAILABLE
+    );
+    assert_eq!(
+        response.headers().get(axum::http::header::RETRY_AFTER),
+        Some(&axum::http::HeaderValue::from_static("5")),
+        "the answer carries the retry hint"
+    );
 
     let rejections = [
         (
@@ -365,4 +401,73 @@ fn the_constructors_stage_reason_and_detail_by_kind() {
         assert_eq!(error.reason, None, "{outcome:?} stages no reason");
         assert_eq!(error.detail, None, "{outcome:?} stages no detail");
     }
+}
+
+/// The full vocabulary, placed: every outcome is a gate refusal, a
+/// failure the gateway answers itself, or neither, never both, and the
+/// warrant admits a line for each of the first two without an error.
+/// The match has no catch-all, so a new outcome breaks this test's
+/// compilation until its side is stated here -- a variant on neither
+/// side would otherwise fail with no record at all.
+#[test]
+fn the_outcome_vocabulary_splits_gates_from_gateway_side_failures() {
+    let all = [
+        ForwardOutcome::GatedAuth,
+        ForwardOutcome::GatedRoute,
+        ForwardOutcome::GatedVisibility,
+        ForwardOutcome::GatedParking,
+        ForwardOutcome::GatedPayload,
+        ForwardOutcome::Upstream2xx,
+        ForwardOutcome::Upstream4xx,
+        ForwardOutcome::Upstream5xx,
+        ForwardOutcome::UpstreamOther,
+        ForwardOutcome::ConnectError,
+        ForwardOutcome::UpstreamError,
+        ForwardOutcome::DownstreamError,
+        ForwardOutcome::InternalError,
+        ForwardOutcome::ResolveError,
+    ];
+    for outcome in all {
+        let (gate, answered) = match outcome {
+            ForwardOutcome::GatedAuth
+            | ForwardOutcome::GatedRoute
+            | ForwardOutcome::GatedVisibility
+            | ForwardOutcome::GatedParking
+            | ForwardOutcome::GatedPayload => (true, false),
+            ForwardOutcome::InternalError | ForwardOutcome::ResolveError => (false, true),
+            ForwardOutcome::Upstream2xx
+            | ForwardOutcome::Upstream4xx
+            | ForwardOutcome::Upstream5xx
+            | ForwardOutcome::UpstreamOther
+            | ForwardOutcome::ConnectError
+            | ForwardOutcome::UpstreamError
+            | ForwardOutcome::DownstreamError => (false, false),
+        };
+        assert_eq!(
+            (outcome.is_gate(), outcome.answers_itself()),
+            (gate, answered),
+            "{outcome:?}"
+        );
+    }
+}
+
+/// A forwarding phase that runs without the selection `request_filter`
+/// stages answers as an `internal_error` the gateway records itself:
+/// the slip is a line, not a panic, and it carries no reason category
+/// since no input caused it.
+#[test]
+fn a_phase_that_lost_its_selection_answers_instead_of_panicking() {
+    let mut ctx = forwarding_ctx();
+    ctx.selection = None;
+    let error = match super::staged_selection(&mut ctx) {
+        Ok(_) => panic!("a phase without a staged selection is a slip"),
+        Err(error) => error,
+    };
+    assert_eq!(ctx.pending_outcome, Some(ForwardOutcome::InternalError));
+    assert_eq!(ctx.pending_reason, None);
+    assert!(
+        ctx.pending_detail.is_some(),
+        "the line carries the slip's own text"
+    );
+    assert!(matches!(error.etype(), ErrorType::InternalError));
 }

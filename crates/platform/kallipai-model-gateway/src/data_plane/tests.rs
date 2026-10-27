@@ -1816,3 +1816,64 @@ async fn a_forward_to_an_unreachable_upstream_is_a_failed_server_span() {
         "a 5xx fails the span: {span:#?}"
     );
 }
+
+/// The unresolvable-upstream path: the gateway answers a retryable 503
+/// and records the reason on the failure line, while the resolver's
+/// error class goes to the counter -- so a resolver outage reads as a
+/// dependency failure rather than a gateway bug. The host carries a
+/// space, so the lookup is rejected locally as a malformed name before
+/// any query leaves the host: the class is `lookup_error` with no name
+/// server having to be reachable.
+#[tokio::test]
+async fn a_forward_to_an_unresolvable_upstream_is_a_retryable_503() {
+    let db = migrated_test_db().await;
+    crate::test_support::seed_registry(&db, "http://bad host/v1").await;
+    let lines = global_lines();
+    let (base, metrics) = spawn_plane_with_metrics(db).await;
+
+    let response = post_generation(
+        &base,
+        "/chat/completions",
+        TEST_TAGMA_BEARER,
+        Some("p1"),
+        r#"{"model":"deepseek-chat","messages":[{"role":"user","content":"hi"}]}"#,
+        &[],
+    )
+    .await;
+    assert_eq!(response.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        response.headers().get("retry-after").map(|v| v.as_bytes()),
+        Some(&b"5"[..]),
+        "the answer carries the retry hint"
+    );
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(
+        body["error"]["message"],
+        "the selected upstream could not be resolved; retry shortly"
+    );
+
+    await_forward_count(&metrics, crate::metrics::ForwardOutcome::ResolveError, 1).await;
+    let exposition = metrics.render();
+    assert!(
+        exposition.contains(
+            "kallipai_model_gateway_upstream_resolution_failures_total{error_class=\"lookup_error\",upstream=\"bad host\"} 1"
+        ),
+        "the resolution counter:\n{exposition}"
+    );
+
+    let line = await_line(&lines, "reason=unresolved_upstream").await;
+    for field in [
+        "endpoint=chat",
+        "outcome=resolve_error",
+        "tagma_id=tagma-under-test",
+        "reason=unresolved_upstream",
+        "error=",
+        "connected=false",
+    ] {
+        assert!(line.contains(field), "{field} missing from {line}");
+    }
+    assert!(
+        line.contains("bad host"),
+        "the host rides the error text: {line}"
+    );
+}

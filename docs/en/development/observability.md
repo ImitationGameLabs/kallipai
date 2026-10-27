@@ -79,9 +79,20 @@ path, not a preflight.
 
 | Attribute | Meaning |
 | --- | --- |
-| `gateway.outcome` | how the request ended, one value per such request: `gated_auth`, `gated_route`, `gated_visibility`, `gated_parking`, `gated_payload`, `upstream_2xx`, `upstream_4xx`, `upstream_5xx`, `upstream_other`, `connect_error`, `upstream_error`, `downstream_error`, `internal_error` |
+| `gateway.outcome` | how the request ended, one value per such request: `gated_auth`, `gated_route`, `gated_visibility`, `gated_parking`, `gated_payload`, `upstream_2xx`, `upstream_4xx`, `upstream_5xx`, `upstream_other`, `connect_error`, `resolve_error`, `upstream_error`, `downstream_error`, `internal_error` |
 | `upstream.authority` | the selected credential's URL authority, which is also the label its metrics carry: an address, host and port, never a key or a token |
 | `upstream.api_family` | the registry family of the selected provider |
+
+A request whose selected upstream does not resolve answers `503` with a
+`retry-after` header in delay-seconds: the lookup failed before anything was
+sent upstream, so the caller may retry, and the gateway counts the request as
+`resolve_error` rather than as its own bug. That 503 is the shape to follow
+for any other answer that means `dependency unavailable, retry`: one hint
+header, and no resolver text in the body. The two faces then part ways. The
+resolution counter labels the host it tried under `upstream`, an authority it
+knows before it dials anything. The failure line has neither an `authority`
+nor a `profile_id` field for a request that never held a selection; the host
+appears there in the `error` text instead.
 
 ## Reading a trace
 

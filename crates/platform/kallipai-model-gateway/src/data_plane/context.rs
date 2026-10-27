@@ -61,26 +61,31 @@ pub struct Selection {
     pub profile_id: String,
 }
 
-/// Why a gateway-side forward failed before any upstream was reached:
-/// the `reason` field of the terminal failure line. The category is the
-/// machine-filterable half of the attribution, while the line's `error`
-/// field carries the readable text.
+/// Why a forward failed before any upstream answered: the value domain
+/// of the failure line's `reason` field, and the machine-filterable
+/// half of the attribution -- the line's `error` field carries the
+/// readable text. The counters keep their own table under
+/// `error_class`, so the two vocabularies never share a value set.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum InternalFailureReason {
+pub enum FailureReason {
     /// A store read behind the selection failed.
     StoreError,
     /// The served profile has no provider credential row.
     MissingCredential,
     /// The credential's endpoint prefix does not parse into a dial target.
     UnparseableEndpointPrefix,
+    /// The endpoint's host did not resolve: the resolver failed,
+    /// answered nothing, or overran the gateway's bound.
+    UnresolvedUpstream,
 }
 
-impl InternalFailureReason {
+impl FailureReason {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::StoreError => "store_error",
             Self::MissingCredential => "missing_credential",
             Self::UnparseableEndpointPrefix => "unparseable_endpoint_prefix",
+            Self::UnresolvedUpstream => "unresolved_upstream",
         }
     }
 }
@@ -105,13 +110,24 @@ pub struct GatewayCtx {
     /// phase is the single terminal record point and prefers it
     /// over anything derived.
     pub pending_outcome: Option<crate::metrics::ForwardOutcome>,
-    /// Why a gateway-side internal failure happened, staged with the
-    /// pending outcome. Invariant: it is set only for an `internal_error`
-    /// line -- never for a gate refusal or a wire failure.
-    pub pending_reason: Option<InternalFailureReason>,
-    /// The gateway-side failure's own message, staged with the reason and
-    /// rendered in the line's `error` field. Same invariant: only the
-    /// `internal_error` line carries it.
+    /// Why a failure line carries a reason: staged with the outcome
+    /// the gateway staged. Invariant: it rides only a line the gateway
+    /// answers itself -- `internal_error`, or `resolve_error` before an
+    /// upstream was ever reached -- never a gate refusal or a wire
+    /// failure.
+    ///
+    /// The invariant runs one way. The forward phase that runs without
+    /// its staged selection is an `internal_error` line with no
+    /// category, because no input caused it, and that line reaches the
+    /// `logging` phase like any other forward. The rewrite phase on a
+    /// route `request_filter` never forwards stages nothing: it returns
+    /// a pingora internal error, and that route never enters the
+    /// forwarding face the `logging` phase records, so no line is
+    /// written for it.
+    pub pending_reason: Option<FailureReason>,
+    /// The failure's own message, staged with the reason and rendered
+    /// in the line's `error` field. Same invariant: only a line the
+    /// gateway answers itself carries it.
     pub pending_detail: Option<String>,
     /// The upstream status line staged at the first response
     /// header, for the terminal classification.

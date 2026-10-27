@@ -61,6 +61,7 @@ use pingora::protocols::Digest;
 use pingora::proxy::{ProxyHttp, Session, http_proxy_service};
 use tracing::Instrument as _;
 
+use context::Selection;
 pub use context::{GatewayCtx, Route};
 
 use crate::distribution::TagmaIdentity;
@@ -222,17 +223,22 @@ impl GatewayProxy {
         upstream_request: &mut RequestHeader,
         ctx: &mut GatewayCtx,
     ) -> Result<()> {
-        let selection = ctx
-            .selection
-            .as_ref()
-            .expect("a forwarded request always has a selection");
+        // The wire path's route: `request_filter` forwards only
+        // `Route::Forward`, so a rewrite on another route is a flow slip.
+        // It returns a pingora internal error rather than panicking; this
+        // route never enters the forwarding face the `logging` phase
+        // records, so no failure line is written for it.
+        let Route::Forward(endpoint) = ctx.route else {
+            return Err(pingora::Error::explain(
+                pingora::ErrorType::InternalError,
+                PHASE_SLIP_NOT_FORWARD,
+            ));
+        };
+        // The selection `request_filter` staged, checked the same way.
+        let selection = staged_selection(ctx)?;
         // The wire path: the credential's base (trimmed) plus the
         // endpoint's resource path. The client's query string is not
         // forwarded: the generation APIs take everything in the body.
-        let endpoint = match ctx.route {
-            Route::Forward(endpoint) => endpoint,
-            _ => unreachable!("the rewrite phase only runs on forwarded requests"),
-        };
         let path = format!(
             "{}{}",
             selection.base_path.trim_end_matches('/'),
@@ -475,10 +481,7 @@ impl ProxyHttp for GatewayProxy {
     ) -> Result<Box<HttpPeer>> {
         // The selection already resolved the dial target; there is
         // nothing left to look up.
-        let selection = ctx
-            .selection
-            .as_ref()
-            .expect("a forwarded request always has a selection");
+        let selection = staged_selection(ctx)?;
         Ok(Box::new(selection.peer.clone()))
     }
 
@@ -634,11 +637,44 @@ macro_rules! failure_line {
     };
 }
 
+/// The two phase-flow slips a forwarding phase can meet, each naming
+/// the flaw it found. They are answered two different ways. A phase
+/// that runs without the selection `request_filter` stages is a
+/// failure the gateway records: the slip is staged and the `logging`
+/// phase writes it as an `internal_error` line with no reason
+/// category, since no input caused it. A rewrite that runs on a route
+/// which does not forward has no line at all: that route never enters
+/// the forwarding face the `logging` phase records, so the slip is
+/// only the text on the pingora error it returns. Neither panics the
+/// worker.
+const PHASE_SLIP_NO_SELECTION: &str = "a forwarding phase ran without a selection";
+const PHASE_SLIP_NOT_FORWARD: &str = "the rewrite phase ran on a route that does not forward";
+
+/// The selection a forwarding phase runs on, staged by
+/// `request_filter` before any later phase runs. A phase that finds
+/// none is a flow slip: it is recorded as the gateway's own failure
+/// (no reason category -- no input caused it) and also answered by
+/// pingora's error path, so the worker is not panicked.
+fn staged_selection(ctx: &mut GatewayCtx) -> Result<&Selection, Box<pingora::Error>> {
+    let selection = match ctx.selection.as_ref() {
+        Some(selection) => selection,
+        None => {
+            ctx.pending_outcome = Some(ForwardOutcome::InternalError);
+            ctx.pending_detail = Some(PHASE_SLIP_NO_SELECTION.to_string());
+            return Err(pingora::Error::explain(
+                pingora::ErrorType::InternalError,
+                PHASE_SLIP_NO_SELECTION,
+            ));
+        }
+    };
+    Ok(selection)
+}
+
 /// The severity a failed forward records at: the gateway's own
-/// forwarding trouble -- a dial failure, an upstream-side mid-stream
-/// break, or a gateway-side internal failure -- is an ERROR, while a
-/// gate rejection, the upstream's own terminations, and a downstream
-/// side's failure are a WARN (the request was refused, answered, or
+/// forwarding trouble -- a dial failure, a failed upstream resolution, an
+/// upstream-side mid-stream break, or a gateway-side internal failure -- is
+/// an ERROR, while a gate rejection, the upstream's own terminations, and a
+/// downstream side's failure are a WARN (the request was refused, answered, or
 /// ended on the caller's side, not the platform's health dented). Every
 /// variant is spelled out: a new outcome cannot land on a severity by
 /// falling into a catch-all.
@@ -646,7 +682,8 @@ fn failure_level(outcome: ForwardOutcome) -> tracing::Level {
     match outcome {
         ForwardOutcome::ConnectError
         | ForwardOutcome::UpstreamError
-        | ForwardOutcome::InternalError => tracing::Level::ERROR,
+        | ForwardOutcome::InternalError
+        | ForwardOutcome::ResolveError => tracing::Level::ERROR,
         ForwardOutcome::GatedAuth
         | ForwardOutcome::GatedRoute
         | ForwardOutcome::GatedVisibility
@@ -662,25 +699,32 @@ fn failure_level(outcome: ForwardOutcome) -> tracing::Level {
 
 /// Whether the terminal phase writes the failure line: an error
 /// terminates the forward on the wire, and a gate refused the client
-/// before one was reached. The gates -- and a gateway-side internal
-/// failure, which renders its own 5xx the same way -- answer the
-/// client themselves, so the logging phase sees no error for them:
-/// their line warrants on the outcome alone. The upstream answers
+/// before one was reached. The gates -- and the two failures the
+/// gateway answers itself, which render their own 5xx the same way --
+/// answer the client themselves, so the logging phase sees no error for
+/// them: their line warrants on the outcome alone. The upstream answers
 /// (2xx through other) are the request's normal terminations and
 /// stay off the failure stream.
 fn warrants_failure_line(outcome: ForwardOutcome, errored: bool) -> bool {
-    errored || outcome.is_gate() || outcome.is_gateway_side()
+    errored || outcome.is_gate() || outcome.answers_itself()
 }
 
 /// The failure line: one structured record per failed forward, naming
-/// the attribution the counters carry, so a log reader and a dashboard
-/// reader see the same request. It warrants on an error (the wire
-/// failure path) or on a gate outcome; the gate line carries no error
-/// field, while an internal failure names the gateway-side error that
-/// ended it and the reason category behind it. A failure before a
-/// selection existed (the identity gate)
-/// records none of the selection's fields, and the clock is absent
-/// before the forward branch staged it.
+/// the endpoint and the outcome the counters carry, so a log reader
+/// and a dashboard reader see the same request. A field only a
+/// selection holds -- `authority` and `profile_id` -- is absent from
+/// the line on a failure that came before one existed (the identity
+/// gate, a failed resolution). The counter face differs there: a
+/// resolution failure knows the authority before it dials, so its
+/// counter labels the host under `upstream`, while the forward outcome
+/// counter carries the endpoint and outcome alone. The host is not
+/// missing from the line either: it sits
+/// in the `error` text, `resolving the upstream <authority> for profile
+/// <id> failed: ...`. It warrants on an error (the wire failure path)
+/// or on a gate outcome; the gate line carries no error field, while a
+/// failure the gateway answers itself names the error that ended it and
+/// the reason category behind it. The clock is absent before the
+/// forward branch staged it.
 fn log_forward_failure(
     endpoint: forward::dialect::Endpoint,
     outcome: ForwardOutcome,

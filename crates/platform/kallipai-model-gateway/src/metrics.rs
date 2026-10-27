@@ -8,13 +8,13 @@
 //! any other collector in the process. Recording is synchronous -- the
 //! pingora phases call inline; there is no background task.
 //!
-//! Label vocabularies are static (endpoint 3, forward outcome 12,
-//! identity outcome 4, connect error class 4, upstream status class 4,
-//! API family 4 -- the registry's validation set). The one
-//! credential-sourced label is `upstream`: the upstream URL authority
-//! (host and port) verbatim. The failure domain is the service behind
-//! that address, so two providers on one host share a series and extra
-//! base paths never split one.
+//! Label vocabularies are static (endpoint 3, forward outcome 14,
+//! identity outcome 4, connect error class 4, resolve error class 3,
+//! upstream status class 4, API family 4) -- the registry's validation
+//! set. The one credential-sourced label is `upstream`: the upstream
+//! URL authority (host and port) verbatim. The failure domain is the
+//! service behind that address, so two providers on one host share a
+//! series and extra base paths never split one.
 //! `api_family` labels the attribution family only: connection and
 //! establishment measurements do not vary with the request dialect,
 //! and the label there would multiply series without information.
@@ -92,6 +92,12 @@ pub(crate) enum ForwardOutcome {
     /// reached: a store error behind the selection, a missing provider
     /// credential, or an unparseable endpoint prefix.
     InternalError,
+    /// The upstream's host did not resolve: the resolver failed, answered
+    /// nothing, or overran the gateway's bound. A dependency the request
+    /// never reached -- not the gateway's own fault, and counted apart
+    /// from `internal_error` so a resolver outage does not read as a
+    /// gateway bug.
+    ResolveError,
 }
 
 impl ForwardOutcome {
@@ -110,14 +116,15 @@ impl ForwardOutcome {
             Self::UpstreamError => "upstream_error",
             Self::DownstreamError => "downstream_error",
             Self::InternalError => "internal_error",
+            Self::ResolveError => "resolve_error",
         }
     }
     /// Whether the outcome is a gate refusal: the selection gates
     /// answered the request before an upstream was reached. The five
     /// variants are enumerated here, beside the enum, so a new gate
     /// variant cannot silently escape the warrant and counter faces; the
-    /// gateway-side internal failure is the non-refusal case, enumerated
-    /// by [`Self::is_gateway_side`].
+    /// outcomes it answers itself are the non-refusal pair, enumerated
+    /// by [`Self::answers_itself`].
     pub(crate) fn is_gate(self) -> bool {
         matches!(
             self,
@@ -129,13 +136,17 @@ impl ForwardOutcome {
         )
     }
 
-    /// Whether the outcome is the gateway's own failure with no upstream
-    /// and no wire error behind it: the one non-refusal outcome the
-    /// failure-line warrant admits on the outcome alone. Enumerated
-    /// here, beside the enum and next to [`Self::is_gate`], so a new
-    /// gateway-side variant cannot quietly lose its line.
-    pub(crate) fn is_gateway_side(self) -> bool {
-        matches!(self, Self::InternalError)
+    /// Whether the gateway answered the request itself, so the logging
+    /// phase sees no wire error for it: the two non-refusal outcomes
+    /// the failure-line warrant admits on the outcome alone. With the
+    /// gate refusals [`Self::is_gate`] enumerates, that is every line
+    /// the gateway writes without an error behind it. Prose calls these
+    /// gateway-side ones: the side that wrote the answer, not a fault
+    /// in it. Enumerated here, beside the enum and next to
+    /// [`Self::is_gate`], so a new such variant cannot quietly lose its
+    /// line.
+    pub(crate) fn answers_itself(self) -> bool {
+        matches!(self, Self::InternalError | Self::ResolveError)
     }
 
     /// The upstream status-line class. Everything outside 2xx/4xx/5xx
@@ -202,6 +213,30 @@ impl ConnectErrorClass {
     }
 }
 
+/// Why an upstream name resolution failed: the `error_class` label values
+/// of `kallipai_model_gateway_upstream_resolution_failures_total`, one
+/// word per class, alongside the counter's `upstream` label.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ResolveErrorClass {
+    /// The resolver returned an error: the usual name-not-known
+    /// answer, or a transient resolver-side failure.
+    LookupError,
+    /// The resolver answered with no address at all.
+    NoAddresses,
+    /// The resolver did not answer inside the gateway's bound.
+    Timeout,
+}
+
+impl ResolveErrorClass {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::LookupError => "lookup_error",
+            Self::NoAddresses => "no_addresses",
+            Self::Timeout => "timeout",
+        }
+    }
+}
+
 /// The upstream status-line class: the label values of
 /// `kallipai_model_gateway_upstream_responses_total`. A closed
 /// four-value vocabulary; codes outside the three classes (3xx and
@@ -260,6 +295,7 @@ pub(crate) struct Metrics {
     in_flight: IntGauge,
     identity_resolutions: IntCounterVec,
     upstream_responses: IntCounterVec,
+    resolution_failures: IntCounterVec,
 }
 
 impl Metrics {
@@ -320,6 +356,14 @@ impl Metrics {
             &["upstream", "error_class"],
         )
         .expect("a statically named counter");
+        let resolution_failures = IntCounterVec::new(
+            Opts::new(
+                "kallipai_model_gateway_upstream_resolution_failures_total",
+                "Upstream name resolutions that failed by upstream address and error class; one count per failed resolution attempt.",
+            ),
+            &["upstream", "error_class"],
+        )
+        .expect("a statically named counter");
         let upstream_responses = IntCounterVec::new(
             Opts::new(
                 "kallipai_model_gateway_upstream_responses_total",
@@ -366,6 +410,9 @@ impl Metrics {
             .register(Box::new(connect_failures.clone()))
             .expect("registering a statically named collector");
         registry
+            .register(Box::new(resolution_failures.clone()))
+            .expect("registering a statically named collector");
+        registry
             .register(Box::new(upstream_responses.clone()))
             .expect("registering a statically named collector");
         registry
@@ -400,6 +447,7 @@ impl Metrics {
             time_to_first_header,
             connect_duration,
             connect_failures,
+            resolution_failures,
             in_flight,
             identity_resolutions,
             upstream_responses,
@@ -466,6 +514,14 @@ impl Metrics {
     pub(crate) fn record_connect_failure(&self, upstream: &str, class: ConnectErrorClass) {
         self.connect_failures
             .with_label_values(&[upstream, class.as_str()])
+            .inc();
+    }
+
+    /// One failed resolution attempt, not one failed request: the
+    /// counter names the attempt, so a retry path reads as two.
+    pub(crate) fn record_resolution_failure(&self, upstream: &str, error_class: ResolveErrorClass) {
+        self.resolution_failures
+            .with_label_values(&[upstream, error_class.as_str()])
             .inc();
     }
 
@@ -601,6 +657,7 @@ mod tests {
             ForwardOutcome::Upstream5xx,
             ForwardOutcome::UpstreamOther,
             ForwardOutcome::ConnectError,
+            ForwardOutcome::ResolveError,
             ForwardOutcome::UpstreamError,
             ForwardOutcome::DownstreamError,
             ForwardOutcome::InternalError,
@@ -619,6 +676,7 @@ mod tests {
                 "upstream_5xx",
                 "upstream_other",
                 "connect_error",
+                "resolve_error",
                 "upstream_error",
                 "downstream_error",
                 "internal_error",
