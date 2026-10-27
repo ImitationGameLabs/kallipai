@@ -435,7 +435,7 @@ impl Registry {
                 // Store seq keeps climbing across generations: clients use
                 // it to detect a reset, so only the tagma push_seq
                 // expectation is voided by a new generation.
-                stored.seq + 1
+                stored.seq.saturating_add(1)
             }
             None => 1,
         };
@@ -816,5 +816,43 @@ mod tests {
             Some(73),
             "the first retained seq jumps from 0 to 73"
         );
+    }
+    /// The store seq saturates at `u64::MAX` instead of wrapping: clients read
+    /// that field as a reset detector, so a wrap would look like a reset.
+    #[test]
+    fn projection_seq_saturates_at_the_ceiling() {
+        use kallipai_common::protocol::AgentState;
+        let mut reg = Registry::new();
+        let owner = UserId::from("alice".to_string());
+        let tagma = TagmaId::from("a1".to_string());
+        let generation = Arc::new(());
+        let snapshot = ProjectionSnapshot {
+            agents: Vec::new(),
+            status: TagmaStatusPayload {
+                root_state: AgentState::Idle,
+                subagents_total: 0,
+                subagents_active: 0,
+                token_budget: 0,
+                token_consumed: 0,
+                token_budget_unlimited: false,
+            },
+            push_seq: 1,
+            work_schedule: None,
+        };
+        let first = reg.accept_projection(&tagma, &generation, 1, owner.clone(), snapshot.clone());
+        assert_eq!(first, Some(1));
+        reg.projections
+            .get_mut(&ParticipantId::for_tagma(&tagma))
+            .expect("stored")
+            .seq = u64::MAX;
+
+        let pid = ParticipantId::for_tagma(&tagma);
+        let next = reg.accept_projection(&tagma, &generation, 2, owner, snapshot);
+        assert_eq!(
+            next,
+            Some(u64::MAX),
+            "the ceiling holds instead of wrapping"
+        );
+        assert_eq!(reg.projections.get(&pid).expect("stored").seq, u64::MAX);
     }
 }
