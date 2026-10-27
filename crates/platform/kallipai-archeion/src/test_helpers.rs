@@ -395,7 +395,7 @@ pub async fn seed_tagma_with_id(
     tagma_id: TagmaId,
     pinned_key: Ed25519PublicKey,
 ) -> (TagmaId, String) {
-    let token = MintedToken::generate(TAGMA);
+    let token = MintedToken::generate(TAGMA).expect("getrandom failed");
     let plaintext = token.secret().to_string();
     let now = OffsetDateTime::now_utc();
     tagmata::ActiveModel {

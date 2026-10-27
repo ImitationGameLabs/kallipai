@@ -136,7 +136,7 @@ async fn seed_session(state: &crate::state::SharedState) -> String {
     .insert(&state.db)
     .await
     .expect("seed user");
-    let session = MintedToken::generate(crate::token::SESSION);
+    let session = MintedToken::generate(crate::token::SESSION).expect("getrandom failed");
     sessions::ActiveModel {
         token_hash: Set(session.hash().as_bytes().to_vec()),
         user_id: Set(user_id.to_string()),

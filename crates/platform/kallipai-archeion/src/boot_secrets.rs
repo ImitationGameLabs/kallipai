@@ -40,7 +40,7 @@ pub(crate) fn provision_internal_token(path: &Path) -> anyhow::Result<String> {
             Ok(secret.to_owned())
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            let minted = MintedToken::generate(token::INTERNAL);
+            let minted = MintedToken::generate(token::INTERNAL).expect("getrandom failed");
             kallipai_common::secret_file::write_atomic(path, minted.secret().as_bytes(), 0o640)
                 .with_context(|| {
                     format!(
@@ -95,7 +95,7 @@ pub(crate) fn provision_admin_token(path: &Path) -> anyhow::Result<String> {
             Ok(secret)
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            let minted = MintedToken::generate(token::ADMIN);
+            let minted = MintedToken::generate(token::ADMIN).expect("getrandom failed");
             write_generated_admin(path, minted.secret())?;
             Ok(minted.secret().to_owned())
         }

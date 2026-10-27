@@ -438,7 +438,7 @@ mod tests {
     async fn verify_session_rejects_disabled_user() {
         let state = make_state().await;
         let user_id = seed_user(&state, "frozen").await;
-        let session = MintedToken::generate(SESSION);
+        let session = MintedToken::generate(SESSION).expect("getrandom failed");
         let now = OffsetDateTime::now_utc();
         sessions::ActiveModel {
             token_hash: Set(session.hash().as_bytes().to_vec()),
@@ -514,7 +514,7 @@ mod tests {
         user_id: String,
         now: OffsetDateTime,
     ) -> MintedToken {
-        let session = MintedToken::generate(SESSION);
+        let session = MintedToken::generate(SESSION).expect("getrandom failed");
         sessions::ActiveModel {
             token_hash: Set(session.hash().as_bytes().to_vec()),
             user_id: Set(user_id),

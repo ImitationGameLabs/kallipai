@@ -222,7 +222,8 @@ pub(crate) async fn run_operator_token(
             // deliberately not a kallipctl dependency.
             const OPERATOR_PREFIX: kallipai_common::authtoken::TokenKind =
                 kallipai_common::authtoken::TokenKind("sk-operator-");
-            let secret = kallipai_common::authtoken::MintedToken::generate(OPERATOR_PREFIX);
+            let secret = kallipai_common::authtoken::MintedToken::generate(OPERATOR_PREFIX)
+                .expect("getrandom failed");
             write_for_slug(client, &slug, secret.secret()).await?;
             // The one print the operator explicitly asked for (the admin
             // token reset contract).

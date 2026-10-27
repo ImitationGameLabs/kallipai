@@ -115,7 +115,7 @@ async fn add_email(
     // the plaintext is delivered to the address via the transport. The token
     // expires after VERIFY_TOKEN_TTL so a leaked log line / compromised inbox
     // cannot redeem it indefinitely.
-    let token = MintedToken::generate(EMAIL_VERIFY);
+    let token = MintedToken::generate(EMAIL_VERIFY).expect("getrandom failed");
     let token_hash = token.hash().as_bytes().to_vec();
 
     // A new address is NEVER auto-primary: a primary must be a verified address

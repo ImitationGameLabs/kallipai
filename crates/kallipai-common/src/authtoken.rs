@@ -82,18 +82,44 @@ pub struct MintedToken {
     hash: TokenHash,
 }
 
+/// The platform entropy source refused to produce a fresh secret.
+///
+/// The realistic cause is an unavailable or broken CSPRNG. Admin token
+/// rotation answers a 500 carrying this error; every other minting site keeps
+/// failing fast. Unifying the two is a separate question.
+#[derive(Debug)]
+pub struct MintError(getrandom::Error);
+
+impl std::fmt::Display for MintError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "entropy source unavailable: {}", self.0)
+    }
+}
+
+impl std::error::Error for MintError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.0)
+    }
+}
+
+impl From<getrandom::Error> for MintError {
+    fn from(source: getrandom::Error) -> Self {
+        Self(source)
+    }
+}
+
 impl MintedToken {
     /// Generate a new 256-bit token of `kind` with its type-tag prefix.
-    pub fn generate(kind: TokenKind) -> Self {
+    ///
+    /// Returns [`MintError`] when the entropy source is unavailable.
+    pub fn generate(kind: TokenKind) -> Result<Self, MintError> {
         let mut bytes = [0u8; SECRET_BYTES];
-        // getrandom is the CSPRNG that backs `rand` and `uuid` v4; a failure
-        // means the system entropy source is unavailable, so panicking is correct.
-        getrandom::fill(&mut bytes).expect("getrandom failed");
+        getrandom::fill(&mut bytes)?;
         let secret = format!("{}{}", kind.0, URL_SAFE_NO_PAD.encode(bytes));
-        Self {
+        Ok(Self {
             hash: TokenHash::of(&secret),
             secret,
-        }
+        })
     }
 
     /// Wrap a caller-supplied secret (e.g. an operator token loaded from env).
@@ -161,7 +187,7 @@ mod tests {
 
     #[test]
     fn generated_token_has_prefix_and_length() {
-        let t = MintedToken::generate(TEST_KIND);
+        let t = MintedToken::generate(TEST_KIND).expect("getrandom failed");
         let s = t.secret();
         assert!(s.starts_with("sk-test-"));
         // base64url NO_PAD of 32 bytes is exactly 43 chars.
@@ -189,8 +215,8 @@ mod tests {
     #[test]
     fn two_generated_tokens_differ() {
         // Astronomically unlikely to collide; guards against a constant-seed bug.
-        let a = MintedToken::generate(TEST_KIND);
-        let b = MintedToken::generate(TEST_KIND);
+        let a = MintedToken::generate(TEST_KIND).expect("getrandom failed");
+        let b = MintedToken::generate(TEST_KIND).expect("getrandom failed");
         assert_ne!(a.hash(), b.hash());
         assert_ne!(a.secret(), b.secret());
     }
@@ -200,6 +226,7 @@ mod tests {
         let other = TokenKind("sk-other-");
         assert!(
             !MintedToken::generate(TEST_KIND)
+                .expect("getrandom failed")
                 .secret()
                 .starts_with(other.0)
         );
@@ -213,7 +240,7 @@ mod tests {
 
     #[test]
     fn mask_token_keeps_prefix_and_head_tail() {
-        let t = MintedToken::generate(TEST_KIND);
+        let t = MintedToken::generate(TEST_KIND).expect("getrandom failed");
         let masked = mask_token(t.secret(), TEST_KIND);
         // 43-char base64url body -> head(3) + "***" + tail(3), prefix preserved.
         assert_eq!(masked.len(), "sk-test-".len() + 3 + 3 + 3);

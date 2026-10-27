@@ -26,9 +26,15 @@ mod tests {
         assert_ne!(OPERATOR.0, AGENT.0);
         assert!(
             MintedToken::generate(OPERATOR)
+                .expect("getrandom failed")
                 .secret()
                 .starts_with(OPERATOR.0)
         );
-        assert!(MintedToken::generate(AGENT).secret().starts_with(AGENT.0));
+        assert!(
+            MintedToken::generate(AGENT)
+                .expect("getrandom failed")
+                .secret()
+                .starts_with(AGENT.0)
+        );
     }
 }

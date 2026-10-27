@@ -548,7 +548,7 @@ async fn finish_signin(
                 // UNLINKED -> hold the claim for the username step. The provider
                 // display_name is display-only (never stored in `emails`, never
                 // used to merge); it rides the row to `signup/complete`.
-                let token = MintedToken::generate(OAUTH_SIGNUP);
+                let token = MintedToken::generate(OAUTH_SIGNUP).expect("getrandom failed");
                 let token_hash = token.hash().as_bytes().to_vec();
                 let mut am: oauth_states::ActiveModel = row.into();
                 am.subject = Set(Some(subject));

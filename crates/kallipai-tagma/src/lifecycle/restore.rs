@@ -368,7 +368,7 @@ async fn restore_one(
 
     // Mint a fresh 256-bit `sk-agent-…` token. The plaintext goes into the agent shell env;
     // only its SHA-256 is indexed for auth lookup.
-    let token = MintedToken::generate(AGENT);
+    let token = MintedToken::generate(AGENT).expect("getrandom failed");
     let env = SpawnArgs::default_env(
         &p.agent_id,
         token.secret(),

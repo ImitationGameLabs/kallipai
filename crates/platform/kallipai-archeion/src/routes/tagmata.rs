@@ -94,7 +94,7 @@ async fn enroll(
         .map_err(proof_to_bad_request)?;
 
     let code_hash = TokenHash::of(&req.code);
-    let tagma_token = MintedToken::generate(TAGMA);
+    let tagma_token = MintedToken::generate(TAGMA).expect("getrandom failed");
     let tagma_token_plaintext = tagma_token.secret().to_string();
     let tagma_token_hash = tagma_token.hash().as_bytes().to_vec();
     let device_key = req.device_public_key.0.clone();
@@ -233,7 +233,7 @@ pub(crate) async fn mint_pending_tagma(
         ));
     }
 
-    let code = MintedToken::generate(ENROLLMENT);
+    let code = MintedToken::generate(ENROLLMENT).expect("getrandom failed");
     let plaintext = code.secret().to_string();
     let masked = mask_token(code.secret(), ENROLLMENT);
     let id = TagmaId::random();

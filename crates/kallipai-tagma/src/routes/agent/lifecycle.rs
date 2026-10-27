@@ -158,7 +158,7 @@ pub async fn ensure_root_agent(state: &SharedState) -> anyhow::Result<()> {
         );
     }
     let id = AgentId::random();
-    let token = MintedToken::generate(AGENT);
+    let token = MintedToken::generate(AGENT).expect("getrandom failed");
     let mut config = AgentConfig::load(None, Vec::new(), None)?;
     config.agent_id = Some(id.clone());
     config.permissions_class = permission_class_from_env();

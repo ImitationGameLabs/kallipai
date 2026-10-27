@@ -553,7 +553,7 @@ pub fn resolve_operator_token(
             OperatorTokenResolution::Loaded(path),
         ));
     }
-    let secret = MintedToken::generate(token::OPERATOR);
+    let secret = MintedToken::generate(token::OPERATOR).expect("getrandom failed");
     write_operator_token_file(&credentials_dir, secret.secret())?;
     Ok((secret, OperatorTokenResolution::Minted(path)))
 }

@@ -314,7 +314,7 @@ async fn bind_respects_the_revocation_denylist() {
 /// `user_id`, and return headers presenting its cookie. Mirrors what a real
 /// login/register finish writes, so `mint_pairing_code` can run end-to-end.
 async fn step_up_headers(state: &SharedState, user_id: &UserId) -> HeaderMap {
-    let session = MintedToken::generate(SESSION);
+    let session = MintedToken::generate(SESSION).expect("getrandom failed");
     let now = OffsetDateTime::now_utc();
     sessions::ActiveModel {
         token_hash: Set(session.hash().as_bytes().to_vec()),

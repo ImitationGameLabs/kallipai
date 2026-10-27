@@ -38,7 +38,7 @@ pub(crate) async fn mint_session_row(
     session_cfg: &SessionCfg,
     now: OffsetDateTime,
 ) -> Result<String, DbErr> {
-    let session = MintedToken::generate(SESSION);
+    let session = MintedToken::generate(SESSION).expect("getrandom failed");
     let session_hash = session.hash().as_bytes().to_vec();
     let set_cookie = build_set_cookie(session_cfg, session.secret());
     sessions::ActiveModel {

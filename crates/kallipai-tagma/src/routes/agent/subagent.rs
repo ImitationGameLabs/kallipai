@@ -46,7 +46,7 @@ pub(crate) async fn spawn_subagent(
     let id = AgentId::random();
     // Mint a fresh 256-bit `sk-agent-…` token. The plaintext goes into the agent
     // shell env (`KALLIPAI_AUTH_TOKEN`); only its SHA-256 is indexed for auth lookup.
-    let token = MintedToken::generate(AGENT);
+    let token = MintedToken::generate(AGENT).expect("getrandom failed");
     let mut config = req.config;
     config.agent_id = Some(id.clone());
 

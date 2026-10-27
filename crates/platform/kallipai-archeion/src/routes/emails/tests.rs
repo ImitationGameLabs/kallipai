@@ -23,7 +23,7 @@ use uuid::Uuid;
 /// return it (`add_email` mints one the test cannot observe). The caller
 /// then drives `verify_email` with the secret.
 async fn plant_token(state: &crate::state::SharedState, email_id: Uuid) -> MintedToken {
-    let token = MintedToken::generate(EMAIL_VERIFY);
+    let token = MintedToken::generate(EMAIL_VERIFY).expect("getrandom failed");
     let row = emails::Entity::find_by_id(email_id)
         .one(&state.db)
         .await
