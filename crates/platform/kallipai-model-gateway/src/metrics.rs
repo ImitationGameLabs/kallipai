@@ -562,6 +562,19 @@ impl Metrics {
     pub(crate) fn in_flight_value(&self) -> i64 {
         self.in_flight.get()
     }
+
+    /// Test-only reader: the recorded count of one resolution-failure
+    /// series.
+    #[cfg(test)]
+    pub(crate) fn resolution_failure_count(
+        &self,
+        upstream: &str,
+        error_class: ResolveErrorClass,
+    ) -> u64 {
+        self.resolution_failures
+            .with_label_values(&[upstream, error_class.as_str()])
+            .get()
+    }
 }
 
 #[cfg(test)]

@@ -44,6 +44,7 @@
 mod context;
 #[cfg(test)]
 mod failure_line_tests;
+mod resolver;
 pub mod routes;
 #[cfg(test)]
 mod tests;
@@ -63,6 +64,7 @@ use tracing::Instrument as _;
 
 use context::Selection;
 pub use context::{GatewayCtx, Route};
+use resolver::Resolver;
 
 use crate::distribution::TagmaIdentity;
 use crate::forward;
@@ -72,6 +74,7 @@ use crate::state::AppState;
 /// The application: shared state plus the CORS allow-origin policy.
 pub struct GatewayProxy {
     pub state: AppState,
+    pub resolver: Resolver,
     pub cors: wire::CorsPolicy,
 }
 
@@ -187,6 +190,7 @@ impl GatewayProxy {
                 // an error here is the client-visible answer.
                 match routes::select_route(
                     &self.state,
+                    &self.resolver,
                     &identity,
                     &session.req_header().headers,
                     endpoint,
@@ -416,10 +420,12 @@ pub fn spawn_data_plane(
         .spawn(move || {
             let mut server = Server::new(None).expect("pingora server");
             server.bootstrap();
+            let resolver = Resolver::system(state.metrics.clone());
             let mut service = http_proxy_service(
                 &server.configuration,
                 GatewayProxy {
                     state,
+                    resolver,
                     cors: wire::CorsPolicy::parse(&cors_origins),
                 },
             );

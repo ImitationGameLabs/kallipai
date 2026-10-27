@@ -9,7 +9,6 @@
 //! phases read it from there.
 
 use std::net::SocketAddr;
-use std::time::Duration;
 
 use axum::http::{HeaderMap, Method};
 use axum::response::IntoResponse;
@@ -27,6 +26,7 @@ use crate::secret;
 use crate::state::AppState;
 
 use super::context::{FailureReason, Route, Selection};
+use super::resolver::{ResolveFailure, Resolver, UPSTREAM_RETRY_AFTER};
 
 /// The parsed upstream prefix: the peer parts plus the rewrite
 /// inputs.
@@ -80,53 +80,27 @@ pub(crate) fn parse_endpoint_prefix(prefix: &str) -> Option<ParsedPrefix> {
     })
 }
 
-/// How long the gateway waits for the resolver: a dead resolver must
-/// not hold a request open, while a slow network resolver must still
-/// land. The bound catches an answer that did not arrive inside it --
-/// a silent resolver, or a live one slow enough to overrun the wait.
-/// The value is fixed rather than configurable until an operator asks
-/// for a knob.
-const UPSTREAM_RESOLVE_BOUND: Duration = Duration::from_secs(5);
-
 /// What a client reads when the upstream could not be resolved: generic
 /// on purpose, since the host and the resolver's answer belong to the
 /// failure line, not to the caller.
 const UPSTREAM_UNRESOLVED_MESSAGE: &str =
     "the selected upstream could not be resolved; retry shortly";
 
-/// The retry hint on that answer, in delay-seconds (RFC 9110): long
-/// enough to outlast a resolver hiccup, short enough that a client which
-/// honours it does not back off for a whole outage.
-const UPSTREAM_RETRY_AFTER_SECS: &str = "5";
-
-/// A failed resolution: the error class the metric counts plus the
-/// resolver's own text, which the failure line records.
-#[derive(Debug)]
-struct ResolveFailure {
-    class: ResolveErrorClass,
-    detail: String,
-}
-
-/// Resolve the dial target outside the forwarding worker: the first
-/// address wins, as it did when pingora resolved the name itself, but
-/// the lookup is asynchronous and bounded, and a failure is a value
-/// instead of a panic.
-async fn resolve_dial_target(parsed: &ParsedPrefix) -> Result<SocketAddr, ResolveFailure> {
-    let lookup = tokio::net::lookup_host((parsed.host.as_str(), parsed.port));
-    let answered = tokio::time::timeout(UPSTREAM_RESOLVE_BOUND, lookup)
-        .await
-        .map_err(|_| ResolveFailure {
-            class: ResolveErrorClass::Timeout,
-            detail: format!("the resolver did not answer within {UPSTREAM_RESOLVE_BOUND:?}"),
-        })?;
-    let mut addresses = answered.map_err(|error| ResolveFailure {
-        class: ResolveErrorClass::LookupError,
-        detail: error.to_string(),
-    })?;
-    addresses.next().ok_or_else(|| ResolveFailure {
+/// Resolve the dial target outside the forwarding worker through the system
+/// resolver: the first answer wins, and the lookup is cached, shared with
+/// concurrent lookups for the same host, and bounded.
+async fn resolve_dial_target(
+    parsed: &ParsedPrefix,
+    resolver: &Resolver,
+) -> Result<SocketAddr, ResolveFailure> {
+    let addresses = resolver.resolve(&parsed.host, &parsed.authority).await?;
+    // A successful answer carries at least one address, so the empty case
+    // here is turned into the failure rather than indexed into a panic.
+    let first = addresses.first().ok_or_else(|| ResolveFailure {
         class: ResolveErrorClass::NoAddresses,
         detail: "the resolver returned no address".to_string(),
-    })
+    })?;
+    Ok(SocketAddr::new(*first, parsed.port))
 }
 
 /// The path/method dispatch, decided once. The `/admin` family is a 404
@@ -241,7 +215,7 @@ impl GateError {
         let mut response = ApiError::unavailable(UPSTREAM_UNRESOLVED_MESSAGE).into_response();
         response.headers_mut().insert(
             axum::http::header::RETRY_AFTER,
-            axum::http::HeaderValue::from_static(UPSTREAM_RETRY_AFTER_SECS),
+            axum::http::HeaderValue::from(UPSTREAM_RETRY_AFTER.as_secs()),
         );
         Self::failure(
             ForwardOutcome::ResolveError,
@@ -315,6 +289,7 @@ fn store_failure(error: sea_orm::DbErr) -> GateError {
 /// face.
 pub(crate) async fn select_route(
     state: &AppState,
+    resolver: &Resolver,
     identity: &TagmaIdentity,
     headers: &HeaderMap,
     endpoint: dialect::Endpoint,
@@ -466,12 +441,9 @@ pub(crate) async fn select_route(
     // address resolved here is a `SocketAddr`, whose `ToSocketAddrs` impl
     // is infallible: no name lookup runs inside the constructor and it
     // cannot fail.
-    let target = match resolve_dial_target(&parsed).await {
+    let target = match resolve_dial_target(&parsed, resolver).await {
         Ok(target) => target,
         Err(failure) => {
-            state
-                .metrics
-                .record_resolution_failure(&parsed.authority, failure.class);
             return Err(GateError::unavailable(
                 FailureReason::UnresolvedUpstream,
                 format_args!(
@@ -505,7 +477,10 @@ mod tests {
     #[tokio::test]
     async fn a_host_that_cannot_be_a_name_fails_as_a_lookup_error() {
         let parsed = parse_endpoint_prefix("http://bad host/v1").expect("the prefix parses");
-        let failure = resolve_dial_target(&parsed).await.expect_err("no address");
+        let resolver = Resolver::system(crate::metrics::Metrics::private());
+        let failure = resolve_dial_target(&parsed, &resolver)
+            .await
+            .expect_err("no address");
         assert_eq!(failure.class, ResolveErrorClass::LookupError);
         assert!(!failure.detail.is_empty());
     }
@@ -515,7 +490,10 @@ mod tests {
     async fn a_literal_address_resolves_to_itself() {
         let parsed =
             parse_endpoint_prefix("http://203.0.113.7:8080/v1").expect("the prefix parses");
-        let address = resolve_dial_target(&parsed).await.expect("an address");
+        let resolver = Resolver::system(crate::metrics::Metrics::private());
+        let address = resolve_dial_target(&parsed, &resolver)
+            .await
+            .expect("an address");
         assert_eq!(address.to_string(), "203.0.113.7:8080");
     }
 }
