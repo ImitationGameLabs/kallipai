@@ -86,15 +86,23 @@ impl Liveness {
     /// "Heartbeat observed": refresh `slot` to now. The single mutation site
     /// keeps the "stamp before work" contract in one place.
     fn stamp(&self, slot: &Mutex<Instant>) {
-        *slot.lock().unwrap() = Instant::now();
+        *slot.lock().unwrap_or_else(|e| e.into_inner()) = Instant::now();
     }
 
     /// `Ok(())` if both loops are fresh relative to `now`, else the stale one.
     /// Takes `now` so staleness is deterministic in tests (`Instant::now() +
     /// Duration` simulates time passing without sleeping).
     pub fn check_at(&self, now: Instant) -> Result<(), Stale> {
-        let last_tick = *self.inner.last_tick.lock().unwrap();
-        let last_deliver = *self.inner.last_deliver.lock().unwrap();
+        let last_tick = *self
+            .inner
+            .last_tick
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let last_deliver = *self
+            .inner
+            .last_deliver
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if now.duration_since(last_tick) > self.inner.tick_max_age {
             return Err(Stale::Scheduler);
         }

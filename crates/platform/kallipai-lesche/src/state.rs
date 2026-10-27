@@ -124,10 +124,7 @@ impl AppStream {
     /// anyway (benign, mirroring the tagma bus: an undelivered frame has no
     /// observer, so no cursor can observe the hole).
     pub fn deliver(&self, event: LescheEvent) -> Result<u64, DeliverError> {
-        let _order = self
-            .send_lock
-            .lock()
-            .expect("app-stream send_lock poisoned");
+        let _order = self.send_lock.lock().unwrap_or_else(|e| e.into_inner());
         let seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
         self.tx
             .send(SequencedAppEvent {
@@ -149,10 +146,7 @@ impl AppStream {
     /// lock-free read could interleave with a concurrent allocation and
     /// manufacture a false gap.
     pub fn capture_marker(&self) -> (u32, u64) {
-        let _order = self
-            .send_lock
-            .lock()
-            .expect("app-stream send_lock poisoned");
+        let _order = self.send_lock.lock().unwrap_or_else(|e| e.into_inner());
         (self.epoch, self.next_seq.load(Ordering::Relaxed))
     }
 }

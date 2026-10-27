@@ -71,7 +71,7 @@ impl DutyStore {
     pub fn get(&self, id: &AgentId) -> DutyStatus {
         self.map
             .lock()
-            .expect("duty map poisoned")
+            .unwrap_or_else(|e| e.into_inner())
             .get(id)
             .copied()
             .unwrap_or_default()
@@ -86,14 +86,17 @@ impl DutyStore {
     pub fn set(&self, id: AgentId, status: DutyStatus) {
         self.map
             .lock()
-            .expect("duty map poisoned")
+            .unwrap_or_else(|e| e.into_inner())
             .insert(id, status);
         self.notify_invalidation();
     }
 
     /// Remove the duty entry for an agent (cleanup on removal).
     pub fn remove(&self, id: &AgentId) {
-        self.map.lock().expect("duty map poisoned").remove(id);
+        self.map
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(id);
         self.notify_invalidation();
     }
 }

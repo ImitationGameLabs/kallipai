@@ -88,7 +88,7 @@ impl UsageStats {
     /// backend that does not report them contributes zero, never a
     /// dropped record.
     pub fn record(&self, agent_id: &AgentId, usage: &Usage) {
-        let mut entries = self.entries.lock().expect("usage stats map poisoned");
+        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
         let entry = entries.entry(agent_id.clone()).or_default();
         // This write point takes its five counters from the history rule, so
         // the totals here match what a history line carries. The store
@@ -105,14 +105,14 @@ impl UsageStats {
     pub fn agent(&self, agent_id: AgentId) -> Option<UsageEntry> {
         self.entries
             .lock()
-            .expect("usage stats map poisoned")
+            .unwrap_or_else(|e| e.into_inner())
             .get(&agent_id)
             .copied()
     }
 
     /// Sums over every recorded agent (single-launch scope).
     pub fn totals(&self) -> UsageTotals {
-        let entries = self.entries.lock().expect("usage stats map poisoned");
+        let entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
         entries
             .values()
             .fold(UsageTotals::default(), |t, e| UsageTotals {

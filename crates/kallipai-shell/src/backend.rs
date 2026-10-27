@@ -643,7 +643,7 @@ async fn finish_capture(
         handle.abort();
         let _ = handle.await; // resolves promptly with Cancelled after abort
     }
-    let taken = std::mem::take(&mut *cap.lock().expect("capture lock poisoned"));
+    let taken = std::mem::take(&mut *cap.lock().unwrap_or_else(|e| e.into_inner()));
     taken.finish()
 }
 
