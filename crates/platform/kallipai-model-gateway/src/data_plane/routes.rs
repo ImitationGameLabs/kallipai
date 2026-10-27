@@ -82,9 +82,10 @@ pub(crate) fn parse_endpoint_prefix(prefix: &str) -> Option<ParsedPrefix> {
 
 /// How long the gateway waits for the resolver: a dead resolver must
 /// not hold a request open, while a slow network resolver must still
-/// land. A resolver answers a name that does not exist with a negative
-/// answer rather than silence, so the bound catches silence alone.
-/// Fixed rather than configurable until an operator asks for a knob.
+/// land. The bound catches an answer that did not arrive inside it --
+/// a silent resolver, or a live one slow enough to overrun the wait.
+/// The value is fixed rather than configurable until an operator asks
+/// for a knob.
 const UPSTREAM_RESOLVE_BOUND: Duration = Duration::from_secs(5);
 
 /// What a client reads when the upstream could not be resolved: generic
