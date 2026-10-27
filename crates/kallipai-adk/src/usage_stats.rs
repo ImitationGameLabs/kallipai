@@ -94,11 +94,19 @@ impl UsageStats {
         // the totals here match what a history line carries. The store
         // layouts keep their own manual flattening.
         let flat = crate::history::TurnUsage::from_usage(usage);
-        entry.prompt_tokens += u64::from(flat.prompt);
-        entry.completion_tokens += u64::from(flat.completion);
-        entry.cache_read_tokens += u64::from(flat.cache_read);
-        entry.cache_write_tokens += u64::from(flat.cache_write);
-        entry.reasoning_tokens += u64::from(flat.reasoning);
+        entry.prompt_tokens = entry.prompt_tokens.saturating_add(u64::from(flat.prompt));
+        entry.completion_tokens = entry
+            .completion_tokens
+            .saturating_add(u64::from(flat.completion));
+        entry.cache_read_tokens = entry
+            .cache_read_tokens
+            .saturating_add(u64::from(flat.cache_read));
+        entry.cache_write_tokens = entry
+            .cache_write_tokens
+            .saturating_add(u64::from(flat.cache_write));
+        entry.reasoning_tokens = entry
+            .reasoning_tokens
+            .saturating_add(u64::from(flat.reasoning));
     }
 
     /// This agent's single-launch totals, or `None` if it recorded nothing.
@@ -116,11 +124,11 @@ impl UsageStats {
         entries
             .values()
             .fold(UsageTotals::default(), |t, e| UsageTotals {
-                prompt_tokens: t.prompt_tokens + e.prompt_tokens,
-                completion_tokens: t.completion_tokens + e.completion_tokens,
-                cache_read_tokens: t.cache_read_tokens + e.cache_read_tokens,
-                cache_write_tokens: t.cache_write_tokens + e.cache_write_tokens,
-                reasoning_tokens: t.reasoning_tokens + e.reasoning_tokens,
+                prompt_tokens: t.prompt_tokens.saturating_add(e.prompt_tokens),
+                completion_tokens: t.completion_tokens.saturating_add(e.completion_tokens),
+                cache_read_tokens: t.cache_read_tokens.saturating_add(e.cache_read_tokens),
+                cache_write_tokens: t.cache_write_tokens.saturating_add(e.cache_write_tokens),
+                reasoning_tokens: t.reasoning_tokens.saturating_add(e.reasoning_tokens),
             })
     }
 }
@@ -230,5 +238,50 @@ mod tests {
         let totals = stats.totals();
         assert_eq!(totals.cache_write_tokens, 40);
         assert_eq!(totals.reasoning_tokens, 7);
+    }
+
+    #[test]
+    fn record_saturates_counters_at_the_ceiling() {
+        let stats = UsageStats::default();
+        let a = AgentId::random();
+        let maxed = UsageEntry {
+            prompt_tokens: u64::MAX,
+            completion_tokens: u64::MAX,
+            cache_read_tokens: u64::MAX,
+            cache_write_tokens: u64::MAX,
+            reasoning_tokens: u64::MAX,
+        };
+        stats
+            .entries
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(a.clone(), maxed);
+        stats.record(&a, &usage_full(5, 1, Some(1), Some(1), Some(1)));
+        assert_eq!(stats.agent(a), Some(maxed));
+    }
+
+    #[test]
+    fn totals_saturate_counters_at_the_ceiling() {
+        let stats = UsageStats::default();
+        let maxed = UsageEntry {
+            prompt_tokens: u64::MAX,
+            completion_tokens: u64::MAX,
+            cache_read_tokens: u64::MAX,
+            cache_write_tokens: u64::MAX,
+            reasoning_tokens: u64::MAX,
+        };
+        let totals_max = UsageTotals {
+            prompt_tokens: u64::MAX,
+            completion_tokens: u64::MAX,
+            cache_read_tokens: u64::MAX,
+            cache_write_tokens: u64::MAX,
+            reasoning_tokens: u64::MAX,
+        };
+        {
+            let mut entries = stats.entries.lock().unwrap_or_else(|e| e.into_inner());
+            entries.insert(AgentId::random(), maxed);
+            entries.insert(AgentId::random(), maxed);
+        }
+        assert_eq!(stats.totals(), totals_max);
     }
 }
