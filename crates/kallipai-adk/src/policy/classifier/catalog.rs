@@ -489,18 +489,33 @@ fn flags_match(words: &[Node], flags: &[&str]) -> bool {
             if f.starts_with("--") {
                 token.split('=').next() == Some(*f)
             } else {
-                token == *f
-                    || (token.starts_with('-')
-                        && !token.starts_with("--")
-                        && f.len() == 2
-                        && token.len() <= 3
-                        && token
-                            .chars()
-                            .skip(1)
-                            .any(|c| c == f.chars().nth(1).unwrap()))
+                token == *f || short_flag_char(f).is_some_and(|flag| cluster_carries(token, flag))
             }
         })
     })
+}
+
+/// The flag char of a one-char short flag (`-f` → `Some('f')`). Long flags,
+/// clusters, and entries without the dash have none. Counting chars rather
+/// than bytes keeps a two-byte single char from reading as a short flag.
+fn short_flag_char(flag: &str) -> Option<char> {
+    let mut chars = flag.chars();
+    match (chars.next(), chars.next(), chars.next()) {
+        (Some('-'), Some(flag), None) => Some(flag),
+        _ => None,
+    }
+}
+
+/// Whether the boolean cluster `token` (`-fi`, `-if`) carries `flag`: one
+/// leading dash, at most two flag chars, and `flag` among them. Glued
+/// short-with-value forms (`-Xtheirs`, `-o<value>`) have more than two flag
+/// chars, so a char scan never reads them as clusters.
+fn cluster_carries(token: &str, flag: char) -> bool {
+    let mut chars = token.chars();
+    chars.next() == Some('-')
+        && !chars.as_str().starts_with('-')
+        && chars.clone().count() <= 2
+        && chars.any(|c| c == flag)
 }
 
 /// Reason for git invocations whose subcommand/flag shape cannot be verified
@@ -628,5 +643,53 @@ mod env_predicate_tests {
     #[test]
     fn env_after_dashdash_runs_command() {
         assert!(env_runs_command(&words("-- ls")));
+    }
+}
+
+#[cfg(test)]
+mod flag_shape_tests {
+    use super::{builtin_deny_reason, cluster_carries, flags_match, short_flag_char};
+
+    /// Parse a command line into rable word nodes — the shape the walker
+    /// hands the flag matcher.
+    fn words(cmd: &str) -> Vec<rable::Node> {
+        let nodes = rable::parse(cmd, false).unwrap();
+        match &nodes[0].kind {
+            rable::NodeKind::Command { words, .. } => words.clone(),
+            _ => unreachable!("one command line parses to one command"),
+        }
+    }
+
+    #[test]
+    fn short_flag_char_needs_a_dash_and_exactly_one_char() {
+        assert_eq!(short_flag_char("-f"), Some('f'));
+        assert_eq!(short_flag_char("-×"), Some('×'));
+        assert_eq!(short_flag_char("×"), None);
+        assert_eq!(short_flag_char("-fi"), None);
+        assert_eq!(short_flag_char("--force"), None);
+        assert_eq!(short_flag_char("f"), None);
+    }
+
+    #[test]
+    fn clusters_carry_flags_only_in_short_boolean_tokens() {
+        assert!(cluster_carries("-fi", 'f'));
+        assert!(cluster_carries("-if", 'f'));
+        assert!(cluster_carries("-×a", '×'));
+        assert!(!cluster_carries("-Xtheirs", 'X'));
+        assert!(!cluster_carries("--force", 'f'));
+        assert!(!cluster_carries("-f", 'i'));
+    }
+
+    #[test]
+    fn a_two_byte_single_char_flag_never_matches() {
+        assert!(!flags_match(&words("git checkout -×"), &["×"]));
+        assert!(flags_match(&words("git rebase -fi"), &["-i"]));
+    }
+
+    #[test]
+    fn the_deny_floor_answers_those_shapes_without_a_panic() {
+        assert!(builtin_deny_reason("git", &words("git config -×")).is_some());
+        assert!(builtin_deny_reason("git", &words("git checkout -×")).is_none());
+        assert!(builtin_deny_reason("git", &words("git push -fi")).is_some());
     }
 }
