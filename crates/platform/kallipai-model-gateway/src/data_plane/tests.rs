@@ -34,14 +34,14 @@ fn wait_for_listener(addr: &str) {
     panic!("listener {addr} never came up");
 }
 
-/// The shared app state over the given store.
-fn test_state(db: crate::db::Db) -> AppState {
+/// The shared app state over the given store and metrics handle.
+fn test_state(db: crate::db::Db, metrics: crate::metrics::Metrics) -> AppState {
     AppState {
         db,
         public_base_url: "http://gw.test:7501".to_string(),
         management: crate::test_support::test_management(),
         identity_cache: std::sync::Arc::new(crate::secret::IdentityCache::default()),
-        metrics: crate::metrics::Metrics::private(),
+        metrics,
     }
 }
 
@@ -50,7 +50,8 @@ fn test_state(db: crate::db::Db) -> AppState {
 /// the dedicated tests).
 async fn spawn_plane(db: crate::db::Db) -> String {
     let addr = next_addr();
-    spawn_data_plane(addr.clone(), test_state(db), String::new()).expect("spawn data plane");
+    let state = test_state(db, crate::metrics::Metrics::private());
+    spawn_data_plane(addr.clone(), state, String::new()).expect("spawn data plane");
     wait_for_listener(&addr);
     format!("http://{addr}")
 }
@@ -61,13 +62,7 @@ async fn spawn_plane(db: crate::db::Db) -> String {
 async fn spawn_plane_with_metrics(db: crate::db::Db) -> (String, crate::metrics::Metrics) {
     let addr = next_addr();
     let metrics = crate::metrics::Metrics::private();
-    let state = AppState {
-        db,
-        public_base_url: "http://gw.test:7501".to_string(),
-        management: crate::test_support::test_management(),
-        identity_cache: std::sync::Arc::new(crate::secret::IdentityCache::default()),
-        metrics: metrics.clone(),
-    };
+    let state = test_state(db, metrics.clone());
     spawn_data_plane(addr.clone(), state, String::new()).expect("spawn data plane");
     wait_for_listener(&addr);
     (format!("http://{addr}"), metrics)
@@ -127,14 +122,16 @@ async fn spawn_data_plane_refuses_a_taken_port() {
     let db = migrated_test_db().await;
     let holder = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let taken = holder.local_addr().unwrap().to_string();
-    assert!(spawn_data_plane(taken, test_state(db), String::new()).is_err());
+    let state = test_state(db, crate::metrics::Metrics::private());
+    assert!(spawn_data_plane(taken, state, String::new()).is_err());
 }
 
 /// A malformed listen address is the caller's error too.
 #[tokio::test]
 async fn spawn_data_plane_refuses_a_bad_listen_addr() {
     let db = migrated_test_db().await;
-    let err = spawn_data_plane("not-a-socket".to_string(), test_state(db), String::new());
+    let state = test_state(db, crate::metrics::Metrics::private());
+    let err = spawn_data_plane("not-a-socket".to_string(), state, String::new());
     assert!(err.is_err());
 }
 
@@ -735,7 +732,8 @@ async fn a_deleted_selected_collection_answers_404_on_both_faces() {
     assert!(pointer.is_some(), "the selection row survives the delete");
 
     // The pull face: the management router names the dangling state.
-    let app = crate::routes::management_plane_router(test_state(db.clone()), "");
+    let state = test_state(db.clone(), crate::metrics::Metrics::private());
+    let app = crate::routes::management_plane_router(state, "");
     let response = app
         .oneshot(
             axum::http::Request::builder()
@@ -1279,7 +1277,8 @@ async fn cors_preflight_is_answered_with_the_cors_headers() {
     let db = migrated_test_db().await;
     let addr = next_addr();
     let origin = "https://app.example";
-    spawn_data_plane(addr.clone(), test_state(db), origin.to_string()).expect("spawn data plane");
+    let state = test_state(db, crate::metrics::Metrics::private());
+    spawn_data_plane(addr.clone(), state, origin.to_string()).expect("spawn data plane");
     wait_for_listener(&addr);
     let base = format!("http://{addr}");
 
@@ -1370,7 +1369,8 @@ async fn oversize_body_is_a_413_with_cors_headers() {
     let db = migrated_test_db().await;
     let addr = next_addr();
     let origin = "https://app.example";
-    spawn_data_plane(addr.clone(), test_state(db), origin.to_string()).expect("spawn data plane");
+    let state = test_state(db, crate::metrics::Metrics::private());
+    spawn_data_plane(addr.clone(), state, origin.to_string()).expect("spawn data plane");
     wait_for_listener(&addr);
 
     let mut stream = tokio::net::TcpStream::connect(&addr).await.unwrap();
@@ -1953,13 +1953,7 @@ async fn spawn_plane_with_addresses(
 ) -> (String, crate::metrics::Metrics) {
     let addr = next_addr();
     let metrics = crate::metrics::Metrics::private();
-    let state = AppState {
-        db,
-        public_base_url: "http://gw.test:7501".to_string(),
-        management: crate::test_support::test_management(),
-        identity_cache: std::sync::Arc::new(crate::secret::IdentityCache::default()),
-        metrics: metrics.clone(),
-    };
+    let state = test_state(db, metrics.clone());
     let answers = answers
         .iter()
         .map(|answer| answer.parse().expect("an ip literal"))
@@ -2004,6 +1998,33 @@ fn spawn_dropping_listener(
     accepted
 }
 
+/// The error a closed candidate cursor answers with: upstream-sourced
+/// like any dial failure (502), typed as a connect error (the forward
+/// outcome), and retry-decided false so the loop stops instead of asking
+/// the same cursor again. The branch is live, not defensive: the budget
+/// can run out between the retry decision and the next ask, because
+/// `take` reads the deadline again; a retry earned by a dropped reused
+/// connection asks again too, after the walk has spent its candidates,
+/// though that one cannot fire here today: every forward is a POST,
+/// and the default `error_while_proxy` refuses to retry a non-
+/// idempotent request.
+#[test]
+fn the_closed_gate_error_stops_the_retry_loop() {
+    let error = super::no_candidate_error();
+    assert_eq!(*error.etype(), pingora::ErrorType::ConnectError);
+    assert_eq!(*error.esource(), pingora::ErrorSource::Upstream);
+    assert!(!error.retry(), "a closed cursor must not be asked again");
+    let line = error.to_string();
+    assert!(
+        line.contains(super::NO_CANDIDATE_LEFT),
+        "the line names the exhausted cursor: {line}"
+    );
+    assert!(
+        !line.contains("cause:"),
+        "no cause tail on the line: {line}"
+    );
+}
+
 /// The first candidate refuses the dial and pingora walks to the second:
 /// the answer is the second candidate's, that candidate served it once,
 /// and the refused dial is counted under one forwarded request.
@@ -2011,8 +2032,8 @@ fn spawn_dropping_listener(
 async fn a_refused_candidate_falls_over_to_the_next_one() {
     let db = migrated_test_db().await;
     let mock = spawn_mock_upstream_counting_body().await;
-    let upstream = format!("http://upstream.test:{}", port_of(&mock.base));
-    crate::test_support::seed_registry(&db, &upstream).await;
+    let authority = format!("upstream.test:{}", port_of(&mock.base));
+    crate::test_support::seed_registry(&db, &format!("http://{authority}")).await;
     let (base, metrics) = spawn_plane_with_addresses(db, &["127.0.0.2", "127.0.0.1"]).await;
 
     let body = serde_json::json!({
@@ -2032,7 +2053,7 @@ async fn a_refused_candidate_falls_over_to_the_next_one() {
     assert_eq!(response.status(), reqwest::StatusCode::OK);
     assert_eq!(mock.hits.load(std::sync::atomic::Ordering::SeqCst), 1);
     assert_eq!(
-        metrics.connect_failure_count(crate::metrics::ConnectErrorClass::Refused),
+        metrics.connect_failure_count(&authority, crate::metrics::ConnectErrorClass::Refused),
         1
     );
     await_forward_count(&metrics, crate::metrics::ForwardOutcome::Upstream2xx, 1).await;
@@ -2044,8 +2065,8 @@ async fn a_refused_candidate_falls_over_to_the_next_one() {
 async fn a_body_bearing_retry_reaches_the_upstream_whole() {
     let db = migrated_test_db().await;
     let mock = spawn_mock_upstream_counting_body().await;
-    let upstream = format!("http://upstream.test:{}", port_of(&mock.base));
-    crate::test_support::seed_registry(&db, &upstream).await;
+    let authority = format!("upstream.test:{}", port_of(&mock.base));
+    crate::test_support::seed_registry(&db, &format!("http://{authority}")).await;
     let (base, metrics) = spawn_plane_with_addresses(db, &["127.0.0.2", "127.0.0.1"]).await;
 
     let payload = "x".repeat(100 * 1024);
@@ -2078,8 +2099,8 @@ async fn exhausting_the_candidates_costs_one_dial_each() {
         let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("bind a probe");
         probe.local_addr().expect("local addr").port()
     };
-    let upstream = format!("http://upstream.test:{port}");
-    crate::test_support::seed_registry(&db, &upstream).await;
+    let authority = format!("upstream.test:{port}");
+    crate::test_support::seed_registry(&db, &format!("http://{authority}")).await;
     let (base, metrics) = spawn_plane_with_addresses(db, &["127.0.0.2", "127.0.0.3"]).await;
 
     let body = serde_json::json!({
@@ -2098,7 +2119,7 @@ async fn exhausting_the_candidates_costs_one_dial_each() {
     .await;
     assert_eq!(response.status(), reqwest::StatusCode::BAD_GATEWAY);
     assert_eq!(
-        metrics.connect_failure_count(crate::metrics::ConnectErrorClass::Refused),
+        metrics.connect_failure_count(&authority, crate::metrics::ConnectErrorClass::Refused),
         2
     );
     await_forward_count(&metrics, crate::metrics::ForwardOutcome::ConnectError, 1).await;
@@ -2115,8 +2136,8 @@ async fn an_upstream_that_drops_the_connection_is_not_replayed() {
     let dropping: std::net::SocketAddr =
         format!("127.0.0.2:{port}").parse().expect("a socket addr");
     let accepted = spawn_dropping_listener(dropping);
-    let upstream = format!("http://upstream.test:{port}");
-    crate::test_support::seed_registry(&db, &upstream).await;
+    let authority = format!("upstream.test:{port}");
+    crate::test_support::seed_registry(&db, &format!("http://{authority}")).await;
     let (base, metrics) = spawn_plane_with_addresses(db, &["127.0.0.2", "127.0.0.1"]).await;
 
     let body = serde_json::json!({
@@ -2137,7 +2158,7 @@ async fn an_upstream_that_drops_the_connection_is_not_replayed() {
     assert!(accepted.load(std::sync::atomic::Ordering::SeqCst) >= 1);
     assert_eq!(mock.hits.load(std::sync::atomic::Ordering::SeqCst), 0);
     assert_eq!(
-        metrics.connect_failure_count(crate::metrics::ConnectErrorClass::Refused),
+        metrics.connect_failure_total(crate::metrics::ConnectErrorClass::Refused),
         0
     );
     await_forward_count(&metrics, crate::metrics::ForwardOutcome::UpstreamError, 1).await;

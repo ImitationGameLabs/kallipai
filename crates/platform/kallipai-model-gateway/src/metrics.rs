@@ -548,21 +548,37 @@ impl Metrics {
             .get()
     }
 
-    /// Test-only reader: the recorded count of one connect-failure class,
-    /// summed over every upstream the gateway dialled.
+    /// Test-only reader: the recorded count of one connect-failure
+    /// series, so an assertion also pins the upstream a failure landed
+    /// on, not just its class.
     #[cfg(test)]
-    pub(crate) fn connect_failure_count(&self, error_class: ConnectErrorClass) -> u64 {
-        use prometheus::core::Collector as _;
+    pub(crate) fn connect_failure_count(
+        &self,
+        upstream: &str,
+        error_class: ConnectErrorClass,
+    ) -> u64 {
+        self.connect_failures
+            .with_label_values(&[upstream, error_class.as_str()])
+            .get()
+    }
+
+    /// Test-only reader: the recorded count of one connect-failure
+    /// class on every upstream, for the assertions that say a class
+    /// was recorded nowhere.
+    #[cfg(test)]
+    pub(crate) fn connect_failure_total(&self, error_class: ConnectErrorClass) -> u64 {
+        use prometheus::core::Collector;
+
         self.connect_failures
             .collect()
             .iter()
             .flat_map(|family| family.get_metric())
-            .filter(|metric| {
-                metric.get_label().iter().any(|label| {
+            .filter(|series| {
+                series.get_label().iter().any(|label| {
                     label.name() == "error_class" && label.value() == error_class.as_str()
                 })
             })
-            .map(|metric| metric.get_counter().value() as u64)
+            .map(|series| series.get_counter().value() as u64)
             .sum()
     }
 
@@ -859,6 +875,23 @@ mod tests {
                 .connect_failures
                 .with_label_values(&["owner/p1", "tls"])
                 .get(),
+            1
+        );
+    }
+
+    /// The class-wide reader sums every upstream's series, so a class
+    /// recorded under an address the assertion did not name still
+    /// shows up here.
+    #[test]
+    fn connect_failure_total_covers_every_upstream() {
+        let metrics = Metrics::private();
+        metrics.record_connect_failure("owner/p1", ConnectErrorClass::Refused);
+        metrics.record_connect_failure("owner/p2", ConnectErrorClass::Refused);
+        metrics.record_connect_failure("owner/p2", ConnectErrorClass::Tls);
+        assert_eq!(metrics.connect_failure_total(ConnectErrorClass::Refused), 2);
+        assert_eq!(metrics.connect_failure_total(ConnectErrorClass::Tls), 1);
+        assert_eq!(
+            metrics.connect_failure_count("owner/p1", ConnectErrorClass::Refused),
             1
         );
     }
