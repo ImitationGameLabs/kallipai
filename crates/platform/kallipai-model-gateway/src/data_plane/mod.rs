@@ -9,7 +9,8 @@
 //!   Everything that can answer 4xx/5xx without an upstream happens
 //!   here.
 //! - `upstream_peer`: builds the dial target for the selection's next
-//!   candidate.
+//!   candidate, and answers with no candidate only once the cursor's
+//!   gate has closed.
 //! - `upstream_request_filter`: the wire-path rewrite, the credential
 //!   header injection and the safe-header passthrough.
 //! - `response_filter`: the CORS response headers.
@@ -18,7 +19,7 @@
 //!   is observed here.
 //! - `connected_to_upstream` / `fail_to_connect`: the connection
 //!   instruments (establishment duration from the pingora digest;
-//!   failures by class).
+//!   failures by class), and the retry decision a failed dial gets.
 //! - `logging`: the terminal phase -- the single point every forwarded
 //!   request is counted at, and where the in-flight gauge decrements.
 //!
@@ -416,13 +417,25 @@ pub fn spawn_data_plane(
     state: AppState,
     cors_origins: String,
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
+    let resolver = Resolver::system(state.metrics.clone());
+    spawn_data_plane_with_resolver(listen, state, cors_origins, resolver)
+}
+
+/// `spawn_data_plane` with the resolver handed in, so a caller can pin
+/// the addresses a dial walks: the tests drive failover this way, while
+/// the production path passes the system resolver.
+pub(crate) fn spawn_data_plane_with_resolver(
+    listen: String,
+    state: AppState,
+    cors_origins: String,
+    resolver: Resolver,
+) -> std::io::Result<std::thread::JoinHandle<()>> {
     drop(std::net::TcpListener::bind(&listen)?);
     std::thread::Builder::new()
         .name("data-plane-pingora".to_string())
         .spawn(move || {
             let mut server = Server::new(None).expect("pingora server");
             server.bootstrap();
-            let resolver = Resolver::system(state.metrics.clone());
             let mut service = http_proxy_service(
                 &server.configuration,
                 GatewayProxy {
@@ -487,13 +500,27 @@ impl ProxyHttp for GatewayProxy {
         _session: &mut Session,
         ctx: &mut Self::CTX,
     ) -> Result<Box<HttpPeer>> {
-        // The selection's cursor starts at the first candidate; a second
-        // ask takes the next one until the list or the dial budget runs
-        // out. Nothing asks twice today: every forwarded route is a POST,
-        // and pingora's default policy does not retry a non-idempotent
-        // request, so one dial takes candidate 0.
+        // Every dial starts from the same instrument state: a second
+        // ask after a failed dial must not read the first one's facts.
+        ctx.t1 = None;
+        ctx.upstream_status = None;
+        ctx.connected = false;
+        // The cursor hands out the next candidate while one remains and
+        // the dial budget is unspent. An empty answer is pingora asking
+        // for a dial this request has no address for: the list or the
+        // budget ended the walk, and no peer is invented to cover it.
         let selection = staged_selection(ctx)?;
-        Ok(Box::new(selection.next_peer()))
+        let Some(peer) = selection.next_peer() else {
+            // This error carries no cause, so `Error::create` hands the
+            // retry loop a `Decided(false)` and it stops here at once: the
+            // walk is over, and asking the same cursor again repeats the
+            // question. A cause added here later would lend its own
+            // `RetryType`, so the site would have to answer for the retry
+            // itself rather than inherit this.
+            return Err(pingora::Error::new_up(pingora::ErrorType::ConnectError)
+                .more_context(NO_CANDIDATE_LEFT));
+        };
+        Ok(Box::new(peer))
     }
 
     async fn upstream_request_filter(
@@ -571,7 +598,7 @@ impl ProxyHttp for GatewayProxy {
         _session: &mut Session,
         _peer: &HttpPeer,
         ctx: &mut Self::CTX,
-        e: Box<pingora::Error>,
+        mut e: Box<pingora::Error>,
     ) -> Box<pingora::Error> {
         // One failed dial, not one failed request: a retry redials and
         // counts here again, while the terminal phase still counts the
@@ -581,6 +608,15 @@ impl ProxyHttp for GatewayProxy {
                 .metrics
                 .record_connect_failure(&selection.authority, connect_error_class(e.etype()));
         }
+        // The gate is read before the next dial is asked for: an address
+        // is worth another dial only while one remains and the budget
+        // lasts, and this answer is what turns that into a retry.
+        let can_retry = ctx.selection.as_ref().is_some_and(|s| s.can_retry());
+        // Both arms carry weight: the gate says whether a candidate is
+        // left, the type filter whether a different address can mend the
+        // failure. `set_retry` always writes `Decided`, so the reused-
+        // connection arm that panics `retry()` stays unreachable.
+        e.set_retry(retry_connect_error(e.etype(), can_retry));
         e
     }
 
@@ -660,6 +696,13 @@ macro_rules! failure_line {
 /// worker.
 const PHASE_SLIP_NO_SELECTION: &str = "a forwarding phase ran without a selection";
 const PHASE_SLIP_NOT_FORWARD: &str = "the rewrite phase ran on a route that does not forward";
+
+/// The text an exhausted candidate cursor answers with. No dial was made,
+/// so it must not read like an upstream refusing a connection: the
+/// operator tells the two apart by this line, and `connect_error_class`
+/// never sees it.
+const NO_CANDIDATE_LEFT: &str =
+    "no candidate left to dial: the resolver's list is exhausted or the dial budget is spent";
 
 /// The selection a forwarding phase runs on, staged by
 /// `request_filter` before any later phase runs. It is handed out
@@ -788,6 +831,31 @@ fn connect_error_class(error: &pingora::ErrorType) -> ConnectErrorClass {
     }
 }
 
+/// Whether a failed dial earns another candidate. `can_retry` is the
+/// cursor's gate, and the type filter keeps the answer off failures a
+/// second address cannot mend: a certificate the client rejects or a
+/// socket it cannot build fails the same way wherever it dials, while
+/// the arms listed are the connect and TLS-handshake failures a
+/// different address can survive.
+fn retry_connect_error(error: &pingora::ErrorType, can_retry: bool) -> bool {
+    use pingora::ErrorType::{
+        ConnectError, ConnectNoRoute, ConnectProxyFailure, ConnectRefused, ConnectTimedout,
+        HandshakeError, TLSHandshakeFailure, TLSHandshakeTimedout,
+    };
+    can_retry
+        && matches!(
+            error,
+            ConnectRefused
+                | ConnectTimedout
+                | ConnectNoRoute
+                | ConnectError
+                | ConnectProxyFailure
+                | TLSHandshakeFailure
+                | TLSHandshakeTimedout
+                | HandshakeError
+        )
+}
+
 #[cfg(test)]
 mod connect_class_tests {
     use super::connect_error_class;
@@ -822,6 +890,52 @@ mod connect_class_tests {
             connect_error_class(&ErrorType::ConnectError),
             ConnectErrorClass::Other
         );
+    }
+}
+
+#[cfg(test)]
+mod retry_connect_error_tests {
+    use super::retry_connect_error;
+    use pingora::ErrorType;
+
+    #[test]
+    fn a_dial_failure_earns_another_candidate_while_the_gate_is_open() {
+        for error in [
+            ErrorType::ConnectRefused,
+            ErrorType::ConnectTimedout,
+            ErrorType::ConnectNoRoute,
+            ErrorType::ConnectError,
+            ErrorType::ConnectProxyFailure,
+            ErrorType::TLSHandshakeFailure,
+            ErrorType::TLSHandshakeTimedout,
+            ErrorType::HandshakeError,
+        ] {
+            assert!(retry_connect_error(&error, true), "{error:?}");
+        }
+    }
+
+    #[test]
+    fn a_failure_no_other_address_can_mend_is_not_retried() {
+        for error in [
+            ErrorType::InvalidCert,
+            ErrorType::TLSWantX509Lookup,
+            ErrorType::InternalError,
+            ErrorType::BindError,
+            ErrorType::SocketError,
+        ] {
+            assert!(!retry_connect_error(&error, true), "{error:?}");
+        }
+    }
+
+    #[test]
+    fn a_closed_gate_overrides_every_class() {
+        for error in [
+            ErrorType::ConnectRefused,
+            ErrorType::ConnectTimedout,
+            ErrorType::TLSHandshakeFailure,
+        ] {
+            assert!(!retry_connect_error(&error, false), "{error:?}");
+        }
     }
 }
 

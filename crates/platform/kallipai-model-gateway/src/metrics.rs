@@ -548,6 +548,24 @@ impl Metrics {
             .get()
     }
 
+    /// Test-only reader: the recorded count of one connect-failure class,
+    /// summed over every upstream the gateway dialled.
+    #[cfg(test)]
+    pub(crate) fn connect_failure_count(&self, error_class: ConnectErrorClass) -> u64 {
+        use prometheus::core::Collector as _;
+        self.connect_failures
+            .collect()
+            .iter()
+            .flat_map(|family| family.get_metric())
+            .filter(|metric| {
+                metric.get_label().iter().any(|label| {
+                    label.name() == "error_class" && label.value() == error_class.as_str()
+                })
+            })
+            .map(|metric| metric.get_counter().value() as u64)
+            .sum()
+    }
+
     /// Test-only reader: the recorded count of one identity-outcome
     /// series.
     #[cfg(test)]

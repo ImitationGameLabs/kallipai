@@ -103,10 +103,10 @@ const MAX_CANDIDATES: usize = 8;
 /// there, before its ACK can arrive. That schedule sets the
 /// ceiling; the handshake reads the same field rather than a value
 /// of its own, and three seconds sits well above what it needs.
-/// The rest of the budget stays unspent -- nothing asks for a
-/// second candidate today, so such a dial ends in a 502 at three
-/// seconds. Fixed rather than configurable until an operator asks
-/// for a knob.
+/// The rest of the budget stays unspent on a failed dial: the
+/// next candidate gets what is left, so the ceiling is one
+/// address's cost rather than the whole request's. Fixed
+/// rather than configurable until an operator asks for a knob.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// How much wall time one request may keep walking candidates: the
@@ -119,19 +119,17 @@ const DIAL_BUDGET: Duration = Duration::from_secs(8);
 
 /// The candidate cursor: which address the next dial takes. The gate
 /// opens while candidates remain and the dial budget is unspent; once
-/// it closes, the cursor keeps handing back the address it gave out
-/// last, so a caller never has to decide what an exhausted list dials.
+/// it closes the cursor hands out nothing, so a caller never has to
+/// decide what an exhausted list dials.
 ///
-/// `next` is the candidate an open gate would hand out and `last` the
-/// one handed out most recently, so `last` sits one behind it; before
-/// any dial both are 0, which is what lets a gate that is already
-/// closed still start at the first candidate.
+/// `next` is the candidate an open gate would hand out; before any
+/// dial it is 0, and a closed gate never consults it.
 ///
-/// `candidate_count` is at least one -- `resolve_candidates` refuses an
-/// empty answer -- so the cursor can always hand out an index.
+/// `candidate_count` is at least one -- `resolve_candidates` refuses
+/// an empty answer -- so the cap is the only thing that can hide an
+/// address.
 pub(crate) struct Attempts {
     next: usize,
-    last: usize,
     limit: usize,
     deadline: Instant,
 }
@@ -142,21 +140,27 @@ impl Attempts {
     pub(crate) fn new(candidate_count: usize, deadline: Instant) -> Self {
         Self {
             next: 0,
-            last: 0,
             limit: candidate_count.min(MAX_CANDIDATES),
             deadline,
         }
     }
 
-    /// The address index the next dial takes: the following candidate
-    /// while the gate is open, and the last one handed out once it
-    /// closes.
-    pub(crate) fn next_index(&mut self) -> usize {
-        if self.next < self.limit && Instant::now() < self.deadline {
-            self.last = self.next;
-            self.next += 1;
+    /// Whether the gate is still open: candidates remain and the dial
+    /// budget is unspent. A caller that wants to know before it asks
+    /// for an address reads this, not the cursor's insides.
+    pub(crate) fn can_retry(&self) -> bool {
+        self.next < self.limit && Instant::now() < self.deadline
+    }
+
+    /// The address index the next dial takes, or nothing once the gate
+    /// has closed.
+    pub(crate) fn take(&mut self) -> Option<usize> {
+        if !self.can_retry() {
+            return None;
         }
-        self.last
+        let index = self.next;
+        self.next += 1;
+        Some(index)
     }
 
     /// The dial budget left: how long a dial starting now may take. It
@@ -193,12 +197,18 @@ impl Selection {
         peer
     }
 
+    /// Whether another candidate is worth a dial: the attempt cursor's
+    /// gate, asked without asking for an address.
+    pub(crate) fn can_retry(&self) -> bool {
+        self.attempts.can_retry()
+    }
+
     /// The peer for the next dial: the following candidate in resolver
-    /// order while the candidate list and the dial budget last, and the
-    /// last candidate tried once either runs out.
-    pub(crate) fn next_peer(&mut self) -> HttpPeer {
-        let index = self.attempts.next_index();
-        self.peer_at(index)
+    /// order while the candidate list and the dial budget last, and
+    /// nothing once either runs out.
+    pub(crate) fn next_peer(&mut self) -> Option<HttpPeer> {
+        let index = self.attempts.take()?;
+        Some(self.peer_at(index))
     }
 }
 
@@ -356,8 +366,8 @@ mod tests {
     /// step gets `CONNECT_TIMEOUT` while the budget is the longer of the
     /// two, the whole L4-plus-TLS sequence gets the remaining budget, and
     /// a budget shorter than `CONNECT_TIMEOUT` caps the connect step as
-    /// well. A spent budget leaves both at zero: the budget is the hard
-    /// bound, so there is no floor under it.
+    /// well. A spent budget hands out no peer at all: the gate closes
+    /// before a dial is built, so there is no zero-timeout peer to use.
     ///
     /// The upstream H1 and H2 client sessions copy the peer's read and
     /// write timeouts onto the stream (pingora-proxy's `proxy_1to1` at
@@ -373,7 +383,9 @@ mod tests {
             tls: false,
             sni: String::new(),
         });
-        let peer = selection.next_peer();
+        let peer = selection
+            .next_peer()
+            .expect("the first candidate is in budget");
         assert_eq!(peer.options.connection_timeout, Some(CONNECT_TIMEOUT));
         assert!(peer.options.read_timeout.is_none());
         assert!(peer.options.write_timeout.is_none());
@@ -381,7 +393,9 @@ mod tests {
         assert!(total <= DIAL_BUDGET);
         assert!(total > DIAL_BUDGET - Duration::from_secs(1));
         selection.attempts = Attempts::new(2, Instant::now() + Duration::from_secs(2));
-        let close = selection.next_peer();
+        let close = selection
+            .next_peer()
+            .expect("a two-second budget still dials");
         let capped = close.options.connection_timeout.unwrap_or_default();
         assert_eq!(
             capped,
@@ -390,9 +404,7 @@ mod tests {
         assert!(capped < CONNECT_TIMEOUT);
         assert!(capped > Duration::from_secs(1));
         selection.attempts = Attempts::new(2, Instant::now());
-        let spent = selection.next_peer();
-        assert_eq!(spent.options.connection_timeout, Some(Duration::ZERO));
-        assert_eq!(spent.options.total_connection_timeout, Some(Duration::ZERO));
+        assert!(selection.next_peer().is_none());
     }
 
     /// The dial bound is a premise, not a tuning value: three seconds is
@@ -405,41 +417,40 @@ mod tests {
     }
 
     /// The cursor walks the candidates in the order the resolver
-    /// answered, then keeps handing back the last one it gave out.
+    /// answered, then closes.
     #[test]
     fn attempts_follow_the_resolver_order() {
         let mut attempts = Attempts::starting_now(3);
-        let served: Vec<usize> = (0..4).map(|_| attempts.next_index()).collect();
-        assert_eq!(served, vec![0, 1, 2, 2]);
+        let served: Vec<Option<usize>> = (0..4).map(|_| attempts.take()).collect();
+        assert_eq!(served, vec![Some(0), Some(1), Some(2), None]);
     }
 
     /// A spent budget closes the gate before the first dial: the cursor
-    /// hands out the first candidate rather than jumping to the last,
-    /// and it does not advance afterwards.
+    /// hands out nothing, while a fresh cursor still starts at the first
+    /// candidate.
     #[test]
     fn the_budget_stops_the_attempts() {
         let spent_at = Instant::now() - Duration::from_secs(1);
         let mut spent = Attempts::new(3, spent_at);
-        assert_eq!(spent.next_index(), 0);
-        assert_eq!(spent.next_index(), 0);
+        assert!(spent.take().is_none());
+        assert!(spent.take().is_none());
         let mut fresh = Attempts::starting_now(3);
-        assert_eq!(fresh.next_index(), 0);
-        assert_eq!(fresh.next_index(), 1);
+        assert_eq!(fresh.take(), Some(0));
+        assert_eq!(fresh.take(), Some(1));
     }
 
-    /// A budget that runs out after the cursor moved keeps the cursor
-    /// where it stands: the gate closes onto the index handed out last,
-    /// not onto the first candidate and not onto the end of the list.
+    /// A budget that runs out after the cursor moved closes the gate
+    /// where the cursor stands: what it has behind it no longer buys a
+    /// dial.
     #[test]
-    fn the_budget_closing_midway_repeats_the_last_index() {
+    fn the_budget_closing_midway_hands_out_nothing() {
         let mut attempts = Attempts {
             next: 2,
-            last: 1,
             limit: 3,
             deadline: Instant::now() - Duration::from_secs(1),
         };
-        assert_eq!(attempts.next_index(), 1);
-        assert_eq!(attempts.next_index(), 1);
+        assert!(attempts.take().is_none());
+        assert!(attempts.take().is_none());
     }
 
     /// Nine candidates still buy eight dials: the cap closes the gate
@@ -447,21 +458,38 @@ mod tests {
     #[test]
     fn the_candidate_cap_bounds_the_attempts() {
         let mut attempts = Attempts::starting_now(9);
-        let served: Vec<usize> = (0..9).map(|_| attempts.next_index()).collect();
-        assert_eq!(served, vec![0, 1, 2, 3, 4, 5, 6, 7, 7]);
+        let served: Vec<Option<usize>> = (0..9).map(|_| attempts.take()).collect();
+        assert_eq!(
+            served,
+            vec![
+                Some(0),
+                Some(1),
+                Some(2),
+                Some(3),
+                Some(4),
+                Some(5),
+                Some(6),
+                Some(7),
+                None
+            ]
+        );
     }
 
     /// The dial follows the cursor: the second dial takes the second
-    /// candidate, and once the list is spent the dials keep taking the
-    /// last one.
+    /// candidate, and once the list is spent there is no dial left to
+    /// make.
     #[test]
     fn next_peer_follows_the_cursor_over_the_candidates() {
         let mut selection = selection_with(DialParams {
             tls: false,
             sni: "upstream.test".to_string(),
         });
-        let first = selection.next_peer();
-        let second = selection.next_peer();
+        let first = selection
+            .next_peer()
+            .expect("the first candidate is dialled");
+        let second = selection
+            .next_peer()
+            .expect("the second candidate is dialled");
         let third = selection.next_peer();
         assert_eq!(
             first._address.as_inet(),
@@ -471,9 +499,19 @@ mod tests {
             second._address.as_inet(),
             Some(&SocketAddr::from(([192, 0, 2, 2], 8443)))
         );
-        assert_eq!(
-            third._address.as_inet(),
-            Some(&SocketAddr::from(([192, 0, 2, 2], 8443)))
-        );
+        assert!(third.is_none());
+    }
+
+    /// A gate that closed before the first dial hands out no peer: the
+    /// cursor is the only thing that answers whether a dial is left.
+    #[test]
+    fn a_closed_gate_hands_out_no_peer() {
+        let mut selection = selection_with(DialParams {
+            tls: false,
+            sni: String::new(),
+        });
+        selection.attempts = Attempts::new(2, Instant::now() - Duration::from_secs(1));
+        assert!(!selection.can_retry());
+        assert!(selection.next_peer().is_none());
     }
 }

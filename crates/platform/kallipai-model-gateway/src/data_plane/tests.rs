@@ -9,7 +9,9 @@ use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+use super::resolver::{Lookup, Resolver};
 use super::spawn_data_plane;
+use super::spawn_data_plane_with_resolver;
 use crate::state::AppState;
 use crate::test_support::{ObservedSpan, TEST_TAGMA_BEARER, UPSTREAM_KEY, migrated_test_db};
 
@@ -1876,4 +1878,267 @@ async fn a_forward_to_an_unresolvable_upstream_is_a_retryable_503() {
         line.contains("bad host"),
         "the host rides the error text: {line}"
     );
+}
+
+/// An upstream mock that answers the chat path, recording the body it
+/// received and how many requests it served.
+struct MockUpstream {
+    base: String,
+    body: std::sync::Arc<tokio::sync::Mutex<Vec<u8>>>,
+    hits: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+async fn spawn_mock_upstream_counting_body() -> MockUpstream {
+    use axum::routing::post;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind mock upstream");
+    let addr = listener.local_addr().expect("local addr");
+    let body = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::<u8>::new()));
+    let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let body_for_handler = body.clone();
+    let hits_for_handler = hits.clone();
+    let app = axum::Router::new().route(
+        "/chat/completions",
+        post(move |received: axum::body::Bytes| {
+            let body = body_for_handler.clone();
+            let hits = hits_for_handler.clone();
+            async move {
+                hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                body.lock().await.extend_from_slice(&received);
+                (
+                    axum::http::StatusCode::OK,
+                    axum::Json(serde_json::json!({
+                        "id": "cmpl-candidate-1",
+                        "object": "chat.completion",
+                        "choices": [{"message": {"role": "assistant", "content": "hi"}}],
+                        "usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5}
+                    })),
+                )
+            }
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, app)
+            .await
+            .expect("mock upstream serve");
+    });
+    MockUpstream {
+        base: format!("http://{addr}"),
+        body,
+        hits,
+    }
+}
+
+/// The resolver answer the tests script: every host resolves to the same
+/// addresses, in the order given.
+struct FixedAnswers(Vec<std::net::IpAddr>);
+
+#[async_trait::async_trait]
+impl Lookup for FixedAnswers {
+    async fn lookup(&self, _host: &str) -> std::io::Result<Vec<std::net::IpAddr>> {
+        Ok(self.0.clone())
+    }
+}
+
+fn port_of(base: &str) -> &str {
+    base.rsplit(':').next().expect("a base URL carries a port")
+}
+
+/// The data plane over a resolver scripted with `answers`: the candidate
+/// list every dial walks is the resolver's answer, in its order.
+async fn spawn_plane_with_addresses(
+    db: crate::db::Db,
+    answers: &[&str],
+) -> (String, crate::metrics::Metrics) {
+    let addr = next_addr();
+    let metrics = crate::metrics::Metrics::private();
+    let state = AppState {
+        db,
+        public_base_url: "http://gw.test:7501".to_string(),
+        management: crate::test_support::test_management(),
+        identity_cache: std::sync::Arc::new(crate::secret::IdentityCache::default()),
+        metrics: metrics.clone(),
+    };
+    let answers = answers
+        .iter()
+        .map(|answer| answer.parse().expect("an ip literal"))
+        .collect();
+    let resolver = Resolver::with_lookup(
+        metrics.clone(),
+        Duration::from_secs(1),
+        std::sync::Arc::new(FixedAnswers(answers)),
+    );
+    spawn_data_plane_with_resolver(addr.clone(), state, String::new(), resolver)
+        .expect("spawn data plane");
+    wait_for_listener(&addr);
+    (format!("http://{addr}"), metrics)
+}
+
+/// A listener that accepts and closes at once: the dial succeeds and the
+/// request dies on the way in, which is the failure a retry must not
+/// paper over. Returns the count of connections it took.
+fn spawn_dropping_listener(
+    addr: std::net::SocketAddr,
+) -> std::sync::Arc<std::sync::atomic::AtomicUsize> {
+    let listener = std::net::TcpListener::bind(addr).expect("bind dropping listener");
+    listener
+        .set_nonblocking(true)
+        .expect("a non-blocking listener");
+    let accepted = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = accepted.clone();
+    std::thread::spawn(move || {
+        loop {
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    drop(stream);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(_) => return,
+            }
+        }
+    });
+    accepted
+}
+
+/// The first candidate refuses the dial and pingora walks to the second:
+/// the answer is the second candidate's, that candidate served it once,
+/// and the refused dial is counted under one forwarded request.
+#[tokio::test]
+async fn a_refused_candidate_falls_over_to_the_next_one() {
+    let db = migrated_test_db().await;
+    let mock = spawn_mock_upstream_counting_body().await;
+    let upstream = format!("http://upstream.test:{}", port_of(&mock.base));
+    crate::test_support::seed_registry(&db, &upstream).await;
+    let (base, metrics) = spawn_plane_with_addresses(db, &["127.0.0.2", "127.0.0.1"]).await;
+
+    let body = serde_json::json!({
+        "model": "deepseek-chat",
+        "messages": [{"role": "user", "content": "hi"}]
+    })
+    .to_string();
+    let response = post_generation(
+        &base,
+        "/chat/completions",
+        TEST_TAGMA_BEARER,
+        Some("p1"),
+        &body,
+        &[],
+    )
+    .await;
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    assert_eq!(mock.hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(
+        metrics.connect_failure_count(crate::metrics::ConnectErrorClass::Refused),
+        1
+    );
+    await_forward_count(&metrics, crate::metrics::ForwardOutcome::Upstream2xx, 1).await;
+}
+
+/// The dial fails before the request body is read, so the second dial
+/// hands the upstream the body whole: 100 KiB arrives byte for byte.
+#[tokio::test]
+async fn a_body_bearing_retry_reaches_the_upstream_whole() {
+    let db = migrated_test_db().await;
+    let mock = spawn_mock_upstream_counting_body().await;
+    let upstream = format!("http://upstream.test:{}", port_of(&mock.base));
+    crate::test_support::seed_registry(&db, &upstream).await;
+    let (base, metrics) = spawn_plane_with_addresses(db, &["127.0.0.2", "127.0.0.1"]).await;
+
+    let payload = "x".repeat(100 * 1024);
+    let body = serde_json::json!({
+        "model": "deepseek-chat",
+        "messages": [{"role": "user", "content": payload}]
+    })
+    .to_string();
+    let response = post_generation(
+        &base,
+        "/chat/completions",
+        TEST_TAGMA_BEARER,
+        Some("p1"),
+        &body,
+        &[],
+    )
+    .await;
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    assert_eq!(mock.body.lock().await.clone(), body.as_bytes());
+    await_forward_count(&metrics, crate::metrics::ForwardOutcome::Upstream2xx, 1).await;
+}
+
+/// Every candidate is dialled once and the request dies as one connect
+/// failure: the walk does not revisit an address to fill a retry count,
+/// and the client reads a 502.
+#[tokio::test]
+async fn exhausting_the_candidates_costs_one_dial_each() {
+    let db = migrated_test_db().await;
+    let port = {
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("bind a probe");
+        probe.local_addr().expect("local addr").port()
+    };
+    let upstream = format!("http://upstream.test:{port}");
+    crate::test_support::seed_registry(&db, &upstream).await;
+    let (base, metrics) = spawn_plane_with_addresses(db, &["127.0.0.2", "127.0.0.3"]).await;
+
+    let body = serde_json::json!({
+        "model": "deepseek-chat",
+        "messages": [{"role": "user", "content": "hi"}]
+    })
+    .to_string();
+    let response = post_generation(
+        &base,
+        "/chat/completions",
+        TEST_TAGMA_BEARER,
+        Some("p1"),
+        &body,
+        &[],
+    )
+    .await;
+    assert_eq!(response.status(), reqwest::StatusCode::BAD_GATEWAY);
+    assert_eq!(
+        metrics.connect_failure_count(crate::metrics::ConnectErrorClass::Refused),
+        2
+    );
+    await_forward_count(&metrics, crate::metrics::ForwardOutcome::ConnectError, 1).await;
+}
+
+/// A dial that connects and then dies on the way in is not replayed: the
+/// address answered the handshake, so the failure is upstream-side and
+/// the second candidate is never dialled.
+#[tokio::test]
+async fn an_upstream_that_drops_the_connection_is_not_replayed() {
+    let db = migrated_test_db().await;
+    let mock = spawn_mock_upstream_counting_body().await;
+    let port = port_of(&mock.base).to_string();
+    let dropping: std::net::SocketAddr =
+        format!("127.0.0.2:{port}").parse().expect("a socket addr");
+    let accepted = spawn_dropping_listener(dropping);
+    let upstream = format!("http://upstream.test:{port}");
+    crate::test_support::seed_registry(&db, &upstream).await;
+    let (base, metrics) = spawn_plane_with_addresses(db, &["127.0.0.2", "127.0.0.1"]).await;
+
+    let body = serde_json::json!({
+        "model": "deepseek-chat",
+        "messages": [{"role": "user", "content": "hi"}]
+    })
+    .to_string();
+    let response = post_generation(
+        &base,
+        "/chat/completions",
+        TEST_TAGMA_BEARER,
+        Some("p1"),
+        &body,
+        &[],
+    )
+    .await;
+    assert_eq!(response.status(), reqwest::StatusCode::BAD_GATEWAY);
+    assert!(accepted.load(std::sync::atomic::Ordering::SeqCst) >= 1);
+    assert_eq!(mock.hits.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert_eq!(
+        metrics.connect_failure_count(crate::metrics::ConnectErrorClass::Refused),
+        0
+    );
+    await_forward_count(&metrics, crate::metrics::ForwardOutcome::UpstreamError, 1).await;
 }
