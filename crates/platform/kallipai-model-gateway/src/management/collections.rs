@@ -15,16 +15,14 @@ use crate::management::user_routes::{
 };
 use crate::management::validate_set_name;
 use crate::registry::{
-    self, EVERYONE_GROUP_ID, collection, platform_groups, platform_publications, profile,
-    profile_set,
+    self, EVERYONE_GROUP_ID, collection, platform_groups, platform_publications, profile_set,
 };
 use crate::state::AppState;
 use kallipai_common::protocol::ApiError;
 
 use sea_orm::sea_query::{Expr, Query as SeaQuery};
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder, Set,
-    TransactionTrait,
+    ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, Set, TransactionTrait,
 };
 
 // -- collections -----------------------------------------------------------
@@ -67,21 +65,14 @@ async fn admin_collection_view<C: sea_orm::ConnectionTrait>(
         .map_err(db::map_db_err)?;
     let mut publications: Vec<String> = pubs.into_iter().map(|p| p.group_id).collect();
     publications.sort();
-    let set_count = base.sets.len() as u64;
-    let profile_count = profile::Entity::find()
-        .filter(profile::Column::Owner.eq(owner))
-        .filter(profile::Column::CollectionName.eq(base.name.clone()))
-        .count(db)
-        .await
-        .map_err(db::map_db_err)?;
     Ok(AdminCollectionView {
         name: base.name,
         description: base.description,
         sets: base.sets,
         default_set: base.default_set,
         publications,
-        profile_count,
-        set_count,
+        profile_count: base.profile_count,
+        set_count: base.set_count,
     })
 }
 

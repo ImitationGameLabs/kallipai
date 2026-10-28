@@ -513,7 +513,12 @@ const SYNONYMS: string[][] = [
     "manage_gateway_provider_actions_aria",
     "manage_profiles_provider_actions_aria",
   ],
-  ["manage_gateway_parking", "manage_profiles_parking"],
+  ["manage_gateway_draft_badge", "user_gateway_profile_draft"],
+  [
+    "manage_gateway_placement_collection_label",
+    "user_gateway_profile_collection",
+    "user_gateway_set_dialog_collection_label",
+  ],
   ["manage_gateway_set_add", "user_gateway_set_add"],
   ["manage_profiles_tab_local", "manage_schedules_clock_local"],
   ["manage_gateway_provider_key", "user_gateway_provider_key"],
@@ -592,7 +597,6 @@ const SYNONYMS: string[][] = [
   ["rooms_name_label", "user_gateway_set_name"],
   ["tagma_drawer_title", "nav_breadcrumb_agents"],
   ["manage_budget_unlimited", "tagma_status_unlimited"],
-  ["agent_state_parked", "user_gateway_profile_parked"],
   ["manage_gateway_provider_edit_title", "user_gateway_provider_edit_title"],
   ["manage_gateway_provider_add", "user_gateway_provider_add"],
   ["manage_gateway_provider_id", "user_gateway_provider_id"],
@@ -600,10 +604,6 @@ const SYNONYMS: string[][] = [
   ["user_gateway_publish", "manage_gateway_collection_publish"],
   ["user_gateway_unpublish", "manage_gateway_collection_unpublish"],
   ["manage_gateway_collections", "user_gateway_collections"],
-  [
-    "manage_gateway_placement_collection_label",
-    "user_gateway_set_dialog_collection_label",
-  ],
   [
     "manage_gateway_collection_add",
     "manage_gateway_collection_dialog_create_title",

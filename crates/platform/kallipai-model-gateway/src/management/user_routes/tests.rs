@@ -115,6 +115,32 @@ async fn user_domain_crud_round_trip() {
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["members"], serde_json::json!(["p-user"]));
+    // A second row in the same collection stays a draft; the counts the
+    // delete confirmation states carry both rows.
+    let (status, body) = send(
+        app(state.clone()),
+        cookie_req(
+            "POST",
+            "/user/collections/scratch/profiles",
+            user,
+            true,
+            Some(serde_json::json!({
+                "profile_id": "p-draft",
+                "provider_id": "up1",
+                "model": "deepseek-chat"
+            })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = send(
+        app(state.clone()),
+        cookie_req("GET", "/user/collections/scratch", user, false, None),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["set_count"], 2, "{body}");
+    assert_eq!(body["profile_count"], 2, "{body}");
     // Group, collection, publish.
     let (status, body) = send(
         app(state.clone()),
@@ -189,6 +215,27 @@ async fn user_domain_crud_round_trip() {
         .find(|r| r.entity == "provider" && r.entity_id == "up1")
         .expect("provider audit row");
     assert_eq!(row.actor, "user-plain");
+    // The delete takes the collection and its rows with it: the list no
+    // longer carries it, so the counts it stated are spent.
+    let (status, body) = send(
+        app(state.clone()),
+        cookie_req("DELETE", "/user/collections/scratch", user, true, None),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = send(
+        app(state.clone()),
+        cookie_req("GET", "/user/collections", user, false, None),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let names: Vec<&str> = body["collections"]
+        .as_array()
+        .expect("collection list")
+        .iter()
+        .filter_map(|c| c["name"].as_str())
+        .collect();
+    assert!(!names.contains(&"scratch"), "{body}");
 }
 
 /// Ownership is the session: the user face shows only the caller's

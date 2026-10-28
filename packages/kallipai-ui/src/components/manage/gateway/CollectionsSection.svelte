@@ -5,10 +5,7 @@
   // subface; every mutation (edit, remove, publish) lives there. The
   // header row carries the create trigger (the CollectionDialog).
   import { adminGatewayCollectionPath } from "../../../lib/shell/routes.ts";
-  import type {
-    AdminCollectionRow,
-    AdminSetRow,
-  } from "../../../lib/manage/gateway/client.ts";
+  import type { AdminCollectionRow } from "../../../lib/manage/gateway/client.ts";
   import {
     manage_gateway_collection_add,
     manage_gateway_collection_profiles_count,
@@ -20,14 +17,11 @@
 
   let {
     collections,
-    sets,
     groups,
     onAdd,
   }: {
     /** The catalog's collections (empty while the first read runs). */
     collections: readonly AdminCollectionRow[];
-    /** The catalog's sets: the member-count source for the cards. */
-    sets: readonly AdminSetRow[];
     /** The platform groups: the audience names behind the ids. */
     groups: readonly { group_id: string; name: string }[];
     onAdd: () => void;
@@ -35,22 +29,6 @@
 
   const groupName = (groupId: string): string =>
     groups.find((g) => g.group_id === groupId)?.name ?? groupId;
-
-  // Set name to member-profile count: a collection's profile count is
-  // the sum over its member sets (sets not yet read count zero).
-  const profilesBySetName = $derived.by(() => {
-    const map = new Map<string, number>();
-    for (const set of sets) map.set(set.name, set.profiles.length);
-    return map;
-  });
-
-  const profilesIn = (collection: AdminCollectionRow): number => {
-    let total = 0;
-    for (const name of collection.sets) {
-      total += profilesBySetName.get(name) ?? 0;
-    }
-    return total;
-  };
 </script>
 
 <section class="space-y-3">
@@ -85,13 +63,13 @@
         <div class="flex items-center gap-1.5">
           <span class="text-xs opacity-60">
             {manage_gateway_collection_sets_count({
-              count: collection.sets.length,
+              count: collection.set_count,
             })}
           </span>
           <span class="text-xs opacity-40">·</span>
           <span class="text-xs opacity-60">
             {manage_gateway_collection_profiles_count({
-              count: profilesIn(collection),
+              count: collection.profile_count,
             })}
           </span>
         </div>

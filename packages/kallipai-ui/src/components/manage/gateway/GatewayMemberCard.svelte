@@ -9,7 +9,10 @@
   // is an admin registry row, not a translated form.
   import type { AdminProfileRow } from "../../../lib/manage/gateway/client.ts";
   import { Trash } from "@lucide/svelte";
-  import { manage_profiles_set_dialog_remove_member } from "../../../paraglide/messages.js";
+  import {
+    manage_gateway_draft_badge,
+    manage_profiles_set_dialog_remove_member,
+  } from "../../../paraglide/messages.js";
 
   let {
     member,
@@ -65,7 +68,7 @@
     </span>
     {#if member.parked}
       <span class="badge preset-tonal-surface text-xs shrink-0 font-mono">
-        parked
+        {manage_gateway_draft_badge()}
       </span>
     {/if}
     <button

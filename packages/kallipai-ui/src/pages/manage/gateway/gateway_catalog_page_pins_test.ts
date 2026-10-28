@@ -1,4 +1,5 @@
 import { assert } from "@std/assert";
+import { manage_gateway_remove_collection_body } from "../../../paraglide/messages.js";
 
 // Source pins for the gateway console: the page rides the
 // GatewayAdminStore over the shared admin client, renders only inside
@@ -12,6 +13,14 @@ const STORE = new URL(
 );
 const CLIENT = new URL(
   "../../../lib/manage/gateway/client.ts",
+  import.meta.url,
+);
+const DRAFTS_SECTION = new URL(
+  "../../../components/manage/gateway/DraftsSection.svelte",
+  import.meta.url,
+);
+const USER_PROFILES_SECTION = new URL(
+  "../../../components/gateway/UserProfilesSection.svelte",
   import.meta.url,
 );
 const WEB_ROUTE = new URL(
@@ -45,6 +54,18 @@ const APP_ADMIN_LAYOUT = new URL(
 
 function source(url: URL): string {
   return new TextDecoder().decode(Deno.readFileSync(url));
+}
+
+// The body of a top-level page function. A guard only earns its pin
+// inside the function that must carry it: the same line appears twice
+// on the page, so a whole-file match cannot tell one call site from
+// the other.
+function functionBody(src: string, name: string): string {
+  const start = src.indexOf(`function ${name}(`);
+  assert(start >= 0, `the page declares ${name}`);
+  const end = src.indexOf("\n  }\n", start);
+  assert(end > start, `${name} closes at the file's top level`);
+  return src.slice(start, end);
 }
 
 Deno.test(
@@ -137,22 +158,22 @@ Deno.test(
 );
 
 Deno.test(
-  "GatewayCatalogPage carries the parking and credential panels",
+  "GatewayCatalogPage carries the draft and credential panels",
   { permissions: { read: [PAGE] } },
   () => {
     const src = source(PAGE);
     // The panels are section components.
     assert(
-      src.includes("<ParkingSection"),
-      "the parking panel renders as a section component",
+      src.includes("<DraftsSection"),
+      "the drafts panel renders as a section component",
     );
     assert(!src.includes("_pending()"), "no pending placeholder rows render");
-    // Parking rides the store's filter; a drag into a set rides the
-    // same member write as every other placement.
+    // Drafts ride the store's parked wire filter; a drag into a set
+    // rides the same member write as every other placement.
     assert(
-      src.includes("gatewayStore.addParked(") &&
-        src.includes("gatewayStore.addParkedToSet("),
-      "parking actions ride the store's parking wraps",
+      src.includes("gatewayStore.addDraft(") &&
+        src.includes("gatewayStore.addDraftToSet("),
+      "draft actions ride the store's draft wraps",
     );
     // Credentials: the plaintext crosses inbound only (dialog PUT plus
     // a confirmed delete), through the store wraps.
@@ -178,7 +199,9 @@ Deno.test(
     );
     assert(
       src.includes("<SetCreateDialog") &&
-        src.includes("names={(gatewayStore.sets ?? []).map((s) => s.name)}"),
+        src.includes(
+          'names={gatewayStore.setsIn(detailRow?.name ?? "").map((s) => s.name)}',
+        ),
       "the create-set dialog is wired with the catalog's names",
     );
   },
@@ -202,13 +225,13 @@ Deno.test(
       "the store is a class singleton (the manage family shape)",
     );
     assert(
-      src.includes("await this.run(() => listParking())") &&
-        !src.includes("parkingView"),
-      "the parking read is the single catalog-space list",
+      src.includes("await this.run(() => listDrafts())") &&
+        !src.includes("draftsView"),
+      "the drafts read is the single catalog-space list",
     );
     assert(
-      src.includes("parkingBody") && src.includes("listCollectionSets"),
-      "parking and the nested sets read are store slices, not page-local state",
+      src.includes("draftsBody") && src.includes("listCollectionSets"),
+      "drafts and the nested sets read are store slices, not page-local state",
     );
     assert(
       !src.includes("localStorage") && !src.includes("sessionStorage"),
@@ -289,7 +312,7 @@ Deno.test(
       "the set-as-default action rides the store's transfer wrap",
     );
     assert(
-      src.includes("onDropAnywhere") && src.includes("<ParkedPlacementDialog"),
+      src.includes("onDropAnywhere") && src.includes("<PlacementDialog"),
       "the list view's drop opens the placement fallback dialog",
     );
     assert(
@@ -309,6 +332,150 @@ Deno.test(
       src.includes("<CollectionsSection") &&
         src.includes("collections={gatewayStore.collections ?? []}"),
       "the list view renders the collections nav cards",
+    );
+  },
+);
+
+Deno.test(
+  "the remove-collection confirm carries the row's own counts",
+  { permissions: { read: [PAGE] } },
+  () => {
+    const src = source(PAGE);
+    assert(
+      src.includes("sets: removeCollectionTarget.set_count") &&
+        src.includes("profiles: removeCollectionTarget.profile_count") &&
+        src.includes("description={removeCollectionBody}"),
+      "the confirm hands over the server's counts",
+    );
+  },
+);
+
+Deno.test("the remove-collection copy renders the counts it is given", () => {
+  // The dialog prints whatever the collection view returned, so the
+  // numbers reach the user as the server counted them.
+  const body = manage_gateway_remove_collection_body({
+    name: "alpha",
+    sets: 2,
+    profiles: 3,
+  });
+  assert(body.includes("2 profile sets") && body.includes("3 profiles"), body);
+});
+
+Deno.test(
+  "a profile row is identified by its collection, not by its id alone",
+  {
+    permissions: {
+      read: [PAGE, STORE, DRAFTS_SECTION, USER_PROFILES_SECTION],
+    },
+  },
+  () => {
+    const page = source(PAGE);
+    const store = source(STORE);
+    const drafts = source(DRAFTS_SECTION);
+    const profiles = source(USER_PROFILES_SECTION);
+    // A profile id is unique inside its collection only, and both lists
+    // span collections, so the id alone would repeat as an each key.
+    assert(
+      drafts.includes("${p.collection_name}/${p.profile_id}"),
+      "the drafts panel keys a row on its collection and id",
+    );
+    assert(
+      profiles.includes("${row.collection_name}/${row.profile_id}"),
+      "the user profile list keys a row on its collection and id",
+    );
+    // The row says which collection, or two same-id rows look alike.
+    assert(
+      drafts.includes("{p.collection_name}") &&
+        profiles.includes("{row.collection_name}"),
+      "both lists print the row's collection",
+    );
+    // A draft belongs to one collection, so the detail panel reads only
+    // that collection's; the whole-space list is the no-detail case.
+    assert(
+      page.includes("gatewayStore.draftsIn(name)") &&
+        page.includes("scope={detailRow?.name ?? null}") &&
+        page.includes(
+          "drafts={detailRow ? (detailDrafts ?? []) : (gatewayStore.drafts ?? [])}",
+        ),
+      "the detail's drafts panel is narrowed to its collection",
+    );
+    assert(
+      store.includes(
+        "listProfiles({ collection_name: collection, parked: true })",
+      ),
+      "the narrowed read asks the server for that collection",
+    );
+    // A draft can only join a set of its own collection, so the drop
+    // names the collection and the dialog cannot pick another.
+    assert(
+      drafts.includes("onDragStart(p)") &&
+        page.includes("dragSourceCollection = profile.collection_name") &&
+        page.includes(
+          "sourceCollection={placementSourceCollection ?? undefined}",
+        ),
+      "a drag carries the row's collection out to the placement",
+    );
+    // With two rows sharing an id, the confirm has to name the row.
+    assert(
+      page.includes('collection: removeDraftTarget?.collection_name ?? ""'),
+      "the draft delete confirm names its collection",
+    );
+  },
+);
+
+Deno.test(
+  "a drafts reload waits for the set edit it follows to succeed",
+  { permissions: { read: [PAGE] } },
+  () => {
+    const page = source(PAGE);
+    // The reload's own read nulls the store error first, so a reload fired
+    // on failure wipes the banner before it paints. It also has to follow
+    // the call it reports on: ahead of it, a failure left over from before
+    // blocks the reload this edit needs, and a clean verdict fires the
+    // reload before this edit lands. Either way the panel keeps old rows.
+    const paths = [
+      ["onDropToSet", "await gatewayStore.addDraftToSet("],
+      ["onSaveSet", "await gatewayStore.saveSet("],
+    ] as const;
+    for (const [fn, call] of paths) {
+      const body = functionBody(page, fn);
+      assert(body.includes(call), `${fn} still calls ${call}`);
+      // One reload per path is today's convention, not an invariant: a
+      // second, conditional reload would be harmless, an unconditional one
+      // would not.
+      const reloads = body
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((line) => line !== "" && !line.startsWith("//"))
+        .filter((line) => line.includes("reloadDetailDrafts("));
+      const reload = reloads[0];
+      assert(reloads.length === 1, `${fn} reloads once`);
+      // The condition is the point: a reload gated on anything but a clean
+      // store verdict is the bug this pin keeps out.
+      assert(
+        reload.startsWith("if (") &&
+          body.includes("gatewayStore.error === null"),
+        `${fn} reloads only on a clean verdict`,
+      );
+      assert(
+        body.indexOf(reload) > body.indexOf(call),
+        `${fn} reloads after ${call} lands`,
+      );
+    }
+  },
+);
+
+Deno.test(
+  "the page hands the create form the open detail's collection, or null",
+  { permissions: { read: [PAGE] } },
+  () => {
+    const page = source(PAGE);
+    // The detail passes its own name; the list entry passes nothing. What
+    // the dialog does with either (seeded and locked, or blank) is read in
+    // profile_dialog_wiring_test.ts, where the dialog is the subject.
+    assert(
+      page.includes("pinnedCollection={detailRow?.name ?? null}"),
+      "the page hands the detail's collection, or null",
     );
   },
 );

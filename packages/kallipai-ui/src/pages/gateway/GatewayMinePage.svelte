@@ -184,7 +184,7 @@
   let profileDialogOpen = $state(false);
   let profileBusy = $state(false);
   let profileError = $state<string | null>(null);
-  let removeProfileTarget = $state<string | null>(null);
+  let removeProfileTarget = $state<UserProfileRow | null>(null);
 
   function openProfileDialog(row: UserProfileRow | null): void {
     editProfile = row;
@@ -193,6 +193,7 @@
   }
 
   async function saveProfile(result: {
+    collection: string;
     profile_id: string;
     provider_id: string;
     model: string;
@@ -216,12 +217,16 @@
     };
     const ok =
       editProfile === null
-        ? await userGatewayStore.addProfile({
+        ? await userGatewayStore.addProfile(result.collection, {
             profile_id: result.profile_id,
             provider_id: result.provider_id,
             ...body,
           })
-        : await userGatewayStore.saveProfile(editProfile.profile_id, body);
+        : await userGatewayStore.saveProfile(
+            editProfile.collection_name,
+            editProfile.profile_id,
+            body,
+          );
     profileBusy = false;
     if (!ok) {
       profileError = userGatewayStore.error;
@@ -232,11 +237,11 @@
   }
 
   async function confirmRemoveProfile(): Promise<void> {
-    const id = removeProfileTarget;
-    if (!id) return;
+    const row = removeProfileTarget;
+    if (row === null) return;
     profileBusy = true;
     profileError = null;
-    await userGatewayStore.removeProfile(id);
+    await userGatewayStore.removeProfile(row.collection_name, row.profile_id);
     profileBusy = false;
     if (userGatewayStore.error !== null) {
       // Keep the confirm open and surface the reason.
@@ -263,7 +268,7 @@
 
   async function onEditSet(set: UserSetRow): Promise<void> {
     const request = ++setEditRequest;
-    const row = await userGatewayStore.loadSet(set.name);
+    const row = await userGatewayStore.loadSet(set.collection_name, set.name);
     if (row && request === setEditRequest) {
       editSet = row;
       setDialogOpen = true;
@@ -279,7 +284,7 @@
     setDialogOpen = false;
     editSet = null;
     if (editing) {
-      void userGatewayStore.saveSet(editing.name, {
+      void userGatewayStore.saveSet(editing.collection_name, editing.name, {
         description: result.description,
         members: result.members,
       });
@@ -293,11 +298,11 @@
   }
 
   async function confirmRemoveSet(): Promise<void> {
-    const name = removeSetTarget?.name;
-    if (!name) return;
+    const row = removeSetTarget;
+    if (row === null) return;
     removeSetBusy = true;
     removeSetError = null;
-    await userGatewayStore.removeSet(name);
+    await userGatewayStore.removeSet(row.collection_name, row.name);
     removeSetBusy = false;
     if (userGatewayStore.error !== null) {
       removeSetError = userGatewayStore.error;
@@ -312,6 +317,17 @@
   let collectionDialogOpen = $state(false);
   let collectionEditRequest = $state(0);
   let removeCollectionTarget = $state<UserCollectionRow | null>(null);
+  // The delete confirm's copy, built from the row: both counts are the
+  // server's numbers, so the dialog quotes what the cascade will take.
+  const removeCollectionBody = $derived(
+    removeCollectionTarget === null
+      ? ""
+      : user_gateway_remove_collection_body({
+          name: removeCollectionTarget.name,
+          sets: removeCollectionTarget.set_count,
+          profiles: removeCollectionTarget.profile_count,
+        }),
+  );
   let removeCollectionBusy = $state(false);
   let removeCollectionError = $state<string | null>(null);
 
@@ -482,7 +498,7 @@
       profiles={userGatewayStore.profiles ?? []}
       onEdit={(row) => openProfileDialog(row)}
       onRemove={(row) => {
-        removeProfileTarget = row.profile_id;
+        removeProfileTarget = row;
         profileError = null;
       }}
       onCreate={() => openProfileDialog(null)}
@@ -664,9 +680,10 @@
 
 <ConfirmDialog
   open={removeProfileTarget !== null}
-  title={removeProfileTarget ?? ""}
+  title={removeProfileTarget?.profile_id ?? ""}
   description={user_gateway_remove_profile_body({
-    name: removeProfileTarget ?? "",
+    name: removeProfileTarget?.profile_id ?? "",
+    collection: removeProfileTarget?.collection_name ?? "",
   })}
   confirmLabel={common_remove()}
   tone="danger"
@@ -699,9 +716,7 @@
 <ConfirmDialog
   open={removeCollectionTarget !== null}
   title={removeCollectionTarget?.name ?? ""}
-  description={user_gateway_remove_collection_body({
-    name: removeCollectionTarget?.name ?? "",
-  })}
+  description={removeCollectionBody}
   confirmLabel={common_remove()}
   tone="danger"
   busy={removeCollectionBusy}

@@ -10,23 +10,24 @@ import {
   type AdminProfileRow,
   type AdminSetRow,
   createCollection,
+  createCollectionSet,
   createGroup,
-  createParked,
+  createProfile,
   createProvider,
-  createSet,
   deleteCollection,
+  deleteCollectionSet,
   deleteGroup,
-  deleteParked,
+  deleteProfile,
   deleteProvider,
   deleteProviderCredential,
-  deleteSet,
-  getSet,
+  getCollectionSet,
   type GroupRow,
   listCollections,
-  listGroups,
-  listParking,
-  listProviders,
   listCollectionSets,
+  listDrafts,
+  listGroups,
+  listProfiles,
+  listProviders,
   type ProviderRow,
   publishCollection,
   putProviderCredential,
@@ -34,10 +35,10 @@ import {
   setCollectionDefault,
   unpublishCollection,
   updateCollection,
+  updateCollectionSet,
   updateGroup,
-  updateParked,
+  updateProfile,
   updateProvider,
-  updateSet,
 } from "./client.ts";
 
 class GatewayAdminStore {
@@ -45,8 +46,9 @@ class GatewayAdminStore {
   sets = $state<AdminSetRow[] | null>(null);
   /** The provider pool (the catalog space's rows); null until first read. */
   providers = $state<ProviderRow[] | null>(null);
-  /** The parked profile rows (the catalog space's drafts). */
-  parking = $state<AdminProfileRow[] | null>(null);
+  /** The catalog space's drafts (the parked filter over the profiles
+   * list); null until the first read lands. */
+  drafts = $state<AdminProfileRow[] | null>(null);
   /** The catalog's collections with their live publications. */
   collections = $state<AdminCollectionRow[] | null>(null);
   /** The platform groups (the publish audiences). */
@@ -69,14 +71,14 @@ class GatewayAdminStore {
   }
 
   /** Read the whole read side: sets (nested per collection),
-   * providers, parking (the active owner filter's slice). */
+   * providers, drafts (the parked slice). */
   async refreshAll(): Promise<void> {
     this.isLoading = true;
     try {
-      const [providersBody, parkingBody, collectionsBody, groupsBody] =
+      const [providersBody, draftsBody, collectionsBody, groupsBody] =
         await Promise.all([
           this.run(() => listProviders()),
-          this.run(() => listParking()),
+          this.run(() => listDrafts()),
           this.run(() => listCollections()),
           this.run(() => listGroups()),
         ]);
@@ -91,7 +93,7 @@ class GatewayAdminStore {
           .flat();
       }
       if (providersBody) this.providers = providersBody;
-      if (parkingBody) this.parking = parkingBody;
+      if (draftsBody) this.drafts = draftsBody;
       if (collectionsBody) this.collections = collectionsBody;
       if (groupsBody) this.groups = groupsBody;
       this.hasLoaded = true;
@@ -115,44 +117,68 @@ class GatewayAdminStore {
     return ok === true;
   }
 
-  /** The full row of a set (the edit dialog's seed). */
-  loadSet(name: string): Promise<AdminSetRow | undefined> {
-    return this.run(() => getSet(name));
+  /** The catalog's sets narrowed to one collection (the pages' one
+   * membership accessor: a set name alone is not its identity). */
+  setsIn(collection: string): AdminSetRow[] {
+    return (this.sets ?? []).filter((s) => s.collection_name === collection);
+  }
+
+  /** One collection's drafts, read from the wire: a draft belongs to its
+   * collection, so only that collection's sets can take it. The detail
+   * panel scopes its read here instead of sifting the whole space. */
+  draftsIn(collection: string): Promise<AdminProfileRow[] | undefined> {
+    return this.run(() =>
+      listProfiles({ collection_name: collection, parked: true }),
+    );
+  }
+
+  /** The full row of a set under the collection that anchors it (the
+   * edit dialog's seed). */
+  loadSet(collection: string, name: string): Promise<AdminSetRow | undefined> {
+    return this.run(() => getCollectionSet(collection, name));
   }
 
   /** PATCH description + member order in one request, then re-read. */
   async saveSet(
+    collection: string,
     name: string,
     body: { description?: string; members?: string[] },
   ): Promise<void> {
     await this.run(async () => {
-      await updateSet(name, body);
+      await updateCollectionSet(collection, name, body);
       await this.refreshAll();
     });
   }
-  /** Drop a parked profile into a set: re-read the set's live member
-   * list first (the drop appends to what the server has, not a stale
-   * cache), treat an id that is already inside as a no-op drop, and
-   * put the full ordered list back. The server adopts a member that
-   * still parks in the caller's space: the membership rewrite
-   * moves it into the catalog in the same transaction.
+
+  /** Drop a draft into a set: re-read the set's live member list first
+   * (the drop appends to what the server has, not a stale cache), treat
+   * an id that is already inside as a no-op drop, and put the full
+   * ordered list back. The server adopts a member that still parks in
+   * the caller's space: the membership rewrite moves it into the catalog
+   * in the same transaction.
    */
-  async addParkedToSet(profileId: string, setName: string): Promise<boolean> {
-    const row = await this.loadSet(setName);
+  async addDraftToSet(
+    collection: string,
+    profileId: string,
+    setName: string,
+  ): Promise<boolean> {
+    const row = await this.loadSet(collection, setName);
     if (!row) return false;
     const members = row.profiles.map((p) => p.profile_id);
     if (members.includes(profileId)) return true;
     const ok = await this.run(async () => {
-      await updateSet(setName, { members: [...members, profileId] });
+      await updateCollectionSet(collection, setName, {
+        members: [...members, profileId],
+      });
       await this.refreshAll();
       return true;
     });
     return ok === true;
   }
 
-  async removeSet(name: string): Promise<void> {
+  async removeSet(collection: string, name: string): Promise<void> {
     await this.run(async () => {
-      await deleteSet(name);
+      await deleteCollectionSet(collection, name);
       await this.refreshAll();
     });
   }
@@ -181,57 +207,57 @@ class GatewayAdminStore {
     });
   }
 
-  /** Re-read just the parking slice (the catalog space's drafts). */
-  async refreshParking(): Promise<void> {
-    const body = await this.run(() => listParking());
-    if (body) this.parking = body;
+  /** Re-read just the drafts slice (the parked filter). */
+  async refreshDrafts(): Promise<void> {
+    const body = await this.run(() => listDrafts());
+    if (body) this.drafts = body;
   }
 
-  /** Create a parked draft, then re-read the parking slice. */
-  async addParked(body: {
-    profile_id: string;
-    provider_id: string;
-    model: string;
-    max_context_window?: number | null;
-    effort?: string | null;
-    modalities?: string[] | null;
-    max_budget?: number | null;
-    tpm_limit?: number | null;
-    rpm_limit?: number | null;
-  }): Promise<boolean> {
+  /** Create a draft in the named collection, then re-read the drafts
+   * slice. */
+  async addDraft(
+    collection: string,
+    body: {
+      profile_id: string;
+      provider_id: string;
+      model: string;
+      max_context_window?: number | null;
+      effort?: string | null;
+      modalities?: string[] | null;
+    },
+  ): Promise<boolean> {
     const ok = await this.run(async () => {
-      await createParked(body);
-      await this.refreshParking();
+      await createProfile(collection, { ...body, parked: true });
+      await this.refreshDrafts();
       return true;
     });
     return ok === true;
   }
 
-  /** PUT the parked row's shape, then re-read the parking slice. */
-  async saveParked(
+  /** PUT the draft's shape in place, then re-read the drafts slice. */
+  async saveDraft(
+    collection: string,
     profileId: string,
     body: {
       model: string;
       max_context_window?: number | null;
       effort?: string | null;
       modalities?: string[] | null;
-      parked: boolean;
-      max_budget?: number | null;
-      tpm_limit?: number | null;
-      rpm_limit?: number | null;
     },
   ): Promise<boolean> {
-    const ok = await this.run(() => updateParked(profileId, body));
+    const ok = await this.run(() =>
+      updateProfile(collection, profileId, { ...body, parked: true }),
+    );
     if (ok === undefined) return false;
-    await this.refreshParking();
+    await this.refreshDrafts();
     return true;
   }
 
-  /** Delete a parked draft, then re-read the parking slice. */
-  async removeParked(profileId: string): Promise<void> {
+  /** Delete a draft, then re-read the drafts slice. */
+  async removeDraft(collection: string, profileId: string): Promise<void> {
     await this.run(async () => {
-      await deleteParked(profileId);
-      await this.refreshParking();
+      await deleteProfile(collection, profileId);
+      await this.refreshDrafts();
     });
   }
 
@@ -243,7 +269,7 @@ class GatewayAdminStore {
     description: string,
   ): Promise<boolean> {
     const ok = await this.run(async () => {
-      await createSet(collection, { name, description });
+      await createCollectionSet(collection, { name, description });
       return true;
     });
     if (ok !== true) return false;

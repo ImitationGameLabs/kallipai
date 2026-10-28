@@ -73,7 +73,7 @@ Deno.test(
         const url = String(input);
         const payloads: [string, unknown][] = [
           ["/admin/providers", { providers: [] }],
-          ["/admin/parking", []],
+          ["/admin/profiles?parked=true", []],
           ["/admin/collections/alpha/sets", { sets: [] }],
           [
             "/admin/collections",
@@ -187,7 +187,7 @@ Deno.test(
 );
 
 Deno.test(
-  "parked-draft mutations answer like the group family: create and save answer booleans, removal rides the error state",
+  "draft mutations answer like the group family: create and save answer booleans, removal rides the error state",
   async () => {
     const realFetch = globalThis.fetch;
     const respond = (status: number) => {
@@ -202,7 +202,7 @@ Deno.test(
     try {
       respond(200);
       assertEquals(
-        await store.addParked({
+        await store.addDraft("alpha", {
           profile_id: "p1",
           provider_id: "up1",
           model: "gpt",
@@ -210,14 +210,14 @@ Deno.test(
         true,
       );
       assertEquals(
-        await store.saveParked("p1", { model: "gpt", parked: true }),
+        await store.saveDraft("alpha", "p1", { model: "gpt" }),
         true,
       );
-      await store.removeParked("p1");
+      await store.removeDraft("alpha", "p1");
       assertEquals(store.error, null);
       respond(404);
       assertEquals(
-        await store.addParked({
+        await store.addDraft("alpha", {
           profile_id: "p1",
           provider_id: "up1",
           model: "gpt",
@@ -225,10 +225,10 @@ Deno.test(
         false,
       );
       assertEquals(
-        await store.saveParked("p1", { model: "gpt", parked: true }),
+        await store.saveDraft("alpha", "p1", { model: "gpt" }),
         false,
       );
-      await store.removeParked("p1");
+      await store.removeDraft("alpha", "p1");
       assertEquals(typeof store.error, "string");
     } finally {
       globalThis.fetch = realFetch;
@@ -237,7 +237,7 @@ Deno.test(
 );
 
 Deno.test(
-  "addParkedToSet puts the appended member list and no-ops on an id already inside",
+  "addDraftToSet puts the appended member list and no-ops on an id already inside",
   async () => {
     const realFetch = globalThis.fetch;
     const calls: { method: string; url: string; body?: string }[] = [];
@@ -260,12 +260,14 @@ Deno.test(
         url,
         body: typeof init?.body === "string" ? init.body : undefined,
       });
-      if (url.endsWith("/admin/sets/s1")) {
+      if (url.endsWith("/admin/collections/alpha/sets/s1")) {
         return Promise.resolve(
           json(method === "GET" ? row(["a"]) : row(["a", "b"])),
         );
       }
-      if (url.endsWith("/admin/parking")) return Promise.resolve(json([]));
+      if (url.endsWith("/admin/profiles?parked=true")) {
+        return Promise.resolve(json([]));
+      }
       if (url.endsWith("/admin/providers")) {
         return Promise.resolve(json({ providers: [] }));
       }
@@ -278,7 +280,7 @@ Deno.test(
       return Promise.resolve(json({}));
     }) as typeof fetch;
     try {
-      assertEquals(await store.addParkedToSet("b", "s1"), true);
+      assertEquals(await store.addDraftToSet("alpha", "b", "s1"), true);
       const updates = calls.filter((c) => c.method === "PATCH");
       assertEquals(updates.length, 1);
       assertEquals(JSON.parse(updates[0].body ?? "{}"), {
@@ -286,7 +288,7 @@ Deno.test(
       });
       // An id already inside the set lands as a no-op drop: no second update.
       calls.length = 0;
-      assertEquals(await store.addParkedToSet("a", "s1"), true);
+      assertEquals(await store.addDraftToSet("alpha", "a", "s1"), true);
       assertEquals(calls.filter((c) => c.method === "PATCH").length, 0);
     } finally {
       globalThis.fetch = realFetch;
@@ -295,7 +297,7 @@ Deno.test(
 );
 
 Deno.test(
-  "addParkedToSet skips the update when the set read fails",
+  "addDraftToSet skips the update when the set read fails",
   async () => {
     const realFetch = globalThis.fetch;
     const calls: { method: string; url: string }[] = [];
@@ -304,13 +306,13 @@ Deno.test(
       calls.push({ method: init?.method ?? "GET", url });
       return Promise.resolve(
         new Response(JSON.stringify({}), {
-          status: url.endsWith("/admin/sets/s1") ? 404 : 200,
+          status: url.endsWith("/admin/collections/alpha/sets/s1") ? 404 : 200,
           headers: { "content-type": "application/json" },
         }),
       );
     }) as typeof fetch;
     try {
-      assertEquals(await store.addParkedToSet("b", "s1"), false);
+      assertEquals(await store.addDraftToSet("alpha", "b", "s1"), false);
       assertEquals(calls.filter((c) => c.method === "PATCH").length, 0);
     } finally {
       globalThis.fetch = realFetch;

@@ -20,7 +20,8 @@ use axum::extract::{Path, State};
 use kallipai_common::protocol::ApiError;
 use sea_orm::sea_query::{Expr, Query};
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, Set, TransactionTrait,
+    ActiveModelTrait, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder, Set,
+    TransactionTrait,
 };
 use serde::{Deserialize, Serialize};
 
@@ -31,6 +32,12 @@ pub(crate) struct UserCollectionView {
     pub sets: Vec<String>,
     /// The collection's default-set anchor (null = none chosen yet).
     pub default_set: Option<String>,
+    /// How many profile rows the collection holds (drafts included): the
+    /// delete confirmation states this number, so the cost is never a
+    /// guess.
+    pub profile_count: u64,
+    /// How many sets the collection anchors (the cascade's other half).
+    pub set_count: u64,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -502,10 +509,17 @@ pub(crate) async fn user_collection_view<C: sea_orm::ConnectionTrait>(
     row: collection::Model,
 ) -> Result<UserCollectionView, ApiError> {
     let sets = profile_set::Entity::find()
-        .filter(profile_set::Column::Owner.eq(owner))
+        .filter(profile_set::Column::Owner.eq(owner.clone()))
         .filter(profile_set::Column::CollectionName.eq(row.name.clone()))
         .order_by_asc(profile_set::Column::Name)
         .all(db)
+        .await
+        .map_err(db::map_db_err)?;
+    let set_count = sets.len() as u64;
+    let profile_count = profile::Entity::find()
+        .filter(profile::Column::Owner.eq(owner))
+        .filter(profile::Column::CollectionName.eq(row.name.clone()))
+        .count(db)
         .await
         .map_err(db::map_db_err)?;
     Ok(UserCollectionView {
@@ -513,6 +527,8 @@ pub(crate) async fn user_collection_view<C: sea_orm::ConnectionTrait>(
         description: row.description,
         sets: sets.into_iter().map(|s| s.name).collect(),
         default_set: row.default_set_name,
+        profile_count,
+        set_count,
     })
 }
 

@@ -40,7 +40,7 @@
   } = $props();
 
   const setsIn = (collection: UserCollectionRow): UserSetRow[] =>
-    memberSetsOf(sets, collection.sets);
+    memberSetsOf(sets, collection);
 </script>
 
 <section class="space-y-3">

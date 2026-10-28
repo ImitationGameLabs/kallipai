@@ -13,7 +13,13 @@ import type {
 } from "../gateway/client.ts";
 
 function own(name: string, sets: string[]): UserCollectionRow {
-  return { name, description: "", sets };
+  return {
+    name,
+    description: "",
+    sets,
+    profile_count: 0,
+    set_count: sets.length,
+  };
 }
 
 function catalog(

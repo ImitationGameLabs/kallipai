@@ -1,10 +1,11 @@
 <script lang="ts" module>
-  // The gateway admin's parked-profile dialog: identity (creation
-  // only), the referenced provider (frozen on edit -- the parking PUT
+  // The gateway admin's draft-profile dialog: identity and the
+  // anchoring collection (both creation only -- a row's collection never
+  // moves), the referenced provider (frozen on edit -- the draft update
   // re-points nothing; the family is derived display), the model, and
-  // the optional limits. Create hands back the full ProfileCreate
-  // shape; edit hands back the ProfilePut replacement fields (the
-  // page holds parked at true).
+  // the limits. Create hands back the full ProfileCreate shape; edit
+  // hands back the ProfilePut replacement fields (the page sends a
+  // created row as a draft).
 </script>
 
 <script lang="ts">
@@ -21,11 +22,12 @@
   import {
     common_cancel,
     common_save,
+    manage_gateway_placement_collection_label,
     manage_gateway_provider_family,
     manage_gateway_provider_label,
     manage_gateway_provider_pool_empty,
-    manage_profiles_parking_dialog_edit_title,
-    manage_profiles_parking_dialog_new_title,
+    manage_gateway_draft_dialog_edit_title,
+    manage_gateway_draft_dialog_new_title,
     user_gateway_profile_budget,
     user_gateway_profile_context,
     user_gateway_profile_effort,
@@ -46,13 +48,24 @@
     onSave,
     onCancel,
     providers = [],
+    collections = [],
+    pinnedCollection = null,
   }: {
     open: boolean;
     /** The admin's provider pool (the provider dropdown). */
     providers?: readonly { provider_id: string; family: string }[];
+    /** The admin's collections (the anchoring-collection dropdown). */
+    collections?: readonly { name: string }[];
+    /**
+     * The collection a create takes, and whether the pick is the user's:
+     * a name seeds the field and locks the picker (the open detail owns
+     * the draft), null leaves both blank and open (the list's entry).
+     */
+    pinnedCollection?: string | null;
     /** The row under edit (null = the create form). */
     row: {
       profile_id: string;
+      collection_name: string;
       provider_id: string;
       family: string;
       model: string;
@@ -66,6 +79,7 @@
     busy?: boolean;
     error?: string | null;
     onSave: (result: {
+      collection: string;
       profile_id: string;
       provider_id: string;
       model: string;
@@ -80,6 +94,7 @@
   } = $props();
 
   let idDraft = $state("");
+  let collectionDraft = $state("");
   let providerDraft = $state("");
   let modelDraft = $state("");
   let effortDraft = $state("");
@@ -92,6 +107,10 @@
   $effect(() => {
     if (open && !lastOpen) {
       idDraft = row?.profile_id ?? "";
+      // Three sources, in order: the row under edit, the collection a
+      // pinned create belongs to, else blank. The catalog's first name
+      // must never stand in for the user's pick.
+      collectionDraft = row?.collection_name ?? pinnedCollection ?? "";
       providerDraft = row?.provider_id ?? "";
       modelDraft = row?.model ?? "";
       effortDraft = row?.effort ?? "";
@@ -110,12 +129,13 @@
   const creating = $derived(row === null);
   const canSubmit = $derived(
     idDraft.trim() !== "" &&
+      collectionDraft.trim() !== "" &&
       providerDraft.trim() !== "" &&
       modelDraft.trim() !== "",
   );
 
   // The family is derived display: it reads the selected provider's
-  // row (create) or the parked row's own link (edit, where the
+  // row (create) or the draft row's own link (edit, where the
   // provider is frozen).
   const familyShown = $derived(
     providers.find((p) => p.provider_id === providerDraft)?.family ??
@@ -162,6 +182,7 @@
   function submit(): void {
     if (!canSubmit || !numbersValid || busy) return;
     onSave({
+      collection: collectionDraft.trim(),
       profile_id: idDraft.trim(),
       provider_id: providerDraft.trim(),
       model: modelDraft.trim(),
@@ -186,8 +207,8 @@
       >
         <Dialog.Title class="text-lg font-semibold">
           {creating
-            ? manage_profiles_parking_dialog_new_title()
-            : manage_profiles_parking_dialog_edit_title()}
+            ? manage_gateway_draft_dialog_new_title()
+            : manage_gateway_draft_dialog_edit_title()}
         </Dialog.Title>
 
         <form
@@ -208,6 +229,25 @@
               disabled={!creating}
               aria-required="true"
             />
+          </label>
+          <label class="flex flex-col gap-1">
+            <span class="text-xs font-medium">
+              {manage_gateway_placement_collection_label()}
+              <ReqMark />
+            </span>
+            <select
+              class="select text-sm font-mono"
+              bind:value={collectionDraft}
+              disabled={!creating || pinnedCollection !== null}
+              aria-required="true"
+            >
+              {#if creating && collectionDraft === ""}
+                <option value="" disabled></option>
+              {/if}
+              {#each collections as c (c.name)}
+                <option value={c.name}>{c.name}</option>
+              {/each}
+            </select>
           </label>
           <label class="flex flex-col gap-1">
             <span class="text-xs font-medium">

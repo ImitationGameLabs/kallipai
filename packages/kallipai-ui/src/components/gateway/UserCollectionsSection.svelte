@@ -1,8 +1,8 @@
 <script lang="ts">
   import { MENU_ITEM, MENU_ITEM_DANGER } from "../../lib/classes.ts";
   // The caller's collections section: one card per collection (name,
-  // description, set count) with publish, edit, and remove in the
-  // kebab. Prop-driven like the sibling sections.
+  // description, the set and profile counts) with publish, edit, and
+  // remove in the kebab. Prop-driven like the sibling sections.
   import { Menu } from "@skeletonlabs/skeleton-svelte";
   import ActionMenu from "../ActionMenu.svelte";
   import { Globe, Pencil, Trash } from "@lucide/svelte";
@@ -10,6 +10,8 @@
   import {
     common_edit,
     common_remove,
+    manage_gateway_collection_profiles_count,
+    manage_gateway_collection_sets_count,
     user_gateway_collection_add,
     user_gateway_collections,
     user_gateway_publish,
@@ -58,7 +60,10 @@
               </p>
             {/if}
             <p class="text-xs opacity-60 mt-0.5">
-              {row.sets.length}
+              {manage_gateway_collection_sets_count({ count: row.set_count })} ·
+              {manage_gateway_collection_profiles_count({
+                count: row.profile_count,
+              })}
             </p>
           </div>
           <ActionMenu

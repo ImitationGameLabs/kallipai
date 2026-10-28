@@ -1,9 +1,11 @@
 <script lang="ts">
-  // The parking drop's fallback: when a parked profile is dropped on
-  // the console while no collection detail is open, this dialog takes
-  // the placement (a collection pick, then a member-set pick). Both
-  // selects are required; a collection without sets disables the
-  // confirm with a hint instead of a dead submit.
+  // The draft drop's fallback: when a draft is dropped on the console
+  // while no collection detail is open, this dialog takes the placement
+  // (a collection pick, then a member-set pick). Both selects are
+  // required; a collection without sets disables the confirm with a
+  // hint instead of a dead submit. A draft belongs to one collection,
+  // so a drop that names its own collection pins the first pick: the
+  // server would refuse a membership across collections.
   import { Dialog, Portal } from "@skeletonlabs/skeleton-svelte";
   import ReqMark from "../../ReqMark.svelte";
   import type {
@@ -26,18 +28,21 @@
     profileId,
     collections,
     sets,
+    sourceCollection = undefined,
     busy = false,
     error = null,
     onConfirm,
     onCancel,
   }: {
     open: boolean;
-    /** The parked profile being placed (carried from the drop). */
+    /** The draft being placed (carried from the drop). */
     profileId: string | null;
     /** The catalog's collections, in list order. */
     collections: readonly AdminCollectionRow[];
     /** The catalog's sets: the member picks come from here. */
     sets: readonly AdminSetRow[];
+    /** The dragged draft's collection: pins the collection pick. */
+    sourceCollection?: string;
     busy?: boolean;
     error?: string | null;
     onConfirm: (collection: string, setName: string) => void;
@@ -49,17 +54,26 @@
   let lastOpen = false;
   $effect(() => {
     if (open && !lastOpen) {
-      collectionDraft = collections[0]?.name ?? "";
+      collectionDraft = sourceCollection ?? collections[0]?.name ?? "";
       setDraft = "";
     }
     lastOpen = open;
   });
 
+  // One collection's sets can take this draft; the others would be
+  // refused, so the pick offers only them when the drop named one.
+  const pickedCollections = $derived(
+    sourceCollection === undefined
+      ? collections
+      : collections.filter((c) => c.name === sourceCollection),
+  );
+
+  const targetCollection = $derived(
+    collections.find((c) => c.name === collectionDraft) ?? null,
+  );
+
   const memberSets = $derived.by(() =>
-    memberSetsOf(
-      sets ?? [],
-      collections.find((c) => c.name === collectionDraft)?.sets ?? [],
-    ),
+    targetCollection === null ? [] : memberSetsOf(sets ?? [], targetCollection),
   );
 
   const canSubmit = $derived(
@@ -108,10 +122,10 @@
               class="input text-sm font-mono"
               bind:value={collectionDraft}
               onchange={() => (setDraft = "")}
-              disabled={busy}
+              disabled={busy || sourceCollection !== undefined}
               aria-required="true"
             >
-              {#each collections as collection (collection.name)}
+              {#each pickedCollections as collection (collection.name)}
                 <option value={collection.name}>{collection.name}</option>
               {/each}
             </select>

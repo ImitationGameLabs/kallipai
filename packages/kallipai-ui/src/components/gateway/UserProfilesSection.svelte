@@ -1,7 +1,9 @@
 <script lang="ts">
   import { MENU_ITEM, MENU_ITEM_DANGER } from "../../lib/classes.ts";
   // The caller's profiles section: one card per row (model, provider,
-  // and the parked/imported badges) with edit and remove in the kebab.
+  // collection, and the draft badge) with edit and remove in the kebab.
+  // The list spans the caller's collections, and a profile id repeats
+  // across them, so the each key and the card both name the collection.
   // Prop-driven like the admin section.
   import { Menu } from "@skeletonlabs/skeleton-svelte";
   import ActionMenu from "../ActionMenu.svelte";
@@ -11,7 +13,7 @@
     common_edit,
     common_remove,
     user_gateway_profile_add,
-    user_gateway_profile_parked,
+    user_gateway_profile_draft,
     user_gateway_profiles,
   } from "../../paraglide/messages.js";
 
@@ -43,7 +45,7 @@
     </button>
   </div>
   <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
-    {#each profiles as row (row.profile_id)}
+    {#each profiles as row (`${row.collection_name}/${row.profile_id}`)}
       <div class="card preset-tonal-surface p-4 space-y-2">
         <div class="flex items-start justify-between gap-2">
           <div class="min-w-0">
@@ -53,12 +55,13 @@
               </span>
               {#if row.parked}
                 <span class="badge preset-filled-surface-500 text-xs shrink-0">
-                  {user_gateway_profile_parked()}
+                  {user_gateway_profile_draft()}
                 </span>
               {/if}
             </div>
             <p class="text-xs opacity-60 mt-0.5 truncate">
-              {row.model} · {row.provider_id}
+              {row.model} · {row.provider_id} ·
+              <span class="font-mono">{row.collection_name}</span>
             </p>
           </div>
           <ActionMenu

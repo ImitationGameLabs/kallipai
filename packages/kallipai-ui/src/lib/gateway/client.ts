@@ -97,6 +97,8 @@ export interface UserProviderRow {
 
 export interface UserProfileRow {
   profile_id: string;
+  /** The collection that anchors the row (part of its identity). */
+  collection_name: string;
   provider_id: string;
   family: string;
   model: string;
@@ -110,6 +112,8 @@ export interface UserProfileRow {
 }
 
 export interface UserSetRow {
+  /** The collection that anchors the set (part of its identity). */
+  collection_name: string;
   name: string;
   description: string;
   /** The failover order (the member list order is the sequence). */
@@ -120,6 +124,10 @@ export interface UserCollectionRow {
   name: string;
   description: string;
   sets: string[];
+  /** How many profile rows the collection holds (drafts included). */
+  profile_count: number;
+  /** How many sets the collection anchors. */
+  set_count: number;
 }
 
 export interface UserGroupRow {
@@ -217,13 +225,25 @@ export function deleteProviderCredential(
 
 // -- profiles ---------------------------------------------------------------
 
-export function listProfiles(url?: string): Promise<UserProfileRow[]> {
-  return userFetch<{ profiles: UserProfileRow[] }>("/user/profiles", {
+/** GET /user/profiles: the caller's rows, optionally narrowed to one
+ * collection. */
+export function listProfiles(
+  collection?: string,
+  url?: string,
+): Promise<UserProfileRow[]> {
+  const suffix =
+    collection === undefined
+      ? ""
+      : `?collection_name=${encodeURIComponent(collection)}`;
+  return userFetch<{ profiles: UserProfileRow[] }>(`/user/profiles${suffix}`, {
     url,
   }).then((r) => r.profiles);
 }
 
+/** POST /user/collections/{collection}/profiles: a row born in the named
+ * collection, always a draft (the user face has no promote step). */
 export function createProfile(
+  collection: string,
   body: {
     profile_id: string;
     provider_id: string;
@@ -231,61 +251,78 @@ export function createProfile(
     max_context_window?: number | null;
     effort?: string | null;
     modalities?: string[] | null;
-    max_budget?: number | null;
-    tpm_limit?: number | null;
-    rpm_limit?: number | null;
   },
   url?: string,
 ): Promise<UserProfileRow> {
-  return userFetch<UserProfileRow>("/user/profiles", {
-    method: "POST",
-    body,
-    url,
-  });
+  return userFetch<UserProfileRow>(
+    `/user/collections/${encodeURIComponent(collection)}/profiles`,
+    { method: "POST", body, url },
+  );
 }
 
-/** PUT is a full-field replacement (parked is not caller-settable). */
+/** PUT is a full-field replacement under the collection that anchors the
+ * row (parked is not caller-settable). */
 export function updateProfile(
+  collection: string,
   profileId: string,
   body: {
     model: string;
     max_context_window?: number | null;
     effort?: string | null;
     modalities?: string[] | null;
-    max_budget?: number | null;
-    tpm_limit?: number | null;
-    rpm_limit?: number | null;
   },
   url?: string,
 ): Promise<UserProfileRow> {
   return userFetch<UserProfileRow>(
-    `/user/profiles/${encodeURIComponent(profileId)}`,
+    `/user/collections/${encodeURIComponent(collection)}/profiles/${encodeURIComponent(profileId)}`,
     { method: "PUT", body, url },
   );
 }
 
-export function deleteProfile(profileId: string, url?: string): Promise<void> {
-  return userFetch(`/user/profiles/${encodeURIComponent(profileId)}`, {
-    method: "DELETE",
-    url,
-  }).then(() => undefined);
+export function deleteProfile(
+  collection: string,
+  profileId: string,
+  url?: string,
+): Promise<void> {
+  return userFetch(
+    `/user/collections/${encodeURIComponent(collection)}/profiles/${encodeURIComponent(profileId)}`,
+    { method: "DELETE", url },
+  ).then(() => undefined);
 }
 
 // -- sets -------------------------------------------------------------------
 
-export function listSets(url?: string): Promise<UserSetRow[]> {
-  return userFetch<{ sets: UserSetRow[] }>("/user/sets", { url }).then(
+/** GET /user/sets: the caller's sets, optionally narrowed to one
+ * collection. */
+export function listSets(
+  collection?: string,
+  url?: string,
+): Promise<UserSetRow[]> {
+  const suffix =
+    collection === undefined
+      ? ""
+      : `?collection_name=${encodeURIComponent(collection)}`;
+  return userFetch<{ sets: UserSetRow[] }>(`/user/sets${suffix}`, { url }).then(
     (r) => r.sets,
   );
 }
 
-export function getSet(name: string, url?: string): Promise<UserSetRow> {
-  return userFetch<UserSetRow>(`/user/sets/${encodeURIComponent(name)}`, {
-    url,
-  });
+/** GET /user/collections/{collection}/sets/{name}: one set under the
+ * collection that anchors it. */
+export function getCollectionSet(
+  collection: string,
+  name: string,
+  url?: string,
+): Promise<UserSetRow> {
+  return userFetch<UserSetRow>(
+    `/user/collections/${encodeURIComponent(collection)}/sets/${encodeURIComponent(name)}`,
+    { url },
+  );
 }
 
-export function createSet(
+/** POST /user/collections/{collection}/sets: a set born in the named
+ * collection. */
+export function createCollectionSet(
   collection: string,
   body: { name: string; description: string; members?: string[] },
   url?: string,
@@ -296,23 +333,28 @@ export function createSet(
   );
 }
 
-export function updateSet(
+/** PATCH the set's description and member order under its collection. */
+export function updateCollectionSet(
+  collection: string,
   name: string,
   body: { description?: string; members?: string[] },
   url?: string,
 ): Promise<UserSetRow> {
-  return userFetch<UserSetRow>(`/user/sets/${encodeURIComponent(name)}`, {
-    method: "PATCH",
-    body,
-    url,
-  });
+  return userFetch<UserSetRow>(
+    `/user/collections/${encodeURIComponent(collection)}/sets/${encodeURIComponent(name)}`,
+    { method: "PATCH", body, url },
+  );
 }
 
-export function deleteSet(name: string, url?: string): Promise<void> {
-  return userFetch(`/user/sets/${encodeURIComponent(name)}`, {
-    method: "DELETE",
-    url,
-  }).then(() => undefined);
+export function deleteCollectionSet(
+  collection: string,
+  name: string,
+  url?: string,
+): Promise<void> {
+  return userFetch(
+    `/user/collections/${encodeURIComponent(collection)}/sets/${encodeURIComponent(name)}`,
+    { method: "DELETE", url },
+  ).then(() => undefined);
 }
 
 // -- collections ------------------------------------------------------------

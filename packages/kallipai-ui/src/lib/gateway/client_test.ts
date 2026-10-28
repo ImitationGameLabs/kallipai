@@ -15,15 +15,15 @@ import {
   createCollection,
   createGroup,
   createProfile,
-  createSet,
+  createCollectionSet,
   deleteCollection,
   deleteGroup,
   deleteProfile,
   deleteProviderCredential,
-  deleteSet,
+  deleteCollectionSet,
   getCollection,
   getGroup,
-  getSet,
+  getCollectionSet,
   listCollections,
   listProfiles,
   listGroups,
@@ -32,7 +32,7 @@ import {
   updateCollection,
   updateGroup,
   updateProvider,
-  updateSet,
+  updateCollectionSet,
 } from "./client.ts";
 
 Deno.test(
@@ -190,19 +190,20 @@ Deno.test("profiles PUT carries the full-field replacement", async () => {
   globalThis.fetch = stubFetch(calls, 200, {});
   try {
     await updateProfile(
+      "c1",
       "p1",
       {
         model: "deepseek-chat",
         max_context_window: 4096,
         effort: null,
         modalities: ["text"],
-        max_budget: null,
-        tpm_limit: null,
-        rpm_limit: null,
       },
       "http://127.0.0.1:7500",
     );
-    assertEquals(calls[0]?.url, "http://127.0.0.1:7500/user/profiles/p1");
+    assertEquals(
+      calls[0]?.url,
+      "http://127.0.0.1:7500/user/collections/c1/profiles/p1",
+    );
     assertEquals(calls[0]?.init?.method, "PUT");
     const body = JSON.parse(calls[0]?.init?.body as string) as Record<
       string,
@@ -268,18 +269,18 @@ Deno.test(
       await putProviderCredential("p1", "https://up.example.com", "k");
       await deleteProviderCredential("p1");
       await listProfiles();
-      await createProfile({
+      await createProfile("c1", {
         profile_id: "pr1",
         provider_id: "p1",
         model: "m",
       });
-      await updateProfile("pr1", { model: "m" });
-      await deleteProfile("pr1");
+      await updateProfile("c1", "pr1", { model: "m" });
+      await deleteProfile("c1", "pr1");
       await listSets();
-      await getSet("s1");
-      await createSet("c1", { name: "s1", description: "" });
-      await updateSet("s1", { description: "" });
-      await deleteSet("s1");
+      await getCollectionSet("c1", "s1");
+      await createCollectionSet("c1", { name: "s1", description: "" });
+      await updateCollectionSet("c1", "s1", { description: "" });
+      await deleteCollectionSet("c1", "s1");
       await listCollections();
       await getCollection("c1");
       await createCollection({ name: "c1", description: "" });
@@ -302,14 +303,14 @@ Deno.test(
         "PUT /user/providers/p1/credential",
         "DELETE /user/providers/p1/credential",
         "GET /user/profiles",
-        "POST /user/profiles",
-        "PUT /user/profiles/pr1",
-        "DELETE /user/profiles/pr1",
+        "POST /user/collections/c1/profiles",
+        "PUT /user/collections/c1/profiles/pr1",
+        "DELETE /user/collections/c1/profiles/pr1",
         "GET /user/sets",
-        "GET /user/sets/s1",
+        "GET /user/collections/c1/sets/s1",
         "POST /user/collections/c1/sets",
-        "PATCH /user/sets/s1",
-        "DELETE /user/sets/s1",
+        "PATCH /user/collections/c1/sets/s1",
+        "DELETE /user/collections/c1/sets/s1",
         "GET /user/collections",
         "GET /user/collections/c1",
         "POST /user/collections",

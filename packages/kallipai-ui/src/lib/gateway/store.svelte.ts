@@ -11,16 +11,16 @@ import {
   createGroup,
   createProfile,
   createProvider,
-  createSet,
+  createCollectionSet,
   deleteCollection,
   deleteGroup,
   deleteProfile,
   deleteProvider,
   deleteProviderCredential,
-  deleteSet,
+  deleteCollectionSet,
   getCollection,
   getGroup,
-  getSet,
+  getCollectionSet,
   listCollections,
   listGroups,
   listPlatformCollections,
@@ -34,7 +34,7 @@ import {
   updateGroup,
   updateProfile,
   updateProvider,
-  updateSet,
+  updateCollectionSet,
   type UserCollectionRow,
   type UserGroupRow,
   type UserPlatformCollectionRow,
@@ -78,8 +78,8 @@ class UserGatewayStore {
       const [providers, profiles, sets, collections, groups, platformCatalog] =
         await Promise.all([
           this.run(() => listProviders(this.gatewayUrl)),
-          this.run(() => listProfiles(this.gatewayUrl)),
-          this.run(() => listSets(this.gatewayUrl)),
+          this.run(() => listProfiles(undefined, this.gatewayUrl)),
+          this.run(() => listSets(undefined, this.gatewayUrl)),
           this.run(() => listCollections(this.gatewayUrl)),
           this.run(() => listGroups(this.gatewayUrl)),
           this.run(() => listPlatformCollections(this.gatewayUrl)),
@@ -191,19 +191,22 @@ class UserGatewayStore {
 
   // -- profiles -----------------------------------------------------------
 
-  async addProfile(body: {
-    profile_id: string;
-    provider_id: string;
-    model: string;
-    max_context_window?: number | null;
-    effort?: string | null;
-    modalities?: string[] | null;
-    max_budget?: number | null;
-    tpm_limit?: number | null;
-    rpm_limit?: number | null;
-  }): Promise<boolean> {
+  async addProfile(
+    collection: string,
+    body: {
+      profile_id: string;
+      provider_id: string;
+      model: string;
+      max_context_window?: number | null;
+      effort?: string | null;
+      modalities?: string[] | null;
+      max_budget?: number | null;
+      tpm_limit?: number | null;
+      rpm_limit?: number | null;
+    },
+  ): Promise<boolean> {
     const ok = await this.run(async () => {
-      await createProfile(body, this.gatewayUrl);
+      await createProfile(collection, body, this.gatewayUrl);
       await this.refreshAll();
       return true;
     });
@@ -211,6 +214,7 @@ class UserGatewayStore {
   }
 
   async saveProfile(
+    collection: string,
     profileId: string,
     body: {
       model: string;
@@ -223,16 +227,16 @@ class UserGatewayStore {
     },
   ): Promise<boolean> {
     const ok = await this.run(async () => {
-      await updateProfile(profileId, body, this.gatewayUrl);
+      await updateProfile(collection, profileId, body, this.gatewayUrl);
       await this.refreshAll();
       return true;
     });
     return ok === true;
   }
 
-  async removeProfile(profileId: string): Promise<boolean> {
+  async removeProfile(collection: string, profileId: string): Promise<boolean> {
     const ok = await this.run(async () => {
-      await deleteProfile(profileId, this.gatewayUrl);
+      await deleteProfile(collection, profileId, this.gatewayUrl);
       await this.refreshAll();
       return true;
     });
@@ -241,9 +245,10 @@ class UserGatewayStore {
 
   // -- sets ---------------------------------------------------------------
 
-  /** The full row of a set (the edit dialog's seed). */
-  loadSet(name: string): Promise<UserSetRow | undefined> {
-    return this.run(() => getSet(name, this.gatewayUrl));
+  /** The full row of a set under the collection that anchors it (the
+   * edit dialog's seed). */
+  loadSet(collection: string, name: string): Promise<UserSetRow | undefined> {
+    return this.run(() => getCollectionSet(collection, name, this.gatewayUrl));
   }
 
   async addSet(
@@ -255,7 +260,7 @@ class UserGatewayStore {
     },
   ): Promise<boolean> {
     const ok = await this.run(async () => {
-      await createSet(collection, body, this.gatewayUrl);
+      await createCollectionSet(collection, body, this.gatewayUrl);
       await this.refreshAll();
       return true;
     });
@@ -263,20 +268,21 @@ class UserGatewayStore {
   }
 
   async saveSet(
+    collection: string,
     name: string,
     body: { description?: string; members?: string[] },
   ): Promise<boolean> {
     const ok = await this.run(async () => {
-      await updateSet(name, body, this.gatewayUrl);
+      await updateCollectionSet(collection, name, body, this.gatewayUrl);
       await this.refreshAll();
       return true;
     });
     return ok === true;
   }
 
-  async removeSet(name: string): Promise<boolean> {
+  async removeSet(collection: string, name: string): Promise<boolean> {
     const ok = await this.run(async () => {
-      await deleteSet(name, this.gatewayUrl);
+      await deleteCollectionSet(collection, name, this.gatewayUrl);
       await this.refreshAll();
       return true;
     });

@@ -92,9 +92,12 @@ Deno.test(
     const originalFetch = globalThis.fetch;
     globalThis.fetch = scriptedFetch({});
     try {
-      assertEquals(await store.saveSet("s1", { description: "x" }), false);
+      assertEquals(
+        await store.saveSet("c1", "s1", { description: "x" }),
+        false,
+      );
       assertEquals(store.error !== null, true);
-      assertEquals(await store.removeSet("s1"), false);
+      assertEquals(await store.removeSet("c1", "s1"), false);
     } finally {
       globalThis.fetch = originalFetch;
     }

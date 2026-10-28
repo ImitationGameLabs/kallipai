@@ -5,14 +5,14 @@
   // The console serves two routes: the list view (/admin/gateway)
   // and a collection's detail subface
   // (/admin/gateway/collections/<name>, reached by the `collection`
-  // prop); groups, parking, and providers render on both, so a
-  // parking drag always has its drop targets in view -- on the set
+  // prop); groups, the drafts, and providers render on both, so a
+  // draft drag always has its drop targets in view -- on the set
   // cards in the detail, or the placement dialog fallback on the
   // list.
   let { collection = null }: { collection?: string | null } = $props();
 
   import { gatewayStore } from "../../../lib/manage/gateway/store.svelte.ts";
-  import ParkedPlacementDialog from "../../../components/manage/gateway/ParkedPlacementDialog.svelte";
+  import PlacementDialog from "../../../components/manage/gateway/PlacementDialog.svelte";
   import type {
     AdminCollectionRow,
     AdminProfileRow,
@@ -53,7 +53,7 @@
     manage_gateway_remove_set_body,
     manage_gateway_remove_collection_body,
     manage_gateway_remove_provider_body,
-    manage_gateway_remove_parked_body,
+    manage_gateway_remove_draft_body,
     manage_gateway_remove_group_body,
     manage_gateway_providers,
     manage_gateway_subtitle,
@@ -61,7 +61,7 @@
   } from "../../../paraglide/messages.js";
   import ProvidersSection from "../../../components/manage/gateway/ProvidersSection.svelte";
   import ProviderDialog from "../../../components/manage/gateway/ProviderDialog.svelte";
-  import ParkingSection from "../../../components/manage/gateway/ParkingSection.svelte";
+  import DraftsSection from "../../../components/manage/gateway/DraftsSection.svelte";
   import ProfileDialog from "../../../components/manage/gateway/ProfileDialog.svelte";
   import ProviderCredentialDialog from "../../../components/manage/gateway/ProviderCredentialDialog.svelte";
   import SetCreateDialog from "../../../components/manage/gateway/SetCreateDialog.svelte";
@@ -90,7 +90,40 @@
   // names, the store's flat set list carries the rows.
   const detailMemberSets = $derived.by(() => {
     if (!detailRow) return [];
-    return memberSetsOf(gatewayStore.sets ?? [], detailRow.sets);
+    return memberSetsOf(gatewayStore.sets ?? [], detailRow);
+  });
+  // The detail's drafts: read for the open collection, so the panel can
+  // never offer a draft whose sets live elsewhere.
+  let detailDrafts = $state<AdminProfileRow[] | null>(null);
+  let detailDraftRequest = 0;
+  // Which collection the panel's rows belong to (plain state: the
+  // effect must not track its own bookkeeping and re-read twice).
+  let detailDraftsFor: string | null = null;
+  async function reloadDetailDrafts(): Promise<void> {
+    const request = ++detailDraftRequest;
+    const name = detailRow?.name ?? null;
+    if (name !== detailDraftsFor) {
+      // A switch clears first: a slow or failed read must not leave
+      // the previous collection's rows under the new detail.
+      detailDrafts = null;
+      detailDraftsFor = name;
+    }
+    if (name === null) return;
+    const rows = await gatewayStore.draftsIn(name);
+    // Only the newest read may land; a late answer for a collection
+    // that already left would otherwise repaint it.
+    if (rows !== undefined && request === detailDraftRequest) {
+      detailDrafts = rows;
+    }
+  }
+  // The re-read keys on the collection name, never on the row object:
+  // the store swaps the row out (refreshAll) without the rows
+  // changing, so identity is no witness. Every mutation reloads
+  // explicitly for the same reason (save, delete, drop).
+  $effect(() => {
+    // Re-read whenever the open collection changes.
+    void detailRow?.name;
+    void reloadDetailDrafts();
   });
   const groupName = (groupId: string): string =>
     (gatewayStore.groups ?? []).find((g) => g.group_id === groupId)?.name ??
@@ -115,10 +148,14 @@
   let setCreateOpen = $state(false);
   let setCreateBusy = $state(false);
   let setCreateError = $state<string | null>(null);
-  // Parking→set drop wiring: the page owns the drag state (the
+  // Draft→set drop wiring: the page owns the drag state (the
   // sections report the raw lifecycle), and a busy latch keeps a
   // second drop from racing the in-flight member update.
   let dragProfileId = $state<string | null>(null);
+  // The dragged row's collection: a draft can only join a set of its own
+  // collection, so the drop names the one collection the placement can
+  // land in.
+  let dragSourceCollection = $state<string | null>(null);
   let dragOverSet = $state<string | null>(null);
   let dropBusy = $state(false);
   // Each edit click takes a request token; only the newest token's
@@ -129,23 +166,28 @@
 
   async function onEditSet(set: AdminSetRow): Promise<void> {
     const request = ++editRequest;
-    const row = await gatewayStore.loadSet(set.name);
+    const row = await gatewayStore.loadSet(set.collection_name, set.name);
     if (row && request === editRequest) {
       editSet = row;
       dialogOpen = true;
     }
   }
 
-  function onSaveSet(result: { description: string; members: string[] }): void {
-    const name = editSet?.name;
+  async function onSaveSet(result: {
+    description: string;
+    members: string[];
+  }): Promise<void> {
+    const target = editSet;
     dialogOpen = false;
     editSet = null;
-    if (name) {
-      void gatewayStore.saveSet(name, {
-        description: result.description,
-        members: result.members,
-      });
-    }
+    if (!target) return;
+    await gatewayStore.saveSet(target.collection_name, target.name, {
+      description: result.description,
+      members: result.members,
+    });
+    // Dropping a set's last member flips that profile back to a draft
+    // server-side, so a member edit moves the drafts panel too.
+    if (gatewayStore.error === null) await reloadDetailDrafts();
   }
 
   // The provider pool's dialog state. editProvider null = the create
@@ -160,11 +202,11 @@
   let providerBusy = $state(false);
   let providerError = $state<string | null>(null);
   let removeProviderTarget = $state<string | null>(null);
-  let editParked = $state<AdminProfileRow | null>(null);
-  let parkedDialogOpen = $state(false);
-  let parkedBusy = $state(false);
-  let parkedError = $state<string | null>(null);
-  let removeParkedTarget = $state<AdminProfileRow | null>(null);
+  let editDraft = $state<AdminProfileRow | null>(null);
+  let draftDialogOpen = $state(false);
+  let draftBusy = $state(false);
+  let draftError = $state<string | null>(null);
+  let removeDraftTarget = $state<AdminProfileRow | null>(null);
 
   function openProviderDialog(
     row: {
@@ -225,13 +267,14 @@
     }
   }
 
-  function openParkedDialog(row: AdminProfileRow | null): void {
-    editParked = row;
-    parkedError = null;
-    parkedDialogOpen = true;
+  function openDraftDialog(row: AdminProfileRow | null): void {
+    editDraft = row;
+    draftError = null;
+    draftDialogOpen = true;
   }
 
-  async function saveParked(result: {
+  async function saveDraft(result: {
+    collection: string;
     profile_id: string;
     provider_id: string;
     model: string;
@@ -242,56 +285,65 @@
     tpm_limit: number | null;
     rpm_limit: number | null;
   }): Promise<void> {
-    parkedBusy = true;
-    parkedError = null;
-    if (editParked === null) {
-      const ok = await gatewayStore.addParked(result);
-      parkedBusy = false;
-      if (!ok) {
-        parkedError = gatewayStore.error;
-        return;
-      }
-    } else {
-      const ok = await gatewayStore.saveParked(editParked.profile_id, {
+    draftBusy = true;
+    draftError = null;
+    if (editDraft === null) {
+      const ok = await gatewayStore.addDraft(result.collection, {
+        profile_id: result.profile_id,
+        provider_id: result.provider_id,
         model: result.model,
         max_context_window: result.max_context_window,
         effort: result.effort,
         modalities: result.modalities,
-        parked: true,
-        max_budget: result.max_budget,
-        tpm_limit: result.tpm_limit,
-        rpm_limit: result.rpm_limit,
       });
-      parkedBusy = false;
+      draftBusy = false;
       if (!ok) {
-        parkedError = gatewayStore.error;
+        draftError = gatewayStore.error;
+        return;
+      }
+    } else {
+      const ok = await gatewayStore.saveDraft(
+        editDraft.collection_name,
+        editDraft.profile_id,
+        {
+          model: result.model,
+          max_context_window: result.max_context_window,
+          effort: result.effort,
+          modalities: result.modalities,
+        },
+      );
+      draftBusy = false;
+      if (!ok) {
+        draftError = gatewayStore.error;
         return;
       }
     }
-    parkedDialogOpen = false;
-    editParked = null;
+    await reloadDetailDrafts();
+    draftDialogOpen = false;
+    editDraft = null;
   }
 
-  async function confirmRemoveParked(): Promise<void> {
-    const row = removeParkedTarget;
+  async function confirmRemoveDraft(): Promise<void> {
+    const row = removeDraftTarget;
     if (row === null) return;
-    parkedBusy = true;
-    parkedError = null;
-    await gatewayStore.removeParked(row.profile_id);
-    parkedBusy = false;
+    draftBusy = true;
+    draftError = null;
+    await gatewayStore.removeDraft(row.collection_name, row.profile_id);
+    draftBusy = false;
     if (gatewayStore.error !== null) {
-      parkedError = gatewayStore.error;
+      draftError = gatewayStore.error;
     } else {
-      removeParkedTarget = null;
+      await reloadDetailDrafts();
+      removeDraftTarget = null;
     }
   }
 
   async function confirmRemove(): Promise<void> {
-    const name = removeTarget?.name;
-    if (!name) return;
+    const target = removeTarget;
+    if (!target) return;
     removeBusy = true;
     removeError = null;
-    await gatewayStore.removeSet(name);
+    await gatewayStore.removeSet(target.collection_name, target.name);
     removeBusy = false;
     if (gatewayStore.error !== null) {
       // Keep the dialog open and surface the reason (a referenced set
@@ -299,6 +351,7 @@
       removeError = gatewayStore.error;
     } else {
       removeTarget = null;
+      await reloadDetailDrafts();
     }
   }
 
@@ -310,6 +363,17 @@
   let collectionBusy = $state(false);
   let collectionError = $state<string | null>(null);
   let removeCollectionTarget = $state<AdminCollectionRow | null>(null);
+  // The delete confirm's copy, built from the row: both counts are the
+  // server's numbers, so the dialog quotes what the cascade will take.
+  const removeCollectionBody = $derived(
+    removeCollectionTarget === null
+      ? ""
+      : manage_gateway_remove_collection_body({
+          name: removeCollectionTarget.name,
+          sets: removeCollectionTarget.set_count,
+          profiles: removeCollectionTarget.profile_count,
+        }),
+  );
   let removeCollectionBusy = $state(false);
   let removeCollectionError = $state<string | null>(null);
 
@@ -514,6 +578,7 @@
 
   function clearDrag(): void {
     dragProfileId = null;
+    dragSourceCollection = null;
     dragOverSet = null;
   }
 
@@ -523,7 +588,15 @@
     if (profileId === null || dropBusy) return;
     dropBusy = true;
     try {
-      await gatewayStore.addParkedToSet(profileId, setName);
+      await gatewayStore.addDraftToSet(
+        detailRow?.name ?? "",
+        profileId,
+        setName,
+      );
+      // Re-read only on success: the reload's own read nulls the error
+      // first (store.run), so an unconditional reload would wipe the
+      // failure banner before it paints.
+      if (gatewayStore.error === null) await reloadDetailDrafts();
     } finally {
       dropBusy = false;
     }
@@ -533,21 +606,30 @@
   // (the dragged profile rides along; the busy latch is shared).
   let placementOpen = $state(false);
   let placementProfileId = $state<string | null>(null);
+  let placementSourceCollection = $state<string | null>(null);
   function onDropAnywhere(e: DragEvent): void {
     e.preventDefault();
     const profileId = dragProfileId;
+    const sourceCollection = dragSourceCollection;
     clearDrag();
     if (profileId === null) return;
     placementProfileId = profileId;
+    placementSourceCollection = sourceCollection;
     placementOpen = true;
   }
-  async function confirmPlacement(setName: string): Promise<void> {
+  async function confirmPlacement(
+    collectionName: string,
+    setName: string,
+  ): Promise<void> {
     const profileId = placementProfileId;
     if (profileId === null || dropBusy) return;
     dropBusy = true;
     try {
-      await gatewayStore.addParkedToSet(profileId, setName);
-      if (gatewayStore.error === null) placementOpen = false;
+      await gatewayStore.addDraftToSet(collectionName, profileId, setName);
+      if (gatewayStore.error === null) {
+        placementOpen = false;
+        placementSourceCollection = null;
+      }
     } finally {
       dropBusy = false;
     }
@@ -698,7 +780,6 @@
         >
           <CollectionsSection
             collections={gatewayStore.collections ?? []}
-            sets={gatewayStore.sets ?? []}
             groups={gatewayStore.groups ?? []}
             onAdd={() => openCollectionDialog(null)}
           />
@@ -714,16 +795,18 @@
         }}
         onAdd={() => openGroupDialog(null)}
       />
-      <ParkingSection
-        parking={gatewayStore.parking ?? []}
-        onCreate={() => openParkedDialog(null)}
-        onEdit={(row) => openParkedDialog(row)}
+      <DraftsSection
+        drafts={detailRow ? (detailDrafts ?? []) : (gatewayStore.drafts ?? [])}
+        scope={detailRow?.name ?? null}
+        onCreate={() => openDraftDialog(null)}
+        onEdit={(row) => openDraftDialog(row)}
         onDelete={(row) => {
-          removeParkedTarget = row;
-          parkedError = null;
+          removeDraftTarget = row;
+          draftError = null;
         }}
-        onDragStart={(profileId) => {
-          dragProfileId = profileId;
+        onDragStart={(profile) => {
+          dragProfileId = profile.profile_id;
+          dragSourceCollection = profile.collection_name;
         }}
         onDragEnd={clearDrag}
       />
@@ -767,7 +850,7 @@
 <SetDialog
   open={dialogOpen}
   set={editSet}
-  onSave={onSaveSet}
+  onSave={(result) => void onSaveSet(result)}
   onCancel={() => {
     dialogOpen = false;
     editSet = null;
@@ -776,7 +859,7 @@
 
 <SetCreateDialog
   open={setCreateOpen}
-  names={(gatewayStore.sets ?? []).map((s) => s.name)}
+  names={gatewayStore.setsIn(detailRow?.name ?? "").map((s) => s.name)}
   busy={setCreateBusy}
   error={setCreateError}
   onSave={(result) => void saveNewSet(result)}
@@ -817,33 +900,36 @@
 />
 
 <ProfileDialog
-  open={parkedDialogOpen}
+  open={draftDialogOpen}
   providers={gatewayStore.providers ?? []}
-  row={editParked}
-  busy={parkedBusy}
-  error={parkedError}
-  onSave={(result) => void saveParked(result)}
+  collections={gatewayStore.collections ?? []}
+  pinnedCollection={detailRow?.name ?? null}
+  row={editDraft}
+  busy={draftBusy}
+  error={draftError}
+  onSave={(result) => void saveDraft(result)}
   onCancel={() => {
-    parkedDialogOpen = false;
-    editParked = null;
-    parkedError = null;
+    draftDialogOpen = false;
+    editDraft = null;
+    draftError = null;
   }}
 />
 
 <ConfirmDialog
-  open={removeParkedTarget !== null}
-  title={removeParkedTarget?.profile_id ?? ""}
-  description={manage_gateway_remove_parked_body({
-    name: removeParkedTarget?.profile_id ?? "",
+  open={removeDraftTarget !== null}
+  title={removeDraftTarget?.profile_id ?? ""}
+  description={manage_gateway_remove_draft_body({
+    name: removeDraftTarget?.profile_id ?? "",
+    collection: removeDraftTarget?.collection_name ?? "",
   })}
   confirmLabel={common_remove()}
   tone="danger"
-  busy={parkedBusy}
-  error={parkedError}
-  onConfirm={() => void confirmRemoveParked()}
+  busy={draftBusy}
+  error={draftError}
+  onConfirm={() => void confirmRemoveDraft()}
   onCancel={() => {
-    removeParkedTarget = null;
-    parkedError = null;
+    removeDraftTarget = null;
+    draftError = null;
   }}
 />
 
@@ -927,9 +1013,7 @@
 <ConfirmDialog
   open={removeCollectionTarget !== null}
   title={removeCollectionTarget?.name ?? ""}
-  description={manage_gateway_remove_collection_body({
-    name: removeCollectionTarget?.name ?? "",
-  })}
+  description={removeCollectionBody}
   confirmLabel={common_remove()}
   tone="danger"
   busy={removeCollectionBusy}
@@ -941,16 +1025,19 @@
   }}
 />
 
-<ParkedPlacementDialog
+<PlacementDialog
   open={placementOpen}
   profileId={placementProfileId}
+  sourceCollection={placementSourceCollection ?? undefined}
   collections={gatewayStore.collections ?? []}
   sets={gatewayStore.sets ?? []}
   busy={dropBusy}
   error={gatewayStore.error}
-  onConfirm={(_collection, setName) => void confirmPlacement(setName)}
+  onConfirm={(collectionName, setName) =>
+    void confirmPlacement(collectionName, setName)}
   onCancel={() => {
     placementOpen = false;
     placementProfileId = null;
+    placementSourceCollection = null;
   }}
 />

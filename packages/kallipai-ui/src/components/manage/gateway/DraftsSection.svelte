@@ -1,13 +1,17 @@
 <script lang="ts">
   import { MENU_ITEM, MENU_ITEM_DANGER } from "../../../lib/classes.ts";
-  // The parking section: one row per parked profile in the catalog
-  // space -- the one space this page manages (full CRUD: the kebab
-  // carries the edit and remove actions).
+  // The drafts section: one row per draft -- the whole catalog space's,
+  // or one collection's when the panel is scoped to a detail. A draft
+  // is a profile row outside every set: the filter is the wire flag, not
+  // a separate store. A row's identity is its collection plus its id
+  // (the id alone repeats across collections), so both the each key and
+  // the row carry the collection.
   // The header row carries the create trigger (the ProfileDialog).
   // Prop-driven like the sets section: the filter and the mutations
   // live with the store, the rows only report intents.
   // Every row drags: dropping it on a set makes it a member (the
-  // server promotes the row in the same write).
+  // server promotes the row in the same write). The drag carries the
+  // row, not just the id: the collection decides where it can land.
   import type { AdminProfileRow } from "../../../lib/manage/gateway/client.ts";
   import { Menu } from "@skeletonlabs/skeleton-svelte";
   import ActionMenu from "../../ActionMenu.svelte";
@@ -15,26 +19,30 @@
   import {
     common_edit,
     common_remove,
-    manage_gateway_parking,
-    manage_gateway_parking_actions_aria,
-    manage_gateway_parking_desc,
-    manage_profiles_parking_add,
+    manage_gateway_drafts,
+    manage_gateway_drafts_actions_aria,
+    manage_gateway_drafts_desc,
+    manage_gateway_drafts_desc_collection,
+    manage_gateway_draft_add,
   } from "../../../paraglide/messages.js";
 
   let {
-    parking,
+    drafts,
+    scope = null,
     onCreate,
     onEdit,
     onDelete,
     onDragStart,
     onDragEnd,
   }: {
-    /** The parked profile rows (the catalog space's drafts). */
-    parking: readonly AdminProfileRow[];
+    /** The drafts on show: the whole space's, or one collection's. */
+    drafts: readonly AdminProfileRow[];
+    /** The collection the panel is narrowed to (null = the whole space). */
+    scope?: string | null;
     onCreate: () => void;
     onEdit: (profile: AdminProfileRow) => void;
     onDelete: (profile: AdminProfileRow) => void;
-    onDragStart: (profileId: string) => void;
+    onDragStart: (profile: AdminProfileRow) => void;
     onDragEnd: () => void;
   } = $props();
 </script>
@@ -42,19 +50,23 @@
 <section class="space-y-3">
   <div class="flex items-center justify-between gap-2">
     <h2 class="text-sm font-medium uppercase opacity-60 tracking-wide">
-      {manage_gateway_parking()}
+      {manage_gateway_drafts()}
     </h2>
     <button
       type="button"
       class="btn btn-sm preset-filled-primary-500"
       onclick={onCreate}
     >
-      {manage_profiles_parking_add()}
+      {manage_gateway_draft_add()}
     </button>
   </div>
-  <p class="text-xs opacity-60 mt-1">{manage_gateway_parking_desc()}</p>
+  <p class="text-xs opacity-60 mt-1">
+    {scope === null
+      ? manage_gateway_drafts_desc()
+      : manage_gateway_drafts_desc_collection({ collection: scope })}
+  </p>
   <div role="list" class="space-y-3">
-    {#each parking as p (p.profile_id)}
+    {#each drafts as p (`${p.collection_name}/${p.profile_id}`)}
       <div
         role="listitem"
         class="card preset-tonal-surface p-3 flex items-center gap-3 cursor-grab"
@@ -65,16 +77,21 @@
             e.dataTransfer.setData("text/plain", p.profile_id);
             e.dataTransfer.effectAllowed = "move";
           }
-          onDragStart(p.profile_id);
+          onDragStart(p);
         }}
         ondragend={onDragEnd}
       >
-        <span class="min-w-0 flex-1 truncate text-sm">{p.profile_id}</span>
+        <span class="min-w-0 flex-1 flex items-baseline gap-2 text-sm">
+          <span class="truncate">{p.profile_id}</span>
+          <span class="text-xs opacity-60 font-mono truncate shrink-0"
+            >{p.collection_name}</span
+          >
+        </span>
         <span class="text-xs opacity-60 font-mono truncate"
           >{p.provider_id}</span
         >
         <ActionMenu
-          label={manage_gateway_parking_actions_aria()}
+          label={manage_gateway_drafts_actions_aria()}
           onSelect={(value) => {
             if (value === "edit") onEdit(p);
             else if (value === "remove") onDelete(p);

@@ -204,14 +204,22 @@ export function listCollectionSets(
   ).then((r) => r.sets);
 }
 
-/** @deprecated The flat /admin/sets/{name} read is gone: a set is addressed under its collection. */
-export function getSet(name: string, url?: string): Promise<AdminSetRow> {
-  return adminFetch<AdminSetRow>(`/admin/sets/${encodeURIComponent(name)}`, {
-    url,
-  });
+/** GET /admin/collections/{collection}/sets/{name}: one set under the
+ * collection that anchors it. */
+export function getCollectionSet(
+  collection: string,
+  name: string,
+  url?: string,
+): Promise<AdminSetRow> {
+  return adminFetch<AdminSetRow>(
+    `/admin/collections/${encodeURIComponent(collection)}/sets/${encodeURIComponent(name)}`,
+    { url },
+  );
 }
 
-export function createSet(
+/** POST /admin/collections/{collection}/sets: a set born in the named
+ * collection. The same name in another collection is a different set. */
+export function createCollectionSet(
   collection: string,
   body: { name: string; description: string },
   url?: string,
@@ -226,91 +234,38 @@ export function createSet(
   );
 }
 
-/** @deprecated The flat /admin/sets/{name} PATCH is gone: a set is addressed under its collection. */
-export function updateSet(
+/** PATCH the set's description and member order under its collection. */
+export function updateCollectionSet(
+  collection: string,
   name: string,
   body: { description?: string; members?: string[] },
   url?: string,
 ): Promise<AdminSetRow> {
-  return adminFetch<AdminSetRow>(`/admin/sets/${encodeURIComponent(name)}`, {
-    method: "PATCH",
-    body,
-    url,
-  });
-}
-
-/** @deprecated The flat /admin/sets/{name} DELETE is gone: a set is addressed under its collection. */
-export function deleteSet(name: string, url?: string): Promise<void> {
-  return adminFetch(`/admin/sets/${encodeURIComponent(name)}`, {
-    method: "DELETE",
-    url,
-  }).then(() => undefined);
-}
-
-/** The catalog space's drafts across every collection: the park
- * filter over the profiles list. */
-export function listParking(url?: string): Promise<AdminProfileRow[]> {
-  return listProfiles({ parked: true }, url);
-}
-
-/** Create a parked draft referencing a provider; the server validates
- * the reference and derives the family from the provider row.
- *
- * @deprecated The flat create is gone; createProfile names the
- * collection the row is born in. */
-export function createParked(
-  body: {
-    profile_id: string;
-    provider_id: string;
-    model: string;
-    max_context_window?: number | null;
-    effort?: string | null;
-    modalities?: string[] | null;
-    max_budget?: number | null;
-    tpm_limit?: number | null;
-    rpm_limit?: number | null;
-  },
-  url?: string,
-): Promise<AdminProfileRow> {
-  return adminFetch<AdminProfileRow>("/admin/parking", {
-    method: "POST",
-    body,
-    url,
-  });
-}
-
-/** Full-field replacement of a parked draft (plain PUT semantics). The
- * family and profile id are immutable here; `parked` moves the row
- * between the parking area and the served face.
- *
- * @deprecated The flat PUT is gone; updateProfile names the
- * collection the row lives in. */
-export function updateParked(
-  profileId: string,
-  body: {
-    model: string;
-    max_context_window?: number | null;
-    effort?: string | null;
-    modalities?: string[] | null;
-    parked: boolean;
-    max_budget?: number | null;
-    tpm_limit?: number | null;
-    rpm_limit?: number | null;
-  },
-  url?: string,
-): Promise<AdminProfileRow> {
-  return adminFetch<AdminProfileRow>(
-    `/admin/parking/${encodeURIComponent(profileId)}`,
-    { method: "PUT", body, url },
+  return adminFetch<AdminSetRow>(
+    `/admin/collections/${encodeURIComponent(collection)}/sets/${encodeURIComponent(name)}`,
+    {
+      method: "PATCH",
+      body,
+      url,
+    },
   );
 }
 
-/** @deprecated The flat DELETE is gone; deleteProfile names the collection the row lives in. */
-export function deleteParked(profileId: string, url?: string): Promise<void> {
-  return adminFetch(`/admin/parking/${encodeURIComponent(profileId)}`, {
-    method: "DELETE",
-    url,
-  }).then(() => undefined);
+export function deleteCollectionSet(
+  collection: string,
+  name: string,
+  url?: string,
+): Promise<void> {
+  return adminFetch(
+    `/admin/collections/${encodeURIComponent(collection)}/sets/${encodeURIComponent(name)}`,
+    { method: "DELETE", url },
+  ).then(() => undefined);
+}
+
+/** The catalog space's drafts across every collection: the parked filter
+ * over the profiles list. */
+export function listDrafts(url?: string): Promise<AdminProfileRow[]> {
+  return listProfiles({ parked: true }, url);
 }
 
 /** GET /admin/profiles: the catalog space's rows, filtered in the query.
@@ -353,7 +308,7 @@ export function createProfile(
 }
 
 /** PUT the row's full content in place (plain PUT semantics; `parked`
- * moves the row between the parking area and the served face). The
+ * moves the row between the draft and the served face). The
  * collection is the address, never the payload. */
 export function updateProfile(
   collection: string,
@@ -418,6 +373,10 @@ export interface AdminCollectionRow {
   default_set: string | null;
   /** The platform audiences the collection is live on. */
   publications: string[];
+  /** How many profile rows the collection holds (drafts included). */
+  profile_count: number;
+  /** How many sets the collection anchors. */
+  set_count: number;
 }
 
 export function listCollections(url?: string): Promise<AdminCollectionRow[]> {

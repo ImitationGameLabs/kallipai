@@ -5,7 +5,10 @@ import { assert } from "@std/assert";
 // null out in the payload, a stored provider or effort value must
 // stay selectable even when it left the pool, and the tag group
 // seeds from the intersection of the stored list with the wire
-// modalities.
+// modalities. The create form's starting collection is dialog-side: a
+// pinned one seeds the field and locks the picker, a null one leaves it
+// blank and unsubmittable until the user picks. The page's call site is
+// pinned by the page's own test.
 const USER_DIALOG = new URL("./UserProfileDialog.svelte", import.meta.url);
 const MANAGE_DIALOG = new URL(
   "../manage/gateway/ProfileDialog.svelte",
@@ -105,5 +108,32 @@ Deno.test(
         "the hint must render only when creating with an empty pool",
       );
     }
+  },
+);
+
+Deno.test(
+  "the manage create form starts blank on the list, seeded on a detail",
+  { permissions: { read: [MANAGE_DIALOG] } },
+  () => {
+    const dialog = source(MANAGE_DIALOG);
+    // One prop carries both sides: a name seeds the field and locks the
+    // picker, null leaves the list entry blank. The page's call site is
+    // pinned by the page's own test.
+    assert(
+      dialog.includes(
+        'collectionDraft = row?.collection_name ?? pinnedCollection ?? "";',
+      ),
+      "the create form seeds from the row or a pinned collection",
+    );
+    assert(
+      dialog.includes("disabled={!creating || pinnedCollection !== null}"),
+      "a pinned collection is not the user's to change",
+    );
+    // With no collection picked (the list entry's blank start) submit
+    // stays disabled.
+    assert(
+      dialog.includes('collectionDraft.trim() !== ""'),
+      "an empty collection keeps submit disabled",
+    );
   },
 );

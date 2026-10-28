@@ -1,9 +1,10 @@
 <script lang="ts" module>
-  // Profile edit dialog: identity (creation only), the model, and the
-  // optional limits. PUT is a full-field replacement, so the dialog
-  // hands back every field each save; the blank numeric fields carry
-  // no limit. Modalities are the shared tag group (empty = text only,
-  // the server default rides as null).
+  // Profile edit dialog: identity and the anchoring collection (both
+  // creation only -- a row's collection never moves), the model, and the
+  // limits. PUT is a full-field replacement, so the dialog hands back
+  // every field each save; the blank numeric fields carry no limit.
+  // Modalities are the shared tag group (empty = text only, the server
+  // default rides as null).
 </script>
 
 <script lang="ts">
@@ -21,6 +22,7 @@
     common_save,
     user_gateway_profile_add,
     user_gateway_profile_budget,
+    user_gateway_profile_collection,
     user_gateway_profile_context,
     user_gateway_profile_edit_title,
     user_gateway_profile_effort,
@@ -43,13 +45,17 @@
     onSave,
     onCancel,
     providers = [],
+    collections = [],
   }: {
     open: boolean;
     /** The caller's provider pool (the provider dropdown). */
     providers?: readonly { provider_id: string }[];
+    /** The caller's collections (the anchoring-collection dropdown). */
+    collections?: readonly { name: string }[];
     /** The row under edit (null = the create form). */
     row: {
       profile_id: string;
+      collection_name: string;
       provider_id: string;
       model: string;
       max_context_window: number | null;
@@ -62,6 +68,7 @@
     busy?: boolean;
     error?: string | null;
     onSave: (result: {
+      collection: string;
       profile_id: string;
       provider_id: string;
       model: string;
@@ -76,6 +83,7 @@
   } = $props();
 
   let idDraft = $state("");
+  let collectionDraft = $state("");
   let providerDraft = $state("");
   let modelDraft = $state("");
   let effortDraft = $state("");
@@ -88,6 +96,9 @@
   $effect(() => {
     if (open && !lastOpen) {
       idDraft = row?.profile_id ?? "";
+      // Blank until picked: the first collection in name order is not a
+      // sensible default for a row the caller is about to place.
+      collectionDraft = row?.collection_name ?? "";
       providerDraft = row?.provider_id ?? "";
       modelDraft = row?.model ?? "";
       effortDraft = row?.effort ?? "";
@@ -106,6 +117,7 @@
   const creating = $derived(row === null);
   const canSubmit = $derived(
     idDraft.trim() !== "" &&
+      collectionDraft.trim() !== "" &&
       providerDraft.trim() !== "" &&
       modelDraft.trim() !== "",
   );
@@ -147,6 +159,7 @@
   function submit(): void {
     if (!canSubmit || !numbersValid || busy) return;
     onSave({
+      collection: collectionDraft.trim(),
       profile_id: idDraft.trim(),
       provider_id: providerDraft.trim(),
       model: modelDraft.trim(),
@@ -193,6 +206,25 @@
               disabled={!creating}
               aria-required="true"
             />
+          </label>
+          <label class="flex flex-col gap-1">
+            <span class="text-xs font-medium">
+              {user_gateway_profile_collection()}
+              <ReqMark />
+            </span>
+            <select
+              class="select text-sm font-mono"
+              bind:value={collectionDraft}
+              disabled={!creating}
+              aria-required="true"
+            >
+              {#if creating && collectionDraft === ""}
+                <option value="" disabled></option>
+              {/if}
+              {#each collections as c (c.name)}
+                <option value={c.name}>{c.name}</option>
+              {/each}
+            </select>
           </label>
           <label class="flex flex-col gap-1">
             <span class="text-xs font-medium">

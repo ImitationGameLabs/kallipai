@@ -1,4 +1,5 @@
 import { assert } from "@std/assert";
+import { user_gateway_remove_collection_body } from "../../paraglide/messages.js";
 
 // Source pins for the user gateway space: the shell gate owns the
 // sign-in posture (any signed-in account qualifies, an admin session
@@ -9,6 +10,10 @@ import { assert } from "@std/assert";
 // nothing invented.
 const PAGE = new URL("./GatewayMinePage.svelte", import.meta.url);
 const STORE = new URL("../../lib/gateway/store.svelte.ts", import.meta.url);
+const PROFILES_SECTION = new URL(
+  "../../components/gateway/UserProfilesSection.svelte",
+  import.meta.url,
+);
 const DIALOG = new URL(
   "../../components/gateway/UserPublishDialog.svelte",
   import.meta.url,
@@ -206,6 +211,52 @@ Deno.test(
     assert(
       src.includes("userGatewayStore.addSet(createCollection, {"),
       "the create lands inside the pre-bound collection",
+    );
+  },
+);
+
+Deno.test(
+  "the remove-collection confirm carries the row's own counts",
+  { permissions: { read: [PAGE] } },
+  () => {
+    const src = source(PAGE);
+    assert(
+      src.includes("sets: removeCollectionTarget.set_count") &&
+        src.includes("profiles: removeCollectionTarget.profile_count") &&
+        src.includes("description={removeCollectionBody}"),
+      "the confirm hands over the server's counts",
+    );
+  },
+);
+
+Deno.test("the remove-collection copy renders the counts it is given", () => {
+  const body = user_gateway_remove_collection_body({
+    name: "alpha",
+    sets: 2,
+    profiles: 3,
+  });
+  assert(body.includes("2 profile sets") && body.includes("3 profiles"), body);
+});
+
+Deno.test(
+  "the user profile list says which collection each row lives in",
+  { permissions: { read: [PAGE, PROFILES_SECTION] } },
+  () => {
+    const page = source(PAGE);
+    const section = source(PROFILES_SECTION);
+    // The list spans the caller's collections and a profile id repeats
+    // across them, so the id alone is not a key.
+    assert(
+      section.includes("${row.collection_name}/${row.profile_id}"),
+      "the list keys a row on its collection and id",
+    );
+    assert(
+      section.includes("{row.collection_name}"),
+      "the card prints the row's collection",
+    );
+    assert(
+      page.includes('collection: removeProfileTarget?.collection_name ?? ""'),
+      "the delete confirm names the collection the row lives in",
     );
   },
 );
