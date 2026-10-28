@@ -1,5 +1,8 @@
 //! The per-request context: what the phases hand to each other.
 
+use std::net::SocketAddr;
+use std::sync::Arc;
+
 use pingora::prelude::HttpPeer;
 
 use crate::forward::dialect;
@@ -42,10 +45,17 @@ impl Route {
 }
 
 /// The selection outcome: the profile the request rides and the pieces
-/// the later phases need: the peer, the credential, and the rewrite
-/// inputs (the base path and the authority for the Host header).
+/// the later phases need: the upstream candidates and the dial
+/// parameters, the credential, and the rewrite inputs (the base path
+/// and the authority for the Host header).
 pub struct Selection {
-    pub peer: HttpPeer,
+    /// The upstream candidates in resolver-answer order, each already
+    /// carrying the credential prefix's port: the port is not part of
+    /// the cache key, so it is joined here once.
+    pub addresses: Arc<[SocketAddr]>,
+    /// The parameters a peer needs besides its address: kept so any
+    /// candidate builds a dial target shaped like the first try.
+    pub dial: DialParams,
     pub credential: ProviderCredential,
     pub auth: crate::secret::AuthStyle,
     /// The registry family of the selected provider: the `api_family`
@@ -59,6 +69,24 @@ pub struct Selection {
     /// The profile the request rides: the terminal failure line
     /// names it, so a failure is attributable to a profile.
     pub profile_id: String,
+}
+
+/// The peer parameters that are not the address: whether the
+/// connection is TLS and the name the certificate must carry.
+pub(crate) struct DialParams {
+    pub tls: bool,
+    pub sni: String,
+}
+
+impl Selection {
+    /// The peer for one candidate: the address at `index` and the dial
+    /// parameters every candidate shares.
+    ///
+    /// `addresses` is never empty -- `resolve_candidates` refuses an empty
+    /// answer -- so a caller only has to pass an index inside it.
+    pub(crate) fn peer_at(&self, index: usize) -> HttpPeer {
+        HttpPeer::new(self.addresses[index], self.dial.tls, self.dial.sni.clone())
+    }
 }
 
 /// Why a forward failed before any upstream answered: the value domain
@@ -150,5 +178,63 @@ impl GatewayCtx {
     /// walks in without it today.
     pub fn phase_span(&self) -> tracing::Span {
         self.span.clone().unwrap_or_else(tracing::Span::none)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A selection over two candidate addresses with the given dial
+    /// parameters: everything else is fixed, so a test varies only the
+    /// part it reads.
+    fn selection_with(dial: DialParams) -> Selection {
+        Selection {
+            addresses: Arc::from(vec![
+                SocketAddr::from(([192, 0, 2, 1], 8443)),
+                SocketAddr::from(([192, 0, 2, 2], 8443)),
+            ]),
+            dial,
+            credential: ProviderCredential::placeholder(),
+            auth: crate::secret::AuthStyle::Bearer,
+            api_family: "openai".to_string(),
+            base_path: "/v1".to_string(),
+            authority: "upstream.test:8443".to_string(),
+            profile_id: "profile-a".to_string(),
+        }
+    }
+
+    /// Each candidate's peer carries that candidate's own address and the
+    /// dial parameters every candidate shares. The secure call keeps its
+    /// SNI different from the authority, so its assertions say where the
+    /// value came from; the TLS flag is read both ways round.
+    #[test]
+    fn peer_at_builds_the_dial_target_for_a_candidate_at_its_index() {
+        let selection = selection_with(DialParams {
+            tls: false,
+            sni: "upstream.test".to_string(),
+        });
+        let peer = selection.peer_at(0);
+        assert_eq!(
+            peer._address.as_inet(),
+            Some(&SocketAddr::from(([192, 0, 2, 1], 8443)))
+        );
+        assert_eq!(peer.sni, "upstream.test");
+        assert!(!peer.is_tls());
+        let second = selection.peer_at(1);
+        assert_eq!(
+            second._address.as_inet(),
+            Some(&SocketAddr::from(([192, 0, 2, 2], 8443)))
+        );
+        assert_eq!(second.sni, "upstream.test");
+        assert!(!second.is_tls());
+        let secure = selection_with(DialParams {
+            tls: true,
+            sni: "secure.test".to_string(),
+        });
+        assert!(secure.peer_at(0).is_tls());
+        assert!(secure.peer_at(1).is_tls());
+        assert_eq!(secure.peer_at(0).sni, "secure.test");
+        assert_eq!(secure.peer_at(1).sni, "secure.test");
     }
 }

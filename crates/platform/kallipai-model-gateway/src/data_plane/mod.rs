@@ -8,7 +8,8 @@
 //!   parking / family gates) and the upstream-credential resolution.
 //!   Everything that can answer 4xx/5xx without an upstream happens
 //!   here.
-//! - `upstream_peer`: reads the peer the selection left in the context.
+//! - `upstream_peer`: builds the dial target for the selection's first
+//!   candidate.
 //! - `upstream_request_filter`: the wire-path rewrite, the credential
 //!   header injection and the safe-header passthrough.
 //! - `response_filter`: the CORS response headers.
@@ -485,10 +486,10 @@ impl ProxyHttp for GatewayProxy {
         _session: &mut Session,
         ctx: &mut Self::CTX,
     ) -> Result<Box<HttpPeer>> {
-        // The selection already resolved the dial target; there is
-        // nothing left to look up.
+        // The selection already resolved the candidates; the first one
+        // is the target the initial try rides.
         let selection = staged_selection(ctx)?;
-        Ok(Box::new(selection.peer.clone()))
+        Ok(Box::new(selection.peer_at(0)))
     }
 
     async fn upstream_request_filter(

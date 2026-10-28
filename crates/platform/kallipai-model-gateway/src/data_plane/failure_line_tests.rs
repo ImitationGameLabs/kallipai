@@ -3,13 +3,13 @@
 //! forwarding suite drives a real listener instead; these read the line
 //! the terminal phase writes for one failed forward.
 
+use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use pingora::ErrorType;
-use pingora::prelude::HttpPeer;
 
-use super::context::{FailureReason, Selection};
+use super::context::{DialParams, FailureReason, Selection};
 use super::{GatewayCtx, Route, failure_level, log_forward_failure, warrants_failure_line};
 use crate::forward::dialect::Endpoint;
 use crate::metrics::ForwardOutcome;
@@ -249,7 +249,11 @@ fn forwarding_ctx() -> GatewayCtx {
     GatewayCtx {
         route: Route::Forward(Endpoint::ChatCompletions),
         selection: Some(Selection {
-            peer: HttpPeer::new(("127.0.0.1", 443), true, "upstream.test".to_string()),
+            addresses: Arc::from(vec![SocketAddr::from(([127, 0, 0, 1], 443))]),
+            dial: DialParams {
+                tls: true,
+                sni: "upstream.test".to_string(),
+            },
             credential: ProviderCredential::placeholder(),
             auth: AuthStyle::Bearer,
             api_family: "openai".to_string(),

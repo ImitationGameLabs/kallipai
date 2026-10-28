@@ -9,10 +9,10 @@
 //! phases read it from there.
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use axum::http::{HeaderMap, Method};
 use axum::response::IntoResponse;
-use pingora::prelude::HttpPeer;
 use sea_orm::EntityTrait;
 
 use crate::db;
@@ -25,7 +25,7 @@ use crate::routes::ApiError;
 use crate::secret;
 use crate::state::AppState;
 
-use super::context::{FailureReason, Route, Selection};
+use super::context::{DialParams, FailureReason, Route, Selection};
 use super::resolver::{ResolveFailure, Resolver, UPSTREAM_RETRY_AFTER};
 
 /// The parsed upstream prefix: the peer parts plus the rewrite
@@ -86,21 +86,30 @@ pub(crate) fn parse_endpoint_prefix(prefix: &str) -> Option<ParsedPrefix> {
 const UPSTREAM_UNRESOLVED_MESSAGE: &str =
     "the selected upstream could not be resolved; retry shortly";
 
-/// Resolve the dial target outside the forwarding worker through the system
-/// resolver: the first answer wins, and the lookup is cached, shared with
-/// concurrent lookups for the same host, and bounded.
-async fn resolve_dial_target(
+/// Resolve the candidate addresses outside the forwarding worker through
+/// the system resolver: every answer becomes a candidate in the order
+/// the resolver returned it, each already carrying the credential
+/// prefix's port, and the lookup is cached, shared with concurrent
+/// lookups for the same host, and bounded.
+async fn resolve_candidates(
     parsed: &ParsedPrefix,
     resolver: &Resolver,
-) -> Result<SocketAddr, ResolveFailure> {
+) -> Result<Arc<[SocketAddr]>, ResolveFailure> {
     let addresses = resolver.resolve(&parsed.host, &parsed.authority).await?;
-    // A successful answer carries at least one address, so the empty case
-    // here is turned into the failure rather than indexed into a panic.
-    let first = addresses.first().ok_or_else(|| ResolveFailure {
-        class: ResolveErrorClass::NoAddresses,
-        detail: "the resolver returned no address".to_string(),
-    })?;
-    Ok(SocketAddr::new(*first, parsed.port))
+    // The cache holds addresses without a port -- its key is the host --
+    // so the credential's port is joined here, once per candidate. A
+    // successful answer carries at least one address, so the empty case
+    // is turned into the failure rather than collected into an empty list.
+    if addresses.is_empty() {
+        return Err(ResolveFailure {
+            class: ResolveErrorClass::NoAddresses,
+            detail: "the resolver returned no address".to_string(),
+        });
+    }
+    Ok(addresses
+        .iter()
+        .map(|address| SocketAddr::new(*address, parsed.port))
+        .collect())
 }
 
 /// The path/method dispatch, decided once. The `/admin` family is a 404
@@ -438,11 +447,11 @@ pub(crate) async fn select_route(
     // Resolution is the selection's, not the constructor's: `HttpPeer::new`
     // on a hostname runs a blocking lookup and unwraps it, so a resolver
     // failure panicked a worker instead of answering the request. The
-    // address resolved here is a `SocketAddr`, whose `ToSocketAddrs` impl
+    // addresses resolved here are `SocketAddr`s, whose `ToSocketAddrs` impl
     // is infallible: no name lookup runs inside the constructor and it
     // cannot fail.
-    let target = match resolve_dial_target(&parsed, resolver).await {
-        Ok(target) => target,
+    let addresses = match resolve_candidates(&parsed, resolver).await {
+        Ok(addresses) => addresses,
         Err(failure) => {
             return Err(GateError::unavailable(
                 FailureReason::UnresolvedUpstream,
@@ -453,10 +462,14 @@ pub(crate) async fn select_route(
             ));
         }
     };
-    let peer = HttpPeer::new(target, parsed.tls, parsed.host.clone());
+    let dial = DialParams {
+        tls: parsed.tls,
+        sni: parsed.host.clone(),
+    };
     let auth = dialect::auth_style(&served.family);
     Ok(Selection {
-        peer,
+        addresses,
+        dial,
         credential,
         auth,
         api_family: served.family.clone(),
@@ -470,6 +483,13 @@ pub(crate) async fn select_route(
 mod tests {
     use super::*;
 
+    use std::net::IpAddr;
+    use std::time::Duration;
+
+    use async_trait::async_trait;
+
+    use crate::data_plane::resolver::Lookup;
+
     /// A malformed host fails as a value: a name with a space is
     /// rejected locally as a malformed name before any query leaves
     /// the host, so the answer is `lookup_error` without a name server
@@ -478,7 +498,7 @@ mod tests {
     async fn a_host_that_cannot_be_a_name_fails_as_a_lookup_error() {
         let parsed = parse_endpoint_prefix("http://bad host/v1").expect("the prefix parses");
         let resolver = Resolver::system(crate::metrics::Metrics::private());
-        let failure = resolve_dial_target(&parsed, &resolver)
+        let failure = resolve_candidates(&parsed, &resolver)
             .await
             .expect_err("no address");
         assert_eq!(failure.class, ResolveErrorClass::LookupError);
@@ -491,9 +511,43 @@ mod tests {
         let parsed =
             parse_endpoint_prefix("http://203.0.113.7:8080/v1").expect("the prefix parses");
         let resolver = Resolver::system(crate::metrics::Metrics::private());
-        let address = resolve_dial_target(&parsed, &resolver)
+        let addresses = resolve_candidates(&parsed, &resolver)
             .await
-            .expect("an address");
-        assert_eq!(address.to_string(), "203.0.113.7:8080");
+            .expect("one address");
+        assert_eq!(addresses.len(), 1);
+        assert_eq!(addresses[0].to_string(), "203.0.113.7:8080");
+    }
+
+    /// Every resolver answer becomes a candidate, in the answer's own
+    /// order, each joined to the credential prefix's port.
+    #[tokio::test]
+    async fn every_resolver_answer_becomes_a_candidate_on_the_prefix_port() {
+        struct TwoAnswers;
+
+        #[async_trait]
+        impl Lookup for TwoAnswers {
+            async fn lookup(&self, _host: &str) -> std::io::Result<Vec<IpAddr>> {
+                Ok(vec![
+                    IpAddr::from([198, 51, 100, 23]),
+                    IpAddr::from([198, 51, 100, 42]),
+                ])
+            }
+        }
+
+        let parsed =
+            parse_endpoint_prefix("https://upstream.test:8443/v1").expect("the prefix parses");
+        let resolver = Resolver::with_lookup(
+            crate::metrics::Metrics::private(),
+            Duration::from_secs(1),
+            Arc::new(TwoAnswers),
+        );
+        let addresses = resolve_candidates(&parsed, &resolver)
+            .await
+            .expect("two addresses");
+        let candidates: Vec<String> = addresses
+            .iter()
+            .map(|address| address.to_string())
+            .collect();
+        assert_eq!(candidates, ["198.51.100.23:8443", "198.51.100.42:8443"]);
     }
 }
