@@ -283,9 +283,11 @@ pub struct GatewayCtx {
     /// The upstream status line staged at the first response
     /// header, for the terminal classification.
     pub upstream_status: Option<u16>,
-    /// Whether the upstream connection was established or reused
-    /// for this request: the discriminator between a connect
-    /// error and an upstream error at the terminal phase.
+    /// Whether the upstream connection of the dial that ended this
+    /// request was established or reused: the discriminator between a
+    /// connect error and an upstream error at the terminal phase.
+    /// `upstream_peer` clears it before every dial, so a retry leaves
+    /// the last dial's fact here, not the request's first connection.
     pub connected: bool,
 }
 

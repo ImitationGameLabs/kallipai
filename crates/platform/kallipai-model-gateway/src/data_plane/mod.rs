@@ -19,7 +19,11 @@
 //!   is observed here.
 //! - `connected_to_upstream` / `fail_to_connect`: the connection
 //!   instruments (establishment duration from the pingora digest;
-//!   failures by class), and the retry decision a failed dial gets.
+//!   failures by class) and the retry decision a failed dial gets: a
+//!   connect or handshake failure takes the next candidate while one
+//!   remains and the dial budget lasts. rustls reports every client
+//!   handshake failure as one class, so a certificate verdict is
+//!   redialled too.
 //! - `logging`: the terminal phase -- the single point every forwarded
 //!   request is counted at, and where the in-flight gauge decrements.
 //!
@@ -500,8 +504,12 @@ impl ProxyHttp for GatewayProxy {
         _session: &mut Session,
         ctx: &mut Self::CTX,
     ) -> Result<Box<HttpPeer>> {
-        // Every dial starts from the same instrument state: a second
-        // ask after a failed dial must not read the first one's facts.
+        // These three instruments belong to one dial, and only the
+        // post-connect callbacks write them: a dial that failed leaves
+        // them where the request starts. Stating the reset here keeps
+        // that true for an arm that later asks again with a request
+        // already past a connect, which would otherwise read the
+        // earlier dial's facts.
         ctx.t1 = None;
         ctx.upstream_status = None;
         ctx.connected = false;
@@ -511,14 +519,17 @@ impl ProxyHttp for GatewayProxy {
         // budget ended the walk, and no peer is invented to cover it.
         let selection = staged_selection(ctx)?;
         let Some(peer) = selection.next_peer() else {
-            // This error carries no cause, so `Error::create` hands the
-            // retry loop a `Decided(false)` and it stops here at once: the
-            // walk is over, and asking the same cursor again repeats the
-            // question. A cause added here later would lend its own
-            // `RetryType`, so the site would have to answer for the retry
-            // itself rather than inherit this.
-            return Err(pingora::Error::new_up(pingora::ErrorType::ConnectError)
-                .more_context(NO_CANDIDATE_LEFT));
+            // A cursor can be closed at this ask three ways: the budget
+            // was spent when the walk started; it ran out between the
+            // retry decision and this ask (`take` reads the deadline
+            // again); or a retry earned by a dropped reused connection
+            // asks again after the walk spent its candidates. That last
+            // one is decided by `error_while_proxy`, not by the cursor,
+            // and cannot come up here today: every forward this crate
+            // answers is a POST, which that hook refuses to retry.
+            // None of the three leaves an address to dial, and this
+            // error says that instead of reading like a refusal.
+            return Err(no_candidate_error());
         };
         Ok(Box::new(peer))
     }
@@ -704,6 +715,21 @@ const PHASE_SLIP_NOT_FORWARD: &str = "the rewrite phase ran on a route that does
 const NO_CANDIDATE_LEFT: &str =
     "no candidate left to dial: the resolver's list is exhausted or the dial budget is spent";
 
+/// The error a closed candidate cursor answers with. With no cause,
+/// `Error::create` gives it `Decided(false)`: the retry loop reads that
+/// and breaks at once instead of asking the same cursor again, and the
+/// line carries no dangling `cause: `. A cause attached here later would
+/// lend its own `RetryType` -- a `ReusedOnly` one panics the loop -- so
+/// that change has to decide the retry at this site.
+fn no_candidate_error() -> Box<pingora::Error> {
+    pingora::Error::create(
+        pingora::ErrorType::ConnectError,
+        pingora::ErrorSource::Upstream,
+        Some(NO_CANDIDATE_LEFT.into()),
+        None,
+    )
+}
+
 /// The selection a forwarding phase runs on, staged by
 /// `request_filter` before any later phase runs. It is handed out
 /// mutably: the peer phase advances the candidate cursor on it,
@@ -832,11 +858,13 @@ fn connect_error_class(error: &pingora::ErrorType) -> ConnectErrorClass {
 }
 
 /// Whether a failed dial earns another candidate. `can_retry` is the
-/// cursor's gate, and the type filter keeps the answer off failures a
-/// second address cannot mend: a certificate the client rejects or a
-/// socket it cannot build fails the same way wherever it dials, while
-/// the arms listed are the connect and TLS-handshake failures a
-/// different address can survive.
+/// cursor's gate, and the type filter keeps the answer to failures a
+/// second address could survive: the connect arms and the handshake
+/// arms. The filter cannot sort a certificate verdict out of them:
+/// this crate dials through rustls, which reports every client
+/// handshake failure, a rejected certificate included, as
+/// `TLSHandshakeFailure` -- so that verdict walks to the next
+/// candidate too, spends the remaining dials and ends on the same 502.
 fn retry_connect_error(error: &pingora::ErrorType, can_retry: bool) -> bool {
     use pingora::ErrorType::{
         ConnectError, ConnectNoRoute, ConnectProxyFailure, ConnectRefused, ConnectTimedout,
@@ -914,6 +942,12 @@ mod retry_connect_error_tests {
         }
     }
 
+    /// The classes a redial cannot mend: a verdict from configuration
+    /// or from a local resource. `InvalidCert` is listed here because
+    /// this crate's dial path cannot produce it -- rustls reports a
+    /// client rejection as `TLSHandshakeFailure`, and that arm is
+    /// whitelisted -- not because a certificate verdict survives a
+    /// redial.
     #[test]
     fn a_failure_no_other_address_can_mend_is_not_retried() {
         for error in [
