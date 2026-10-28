@@ -91,13 +91,22 @@ pub(crate) struct DialParams {
 /// asks for a knob.
 const MAX_CANDIDATES: usize = 8;
 
-/// How long one dial may spend on a single connect step: the L4
-/// attempt and the TLS handshake each get this much, capped by
-/// whatever the dial budget leaves. Three seconds because Linux
-/// retransmits a lost SYN at one second and at three: a candidate
-/// that needs the second retransmit is cut there, and the budget it
-/// saves goes to the next candidate. Fixed rather than
-/// configurable until an operator asks for a knob.
+/// How long one dial may spend on a single connect step. The TCP
+/// connect and the TLS handshake that follows it each get this much
+/// on their own: pingora-core's connectors/l4.rs:158 wraps the
+/// connect, connectors/tls/rustls/mod.rs:284 the handshake. Both
+/// are capped by whatever the remaining budget leaves, and the
+/// pair together answers to that same remaining budget as a whole
+/// (connectors/mod.rs:403).
+/// Three seconds because Linux retransmits a lost SYN at one second
+/// and at three: a candidate that needs the second retransmit is cut
+/// there, before its ACK can arrive. That schedule sets the
+/// ceiling; the handshake reads the same field rather than a value
+/// of its own, and three seconds sits well above what it needs.
+/// The rest of the budget stays unspent -- nothing asks for a
+/// second candidate today, so such a dial ends in a 502 at three
+/// seconds. Fixed rather than configurable until an operator asks
+/// for a knob.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// How much wall time one request may keep walking candidates: the
@@ -350,9 +359,14 @@ mod tests {
     /// well. A spent budget leaves both at zero: the budget is the hard
     /// bound, so there is no floor under it.
     ///
-    /// The H1 path consumes neither the read nor the write timeout, so
-    /// both stay unset: a value there would promise a bound nothing
-    /// enforces.
+    /// The upstream H1 and H2 client sessions copy the peer's read and
+    /// write timeouts onto the stream (pingora-proxy's `proxy_1to1` at
+    /// `proxy_h1.rs:43-44`; H2 at `proxy_h2.rs:271` and `:293`), so a
+    /// value there is enforced. Both stay unset because this bound
+    /// covers getting connected, and because a per-read bound on the
+    /// response cannot tell a quiet stream from a stalled one. The
+    /// response side carries no bound of its own today either, so
+    /// that call stays open rather than taken.
     #[test]
     fn a_peer_carries_the_dial_timeouts() {
         let mut selection = selection_with(DialParams {
@@ -361,7 +375,6 @@ mod tests {
         });
         let peer = selection.next_peer();
         assert_eq!(peer.options.connection_timeout, Some(CONNECT_TIMEOUT));
-        assert_eq!(CONNECT_TIMEOUT, Duration::from_secs(3));
         assert!(peer.options.read_timeout.is_none());
         assert!(peer.options.write_timeout.is_none());
         let total = peer.options.total_connection_timeout.unwrap_or_default();
@@ -380,6 +393,15 @@ mod tests {
         let spent = selection.next_peer();
         assert_eq!(spent.options.connection_timeout, Some(Duration::ZERO));
         assert_eq!(spent.options.total_connection_timeout, Some(Duration::ZERO));
+    }
+
+    /// The dial bound is a premise, not a tuning value: three seconds is
+    /// where the kernel's second SYN retransmit lands, so an edit there
+    /// moves the ceiling every dial reads -- this test makes that edit
+    /// loud.
+    #[test]
+    fn the_connect_timeout_matches_the_syn_retransmit_schedule() {
+        assert_eq!(CONNECT_TIMEOUT, Duration::from_secs(3));
     }
 
     /// The cursor walks the candidates in the order the resolver
