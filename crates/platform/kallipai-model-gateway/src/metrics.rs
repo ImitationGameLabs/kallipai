@@ -211,6 +211,12 @@ impl ConnectErrorClass {
             Self::Other => "other",
         }
     }
+
+    /// Every class, for assertions that want the whole vocabulary. `as_str`'s
+    /// wildcard-free match is what breaks the build when a class is added; this
+    /// list is hand-kept beside it.
+    #[cfg(test)]
+    pub(crate) const ALL: [Self; 4] = [Self::Refused, Self::Timeout, Self::Tls, Self::Other];
 }
 
 /// Why an upstream name resolution failed: the `error_class` label values
@@ -333,7 +339,7 @@ impl Metrics {
         let time_to_first_header = HistogramVec::new(
             HistogramOpts::new(
                 "kallipai_model_gateway_upstream_time_to_first_header_seconds",
-                "Time from request acceptance to the first upstream response header, by upstream address.",
+                "Time from request acceptance to an upstream response header, one observation per header (interim 1xx included, so one request can record more than one), by upstream authority.",
             )
             .buckets(FORWARD_BUCKETS.to_vec()),
             &["upstream"],
@@ -342,7 +348,7 @@ impl Metrics {
         let connect_duration = HistogramVec::new(
             HistogramOpts::new(
                 "kallipai_model_gateway_upstream_connect_duration_seconds",
-                "Upstream connection establishment duration (L4 plus TLS, read from the pingora timing digest), by upstream address.",
+                "Upstream connection establishment duration (L4 plus TLS, read from the pingora timing digest), one observation per successful dial, reused connections excluded, by upstream authority.",
             )
             .buckets(CONNECT_BUCKETS.to_vec()),
             &["upstream"],
@@ -351,7 +357,7 @@ impl Metrics {
         let connect_failures = IntCounterVec::new(
             Opts::new(
                 "kallipai_model_gateway_upstream_connect_failures_total",
-                "Upstream connection establishment failures by upstream address and error class.",
+                "Upstream connection establishment failures by upstream authority and error class; one count per failed dial.",
             ),
             &["upstream", "error_class"],
         )
@@ -359,7 +365,7 @@ impl Metrics {
         let resolution_failures = IntCounterVec::new(
             Opts::new(
                 "kallipai_model_gateway_upstream_resolution_failures_total",
-                "Upstream name resolutions that failed by upstream address and error class; one count per failed resolution attempt.",
+                "Upstream name resolutions that failed by upstream authority and error class; one count per failed resolution attempt.",
             ),
             &["upstream", "error_class"],
         )
@@ -367,7 +373,7 @@ impl Metrics {
         let upstream_responses = IntCounterVec::new(
             Opts::new(
                 "kallipai_model_gateway_upstream_responses_total",
-                "Upstream response status classes by upstream address and API family, one count per response at the first upstream header; a break after a healthy header lands in the forward table's terminal outcome -- upstream_error when the upstream side broke it, downstream_error when the downstream side did -- so the two tables do not sum equal.",
+                "Upstream response status classes by upstream authority and API family, one count per upstream response header, interim 1xx included; a break after a healthy header lands in the forward table's terminal outcome -- upstream_error when the upstream side broke it, downstream_error when the downstream side did -- so the two tables do not sum equal.",
             ),
             &["upstream", "api_family", "status_class"],
         )
@@ -478,13 +484,16 @@ impl Metrics {
             .observe(duration.as_secs_f64());
     }
 
+    /// A request that never reaches a header records nothing here: a failed
+    /// dial lands in the dial tables, a request a gate stopped in the forward
+    /// table's outcome.
     pub(crate) fn observe_time_to_first_header(&self, upstream: &str, duration: Duration) {
         self.time_to_first_header
             .with_label_values(&[upstream])
             .observe(duration.as_secs_f64());
     }
-    /// The attribution table: one count per upstream response, taken at
-    /// the first upstream header (the status line is in). Mid-stream
+    /// The attribution table: one count per upstream response header, taken as
+    /// the header arrives (the status line is in). Mid-stream
     /// breaks after a healthy header still count here under the status
     /// class the header carried; the forward table's terminal outcome
     /// records the break as `upstream_error` when the upstream side
@@ -502,6 +511,9 @@ impl Metrics {
             .inc();
     }
 
+    /// The digest's establishment durations are summed across layers, so one
+    /// value covers the whole handshake; a request that dialled twice reads
+    /// as two here, while `forward_duration` stays one per request.
     pub(crate) fn observe_connect_duration(&self, upstream: &str, duration: Duration) {
         self.connect_duration
             .with_label_values(&[upstream])
@@ -525,14 +537,23 @@ impl Metrics {
             .inc();
     }
 
+    /// Entering the forwarding walk: paired with `dec_in_flight` at the
+    /// terminal phase. A request the gate rejects never increments, so the
+    /// gauge reads the walks actually in progress.
     pub(crate) fn inc_in_flight(&self) {
         self.in_flight.inc();
     }
 
+    /// Leaving the forwarding walk: the terminal phase's pair to
+    /// `inc_in_flight`, once per request that had a selection.
     pub(crate) fn dec_in_flight(&self) {
         self.in_flight.dec();
     }
 
+    /// One per forwarding request that reaches the identity check: it runs
+    /// before the selection is built, so a rejected identity still records
+    /// one, and a preflight, the routing table's 404 or 405, the
+    /// declared-body 413 or a health probe records none.
     pub(crate) fn record_identity(&self, outcome: IdentityOutcome) {
         self.identity_resolutions
             .with_label_values(&[outcome.as_str()])
@@ -880,7 +901,7 @@ mod tests {
     }
 
     /// The class-wide reader sums every upstream's series, so a class
-    /// recorded under an address the assertion did not name still
+    /// recorded under an upstream the assertion did not name still
     /// shows up here.
     #[test]
     fn connect_failure_total_covers_every_upstream() {

@@ -1,8 +1,10 @@
-//! The data-plane end-to-end tests: every test drives a real pingora
+//! The data-plane end-to-end tests: most drive a real pingora
 //! listener (a scratch port per test) against an in-process mock
 //! upstream, the way a client would -- no oneshot shortcuts, so the
-//! phase wiring itself is under test. The assertion set is the
-//! forwarding suite's.
+//! phase wiring itself is under test. Three never reach a running
+//! gateway listener: two hand the spawner something it must refuse (a
+//! taken port, a malformed address), and one reads the closed-gate
+//! error directly. The assertion set is the forwarding suite's.
 
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::Duration;
@@ -2006,8 +2008,8 @@ fn spawn_dropping_listener(
 /// `take` reads the deadline again; a retry earned by a dropped reused
 /// connection asks again too, after the walk has spent its candidates,
 /// though that one cannot fire here today: every forward is a POST,
-/// and the default `error_while_proxy` refuses to retry a non-
-/// idempotent request.
+/// and the default `error_while_proxy` refuses to retry a request
+/// that is not idempotent.
 #[test]
 fn the_closed_gate_error_stops_the_retry_loop() {
     let error = super::no_candidate_error();
@@ -2157,9 +2159,10 @@ async fn an_upstream_that_drops_the_connection_is_not_replayed() {
     assert_eq!(response.status(), reqwest::StatusCode::BAD_GATEWAY);
     assert!(accepted.load(std::sync::atomic::Ordering::SeqCst) >= 1);
     assert_eq!(mock.hits.load(std::sync::atomic::Ordering::SeqCst), 0);
-    assert_eq!(
-        metrics.connect_failure_total(crate::metrics::ConnectErrorClass::Refused),
-        0
-    );
+    let recorded = crate::metrics::ConnectErrorClass::ALL
+        .into_iter()
+        .map(|class| metrics.connect_failure_total(class))
+        .sum::<u64>();
+    assert_eq!(recorded, 0, "no class recorded a failed dial");
     await_forward_count(&metrics, crate::metrics::ForwardOutcome::UpstreamError, 1).await;
 }

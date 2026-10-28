@@ -91,30 +91,25 @@ pub(crate) struct DialParams {
 /// asks for a knob.
 const MAX_CANDIDATES: usize = 8;
 
-/// How long one dial may spend on a single connect step. The TCP
-/// connect and the TLS handshake that follows it each get this much
-/// on their own: pingora-core's connectors/l4.rs:158 wraps the
-/// connect, connectors/tls/rustls/mod.rs:284 the handshake. Both
-/// are capped by whatever the remaining budget leaves, and the
-/// pair together answers to that same remaining budget as a whole
-/// (connectors/mod.rs:403).
-/// Three seconds because Linux retransmits a lost SYN at one second
-/// and at three: a candidate that needs the second retransmit is cut
-/// there, before its ACK can arrive. That schedule sets the
-/// ceiling; the handshake reads the same field rather than a value
-/// of its own, and three seconds sits well above what it needs.
-/// The rest of the budget stays unspent on a failed dial: the
-/// next candidate gets what is left, so the ceiling is one
-/// address's cost rather than the whole request's. Fixed
-/// rather than configurable until an operator asks for a knob.
+/// How long one connect step may take: the TCP connect and the TLS
+/// handshake that follows each get this value, and the dial budget's
+/// remainder caps both (connectors/l4.rs:158,
+/// connectors/tls/rustls/mod.rs:284, connectors/mod.rs:403).
+///
+/// Three seconds because Linux retransmits the SYN one second after
+/// the original and again two seconds later, at three seconds, so a
+/// candidate whose ACK needs that second retransmission is cut there.
+/// The handshake reads the same field, and three seconds sits well above it.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// How much wall time one request may keep walking candidates: the
-/// budget closes the cursor's gate and, through the remaining time,
-/// bounds each dial -- one dial's connect step and its handshake.
-/// Counted from the moment the selection is built, so the resolver
-/// answer that came before it is not part of the budget. Fixed
-/// rather than configurable until an operator asks for a knob.
+/// How much wall time one request may spend walking candidates: it
+/// closes the cursor's gate and, as the remaining time, caps each dial's
+/// connect step and handshake. What a dial leaves unspent only feeds the
+/// next candidate, and nothing reads it once the gate has closed, so a walk
+/// that ends without an answer answers 502.
+///
+/// The clock starts when the selection is built, so the resolver answer
+/// is outside it. Fixed until an operator asks for a knob.
 const DIAL_BUDGET: Duration = Duration::from_secs(8);
 
 /// The candidate cursor: which address the next dial takes. The gate
