@@ -302,6 +302,7 @@ pub(crate) struct Metrics {
     identity_resolutions: IntCounterVec,
     upstream_responses: IntCounterVec,
     resolution_failures: IntCounterVec,
+    build_info: IntGaugeVec,
 }
 
 impl Metrics {
@@ -442,11 +443,7 @@ impl Metrics {
             Err(prometheus::Error::AlreadyReg) => {}
             Err(e) => panic!("registering the process collector: {e}"),
         }
-        build_info
-            .with_label_values(&[env!("CARGO_PKG_VERSION")])
-            .set(1);
-
-        Self {
+        let metrics = Self {
             registry,
             forward_total,
             forward_duration,
@@ -457,7 +454,13 @@ impl Metrics {
             in_flight,
             identity_resolutions,
             upstream_responses,
-        }
+            build_info,
+        };
+        metrics
+            .build_info
+            .with_label_values(&[env!("CARGO_PKG_VERSION")])
+            .set(1);
+        metrics
     }
 
     /// The Prometheus text exposition of every family in the registry.
@@ -636,11 +639,13 @@ impl Metrics {
 mod tests {
     use super::*;
 
-    /// The families the face owns -- names and label names -- locked
-    /// from the collectors' descriptors: a rename, a relabel, a drop,
-    /// or an accidental extra family fails here, not in a dashboard.
-    /// (A label-vec collector only gathers once it has children, so
-    /// the lock reads the descriptors, not the exposition.)
+    /// The names and label names of every family the struct holds, in the
+    /// factory's construction order: a rename or a relabel fails here, a
+    /// new family is added at its construction position. The collector
+    /// type and the help text are not locked. (A label-vec collector only
+    /// gathers once it has children, so the lock reads the descriptors,
+    /// not the exposition.) Each family must also already sit in the
+    /// registry: registering its handle again has to be refused.
     #[test]
     fn families_lock() {
         use prometheus::core::Collector;
@@ -686,6 +691,13 @@ mod tests {
             )
         );
         assert_eq!(
+            shape(&metrics.resolution_failures),
+            (
+                "kallipai_model_gateway_upstream_resolution_failures_total".to_owned(),
+                vec!["upstream".to_owned(), "error_class".to_owned()],
+            )
+        );
+        assert_eq!(
             shape(&metrics.upstream_responses),
             (
                 "kallipai_model_gateway_upstream_responses_total".to_owned(),
@@ -710,6 +722,33 @@ mod tests {
                 vec!["outcome".to_owned()]
             )
         );
+        assert_eq!(
+            shape(&metrics.build_info),
+            (
+                "kallipai_model_gateway_build_info".to_owned(),
+                vec!["version".to_owned()]
+            )
+        );
+        let assert_registered = |c: Box<dyn Collector>| {
+            let name = c.desc()[0].fq_name.clone();
+            assert!(
+                matches!(
+                    metrics.registry.register(c),
+                    Err(prometheus::Error::AlreadyReg)
+                ),
+                "the factory registers {name}"
+            );
+        };
+        assert_registered(Box::new(metrics.forward_total.clone()));
+        assert_registered(Box::new(metrics.forward_duration.clone()));
+        assert_registered(Box::new(metrics.time_to_first_header.clone()));
+        assert_registered(Box::new(metrics.connect_duration.clone()));
+        assert_registered(Box::new(metrics.connect_failures.clone()));
+        assert_registered(Box::new(metrics.resolution_failures.clone()));
+        assert_registered(Box::new(metrics.upstream_responses.clone()));
+        assert_registered(Box::new(metrics.in_flight.clone()));
+        assert_registered(Box::new(metrics.identity_resolutions.clone()));
+        assert_registered(Box::new(metrics.build_info.clone()));
     }
 
     #[test]
