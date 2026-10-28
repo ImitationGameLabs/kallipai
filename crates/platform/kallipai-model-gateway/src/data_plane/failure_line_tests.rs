@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use pingora::ErrorType;
 
-use super::context::{DialParams, FailureReason, Selection};
+use super::context::{Attempts, DialParams, FailureReason, Selection};
 use super::{GatewayCtx, Route, failure_level, log_forward_failure, warrants_failure_line};
 use crate::forward::dialect::Endpoint;
 use crate::metrics::ForwardOutcome;
@@ -254,6 +254,7 @@ fn forwarding_ctx() -> GatewayCtx {
                 tls: true,
                 sni: "upstream.test".to_string(),
             },
+            attempts: Attempts::starting_now(1),
             credential: ProviderCredential::placeholder(),
             auth: AuthStyle::Bearer,
             api_family: "openai".to_string(),

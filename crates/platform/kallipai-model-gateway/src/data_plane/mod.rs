@@ -8,7 +8,7 @@
 //!   parking / family gates) and the upstream-credential resolution.
 //!   Everything that can answer 4xx/5xx without an upstream happens
 //!   here.
-//! - `upstream_peer`: builds the dial target for the selection's first
+//! - `upstream_peer`: builds the dial target for the selection's next
 //!   candidate.
 //! - `upstream_request_filter`: the wire-path rewrite, the credential
 //!   header injection and the safe-header passthrough.
@@ -240,7 +240,8 @@ impl GatewayProxy {
             ));
         };
         // The selection `request_filter` staged, checked the same way.
-        let selection = staged_selection(ctx)?;
+        // Read only: the rewrite moves no candidate, so the cursor stays put.
+        let selection: &Selection = staged_selection(ctx)?;
         // The wire path: the credential's base (trimmed) plus the
         // endpoint's resource path. The client's query string is not
         // forwarded: the generation APIs take everything in the body.
@@ -486,10 +487,13 @@ impl ProxyHttp for GatewayProxy {
         _session: &mut Session,
         ctx: &mut Self::CTX,
     ) -> Result<Box<HttpPeer>> {
-        // The selection already resolved the candidates; the first one
-        // is the target the initial try rides.
+        // The selection's cursor starts at the first candidate; a second
+        // ask takes the next one until the list or the dial budget runs
+        // out. Nothing asks twice today: every forwarded route is a POST,
+        // and pingora's default policy does not retry a non-idempotent
+        // request, so one dial takes candidate 0.
         let selection = staged_selection(ctx)?;
-        Ok(Box::new(selection.peer_at(0)))
+        Ok(Box::new(selection.next_peer()))
     }
 
     async fn upstream_request_filter(
@@ -658,12 +662,14 @@ const PHASE_SLIP_NO_SELECTION: &str = "a forwarding phase ran without a selectio
 const PHASE_SLIP_NOT_FORWARD: &str = "the rewrite phase ran on a route that does not forward";
 
 /// The selection a forwarding phase runs on, staged by
-/// `request_filter` before any later phase runs. A phase that finds
-/// none is a flow slip: it is recorded as the gateway's own failure
-/// (no reason category -- no input caused it) and also answered by
+/// `request_filter` before any later phase runs. It is handed out
+/// mutably: the peer phase advances the candidate cursor on it,
+/// and the other phases only read. A phase that finds none is a
+/// flow slip: it is recorded as the gateway's own failure (no
+/// reason category -- no input caused it) and also answered by
 /// pingora's error path, so the worker is not panicked.
-fn staged_selection(ctx: &mut GatewayCtx) -> Result<&Selection, Box<pingora::Error>> {
-    let selection = match ctx.selection.as_ref() {
+fn staged_selection(ctx: &mut GatewayCtx) -> Result<&mut Selection, Box<pingora::Error>> {
+    let selection = match ctx.selection.as_mut() {
         Some(selection) => selection,
         None => {
             ctx.pending_outcome = Some(ForwardOutcome::InternalError);

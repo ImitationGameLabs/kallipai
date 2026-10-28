@@ -25,7 +25,7 @@ use crate::routes::ApiError;
 use crate::secret;
 use crate::state::AppState;
 
-use super::context::{DialParams, FailureReason, Route, Selection};
+use super::context::{Attempts, DialParams, FailureReason, Route, Selection};
 use super::resolver::{ResolveFailure, Resolver, UPSTREAM_RETRY_AFTER};
 
 /// The parsed upstream prefix: the peer parts plus the rewrite
@@ -466,10 +466,15 @@ pub(crate) async fn select_route(
         tls: parsed.tls,
         sni: parsed.host.clone(),
     };
+    // The cursor and its budget open here, once the selection exists:
+    // the answer above came before them, so resolution time is not
+    // part of the budget, and the budget bounds the rotation only.
+    let attempts = Attempts::starting_now(addresses.len());
     let auth = dialect::auth_style(&served.family);
     Ok(Selection {
         addresses,
         dial,
+        attempts,
         credential,
         auth,
         api_family: served.family.clone(),

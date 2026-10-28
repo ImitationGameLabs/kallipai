@@ -2,8 +2,10 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use pingora::prelude::HttpPeer;
+use tokio::time::Instant;
 
 use crate::forward::dialect;
 use crate::secret::ProviderCredential;
@@ -48,6 +50,8 @@ impl Route {
 /// the later phases need: the upstream candidates and the dial
 /// parameters, the credential, and the rewrite inputs (the base path
 /// and the authority for the Host header).
+/// The candidate cursor travels with the candidate list: the peer
+/// phase advances it, so a second ask walks to the next candidate.
 pub struct Selection {
     /// The upstream candidates in resolver-answer order, each already
     /// carrying the credential prefix's port: the port is not part of
@@ -56,6 +60,9 @@ pub struct Selection {
     /// The parameters a peer needs besides its address: kept so any
     /// candidate builds a dial target shaped like the first try.
     pub dial: DialParams,
+    /// The candidate cursor: which address the next dial takes. Built
+    /// at the selection point, so the dial budget counts from there.
+    pub attempts: Attempts,
     pub credential: ProviderCredential,
     pub auth: crate::secret::AuthStyle,
     /// The registry family of the selected provider: the `api_family`
@@ -78,6 +85,68 @@ pub(crate) struct DialParams {
     pub sni: String,
 }
 
+/// How many candidates one request may try: a defence against a
+/// pathological answer rather than a tuning knob -- a normal answer
+/// carries a handful. Fixed rather than configurable until an operator
+/// asks for a knob.
+const MAX_CANDIDATES: usize = 8;
+
+/// How much wall time one request may keep walking candidates: the
+/// budget closes the cursor's gate, it does not bound a single dial --
+/// no dial has a timeout of its own. Counted from the moment the
+/// selection is built. Fixed rather than configurable until an
+/// operator asks for a knob.
+const DIAL_BUDGET: Duration = Duration::from_secs(8);
+
+/// The candidate cursor: which address the next dial takes. The gate
+/// opens while candidates remain and the dial budget is unspent; once
+/// it closes, the cursor keeps handing back the address it gave out
+/// last, so a caller never has to decide what an exhausted list dials.
+///
+/// `next` is the candidate an open gate would hand out and `last` the
+/// one handed out most recently, so `last` sits one behind it; before
+/// any dial both are 0, which is what lets a gate that is already
+/// closed still start at the first candidate.
+///
+/// `candidate_count` is at least one -- `resolve_candidates` refuses an
+/// empty answer -- so the cursor can always hand out an index.
+pub(crate) struct Attempts {
+    next: usize,
+    last: usize,
+    limit: usize,
+    deadline: Instant,
+}
+
+impl Attempts {
+    /// A cursor over `candidate_count` candidates, capped at
+    /// `MAX_CANDIDATES`, whose gate closes at `deadline`.
+    pub(crate) fn new(candidate_count: usize, deadline: Instant) -> Self {
+        Self {
+            next: 0,
+            last: 0,
+            limit: candidate_count.min(MAX_CANDIDATES),
+            deadline,
+        }
+    }
+
+    /// The address index the next dial takes: the following candidate
+    /// while the gate is open, and the last one handed out once it
+    /// closes.
+    pub(crate) fn next_index(&mut self) -> usize {
+        if self.next < self.limit && Instant::now() < self.deadline {
+            self.last = self.next;
+            self.next += 1;
+        }
+        self.last
+    }
+
+    /// A cursor whose budget runs out `DIAL_BUDGET` from now: the
+    /// shape the gateway builds once a selection is resolved.
+    pub(crate) fn starting_now(candidate_count: usize) -> Self {
+        Self::new(candidate_count, Instant::now() + DIAL_BUDGET)
+    }
+}
+
 impl Selection {
     /// The peer for one candidate: the address at `index` and the dial
     /// parameters every candidate shares.
@@ -86,6 +155,14 @@ impl Selection {
     /// answer -- so a caller only has to pass an index inside it.
     pub(crate) fn peer_at(&self, index: usize) -> HttpPeer {
         HttpPeer::new(self.addresses[index], self.dial.tls, self.dial.sni.clone())
+    }
+
+    /// The peer for the next dial: the following candidate in resolver
+    /// order while the candidate list and the dial budget last, and the
+    /// last candidate tried once either runs out.
+    pub(crate) fn next_peer(&mut self) -> HttpPeer {
+        let index = self.attempts.next_index();
+        self.peer_at(index)
     }
 }
 
@@ -195,6 +272,7 @@ mod tests {
                 SocketAddr::from(([192, 0, 2, 2], 8443)),
             ]),
             dial,
+            attempts: Attempts::starting_now(2),
             credential: ProviderCredential::placeholder(),
             auth: crate::secret::AuthStyle::Bearer,
             api_family: "openai".to_string(),
@@ -236,5 +314,78 @@ mod tests {
         assert!(secure.peer_at(1).is_tls());
         assert_eq!(secure.peer_at(0).sni, "secure.test");
         assert_eq!(secure.peer_at(1).sni, "secure.test");
+    }
+
+    /// The cursor walks the candidates in the order the resolver
+    /// answered, then keeps handing back the last one it gave out.
+    #[test]
+    fn attempts_follow_the_resolver_order() {
+        let mut attempts = Attempts::starting_now(3);
+        let served: Vec<usize> = (0..4).map(|_| attempts.next_index()).collect();
+        assert_eq!(served, vec![0, 1, 2, 2]);
+    }
+
+    /// A spent budget closes the gate before the first dial: the cursor
+    /// hands out the first candidate rather than jumping to the last,
+    /// and it does not advance afterwards.
+    #[test]
+    fn the_budget_stops_the_attempts() {
+        let spent_at = Instant::now() - Duration::from_secs(1);
+        let mut spent = Attempts::new(3, spent_at);
+        assert_eq!(spent.next_index(), 0);
+        assert_eq!(spent.next_index(), 0);
+        let mut fresh = Attempts::starting_now(3);
+        assert_eq!(fresh.next_index(), 0);
+        assert_eq!(fresh.next_index(), 1);
+    }
+
+    /// A budget that runs out after the cursor moved keeps the cursor
+    /// where it stands: the gate closes onto the index handed out last,
+    /// not onto the first candidate and not onto the end of the list.
+    #[test]
+    fn the_budget_closing_midway_repeats_the_last_index() {
+        let mut attempts = Attempts {
+            next: 2,
+            last: 1,
+            limit: 3,
+            deadline: Instant::now() - Duration::from_secs(1),
+        };
+        assert_eq!(attempts.next_index(), 1);
+        assert_eq!(attempts.next_index(), 1);
+    }
+
+    /// Nine candidates still buy eight dials: the cap closes the gate
+    /// exactly as the end of the list does.
+    #[test]
+    fn the_candidate_cap_bounds_the_attempts() {
+        let mut attempts = Attempts::starting_now(9);
+        let served: Vec<usize> = (0..9).map(|_| attempts.next_index()).collect();
+        assert_eq!(served, vec![0, 1, 2, 3, 4, 5, 6, 7, 7]);
+    }
+
+    /// The dial follows the cursor: the second dial takes the second
+    /// candidate, and once the list is spent the dials keep taking the
+    /// last one.
+    #[test]
+    fn next_peer_follows_the_cursor_over_the_candidates() {
+        let mut selection = selection_with(DialParams {
+            tls: false,
+            sni: "upstream.test".to_string(),
+        });
+        let first = selection.next_peer();
+        let second = selection.next_peer();
+        let third = selection.next_peer();
+        assert_eq!(
+            first._address.as_inet(),
+            Some(&SocketAddr::from(([192, 0, 2, 1], 8443)))
+        );
+        assert_eq!(
+            second._address.as_inet(),
+            Some(&SocketAddr::from(([192, 0, 2, 2], 8443)))
+        );
+        assert_eq!(
+            third._address.as_inet(),
+            Some(&SocketAddr::from(([192, 0, 2, 2], 8443)))
+        );
     }
 }
