@@ -468,7 +468,8 @@ pub(crate) async fn select_route(
     };
     // The cursor and its budget open here, once the selection exists:
     // the answer above came before them, so resolution time is not
-    // part of the budget, and the budget bounds the rotation only.
+    // part of the budget, and the budget bounds the rotation and,
+    // through the time it leaves, every dial the rotation makes.
     let attempts = Attempts::starting_now(addresses.len());
     let auth = dialect::auth_style(&served.family);
     Ok(Selection {

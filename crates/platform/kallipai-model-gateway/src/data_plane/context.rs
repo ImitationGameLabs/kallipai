@@ -91,11 +91,21 @@ pub(crate) struct DialParams {
 /// asks for a knob.
 const MAX_CANDIDATES: usize = 8;
 
+/// How long one dial may spend on a single connect step: the L4
+/// attempt and the TLS handshake each get this much, capped by
+/// whatever the dial budget leaves. Three seconds because Linux
+/// retransmits a lost SYN at one second and at three: a candidate
+/// that needs the second retransmit is cut there, and the budget it
+/// saves goes to the next candidate. Fixed rather than
+/// configurable until an operator asks for a knob.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+
 /// How much wall time one request may keep walking candidates: the
-/// budget closes the cursor's gate, it does not bound a single dial --
-/// no dial has a timeout of its own. Counted from the moment the
-/// selection is built. Fixed rather than configurable until an
-/// operator asks for a knob.
+/// budget closes the cursor's gate and, through the remaining time,
+/// bounds each dial -- one dial's connect step and its handshake.
+/// Counted from the moment the selection is built, so the resolver
+/// answer that came before it is not part of the budget. Fixed
+/// rather than configurable until an operator asks for a knob.
 const DIAL_BUDGET: Duration = Duration::from_secs(8);
 
 /// The candidate cursor: which address the next dial takes. The gate
@@ -140,6 +150,14 @@ impl Attempts {
         self.last
     }
 
+    /// The dial budget left: how long a dial starting now may take. It
+    /// feeds the dial timeouts only -- whether another candidate is
+    /// worth trying is the gate's question, and the gate reads the
+    /// deadline itself.
+    pub(crate) fn remaining_budget(&self) -> Duration {
+        self.deadline.saturating_duration_since(Instant::now())
+    }
+
     /// A cursor whose budget runs out `DIAL_BUDGET` from now: the
     /// shape the gateway builds once a selection is resolved.
     pub(crate) fn starting_now(candidate_count: usize) -> Self {
@@ -153,8 +171,17 @@ impl Selection {
     ///
     /// `addresses` is never empty -- `resolve_candidates` refuses an empty
     /// answer -- so a caller only has to pass an index inside it.
+    ///
+    /// The timeouts come from the dial budget's remaining time: this
+    /// dial's connect step gets `CONNECT_TIMEOUT`, capped by what the
+    /// budget leaves, and the whole L4-plus-TLS sequence gets the
+    /// remaining time outright.
     pub(crate) fn peer_at(&self, index: usize) -> HttpPeer {
-        HttpPeer::new(self.addresses[index], self.dial.tls, self.dial.sni.clone())
+        let mut peer = HttpPeer::new(self.addresses[index], self.dial.tls, self.dial.sni.clone());
+        let remaining = self.attempts.remaining_budget();
+        peer.options.connection_timeout = Some(CONNECT_TIMEOUT.min(remaining));
+        peer.options.total_connection_timeout = Some(remaining);
+        peer
     }
 
     /// The peer for the next dial: the following candidate in resolver
@@ -314,6 +341,45 @@ mod tests {
         assert!(secure.peer_at(1).is_tls());
         assert_eq!(secure.peer_at(0).sni, "secure.test");
         assert_eq!(secure.peer_at(1).sni, "secure.test");
+    }
+
+    /// A dial's peer carries the timeouts the budget buys: the connect
+    /// step gets `CONNECT_TIMEOUT` while the budget is the longer of the
+    /// two, the whole L4-plus-TLS sequence gets the remaining budget, and
+    /// a budget shorter than `CONNECT_TIMEOUT` caps the connect step as
+    /// well. A spent budget leaves both at zero: the budget is the hard
+    /// bound, so there is no floor under it.
+    ///
+    /// The H1 path consumes neither the read nor the write timeout, so
+    /// both stay unset: a value there would promise a bound nothing
+    /// enforces.
+    #[test]
+    fn a_peer_carries_the_dial_timeouts() {
+        let mut selection = selection_with(DialParams {
+            tls: false,
+            sni: String::new(),
+        });
+        let peer = selection.next_peer();
+        assert_eq!(peer.options.connection_timeout, Some(CONNECT_TIMEOUT));
+        assert_eq!(CONNECT_TIMEOUT, Duration::from_secs(3));
+        assert!(peer.options.read_timeout.is_none());
+        assert!(peer.options.write_timeout.is_none());
+        let total = peer.options.total_connection_timeout.unwrap_or_default();
+        assert!(total <= DIAL_BUDGET);
+        assert!(total > DIAL_BUDGET - Duration::from_secs(1));
+        selection.attempts = Attempts::new(2, Instant::now() + Duration::from_secs(2));
+        let close = selection.next_peer();
+        let capped = close.options.connection_timeout.unwrap_or_default();
+        assert_eq!(
+            capped,
+            close.options.total_connection_timeout.unwrap_or_default()
+        );
+        assert!(capped < CONNECT_TIMEOUT);
+        assert!(capped > Duration::from_secs(1));
+        selection.attempts = Attempts::new(2, Instant::now());
+        let spent = selection.next_peer();
+        assert_eq!(spent.options.connection_timeout, Some(Duration::ZERO));
+        assert_eq!(spent.options.total_connection_timeout, Some(Duration::ZERO));
     }
 
     /// The cursor walks the candidates in the order the resolver
