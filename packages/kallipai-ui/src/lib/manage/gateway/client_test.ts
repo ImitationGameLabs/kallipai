@@ -6,15 +6,19 @@ import {
   bakedAdminUrl,
   createCollection,
   createGroup,
+  createProfile,
   deleteCollection,
   deleteGroup,
+  deleteProfile,
   getCollection,
   isConnected,
   listCollections,
   listCollectionSets,
   listGroups,
   listParking,
+  listProfiles,
   listProviders,
+  moveProfile,
   publishCollection,
   putProviderCredential,
   removeGroupMember,
@@ -23,6 +27,7 @@ import {
   unpublishCollection,
   updateCollection,
   updateGroup,
+  updateProfile,
 } from "./client.ts";
 
 Deno.test(
@@ -91,7 +96,7 @@ Deno.test(
       // content-type rides the body, not the method: a bodied POST
       // carries it, a body-less DELETE does not.
       assertEquals(postHeaders["content-type"], "application/json");
-      await adminFetch("/admin/sets/alpha", {
+      await adminFetch("/admin/collections/main/sets/alpha", {
         method: "DELETE",
         url: "http://127.0.0.1:7500",
       });
@@ -177,11 +182,18 @@ Deno.test("sets and parking reads speak the server's shapes", async () => {
       payload = {
         sets: [{ name: "alpha", description: "d", profiles: [] }],
       };
-    } else if (url.endsWith("/admin/parking")) {
-      // list_parked answers a bare array -- the one unwrap-less GET
-      // in the family (no {profiles: [...]} wrapper exists).
+    } else if (url.endsWith("/admin/profiles?parked=true")) {
+      // The drafts read is the profiles list with the park filter; it
+      // answers a bare AdminProfile[] (the one unwrap-less GET in the
+      // family), and every row names its collection.
       payload = [
-        { profile_id: "p1", family: "openai", model: "m", parked: true },
+        {
+          profile_id: "p1",
+          collection_name: "baseline",
+          family: "openai",
+          model: "m",
+          parked: true,
+        },
       ];
     }
     const stub = {
@@ -196,13 +208,14 @@ Deno.test("sets and parking reads speak the server's shapes", async () => {
     assertEquals(sets[0]?.name, "alpha");
     const parked = await listParking();
     assertEquals(parked[0]?.profile_id, "p1");
+    assertEquals(parked[0]?.collection_name, "baseline");
   } finally {
     globalThis.fetch = originalFetch;
   }
 });
 
 Deno.test(
-  "listParking reads the one parking list the face serves",
+  "listParking reads the drafts list with the park filter",
   async () => {
     const calls: string[] = [];
     const originalFetch = globalThis.fetch;
@@ -217,7 +230,7 @@ Deno.test(
     }) as unknown as typeof fetch;
     try {
       await listParking("http://127.0.0.1:7500");
-      assertEquals(calls, ["http://127.0.0.1:7500/admin/parking"]);
+      assertEquals(calls, ["http://127.0.0.1:7500/admin/profiles?parked=true"]);
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -400,6 +413,59 @@ Deno.test(
         "username",
       ]);
       assertEquals(JSON.parse(String(calls[6]?.init?.body)), { query: "ad" });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  },
+);
+
+Deno.test(
+  "the profile addresses name their collection and the move carries the source",
+  async () => {
+    const calls: { url: string; init?: RequestInit }[] = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = ((input: unknown, init?: RequestInit) => {
+      calls.push({ url: String(input), init });
+      const stub = {
+        ok: true,
+        status: 200,
+        json: () =>
+          Promise.resolve({ profile_id: "p1", collection_name: "main" }),
+      } as unknown as Response;
+      return Promise.resolve(stub);
+    }) as unknown as typeof fetch;
+    try {
+      await listProfiles({ collection_name: "main", parked: true });
+      assertEquals(
+        calls[0]?.url,
+        "/admin/profiles?collection_name=main&parked=true",
+      );
+      await listProfiles();
+      assertEquals(calls[1]?.url, "/admin/profiles");
+      await createProfile("main", {
+        profile_id: "p1",
+        provider_id: "up1",
+        model: "m",
+      });
+      assertEquals(calls[2]?.url, "/admin/collections/main/profiles");
+      assertEquals(calls[2]?.init?.method, "POST");
+      await updateProfile("main", "p1", { model: "m2", parked: false });
+      assertEquals(calls[3]?.url, "/admin/collections/main/profiles/p1");
+      assertEquals(calls[3]?.init?.method, "PUT");
+      await deleteProfile("main", "p1");
+      assertEquals(calls[4]?.url, "/admin/collections/main/profiles/p1");
+      assertEquals(calls[4]?.init?.method, "DELETE");
+      await moveProfile("pro", "main", "p1");
+      assertEquals(calls[5]?.url, "/admin/collections/pro/profiles/p1/move");
+      assertEquals(JSON.parse(String(calls[5]?.init?.body)), {
+        from_collection_name: "main",
+        set: null,
+      });
+      await moveProfile("pro", "main", "p1", "alpha");
+      assertEquals(JSON.parse(String(calls[6]?.init?.body)), {
+        from_collection_name: "main",
+        set: "alpha",
+      });
     } finally {
       globalThis.fetch = originalFetch;
     }

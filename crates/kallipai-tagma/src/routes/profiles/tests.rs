@@ -922,7 +922,7 @@ fn baseline_snapshot(default: Option<&str>) -> serde_json::Value {
     };
     serde_json::json!({
         "owner": "system",
-        "collection": "baseline",
+        "collection_name": "baseline",
         "description": "the platform default audience",
         "sets": [set("alpha", "baseline-main"), set("beta", "baseline-fast")],
         "default_set": default,
@@ -1431,7 +1431,7 @@ async fn spawn_switch_gateway() -> String {
                     let sel = sel.lock().unwrap().clone();
                     match sel.as_deref() {
                         Some("beta-col") => axum::Json(serde_json::json!({
-                            "owner": "acc-x", "collection": "beta-col",
+                            "owner": "acc-x", "collection_name": "beta-col",
                             "description": "the shared narrow collection",
                             "sets": [
                                 { "name": "beta", "description": "second",
@@ -1445,13 +1445,13 @@ async fn spawn_switch_gateway() -> String {
                             "default_set": "beta"
                         })).into_response(),
                         Some("empty-col") => axum::Json(serde_json::json!({
-                            "owner": "acc-x", "collection": "empty-col",
+                            "owner": "acc-x", "collection_name": "empty-col",
                             "description": "a collection with no sets yet",
                             "sets": [],
                             "default_set": null
                         })).into_response(),
                         Some("hollow-col") => axum::Json(serde_json::json!({
-                            "owner": "acc-x", "collection": "hollow-col",
+                            "owner": "acc-x", "collection_name": "hollow-col",
                             "description": "a collection whose set lost every member",
                             "sets": [
                                 { "name": "hollow", "description": "memberless",
@@ -1460,7 +1460,7 @@ async fn spawn_switch_gateway() -> String {
                             "default_set": "hollow"
                         })).into_response(),
                         _ => axum::Json(serde_json::json!({
-                            "owner": "acc-x", "collection": "user-col",
+                            "owner": "acc-x", "collection_name": "user-col",
                             "description": "the account's own collection",
                             "sets": [
                                 { "name": "alpha", "description": "primary",
@@ -1490,7 +1490,7 @@ async fn spawn_switch_gateway() -> String {
                 let sel = sel_write.clone();
                 async move {
                     let asked = body
-                        .get("collection")
+                        .get("collection_name")
                         .and_then(|v| v.as_str())
                         .unwrap_or_default()
                         .to_owned();
@@ -1509,7 +1509,7 @@ async fn spawn_switch_gateway() -> String {
                     *sel.lock().unwrap() = Some(asked.clone());
                     axum::Json(serde_json::json!({
                         "owner": "acc-x",
-                        "collection": asked
+                        "collection_name": asked
                     }))
                     .into_response()
                 }

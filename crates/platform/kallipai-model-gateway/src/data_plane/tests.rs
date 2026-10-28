@@ -336,6 +336,9 @@ async fn a_client_that_walks_away_mid_stream_is_not_an_upstream_error() {
     let db = migrated_test_db().await;
     let upstream_base = spawn_mock_streaming_upstream(40, Duration::from_millis(100)).await;
     crate::test_support::seed_registry(&db, &upstream_base).await;
+    // The selected collection: the override path resolves its ids
+    // inside it, so every forward here needs the pointer.
+    seed_selection(&db).await;
     let (base, metrics) = spawn_plane_with_metrics(db).await;
     let addr = base.strip_prefix("http://").expect("base carries a host");
 
@@ -386,6 +389,9 @@ async fn an_upstream_that_breaks_mid_stream_stays_an_upstream_error() {
     let db = migrated_test_db().await;
     let upstream_base = spawn_mock_streaming_upstream(1, Duration::ZERO).await;
     crate::test_support::seed_registry(&db, &upstream_base).await;
+    // The selected collection: the override path resolves its ids
+    // inside it, so every forward here needs the pointer.
+    seed_selection(&db).await;
     let (base, metrics) = spawn_plane_with_metrics(db).await;
 
     let response = post_generation(
@@ -416,6 +422,9 @@ async fn forward_injects_upstream_authorization_and_passes_through() {
     let db = migrated_test_db().await;
     let (upstream_base, seen) = spawn_mock_upstream().await;
     crate::test_support::seed_registry(&db, &upstream_base).await;
+    // The selected collection: the override path resolves its ids
+    // inside it, so every forward here needs the pointer.
+    seed_selection(&db).await;
     let (base, metrics) = spawn_plane_with_metrics(db).await;
 
     let response = post_generation(
@@ -456,6 +465,9 @@ async fn upstream_histograms_label_the_url_authority() {
     let db = migrated_test_db().await;
     let (upstream_base, _seen) = spawn_mock_upstream().await;
     crate::test_support::seed_registry(&db, &upstream_base).await;
+    // The selected collection: the override path resolves its ids
+    // inside it, so every forward here needs the pointer.
+    seed_selection(&db).await;
 
     provider::ActiveModel {
         owner: Set(crate::registry::CATALOG_OWNER.to_string()),
@@ -476,6 +488,7 @@ async fn upstream_histograms_label_the_url_authority() {
     .await
     .expect("insert the distinct credential");
     profile::ActiveModel {
+        collection_name: Set("baseline".to_string()),
         profile_id: Set("pf-9".to_string()),
         provider_id: Set("pv-9".to_string()),
         model: Set("deepseek-chat".to_string()),
@@ -490,6 +503,7 @@ async fn upstream_histograms_label_the_url_authority() {
     .await
     .expect("insert the distinct profile");
     set_member::ActiveModel {
+        collection_name: Set("baseline".to_string()),
         set_name: Set("alpha".to_string()),
         profile_id: Set("pf-9".to_string()),
         position: Set(9),
@@ -541,6 +555,23 @@ async fn forward_rejects_unknown_bearers_and_out_of_domain_profiles() {
     let db = migrated_test_db().await;
     let (upstream_base, _seen) = spawn_mock_upstream().await;
     crate::test_support::seed_registry(&db, &upstream_base).await;
+    // The selected collection: the override path resolves its ids
+    // inside it, so every forward here needs the pointer. The pro catalog
+    // hides behind the platform group, so a row there resolves and then
+    // fails the grant (403), while a ghost stays a 404.
+    seed_selection(&db).await;
+    {
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+        crate::registry::gateway_selection::Entity::update_many()
+            .col_expr(
+                crate::registry::gateway_selection::Column::CollectionName,
+                sea_orm::sea_query::Expr::value("catalog-pro"),
+            )
+            .filter(crate::registry::gateway_selection::Column::TagmaId.eq("tagma-under-test"))
+            .exec(&db)
+            .await
+            .expect("point the selection at the pro catalog");
+    }
     let (base, metrics) = spawn_plane_with_metrics(db).await;
 
     let response =
@@ -777,10 +808,11 @@ async fn a_deleted_selected_collection_answers_404_on_both_faces() {
     );
 }
 
-/// The set-level domain gate: the selected collection can be inside
-/// the viewer's domain while its anchored default set sits outside
-/// it. The forward denies with a 403 -- the default deployment must
-/// not become a fail-open side door around the visibility domain.
+/// The set-level domain gate: the selected collection stays a row while
+/// the publication that carried it is revoked, and the anchored default
+/// set falls out of the viewer's domain with it. The forward denies with
+/// a 403 -- the default deployment must not become a fail-open side door
+/// around the visibility domain.
 #[tokio::test]
 async fn an_out_of_domain_default_set_denies_the_forward() {
     use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
@@ -788,9 +820,7 @@ async fn an_out_of_domain_default_set_denies_the_forward() {
     let db = migrated_test_db().await;
     crate::test_support::seed_registry(&db, "https://api.upstream.test").await;
 
-    // `user-col` is published to everyone (the collection is inside
-    // the domain); its anchored default `grp-set` is not, because
-    // `grp-col`'s publication names a group acct-test does not sit in.
+    // The pointer names a published collection and its anchored set...
     crate::registry::gateway_selection::ActiveModel {
         tagma_id: Set("tagma-under-test".to_string()),
         owner: Set("acc-bound".to_string()),
@@ -803,13 +833,21 @@ async fn an_out_of_domain_default_set_denies_the_forward() {
     crate::registry::collection::Entity::update_many()
         .col_expr(
             crate::registry::collection::Column::DefaultSetName,
-            sea_orm::sea_query::Expr::value("grp-set"),
+            sea_orm::sea_query::Expr::value("user-set"),
         )
         .filter(crate::registry::collection::Column::Owner.eq("acc-bound"))
         .filter(crate::registry::collection::Column::Name.eq("user-col"))
         .exec(&db)
         .await
-        .expect("anchor the out-of-domain default set");
+        .expect("anchor the default set");
+    // ...and the publication behind it is revoked: the collection row
+    // survives, the set leaves the domain.
+    crate::registry::collection_publication::Entity::delete_many()
+        .filter(crate::registry::collection_publication::Column::Owner.eq("acc-bound"))
+        .filter(crate::registry::collection_publication::Column::CollectionName.eq("user-col"))
+        .exec(&db)
+        .await
+        .expect("revoke the publication");
 
     let base = spawn_plane(db).await;
     let response = post_generation(
@@ -837,6 +875,9 @@ async fn forward_strips_accept_encoding() {
     let db = migrated_test_db().await;
     let (upstream_base, seen) = spawn_mock_upstream().await;
     crate::test_support::seed_registry(&db, &upstream_base).await;
+    // The selected collection: the override path resolves its ids
+    // inside it, so every forward here needs the pointer.
+    seed_selection(&db).await;
     let base = spawn_plane(db).await;
 
     let response = post_generation(
@@ -866,6 +907,9 @@ async fn forward_strips_client_credential_headers() {
     let db = migrated_test_db().await;
     let (upstream_base, seen) = spawn_mock_upstream().await;
     crate::test_support::seed_registry(&db, &upstream_base).await;
+    // The selected collection: the override path resolves its ids
+    // inside it, so every forward here needs the pointer.
+    seed_selection(&db).await;
     let base = spawn_plane(db).await;
 
     let response = post_generation(
@@ -904,6 +948,9 @@ async fn forward_rejects_parked_profiles_inside_the_domain() {
     let db = migrated_test_db().await;
     let (upstream_base, _seen) = spawn_mock_upstream().await;
     crate::test_support::seed_registry(&db, &upstream_base).await;
+    // The selected collection: the override path resolves its ids
+    // inside it, so every forward here needs the pointer.
+    seed_selection(&db).await;
     // Park p5 into the baseline set `alpha` (position 2; the failover
     // slots 0/1 are taken).
     use sea_orm::{ActiveModelTrait, ConnectionTrait, Set, Statement};
@@ -918,6 +965,7 @@ async fn forward_rejects_parked_profiles_inside_the_domain() {
     .await
     .expect("insert parked provider");
     crate::registry::profile::ActiveModel {
+        collection_name: Set("baseline".to_string()),
         profile_id: Set("p5".to_string()),
         provider_id: Set("p5".to_string()),
         model: Set("deepseek-parked".to_string()),
@@ -933,7 +981,8 @@ async fn forward_rejects_parked_profiles_inside_the_domain() {
     .expect("insert parked profile");
     db.execute(Statement::from_string(
         sea_orm::DatabaseBackend::Postgres,
-        "INSERT INTO set_members (set_name, profile_id, position) VALUES ('alpha', 'p5', 3)",
+        "INSERT INTO set_members (owner, collection_name, set_name, profile_id, position) \
+         VALUES ('system', 'baseline', 'alpha', 'p5', 3)",
     ))
     .await
     .expect("park the parked profile into the allowed set");
@@ -961,6 +1010,9 @@ async fn family_gate_rejects_cross_family_endpoints() {
     let db = migrated_test_db().await;
     let upstream_base = spawn_mock_upstream_answering("/responses", serde_json::json!({})).await;
     crate::test_support::seed_registry(&db, &upstream_base).await;
+    // The selected collection: the override path resolves its ids
+    // inside it, so every forward here needs the pointer.
+    seed_selection(&db).await;
     let base = spawn_plane(db.clone()).await;
 
     // A responses-family profile cannot serve the chat endpoint.
@@ -1084,6 +1136,7 @@ async fn seed_anthropic_profile(db: &crate::db::Db, upstream_base: &str) {
     .await
     .expect("insert anthropic provider");
     profile::ActiveModel {
+        collection_name: Set("baseline".to_string()),
         profile_id: Set("pa".to_string()),
         provider_id: Set("pa".to_string()),
         model: Set("claude-test".to_string()),
@@ -1106,6 +1159,7 @@ async fn seed_anthropic_profile(db: &crate::db::Db, upstream_base: &str) {
     .await
     .expect("insert anthropic credential");
     set_member::ActiveModel {
+        collection_name: Set("baseline".to_string()),
         set_name: Set("alpha".to_string()),
         profile_id: Set("pa".to_string()),
         position: Set(9),
@@ -1126,6 +1180,9 @@ async fn anthropic_endpoint_swaps_in_the_gateway_credential() {
     let db = migrated_test_db().await;
     let (upstream_base, seen) = spawn_mock_anthropic().await;
     crate::test_support::seed_registry(&db, &upstream_base).await;
+    // The selected collection: the override path resolves its ids
+    // inside it, so every forward here needs the pointer.
+    seed_selection(&db).await;
     seed_anthropic_profile(&db, &upstream_base).await;
     let base = spawn_plane(db).await;
 
@@ -1164,6 +1221,9 @@ async fn anthropic_stream_passes_through() {
     let db = migrated_test_db().await;
     let upstream_base = spawn_mock_anthropic_stream().await;
     crate::test_support::seed_registry(&db, &upstream_base).await;
+    // The selected collection: the override path resolves its ids
+    // inside it, so every forward here needs the pointer.
+    seed_selection(&db).await;
     seed_anthropic_profile(&db, &upstream_base).await;
     let base = spawn_plane(db).await;
 
@@ -1783,6 +1843,9 @@ async fn a_forward_to_an_unreachable_upstream_is_a_failed_server_span() {
     crate::test_support::global_capture();
     let db = migrated_test_db().await;
     crate::test_support::seed_registry(&db, "http://127.0.0.1:1").await;
+    // The selected collection: the override path resolves its ids
+    // inside it, so every forward here needs the pointer.
+    seed_selection(&db).await;
     let base = spawn_plane(db).await;
     let trace = "11111111111111111111111111111111";
     let caller_span = "2222222222222222";
@@ -1832,6 +1895,9 @@ async fn a_forward_to_an_unreachable_upstream_is_a_failed_server_span() {
 async fn a_forward_to_an_unresolvable_upstream_is_a_retryable_503() {
     let db = migrated_test_db().await;
     crate::test_support::seed_registry(&db, "http://bad host/v1").await;
+    // The selected collection: the override path resolves its ids
+    // inside it, so every forward here needs the pointer.
+    seed_selection(&db).await;
     let lines = global_lines();
     let (base, metrics) = spawn_plane_with_metrics(db).await;
 
@@ -2036,6 +2102,9 @@ async fn a_refused_candidate_falls_over_to_the_next_one() {
     let mock = spawn_mock_upstream_counting_body().await;
     let authority = format!("upstream.test:{}", port_of(&mock.base));
     crate::test_support::seed_registry(&db, &format!("http://{authority}")).await;
+    // The selected collection: the override path resolves its ids
+    // inside it, so every forward here needs the pointer.
+    seed_selection(&db).await;
     let (base, metrics) = spawn_plane_with_addresses(db, &["127.0.0.2", "127.0.0.1"]).await;
 
     let body = serde_json::json!({
@@ -2069,6 +2138,9 @@ async fn a_body_bearing_retry_reaches_the_upstream_whole() {
     let mock = spawn_mock_upstream_counting_body().await;
     let authority = format!("upstream.test:{}", port_of(&mock.base));
     crate::test_support::seed_registry(&db, &format!("http://{authority}")).await;
+    // The selected collection: the override path resolves its ids
+    // inside it, so every forward here needs the pointer.
+    seed_selection(&db).await;
     let (base, metrics) = spawn_plane_with_addresses(db, &["127.0.0.2", "127.0.0.1"]).await;
 
     let payload = "x".repeat(100 * 1024);
@@ -2103,6 +2175,9 @@ async fn exhausting_the_candidates_costs_one_dial_each() {
     };
     let authority = format!("upstream.test:{port}");
     crate::test_support::seed_registry(&db, &format!("http://{authority}")).await;
+    // The selected collection: the override path resolves its ids
+    // inside it, so every forward here needs the pointer.
+    seed_selection(&db).await;
     let (base, metrics) = spawn_plane_with_addresses(db, &["127.0.0.2", "127.0.0.3"]).await;
 
     let body = serde_json::json!({
@@ -2140,6 +2215,9 @@ async fn an_upstream_that_drops_the_connection_is_not_replayed() {
     let accepted = spawn_dropping_listener(dropping);
     let authority = format!("upstream.test:{port}");
     crate::test_support::seed_registry(&db, &format!("http://{authority}")).await;
+    // The selected collection: the override path resolves its ids
+    // inside it, so every forward here needs the pointer.
+    seed_selection(&db).await;
     let (base, metrics) = spawn_plane_with_addresses(db, &["127.0.0.2", "127.0.0.1"]).await;
 
     let body = serde_json::json!({

@@ -319,9 +319,9 @@ async fn call(
 
 /// Bring one tagma to a forwardable state through the real faces: a
 /// provider pointed at the (fake) upstream, a collection published to
-/// the reserved everyone audience, a parked profile promoted into the
-/// collection's first set, and the tagma's selection pointing at that
-/// collection. Seven writes in dependency order; the first set of a
+/// the reserved everyone audience, a parked profile born inside the
+/// collection and promoted into its first set, and the tagma's selection
+/// pointing at that collection. Seven writes in dependency order; the first set of a
 /// collection anchors as its default, so the selection resolves
 /// without naming a set.
 async fn seed(mgmt: &str, upstream_base: &str) {
@@ -358,7 +358,7 @@ async fn seed(mgmt: &str, upstream_base: &str) {
     call(
         &http,
         reqwest::Method::POST,
-        format!("{mgmt}/admin/parking"),
+        format!("{mgmt}/admin/collections/main/profiles"),
         ADMIN_BEARER,
         json!({"profile_id": "p1", "provider_id": "p1", "model": "deepseek-chat"}),
     )
@@ -374,7 +374,7 @@ async fn seed(mgmt: &str, upstream_base: &str) {
     call(
         &http,
         reqwest::Method::PATCH,
-        format!("{mgmt}/admin/sets/alpha"),
+        format!("{mgmt}/admin/collections/main/sets/alpha"),
         ADMIN_BEARER,
         json!({"members": ["p1"]}),
     )
@@ -386,7 +386,7 @@ async fn seed(mgmt: &str, upstream_base: &str) {
         reqwest::Method::PUT,
         format!("{mgmt}/selection"),
         TAGMA_BEARER,
-        json!({"owner": "system", "collection": "main"}),
+        json!({"owner": "system", "collection_name": "main"}),
     )
     .await;
 }

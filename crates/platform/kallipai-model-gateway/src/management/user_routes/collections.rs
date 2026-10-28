@@ -20,8 +20,7 @@ use axum::extract::{Path, State};
 use kallipai_common::protocol::ApiError;
 use sea_orm::sea_query::{Expr, Query};
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder, Set,
-    TransactionTrait,
+    ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, Set, TransactionTrait,
 };
 use serde::{Deserialize, Serialize};
 
@@ -356,26 +355,27 @@ pub(super) async fn unpublish_collection(
     Ok(Json(serde_json::json!({ "deleted": true })))
 }
 
-/// POST /user/collections/{name}/sets: a set created directly inside the
-/// collection -- the row carries the collection in `collection_name`,
-/// the membership authority. The first set in a default-less
-/// collection takes the default anchor.
+/// POST /user/collections/{collection}/sets: a set created directly inside
+/// the collection -- the row carries the collection in `collection_name`,
+/// the membership authority. The first set in a default-less collection
+/// takes the default anchor, and the name is unique inside this collection
+/// only.
 pub(super) async fn create_collection_set(
     State(state): State<AppState>,
     usr: UserSession,
-    Path(name): Path<String>,
+    Path(collection): Path<String>,
     Json(body): Json<UserCollectionSetCreate>,
 ) -> Result<Json<UserSetView>, ApiError> {
     let owner = owner_of(&usr);
     let actor = std::borrow::Cow::Owned(owner.clone());
     validate_set_name(&body.name)?;
     let txn = state.db.begin().await.map_err(db::map_db_err)?;
-    collection::Entity::find_by_id((owner.clone(), name.clone()))
+    collection::Entity::find_by_id((owner.clone(), collection.clone()))
         .one(&txn)
         .await
         .map_err(db::map_db_err)?
-        .ok_or_else(|| ApiError::not_found(format!("no such collection: {name}")))?;
-    if registry::set_by_id(&txn, &owner, &body.name)
+        .ok_or_else(|| ApiError::not_found(format!("no such collection: {collection}")))?;
+    if registry::set_by_id(&txn, &owner, &collection, &body.name)
         .await
         .map_err(db::map_db_err)?
         .is_some()
@@ -386,16 +386,16 @@ pub(super) async fn create_collection_set(
         name: Set(body.name.clone()),
         description: Set(body.description.clone()),
         owner: Set(owner.clone()),
-        collection_name: Set(name.clone()),
+        collection_name: Set(collection.clone()),
     }
     .insert(&txn)
     .await
     .map_err(db::map_db_err)?;
-    anchor_collection_default(&txn, &owner, &name, &body.name).await?;
+    anchor_collection_default(&txn, &owner, &collection, &body.name).await?;
     if let Some(members) = &body.members {
-        replace_set_members(&txn, &owner, &body.name, members).await?;
+        replace_set_members(&txn, &owner, &collection, &body.name, members).await?;
     }
-    let set = registry::set_by_id(&txn, &owner, &body.name)
+    let set = registry::set_by_id(&txn, &owner, &collection, &body.name)
         .await
         .map_err(db::map_db_err)?
         .expect("the row was just inserted");
@@ -437,13 +437,13 @@ pub(super) async fn set_collection_default(
         .map_err(db::map_db_err)?
         .ok_or_else(|| ApiError::not_found(format!("no such collection: {name}")))?;
     let before = user_collection_view(&txn, owner.clone(), row).await?;
-    let set = registry::set_by_id(&txn, &owner, &body.set_name)
+    if registry::set_by_id(&txn, &owner, &name, &body.set_name)
         .await
         .map_err(db::map_db_err)?
-        .ok_or_else(|| ApiError::not_found(format!("no such set: {}", body.set_name)))?;
-    if set.collection_name != name {
+        .is_none()
+    {
         return Err(ApiError::not_found(format!(
-            "set {} is not a member of collection {name}",
+            "no such set: {} in collection {name}",
             body.set_name
         )));
     }
@@ -560,15 +560,19 @@ pub(crate) async fn anchor_collection_default<C: sea_orm::ConnectionTrait>(
 
 /// Refuse to delete a set that carries a collection's default anchor:
 /// a dangling default breaks the collection's default-fallback
-/// resolution. `face` names the transfer path in the message.
+/// resolution. The anchor is per collection, so the guard names the
+/// collection the set belongs to. `face` names the transfer path in the
+/// message.
 pub(crate) async fn collection_default_guard<C: sea_orm::ConnectionTrait>(
     txn: &C,
     owner: &str,
+    collection_name: &str,
     set_name: &str,
     face: &str,
 ) -> Result<(), ApiError> {
     let anchored = collection::Entity::find()
         .filter(collection::Column::Owner.eq(owner))
+        .filter(collection::Column::Name.eq(collection_name))
         .filter(collection::Column::DefaultSetName.eq(set_name))
         .one(txn)
         .await
@@ -582,13 +586,14 @@ pub(crate) async fn collection_default_guard<C: sea_orm::ConnectionTrait>(
     Ok(())
 }
 
-/// Delete a collection's anchored sets and the profiles the deletion
-/// leaves without any set in this space (profiles a set another
-/// collection still references survive). The member rows cascade with
-/// the set rows; each deletion lands its
-/// own audit event inside the caller's transaction. The collection
-/// row itself is the caller's to delete (its audit shape is
-/// face-specific).
+/// Delete a collection's anchored sets and the profiles the collection
+/// holds, auditing every deleted row. Collection isolation makes the sweep
+/// exact: a profile belongs to exactly one collection and membership never
+/// leaves it, so deleting the collection takes every profile it holds --
+/// members and drafts alike -- and nothing outside it. The member rows
+/// cascade with the set and profile rows; each deletion lands its own audit
+/// event inside the caller's transaction. The collection row itself is the
+/// caller's to delete (its audit shape is face-specific).
 pub(crate) async fn delete_collection_cascade<C: sea_orm::ConnectionTrait>(
     txn: &C,
     owner: &str,
@@ -603,14 +608,13 @@ pub(crate) async fn delete_collection_cascade<C: sea_orm::ConnectionTrait>(
         .all(txn)
         .await
         .map_err(db::map_db_err)?;
-    // Before-views while the rows exist: the member lists go with the
-    // set rows (the FK cascade), so they are read first. The union of
-    // member ids feeds the profile sweep below.
+    // Before-views while the rows exist: the member lists go with the set
+    // rows (the FK cascade), so they are read first.
     let mut before_sets = Vec::with_capacity(sets.len());
-    let mut member_union: Vec<String> = Vec::new();
     for set in &sets {
         let members: Vec<String> = set_member::Entity::find()
             .filter(set_member::Column::Owner.eq(owner))
+            .filter(set_member::Column::CollectionName.eq(name))
             .filter(set_member::Column::SetName.eq(&set.name))
             .order_by_asc(set_member::Column::Position)
             .all(txn)
@@ -619,26 +623,59 @@ pub(crate) async fn delete_collection_cascade<C: sea_orm::ConnectionTrait>(
             .into_iter()
             .map(|m| m.profile_id)
             .collect();
-        for id in &members {
-            if !member_union.contains(id) {
-                member_union.push(id.clone());
-            }
-        }
         let view = match face {
             CascadeFace::User => serde_json::to_value(UserSetView {
                 name: set.name.clone(),
+                collection_name: set.collection_name.clone(),
                 description: set.description.clone(),
                 members,
             })
             .expect("view serializes"),
             CascadeFace::Admin => serde_json::json!({
                 "name": set.name.clone(),
+                "collection_name": set.collection_name.clone(),
                 "description": set.description.clone(),
                 "owner": set.owner.clone(),
                 "members": members,
             }),
         };
         before_sets.push(view);
+    }
+    // The profiles the collection holds, with their before-views, read
+    // while the rows are still there.
+    let profiles = profile::Entity::find()
+        .filter(profile::Column::Owner.eq(owner))
+        .filter(profile::Column::CollectionName.eq(name))
+        .order_by_asc(profile::Column::ProfileId)
+        .all(txn)
+        .await
+        .map_err(db::map_db_err)?;
+    // The module's lock order reaches here too: profile rows first, taken
+    // in id order (the read above is ordered by id), before the cascade
+    // below takes the member rows with its set rows. The views below only
+    // read, so locking ahead of them costs nothing.
+    for row in &profiles {
+        registry::profile_by_id_for_update(txn, owner, name, &row.profile_id)
+            .await
+            .map_err(db::map_db_err)?;
+    }
+    let mut profile_befores = Vec::with_capacity(profiles.len());
+    for row in profiles {
+        let profile_id = row.profile_id.clone();
+        let before = match face {
+            CascadeFace::User => {
+                serde_json::to_value(user_profile_view(txn, row).await?).expect("view serializes")
+            }
+            CascadeFace::Admin => {
+                let served = registry::served_profile(txn, row)
+                    .await
+                    .map_err(db::map_db_err)?
+                    .ok_or_else(|| ApiError::internal("profile row without its provider"))?;
+                serde_json::to_value(crate::management::sets::AdminProfile::from(served))
+                    .expect("view serializes")
+            }
+        };
+        profile_befores.push((profile_id, before));
     }
     profile_set::Entity::delete_many()
         .filter(profile_set::Column::Owner.eq(owner))
@@ -661,48 +698,19 @@ pub(crate) async fn delete_collection_cascade<C: sea_orm::ConnectionTrait>(
         .await
         .map_err(db::map_db_err)?;
     }
-    // The sweep: a profile whose last set in this space went with the
-    // collection has nothing left to serve; one still referenced
-    // elsewhere stays.
-    for profile_id in member_union {
-        let remaining = set_member::Entity::find()
-            .filter(set_member::Column::Owner.eq(owner))
-            .filter(set_member::Column::ProfileId.eq(&profile_id))
-            .count(txn)
-            .await
-            .map_err(db::map_db_err)?;
-        if remaining > 0 {
-            continue;
-        }
-        let Some(row) = registry::profile_by_id(txn, owner, &profile_id)
-            .await
-            .map_err(db::map_db_err)?
-        else {
-            continue;
-        };
-        let before = match face {
-            CascadeFace::User => {
-                serde_json::to_value(user_profile_view(txn, row).await?).expect("view serializes")
-            }
-            CascadeFace::Admin => {
-                let served = registry::served_profile(txn, row)
-                    .await
-                    .map_err(db::map_db_err)?
-                    .ok_or_else(|| ApiError::internal("profile row without its provider"))?;
-                serde_json::to_value(crate::management::sets::AdminProfile::from(served))
-                    .expect("view serializes")
-            }
-        };
-        profile::Entity::delete_by_id((owner.to_owned(), profile_id.clone()))
-            .exec(txn)
-            .await
-            .map_err(db::map_db_err)?;
+    profile::Entity::delete_many()
+        .filter(profile::Column::Owner.eq(owner))
+        .filter(profile::Column::CollectionName.eq(name))
+        .exec(txn)
+        .await
+        .map_err(db::map_db_err)?;
+    for (profile_id, before) in profile_befores {
         management_event::record(
             txn,
             ManagementEventRow {
                 action: "delete",
                 entity: "profile",
-                entity_id: profile_id.clone(),
+                entity_id: profile_id,
                 actor: std::borrow::Cow::Owned(actor.to_owned()),
                 before: Some(before),
                 after: None,

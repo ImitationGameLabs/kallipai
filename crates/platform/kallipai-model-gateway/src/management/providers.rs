@@ -761,7 +761,12 @@ mod tests {
         // the delete succeeds with the stored value in place.
         let (status, deleted) = send(
             app(state.clone()),
-            req("DELETE", "/admin/parking/a4", Some(TEST_ADMIN_BEARER), None),
+            req(
+                "DELETE",
+                "/admin/collections/baseline/profiles/a4",
+                Some(TEST_ADMIN_BEARER),
+                None,
+            ),
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{deleted}");
@@ -814,24 +819,29 @@ mod tests {
         // No set row survived the failed audit.
         let (status, _) = send(
             app(state),
-            req("GET", "/admin/sets/gamma", Some(TEST_ADMIN_BEARER), None),
+            req(
+                "GET",
+                "/admin/collections/baseline/sets/gamma",
+                Some(TEST_ADMIN_BEARER),
+                None,
+            ),
         )
         .await;
         assert_eq!(status, StatusCode::NOT_FOUND);
     }
 
-    /// The domain is a wall, not a filter: the parking and provider
+    /// The domain is a wall, not a filter: the draft and provider
     /// routes are pinned to the catalog space, so rows planted one
     /// space over answer 404 on every route.
     #[tokio::test]
-    async fn parking_and_provider_routes_refuse_cross_space_rows() {
+    async fn draft_and_provider_routes_refuse_cross_space_rows() {
         let state = seeded_state().await;
         foreign_parked(&state, "fx").await;
         for (method, path, body) in [
-            ("GET", "/admin/parking/fx", None),
+            ("GET", "/admin/collections/baseline/profiles/fx", None),
             (
                 "PUT",
-                "/admin/parking/fx",
+                "/admin/collections/baseline/profiles/fx",
                 Some(serde_json::json!({
                     "model": "draft-x",
                     "max_context_window": 8192,
@@ -840,7 +850,7 @@ mod tests {
                     "parked": false
                 })),
             ),
-            ("DELETE", "/admin/parking/fx", None),
+            ("DELETE", "/admin/collections/baseline/profiles/fx", None),
             ("DELETE", "/admin/providers/fx", None),
             (
                 "PUT",
@@ -887,7 +897,19 @@ mod tests {
             app(state.clone()),
             cookie_req(
                 "POST",
-                "/user/profiles",
+                "/user/collections",
+                user,
+                true,
+                Some(serde_json::json!({"name": "c1", "description": "d"})),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, _) = send(
+            app(state.clone()),
+            cookie_req(
+                "POST",
+                "/user/collections/c1/profiles",
                 user,
                 true,
                 Some(serde_json::json!({

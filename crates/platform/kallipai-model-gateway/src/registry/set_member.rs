@@ -10,8 +10,14 @@ pub struct Model {
     /// membership never crosses a space boundary).
     #[sea_orm(primary_key, auto_increment = false)]
     pub owner: String,
+    /// The owning set's collection: membership never crosses a
+    /// collection either (the composite foreign keys pin both the set
+    /// and the profile inside it).
+    #[sea_orm(primary_key, auto_increment = false)]
+    pub collection_name: String,
     #[sea_orm(primary_key, auto_increment = false)]
     pub set_name: String,
+    #[sea_orm(primary_key, auto_increment = false)]
     pub profile_id: String,
     pub position: i32,
 }

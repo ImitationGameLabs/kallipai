@@ -19,6 +19,12 @@ use tower::ServiceExt;
 /// constant, one spelling with the audit attribution).
 pub(crate) const LOCAL_ADMIN_OWNER: &str = "admin";
 
+/// The catalog collection the plain planting helpers anchor to: the
+/// migration-seeded `baseline` bundle, which is where the fixture sets
+/// (`alpha`, `beta`) live. Helpers that need a different collection take
+/// it as an argument (`*_in`).
+pub(crate) const TEST_COLLECTION: &str = "baseline";
+
 pub(crate) fn app(state: AppState) -> axum::Router {
     crate::routes::management_plane_router(state, "")
 }
@@ -77,8 +83,20 @@ pub(crate) async fn catalog_provider(state: &AppState, id: &str, family: &str) {
 /// A profile row in the catalog space: the provider lands first
 /// (the FK needs it), then the profile with the given parked flag.
 pub(crate) async fn catalog_profile(state: &AppState, id: &str, model: &str, parked: bool) {
+    catalog_profile_in(state, TEST_COLLECTION, id, model, parked).await;
+}
+
+/// The same profile row anchored to a named collection.
+pub(crate) async fn catalog_profile_in(
+    state: &AppState,
+    collection: &str,
+    id: &str,
+    model: &str,
+    parked: bool,
+) {
     catalog_provider(state, id, "openai-compatible").await;
     profile::ActiveModel {
+        collection_name: Set(collection.to_owned()),
         profile_id: Set(id.to_owned()),
         provider_id: Set(id.to_owned()),
         model: Set(model.to_owned()),
@@ -111,11 +129,17 @@ pub(crate) async fn catalog_credential(state: &AppState, id: &str, key: &str) {
 /// catalog space's default collection), so tests can pin
 /// membership edges without the collection face.
 pub(crate) async fn catalog_set(state: &AppState, name: &str) {
+    catalog_set_in(state, TEST_COLLECTION, name).await;
+}
+
+/// The same set row anchored to a named collection (a same-name twin in
+/// another collection is a different row, which is the point).
+pub(crate) async fn catalog_set_in(state: &AppState, collection: &str, name: &str) {
     profile_set::ActiveModel {
         name: Set(name.to_owned()),
         description: Set("d".to_owned()),
         owner: Set(registry::CATALOG_OWNER.to_owned()),
-        collection_name: Set("baseline".to_owned()),
+        collection_name: Set(collection.to_owned()),
     }
     .insert(&state.db)
     .await
@@ -123,9 +147,21 @@ pub(crate) async fn catalog_set(state: &AppState, name: &str) {
 }
 
 /// One membership edge for a planted set (the FK pair is the member
-/// profile, planted before this call).
+/// profile, planted before this call in the same collection).
 pub(crate) async fn catalog_member(state: &AppState, set: &str, id: &str, position: i32) {
+    catalog_member_in(state, TEST_COLLECTION, set, id, position).await;
+}
+
+/// The same membership edge for a set and a profile in a named collection.
+pub(crate) async fn catalog_member_in(
+    state: &AppState,
+    collection: &str,
+    set: &str,
+    id: &str,
+    position: i32,
+) {
     set_member::ActiveModel {
+        collection_name: Set(collection.to_owned()),
         set_name: Set(set.to_owned()),
         profile_id: Set(id.to_owned()),
         position: Set(position),
@@ -140,6 +176,7 @@ pub(crate) async fn catalog_member(state: &AppState, set: &str, id: &str, positi
 /// space (a foreign space to this face), planted directly: no
 /// admin route reaches that space.
 pub(crate) async fn foreign_parked(state: &AppState, id: &str) {
+    seed_collection(state, LOCAL_ADMIN_OWNER, "personal").await;
     provider::ActiveModel {
         owner: Set(LOCAL_ADMIN_OWNER.to_owned()),
         provider_id: Set(id.to_owned()),
@@ -151,6 +188,7 @@ pub(crate) async fn foreign_parked(state: &AppState, id: &str) {
     .await
     .expect("foreign provider insert");
     profile::ActiveModel {
+        collection_name: Set("personal".to_owned()),
         profile_id: Set(id.to_owned()),
         provider_id: Set(id.to_owned()),
         model: Set("foreign-model".to_owned()),
@@ -207,8 +245,9 @@ pub(crate) async fn audit_rows(
         .expect("audit rows read")
 }
 
-pub(crate) async fn parked_flag(state: &AppState, id: &str) -> bool {
+pub(crate) async fn parked_flag(state: &AppState, collection: &str, id: &str) -> bool {
     profile::Entity::find()
+        .filter(profile::Column::CollectionName.eq(collection))
         .filter(profile::Column::ProfileId.eq(id))
         .one(&state.db)
         .await
@@ -220,8 +259,15 @@ pub(crate) async fn parked_flag(state: &AppState, id: &str) -> bool {
 // The folded shape: a1b rides a1's provider row, so every handler
 // below must address the provider by the profile's link column,
 // not by the profile's own id.
-pub(crate) async fn insert_co_rider(db: &crate::db::Db, owner: &str, id: &str, provider: &str) {
+pub(crate) async fn insert_co_rider(
+    db: &crate::db::Db,
+    owner: &str,
+    collection: &str,
+    id: &str,
+    provider: &str,
+) {
     profile::ActiveModel {
+        collection_name: Set(collection.to_owned()),
         profile_id: Set(id.to_owned()),
         provider_id: Set(provider.to_owned()),
         model: Set("deepseek-chat".to_owned()),
@@ -288,35 +334,35 @@ pub(crate) async fn create_group(
     .await
 }
 
-/// A provider+profile pair in the signed-in user's space: the cascade
-/// tests need real profile rows to sweep (or to spare).
-pub(crate) async fn user_provider_profile(state: &AppState, provider: &str, profile: &str) {
-    for body in [
-        serde_json::json!({
-            "provider_id": provider,
-            "family": "deepseek",
-            "base_url": "https://api.user.test",
-            "api_key": "sk-user-x",
-        }),
-        serde_json::json!({
-            "profile_id": profile,
-            "provider_id": provider,
-            "model": "m",
-        }),
+/// A provider+profile pair in the signed-in user's space, the profile
+/// anchored to the named collection: the cascade tests need real profile
+/// rows to delete with their collection (or to spare), and a profile
+/// belongs to exactly one collection.
+pub(crate) async fn user_provider_profile(
+    state: &AppState,
+    collection: &str,
+    provider: &str,
+    profile: &str,
+) {
+    let profile_path = format!("/user/collections/{collection}/profiles");
+    let provider_body = serde_json::json!({
+        "provider_id": provider,
+        "family": "deepseek",
+        "base_url": "https://api.user.test",
+        "api_key": "sk-user-x",
+    });
+    let profile_body = serde_json::json!({
+        "profile_id": profile,
+        "provider_id": provider,
+        "model": "m",
+    });
+    for (path, body) in [
+        ("/user/providers", provider_body),
+        (profile_path.as_str(), profile_body),
     ] {
         let (status, body) = send(
             app(state.clone()),
-            cookie_req(
-                "POST",
-                if body.get("profile_id").is_some() {
-                    "/user/profiles"
-                } else {
-                    "/user/providers"
-                },
-                Some(TEST_USER_COOKIE),
-                true,
-                Some(body),
-            ),
+            cookie_req("POST", path, Some(TEST_USER_COOKIE), true, Some(body)),
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{body}");

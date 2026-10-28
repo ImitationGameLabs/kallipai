@@ -58,16 +58,17 @@ pub(crate) fn router() -> axum::Router<AppState> {
             "/providers/{provider_id}/credential",
             put(put_provider_credential).delete(delete_provider_credential),
         )
-        // -- profiles -------------------------------------------------------
-        .route("/profiles", get(list_profiles).post(create_profile))
+        // -- profiles: the collection-scoped items, the filtered list ------
+        .route("/profiles", get(list_profiles))
+        .route("/collections/{collection}/profiles", post(create_profile))
         .route(
-            "/profiles/{profile_id}",
+            "/collections/{collection}/profiles/{profile_id}",
             put(update_profile).delete(delete_profile),
         )
-        // -- sets -----------------------------------------------------------
+        // -- sets: the filtered list, the collection-scoped items ----------
         .route("/sets", get(list_sets))
         .route(
-            "/sets/{name}",
+            "/collections/{collection}/sets/{name}",
             get(get_set).patch(update_set).delete(delete_set),
         )
         // -- collections ----------------------------------------------------
@@ -86,7 +87,10 @@ pub(crate) fn router() -> axum::Router<AppState> {
             "/collections/{name}/publications/{group}",
             delete(unpublish_collection),
         )
-        .route("/collections/{name}/sets", post(create_collection_set))
+        .route(
+            "/collections/{collection}/sets",
+            post(create_collection_set),
+        )
         .route("/collections/{name}/default", patch(set_collection_default))
         // -- groups ---------------------------------------------------------
         .route("/groups", get(list_groups).post(create_group))

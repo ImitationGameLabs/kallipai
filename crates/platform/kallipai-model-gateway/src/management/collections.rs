@@ -15,14 +15,16 @@ use crate::management::user_routes::{
 };
 use crate::management::validate_set_name;
 use crate::registry::{
-    self, EVERYONE_GROUP_ID, collection, platform_groups, platform_publications, profile_set,
+    self, EVERYONE_GROUP_ID, collection, platform_groups, platform_publications, profile,
+    profile_set,
 };
 use crate::state::AppState;
 use kallipai_common::protocol::ApiError;
 
 use sea_orm::sea_query::{Expr, Query as SeaQuery};
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, Set, TransactionTrait,
+    ActiveModelTrait, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder, Set,
+    TransactionTrait,
 };
 
 // -- collections -----------------------------------------------------------
@@ -38,6 +40,12 @@ pub struct AdminCollectionView {
     pub publications: Vec<String>,
     /// The collection's default-set anchor (null = none chosen yet).
     pub default_set: Option<String>,
+    /// How many profile rows the collection holds (drafts included): the
+    /// delete confirmation states this number, so the cost is never a
+    /// guess.
+    pub profile_count: u64,
+    /// How many sets the collection anchors (the cascade's other half).
+    pub set_count: u64,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -52,19 +60,28 @@ async fn admin_collection_view<C: sea_orm::ConnectionTrait>(
 ) -> Result<AdminCollectionView, ApiError> {
     let base = user_collection_view(db, owner.clone(), row).await?;
     let pubs = platform_publications::Entity::find()
-        .filter(platform_publications::Column::Owner.eq(owner))
+        .filter(platform_publications::Column::Owner.eq(owner.clone()))
         .filter(platform_publications::Column::CollectionName.eq(base.name.clone()))
         .all(db)
         .await
         .map_err(db::map_db_err)?;
     let mut publications: Vec<String> = pubs.into_iter().map(|p| p.group_id).collect();
     publications.sort();
+    let set_count = base.sets.len() as u64;
+    let profile_count = profile::Entity::find()
+        .filter(profile::Column::Owner.eq(owner))
+        .filter(profile::Column::CollectionName.eq(base.name.clone()))
+        .count(db)
+        .await
+        .map_err(db::map_db_err)?;
     Ok(AdminCollectionView {
         name: base.name,
         description: base.description,
         sets: base.sets,
         default_set: base.default_set,
         publications,
+        profile_count,
+        set_count,
     })
 }
 
@@ -363,13 +380,13 @@ pub async fn set_collection_default(
         .map_err(db::map_db_err)?
         .ok_or_else(|| ApiError::not_found(format!("no such collection: {name}")))?;
     let before = admin_collection_view(&txn, owner.clone(), row).await?;
-    let set = registry::set_by_id(&txn, &owner, &body.set_name)
+    if registry::set_by_id(&txn, &owner, &name, &body.set_name)
         .await
         .map_err(db::map_db_err)?
-        .ok_or_else(|| ApiError::not_found(format!("no such set: {}", body.set_name)))?;
-    if set.collection_name != name {
+        .is_none()
+    {
         return Err(ApiError::not_found(format!(
-            "set {} is not a member of collection {name}",
+            "no such set: {} in collection {name}",
             body.set_name
         )));
     }
@@ -999,7 +1016,6 @@ mod tests {
     async fn user_first_set_anchors_the_collection_default() {
         let state = seeded_state().await;
         let user = Some(TEST_USER_COOKIE);
-        user_provider_profile(&state, "up1", "pA").await;
         let (status, body) = send(
             app(state.clone()),
             cookie_req(
@@ -1012,6 +1028,9 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{body}");
+        // The profile lands in the collection whose set carries it:
+        // membership never crosses a collection.
+        user_provider_profile(&state, "c1", "up1", "pA").await;
         for name in ["s1", "s2"] {
             let (status, body) = send(
                 app(state.clone()),
@@ -1074,7 +1093,6 @@ mod tests {
     async fn user_collection_default_transfer_is_membership_gated() {
         let state = seeded_state().await;
         let user = Some(TEST_USER_COOKIE);
-        user_provider_profile(&state, "up1", "pA").await;
         for collection in ["c1", "c2"] {
             let (status, body) = send(
                 app(state.clone()),
@@ -1089,6 +1107,7 @@ mod tests {
             .await;
             assert_eq!(status, StatusCode::OK, "{body}");
         }
+        user_provider_profile(&state, "c1", "up1", "pA").await;
         // s1 in c1 (its default), s2 in c2.
         for (path, name) in [
             ("/user/collections/c1/sets", "s1"),
@@ -1163,7 +1182,6 @@ mod tests {
     async fn collection_default_set_deletion_is_guarded() {
         let state = seeded_state().await;
         let user = Some(TEST_USER_COOKIE);
-        user_provider_profile(&state, "up1", "pA").await;
         // c1 with s1 (the anchored default) and s2.
         let (status, body) = send(
             app(state.clone()),
@@ -1177,6 +1195,7 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{body}");
+        user_provider_profile(&state, "c1", "up1", "pA").await;
         for name in ["s1", "s2"] {
             let (status, body) = send(
                 app(state.clone()),
@@ -1194,7 +1213,7 @@ mod tests {
         // Deleting the anchored default is a 409 naming the transfer route.
         let (status, body) = send(
             app(state.clone()),
-            cookie_req("DELETE", "/user/sets/s1", user, true, None),
+            cookie_req("DELETE", "/user/collections/c1/sets/s1", user, true, None),
         )
         .await;
         assert_eq!(status, StatusCode::CONFLICT, "{body}");
@@ -1220,26 +1239,24 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "{body}");
         let (status, body) = send(
             app(state.clone()),
-            cookie_req("DELETE", "/user/sets/s1", user, true, None),
+            cookie_req("DELETE", "/user/collections/c1/sets/s1", user, true, None),
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{body}");
     }
 
     /// The cascade: deleting a collection removes its anchored sets, their
-    /// member rows, sweeps the profiles nothing else in the space
-    /// references (sets another collection still holds survive), and
-    /// the publication rows go with the collection row; each deletion
-    /// lands its audit row and other collections stay untouched.
+    /// member rows, and the collection's own profiles (a profile belongs
+    /// to one collection, so nothing outside it can still reference them);
+    /// the publication rows go with the collection row, another
+    /// collection's profiles and sets stay untouched, and each deletion
+    /// lands its audit row.
     #[tokio::test]
-    async fn user_collection_deletion_cascades_and_sweeps_profiles() {
+    async fn user_collection_deletion_takes_its_sets_and_profiles() {
         let state = seeded_state().await;
         let user = Some(TEST_USER_COOKIE);
         let owner = "user-plain";
-        for (provider, profile) in [("up1", "pA"), ("up2", "pB"), ("up3", "pC")] {
-            user_provider_profile(&state, provider, profile).await;
-        }
-        // c1: sA(pA, pB) published to everyone; c2: sB2(pB) and sC(pC).
+        // The collections first: profiles and sets anchor to them.
         for collection in ["c1", "c2"] {
             let (status, body) = send(
                 app(state.clone()),
@@ -1254,10 +1271,20 @@ mod tests {
             .await;
             assert_eq!(status, StatusCode::OK, "{body}");
         }
+        // Each collection owns the profiles its sets carry: membership
+        // never crosses a collection.
+        for (collection, provider, profile) in [
+            ("c1", "up1", "pA"),
+            ("c1", "up2", "pB"),
+            ("c2", "up3", "pC"),
+            ("c2", "up4", "pD"),
+        ] {
+            user_provider_profile(&state, collection, provider, profile).await;
+        }
         for (path, name, members) in [
             ("/user/collections/c1/sets", "sA", vec!["pA", "pB"]),
-            ("/user/collections/c2/sets", "sB2", vec!["pB"]),
-            ("/user/collections/c2/sets", "sC", vec!["pC"]),
+            ("/user/collections/c2/sets", "sB2", vec!["pC"]),
+            ("/user/collections/c2/sets", "sC", vec!["pD"]),
         ] {
             let (status, body) = send(
                 app(state.clone()),
@@ -1311,14 +1338,22 @@ mod tests {
             .await
             .expect("set count");
         assert_eq!(n, 2, "the surviving collection keeps its anchored sets");
-        for (profile, expected) in [("pA", 0), ("pB", 1), ("pC", 1)] {
+        // The doomed collection's profiles go whole; the survivor's rows
+        // stay, even where the two collections use the same shape.
+        for (collection, profile, expected) in [
+            ("c1", "pA", 0),
+            ("c1", "pB", 0),
+            ("c2", "pC", 1),
+            ("c2", "pD", 1),
+        ] {
             let n = profile::Entity::find()
                 .filter(profile::Column::Owner.eq(owner))
+                .filter(profile::Column::CollectionName.eq(collection))
                 .filter(profile::Column::ProfileId.eq(profile))
                 .count(&state.db)
                 .await
                 .expect("profile count");
-            assert_eq!(n, expected, "profile {profile}");
+            assert_eq!(n, expected, "profile {collection}/{profile}");
         }
         let n = collection_publication::Entity::find()
             .filter(collection_publication::Column::Owner.eq(owner))
@@ -1334,7 +1369,12 @@ mod tests {
             .expect("c2 untouched");
         assert_eq!(c2.default_set_name.as_deref(), Some("sB2"));
         let rows = audit_rows(&state.db).await;
-        for (entity, id) in [("set", "sA"), ("profile", "pA"), ("collection", "c1")] {
+        for (entity, id) in [
+            ("set", "sA"),
+            ("profile", "pA"),
+            ("profile", "pB"),
+            ("collection", "c1"),
+        ] {
             assert!(
                 rows.iter()
                     .any(|r| r.action == "delete" && r.entity == entity && r.entity_id == id),
@@ -1411,12 +1451,13 @@ mod tests {
     }
 
     /// The admin cascade: deleting a catalog collection removes its set
-    /// (with the member rows and the platform publication), sweeps the
-    /// profiles the deletion leaves unreferenced while one a surviving
-    /// set still holds stays, and leaves the baseline collection's
-    /// anchored sets untouched; each swept entity lands its audit row.
+    /// (with the member rows and the platform publication) and the
+    /// collection's own profiles -- a profile belongs to one collection,
+    /// so a surviving set cannot still hold one -- while the baseline
+    /// collection stays untouched; each deleted entity lands its audit
+    /// row, named per profile.
     #[tokio::test]
-    async fn admin_collection_deletion_cascades_and_sweeps_profiles() {
+    async fn admin_collection_deletion_takes_its_sets_and_profiles() {
         let state = seeded_state().await;
         let admin = Some(TEST_ADMIN_BEARER);
         let (status, body) = send(
@@ -1430,6 +1471,9 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{body}");
+        // The doomed collection's own profiles ride its set.
+        catalog_profile_in(&state, "cx", "cx1", "m-cx", false).await;
+        catalog_profile_in(&state, "cx", "cx2", "m-cx2", false).await;
         let (status, body) = send(
             app(state.clone()),
             req(
@@ -1445,21 +1489,9 @@ mod tests {
             app(state.clone()),
             req(
                 "PATCH",
-                "/admin/sets/sxA",
+                "/admin/collections/cx/sets/sxA",
                 admin,
-                Some(serde_json::json!({"members": ["p1", "p2"]})),
-            ),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK, "{body}");
-        // p2 leaves alpha: its last reference will be the doomed set.
-        let (status, body) = send(
-            app(state.clone()),
-            req(
-                "PATCH",
-                "/admin/sets/alpha",
-                admin,
-                Some(serde_json::json!({"members": ["p1", "p6"]})),
+                Some(serde_json::json!({"members": ["cx1", "cx2"]})),
             ),
         )
         .await;
@@ -1495,15 +1527,17 @@ mod tests {
             .await
             .expect("member count");
         assert_eq!(n, 0, "member rows cascade with the set");
-        // p2's last reference went with the collection; p1 stays (alpha).
-        for (profile, expected) in [("p1", 1), ("p2", 0)] {
+        for (collection, profile, expected) in
+            [("cx", "cx1", 0), ("cx", "cx2", 0), ("baseline", "p1", 1)]
+        {
             let n = profile::Entity::find()
                 .filter(profile::Column::Owner.eq("system"))
+                .filter(profile::Column::CollectionName.eq(collection))
                 .filter(profile::Column::ProfileId.eq(profile))
                 .count(&state.db)
                 .await
                 .expect("profile count");
-            assert_eq!(n, expected, "profile {profile}");
+            assert_eq!(n, expected, "profile {collection}/{profile}");
         }
         let n = platform_publications::Entity::find()
             .filter(platform_publications::Column::Owner.eq("system"))
@@ -1522,7 +1556,8 @@ mod tests {
         let rows = audit_rows(&state.db).await;
         for (entity, id) in [
             ("profile_set", "sxA"),
-            ("profile", "p2"),
+            ("profile", "cx1"),
+            ("profile", "cx2"),
             ("collection", "cx"),
         ] {
             assert!(
@@ -1563,5 +1598,27 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    }
+
+    /// The view states the cascade cost: the collection's own profile and
+    /// set counts, read per collection (a sibling's rows never count).
+    #[tokio::test]
+    async fn the_collection_view_counts_its_own_rows() {
+        let state = seeded_state().await;
+        for (name, profiles, sets) in [("baseline", 5, 2), ("catalog-pro", 1, 1)] {
+            let (status, body) = send(
+                app(state.clone()),
+                req(
+                    "GET",
+                    &format!("/admin/collections/{name}"),
+                    Some(TEST_ADMIN_BEARER),
+                    None,
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body["profile_count"], profiles, "{name}");
+            assert_eq!(body["set_count"], sets, "{name}");
+        }
     }
 }

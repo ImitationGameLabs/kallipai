@@ -34,43 +34,8 @@ async fn user_domain_crud_round_trip() {
     // The plaintext is stored; the face only ever shows the mask.
     assert!(body.to_string().contains("***"));
     assert!(!body.to_string().contains("sk-user-secret"));
-    // Profile referencing the provider (the family rides along).
-    let (status, body) = send(
-        app(state.clone()),
-        cookie_req(
-            "POST",
-            "/user/profiles",
-            user,
-            true,
-            Some(serde_json::json!({
-                "profile_id": "p-user",
-                "provider_id": "up1",
-                "model": "deepseek-chat"
-            })),
-        ),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["family"], "deepseek");
-    // A profile pointing at a provider outside the space is 404.
-    let (status, _) = send(
-        app(state.clone()),
-        cookie_req(
-            "POST",
-            "/user/profiles",
-            user,
-            true,
-            Some(serde_json::json!({
-                "profile_id": "p-x",
-                "provider_id": "p1",
-                "model": "m"
-            })),
-        ),
-    )
-    .await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
-    // A scratch collection carries the set until the bundle takes it;
-    // s0 holds its anchor so "mine" can travel.
+    // The scratch collection lands first: a profile belongs to exactly
+    // one collection, so the row below anchors where its set will live.
     let (status, _) = send(
         app(state.clone()),
         cookie_req(
@@ -83,6 +48,43 @@ async fn user_domain_crud_round_trip() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
+    // Profile referencing the provider (the family rides along).
+    let (status, body) = send(
+        app(state.clone()),
+        cookie_req(
+            "POST",
+            "/user/collections/scratch/profiles",
+            user,
+            true,
+            Some(serde_json::json!({
+                "profile_id": "p-user",
+                "provider_id": "up1",
+                "model": "deepseek-chat"
+            })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["family"], "deepseek");
+    assert_eq!(body["collection_name"], "scratch");
+    // A profile pointing at a provider outside the space is 404.
+    let (status, _) = send(
+        app(state.clone()),
+        cookie_req(
+            "POST",
+            "/user/collections/scratch/profiles",
+            user,
+            true,
+            Some(serde_json::json!({
+                "profile_id": "p-x",
+                "provider_id": "p1",
+                "model": "m"
+            })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    // s0 holds the collection's anchor so "mine" can travel.
     let (status, _) = send(
         app(state.clone()),
         cookie_req(
@@ -267,4 +269,84 @@ async fn user_face_unreachable_backend_fails_closed_503() {
     .await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(body["error"]["code"], "auth_backend_unavailable");
+}
+
+/// A set's members live in the set's own collection: a user-face write
+/// naming a same-id row from another collection is refused, not silently
+/// resolved.
+#[tokio::test]
+async fn user_set_members_must_live_in_the_sets_collection() {
+    let state = seeded_state().await;
+    let user = Some(TEST_USER_COOKIE);
+    let (status, body) = send(
+        app(state.clone()),
+        cookie_req(
+            "POST",
+            "/user/providers",
+            user,
+            true,
+            Some(serde_json::json!({
+                "provider_id": "up1",
+                "family": "deepseek",
+                "base_url": "https://api.user.test",
+                "api_key": "sk-user-x"
+            })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    for name in ["scratch", "other"] {
+        let (status, body) = send(
+            app(state.clone()),
+            cookie_req(
+                "POST",
+                "/user/collections",
+                user,
+                true,
+                Some(serde_json::json!({"name": name, "description": "d"})),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+    let (status, body) = send(
+        app(state.clone()),
+        cookie_req(
+            "POST",
+            "/user/collections/other/profiles",
+            user,
+            true,
+            Some(serde_json::json!({
+                "profile_id": "p-other",
+                "provider_id": "up1",
+                "model": "m"
+            })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    // The row lives in `other`; a set in `scratch` cannot carry it.
+    let (status, body) = send(
+        app(state.clone()),
+        cookie_req(
+            "POST",
+            "/user/collections/scratch/sets",
+            user,
+            true,
+            Some(serde_json::json!({
+                "name": "s0",
+                "description": "d",
+                "members": ["p-other"]
+            })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .expect("message")
+            .contains("lives in collection other"),
+        "{body}"
+    );
 }

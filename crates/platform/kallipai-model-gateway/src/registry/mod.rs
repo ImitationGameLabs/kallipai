@@ -1,5 +1,6 @@
 //! The registry domain: the provider pool, model profiles, their ordered
-//! sets, collections, groups, and the parking resource.
+//! sets, collections, and groups; a collection's parked rows are the same
+//! table read through a flag.
 //!
 //! This is the distribution face's data: no credential columns live here
 //! (the key half of the pool is the secret domain's `provider_credentials`,
@@ -9,12 +10,13 @@
 //!
 //! Ownership keys the registry: every table is `(owner, name/id)` primary
 //! keyed, and the profile -> provider reference is a composite foreign
-//! key, so a cross-space reference cannot exist in the store. Names and
-//! profile ids are additionally globally unique (the
-//! `uq_profile_sets_name_global` / `uq_profiles_profile_id_global`
-//! indexes), so the by-name and by-id lookups behind the management
-//! face's `?owner=` addressing resolve to one row; the write paths
-//! still refuse a duplicate early with a 409.
+//! key, so a cross-space reference cannot exist in the store. Profiles,
+//! sets, and membership live inside a collection: `(owner,
+//! collection_name, ...)` is each key, so a profile id and a set name are
+//! unique inside their collection and may repeat in another one. Every
+//! read on both faces names the collection it addresses; the one query
+//! that takes a bare profile id is the diagnostic below, which asks where
+//! an id lives instead of resolving it.
 //!
 //! `position` in `set_members` is failover semantics (the first member
 //! active deployment, `FailoverState` walks the Vec); every read path
@@ -48,7 +50,7 @@ pub mod provider;
 pub mod set_member;
 
 use sea_orm::prelude::*;
-use sea_orm::{ConnectionTrait, DatabaseConnection, DbErr, QueryOrder};
+use sea_orm::{ConnectionTrait, DatabaseConnection, DbErr, QueryOrder, QuerySelect};
 use std::collections::{HashMap, HashSet};
 
 use profile::Entity as Profiles;
@@ -144,54 +146,107 @@ pub async fn served_many<C: ConnectionTrait>(
         .collect())
 }
 
-// -- id lookups ---------------------------------------------------------------
+// -- collection-scoped lookups ------------------------------------------------
 
-/// Every profile row with this id, across spaces (at most one row: the
-/// profile id is globally unique). The management face's id-only
-/// addressing resolves through this read; the write paths refuse the
-/// second row that would break the index.
-pub async fn profiles_by_id<C: ConnectionTrait>(
+/// The profile rows of one collection -- or, with `collection_name` left
+/// out by the caller, of every collection in the space. Both filters ride
+/// the query (never a post-filter), the rule every read in this module
+/// follows. The management face's summary read
+/// (`GET /admin/profiles?collection_name=&parked=`) is this function.
+pub async fn profiles_in_collection<C: ConnectionTrait>(
     db: &C,
-    profile_id: &str,
+    owner: &str,
+    collection_name: Option<&str>,
+    parked: Option<bool>,
 ) -> Result<Vec<profile::Model>, DbErr> {
-    Profiles::find()
-        .filter(profile::Column::ProfileId.eq(profile_id))
+    let mut query = Profiles::find().filter(profile::Column::Owner.eq(owner.to_owned()));
+    if let Some(collection_name) = collection_name {
+        query = query.filter(profile::Column::CollectionName.eq(collection_name.to_owned()));
+    }
+    if let Some(parked) = parked {
+        query = query.filter(profile::Column::Parked.eq(parked));
+    }
+    query
+        .order_by_asc(profile::Column::CollectionName)
+        .order_by_asc(profile::Column::ProfileId)
         .all(db)
         .await
 }
 
-/// The profile in one space (the precise read for owner-scoped paths).
+/// The profile in one collection of one space: the identity is the triple,
+/// so a same-id row in another collection stays invisible to this read.
 pub async fn profile_by_id<C: ConnectionTrait>(
     db: &C,
     owner: &str,
+    collection_name: &str,
     profile_id: &str,
 ) -> Result<Option<profile::Model>, DbErr> {
-    Profiles::find_by_id((owner.to_owned(), profile_id.to_owned()))
-        .one(db)
-        .await
+    Profiles::find_by_id((
+        owner.to_owned(),
+        collection_name.to_owned(),
+        profile_id.to_owned(),
+    ))
+    .one(db)
+    .await
 }
 
-/// Every set row with this name, across spaces (at most one: names are
-/// globally unique).
-pub async fn sets_by_name<C: ConnectionTrait>(
+/// [`profile_by_id`], with the row locked for the caller's transaction:
+/// the read a write takes when another writer may flip the same row.
+pub async fn profile_by_id_for_update<C: ConnectionTrait>(
     db: &C,
-    name: &str,
-) -> Result<Vec<profile_set::Model>, DbErr> {
-    ProfileSets::find()
-        .filter(profile_set::Column::Name.eq(name))
-        .all(db)
-        .await
+    owner: &str,
+    collection_name: &str,
+    profile_id: &str,
+) -> Result<Option<profile::Model>, DbErr> {
+    Profiles::find_by_id((
+        owner.to_owned(),
+        collection_name.to_owned(),
+        profile_id.to_owned(),
+    ))
+    .lock_exclusive()
+    .one(db)
+    .await
 }
 
-/// The set in one space.
+/// The collections in one space that hold a row with this id: the
+/// diagnostic behind one management answer. A scoped read answers 404
+/// when the id lives elsewhere; this read names where it actually
+/// lives, so the caller can say so instead of guessing. The user face's
+/// set edit is the only caller.
+pub async fn profile_collections<C: ConnectionTrait>(
+    db: &C,
+    owner: &str,
+    profile_id: &str,
+) -> Result<Vec<String>, DbErr> {
+    let mut collections: Vec<String> = Profiles::find()
+        .filter(profile::Column::Owner.eq(owner.to_owned()))
+        .filter(profile::Column::ProfileId.eq(profile_id.to_owned()))
+        .all(db)
+        .await?
+        .into_iter()
+        .map(|p| p.collection_name)
+        .collect();
+    collections.sort();
+    collections.dedup();
+    Ok(collections)
+}
+
+/// The set in one collection. Set names are unique per collection, so the
+/// triple is the identity: a same-name set in another collection is a
+/// different row, and every container-addressed path names its collection.
 pub async fn set_by_id<C: ConnectionTrait>(
     db: &C,
     owner: &str,
+    collection_name: &str,
     name: &str,
 ) -> Result<Option<profile_set::Model>, DbErr> {
-    ProfileSets::find_by_id((owner.to_owned(), name.to_owned()))
-        .one(db)
-        .await
+    ProfileSets::find_by_id((
+        owner.to_owned(),
+        collection_name.to_owned(),
+        name.to_owned(),
+    ))
+    .one(db)
+    .await
 }
 
 /// The provider row for a space-scoped provider id (the management face's
@@ -204,16 +259,18 @@ pub async fn provider_by_id<C: ConnectionTrait>(
     provider_of(db, owner, provider_id).await
 }
 
-/// The set names `profile_id` belongs to in `profile_owner`'s space
-/// (the visibility predicate's member read: the caller intersects
-/// with the viewer's visibility domain).
+/// The set names `profile_id` belongs to inside one collection (membership
+/// never leaves the collection, so the container is the whole scope). The
+/// visibility predicate intersects the result with the viewer's domain.
 pub async fn profile_set_names_of<C: ConnectionTrait>(
     db: &C,
     profile_owner: &str,
+    collection_name: &str,
     profile_id: &str,
 ) -> Result<Vec<String>, DbErr> {
     Ok(SetMembers::find()
         .filter(set_member::Column::Owner.eq(profile_owner.to_owned()))
+        .filter(set_member::Column::CollectionName.eq(collection_name.to_owned()))
         .filter(set_member::Column::ProfileId.eq(profile_id.to_owned()))
         .all(db)
         .await?
@@ -222,18 +279,20 @@ pub async fn profile_set_names_of<C: ConnectionTrait>(
         .collect())
 }
 
-/// The members of `(owner, set_name)` in `position` order, joined with
-/// their profiles and provider families. A member row whose profile
-/// vanished cannot exist (the FK cascades), so the two-step read cannot
-/// lose rows; a vanished provider is skipped (cannot happen, but a
+/// The members of `(owner, collection_name, set_name)` in `position` order,
+/// joined with their profiles and provider families. A member row whose
+/// profile vanished cannot exist (the FK cascades), so the two-step read
+/// cannot lose rows; a vanished provider is skipped (cannot happen, but a
 /// corrupted store degrades to a shorter order, never a panic).
 pub async fn set_members_ordered(
     db: &DatabaseConnection,
     owner: &str,
+    collection_name: &str,
     set_name: &str,
 ) -> Result<Vec<ServedProfile>, DbErr> {
     let members = SetMembers::find()
         .filter(set_member::Column::Owner.eq(owner))
+        .filter(set_member::Column::CollectionName.eq(collection_name))
         .filter(set_member::Column::SetName.eq(set_name))
         .order_by_asc(set_member::Column::Position)
         .all(db)
@@ -244,6 +303,7 @@ pub async fn set_members_ordered(
     }
     let mut profiles = Profiles::find()
         .filter(profile::Column::Owner.eq(owner))
+        .filter(profile::Column::CollectionName.eq(collection_name))
         .filter(profile::Column::ProfileId.is_in(ids.clone()))
         .all(db)
         .await?;
@@ -252,18 +312,19 @@ pub async fn set_members_ordered(
     served_many(db, profiles).await
 }
 
-/// The head profile of `owner`'s set `set_name` among the families a
-/// generation endpoint serves: the first member in position order
-/// whose provider family is in `families`. Position order is the
-/// failover order, so the walk preserves it -- a family-mismatched
-/// head must not blind the endpoint to servable members behind it.
+/// The head profile of one collection's set `set_name` among the families a
+/// generation endpoint serves: the first member in position order whose
+/// provider family is in `families`. Position order is the failover order,
+/// so the walk preserves it -- a family-mismatched head must not blind the
+/// endpoint to servable members behind it.
 pub async fn set_head_for_families(
     db: &DatabaseConnection,
     owner: &str,
+    collection_name: &str,
     set_name: &str,
     families: &[&str],
 ) -> Result<Option<ServedProfile>, DbErr> {
-    for served in set_members_ordered(db, owner, set_name).await? {
+    for served in set_members_ordered(db, owner, collection_name, set_name).await? {
         if families.contains(&served.family.as_str()) {
             return Ok(Some(served));
         }
@@ -271,19 +332,25 @@ pub async fn set_head_for_families(
     Ok(None)
 }
 
-// -- the platform-catalog read family ---------------------------------------
+// -- the parked-draft read family -------------------------------------------
 //
-// The distribution face's view: every read filters `owner = 'system'`, so
-// a private row is outside this face by construction (in the query, not a
-// post-filter). The management face reads the owner-agnostic functions
-// above; these are the distribution face's only registry entry points.
+// The distribution face reads one collection's drafts: the one its selection
+// pointer names, in that collection's own space. The filter is in the query
+// (owner + collection), never a post-filter, so a draft in another
+// collection is outside this read by construction.
 
-/// The catalog parking resource: parked drafts the distribution face
-/// serves (a private-space draft joins the catalog only through a set).
-pub async fn catalog_parked_profiles(db: &DatabaseConnection) -> Result<Vec<ServedProfile>, DbErr> {
+/// The parked drafts of one collection: what the distribution face's
+/// `/parking` answer carries for the pointer's collection.
+pub async fn catalog_parked_profiles(
+    db: &DatabaseConnection,
+    owner: &str,
+    collection_name: &str,
+) -> Result<Vec<ServedProfile>, DbErr> {
     let parked = Profiles::find()
+        .filter(profile::Column::Owner.eq(owner))
+        .filter(profile::Column::CollectionName.eq(collection_name))
         .filter(profile::Column::Parked.eq(true))
-        .filter(profile::Column::Owner.eq(CATALOG_OWNER))
+        .order_by_asc(profile::Column::ProfileId)
         .all(db)
         .await?;
     served_many(db, parked).await

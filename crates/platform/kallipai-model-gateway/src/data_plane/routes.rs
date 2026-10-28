@@ -312,15 +312,30 @@ pub(crate) async fn select_route(
         .and_then(|v| v.to_str().ok())
     {
         Some(explicit) => {
-            // The row: the id is globally unique; the grant decides
-            // what this identity may see of it, the same vocabulary as
-            // the distribution face: a catalog row outside the domain
-            // is 403, a user-space row 404 (no existence oracle across
-            // accounts).
-            let mut rows = registry::profiles_by_id(&state.db, explicit)
-                .await
-                .map_err(store_failure)?;
-            let Some(profile) = rows.pop() else {
+            // The row: the override resolves inside the tagma's selected
+            // collection. An id names a row only together with its
+            // collection (the same id may exist in another one), so no
+            // pointer means nothing to resolve against -- the same 404 the
+            // default path answers.
+            let Some(pointer) =
+                registry::gateway_selection::Entity::find_by_id(identity.tagma_id.clone())
+                    .one(&state.db)
+                    .await
+                    .map_err(store_failure)?
+            else {
+                return Err(GateError::route(ApiError::not_found(
+                    "no collection selected",
+                )));
+            };
+            let Some(profile) = registry::profile_by_id(
+                &state.db,
+                &pointer.owner,
+                &pointer.collection_name,
+                explicit,
+            )
+            .await
+            .map_err(store_failure)?
+            else {
                 return Err(GateError::route(ApiError::not_found("no such profile")));
             };
             let served = registry::served_profile(&state.db, profile)
@@ -331,6 +346,7 @@ pub(crate) async fn select_route(
                 &state.db,
                 &identity.viewer,
                 &served.provider_owner,
+                &pointer.collection_name,
                 explicit,
             )
             .await
@@ -384,6 +400,7 @@ pub(crate) async fn select_route(
             let served = registry::set_head_for_families(
                 &state.db,
                 &collection.owner,
+                &collection.name,
                 &default_set,
                 endpoint.families(),
             )
@@ -400,9 +417,15 @@ pub(crate) async fn select_route(
             // forward is denied -- the default deployment must not
             // become a fail-open side door around the visibility
             // domain.
-            if !visibility::set_visible(&state.db, &identity.viewer, &default_set)
-                .await
-                .map_err(store_failure)?
+            if !visibility::set_visible(
+                &state.db,
+                &identity.viewer,
+                &collection.owner,
+                &collection.name,
+                &default_set,
+            )
+            .await
+            .map_err(store_failure)?
             {
                 return Err(GateError::visibility(ApiError::forbidden(
                     "default profile is outside the visibility domain",

@@ -52,6 +52,28 @@ pub fn map_db_err(e: DbErr) -> kallipai_common::protocol::ApiError {
             pg_unique_detail(&e).unwrap_or("a row with that identity already exists"),
         );
     }
+    if is_foreign_key_violation(&e) {
+        // Two rules trip 23503, so the answer names the one the store
+        // actually enforced. The registry's references are collection
+        // scoped: a row can only name a provider, set, or profile that
+        // shares its space and its collection, and a trip there is a caller
+        // mistake the handlers check for first, so the answer stays a
+        // client conflict and names the rule rather than the constraint.
+        // The provider arm is the exception: its sentence covers both
+        // directions -- a provider missing from the profile's space, and a
+        // delete the store blocks because a profile still names it (ON
+        // DELETE RESTRICT). An unknown constraint keeps the container
+        // sentence instead of guessing.
+        let message = match pg_constraint_name(&e) {
+            Some("fk_profiles_provider") => {
+                "a provider must exist in the profile's space and cannot be deleted while a profile names it"
+            }
+            _ => {
+                "the reference points outside its own collection (a profile, set, or provider in another collection or space)"
+            }
+        };
+        return kallipai_common::protocol::ApiError::conflict(message);
+    }
     error!(error = %e, "database failure: mapping to an internal error response");
     kallipai_common::protocol::ApiError::internal(store_error_detail(&e))
 }
@@ -63,19 +85,46 @@ pub fn store_error_detail(e: &DbErr) -> String {
     format!("database error: {e}")
 }
 
-/// Whether the error is a Postgres unique violation (SQLSTATE 23505),
-/// unwrapped from the sea-orm runtime layers down to the sqlx database
-/// error that carries the state code.
-pub(crate) fn is_unique_violation(e: &DbErr) -> bool {
+/// The driver's own database error, unwrapped from the sea-orm runtime
+/// layers; `None` for a shape that hides it (an internal error, or a
+/// driver carrying no database error).
+fn pg_database_error(e: &DbErr) -> Option<&(dyn sqlx::error::DatabaseError + 'static)> {
     let runtime = match e {
         DbErr::Exec(runtime) | DbErr::Query(runtime) | DbErr::Conn(runtime) => runtime,
-        _ => return false,
+        _ => return None,
     };
-    let sqlx_err = match runtime {
-        sea_orm::RuntimeErr::SqlxError(err) => err,
-        sea_orm::RuntimeErr::Internal(_) => return false,
-    };
-    matches!(sqlx_err, sqlx::Error::Database(db) if db.code().as_deref() == Some("23505"))
+    match runtime {
+        sea_orm::RuntimeErr::SqlxError(sqlx::Error::Database(db)) => Some(db.as_ref()),
+        _ => None,
+    }
+}
+
+/// The SQLSTATE the driver reported, when its shape carries one.
+fn sqlstate(e: &DbErr) -> Option<std::borrow::Cow<'_, str>> {
+    pg_database_error(e).and_then(|db| db.code())
+}
+
+/// Whether the error is a Postgres unique violation (SQLSTATE 23505).
+pub(crate) fn is_unique_violation(e: &DbErr) -> bool {
+    sqlstate(e).as_deref() == Some("23505")
+}
+
+/// Whether the error is a Postgres foreign-key violation (SQLSTATE 23503).
+/// Two rules trip it and [`map_db_err`] answers both as a client conflict:
+/// the composite keys are the isolation mechanism, so a reference outside
+/// the row's own collection names that rule, while the provider reference
+/// names its own.
+pub(crate) fn is_foreign_key_violation(e: &DbErr) -> bool {
+    sqlstate(e).as_deref() == Some("23503")
+}
+
+/// The constraint a Postgres foreign-key violation tripped, when the
+/// driver shape carries it: the one fact that tells the two 23503 rules
+/// apart.
+fn pg_constraint_name(e: &DbErr) -> Option<&str> {
+    pg_database_error(e)
+        .and_then(|db| db.try_downcast_ref::<sqlx::postgres::PgDatabaseError>())
+        .and_then(|pg| pg.constraint())
 }
 
 /// The Postgres unique-violation detail names the key tuple that
@@ -84,20 +133,9 @@ pub(crate) fn is_unique_violation(e: &DbErr) -> bool {
 /// downcast is the fallible one, so a database error from another
 /// driver shape answers `None` instead of panicking.
 fn pg_unique_detail(e: &DbErr) -> Option<&str> {
-    let runtime = match e {
-        DbErr::Exec(runtime) | DbErr::Query(runtime) | DbErr::Conn(runtime) => runtime,
-        _ => return None,
-    };
-    let sqlx_err = match runtime {
-        sea_orm::RuntimeErr::SqlxError(err) => err,
-        _ => return None,
-    };
-    match sqlx_err {
-        sqlx::Error::Database(db) => db
-            .try_downcast_ref::<sqlx::postgres::PgDatabaseError>()
-            .and_then(|pg| pg.detail()),
-        _ => None,
-    }
+    pg_database_error(e)
+        .and_then(|db| db.try_downcast_ref::<sqlx::postgres::PgDatabaseError>())
+        .and_then(|pg| pg.detail())
 }
 
 #[cfg(test)]
@@ -229,6 +267,43 @@ mod tests {
         assert!(
             logged.contains("database failure"),
             "the storage failure must log at ERROR: {logged}"
+        );
+    }
+
+    /// The provider arm of the 23503 split on a real driver error: the
+    /// handlers count riders before deleting a provider, so only a direct
+    /// delete reaches the constraint -- the shape a caller racing another
+    /// delete sees, and the answer names the reference, not a collection.
+    #[tokio::test]
+    async fn a_delete_blocked_by_a_live_profile_names_the_provider_reference() {
+        use sea_orm::ConnectionTrait;
+
+        let db = crate::test_support::migrated_test_db().await;
+        db.execute_unprepared(
+            "INSERT INTO providers (owner, provider_id, family) VALUES ('system', 'p', 'deepseek')",
+        )
+        .await
+        .expect("provider insert");
+        db.execute_unprepared(
+            "INSERT INTO profiles (owner, collection_name, profile_id, provider_id, model) VALUES ('system', 'baseline', 'p9', 'p', 'm')",
+        )
+        .await
+        .expect("profile insert");
+
+        let err = db
+            .execute_unprepared(
+                "DELETE FROM providers WHERE owner = 'system' AND provider_id = 'p'",
+            )
+            .await
+            .expect_err("the profile still names the provider");
+        let mapped = map_db_err(err);
+        assert_eq!(mapped.status, 409);
+        assert!(
+            mapped
+                .message
+                .contains("cannot be deleted while a profile names it"),
+            "the rule names the delete-blocked direction: {}",
+            mapped.message
         );
     }
 }

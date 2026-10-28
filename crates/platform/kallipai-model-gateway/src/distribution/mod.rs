@@ -15,7 +15,7 @@
 
 pub mod visibility;
 use axum::Json;
-use axum::extract::{FromRequestParts, Path, State};
+use axum::extract::{FromRequestParts, State};
 use axum::http::request::Parts;
 use serde::Deserialize;
 use serde::Serialize;
@@ -133,91 +133,33 @@ fn sanitize(
     }
 }
 
-/// GET /profiles/{profile_id}.
-pub async fn get_profile(
-    State(state): State<AppState>,
-    identity: TagmaIdentity,
-    Path(profile_id): Path<String>,
-) -> Result<Json<SanitizedProfile>, ApiError> {
-    // The row: the id is globally unique, so this is the one row, in
-    // whatever space owns it. A user-space row can serve here now;
-    // the grant check below decides what this identity may see of it.
-    let mut rows = registry::profiles_by_id(&state.db, &profile_id)
-        .await
-        .map_err(db::map_db_err)?;
-    let Some(profile) = rows.pop() else {
-        return Err(ApiError::not_found("no such profile"));
-    };
-    let served = registry::served_profile(&state.db, profile)
-        .await
-        .map_err(db::map_db_err)?
-        .ok_or_else(|| ApiError::not_found("no such profile"))?;
-    // The grant: invisible answers 404 for a user-space row (no
-    // existence oracle across accounts) and 403 for a catalog row
-    // (the row is catalog knowledge; the identity's domain just does
-    // not reach it).
-    let grant = visibility::profile_grant(
-        &state.db,
-        &identity.viewer,
-        &served.provider_owner,
-        &profile_id,
-    )
-    .await
-    .map_err(db::map_db_err)?;
-    match grant {
-        None if served.provider_owner == registry::CATALOG_OWNER => Err(ApiError::forbidden(
-            "profile is outside the visibility domain",
-        )),
-        None => Err(ApiError::not_found("no such profile")),
-        Some(_) => Ok(Json(sanitize(&state, served, identity.bearer))),
-    }
-}
-
 /// One set entry with its ordered members (the failover order, verbatim).
+/// The container is echoed: a set name is unique inside its collection,
+/// not across the face, so the row names its home instead of leaving the
+/// caller to infer it.
 #[derive(Clone, Debug, Serialize)]
 pub struct SanitizedSet {
+    pub owner: String,
+    pub collection_name: String,
     pub name: String,
     pub description: String,
     pub profiles: Vec<SanitizedProfile>,
 }
 
-/// GET /sets/{name}.
-pub async fn get_set(
-    State(state): State<AppState>,
-    identity: TagmaIdentity,
-    Path(name): Path<String>,
-) -> Result<Json<SanitizedSet>, ApiError> {
-    // The row: set names are globally unique, so one row, in whatever
-    // space owns it. The members read follows that space, not a
-    // catalog assumption.
-    let mut rows = registry::sets_by_name(&state.db, &name)
-        .await
-        .map_err(db::map_db_err)?;
-    let Some(set) = rows.pop() else {
-        return Err(ApiError::not_found("no such set"));
-    };
-    if !visibility::set_visible(&state.db, &identity.viewer, &name)
-        .await
-        .map_err(db::map_db_err)?
-    {
-        return Err(ApiError::forbidden("set is outside the visibility domain"));
-    }
-    Ok(Json(sanitized_set(&state, &identity, &set).await?))
-}
-
-/// Assemble one sanitized set (the /sets/{name} and the
-/// selected-collection answer shape): the owner space's ordered
-/// members, the sanitized
-/// profiles.
+/// Assemble one sanitized set (the selected-collection answer shape): the
+/// ordered members of the set's own collection, sanitized.
 async fn sanitized_set(
     state: &AppState,
     identity: &TagmaIdentity,
     set: &registry::profile_set::Model,
 ) -> Result<SanitizedSet, ApiError> {
-    let profiles = registry::set_members_ordered(&state.db, &set.owner, &set.name)
-        .await
-        .map_err(db::map_db_err)?;
+    let profiles =
+        registry::set_members_ordered(&state.db, &set.owner, &set.collection_name, &set.name)
+            .await
+            .map_err(db::map_db_err)?;
     Ok(SanitizedSet {
+        owner: set.owner.clone(),
+        collection_name: set.collection_name.clone(),
         name: set.name.clone(),
         description: set.description.clone(),
         profiles: profiles
@@ -227,24 +169,8 @@ async fn sanitized_set(
     })
 }
 
-/// GET /sets: the set names the identity's visibility domain reaches.
-#[derive(Clone, Debug, Serialize)]
-pub struct SetNames {
-    pub sets: Vec<String>,
-}
-
-pub async fn get_sets(
-    State(state): State<AppState>,
-    identity: TagmaIdentity,
-) -> Result<Json<SetNames>, ApiError> {
-    let names = visibility::visible_set_names(&state.db, &identity.viewer)
-        .await
-        .map_err(db::map_db_err)?;
-    Ok(Json(SetNames { sets: names }))
-}
-
-/// GET /parking: the catalog's parked drafts, any valid identity (a
-/// parked draft joins the face only through set membership).
+/// GET /parking: the drafts of the collection this tagma selected. The
+/// container is the selection pointer's -- the URL carries none.
 #[derive(Clone, Debug, Serialize)]
 pub struct Parking {
     pub profiles: Vec<SanitizedProfile>,
@@ -254,9 +180,22 @@ pub async fn get_parking(
     State(state): State<AppState>,
     identity: TagmaIdentity,
 ) -> Result<Json<Parking>, ApiError> {
-    let parked = registry::catalog_parked_profiles(&state.db)
+    use sea_orm::EntityTrait;
+    let pointer = registry::gateway_selection::Entity::find_by_id(identity.tagma_id.clone())
+        .one(&state.db)
         .await
         .map_err(db::map_db_err)?;
+    // No selection = no collection to hold drafts: an empty answer, not a
+    // 404. The tagma reads this endpoint as required (a 404 means a
+    // transport fault to its client), and "nothing selected" is an empty
+    // mirror, not a failure.
+    let Some(pointer) = pointer else {
+        return Ok(Json(Parking { profiles: vec![] }));
+    };
+    let parked =
+        registry::catalog_parked_profiles(&state.db, &pointer.owner, &pointer.collection_name)
+            .await
+            .map_err(db::map_db_err)?;
     Ok(Json(Parking {
         profiles: parked
             .into_iter()
@@ -274,14 +213,14 @@ pub async fn get_parking(
 pub struct SelectionPut {
     #[serde(default)]
     pub owner: Option<String>,
-    pub collection: String,
+    pub collection_name: String,
 }
 
 /// The stored pointer, echoed by the write.
 #[derive(Clone, Debug, Serialize)]
 pub struct SelectionView {
     pub owner: String,
-    pub collection: String,
+    pub collection_name: String,
 }
 
 /// PUT /selection: point the tagma at one collection of its
@@ -297,22 +236,28 @@ pub async fn put_selection(
         .owner
         .unwrap_or_else(|| identity.viewer.account_id.clone());
     use sea_orm::EntityTrait;
-    let exists = registry::collection::Entity::find_by_id((owner.clone(), body.collection.clone()))
-        .one(&state.db)
-        .await
-        .map_err(db::map_db_err)?
-        .is_some();
-    if !exists
-        || !visibility::collection_visible(&state.db, &identity.viewer, &owner, &body.collection)
+    let exists =
+        registry::collection::Entity::find_by_id((owner.clone(), body.collection_name.clone()))
+            .one(&state.db)
             .await
             .map_err(db::map_db_err)?
+            .is_some();
+    if !exists
+        || !visibility::collection_visible(
+            &state.db,
+            &identity.viewer,
+            &owner,
+            &body.collection_name,
+        )
+        .await
+        .map_err(db::map_db_err)?
     {
         return Err(ApiError::not_found("no such collection"));
     }
     let row = registry::gateway_selection::ActiveModel {
         tagma_id: sea_orm::Set(identity.tagma_id.clone()),
         owner: sea_orm::Set(owner.clone()),
-        collection_name: sea_orm::Set(body.collection.clone()),
+        collection_name: sea_orm::Set(body.collection_name.clone()),
         updated_at: sea_orm::Set(time::OffsetDateTime::now_utc()),
     };
     // The upsert keeps the one-row shape without racing two writers
@@ -332,7 +277,7 @@ pub async fn put_selection(
         .map_err(db::map_db_err)?;
     Ok(Json(SelectionView {
         owner,
-        collection: body.collection,
+        collection_name: body.collection_name,
     }))
 }
 
@@ -351,14 +296,14 @@ pub async fn delete_selection(
 }
 
 /// GET /selected-collection: the collection the tagma selected,
-/// with its member sets (each sanitized like /sets/{name}) and its
-/// default-set anchor, in one read. The members filter to the
-/// visibility domain: a publication revoked under the pointer
-/// degrades the answer instead of leaking the members.
+/// with its member sets (each sanitized) and its default-set anchor, in
+/// one read. The members filter to the visibility domain: a publication
+/// revoked under the pointer degrades the answer instead of leaking the
+/// members.
 #[derive(Clone, Debug, Serialize)]
 pub struct SelectedCollection {
     pub owner: String,
-    pub collection: String,
+    pub collection_name: String,
     pub description: String,
     pub sets: Vec<SanitizedSet>,
     /// The effective default: the anchor when it names a member
@@ -406,36 +351,29 @@ pub async fn get_selected_collection(
             "the selected collection is outside the visibility domain",
         ));
     }
-    let mut member_names: Vec<String> = registry::profile_set::Entity::find()
+    let member_sets = registry::profile_set::Entity::find()
         .filter(registry::profile_set::Column::Owner.eq(pointer.owner.clone()))
         .filter(registry::profile_set::Column::CollectionName.eq(pointer.collection_name.clone()))
         .order_by_asc(registry::profile_set::Column::Name)
         .all(&state.db)
         .await
-        .map_err(db::map_db_err)?
-        .into_iter()
-        .map(|set| set.name)
-        .collect();
-    member_names.sort();
-    member_names.dedup();
-    let domain: std::collections::HashSet<String> =
-        visibility::visible_set_names(&state.db, &identity.viewer)
+        .map_err(db::map_db_err)?;
+    let domain: std::collections::HashSet<visibility::SetKey> =
+        visibility::visible_sets(&state.db, &identity.viewer)
             .await
             .map_err(db::map_db_err)?
             .into_iter()
             .collect();
-    let mut sets = Vec::with_capacity(member_names.len());
-    for name in member_names {
-        if !domain.contains(&name) {
+    let mut sets = Vec::with_capacity(member_sets.len());
+    for set_row in member_sets {
+        let key = visibility::SetKey {
+            owner: set_row.owner.clone(),
+            collection_name: set_row.collection_name.clone(),
+            name: set_row.name.clone(),
+        };
+        if !domain.contains(&key) {
             continue;
         }
-        let Some(set_row) = registry::sets_by_name(&state.db, &name)
-            .await
-            .map_err(db::map_db_err)?
-            .pop()
-        else {
-            continue;
-        };
         sets.push(sanitized_set(&state, &identity, &set_row).await?);
     }
     let default_set = match collection_row.default_set_name {
@@ -445,7 +383,7 @@ pub async fn get_selected_collection(
     };
     Ok(Json(SelectedCollection {
         owner: pointer.owner,
-        collection: pointer.collection_name,
+        collection_name: pointer.collection_name,
         description: collection_row.description,
         default_set,
         sets,
@@ -503,40 +441,41 @@ mod tests {
         crate::test_support::seed_registry(&db, "https://api.upstream.test").await;
         let app = router_for_test(state_for(db));
 
-        // /sets: the domain the bare test account reaches -- the
-        // baseline catalog reach (it owns no user space).
+        // The selection write: the catalog baseline the bare test
+        // account reaches through the everyone publication.
         let response = app
             .clone()
-            .oneshot(get("/sets", Some(TEST_TAGMA_BEARER)))
+            .oneshot(req_with_body(
+                "PUT",
+                "/selection",
+                Some(TEST_TAGMA_BEARER),
+                serde_json::json!({"owner": "system", "collection_name": "baseline"}),
+            ))
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
-        let body: serde_json::Value = serde_json::from_slice(
-            &axum::body::to_bytes(response.into_body(), usize::MAX)
-                .await
-                .unwrap(),
-        )
-        .unwrap();
-        assert_eq!(
-            body["sets"],
-            serde_json::json!(["alpha", "beta", "user-set"])
-        );
 
-        // /sets/alpha: ordered members (failover order verbatim), sanitized.
+        // /selected-collection: the collection's member sets with their
+        // ordered members, sanitized (failover order verbatim).
         let response = app
             .clone()
-            .oneshot(get("/sets/alpha", Some(TEST_TAGMA_BEARER)))
+            .oneshot(get("/selected-collection", Some(TEST_TAGMA_BEARER)))
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
-        let body: serde_json::Value = serde_json::from_slice(
-            &axum::body::to_bytes(response.into_body(), usize::MAX)
-                .await
-                .unwrap(),
-        )
-        .unwrap();
-        assert_eq!(body["name"], "alpha");
-        let profiles = body["profiles"].as_array().expect("profiles array");
+        let body = json_of(response).await;
+        assert_eq!(body["owner"], "system");
+        assert_eq!(body["collection_name"], "baseline");
+        let names: Vec<&str> = body["sets"]
+            .as_array()
+            .expect("sets array")
+            .iter()
+            .map(|set| set["name"].as_str().expect("set name"))
+            .collect();
+        assert_eq!(names, vec!["alpha", "beta"]);
+        let alpha = &body["sets"][0];
+        assert_eq!(alpha["collection_name"], "baseline");
+        let profiles = alpha["profiles"].as_array().expect("profiles array");
         assert_eq!(profiles.len(), 3);
         assert_eq!(profiles[2]["model"], "gpt-x-responses");
         assert_eq!(profiles[0]["model"], "deepseek-chat");
@@ -550,65 +489,114 @@ mod tests {
             "no upstream field may leak: {text}"
         );
 
-        // /profiles/<id>: visible, outside the domain, unknown. A
-        // beta-set catalog row is in the domain; the platform-group
-        // pro catalog row is not (403 -- catalog knowledge, no grant);
-        // a ghost is 404.
+        // The same write for another space's unpublished collection is a
+        // 404 before it is stored (no existence oracle across spaces).
         let response = app
             .clone()
-            .oneshot(get("/profiles/p1", Some(TEST_TAGMA_BEARER)))
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let response = app
-            .clone()
-            .oneshot(get("/profiles/p3", Some(TEST_TAGMA_BEARER)))
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let response = app
-            .clone()
-            .oneshot(get("/profiles/p7", Some(TEST_TAGMA_BEARER)))
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::FORBIDDEN);
-        let response = app
-            .clone()
-            .oneshot(get("/profiles/ghost", Some(TEST_TAGMA_BEARER)))
+            .oneshot(req_with_body(
+                "PUT",
+                "/selection",
+                Some(TEST_TAGMA_BEARER),
+                serde_json::json!({"owner": "acc-bound", "collection_name": "own-col"}),
+            ))
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
 
-        // /sets/pro-set: exists but outside the domain -- 403
-        // default-deny (set names are globally unique, so no per-space
-        // oracle applies).
+        // The everyone publication crosses accounts: the bare account
+        // selects the bound account's published collection.
         let response = app
             .clone()
-            .oneshot(get("/sets/pro-set", Some(TEST_TAGMA_BEARER)))
+            .oneshot(req_with_body(
+                "PUT",
+                "/selection",
+                Some(TEST_TAGMA_BEARER),
+                serde_json::json!({"owner": "acc-bound", "collection_name": "user-col"}),
+            ))
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(response.status(), StatusCode::OK);
+        let response = app
+            .clone()
+            .oneshot(get("/selected-collection", Some(TEST_TAGMA_BEARER)))
+            .await
+            .unwrap();
+        let body = json_of(response).await;
+        assert_eq!(body["sets"].as_array().unwrap().len(), 1);
+        assert_eq!(body["sets"][0]["name"], "user-set");
+        assert_eq!(body["sets"][0]["profiles"][0]["model"], "bound-model");
+        assert_eq!(body["default_set"], "user-set");
 
-        // /parking: parked drafts.
+        // /parking: the drafts of the selected collection. Back on the
+        // catalog baseline, p4 is the one draft; its members are served
+        // and never list.
+        let response = app
+            .clone()
+            .oneshot(req_with_body(
+                "PUT",
+                "/selection",
+                Some(TEST_TAGMA_BEARER),
+                serde_json::json!({"owner": "system", "collection_name": "baseline"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
         let response = app
             .clone()
             .oneshot(get("/parking", Some(TEST_TAGMA_BEARER)))
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
-        let body: serde_json::Value = serde_json::from_slice(
-            &axum::body::to_bytes(response.into_body(), usize::MAX)
-                .await
-                .unwrap(),
-        )
-        .unwrap();
+        let body = json_of(response).await;
+        assert_eq!(body["profiles"].as_array().unwrap().len(), 1);
         assert_eq!(body["profiles"][0]["model"], "draft-x");
 
+        // No selection = no collection to hold drafts: an empty mirror,
+        // never a 404 (the tagma reads this endpoint as required).
+        let response = app
+            .clone()
+            .oneshot(req_with_body(
+                "DELETE",
+                "/selection",
+                Some(TEST_TAGMA_BEARER),
+                serde_json::Value::Null,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        let response = app
+            .clone()
+            .oneshot(get("/parking", Some(TEST_TAGMA_BEARER)))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_of(response).await;
+        assert_eq!(body["profiles"].as_array().unwrap().len(), 0);
+
+        // The selection is this face's one addressing channel: there is no
+        // set listing and no per-profile read to take the container from.
+        let response = app
+            .clone()
+            .oneshot(get("/sets", Some(TEST_TAGMA_BEARER)))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let response = app
+            .clone()
+            .oneshot(get("/profiles/p1", Some(TEST_TAGMA_BEARER)))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
         // Failure vocabulary on the bearer: missing and unknown -> 401.
-        let response = app.clone().oneshot(get("/sets", None)).await.unwrap();
+        let response = app
+            .clone()
+            .oneshot(get("/selected-collection", None))
+            .await
+            .unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         let response = app
-            .oneshot(get("/sets", Some("not-a-token")))
+            .oneshot(get("/selected-collection", Some("not-a-token")))
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
@@ -621,7 +609,7 @@ mod tests {
         crate::test_support::seed_registry(&db, "https://api.upstream.test").await;
         let app = router_for_test(state_for(db));
         let response = app
-            .oneshot(get("/sets", Some("never-minted-bearer")))
+            .oneshot(get("/parking", Some("never-minted-bearer")))
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
@@ -631,12 +619,10 @@ mod tests {
 
     /// The visibility domains at the HTTP face: the bare account, the
     /// bound account with its publications, and the platform-group
-    /// member's extra catalog reach. The faces split the failure
-    /// codes: the profile face answers 404 for a cross-account row (no
-    /// existence oracle across accounts) and 403 for a catalog row
-    /// outside the domain, while the set face answers 403 default-deny
-    /// for every set outside the domain (set names are globally
-    /// unique, so no per-space oracle applies).
+    /// member's extra catalog reach. The selection is the one
+    /// addressing channel, and an out-of-domain collection answers the
+    /// same 404 an unknown one does -- no existence oracle across
+    /// spaces, and no per-set oracle either.
     #[tokio::test]
     async fn visibility_domains_at_the_face() {
         let db = migrated_test_db().await;
@@ -662,80 +648,124 @@ mod tests {
         };
         let app = router_for_test(state);
 
-        // The bare account: the catalog plus the everyone-publication.
+        // The bare account: the catalog baseline and the user-side
+        // everyone publication are both selectable; another space's
+        // unpublished collection is not.
         let response = app
             .clone()
-            .oneshot(get("/sets", Some(TEST_TAGMA_BEARER)))
-            .await
-            .unwrap();
-        let body = json_of(response).await;
-        assert_eq!(
-            body["sets"],
-            serde_json::json!(["alpha", "beta", "user-set"])
-        );
-        let response = app
-            .clone()
-            .oneshot(get("/profiles/u1", Some(TEST_TAGMA_BEARER)))
+            .oneshot(req_with_body(
+                "PUT",
+                "/selection",
+                Some(TEST_TAGMA_BEARER),
+                serde_json::json!({"owner": "system", "collection_name": "baseline"}),
+            ))
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+        let response = app
+            .clone()
+            .oneshot(get("/selected-collection", Some(TEST_TAGMA_BEARER)))
+            .await
+            .unwrap();
+        let body = json_of(response).await;
+        let names: Vec<&str> = body["sets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|set| set["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, vec!["alpha", "beta"]);
+        let response = app
+            .clone()
+            .oneshot(req_with_body(
+                "PUT",
+                "/selection",
+                Some(TEST_TAGMA_BEARER),
+                serde_json::json!({"owner": "acc-bound", "collection_name": "own-col"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
 
-        // The bound account: its own publications join the face.
+        // The bound account: its own collections answer, another
+        // account's unpublished one does not.
         let bound = crate::test_support::TEST_TAGMA_BEARER_BOUND;
         let response = app
             .clone()
-            .oneshot(get("/sets", Some(bound)))
-            .await
-            .unwrap();
-        let body = json_of(response).await;
-        assert_eq!(
-            body["sets"],
-            serde_json::json!(["alpha", "beta", "grp-set", "own-set", "user-set"])
-        );
-        let response = app
-            .clone()
-            .oneshot(get("/profiles/u1", Some(bound)))
+            .oneshot(req_with_body(
+                "PUT",
+                "/selection",
+                Some(bound),
+                serde_json::json!({"collection_name": "own-col"}),
+            ))
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let response = app
             .clone()
-            .oneshot(get("/profiles/u2", Some(bound)))
+            .oneshot(get("/selected-collection", Some(bound)))
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = json_of(response).await;
+        assert_eq!(body["sets"][0]["name"], "own-set");
+        assert_eq!(body["sets"][0]["profiles"][0]["model"], "bound-own");
         let response = app
             .clone()
-            .oneshot(get("/sets/other-set", Some(bound)))
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::FORBIDDEN);
-        let response = app
-            .clone()
-            .oneshot(get("/sets/ghost", Some(bound)))
+            .oneshot(req_with_body(
+                "PUT",
+                "/selection",
+                Some(bound),
+                serde_json::json!({"owner": "acc-other", "collection_name": "other-col"}),
+            ))
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
 
-        // The platform-group member: the group's catalog joins the face.
+        // The platform-group member: the group's catalog collection is
+        // selectable, and the user group publication crosses the same
+        // way; the never-published one stays out.
         let other = crate::test_support::TEST_TAGMA_BEARER_OTHER;
         let response = app
             .clone()
-            .oneshot(get("/sets", Some(other)))
+            .oneshot(req_with_body(
+                "PUT",
+                "/selection",
+                Some(other),
+                serde_json::json!({"owner": "system", "collection_name": "catalog-pro"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let response = app
+            .clone()
+            .oneshot(get("/selected-collection", Some(other)))
             .await
             .unwrap();
         let body = json_of(response).await;
-        assert_eq!(
-            body["sets"],
-            serde_json::json!([
-                "alpha",
-                "beta",
-                "grp-set",
-                "other-set",
-                "pro-set",
-                "user-set"
-            ])
-        );
+        assert_eq!(body["sets"][0]["name"], "pro-set");
+        assert_eq!(body["sets"][0]["profiles"][0]["model"], "gpt-pro");
+        let response = app
+            .clone()
+            .oneshot(req_with_body(
+                "PUT",
+                "/selection",
+                Some(other),
+                serde_json::json!({"owner": "acc-bound", "collection_name": "grp-col"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let response = app
+            .clone()
+            .oneshot(req_with_body(
+                "PUT",
+                "/selection",
+                Some(other),
+                serde_json::json!({"owner": "acc-bound", "collection_name": "own-col"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     /// A tagma whose owner account is disabled fails the archeion's
@@ -764,7 +794,7 @@ mod tests {
         let response = app
             .clone()
             .oneshot(get(
-                "/sets",
+                "/parking",
                 Some(crate::test_support::TEST_TAGMA_BEARER_BOUND),
             ))
             .await
@@ -774,7 +804,7 @@ mod tests {
         assert_eq!(body["error"]["message"], "unknown tagma token", "{body}");
 
         let response = app
-            .oneshot(get("/sets", Some(TEST_TAGMA_BEARER)))
+            .oneshot(get("/parking", Some(TEST_TAGMA_BEARER)))
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
@@ -800,7 +830,7 @@ mod tests {
         let app = router_for_test(state);
 
         let response = app
-            .oneshot(get("/sets", Some(TEST_TAGMA_BEARER)))
+            .oneshot(get("/parking", Some(TEST_TAGMA_BEARER)))
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
@@ -827,7 +857,7 @@ mod tests {
         let app = router_for_test(state);
 
         let response = app
-            .oneshot(get("/sets", Some(TEST_TAGMA_BEARER)))
+            .oneshot(get("/parking", Some(TEST_TAGMA_BEARER)))
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
@@ -897,7 +927,7 @@ mod tests {
                 "PUT",
                 "/selection",
                 Some(TEST_TAGMA_BEARER),
-                serde_json::json!({"owner": "acc-bound", "collection": "own-col"}),
+                serde_json::json!({"owner": "acc-bound", "collection_name": "own-col"}),
             ))
             .await
             .unwrap();
@@ -910,14 +940,14 @@ mod tests {
                 "PUT",
                 "/selection",
                 Some(bound),
-                serde_json::json!({"owner": "acc-bound", "collection": "own-col"}),
+                serde_json::json!({"owner": "acc-bound", "collection_name": "own-col"}),
             ))
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let body = json_of(response).await;
         assert_eq!(body["owner"], "acc-bound");
-        assert_eq!(body["collection"], "own-col");
+        assert_eq!(body["collection_name"], "own-col");
 
         // An absent owner means the account's own space.
         let response = app
@@ -926,14 +956,14 @@ mod tests {
                 "PUT",
                 "/selection",
                 Some(bound),
-                serde_json::json!({"collection": "own-col"}),
+                serde_json::json!({"collection_name": "own-col"}),
             ))
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let body = json_of(response).await;
         assert_eq!(body["owner"], "acc-bound");
-        assert_eq!(body["collection"], "own-col");
+        assert_eq!(body["collection_name"], "own-col");
         // The one-read shape: the collection's member sets, sanitized.
         let response = app
             .clone()
@@ -942,10 +972,10 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let body = json_of(response).await;
-        assert_eq!(body["collection"], "own-col");
+        assert_eq!(body["collection_name"], "own-col");
         assert_eq!(body["sets"].as_array().unwrap().len(), 1);
         assert_eq!(body["sets"][0]["name"], "own-set");
-        assert_eq!(body["sets"][0]["profiles"][0]["model"], "bound-model");
+        assert_eq!(body["sets"][0]["profiles"][0]["model"], "bound-own");
         assert_eq!(body["default_set"], "own-set");
 
         // A re-PUT replaces the pointer whole.
@@ -955,7 +985,7 @@ mod tests {
                 "PUT",
                 "/selection",
                 Some(bound),
-                serde_json::json!({"owner": "system", "collection": "baseline"}),
+                serde_json::json!({"owner": "system", "collection_name": "baseline"}),
             ))
             .await
             .unwrap();
@@ -1005,7 +1035,7 @@ mod tests {
                 "PUT",
                 "/selection",
                 Some(bound),
-                serde_json::json!({"owner": "acc-bound", "collection": "own-col"}),
+                serde_json::json!({"owner": "acc-bound", "collection_name": "own-col"}),
             ))
             .await
             .unwrap();
@@ -1109,7 +1139,7 @@ mod tests {
                 "PUT",
                 "/selection",
                 Some(a),
-                serde_json::json!({"collection": "own-col"}),
+                serde_json::json!({"collection_name": "own-col"}),
             ))
             .await
             .unwrap();
@@ -1128,7 +1158,7 @@ mod tests {
                 "PUT",
                 "/selection",
                 Some(b),
-                serde_json::json!({"owner": "system", "collection": "baseline"}),
+                serde_json::json!({"owner": "system", "collection_name": "baseline"}),
             ))
             .await
             .unwrap();
@@ -1140,7 +1170,7 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let body = json_of(response).await;
-        assert_eq!(body["collection"], "own-col");
+        assert_eq!(body["collection_name"], "own-col");
         let response = app
             .clone()
             .oneshot(get("/selected-collection", Some(b)))
@@ -1148,6 +1178,6 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let body = json_of(response).await;
-        assert_eq!(body["collection"], "baseline");
+        assert_eq!(body["collection_name"], "baseline");
     }
 }

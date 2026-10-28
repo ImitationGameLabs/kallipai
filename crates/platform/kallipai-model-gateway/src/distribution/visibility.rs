@@ -108,24 +108,45 @@ impl Viewer {
     }
 }
 
-/// The set names the viewer's domain reaches. Two independent reaches,
-/// each one raw join: the platform reach runs for every viewer (the
-/// platform publications joined to the catalog sets they carry,
-/// filtered to the everyone sentinel or the account's platform
-/// memberships), and the user reach runs for a bound account (its own
-/// collection sets plus the user publications it can see). The set name
-/// is the join key (names are globally unique), so the domain stays
-/// space-agnostic -- the handlers resolve the row behind a name.
-async fn domain_set_names(
-    db: &DatabaseConnection,
-    viewer: &Viewer,
-) -> Result<HashSet<String>, DbErr> {
-    let mut names: HashSet<String> = HashSet::new();
+/// A set addressed by its full identity: a bare name answers only
+/// together with its collection, so the domain holds triples and every
+/// membership test is a triple comparison.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct SetKey {
+    pub owner: String,
+    pub collection_name: String,
+    pub name: String,
+}
+
+/// Read one joined row into a [`SetKey`]; a row missing a column is
+/// skipped (cannot happen with the queries below, but a malformed answer
+/// degrades to a smaller domain, never a panic).
+fn row_set_key(row: &sea_orm::QueryResult) -> Option<SetKey> {
+    let owner = row.try_get::<String>("", "owner").ok()?;
+    let collection_name = row.try_get::<String>("", "collection_name").ok()?;
+    let name = row.try_get::<String>("", "set_name").ok()?;
+    Some(SetKey {
+        owner,
+        collection_name,
+        name,
+    })
+}
+
+/// The sets the viewer's domain reaches. Two independent reaches, each one
+/// raw join: the platform reach runs for every viewer (the platform
+/// publications joined to the catalog sets they carry, filtered to the
+/// everyone sentinel or the account's platform memberships), and the user
+/// reach runs for a bound account (its own collection sets plus the user
+/// publications it can see). The join condition is the full container, so
+/// a same-name set in another collection is a different key.
+async fn domain_sets(db: &DatabaseConnection, viewer: &Viewer) -> Result<HashSet<SetKey>, DbErr> {
+    let mut sets: HashSet<SetKey> = HashSet::new();
     // The platform reach. SQL boundary: the only format! interpolation is
     // the compile-time `EVERYONE_GROUP_ID` constant; the group filters
     // bind via $1 -- no request data enters the SQL text.
     let sql = format!(
-        "SELECT ps.name AS set_name \
+        "SELECT ps.owner AS owner, ps.collection_name AS collection_name, \
+         ps.name AS set_name \
          FROM platform_publications p \
          JOIN profile_sets ps \
            ON ps.owner = p.owner AND ps.collection_name = p.collection_name \
@@ -139,8 +160,8 @@ async fn domain_set_names(
         ))
         .await?;
     for row in rows {
-        if let Ok(name) = row.try_get::<String>("", "set_name") {
-            names.insert(name);
+        if let Some(key) = row_set_key(&row) {
+            sets.insert(key);
         }
     }
     // The user reach: the account's own collections (the set rows it
@@ -149,10 +170,12 @@ async fn domain_set_names(
     // the format! interpolation is the same compile-time constant;
     // the account and group filters bind via $1/$2.
     let sql = format!(
-        "SELECT set_name FROM ( \
-           SELECT name AS set_name FROM profile_sets WHERE owner = $1 \
+        "SELECT owner, collection_name, set_name FROM ( \
+           SELECT owner, collection_name, name AS set_name \
+             FROM profile_sets WHERE owner = $1 \
            UNION \
-           SELECT ps.name AS set_name \
+           SELECT ps.owner AS owner, ps.collection_name AS collection_name, \
+                  ps.name AS set_name \
              FROM collection_publications p \
              JOIN profile_sets ps \
                ON ps.owner = p.owner AND ps.collection_name = p.collection_name \
@@ -170,30 +193,36 @@ async fn domain_set_names(
         ))
         .await?;
     for row in rows {
-        if let Ok(name) = row.try_get::<String>("", "set_name") {
-            names.insert(name);
+        if let Some(key) = row_set_key(&row) {
+            sets.insert(key);
         }
     }
-    Ok(names)
+    Ok(sets)
 }
 
-/// Every set name the viewer's domain reaches, sorted.
-pub async fn visible_set_names(
-    db: &DatabaseConnection,
-    viewer: &Viewer,
-) -> Result<Vec<String>, DbErr> {
-    let mut names: Vec<String> = domain_set_names(db, viewer).await?.into_iter().collect();
-    names.sort();
-    Ok(names)
+/// Every set the viewer's domain reaches, sorted by its full identity.
+pub async fn visible_sets(db: &DatabaseConnection, viewer: &Viewer) -> Result<Vec<SetKey>, DbErr> {
+    let mut sets: Vec<SetKey> = domain_sets(db, viewer).await?.into_iter().collect();
+    sets.sort_by(|a, b| {
+        (&a.owner, &a.collection_name, &a.name).cmp(&(&b.owner, &b.collection_name, &b.name))
+    });
+    Ok(sets)
 }
 
-/// Whether the named set is inside the viewer's domain.
+/// Whether the set inside one collection is in the viewer's domain.
 pub async fn set_visible(
     db: &DatabaseConnection,
     viewer: &Viewer,
+    owner: &str,
+    collection_name: &str,
     set_name: &str,
 ) -> Result<bool, DbErr> {
-    Ok(domain_set_names(db, viewer).await?.contains(set_name))
+    let key = SetKey {
+        owner: owner.to_owned(),
+        collection_name: collection_name.to_owned(),
+        name: set_name.to_owned(),
+    };
+    Ok(domain_sets(db, viewer).await?.contains(&key))
 }
 
 /// One platform catalog entry on the user face: a published platform
@@ -268,26 +297,35 @@ pub struct Grant {
     pub collection_name: Option<String>,
 }
 
-/// Whether the profile (in its own space) is inside the viewer's
+/// Whether the profile (in its own collection) is inside the viewer's
 /// domain, and if so through what. `Ok(None)` = invisible. The set the
-/// profile sits in must itself be in the domain; the attribution is the
-/// alphabetically first granting collection (the store may hold several).
+/// profile sits in must itself be in the domain -- membership never leaves
+/// the collection, so the container is one read's worth of scope -- and the
+/// attribution is the alphabetically first granting collection (the store
+/// may hold several).
 pub async fn profile_grant(
     db: &DatabaseConnection,
     viewer: &Viewer,
     profile_owner: &str,
+    collection_name: &str,
     profile_id: &str,
 ) -> Result<Option<Grant>, DbErr> {
-    let domain = domain_set_names(db, viewer).await?;
+    let domain = domain_sets(db, viewer).await?;
     if domain.is_empty() {
         return Ok(None);
     }
-    // The profile's own sets (a profile's member rows live in its
-    // space), intersected with the domain.
-    let members = registry::profile_set_names_of(db, profile_owner, profile_id).await?;
+    // The profile's own sets, intersected with the domain on the full key.
+    let members =
+        registry::profile_set_names_of(db, profile_owner, collection_name, profile_id).await?;
     let mut granting: Vec<String> = members
         .into_iter()
-        .filter(|name| domain.contains(name))
+        .filter(|name| {
+            domain.contains(&SetKey {
+                owner: profile_owner.to_owned(),
+                collection_name: collection_name.to_owned(),
+                name: name.clone(),
+            })
+        })
         .collect();
     granting.sort();
     let Some(set_name) = granting.first() else {
@@ -300,19 +338,20 @@ pub async fn profile_grant(
             collection_name: None,
         }));
     }
-    // The alphabetically first user collection in the set's space that
-    // is published to a reach the viewer has and carries this set.
+    // The alphabetically first user collection in the space that is
+    // published to a reach the viewer has and carries this set -- in the
+    // set's own collection, so a same-name set elsewhere cannot answer.
     // SQL boundary: the only format! interpolation is the compile-time
-    // `EVERYONE_GROUP_ID` constant; the set, owner, and group filters
-    // bind via $1/$2/$3 -- no request data enters the SQL text.
+    // `EVERYONE_GROUP_ID` constant; the set, owner, collection, and group
+    // filters bind via $1/$2/$3/$4 -- no request data enters the SQL text.
     let sql = format!(
         "SELECT p.collection_name AS collection_name \
          FROM collection_publications p \
          JOIN profile_sets ps \
            ON ps.owner = p.owner AND ps.collection_name = p.collection_name \
-         WHERE ps.name = $1 AND ps.owner = $2 \
+         WHERE ps.name = $1 AND ps.owner = $2 AND ps.collection_name = $3 \
            AND (p.group_id = '{EVERYONE_GROUP_ID}' OR ps.owner = $2 \
-              OR p.group_id = ANY($3)) \
+              OR p.group_id = ANY($4)) \
          ORDER BY p.owner, p.collection_name \
          LIMIT 1"
     );
@@ -323,6 +362,7 @@ pub async fn profile_grant(
             [
                 set_name.clone().into(),
                 profile_owner.to_owned().into(),
+                collection_name.to_owned().into(),
                 viewer.memberships.clone().into(),
             ],
         ))
@@ -344,6 +384,25 @@ mod tests {
         db
     }
 
+    /// The domain rendered as `owner/collection/set`: the full key, so a
+    /// same-name set in another collection is a visible separate entry.
+    async fn visible_keys(db: &db::Db, viewer: &Viewer) -> Vec<String> {
+        visible_sets(db, viewer)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|k| format!("{}/{}/{}", k.owner, k.collection_name, k.name))
+            .collect()
+    }
+
+    fn key(owner: &str, collection: &str, name: &str) -> SetKey {
+        SetKey {
+            owner: owner.to_owned(),
+            collection_name: collection.to_owned(),
+            name: name.to_owned(),
+        }
+    }
+
     /// A bare account (no own space, no memberships) rides the everyone
     /// publications alone: the catalog baseline and any user-side
     /// everyone-published set cross to it.
@@ -351,8 +410,14 @@ mod tests {
     async fn a_bare_account_rides_the_baseline_reach() {
         let db = seeded().await;
         let viewer = Viewer::resolve(&db, "user-plain".to_owned()).await.unwrap();
-        let names = visible_set_names(&db, &viewer).await.unwrap();
-        assert_eq!(names, vec!["alpha", "beta", "user-set"]);
+        assert_eq!(
+            visible_keys(&db, &viewer).await,
+            vec![
+                "acc-bound/user-col/user-set",
+                "system/baseline/alpha",
+                "system/baseline/beta",
+            ]
+        );
     }
 
     /// The bound shapes: an account reaches its own collections whether
@@ -364,26 +429,30 @@ mod tests {
         let db = seeded().await;
 
         let viewer = Viewer::resolve(&db, "acc-bound".to_owned()).await.unwrap();
-        let names = visible_set_names(&db, &viewer).await.unwrap();
         assert_eq!(
-            names,
-            vec!["alpha", "beta", "grp-set", "own-set", "user-set"]
+            visible_keys(&db, &viewer).await,
+            vec![
+                "acc-bound/grp-col/grp-set",
+                "acc-bound/own-col/own-set",
+                "acc-bound/user-col/user-set",
+                "system/baseline/alpha",
+                "system/baseline/beta",
+            ]
         );
 
         // acc-other: the everyone publication, the user group
         // membership, and the platform group membership reach across
         // the boundary; the never-published set does not.
         let viewer = Viewer::resolve(&db, "acc-other".to_owned()).await.unwrap();
-        let names = visible_set_names(&db, &viewer).await.unwrap();
         assert_eq!(
-            names,
+            visible_keys(&db, &viewer).await,
             vec![
-                "alpha",
-                "beta",
-                "grp-set",
-                "other-set",
-                "pro-set",
-                "user-set"
+                "acc-bound/grp-col/grp-set",
+                "acc-bound/user-col/user-set",
+                "acc-other/other-col/other-set",
+                "system/baseline/alpha",
+                "system/baseline/beta",
+                "system/catalog-pro/pro-set",
             ]
         );
 
@@ -392,10 +461,50 @@ mod tests {
         // never-published set stays inside its owner's space for both.
         let viewer = Viewer::resolve(&db, "acc-other".to_owned()).await.unwrap();
         assert!(
-            set_visible(&db, &viewer, "grp-set").await.unwrap(),
+            set_visible(&db, &viewer, "acc-bound", "grp-col", "grp-set")
+                .await
+                .unwrap(),
             "the membership row makes the group publication visible"
         );
-        assert!(!set_visible(&db, &viewer, "own-set").await.unwrap());
+        assert!(
+            !set_visible(&db, &viewer, "acc-bound", "own-col", "own-set")
+                .await
+                .unwrap()
+        );
+    }
+
+    /// A same-name set in a reachable collection and an unreachable one:
+    /// the domain holds the triple, so only the reachable twin lands (the
+    /// key carries the collection, not just the name).
+    #[tokio::test]
+    async fn a_same_name_set_in_another_collection_is_a_different_key() {
+        let db = seeded().await;
+        db.execute_unprepared(
+            "INSERT INTO profile_sets (owner, collection_name, name, description) \
+             VALUES ('acc-bound', 'grp-col', 'own-set', 'the published twin')",
+        )
+        .await
+        .unwrap();
+
+        let viewer = Viewer::resolve(&db, "acc-other".to_owned()).await.unwrap();
+        assert!(
+            set_visible(&db, &viewer, "acc-bound", "grp-col", "own-set")
+                .await
+                .unwrap(),
+            "the twin in the group-published collection is in the domain"
+        );
+        assert!(
+            !set_visible(&db, &viewer, "acc-bound", "own-col", "own-set")
+                .await
+                .unwrap(),
+            "the never-published twin of the same name stays out"
+        );
+        let keys = visible_sets(&db, &viewer).await.unwrap();
+        assert!(
+            keys.contains(&key("acc-bound", "grp-col", "own-set"))
+                && !keys.contains(&key("acc-bound", "own-col", "own-set")),
+            "the domain names the collection: {keys:?}"
+        );
     }
 
     /// The platform reach is the publication join itself: a platform
@@ -411,14 +520,18 @@ mod tests {
         // user-side space.
         let viewer = Viewer::resolve(&db, "acc-bound".to_owned()).await.unwrap();
         assert!(
-            !set_visible(&db, &viewer, "pro-set").await.unwrap(),
+            !set_visible(&db, &viewer, "system", "catalog-pro", "pro-set")
+                .await
+                .unwrap(),
             "a non-member cannot see the platform group's catalog"
         );
 
         // A member (acc-other) sees it.
         let viewer = Viewer::resolve(&db, "acc-other".to_owned()).await.unwrap();
         assert!(
-            set_visible(&db, &viewer, "pro-set").await.unwrap(),
+            set_visible(&db, &viewer, "system", "catalog-pro", "pro-set")
+                .await
+                .unwrap(),
             "the platform membership opens the group's catalog"
         );
 
@@ -431,20 +544,24 @@ mod tests {
         .await
         .unwrap();
         let viewer = Viewer::resolve(&db, "user-plain".to_owned()).await.unwrap();
-        let names = visible_set_names(&db, &viewer).await.unwrap();
-        assert_eq!(names, vec!["user-set"], "the join is the enforcement");
+        assert_eq!(
+            visible_keys(&db, &viewer).await,
+            vec!["acc-bound/user-col/user-set"],
+            "the join is the enforcement"
+        );
     }
 
-    /// The grant attribution: catalog profiles grant without a collection
-    /// name, a publication path names its collection, the own-collection
-    /// reach stays unattributed, a profile in no set is invisible, and a
-    /// cross-account probe on a user-space row is invisible.
+    /// The grant attribution: a catalog profile grants without a
+    /// collection name, a published user set names its collection, the
+    /// own-collection reach stays unattributed, a profile in no set is
+    /// invisible, and both the account and the collection bound the
+    /// grant.
     #[tokio::test]
     async fn profile_grant_attributes_publications() {
         let db = seeded().await;
 
         let viewer = Viewer::resolve(&db, "user-plain".to_owned()).await.unwrap();
-        let grant = profile_grant(&db, &viewer, registry::CATALOG_OWNER, "p1")
+        let grant = profile_grant(&db, &viewer, registry::CATALOG_OWNER, "baseline", "p1")
             .await
             .unwrap();
         assert_eq!(
@@ -455,13 +572,13 @@ mod tests {
         );
 
         // A profile in no set at all is invisible to every viewer.
-        let grant = profile_grant(&db, &viewer, registry::CATALOG_OWNER, "p4")
+        let grant = profile_grant(&db, &viewer, registry::CATALOG_OWNER, "baseline", "p4")
             .await
             .unwrap();
         assert_eq!(grant, None);
 
         let viewer = Viewer::resolve(&db, "acc-other".to_owned()).await.unwrap();
-        let grant = profile_grant(&db, &viewer, "acc-other", "u2")
+        let grant = profile_grant(&db, &viewer, "acc-other", "other-col", "u2")
             .await
             .unwrap();
         // u2's only set sits in an unpublished collection: reachable
@@ -473,11 +590,20 @@ mod tests {
             })
         );
 
-        // u1 sits in three sets; the alphabetically first granting set
-        // drives the attribution (grp-set wins, its collection is
-        // published to the group).
-        let viewer = Viewer::resolve(&db, "acc-bound".to_owned()).await.unwrap();
-        let grant = profile_grant(&db, &viewer, "acc-bound", "u1")
+        // The everyone publication attributes across accounts: u3 sits
+        // only in user-set, so the attribution is unambiguous.
+        let grant = profile_grant(&db, &viewer, "acc-bound", "user-col", "u3")
+            .await
+            .unwrap();
+        assert_eq!(
+            grant,
+            Some(Grant {
+                collection_name: Some("user-col".to_owned())
+            })
+        );
+
+        // The group publication attributes through the membership row.
+        let grant = profile_grant(&db, &viewer, "acc-bound", "grp-col", "u5")
             .await
             .unwrap();
         assert_eq!(
@@ -487,15 +613,26 @@ mod tests {
             })
         );
 
-        let grant = profile_grant(&db, &viewer, "acc-other", "u2")
+        // The never-published collection stays out of another account's
+        // reach, and a cross-account probe on it grants nothing.
+        let grant = profile_grant(&db, &viewer, "acc-bound", "own-col", "u4")
             .await
             .unwrap();
         assert_eq!(grant, None);
 
-        // The everyone publication attributes across accounts too:
-        // u3 sits only in user-set, so the attribution is unambiguous.
-        let viewer = Viewer::resolve(&db, "acc-other".to_owned()).await.unwrap();
-        let grant = profile_grant(&db, &viewer, "acc-bound", "u3")
+        // The owner sees its own never-published collection, with no
+        // publication to attribute.
+        let viewer = Viewer::resolve(&db, "acc-bound".to_owned()).await.unwrap();
+        let grant = profile_grant(&db, &viewer, "acc-bound", "own-col", "u4")
+            .await
+            .unwrap();
+        assert_eq!(
+            grant,
+            Some(Grant {
+                collection_name: None
+            })
+        );
+        let grant = profile_grant(&db, &viewer, "acc-bound", "user-col", "u1")
             .await
             .unwrap();
         assert_eq!(
@@ -504,5 +641,12 @@ mod tests {
                 collection_name: Some("user-col".to_owned())
             })
         );
+
+        // The collection is part of the probe: u1 lives in user-col, so
+        // the same id asked about in own-col grants nothing.
+        let grant = profile_grant(&db, &viewer, "acc-bound", "own-col", "u1")
+            .await
+            .unwrap();
+        assert_eq!(grant, None);
     }
 }

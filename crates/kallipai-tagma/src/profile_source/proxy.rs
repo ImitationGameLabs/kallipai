@@ -293,7 +293,7 @@ impl ProxyProfileSource {
             .bearer_auth(&self.token)
             .json(&serde_json::json!({
                 "owner": owner,
-                "collection": collection,
+                "collection_name": collection,
             }))
             .send()
             .await
@@ -688,7 +688,7 @@ mod tests {
                 get(|| async {
                     axum::Json(json!({
                         "owner": "acc-x",
-                        "collection": "user-col",
+                        "collection_name": "user-col",
                         "description": "the account's own collection",
                         "sets": [
                             { "name": "alpha",
@@ -832,7 +832,7 @@ mod tests {
                     };
                     axum::Json(json!({
                         "owner": "acc-x",
-                        "collection": "user-col",
+                        "collection_name": "user-col",
                         "description": "the account's own collection",
                         "sets": sets,
                         "default_set": "alpha"
@@ -912,7 +912,7 @@ mod tests {
                 get(|| async {
                     axum::Json(json!({
                         "owner": "acc-x",
-                        "collection": "user-col",
+                        "collection_name": "user-col",
                         "description": "the account's own collection",
                         "sets": [
                             { "name": "beta", "description": "second",
@@ -1155,7 +1155,7 @@ mod tests {
                             2 => (StatusCode::INTERNAL_SERVER_ERROR, "down").into_response(),
                             _ => axum::Json(json!({
                                 "owner": "acc-x",
-                                "collection": "user-col",
+                                "collection_name": "user-col",
                                 "description": "the account's own collection",
                                 "sets": [
                                     { "name": "alpha", "description": "primary",

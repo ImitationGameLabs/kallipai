@@ -5,19 +5,23 @@ use sea_orm::entity::prelude::*;
 /// A distribution-face model profile. This model structurally carries no
 /// secret material: the upstream endpoint and provider API key live in the
 /// secret domain's `provider_credentials` table and are never joined into
-/// this type. The owner is part of the primary key, so ids are unique
-/// within a space; a global unique index makes each id unique across
-/// spaces.
+/// this type. Keys are collection-scoped: `(owner, collection_name,
+/// profile_id)` is the primary key, so an id is unique inside its
+/// collection and the same id may exist in another collection.
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
 #[sea_orm(table_name = "profiles")]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     /// The ownership space: the platform catalog (`system`, the
     /// distribution face's only source) or the owning account's private
-    /// space. Written by the parking create and the set-membership
-    /// promote on the management face; read everywhere, served only in the
-    /// catalog.
+    /// space. Written by the profile create, update, and move handlers on
+    /// the management face; read everywhere, served only in the catalog.
     pub owner: String,
+    /// The collection this row belongs to: part of the primary key. A
+    /// profile belongs to exactly one collection; the composite key
+    /// makes its id unique there and nowhere else.
+    #[sea_orm(primary_key, auto_increment = false)]
+    pub collection_name: String,
     #[sea_orm(primary_key, auto_increment = false)]
     pub profile_id: String,
     /// The space-owned provider this deployment runs on (the composite
@@ -29,7 +33,9 @@ pub struct Model {
     pub effort: Option<String>,
     /// JSON-encoded modality list (e.g. `["text"]`).
     pub modalities: Option<String>,
-    /// Parking-resource flag: parked drafts are the `GET /parking` set.
+    /// Draft flag. In the catalog space a set member is never parked; the
+    /// membership and the flag are written together. The user face has no
+    /// promote step, so a set edit there can leave a member parked.
     pub parked: bool,
     /// The responses wire's server-side transcript tri-state: `true`
     /// persists the response upstream, `false` does not, `NULL` = no

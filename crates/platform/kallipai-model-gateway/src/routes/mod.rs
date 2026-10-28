@@ -36,13 +36,7 @@ pub fn management_plane_router(state: AppState, cors_origins: &str) -> Router {
         // The distribution reads: the tagma-bearer-authenticated, secret-free
         // profile API, mounted at the root of the management face (the
         // api edge routes the stripped /v1/model-gateway segment here).
-        .route("/sets", get(crate::distribution::get_sets))
-        .route("/sets/{name}", get(crate::distribution::get_set))
         .route("/parking", get(crate::distribution::get_parking))
-        .route(
-            "/profiles/{profile_id}",
-            get(crate::distribution::get_profile),
-        )
         .route(
             "/selection",
             put(crate::distribution::put_selection).delete(crate::distribution::delete_selection),
@@ -219,7 +213,7 @@ mod tests {
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri("/sets")
+                    .uri("/selected-collection")
                     .body(Body::empty())
                     .expect("request"),
             )
@@ -234,7 +228,7 @@ mod tests {
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri("/sets")
+                    .uri("/selected-collection")
                     .header("authorization", format!("Bearer {TEST_ADMIN_BEARER}"))
                     .body(Body::empty())
                     .expect("request"),
@@ -242,6 +236,46 @@ mod tests {
             .await
             .expect("infallible oneshot");
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        // The unaddressable-column reads are not routes at all: the set
+        // listing and the per-profile read answer 404 here, while the
+        // selection-addressed reads stay (401 without a bearer).
+        for path in ["/sets", "/sets/alpha", "/profiles/p1"] {
+            let response = management
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(path)
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("infallible oneshot");
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+        }
+        let response = management
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/parking")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("infallible oneshot");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "/parking");
+        // GET /selection is a known path with an unknown method: 405, not
+        // the 404 the removed reads answer.
+        let response = management
+            .oneshot(
+                Request::builder()
+                    .uri("/selection")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("infallible oneshot");
+        assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
     }
 }
 

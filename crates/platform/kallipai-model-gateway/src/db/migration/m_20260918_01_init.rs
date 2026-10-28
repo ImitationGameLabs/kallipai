@@ -1,12 +1,13 @@
-//! The gateway store's initial schema: the terminal shape, in one
-//! migration.
+//! The gateway store's base schema, in one migration: the registry,
+//! secret and audit tables every later step builds on.
 //!
 //! Three physically separated domains live in this schema (the dual-face
 //! layering: registry data serves distribution, secrets stay isolated):
 //!
 //! - Registry domain (distribution-face data, no secrets): `profiles`
-//!   (model profiles with a `parked` flag for the parking resource and
-//!   the `store` mirror), `profile_sets` + `set_members` (ordered
+//!   (model profiles with a `parked` flag -- a draft sits outside every
+//!   set -- and a `store` tri-state the distribution face passes through),
+//!   `profile_sets` + `set_members` (ordered
 //!   membership -- `position` carries the failover order and the
 //!   distribution face returns it verbatim; a set is born anchored to
 //!   its `collection_name`, the single membership authority), the
@@ -26,11 +27,12 @@
 //! Ownership lives in archeion: the enrollment lookup answers which
 //! account a tagma belongs to, and this store keeps no identity row of
 //! its own. The space key `owner` is the catalog space `system` for
-//! admin-face rows and the account id for user-space rows. Set names
-//! and profile ids are globally unique (`uq_profile_sets_name_global`,
-//! `uq_profiles_profile_id_global`), so the by-name and by-id lookups
-//! resolve to exactly one row. The reserved audience `everyone` exists
-//! as a sentinel row on both group tables (the visibility predicates
+//! admin-face rows and the account id for user-space rows. This step
+//! keys set names and profile ids globally (`uq_profile_sets_name_global`,
+//! `uq_profiles_profile_id_global`), so its by-name and by-id lookups
+//! resolve to exactly one row; the collection isolation migration moves
+//! both keys inside the collection. The reserved audience `everyone`
+//! exists as a sentinel row on both group tables (the visibility predicates
 //! answer for it directly), and the `baseline` collection is seeded
 //! published to it -- the platform's default audience bundle. New
 //! catalog sets join `baseline` through the admin face's collection

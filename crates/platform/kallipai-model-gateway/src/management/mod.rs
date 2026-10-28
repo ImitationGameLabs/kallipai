@@ -39,7 +39,7 @@
 pub mod accounts;
 pub mod collections;
 pub mod groups;
-pub mod parking;
+pub mod profiles;
 pub mod providers;
 pub mod sets;
 #[cfg(test)]
@@ -625,9 +625,9 @@ pub(crate) fn validate_set_name(name: &str) -> Result<(), ApiError> {
     Ok(())
 }
 
-/// Profile ids ride in URL path segments on the parking detail routes, so
+/// Profile ids ride in URL path segments on the item and move routes, so
 /// an id containing the segment separator would create an unaddressable
-/// draft (same rule as [`validate_set_name`]).
+/// row (same rule as [`validate_set_name`]).
 pub(crate) fn validate_profile_id(id: &str) -> Result<(), ApiError> {
     if id.is_empty() {
         return Err(ApiError::bad_request("profile_id must not be empty"));
@@ -680,61 +680,101 @@ where
 }
 
 /// The audit JSON for a set: identity plus ordered member ids. `None` =
-/// no such set (the handler turns that into the face's 404).
+/// no such set (the handler turns that into the face's 404). The identity
+/// is the collection-scoped triple, echoed so the audit row names the
+/// container the set belongs to.
 pub(crate) async fn set_state_json<C: sea_orm::ConnectionTrait>(
     txn: &C,
     owner: &str,
+    collection_name: &str,
     name: &str,
 ) -> Result<Option<serde_json::Value>, ApiError> {
-    let Some(set) = profile_set::Entity::find_by_id((owner.to_owned(), name.to_owned()))
-        .one(txn)
-        .await
-        .map_err(db::map_db_err)?
+    let Some(set) = profile_set::Entity::find_by_id((
+        owner.to_owned(),
+        collection_name.to_owned(),
+        name.to_owned(),
+    ))
+    .one(txn)
+    .await
+    .map_err(db::map_db_err)?
     else {
         return Ok(None);
     };
     let members = set_member::Entity::find()
-        .filter(set_member::Column::SetName.eq(name))
         .filter(set_member::Column::Owner.eq(owner))
+        .filter(set_member::Column::CollectionName.eq(collection_name))
+        .filter(set_member::Column::SetName.eq(name))
         .order_by_asc(set_member::Column::Position)
         .all(txn)
         .await
         .map_err(db::map_db_err)?;
     Ok(Some(serde_json::json!({
         "name": set.name,
+        "collection_name": set.collection_name,
         "description": set.description,
         "owner": set.owner,
         "members": members.into_iter().map(|m| m.profile_id).collect::<Vec<_>>(),
     })))
 }
 
-/// Resolve one profile row in a fixed space. Every caller passes
-/// the catalog space; the read is exact. A cross-space duplicate
-/// is invisible to a scoped read, which is the point.
+/// Resolve one profile row inside one collection of a fixed space. Every
+/// caller names the container; a same-id row in another collection is
+/// invisible to a scoped read, which is the point.
 pub(crate) async fn resolve_profile<C: sea_orm::ConnectionTrait>(
     txn: &C,
     owner: &str,
+    collection_name: &str,
     profile_id: &str,
 ) -> Result<profile::Model, ApiError> {
-    registry::profile_by_id(txn, owner, profile_id)
+    registry::profile_by_id(txn, owner, collection_name, profile_id)
         .await
         .map_err(db::map_db_err)?
-        .ok_or_else(|| ApiError::not_found(format!("no such profile: {profile_id}")))
+        .ok_or_else(|| {
+            ApiError::not_found(format!(
+                "no such profile: {profile_id} in collection {collection_name}"
+            ))
+        })
+}
+
+/// [`resolve_profile`], with the row locked for the caller's transaction:
+/// the gate a write takes when another writer flips the same row. A writer
+/// that also touches the row's member rows takes this lock first and the
+/// member rows after: that is the module's one lock order, and a new writer
+/// must keep it.
+pub(crate) async fn resolve_profile_for_update<C: sea_orm::ConnectionTrait>(
+    txn: &C,
+    owner: &str,
+    collection_name: &str,
+    profile_id: &str,
+) -> Result<profile::Model, ApiError> {
+    registry::profile_by_id_for_update(txn, owner, collection_name, profile_id)
+        .await
+        .map_err(db::map_db_err)?
+        .ok_or_else(|| {
+            ApiError::not_found(format!(
+                "no such profile: {profile_id} in collection {collection_name}"
+            ))
+        })
 }
 
 /// The set twin of [`resolve_profile`].
 pub(crate) async fn resolve_set<C: sea_orm::ConnectionTrait>(
     txn: &C,
     owner: &str,
+    collection_name: &str,
     name: &str,
 ) -> Result<profile_set::Model, ApiError> {
-    registry::set_by_id(txn, owner, name)
+    registry::set_by_id(txn, owner, collection_name, name)
         .await
         .map_err(db::map_db_err)?
-        .ok_or_else(|| ApiError::not_found(format!("no such set: {name}")))
+        .ok_or_else(|| {
+            ApiError::not_found(format!(
+                "no such set: {name} in collection {collection_name}"
+            ))
+        })
 }
 
-/// The management route table: registry CRUD (sets, parking), the provider
+/// The management route table: registry CRUD (sets, profiles), the provider
 /// credential store, and the fail-closed audit that
 /// wraps every mutation.
 ///
@@ -756,29 +796,41 @@ pub(crate) async fn resolve_set<C: sea_orm::ConnectionTrait>(
 /// and the audit rows carry the mask too.
 pub fn router() -> Router<AppState> {
     Router::new()
-        // -- the set face: family-nested create/list, flat item routes ---
+        // -- the set face: collection-nested create/list and items ------
+        //    A missing container here is a 404: the name is in the path, so
+        //    the request addresses that collection or nothing.
         .route(
-            "/collections/{name}/sets",
+            "/collections/{collection}/sets",
             get(sets::list_collection_sets).post(sets::create_set),
         )
         .route(
-            "/sets/{name}",
+            "/collections/{collection}/sets/{name}",
             get(sets::get_set)
                 .patch(sets::update_set)
                 .delete(sets::delete_set),
         )
-        // -- parking --------------------------------------------------------
+        // -- the profile face: the collection-scoped items, the filtered
+        //    list, and the cross-collection move ------------------------
+        //    A missing container is a 404 where it sits in the path; on the
+        //    summary read the collection is a filter value, so a name that
+        //    matches nothing answers an empty list. Two answers by design,
+        //    not an oversight to align away.
+        .route("/profiles", get(profiles::list_profiles))
         .route(
-            "/parking",
-            post(parking::create_parked).get(parking::list_parked),
+            "/collections/{collection}/profiles",
+            post(profiles::create_profile),
         )
         .route(
-            "/parking/{profile_id}",
-            get(parking::get_parked)
-                .put(parking::update_parked)
-                .delete(parking::delete_parked),
+            "/collections/{collection}/profiles/{profile_id}",
+            get(profiles::get_profile)
+                .put(profiles::update_profile)
+                .delete(profiles::delete_profile),
         )
-        // -- the provider pool -----------------------------------------------
+        .route(
+            "/collections/{collection}/profiles/{profile_id}/move",
+            post(profiles::move_profile),
+        )
+        // -- the provider pool -----------------------------------------
         .route(
             "/providers",
             get(providers::list_providers).post(providers::create_provider),
@@ -791,12 +843,12 @@ pub fn router() -> Router<AppState> {
             "/providers/{provider_id}/credential",
             put(providers::put_provider_credential).delete(providers::delete_provider_credential),
         )
-        // -- the collection face -------------------------------------------------
+        // -- the collection face ---------------------------------------
         .route(
             "/collections",
             post(collections::create_collection).get(collections::list_collections),
         )
-        // -- the group face -----------------------------------------------------
+        // -- the group face --------------------------------------------
         .route(
             "/groups",
             post(groups::create_group).get(groups::list_groups),
@@ -922,18 +974,6 @@ mod tests {
                 .contains("not configured")
         );
     }
-
-    // -- sets -------------------------------------------------------------
-
-    // -- parking -----------------------------------------------------------
-
-    // -- the provider credentials -------------------------------------------
-
-    // -- parking delete: the cascade and its audit -----------------------
-
-    // -- owner: the set's ownership dimension ------------------------------
-
-    // -- the user platform catalog -----------------------------------------
 
     // -- the platform-identity channels (bearer + cookie) -------------------
 
@@ -1107,7 +1147,7 @@ mod tests {
         for _ in 0..2 {
             let (status, _) = send(
                 app(state.clone()),
-                req("GET", "/sets", Some(TEST_TAGMA_BEARER), None),
+                req("GET", "/parking", Some(TEST_TAGMA_BEARER), None),
             )
             .await;
             assert_eq!(status, StatusCode::OK);
@@ -1151,7 +1191,7 @@ mod tests {
         // identity an unreachable archeion stops the user face too.
         let (status, _) = send(
             app(state),
-            req("GET", "/sets", Some(TEST_TAGMA_BEARER), None),
+            req("GET", "/parking", Some(TEST_TAGMA_BEARER), None),
         )
         .await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
@@ -1203,9 +1243,7 @@ mod tests {
         assert_eq!(err.status, 401);
     }
 
-    // -- the user domain -------------------------------------------------
-
-    // -- the reserved audience (everyone) ------------------------------------
+    // -- the admin's own user domain -----------------------------------------
 
     /// The admin session owns a user domain of its own: the same
     /// endpoints, the same owner column, the rows attributed to the
@@ -1275,8 +1313,4 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "{body}");
         assert!(!body.to_string().contains("admin-bundle"));
     }
-
-    // -- the admin group face -----------------------------------------------
-
-    // -- the collection-default family ----------------------------------
 }

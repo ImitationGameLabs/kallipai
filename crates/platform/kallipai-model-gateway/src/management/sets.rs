@@ -1,6 +1,6 @@
-//! The set face: family-nested create and list plus the flat item
-//! routes, with the membership rewrite that promotes and re-parks
-//! member profiles in the same transaction.
+//! The set face: collection-nested create and list plus the nested item
+//! routes, with the membership rewrite that promotes and re-parks member
+//! profiles in the same transaction.
 
 use axum::Json;
 use axum::extract::{Path, State};
@@ -17,16 +17,19 @@ use kallipai_common::protocol::ApiError;
 
 use sea_orm::sea_query::Expr;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, EntityTrait, NotSet, PaginatorTrait, QueryFilter, QueryOrder,
-    Set, TransactionTrait,
+    ActiveModelTrait, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder, Set,
+    TransactionTrait,
 };
 
 /// The admin view of a profile: the full registry row joined with the
 /// provider's family, no credential material (that lives in the secret
-/// store, keyed by provider).
+/// store, keyed by provider). `collection_name` echoes the container so a
+/// caller reads the row's home instead of inferring it from the URL.
 #[derive(Clone, Debug, Serialize)]
 pub struct AdminProfile {
     pub profile_id: String,
+    /// The collection this row belongs to (part of the row's identity).
+    pub collection_name: String,
     /// The space-owned provider this deployment rides (the family's
     /// holder; N profiles may share one).
     pub provider_id: String,
@@ -52,6 +55,7 @@ impl From<registry::ServedProfile> for AdminProfile {
             .unwrap_or_default();
         Self {
             profile_id: p.profile_id.clone(),
+            collection_name: p.collection_name.clone(),
             family: s.family,
             model: p.model.clone(),
             max_context_window: p.max_context_window,
@@ -69,6 +73,7 @@ impl From<registry::ServedProfile> for AdminProfile {
 #[derive(Clone, Debug, Serialize)]
 pub struct AdminSet {
     pub name: String,
+    pub collection_name: String,
     pub description: String,
     pub profiles: Vec<AdminProfile>,
 }
@@ -77,7 +82,7 @@ pub struct AdminSetList {
     pub sets: Vec<AdminSet>,
 }
 
-/// POST /admin/collections/{name}/sets body: a set created directly
+/// POST /admin/collections/{collection}/sets body: a set created directly
 /// inside the named collection (the collection anchors the set; the
 /// catalog space is the only space on this face).
 #[derive(Deserialize)]
@@ -86,18 +91,20 @@ pub struct SetCreate {
     pub description: String,
 }
 
-/// PATCH /admin/sets/{name}: `description` and `members` are independent --
-/// absent means unchanged. `members`, when present, replaces the whole
-/// membership (the list order is the failover order).
+/// PATCH /admin/collections/{collection}/sets/{name}: `description` and
+/// `members` are independent -- absent means unchanged. `members`, when
+/// present, replaces the whole membership (the list order is the failover
+/// order).
 #[derive(Deserialize)]
 pub struct SetUpdate {
     pub description: Option<String>,
     pub members: Option<Vec<String>>,
 }
 
-/// POST /admin/collections/{name}/sets: a set born inside the named
+/// POST /admin/collections/{collection}/sets: a set born inside the named
 /// collection (the only creation door on this face; the anchor is for
-/// life -- there is no move).
+/// life -- there is no move). A same-name set in another collection is a
+/// different row, so the duplicate check is scoped to this collection.
 pub async fn create_set(
     State(state): State<AppState>,
     admin: AdminToken,
@@ -112,17 +119,6 @@ pub async fn create_set(
     let owner = registry::CATALOG_OWNER.to_owned();
     let txn = state.db.begin().await.map_err(db::map_db_err)?;
     let description = body.description;
-    // Set names are globally unique (uq_profile_sets_name_global backs
-    // the by-name lookups on this face); this early check answers a
-    // duplicate with a 409 instead of letting it die on the unique
-    // index at insert.
-    if !registry::sets_by_name(&txn, &body.name)
-        .await
-        .map_err(db::map_db_err)?
-        .is_empty()
-    {
-        return Err(ApiError::conflict("set already exists"));
-    }
     if collection::Entity::find_by_id((owner.clone(), collection.clone()))
         .one(&txn)
         .await
@@ -132,6 +128,16 @@ pub async fn create_set(
         return Err(ApiError::not_found(format!(
             "no such collection: {collection}"
         )));
+    }
+    // The name is unique per collection; this early check answers a
+    // duplicate with a 409 instead of letting it die on the primary key
+    // at insert.
+    if registry::set_by_id(&txn, &owner, &collection, &body.name)
+        .await
+        .map_err(db::map_db_err)?
+        .is_some()
+    {
+        return Err(ApiError::conflict("set already exists"));
     }
     profile_set::ActiveModel {
         name: Set(body.name.clone()),
@@ -146,7 +152,7 @@ pub async fn create_set(
     // the membership authority. The first set in a default-less
     // collection takes the default anchor.
     anchor_collection_default(&txn, &owner, &collection, &body.name).await?;
-    let after = set_state_json(&txn, &owner, &body.name)
+    let after = set_state_json(&txn, &owner, &collection, &body.name)
         .await?
         .expect("the set was just inserted");
     management_event::record(
@@ -165,13 +171,14 @@ pub async fn create_set(
     txn.commit().await.map_err(db::map_db_err)?;
     Ok(Json(AdminSet {
         name: body.name,
+        collection_name: collection,
         description,
         profiles: vec![],
     }))
 }
 
-/// GET /admin/collections/{name}/sets: the collection's sets with their
-/// ordered members (the family-nested list; the manage page reads a
+/// GET /admin/collections/{collection}/sets: the collection's sets with
+/// their ordered members (the family-nested list; the manage page reads a
 /// collection at a time).
 pub async fn list_collection_sets(
     State(state): State<AppState>,
@@ -193,11 +200,12 @@ pub async fn list_collection_sets(
         .map_err(db::map_db_err)?;
     let mut sets = Vec::with_capacity(set_rows.len());
     for set in set_rows {
-        let profiles = registry::set_members_ordered(&state.db, &owner, &set.name)
+        let profiles = registry::set_members_ordered(&state.db, &owner, &row.name, &set.name)
             .await
             .map_err(db::map_db_err)?;
         sets.push(AdminSet {
             name: set.name,
+            collection_name: set.collection_name,
             description: set.description,
             profiles: profiles.into_iter().map(AdminProfile::from).collect(),
         });
@@ -205,49 +213,31 @@ pub async fn list_collection_sets(
     Ok(Json(AdminSetList { sets }))
 }
 
-/// GET /admin/sets/{name}: flat item addressing (names are globally
-/// unique), the catalog space only.
+/// GET /admin/collections/{collection}/sets/{name}: item addressing inside
+/// one collection (a same-name set in another collection is a 404 here),
+/// the catalog space only.
 pub async fn get_set(
     State(state): State<AppState>,
     _admin: AdminToken,
-    Path(name): Path<String>,
+    Path((collection, name)): Path<(String, String)>,
 ) -> Result<Json<AdminSet>, ApiError> {
     let owner = registry::CATALOG_OWNER.to_owned();
-    let set = resolve_set(&state.db, &owner, &name).await?;
-    let profiles = registry::set_members_ordered(&state.db, &owner, &name)
-        .await
-        .map_err(db::map_db_err)?;
-    Ok(Json(AdminSet {
-        name: set.name,
-        description: set.description,
-        profiles: profiles.into_iter().map(AdminProfile::from).collect(),
-    }))
+    get_set_inner(&state, &owner, &collection, &name).await
 }
 
 pub async fn update_set(
     State(state): State<AppState>,
     admin: AdminToken,
-    Path(name): Path<String>,
+    Path((collection, name)): Path<(String, String)>,
     Json(body): Json<SetUpdate>,
 ) -> Result<Json<AdminSet>, ApiError> {
     let actor = admin.operator.as_str();
     let owner = registry::CATALOG_OWNER.to_owned();
     let txn = state.db.begin().await.map_err(db::map_db_err)?;
-    let set = resolve_set(&txn, &owner, &name).await?;
-    let before = set_state_json(&txn, &set.owner, &name)
+    let set = resolve_set(&txn, &owner, &collection, &name).await?;
+    let before = set_state_json(&txn, &set.owner, &set.collection_name, &name)
         .await?
         .expect("the set was resolved above");
-    if let Some(description) = &body.description {
-        profile_set::ActiveModel {
-            name: Set(name.clone()),
-            description: Set(description.clone()),
-            owner: Set(set.owner.clone()),
-            collection_name: NotSet,
-        }
-        .update(&txn)
-        .await
-        .map_err(db::map_db_err)?;
-    }
     if let Some(members) = &body.members {
         // Duplicate ids cannot carry two positions; unknown ids would make
         // the set unresolvable for the forwarding face. Both checks run
@@ -260,42 +250,63 @@ pub async fn update_set(
                 )));
             }
         }
-        // The set's owner gates its members: a catalog set serves its
+        // The set's collection gates its members: a catalog set serves its
         // members through the distribution face, so a member row must
-        // live in the set's space -- the one space this face manages.
-        let mut rows = Vec::with_capacity(members.len());
-        for id in members {
-            // The rows seed the promotion flip below (parked lives on
-            // the profile row, not the membership row).
-            let row = registry::profile_by_id(&txn, &set.owner, id)
-                .await
-                .map_err(db::map_db_err)?
-                .ok_or_else(|| {
-                    ApiError::not_found(format!("profile {id} is not in the catalog space"))
-                })?;
-            rows.push(row);
-        }
-        // The rewrite drives the served face, so keep the ids leaving
-        // this set: the flip below must tell "removed" from "reordered".
+        // live in the set's own collection -- a same-id row in another
+        // collection is a 404 (the composite foreign key backs this).
+        // The rows seed the promotion flip below (parked lives on the
+        // profile row, not the membership row) and are taken with a row
+        // lock: a profile write takes the same row first, so the two
+        // serialize here -- profile rows before member rows, never the
+        // reverse. The lock set is the members plus the ids leaving this
+        // set: a leaver's profile row is updated by the re-park flip after
+        // its member rows are gone, so it has to be locked before any member
+        // row is written. Locks are taken in id order, ascending,
+        // independent of the order the request lists its members in, so two
+        // rewrites that share profiles cannot deadlock on a disagreement;
+        // the rows are then read back in request order.
         let old_ids: std::collections::HashSet<String> = set_member::Entity::find()
-            .filter(set_member::Column::SetName.eq(&name))
             .filter(set_member::Column::Owner.eq(&set.owner))
+            .filter(set_member::Column::CollectionName.eq(&set.collection_name))
+            .filter(set_member::Column::SetName.eq(&name))
             .all(&txn)
             .await
             .map_err(db::map_db_err)?
             .into_iter()
             .map(|m| m.profile_id)
             .collect();
+        let mut lock_ids: Vec<&String> = members.iter().chain(old_ids.iter()).collect();
+        lock_ids.sort_unstable();
+        lock_ids.dedup();
+        let mut locked_rows = std::collections::HashMap::with_capacity(lock_ids.len());
+        for id in lock_ids {
+            let row =
+                registry::profile_by_id_for_update(&txn, &set.owner, &set.collection_name, id)
+                    .await
+                    .map_err(db::map_db_err)?;
+            locked_rows.insert(id.clone(), row);
+        }
+        // The 404 still names the first unknown id in request order: the
+        // walk below reads the locked rows back in that order.
+        let mut rows = Vec::with_capacity(members.len());
+        for id in members {
+            let row = locked_rows.remove(id).flatten().ok_or_else(|| {
+                ApiError::not_found(format!("profile {id} is not in collection {collection}"))
+            })?;
+            rows.push(row);
+        }
         set_member::Entity::delete_many()
-            .filter(set_member::Column::SetName.eq(&name))
             .filter(set_member::Column::Owner.eq(&set.owner))
+            .filter(set_member::Column::CollectionName.eq(&set.collection_name))
+            .filter(set_member::Column::SetName.eq(&name))
             .exec(&txn)
             .await
             .map_err(db::map_db_err)?;
         for (position, id) in members.iter().enumerate() {
             set_member::ActiveModel {
-                set_name: Set(name.clone()),
                 owner: Set(set.owner.clone()),
+                collection_name: Set(set.collection_name.clone()),
+                set_name: Set(name.clone()),
                 profile_id: Set(id.clone()),
                 position: Set(position as i32),
             }
@@ -306,14 +317,22 @@ pub async fn update_set(
         // Membership drives the served face: any parked member of the
         // rewritten list is promoted -- a set member is served, that
         // is the invariant, so a stale parked row heals on the next
-        // save -- and a member leaving its last set in this owner
-        // space returns to the parking area. The same transaction
-        // keeps both faces consistent; each flip lands its own profile
-        // update event (the set event records the membership change,
-        // this row records the served-face flip it caused).
+        // save -- and a member leaving its last set in this collection
+        // returns to a draft. The same transaction keeps both
+        // faces consistent; each flip lands its own profile update
+        // event (the set event records the membership change, this row
+        // records the served-face flip it caused).
         for (id, row) in members.iter().zip(&rows) {
             if row.parked {
-                flip_parked(&txn, &actor, &set.owner, id, false).await?;
+                flip_parked(
+                    &txn,
+                    actor.clone(),
+                    &set.owner,
+                    &set.collection_name,
+                    id,
+                    false,
+                )
+                .await?;
             }
         }
         for id in &old_ids {
@@ -321,17 +340,40 @@ pub async fn update_set(
                 continue;
             }
             let remaining = set_member::Entity::find()
-                .filter(set_member::Column::ProfileId.eq(id))
                 .filter(set_member::Column::Owner.eq(&set.owner))
+                .filter(set_member::Column::CollectionName.eq(&set.collection_name))
+                .filter(set_member::Column::ProfileId.eq(id))
                 .count(&txn)
                 .await
                 .map_err(db::map_db_err)?;
             if remaining == 0 {
-                flip_parked(&txn, &actor, &set.owner, id, true).await?;
+                flip_parked(
+                    &txn,
+                    actor.clone(),
+                    &set.owner,
+                    &set.collection_name,
+                    id,
+                    true,
+                )
+                .await?;
             }
         }
     }
-    let after = set_state_json(&txn, &set.owner, &name)
+    // The set row is written after the profile rows: the collection
+    // cascade takes the profile rows first and the set row after, so this
+    // write keeps the module's order and the two paths cannot cycle.
+    if let Some(description) = &body.description {
+        profile_set::ActiveModel {
+            name: Set(name.clone()),
+            description: Set(description.clone()),
+            owner: Set(set.owner.clone()),
+            collection_name: Set(set.collection_name.clone()),
+        }
+        .update(&txn)
+        .await
+        .map_err(db::map_db_err)?;
+    }
+    let after = set_state_json(&txn, &set.owner, &set.collection_name, &name)
         .await?
         .expect("the set existed at transaction start");
     management_event::record(
@@ -348,20 +390,25 @@ pub async fn update_set(
     .await
     .map_err(db::map_db_err)?;
     txn.commit().await.map_err(db::map_db_err)?;
-    get_set_inner(&state, &set.owner, &name).await
+    get_set_inner(&state, &set.owner, &set.collection_name, &name).await
 }
 /// Flip one member's `parked` flag inside the caller's transaction and
-/// audit it as a profile update (the same event shape the parking PUT
-/// emits): the set event records the membership change, this row
-/// records the served-face flip that change caused.
+/// audit it as a profile update (the same event shape the profile PUT
+/// emits): the set event records the membership change, this row records
+/// the served-face flip that change caused. The write names its row in
+/// full, and the owner in that name is load-bearing: an id is unique
+/// inside its collection, not inside the store, so another space's
+/// same-id row is a real row a narrower filter would flip too
+/// (`a_same_id_row_in_another_space_survives_the_rewrite` pins it).
 async fn flip_parked(
     txn: &impl sea_orm::ConnectionTrait,
-    actor: &str,
+    actor: std::borrow::Cow<'static, str>,
     owner: &str,
+    collection_name: &str,
     profile_id: &str,
     to: bool,
 ) -> Result<(), ApiError> {
-    let before = registry::profile_by_id(txn, owner, profile_id)
+    let before = registry::profile_by_id(txn, owner, collection_name, profile_id)
         .await
         .map_err(db::map_db_err)?
         .ok_or_else(|| ApiError::internal("member row vanished mid-rewrite"))?;
@@ -371,12 +418,13 @@ async fn flip_parked(
         .ok_or_else(|| ApiError::internal("profile row without its provider"))?;
     profile::Entity::update_many()
         .col_expr(profile::Column::Parked, Expr::value(to))
-        .filter(profile::Column::ProfileId.eq(profile_id))
         .filter(profile::Column::Owner.eq(owner))
+        .filter(profile::Column::CollectionName.eq(collection_name))
+        .filter(profile::Column::ProfileId.eq(profile_id))
         .exec(txn)
         .await
         .map_err(db::map_db_err)?;
-    let after = registry::profile_by_id(txn, owner, profile_id)
+    let after = registry::profile_by_id(txn, owner, collection_name, profile_id)
         .await
         .map_err(db::map_db_err)?
         .ok_or_else(|| ApiError::internal("member row vanished mid-rewrite"))?;
@@ -390,7 +438,7 @@ async fn flip_parked(
             action: "update",
             entity: "profile",
             entity_id: profile_id.to_owned(),
-            actor: actor.to_owned().into(),
+            actor: actor.clone(),
             before: Some(
                 serde_json::to_value(AdminProfile::from(before_served))
                     .expect("AdminProfile always serializes"),
@@ -411,17 +459,19 @@ async fn flip_parked(
 async fn get_set_inner(
     state: &AppState,
     owner: &str,
+    collection_name: &str,
     name: &str,
 ) -> Result<Json<AdminSet>, ApiError> {
-    let set = registry::set_by_id(&state.db, owner, name)
+    let set = registry::set_by_id(&state.db, owner, collection_name, name)
         .await
         .map_err(db::map_db_err)?
         .ok_or_else(|| ApiError::not_found("no such set"))?;
-    let profiles = registry::set_members_ordered(&state.db, owner, name)
+    let profiles = registry::set_members_ordered(&state.db, owner, collection_name, name)
         .await
         .map_err(db::map_db_err)?;
     Ok(Json(AdminSet {
         name: set.name,
+        collection_name: set.collection_name,
         description: set.description,
         profiles: profiles.into_iter().map(AdminProfile::from).collect(),
     }))
@@ -430,20 +480,24 @@ async fn get_set_inner(
 pub async fn delete_set(
     State(state): State<AppState>,
     admin: AdminToken,
-    Path(name): Path<String>,
+    Path((collection, name)): Path<(String, String)>,
 ) -> Result<Json<Deleted>, ApiError> {
     let actor = admin.operator.as_str();
     let owner = registry::CATALOG_OWNER.to_owned();
     let txn = state.db.begin().await.map_err(db::map_db_err)?;
-    let set = resolve_set(&txn, &owner, &name).await?;
-    let before = set_state_json(&txn, &set.owner, &name)
+    let set = resolve_set(&txn, &owner, &collection, &name).await?;
+    let before = set_state_json(&txn, &set.owner, &set.collection_name, &name)
         .await?
         .expect("the set was resolved above");
-    collection_default_guard(&txn, &set.owner, &name, "admin").await?;
-    profile_set::Entity::delete_by_id((set.owner, name.clone()))
-        .exec(&txn)
-        .await
-        .map_err(db::map_db_err)?;
+    collection_default_guard(&txn, &set.owner, &set.collection_name, &name, "admin").await?;
+    profile_set::Entity::delete_by_id((
+        set.owner.clone(),
+        set.collection_name.clone(),
+        name.clone(),
+    ))
+    .exec(&txn)
+    .await
+    .map_err(db::map_db_err)?;
     management_event::record(
         &txn,
         ManagementEventRow {
@@ -476,7 +530,6 @@ mod tests {
     use crate::registry::provider;
     use crate::secret::provider_credential;
     use axum::http::StatusCode;
-    use sea_orm::sea_query::Expr;
 
     #[tokio::test]
     async fn set_crud_round_trip_preserves_order_and_audits() {
@@ -521,7 +574,7 @@ mod tests {
             app(state.clone()),
             req(
                 "PATCH",
-                "/admin/sets/gamma",
+                "/admin/collections/baseline/sets/gamma",
                 Some(TEST_ADMIN_BEARER),
                 Some(serde_json::json!({"members": ["p4", "p1"]})),
             ),
@@ -535,7 +588,7 @@ mod tests {
             app(state.clone()),
             req(
                 "PATCH",
-                "/admin/sets/gamma",
+                "/admin/collections/baseline/sets/gamma",
                 Some(TEST_ADMIN_BEARER),
                 Some(serde_json::json!({"members": ["p1", "p4"]})),
             ),
@@ -548,7 +601,7 @@ mod tests {
             app(state.clone()),
             req(
                 "PATCH",
-                "/admin/sets/gamma",
+                "/admin/collections/baseline/sets/gamma",
                 Some(TEST_ADMIN_BEARER),
                 Some(serde_json::json!({"description": "new text"})),
             ),
@@ -583,55 +636,55 @@ mod tests {
             app(state.clone()),
             req(
                 "PATCH",
-                "/admin/sets/alpha",
+                "/admin/collections/baseline/sets/alpha",
                 Some(TEST_ADMIN_BEARER),
                 Some(serde_json::json!({"members": ["p1", "p2", "p6", "p4"]})),
             ),
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{body}");
-        assert!(!parked_flag(&state, "p4").await);
-        // Leave the only set: p4 returns to the parking area.
+        assert!(!parked_flag(&state, "baseline", "p4").await);
+        // Leave the only set: p4 becomes a draft again.
         let (status, body) = send(
             app(state.clone()),
             req(
                 "PATCH",
-                "/admin/sets/alpha",
+                "/admin/collections/baseline/sets/alpha",
                 Some(TEST_ADMIN_BEARER),
                 Some(serde_json::json!({"members": ["p1", "p2", "p6"]})),
             ),
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{body}");
-        assert!(parked_flag(&state, "p4").await);
+        assert!(parked_flag(&state, "baseline", "p4").await);
         // Leave one of two sets: p3 stays served while beta still
         // holds it.
         let (status, body) = send(
             app(state.clone()),
             req(
                 "PATCH",
-                "/admin/sets/alpha",
+                "/admin/collections/baseline/sets/alpha",
                 Some(TEST_ADMIN_BEARER),
                 Some(serde_json::json!({"members": ["p1", "p2", "p3", "p6"]})),
             ),
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{body}");
-        assert!(!parked_flag(&state, "p3").await);
+        assert!(!parked_flag(&state, "baseline", "p3").await);
         let (status, body) = send(
             app(state.clone()),
             req(
                 "PATCH",
-                "/admin/sets/alpha",
+                "/admin/collections/baseline/sets/alpha",
                 Some(TEST_ADMIN_BEARER),
                 Some(serde_json::json!({"members": ["p1", "p2", "p6"]})),
             ),
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{body}");
-        assert!(!parked_flag(&state, "p3").await);
+        assert!(!parked_flag(&state, "baseline", "p3").await);
         // The audit record: each flip lands its own profile update
-        // event (same shape the parking PUT emits), p4 moving true ->
+        // event (same shape the profile PUT emits), p4 moving true ->
         // false -> true across the two rewrites (write order, as the
         // crud test above relies on).
         let rows = audit_rows(&state.db).await;
@@ -649,69 +702,66 @@ mod tests {
         assert_eq!(p4_flips[1].after.as_ref().expect("after")["parked"], true);
     }
 
-    /// The stale-row heal: a catalog member parked while still in
-    /// the set -- the shape a pre-fix drop left behind -- heals on the
-    /// next save, because a set member being served is the invariant.
-    /// The owner scoping on the flip and the last-set count cannot be
-    /// exercised here: the schema holds a global unique constraint on
-    /// profiles.profile_id and a composite FK on set_members
-    /// (owner, profile_id), so cross-owner rows cannot exist -- the
-    /// filters are defense in depth, not observable behavior.
+    /// An id is unique inside its collection, not inside the store: the
+    /// same id and collection name under another owner is a different
+    /// profile, and the membership rewrite leaves it where it was.
     #[tokio::test]
-    async fn set_member_rewrite_heals_a_stale_parked_row() {
+    async fn a_same_id_row_in_another_space_survives_the_rewrite() {
         let state = seeded_state().await;
-        async fn catalog_parked(state: &AppState, id: &str) -> bool {
-            profile::Entity::find()
-                .filter(profile::Column::ProfileId.eq(id))
-                .filter(profile::Column::Owner.eq("system"))
-                .one(&state.db)
-                .await
-                .expect("row read")
-                .expect("row exists")
-                .parked
+        seed_collection(&state, "user-other", "baseline").await;
+        provider::ActiveModel {
+            owner: Set("user-other".to_owned()),
+            provider_id: Set("pp".to_owned()),
+            family: Set("deepseek".to_owned()),
+            base_url: Set(None),
+            ..Default::default()
         }
-        // The stale catalog state: system's p1 parked while still a
-        // member (what a pre-fix drop left behind).
-        profile::Entity::update_many()
-            .col_expr(profile::Column::Parked, Expr::value(true))
-            .filter(profile::Column::ProfileId.eq("p1"))
-            .filter(profile::Column::Owner.eq("system"))
-            .exec(&state.db)
-            .await
-            .expect("stale flip");
-        // Re-save alpha with p1 inside: the rewrite heals the row.
+        .insert(&state.db)
+        .await
+        .expect("other-space provider insert");
+        profile::ActiveModel {
+            owner: Set("user-other".to_owned()),
+            collection_name: Set("baseline".to_owned()),
+            profile_id: Set("p1".to_owned()),
+            provider_id: Set("pp".to_owned()),
+            model: Set("m".to_owned()),
+            parked: Set(true),
+            ..Default::default()
+        }
+        .insert(&state.db)
+        .await
+        .expect("other-space profile insert");
+
+        // The catalog rewrite that heals system's p1.
         let (status, body) = send(
             app(state.clone()),
             req(
                 "PATCH",
-                "/admin/sets/alpha",
+                "/admin/collections/baseline/sets/alpha",
                 Some(TEST_ADMIN_BEARER),
-                Some(serde_json::json!({"members": ["p1", "p2", "p6"]})),
+                Some(serde_json::json!({"members": ["p1", "p2"]})),
             ),
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{body}");
+        let parked = |owner: &'static str| {
+            let state = state.clone();
+            async move {
+                profile::Entity::find()
+                    .filter(profile::Column::Owner.eq(owner))
+                    .filter(profile::Column::CollectionName.eq("baseline"))
+                    .filter(profile::Column::ProfileId.eq("p1"))
+                    .one(&state.db)
+                    .await
+                    .expect("row read")
+                    .expect("row exists")
+                    .parked
+            }
+        };
+        assert!(!parked("system").await, "the catalog row is served");
         assert!(
-            !catalog_parked(&state, "p1").await,
-            "the stale catalog row heals on the rewrite"
-        );
-        // Remove p1 from the catalog set: the row re-parks on the last
-        // membership gone (the owner filter keeps the count scoped
-        // even as defense in depth).
-        let (status, body) = send(
-            app(state.clone()),
-            req(
-                "PATCH",
-                "/admin/sets/alpha",
-                Some(TEST_ADMIN_BEARER),
-                Some(serde_json::json!({"members": ["p2", "p6"]})),
-            ),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK, "{body}");
-        assert!(
-            catalog_parked(&state, "p1").await,
-            "the catalog row re-parks once the last membership is gone"
+            parked("user-other").await,
+            "the other space's row keeps its own flag"
         );
     }
 
@@ -761,7 +811,7 @@ mod tests {
             app(state.clone()),
             req(
                 "PATCH",
-                "/admin/sets/alpha",
+                "/admin/collections/baseline/sets/alpha",
                 Some(TEST_ADMIN_BEARER),
                 Some(serde_json::json!({"members": ["p1", "ghost"]})),
             ),
@@ -772,7 +822,7 @@ mod tests {
             app(state.clone()),
             req(
                 "PATCH",
-                "/admin/sets/alpha",
+                "/admin/collections/baseline/sets/alpha",
                 Some(TEST_ADMIN_BEARER),
                 Some(serde_json::json!({"members": ["p1", "p1"]})),
             ),
@@ -782,7 +832,12 @@ mod tests {
         // The failed writes rolled back: alpha still has exactly p1, p2.
         let (status, body) = send(
             app(state),
-            req("GET", "/admin/sets/alpha", Some(TEST_ADMIN_BEARER), None),
+            req(
+                "GET",
+                "/admin/collections/baseline/sets/alpha",
+                Some(TEST_ADMIN_BEARER),
+                None,
+            ),
         )
         .await;
         assert_eq!(status, StatusCode::OK);
@@ -794,7 +849,12 @@ mod tests {
         let state = seeded_state().await;
         let (status, body) = send(
             app(state.clone()),
-            req("DELETE", "/admin/sets/alpha", Some(TEST_ADMIN_BEARER), None),
+            req(
+                "DELETE",
+                "/admin/collections/baseline/sets/alpha",
+                Some(TEST_ADMIN_BEARER),
+                None,
+            ),
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{body}");
@@ -804,17 +864,41 @@ mod tests {
         // The set is gone from both faces.
         let (status, _) = send(
             app(state.clone()),
-            req("GET", "/admin/sets/alpha", Some(TEST_ADMIN_BEARER), None),
+            req(
+                "GET",
+                "/admin/collections/baseline/sets/alpha",
+                Some(TEST_ADMIN_BEARER),
+                None,
+            ),
         )
         .await;
         assert_eq!(status, StatusCode::NOT_FOUND);
-        let (status, body) = send(
+        // The selected-collection read is the surviving view: a pointer
+        // at the catalog baseline lists the members it still has.
+        let (status, _) = send(
             app(state.clone()),
-            req("GET", "/sets", Some(TEST_TAGMA_BEARER), None),
+            req(
+                "PUT",
+                "/selection",
+                Some(TEST_TAGMA_BEARER),
+                Some(serde_json::json!({"owner": "system", "collection_name": "baseline"})),
+            ),
         )
         .await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(body["sets"], serde_json::json!(["beta", "user-set"]));
+        let (status, body) = send(
+            app(state.clone()),
+            req("GET", "/selected-collection", Some(TEST_TAGMA_BEARER), None),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let names: Vec<&str> = body["sets"]
+            .as_array()
+            .expect("sets array")
+            .iter()
+            .map(|set| set["name"].as_str().expect("set name"))
+            .collect();
+        assert_eq!(names, vec!["beta"], "the deleted set left the view");
         // The delete landed an audit row with the full before-state.
         let rows = audit_rows(&state.db).await;
         let del = rows
@@ -831,14 +915,14 @@ mod tests {
     async fn update_on_folded_co_rider_addresses_the_shared_provider() {
         let state = seeded_state().await;
         catalog_provider(&state, "a1", "deepseek").await;
-        insert_co_rider(&state.db, registry::CATALOG_OWNER, "a1b", "a1").await;
+        insert_co_rider(&state.db, registry::CATALOG_OWNER, "baseline", "a1b", "a1").await;
         // The profile PUT carries no family: the wire shape moved it to
         // the provider face.
         let (status, body) = send(
             app(state.clone()),
             req(
                 "PUT",
-                "/admin/parking/a1b",
+                "/admin/collections/baseline/profiles/a1b",
                 Some(TEST_ADMIN_BEARER),
                 Some(serde_json::json!({
                     "model": "deepseek-chat",
@@ -894,13 +978,13 @@ mod tests {
         .insert(&state.db)
         .await
         .expect("seed shared credential");
-        insert_co_rider(&state.db, registry::CATALOG_OWNER, "a1", "a1").await;
-        insert_co_rider(&state.db, registry::CATALOG_OWNER, "a1b", "a1").await;
+        insert_co_rider(&state.db, registry::CATALOG_OWNER, "baseline", "a1", "a1").await;
+        insert_co_rider(&state.db, registry::CATALOG_OWNER, "baseline", "a1b", "a1").await;
         let (status, body) = send(
             app(state.clone()),
             req(
                 "DELETE",
-                "/admin/parking/a1b",
+                "/admin/collections/baseline/profiles/a1b",
                 Some(TEST_ADMIN_BEARER),
                 None,
             ),
@@ -927,7 +1011,12 @@ mod tests {
         // The last rider's exit takes the provider with it.
         let (status, body) = send(
             app(state.clone()),
-            req("DELETE", "/admin/parking/a1", Some(TEST_ADMIN_BEARER), None),
+            req(
+                "DELETE",
+                "/admin/collections/baseline/profiles/a1",
+                Some(TEST_ADMIN_BEARER),
+                None,
+            ),
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{body}");
@@ -976,8 +1065,8 @@ mod tests {
         );
     }
 
-    /// Set names stay globally unique: an exact duplicate of a listed
-    /// name is a conflict, whatever its collection.
+    /// Set names are unique within their collection: an exact duplicate
+    /// lands a conflict, and the same name elsewhere is a second row.
     #[tokio::test]
     async fn duplicate_set_name_still_conflicts() {
         let state = seeded_state().await;
@@ -1017,7 +1106,7 @@ mod tests {
             app(state.clone()),
             req(
                 "POST",
-                "/admin/parking",
+                "/admin/collections/baseline/profiles",
                 Some(TEST_ADMIN_BEARER),
                 Some(serde_json::json!({
                     "profile_id": "draft-1",
@@ -1033,7 +1122,7 @@ mod tests {
             app(state.clone()),
             req(
                 "PATCH",
-                "/admin/sets/alpha",
+                "/admin/collections/baseline/sets/alpha",
                 Some(TEST_ADMIN_BEARER),
                 Some(serde_json::json!({"members": ["draft-1"]})),
             ),
@@ -1041,12 +1130,15 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK, "{body}");
         assert_eq!(body["profiles"][0]["profile_id"], "draft-1");
-        let member =
-            profile::Entity::find_by_id((registry::CATALOG_OWNER.to_owned(), "draft-1".to_owned()))
-                .one(&state.db)
-                .await
-                .expect("profile read")
-                .expect("the draft joined the set");
+        let member = profile::Entity::find_by_id((
+            registry::CATALOG_OWNER.to_owned(),
+            "baseline".to_owned(),
+            "draft-1".to_owned(),
+        ))
+        .one(&state.db)
+        .await
+        .expect("profile read")
+        .expect("the draft joined the set");
         assert!(!member.parked, "a member is served");
         // The join is audited twice: the set event for the membership
         // rewrite and a profile update for the served-face flip.
@@ -1072,19 +1164,22 @@ mod tests {
             app(state.clone()),
             req(
                 "PATCH",
-                "/admin/sets/alpha",
+                "/admin/collections/baseline/sets/alpha",
                 Some(TEST_ADMIN_BEARER),
                 Some(serde_json::json!({"members": ["draft-x"]})),
             ),
         )
         .await;
         assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
-        let stayed =
-            profile::Entity::find_by_id((LOCAL_ADMIN_OWNER.to_owned(), "draft-x".to_owned()))
-                .one(&state.db)
-                .await
-                .expect("profile read")
-                .expect("the foreign draft stays where it is");
+        let stayed = profile::Entity::find_by_id((
+            LOCAL_ADMIN_OWNER.to_owned(),
+            "personal".to_owned(),
+            "draft-x".to_owned(),
+        ))
+        .one(&state.db)
+        .await
+        .expect("profile read")
+        .expect("the foreign draft stays where it is");
         assert!(stayed.parked);
     }
 
@@ -1094,6 +1189,18 @@ mod tests {
     async fn user_set_members_keep_the_submitted_order() {
         let state = seeded_state().await;
         let user = Some(TEST_USER_COOKIE);
+        let (status, _) = send(
+            app(state.clone()),
+            cookie_req(
+                "POST",
+                "/user/collections",
+                user,
+                true,
+                Some(serde_json::json!({"name": "home", "description": "d"})),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
         for pid in ["p-b", "p-a"] {
             let (status, _) = send(
                 app(state.clone()),
@@ -1111,7 +1218,7 @@ mod tests {
                 app(state.clone()),
                 cookie_req(
                     "POST",
-                    "/user/profiles",
+                    "/user/collections/home/profiles",
                     user,
                     true,
                     Some(serde_json::json!({
@@ -1124,18 +1231,6 @@ mod tests {
             .await;
             assert_eq!(status, StatusCode::OK);
         }
-        let (status, _) = send(
-            app(state.clone()),
-            cookie_req(
-                "POST",
-                "/user/collections",
-                user,
-                true,
-                Some(serde_json::json!({"name": "home", "description": "d"})),
-            ),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
         let (status, _) = send(
             app(state.clone()),
             cookie_req(
@@ -1157,7 +1252,7 @@ mod tests {
                 app(state.clone()),
                 cookie_req(
                     "PATCH",
-                    "/user/sets/ordered",
+                    "/user/collections/home/sets/ordered",
                     user,
                     true,
                     Some(serde_json::json!({ "members": order })),
@@ -1167,7 +1262,13 @@ mod tests {
             assert_eq!(status, StatusCode::OK, "{body}");
             let (status, body) = send(
                 app(state.clone()),
-                cookie_req("GET", "/user/sets/ordered", user, false, None),
+                cookie_req(
+                    "GET",
+                    "/user/collections/home/sets/ordered",
+                    user,
+                    false,
+                    None,
+                ),
             )
             .await;
             assert_eq!(status, StatusCode::OK);
@@ -1263,7 +1364,7 @@ mod tests {
         }
         let (status, body) = send(
             app(state.clone()),
-            req("DELETE", "/admin/sets/g8", admin, None),
+            req("DELETE", "/admin/collections/ac8/sets/g8", admin, None),
         )
         .await;
         assert_eq!(status, StatusCode::CONFLICT, "{body}");
@@ -1287,9 +1388,97 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "{body}");
         let (status, body) = send(
             app(state.clone()),
-            req("DELETE", "/admin/sets/g8", admin, None),
+            req("DELETE", "/admin/collections/ac8/sets/g8", admin, None),
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{body}");
+    }
+
+    /// A set's anchor is its collection: a same-name set elsewhere is a
+    /// different row, and a member row from another collection is not a
+    /// member here.
+    #[tokio::test]
+    async fn a_same_name_set_in_another_collection_is_a_different_row() {
+        let state = seeded_state().await;
+        seed_collection(&state, "system", "extra").await;
+        let (status, body) = send(
+            app(state.clone()),
+            req(
+                "POST",
+                "/admin/collections/extra/sets",
+                Some(TEST_ADMIN_BEARER),
+                Some(serde_json::json!({"name": "alpha", "description": "the twin"})),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["collection_name"], "extra");
+        // Serving a member through the twin leaves baseline's alpha alone.
+        catalog_profile_in(&state, "extra", "ex1", "m", true).await;
+        let (status, body) = send(
+            app(state.clone()),
+            req(
+                "PATCH",
+                "/admin/collections/extra/sets/alpha",
+                Some(TEST_ADMIN_BEARER),
+                Some(serde_json::json!({"members": ["ex1"]})),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["profiles"][0]["profile_id"], "ex1");
+        assert_eq!(body["profiles"][0]["parked"], false);
+        let baseline_ids = |body: &serde_json::Value| -> Vec<String> {
+            body["profiles"]
+                .as_array()
+                .expect("profiles array")
+                .iter()
+                .map(|p| p["profile_id"].as_str().expect("profile id").to_owned())
+                .collect()
+        };
+        let (status, body) = send(
+            app(state.clone()),
+            req(
+                "GET",
+                "/admin/collections/baseline/sets/alpha",
+                Some(TEST_ADMIN_BEARER),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(baseline_ids(&body), ["p1", "p2", "p6"]);
+        // A member row that lives in another collection is not reachable
+        // from this set, and the rejected rewrite leaves the list intact.
+        let (status, body) = send(
+            app(state.clone()),
+            req(
+                "PATCH",
+                "/admin/collections/baseline/sets/alpha",
+                Some(TEST_ADMIN_BEARER),
+                Some(serde_json::json!({"members": ["ex1"]})),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .expect("message")
+                .contains("is not in collection baseline"),
+            "{body}"
+        );
+        let (status, body) = send(
+            app(state.clone()),
+            req(
+                "GET",
+                "/admin/collections/baseline/sets/alpha",
+                Some(TEST_ADMIN_BEARER),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(baseline_ids(&body), ["p1", "p2", "p6"]);
     }
 }
