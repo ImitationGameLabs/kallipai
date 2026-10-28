@@ -171,6 +171,9 @@ Bound reviewer to profile set cheap.
 `list` prints the default marker plus per-set profile and agent counts,
 and each set's effective modalities (the intersection across member
 declarations).
+When a gateway serves the tagma, `list` prints `collection: owner/name`
+after the default marker and before the set lines: those set names resolve
+inside that collection.
 `bind` takes effect on the agent's next wake-up (parked agents pick the new
 binding up at their next restore).
 

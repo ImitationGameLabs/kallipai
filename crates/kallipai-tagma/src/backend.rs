@@ -373,6 +373,7 @@ mod tests {
             },
         );
         ProfileConfig {
+            collection_ref: None,
             sets: BTreeMap::from([(
                 "default".to_string(),
                 ProfileSet {
@@ -530,6 +531,7 @@ mod tests {
             },
         );
         let cfg = ProfileConfig {
+            collection_ref: None,
             sets: BTreeMap::from([(
                 "default".to_string(),
                 ProfileSet {

@@ -1,6 +1,7 @@
 pub mod agentid;
 pub mod approval;
 pub mod authtoken;
+pub mod collection;
 pub mod context;
 pub mod declaration;
 pub mod facts;

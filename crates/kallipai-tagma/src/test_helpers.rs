@@ -267,6 +267,7 @@ pub fn make_profile_bundle() -> Arc<arc_swap::ArcSwap<crate::state::ProfileBundl
         },
     );
     let cfg = ProfileConfig {
+        collection_ref: None,
         sets: BTreeMap::from([(
             "default".to_string(),
             ProfileSet {
@@ -350,6 +351,7 @@ pub fn make_profile_bundle_two_sets() -> Arc<arc_swap::ArcSwap<crate::state::Pro
         )
     };
     let cfg = ProfileConfig {
+        collection_ref: None,
         sets: BTreeMap::from([set("default", "test"), set("alt", "alt")]),
         default: "default".into(),
         endpoints,
@@ -433,6 +435,7 @@ pub fn make_profile_bundle_image_set() -> Arc<arc_swap::ArcSwap<crate::state::Pr
         },
     );
     let cfg = ProfileConfig {
+        collection_ref: None,
         sets: BTreeMap::from([(
             "default".to_string(),
             ProfileSet {

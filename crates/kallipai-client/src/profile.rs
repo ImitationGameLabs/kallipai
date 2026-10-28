@@ -9,6 +9,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use kallipai_common::collection::CollectionRef;
 use kallipai_common::protocol::Modality;
 use serde::Deserialize;
 
@@ -21,6 +22,11 @@ pub struct ProfileConfig {
     /// The default set's name; empty when unset.
     #[serde(default)]
     pub default: String,
+    /// The collection this mirror serves, absent whenever it serves none. It
+    /// names the collection a listing came from, and the count beside it matches
+    /// on the set name — unique inside that collection, not across the gateway.
+    #[serde(default)]
+    pub collection_ref: Option<CollectionRef>,
 }
 
 /// A named set, narrowed to its members: the modality helpers' data source
@@ -179,5 +185,22 @@ mod tests {
             cfg.sets["main"].profiles[0].modalities,
             vec![Modality::Text]
         );
+    }
+
+    /// The served collection parses from the same response, so a caller can
+    /// pair a set name with the collection it belongs to; an absent key reads
+    /// as none (a local source).
+    #[test]
+    fn reads_the_served_collection() {
+        let raw = serde_json::json!({
+            "sets": { "main": { "profiles": [{ "model": "m" }] } },
+            "default": "main",
+            "collection_ref": { "owner": "acme", "collection_name": "one" },
+        });
+        let cfg: ProfileConfig = serde_json::from_value(raw).unwrap();
+        assert_eq!(cfg.collection_ref, Some(CollectionRef::new("acme", "one")));
+        let local: ProfileConfig =
+            serde_json::from_value(serde_json::json!({ "sets": {} })).unwrap();
+        assert!(local.collection_ref.is_none());
     }
 }

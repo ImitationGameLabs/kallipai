@@ -29,6 +29,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use just_llm_client::types::generation::ReasoningEffort;
 use kallipai_adk::profile::{Profile, ProfileConfig, ProfileSet, Provider};
+use kallipai_common::collection::CollectionRef;
 use kallipai_common::protocol::Modality;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -42,6 +43,11 @@ use super::{ProfileSource, ProfileSourceKind};
 
 #[derive(Deserialize)]
 struct SelectedCollection {
+    /// The collection this answer belongs to: both halves are required, and
+    /// the tagma records the pair as the collection its mirror serves.
+    owner: String,
+    /// The collection's name inside that account.
+    collection_name: String,
     sets: Vec<SanitizedSet>,
     default_set: Option<String>,
 }
@@ -330,6 +336,9 @@ impl ProxyProfileSource {
             .as_ref()
             .and_then(|s| s.default_set.clone())
             .unwrap_or_default();
+        let collection_ref = selected
+            .as_ref()
+            .map(|s| CollectionRef::new(s.owner.clone(), s.collection_name.clone()));
         let mut endpoints: HashMap<String, Provider> = HashMap::new();
         let mut sets = BTreeMap::new();
         if let Some(selected) = selected {
@@ -360,6 +369,7 @@ impl ProxyProfileSource {
             default: default_set,
             endpoints,
             parking: parked,
+            collection_ref,
         })
     }
 }
@@ -441,6 +451,7 @@ impl ProfileSource for ProxyProfileSource {
                             "boot fetch failed with no snapshot: booting with an empty profile set (degraded); the repull task retries in the background"
                         );
                         Ok(ProfileConfig {
+                            collection_ref: None,
                             sets: BTreeMap::new(),
                             default: String::new(),
                             endpoints: HashMap::new(),
@@ -728,6 +739,37 @@ mod tests {
         format!("http://{addr}")
     }
 
+    /// The collection half is required: a face answer without it is a
+    /// refresh error, never a mirror that serves an unnamed collection.
+    #[tokio::test]
+    async fn a_selected_collection_without_its_name_is_a_refresh_error() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = axum::Router::new().route(
+            "/selected-collection",
+            get(|| async {
+                axum::Json(json!({
+                    "owner": "acc-x",
+                    "description": "an answer with no collection name",
+                    "sets": [],
+                    "default_set": null
+                }))
+            }),
+        );
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        let source = ProxyProfileSource::new(&format!("http://{addr}"), "tagma-token-1").unwrap();
+        let err = source
+            .load()
+            .await
+            .expect_err("a nameless collection must fail the refresh");
+        // The name is not optional: an answer without it fails the refresh
+        // instead of producing a mirror that claims no collection.
+        let text = format!("{err:#}");
+        assert!(text.contains("malformed payload"), "got: {text}");
+    }
+
     /// A dead base: a bound-then-dropped listener (the next connect is
     /// refused — nothing serves the port).
     async fn dead_base() -> String {
@@ -765,6 +807,12 @@ mod tests {
         // The undeclared-modality profile falls back to text-only.
         assert_eq!(set.profiles[1].modalities, Profile::default_modalities());
         assert_eq!(cfg.default, "alpha");
+        // The mirror records the collection it serves; GET /profiles and
+        // `profile-set list` name it with that pair.
+        assert_eq!(
+            cfg.collection_ref,
+            Some(CollectionRef::new("acc-x", "user-col"))
+        );
         // Endpoints collapse by family with the presenting token echoed and
         // the face's own public base copied verbatim.
         assert_eq!(cfg.endpoints.len(), 2);

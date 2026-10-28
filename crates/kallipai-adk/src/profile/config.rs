@@ -14,6 +14,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 use super::model::{Profile, ProfileSet, Provider};
+use kallipai_common::collection::CollectionRef;
 use kallipai_common::protocol::Modality;
 
 /// Parsed + validated profile configuration: the data the tagma assembles into a
@@ -39,6 +40,16 @@ pub struct ProfileConfig {
     /// when empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub parking: Vec<Profile>,
+    /// The collection this mirror serves: `Some` when the tagma pulls from a
+    /// gateway collection, `None` whenever it serves no collection — local
+    /// source, a boot without a selection, a boot whose first fetch failed,
+    /// or a pointer whose collection is gone.
+    ///
+    /// Memory only. The gateway's selection pointer is the authority and every
+    /// refresh overwrites it; every path that persists a config is local-source
+    /// only, where this is `None`, so `profiles.toml` never carries it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collection_ref: Option<CollectionRef>,
 }
 
 impl ProfileConfig {
@@ -53,6 +64,7 @@ impl ProfileConfig {
             default: String::new(),
             endpoints: HashMap::new(),
             parking: Vec::new(),
+            collection_ref: None,
         }
     }
 }
@@ -128,6 +140,9 @@ fn load_file(path: &Path) -> Result<ProfileConfig> {
         sets: file.sets,
         default,
         endpoints,
+        // The file never carries it: the gateway's selection is the authority
+        // and the proxy refresh fills it in memory.
+        collection_ref: None,
         parking: file.parking,
     })
 }
@@ -769,6 +784,7 @@ max_context_window = 1000
             },
         );
         let original = ProfileConfig {
+            collection_ref: None,
             sets: BTreeMap::from([
                 (
                     "thinking".to_string(),
@@ -896,6 +912,7 @@ max_context_window = 1000
             },
         );
         let cfg = ProfileConfig {
+            collection_ref: None,
             sets: BTreeMap::from([(
                 "only".to_string(),
                 ProfileSet {

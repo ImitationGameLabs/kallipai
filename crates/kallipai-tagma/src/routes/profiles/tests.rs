@@ -510,6 +510,7 @@ fn merge_wire_rejects_set_id_colliding_with_kept_live_parking() {
 
 fn live_config() -> ProfileConfig {
     ProfileConfig {
+        collection_ref: None,
         default: String::new(),
         sets: std::collections::BTreeMap::new(),
         endpoints: std::collections::HashMap::from([(
@@ -1113,6 +1114,7 @@ fn recovered_config() -> kallipai_adk::profile::ProfileConfig {
         },
     );
     ProfileConfig {
+        collection_ref: None,
         sets: BTreeMap::from([(
             "recovered".to_string(),
             ProfileSet {
@@ -1314,6 +1316,7 @@ fn unbuildable_config() -> kallipai_adk::profile::ProfileConfig {
         },
     );
     ProfileConfig {
+        collection_ref: None,
         sets: BTreeMap::from([(
             "recovered".to_string(),
             ProfileSet {
@@ -1602,6 +1605,12 @@ async fn switch_to_an_enrolled_platform_succeeds_and_pins_it() {
     let response = get_profiles(State(state), op_auth()).await.unwrap();
     assert_eq!(response["source"]["proxy_available"], true);
     assert_eq!(response["source"]["polis"], serde_json::json!(origin));
+    // The mirror names the collection it serves, not just the sets: a field
+    // skipped by serde would make `profile-set list` omit its collection line.
+    assert_eq!(
+        response["collection_ref"],
+        serde_json::json!({ "owner": "acc-x", "collection_name": "user-col" })
+    );
     let _ = std::fs::remove_file(crate::settings::settings_path().unwrap());
 }
 
@@ -1674,6 +1683,13 @@ async fn a_same_mode_selection_write_through_narrows_the_live_source() {
     let bundle = state.profiles.load();
     let names: Vec<String> = bundle.config.sets.keys().cloned().collect();
     assert_eq!(names, ["beta".to_owned()]);
+    // The recorded reference follows the pointer, not the boot answer.
+    assert_eq!(
+        bundle.config.collection_ref,
+        Some(kallipai_common::collection::CollectionRef::new(
+            "acc-x", "beta-col"
+        ))
+    );
     // The update is not a switch: the mode was never written (the
     // test started from an in-memory proxy state; settings never
     // saw a mode at all, so the default local spelling survives).

@@ -945,6 +945,7 @@ fn resolve_with_fallback_matrix() {
         }],
     };
     let cfg = ProfileConfig {
+        collection_ref: None,
         sets: BTreeMap::from([("research".to_string(), set)]),
         default: "research".into(),
         endpoints: BTreeMap::<String, Provider>::new()
@@ -1019,6 +1020,7 @@ fn resolve_without_default_never_falls_back() {
             .expect("empty set map is constructible"),
     );
     let cfg = ProfileConfig {
+        collection_ref: None,
         sets: std::collections::BTreeMap::new(),
         default: String::new(),
         endpoints: Default::default(),

@@ -261,6 +261,10 @@ pub(super) fn merge_wire(
             .map_err(|e| ApiError::bad_request(format!("{e:#}")))?;
     }
     Ok(ProfileConfig {
+        // The only write path is local, where the live value is absent by
+        // construction; cloning it keeps this merge from deciding, should a
+        // proxy-side write ever land here.
+        collection_ref: live.collection_ref.clone(),
         sets,
         default,
         parking,

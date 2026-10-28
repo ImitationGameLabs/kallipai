@@ -168,6 +168,11 @@ restored agent takes the tagma default again.
 name. Required: an unknown name is rejected with `400 Bad Request`
 listing the available sets.
 
+A binding is a name resolved inside the collection this tagma serves, so a
+subagent spawned here lands on this mirror's set of that name. Switching the
+mirror to another collection re-resolves every binding in the new one; a name
+it does not serve is dangling until the agent is rebound.
+
 **`permission_class`**: the required FS-access permission class for the
 subagent, as the lowercase wire spelling (`"normal"` / `"guest"`). The
 tagma treats it as a **downgrade only**: a value above the supervisor's
@@ -475,9 +480,9 @@ and the set is removed:
 binder has no live round to interrupt; its end state (a dangling record,
 delivery-gated until recovery) is exactly what interrupting a live agent
 produces, so the sweep skips straight to it. Either way the record keeps
-the set name and dangles: prompt delivery rejects with `409` until a set
-exists again under that name, the agent is rebound via
-`PUT /agents/{id}/profile-set`, or the agent is removed. Before the
+the set name: prompt delivery rejects with `409` until the
+served collection has a set of that name again, the agent is
+rebound via `PUT /agents/{id}/profile-set`, or the agent is removed. Before the
 write the sweep re-scans the registry; a spawn that landed inside the
 interrupt-to-persist window fails the whole delete with `409` (retry the
 same command; nothing was removed).
@@ -514,6 +519,20 @@ selection serves an empty config). Under `model-gateway` the response
 also carries `local_disk`: the local `profiles.toml` as a masked
 read-only preview, or `{"absent": true, "error": "..."}` when nothing
 readable is on disk.
+
+The response also carries `collection_ref` (`{owner, collection_name}`): the
+collection this mirror serves, filled from the gateway's selection on every
+successful refresh and kept in memory only — the file never stores it, and no
+`PUT` body can set it directly: the only mover is `source.collection`. The
+field is absent when the tagma serves no collection: a local source, a cold
+proxy boot whose fetch failed, a boot that came up without a selection, or a
+pointer whose collection is gone — that last shape empties `sets` too, not
+just this name. Absence alone does not mean "local source" — `source.mode`
+in the same response says which source is answering.
+
+An answer is not allowed to be half a collection: `SelectedCollection` requires
+both `owner` and `collection_name`, and missing either is a refresh failure,
+not a mirror that serves nothing.
 
 #### `PUT /profiles`: Validate, Persist, Hot-Swap
 
@@ -553,6 +572,10 @@ one needs `force`, the others another collection). A target that
 drops a set a live agent still records answers `409` with the
 stranded bindings; `force: true` on the PUT wire confirms the
 stranding.
+After the pointer moves, every binding is re-read as a name in the new
+collection: a name the new collection does not serve is dangling until the
+agent is rebound, and that stranding check is what makes the move take
+`force`.
 Switching back to `local` requires a readable `profiles.toml` (`409`
 otherwise). The response is the new source's masked config plus a
 `source_switch` block describing the change; `POST /profiles/apply` pushes

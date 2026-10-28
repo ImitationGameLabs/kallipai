@@ -822,6 +822,7 @@ mod tests {
             }],
         };
         let cfg = kallipai_adk::profile::ProfileConfig {
+            collection_ref: None,
             sets: std::collections::BTreeMap::from([("research".to_string(), set)]),
             default: "research".into(),
             endpoints: Default::default(),
@@ -849,6 +850,7 @@ mod tests {
         .expect("empty set map is constructible");
         let bundle = crate::state::ProfileBundle {
             config: kallipai_adk::profile::ProfileConfig {
+                collection_ref: None,
                 sets: Default::default(),
                 default: String::new(),
                 endpoints: Default::default(),

@@ -12,6 +12,11 @@
 //! Failure vocabulary: a missing resource is 404; a resource that exists
 //! but is outside the identity's visibility domain is 403 (default-deny);
 //! a missing/unknown bearer is 401 from the [`TagmaIdentity`] extractor.
+//!
+//! One exception on the read side: `GET /parking` answers an empty 200 with
+//! no pointer at all, with a pointer whose collection row is gone, and with
+//! one outside the domain -- visibility is the sibling's verdict, so a
+//! non-200 would read to the tagma as a transport fault.
 
 pub mod visibility;
 use axum::Json;
@@ -170,7 +175,9 @@ async fn sanitized_set(
 }
 
 /// GET /parking: the drafts of the collection this tagma selected. The
-/// container is the selection pointer's -- the URL carries none.
+/// container is the selection pointer's -- the URL carries none. A pointer
+/// this viewer cannot see answers an empty list, never a 403: visibility is
+/// `GET /selected-collection`'s verdict, kept in one place.
 #[derive(Clone, Debug, Serialize)]
 pub struct Parking {
     pub profiles: Vec<SanitizedProfile>,
@@ -192,6 +199,21 @@ pub async fn get_parking(
     let Some(pointer) = pointer else {
         return Ok(Json(Parking { profiles: vec![] }));
     };
+    // Visibility is the sibling's verdict alone: a pointer outside this
+    // viewer's domain answers the same empty list as an empty draft space, so
+    // the two faces never disagree about one pointer and the tagma keeps its
+    // non-200-is-a-transport-fault contract (the sibling still 404s/403s).
+    if !visibility::collection_visible(
+        &state.db,
+        &identity.viewer,
+        &pointer.owner,
+        &pointer.collection_name,
+    )
+    .await
+    .map_err(db::map_db_err)?
+    {
+        return Ok(Json(Parking { profiles: vec![] }));
+    }
     let parked =
         registry::catalog_parked_profiles(&state.db, &pointer.owner, &pointer.collection_name)
             .await
@@ -1179,5 +1201,167 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = json_of(response).await;
         assert_eq!(body["collection_name"], "baseline");
+    }
+
+    /// Insert a parked draft into one collection (the fixtures park none
+    /// outside the catalog baseline).
+    async fn park(
+        db: &sea_orm::DatabaseConnection,
+        owner: &str,
+        collection: &str,
+        id: &str,
+        model: &str,
+    ) {
+        use sea_orm::{ActiveModelTrait, Set};
+        crate::registry::provider::ActiveModel {
+            owner: Set(owner.to_string()),
+            provider_id: Set(format!("{id}-prov")),
+            family: Set("openai-compatible".to_string()),
+            base_url: Set(Some("https://api.upstream.test".to_string())),
+            ..Default::default()
+        }
+        .insert(db)
+        .await
+        .expect("insert provider");
+        crate::registry::profile::ActiveModel {
+            owner: Set(owner.to_string()),
+            collection_name: Set(collection.to_string()),
+            profile_id: Set(id.to_string()),
+            provider_id: Set(format!("{id}-prov")),
+            model: Set(model.to_string()),
+            max_context_window: Set(Some(128_000)),
+            effort: Set(None),
+            modalities: Set(Some("[\"text\"]".to_string())),
+            parked: Set(true),
+            store: Set(None),
+        }
+        .insert(db)
+        .await
+        .expect("insert parked profile");
+    }
+
+    /// Point a tagma's store at a collection directly: the selection route
+    /// refuses targets outside the domain, and this test needs the stale row
+    /// a revoked publication (or a deleted collection) leaves behind.
+    async fn point_at(
+        db: &sea_orm::DatabaseConnection,
+        tagma: &str,
+        owner: &str,
+        collection: &str,
+    ) {
+        use sea_orm::{ActiveModelTrait, EntityTrait, IntoActiveModel, Set};
+        let existing = crate::registry::gateway_selection::Entity::find_by_id(tagma.to_string())
+            .one(db)
+            .await
+            .expect("find pointer");
+        match existing {
+            Some(row) => {
+                let mut row = row.into_active_model();
+                row.owner = Set(owner.to_string());
+                row.collection_name = Set(collection.to_string());
+                row.updated_at = Set(time::OffsetDateTime::now_utc());
+                row.update(db).await.expect("update pointer");
+            }
+            None => {
+                crate::registry::gateway_selection::ActiveModel {
+                    tagma_id: Set(tagma.to_string()),
+                    owner: Set(owner.to_string()),
+                    collection_name: Set(collection.to_string()),
+                    updated_at: Set(time::OffsetDateTime::now_utc()),
+                }
+                .insert(db)
+                .await
+                .expect("insert pointer");
+            }
+        }
+    }
+
+    /// `/parking` never speaks about visibility: a pointer the viewer cannot
+    /// see answers the same empty list as an empty draft space (no row of the
+    /// hidden collection leaks), and so does a pointer whose collection row
+    /// is gone. The 403 lives on the sibling alone, which the tagma reads
+    /// first -- one verdict, one place.
+    #[tokio::test]
+    async fn parking_answers_empty_for_an_invisible_or_deleted_pointer() {
+        let db = migrated_test_db().await;
+        crate::test_support::seed_registry(&db, "https://api.upstream.test").await;
+        // A draft in a collection the viewer cannot see: leaking it is the
+        // temptation this test measures.
+        park(&db, "acc-bound", "own-col", "hidden-draft", "hidden-model").await;
+        // A draft the viewer may see, so an empty answer above cannot be a
+        // broken query.
+        park(&db, "acc-other", "other-col", "own-draft", "own-model").await;
+
+        let management = crate::management::AdminAuth::Platform(std::sync::Arc::new(
+            crate::test_support::MockVerifier::enrolled(&[("tagma-park", "acc-other")])
+                .with_tagmas(&[("bearer-park-invisible-0123456789ab", "tagma-park")]),
+        ));
+        let app = router_for_test(AppState {
+            db: db.clone(),
+            public_base_url: "http://gw.test:7501".to_string(),
+            management,
+            identity_cache: std::sync::Arc::new(crate::secret::IdentityCache::default()),
+            metrics: crate::metrics::Metrics::private(),
+        });
+        let bearer = "bearer-park-invisible-0123456789ab";
+
+        point_at(&db, "tagma-park", "acc-bound", "own-col").await;
+        let response = app
+            .clone()
+            .oneshot(get("/selected-collection", Some(bearer)))
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "the sibling owns the visibility verdict"
+        );
+        let response = app
+            .clone()
+            .oneshot(get("/parking", Some(bearer)))
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "this face answers 200 or a transport fault, never 403"
+        );
+        let body = json_of(response).await;
+        assert_eq!(
+            body["profiles"].as_array().expect("profiles array").len(),
+            0
+        );
+        let text = body.to_string();
+        assert!(
+            !text.contains("hidden"),
+            "no row of the invisible collection may leak: {text}"
+        );
+
+        // The visible pointer serves exactly its own draft.
+        point_at(&db, "tagma-park", "acc-other", "other-col").await;
+        let response = app
+            .clone()
+            .oneshot(get("/parking", Some(bearer)))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_of(response).await;
+        let profiles = body["profiles"].as_array().expect("profiles array");
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(profiles[0]["model"], "own-model");
+
+        // A pointer whose collection row is gone answers the same empty list.
+        point_at(&db, "tagma-park", "acc-other", "vanished-col").await;
+        let response = app
+            .clone()
+            .oneshot(get("/parking", Some(bearer)))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_of(response).await;
+        assert_eq!(
+            body["profiles"].as_array().expect("profiles array").len(),
+            0
+        );
     }
 }

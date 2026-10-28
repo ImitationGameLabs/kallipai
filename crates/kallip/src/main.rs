@@ -752,7 +752,13 @@ async fn main() -> Result<()> {
                 if !cfg.default.is_empty() {
                     println!("default set: {}", cfg.default);
                 }
+                if let Some(collection) = &cfg.collection_ref {
+                    println!("collection: {collection}");
+                }
                 for (name, set) in &cfg.sets {
+                    // This mirror's users of the set: a binding is a bare set
+                    // name resolved inside the served collection, so the name
+                    // alone decides.
                     let users = agents
                         .iter()
                         .filter(|a| a.profile_set.as_deref() == Some(name.as_str()))
