@@ -1,8 +1,11 @@
 <script lang="ts">
   import { MENU_ITEM, MENU_ITEM_DANGER } from "../../../lib/classes.ts";
-  // The drafts section: one row per draft -- the whole catalog space's,
-  // or one collection's when the panel is scoped to a detail. A draft
-  // is a profile row outside every set: the filter is the wire flag, not
+  // The unassigned section: one row per unassigned profile -- the whole
+  // catalog space's, or one collection's when the panel is scoped to a
+  // detail. An unassigned profile is a profile row outside every set:
+  // the filter is the wire flag, not a separate store. A row's identity
+  // is its collection plus its id (the id alone repeats across
+  // collections), so both the each key and the row carry the collection.
   // a separate store. A row's identity is its collection plus its id
   // (the id alone repeats across collections), so both the each key and
   // the row carry the collection.
@@ -19,15 +22,15 @@
   import {
     common_edit,
     common_remove,
-    manage_gateway_drafts,
-    manage_gateway_drafts_actions_aria,
-    manage_gateway_drafts_desc,
-    manage_gateway_drafts_desc_collection,
-    manage_gateway_draft_add,
+    manage_gateway_unassigned,
+    manage_gateway_unassigned_actions_aria,
+    manage_gateway_unassigned_desc,
+    manage_gateway_unassigned_desc_collection,
+    manage_gateway_unassigned_add,
   } from "../../../paraglide/messages.js";
 
   let {
-    drafts,
+    unassigned,
     scope = null,
     onCreate,
     onEdit,
@@ -35,8 +38,8 @@
     onDragStart,
     onDragEnd,
   }: {
-    /** The drafts on show: the whole space's, or one collection's. */
-    drafts: readonly AdminProfileRow[];
+    /** The unassigned profiles on show: the whole space's, or one collection's. */
+    unassigned: readonly AdminProfileRow[];
     /** The collection the panel is narrowed to (null = the whole space). */
     scope?: string | null;
     onCreate: () => void;
@@ -50,23 +53,23 @@
 <section class="space-y-3">
   <div class="flex items-center justify-between gap-2">
     <h2 class="text-sm font-medium uppercase opacity-60 tracking-wide">
-      {manage_gateway_drafts()}
+      {manage_gateway_unassigned()}
     </h2>
     <button
       type="button"
       class="btn btn-sm preset-filled-primary-500"
       onclick={onCreate}
     >
-      {manage_gateway_draft_add()}
+      {manage_gateway_unassigned_add()}
     </button>
   </div>
   <p class="text-xs opacity-60 mt-1">
     {scope === null
-      ? manage_gateway_drafts_desc()
-      : manage_gateway_drafts_desc_collection({ collection: scope })}
+      ? manage_gateway_unassigned_desc()
+      : manage_gateway_unassigned_desc_collection({ collection: scope })}
   </p>
   <div role="list" class="space-y-3">
-    {#each drafts as p (`${p.collection_name}/${p.profile_id}`)}
+    {#each unassigned as p (`${p.collection_name}/${p.profile_id}`)}
       <div
         role="listitem"
         class="card preset-tonal-surface p-3 flex items-center gap-3 cursor-grab"
@@ -91,7 +94,7 @@
           >{p.provider_id}</span
         >
         <ActionMenu
-          label={manage_gateway_drafts_actions_aria()}
+          label={manage_gateway_unassigned_actions_aria()}
           onSelect={(value) => {
             if (value === "edit") onEdit(p);
             else if (value === "remove") onDelete(p);

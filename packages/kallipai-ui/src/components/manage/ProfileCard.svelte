@@ -1,6 +1,6 @@
 <script lang="ts">
   import { MENU_ITEM, MENU_ITEM_DANGER } from "../../lib/classes.ts";
-  // One draggable profile card (set slots and the parking area share this
+  // One draggable profile card (set slots and the unassigned area share this
   // language). The card only reports the raw drag lifecycle and menu
   // intents; payloads and mutations stay with the owning page/section.
   import { Menu } from "@skeletonlabs/skeleton-svelte";

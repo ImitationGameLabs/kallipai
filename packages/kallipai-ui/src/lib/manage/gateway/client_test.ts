@@ -15,7 +15,7 @@ import {
   listCollections,
   listCollectionSets,
   listGroups,
-  listDrafts,
+  listUnassigned,
   listProfiles,
   listProviders,
   moveProfile,
@@ -172,7 +172,7 @@ Deno.test("provider wraps speak the server's wire shapes", async () => {
   }
 });
 
-Deno.test("set and draft reads speak the server's shapes", async () => {
+Deno.test("set and unassigned reads speak the server's shapes", async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = ((input: unknown) => {
     const url = String(input);
@@ -183,7 +183,7 @@ Deno.test("set and draft reads speak the server's shapes", async () => {
         sets: [{ name: "alpha", description: "d", profiles: [] }],
       };
     } else if (url.endsWith("/admin/profiles?parked=true")) {
-      // The drafts read is the profiles list with the parked filter; it
+      // The unassigned read is the profiles list with the parked filter; it
       // answers a bare AdminProfile[] (the one unwrap-less GET in the
       // family), and every row names its collection.
       payload = [
@@ -206,16 +206,16 @@ Deno.test("set and draft reads speak the server's shapes", async () => {
   try {
     const sets = await listCollectionSets("baseline");
     assertEquals(sets[0]?.name, "alpha");
-    const drafts = await listDrafts();
-    assertEquals(drafts[0]?.profile_id, "p1");
-    assertEquals(drafts[0]?.collection_name, "baseline");
+    const unassigned = await listUnassigned();
+    assertEquals(unassigned[0]?.profile_id, "p1");
+    assertEquals(unassigned[0]?.collection_name, "baseline");
   } finally {
     globalThis.fetch = originalFetch;
   }
 });
 
 Deno.test(
-  "listDrafts reads the drafts list with the parked filter",
+  "listUnassigned reads the unassigned list with the parked filter",
   async () => {
     const calls: string[] = [];
     const originalFetch = globalThis.fetch;
@@ -229,7 +229,7 @@ Deno.test(
       return Promise.resolve(stub);
     }) as unknown as typeof fetch;
     try {
-      await listDrafts("http://127.0.0.1:7500");
+      await listUnassigned("http://127.0.0.1:7500");
       assertEquals(calls, ["http://127.0.0.1:7500/admin/profiles?parked=true"]);
     } finally {
       globalThis.fetch = originalFetch;

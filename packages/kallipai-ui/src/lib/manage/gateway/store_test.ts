@@ -187,7 +187,7 @@ Deno.test(
 );
 
 Deno.test(
-  "draft mutations answer like the group family: create and save answer booleans, removal rides the error state",
+  "unassigned mutations answer like the group family: create and save answer booleans, removal rides the error state",
   async () => {
     const realFetch = globalThis.fetch;
     const respond = (status: number) => {
@@ -202,7 +202,7 @@ Deno.test(
     try {
       respond(200);
       assertEquals(
-        await store.addDraft("alpha", {
+        await store.addUnassigned("alpha", {
           profile_id: "p1",
           provider_id: "up1",
           model: "gpt",
@@ -210,14 +210,14 @@ Deno.test(
         true,
       );
       assertEquals(
-        await store.saveDraft("alpha", "p1", { model: "gpt" }),
+        await store.saveUnassigned("alpha", "p1", { model: "gpt" }),
         true,
       );
-      await store.removeDraft("alpha", "p1");
+      await store.removeUnassigned("alpha", "p1");
       assertEquals(store.error, null);
       respond(404);
       assertEquals(
-        await store.addDraft("alpha", {
+        await store.addUnassigned("alpha", {
           profile_id: "p1",
           provider_id: "up1",
           model: "gpt",
@@ -225,10 +225,10 @@ Deno.test(
         false,
       );
       assertEquals(
-        await store.saveDraft("alpha", "p1", { model: "gpt" }),
+        await store.saveUnassigned("alpha", "p1", { model: "gpt" }),
         false,
       );
-      await store.removeDraft("alpha", "p1");
+      await store.removeUnassigned("alpha", "p1");
       assertEquals(typeof store.error, "string");
     } finally {
       globalThis.fetch = realFetch;
@@ -237,7 +237,7 @@ Deno.test(
 );
 
 Deno.test(
-  "addDraftToSet puts the appended member list and no-ops on an id already inside",
+  "addUnassignedToSet puts the appended member list and no-ops on an id already inside",
   async () => {
     const realFetch = globalThis.fetch;
     const calls: { method: string; url: string; body?: string }[] = [];
@@ -280,7 +280,7 @@ Deno.test(
       return Promise.resolve(json({}));
     }) as typeof fetch;
     try {
-      assertEquals(await store.addDraftToSet("alpha", "b", "s1"), true);
+      assertEquals(await store.addUnassignedToSet("alpha", "b", "s1"), true);
       const updates = calls.filter((c) => c.method === "PATCH");
       assertEquals(updates.length, 1);
       assertEquals(JSON.parse(updates[0].body ?? "{}"), {
@@ -288,7 +288,7 @@ Deno.test(
       });
       // An id already inside the set lands as a no-op drop: no second update.
       calls.length = 0;
-      assertEquals(await store.addDraftToSet("alpha", "a", "s1"), true);
+      assertEquals(await store.addUnassignedToSet("alpha", "a", "s1"), true);
       assertEquals(calls.filter((c) => c.method === "PATCH").length, 0);
     } finally {
       globalThis.fetch = realFetch;
@@ -297,7 +297,7 @@ Deno.test(
 );
 
 Deno.test(
-  "addDraftToSet skips the update when the set read fails",
+  "addUnassignedToSet skips the update when the set read fails",
   async () => {
     const realFetch = globalThis.fetch;
     const calls: { method: string; url: string }[] = [];
@@ -312,7 +312,7 @@ Deno.test(
       );
     }) as typeof fetch;
     try {
-      assertEquals(await store.addDraftToSet("alpha", "b", "s1"), false);
+      assertEquals(await store.addUnassignedToSet("alpha", "b", "s1"), false);
       assertEquals(calls.filter((c) => c.method === "PATCH").length, 0);
     } finally {
       globalThis.fetch = realFetch;

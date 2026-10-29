@@ -24,7 +24,7 @@ import {
   type GroupRow,
   listCollections,
   listCollectionSets,
-  listDrafts,
+  listUnassigned,
   listGroups,
   listProfiles,
   listProviders,
@@ -46,9 +46,9 @@ class GatewayAdminStore {
   sets = $state<AdminSetRow[] | null>(null);
   /** The provider pool (the catalog space's rows); null until first read. */
   providers = $state<ProviderRow[] | null>(null);
-  /** The catalog space's drafts (the parked filter over the profiles
+  /** The catalog space's unassigned profiles (the `parked` filter over the
    * list); null until the first read lands. */
-  drafts = $state<AdminProfileRow[] | null>(null);
+  unassigned = $state<AdminProfileRow[] | null>(null);
   /** The catalog's collections with their live publications. */
   collections = $state<AdminCollectionRow[] | null>(null);
   /** The platform groups (the publish audiences). */
@@ -71,14 +71,14 @@ class GatewayAdminStore {
   }
 
   /** Read the whole read side: sets (nested per collection),
-   * providers, drafts (the parked slice). */
+   * providers, unassigned (the `parked` slice). */
   async refreshAll(): Promise<void> {
     this.isLoading = true;
     try {
-      const [providersBody, draftsBody, collectionsBody, groupsBody] =
+      const [providersBody, unassignedBody, collectionsBody, groupsBody] =
         await Promise.all([
           this.run(() => listProviders()),
-          this.run(() => listDrafts()),
+          this.run(() => listUnassigned()),
           this.run(() => listCollections()),
           this.run(() => listGroups()),
         ]);
@@ -93,7 +93,7 @@ class GatewayAdminStore {
           .flat();
       }
       if (providersBody) this.providers = providersBody;
-      if (draftsBody) this.drafts = draftsBody;
+      if (unassignedBody) this.unassigned = unassignedBody;
       if (collectionsBody) this.collections = collectionsBody;
       if (groupsBody) this.groups = groupsBody;
       this.hasLoaded = true;
@@ -123,10 +123,10 @@ class GatewayAdminStore {
     return (this.sets ?? []).filter((s) => s.collection_name === collection);
   }
 
-  /** One collection's drafts, read from the wire: a draft belongs to its
-   * collection, so only that collection's sets can take it. The detail
+  /** One collection's unassigned profiles, read from the wire: a row
+   * belongs to its collection, so only that collection's sets can take it.
    * panel scopes its read here instead of sifting the whole space. */
-  draftsIn(collection: string): Promise<AdminProfileRow[] | undefined> {
+  unassignedIn(collection: string): Promise<AdminProfileRow[] | undefined> {
     return this.run(() =>
       listProfiles({ collection_name: collection, parked: true }),
     );
@@ -150,14 +150,14 @@ class GatewayAdminStore {
     });
   }
 
-  /** Drop a draft into a set: re-read the set's live member list first
+  /** Drop an unassigned profile into a set: re-read the set's live member list
    * (the drop appends to what the server has, not a stale cache), treat
    * an id that is already inside as a no-op drop, and put the full
-   * ordered list back. The server adopts a member that still parks in
-   * the caller's space: the membership rewrite moves it into the catalog
-   * in the same transaction.
+   * ordered list back. The server adopts a member that still carries the
+   * `parked` flag in the caller's space: the membership rewrite moves it
+   * into the catalog in the same transaction.
    */
-  async addDraftToSet(
+  async addUnassignedToSet(
     collection: string,
     profileId: string,
     setName: string,
@@ -207,15 +207,15 @@ class GatewayAdminStore {
     });
   }
 
-  /** Re-read just the drafts slice (the parked filter). */
-  async refreshDrafts(): Promise<void> {
-    const body = await this.run(() => listDrafts());
-    if (body) this.drafts = body;
+  /** Re-read just the unassigned slice (the `parked` filter). */
+  async refreshUnassigned(): Promise<void> {
+    const body = await this.run(() => listUnassigned());
+    if (body) this.unassigned = body;
   }
 
-  /** Create a draft in the named collection, then re-read the drafts
+  /** Create an unassigned profile in the named collection, then re-read the
    * slice. */
-  async addDraft(
+  async addUnassigned(
     collection: string,
     body: {
       profile_id: string;
@@ -228,14 +228,14 @@ class GatewayAdminStore {
   ): Promise<boolean> {
     const ok = await this.run(async () => {
       await createProfile(collection, { ...body, parked: true });
-      await this.refreshDrafts();
+      await this.refreshUnassigned();
       return true;
     });
     return ok === true;
   }
 
-  /** PUT the draft's shape in place, then re-read the drafts slice. */
-  async saveDraft(
+  /** PUT an unassigned profile's content in place, then re-read the slice. */
+  async saveUnassigned(
     collection: string,
     profileId: string,
     body: {
@@ -249,15 +249,15 @@ class GatewayAdminStore {
       updateProfile(collection, profileId, { ...body, parked: true }),
     );
     if (ok === undefined) return false;
-    await this.refreshDrafts();
+    await this.refreshUnassigned();
     return true;
   }
 
-  /** Delete a draft, then re-read the drafts slice. */
-  async removeDraft(collection: string, profileId: string): Promise<void> {
+  /** Delete an unassigned profile, then re-read the unassigned slice. */
+  async removeUnassigned(collection: string, profileId: string): Promise<void> {
     await this.run(async () => {
       await deleteProfile(collection, profileId);
-      await this.refreshDrafts();
+      await this.refreshUnassigned();
     });
   }
 

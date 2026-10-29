@@ -1,10 +1,10 @@
 <script lang="ts">
   // Toolbar card for the profiles page: heading, refresh/test-all/save/apply
   // buttons, the error/result/discard/loading lines, and the advisory banners
-  // (set hazard, parked-live). The apply *flow* — dialog open state and the
+  // (set hazard, unassigned-live). The apply *flow* — dialog open state and the
   // confirm handler — stays in the page so the tail ConfirmDialog keeps a
   // single source of truth; this row only requests it.
-  import type { ParkedLiveSnapshot } from "../../lib/manage/parkedLive.ts";
+  import type { UnassignedLiveSnapshot } from "../../lib/manage/unassignedLive.ts";
   import type { ProfilesStore } from "../../lib/manage/profiles.svelte.ts";
   import {
     common_loading,
@@ -14,7 +14,7 @@
     manage_profiles_heading_desc_l1,
     manage_profiles_heading_desc_l2,
     manage_profiles_heading_desc_l3,
-    manage_profiles_parking_warn,
+    manage_profiles_unassigned_warn,
     manage_profiles_save_changes,
     manage_profiles_test_all,
     manage_profiles_sets_hazard,
@@ -24,7 +24,7 @@
   let {
     store,
     applyResult,
-    parkedLive,
+    unassignedLive,
     onTestAll,
     onSave,
     onDiscard,
@@ -34,7 +34,7 @@
   }: {
     store: ProfilesStore;
     applyResult: string | null;
-    parkedLive: ParkedLiveSnapshot | null;
+    unassignedLive: UnassignedLiveSnapshot | null;
     onTestAll: () => void;
     onSave: () => void;
     onDiscard: () => void;
@@ -117,13 +117,13 @@
     ⚠ {manage_profiles_sets_hazard()}
   </div>
 
-  {#if parkedLive}
+  {#if unassignedLive}
     <div
       class="card preset-tonal-surface p-3 text-xs opacity-70 border-l-4 border-l-warning-500"
     >
-      ⚠ {manage_profiles_parking_warn({
-        count: parkedLive.agentCount,
-        ids: parkedLive.profileIds.join(", "),
+      ⚠ {manage_profiles_unassigned_warn({
+        count: unassignedLive.agentCount,
+        ids: unassignedLive.profileIds.join(", "),
       })}
     </div>
   {/if}

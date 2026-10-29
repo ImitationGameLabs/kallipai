@@ -1,7 +1,7 @@
 <script lang="ts">
   import { MENU_ITEM, MENU_ITEM_DANGER } from "../../lib/classes.ts";
   // The caller's profiles section: one card per row (model, provider,
-  // collection, and the draft badge) with edit and remove in the kebab.
+  // collection, and the unassigned badge) with edit and remove in the kebab.
   // The list spans the caller's collections, and a profile id repeats
   // across them, so the each key and the card both name the collection.
   // Prop-driven like the admin section.
@@ -13,7 +13,7 @@
     common_edit,
     common_remove,
     user_gateway_profile_add,
-    user_gateway_profile_draft,
+    user_gateway_profile_unassigned,
     user_gateway_profiles,
   } from "../../paraglide/messages.js";
 
@@ -55,7 +55,7 @@
               </span>
               {#if row.parked}
                 <span class="badge preset-filled-surface-500 text-xs shrink-0">
-                  {user_gateway_profile_draft()}
+                  {user_gateway_profile_unassigned()}
                 </span>
               {/if}
             </div>

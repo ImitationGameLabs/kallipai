@@ -133,7 +133,7 @@ export function providerIdsOf(
 }
 
 /**
- * Every profile id visible in the draft — sets ∪ parking (the parking
+ * Every profile id visible in the draft — sets ∪ unassigned (the unassigned
  * dialog's new-mode duplicate check; advisory only, PUT is authoritative).
  */
 export function occupiedIdsOf(
@@ -242,22 +242,22 @@ export function modelsCountLabel(count: number): string {
 }
 
 /**
- * Parked-live snapshot core: which parked ids some live agent still runs.
+ * Unassigned-live snapshot core: which unassigned ids some live agent still runs.
  * Takes the settled per-agent statuses (the page fetches them; per-agent
  * failures arrive as rejections and are skipped — one 409/404 must not void
- * the advisory snapshot). Null = nothing parked-live.
+ * the advisory snapshot). Null = nothing unassigned-live.
  */
-export function parkedLiveSnapshot(
-  parkedIds: string[],
+export function unassignedLiveSnapshot(
+  unassignedIds: string[],
   statuses: PromiseSettledResult<AgentStatusResponse>[],
 ): { agentCount: number; profileIds: string[] } | null {
-  const parked = new Set(parkedIds);
+  const unassigned = new Set(unassignedIds);
   let agentCount = 0;
   const profileIds = new Set<string>();
   for (const s of statuses) {
     if (s.status !== "fulfilled") continue;
     const pid = s.value.profile?.profile_id;
-    if (pid && parked.has(pid)) {
+    if (pid && unassigned.has(pid)) {
       agentCount++;
       profileIds.add(pid);
     }

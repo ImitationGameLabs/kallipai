@@ -262,9 +262,9 @@ export function deleteCollectionSet(
   ).then(() => undefined);
 }
 
-/** The catalog space's drafts across every collection: the parked filter
- * over the profiles list. */
-export function listDrafts(url?: string): Promise<AdminProfileRow[]> {
+/** The catalog space's unassigned profiles across every collection: the
+ * `parked` query flag over the profiles list. */
+export function listUnassigned(url?: string): Promise<AdminProfileRow[]> {
   return listProfiles({ parked: true }, url);
 }
 
@@ -308,7 +308,7 @@ export function createProfile(
 }
 
 /** PUT the row's full content in place (plain PUT semantics; `parked`
- * moves the row between the draft and the served face). The
+ * moves the row between the unassigned pool and the served face). The
  * collection is the address, never the payload. */
 export function updateProfile(
   collection: string,
@@ -341,7 +341,7 @@ export function deleteProfile(
 
 /** POST /admin/collections/{target}/profiles/{id}/move: re-anchor one row.
  * `from` names the source collection; `set` (which must live in the
- * target) makes the arrival a served member instead of a draft. The source
+ * target) makes the arrival a served member instead of an unassigned row. The
  * row leaves and the copy is the same row, id and content included. */
 export function moveProfile(
   targetCollection: string,
@@ -373,7 +373,7 @@ export interface AdminCollectionRow {
   default_set: string | null;
   /** The platform audiences the collection is live on. */
   publications: string[];
-  /** How many profile rows the collection holds (drafts included). */
+  /** How many profile rows the collection holds (unassigned included). */
   profile_count: number;
   /** How many sets the collection anchors. */
   set_count: number;

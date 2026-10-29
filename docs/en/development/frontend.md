@@ -228,13 +228,13 @@ containers, chat bubbles) — never a bare button in new work.
 A handful of interactive sites outside those families keep tonal at rest
 and fill on hover, pairing `preset-tonal-*` with `hover:preset-filled-*`
 instead of the outlined/filled pair above: the `AccountMenu` trigger, the
-dashed empty-state buttons in `ParkingSection`, `ProvidersSection` and
-`SetsSection`, the tonal create card in the `RoomsDashboard` room list,
-the budget and agents cards in `OverviewPage`, and the members toggle in
-`RoomConversationPage`. That list locates the sites; it is not a
-registry, so judge a site by its hover feedback rather than by the
-outlined default, leave existing ones in place, and reach for the
-presets above in new work.
+dashed empty-state buttons in `components/manage/UnassignedSection.svelte`,
+`ProvidersSection` and `SetsSection`, the tonal create card in the
+`RoomsDashboard` room list, the budget and agents cards in `OverviewPage`,
+and the members toggle in `RoomConversationPage`. That list locates the
+sites; it is not a registry, so judge a site by its hover feedback
+rather than by the outlined default, leave existing ones in place, and
+reach for the presets above in new work.
 
 ### If a Workflow Isn't Covered
 

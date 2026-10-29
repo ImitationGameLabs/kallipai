@@ -1,10 +1,10 @@
 <script lang="ts">
   // Profiles manage page — card-based layered view (provider cards in a
-  // global pool, named-set containers holding profile cards, a parking
+  // global pool, named-set containers holding profile cards, an unassigned
   // area for profiles out of rotation), matching the wire shape 1:1.
-  // Read-mostly: editing goes through the Provider/Set/Parking dialogs;
-  // profile cards drag between sets and parking (HTML5 DnD updating the
-  // draft).
+  // Read-mostly: editing goes through the Provider/Set/Unassigned dialogs;
+  // profile cards drag between sets and the unassigned area (HTML5 DnD
+  // updating the draft).
   //
   // Probe results route inline to the card that triggered them: the page
   // accumulates providerReports/profileReports maps keyed by id, because a
@@ -18,7 +18,7 @@
     gatewayTabPosture,
   } from "../../lib/manage/profilesGatewayTab.ts";
   import type { PullRow } from "../../lib/manage/profilesGatewayTab.ts";
-  import { refreshParkedLive as fetchParkedLive } from "../../lib/manage/parkedLive.ts";
+  import { refreshUnassignedLive as fetchUnassignedLive } from "../../lib/manage/unassignedLive.ts";
   import { displayError } from "../../lib/manage/errors.ts";
   import { KallipaiError } from "@kallipai/kallipai-common";
   import { adminGatewayPath, gatewayPath } from "../../lib/shell/routes.ts";
@@ -34,23 +34,23 @@
   import ProfilesToolbar from "../../components/manage/ProfilesToolbar.svelte";
   import ProvidersSection from "../../components/manage/ProvidersSection.svelte";
   import SetsSection from "../../components/manage/SetsSection.svelte";
-  import ParkingSection from "../../components/manage/ParkingSection.svelte";
+  import UnassignedSection from "../../components/manage/UnassignedSection.svelte";
   import ConfirmDialog from "../../components/ConfirmDialog.svelte";
   import ProviderDialog from "../../components/manage/ProviderDialog.svelte";
   import SetDialog from "../../components/manage/SetDialog.svelte";
   import ProfileDialog from "../../components/manage/ProfileDialog.svelte";
   import {
     moveProfile,
-    moveFromParking,
-    moveToParking,
+    moveFromUnassigned,
+    moveToUnassigned,
     replaceSetProfiles,
     replaceSetProfile,
     renameSet,
     setDefaultSet,
     updateSetDescription,
-    replaceParkingProfiles,
+    replaceUnassignedProfiles,
     singleProfileProbeRequest,
-    singleParkingProfileProbeRequest,
+    singleUnassignedProfileProbeRequest,
     upsertProvider,
     providerFromDialog,
   } from "../../lib/manage/compute.ts";
@@ -76,7 +76,7 @@
     common_remove,
     common_save,
     manage_profiles_apply,
-    manage_profiles_parking_dialog_desc,
+    manage_profiles_unassigned_dialog_desc,
     manage_profiles_source_proxy_banner,
     manage_profiles_source_local,
     manage_profiles_source_degraded,
@@ -90,8 +90,8 @@
     manage_gateway_health_token_state,
     manage_gateway_health_last_refresh,
     manage_gateway_health_failures,
-    manage_profiles_parking_dialog_edit_title,
-    manage_profiles_parking_dialog_new_title,
+    manage_profiles_unassigned_dialog_edit_title,
+    manage_profiles_unassigned_dialog_new_title,
     manage_profiles_profile_dialog_desc,
     manage_profiles_profile_dialog_edit_title,
     manage_profiles_remove_provider,
@@ -99,7 +99,7 @@
     manage_profiles_dangling_desc,
     manage_profiles_dangling_title,
     manage_profiles_apply_desc,
-    manage_profiles_apply_desc_parked,
+    manage_profiles_apply_desc_unassigned,
     manage_profiles_apply_title,
     manage_profiles_applied_result,
     manage_profiles_remove_set_confirm_desc,
@@ -241,42 +241,42 @@
     selection = null;
     providerReports.clear();
     profileReports.clear();
-    parkedLive = null;
+    unassignedLive = null;
   }
 
-  // --- drag & drop (profile cards between sets and the parking area) ---
+  // --- drag & drop (profile cards between sets and the unassigned area) ---
 
   interface DragPayload {
-    area: "set" | "parking";
+    area: "set" | "unassigned";
     fromSet: string | null;
     fromIdx: number;
   }
 
   let drag = $state<DragPayload | null>(null);
   let dragOverSet = $state<string | null>(null);
-  let dragOverParking = $state(false);
+  let dragOverUnassigned = $state(false);
 
   // Shared drag-end reset for both drop targets (card sections own the
   // markup, the page owns the drag state).
   function clearDrag(): void {
     drag = null;
     dragOverSet = null;
-    dragOverParking = false;
+    dragOverUnassigned = false;
   }
 
   function onDropSet(toSet: string): void {
     const d = drag;
     drag = null;
     dragOverSet = null;
-    dragOverParking = false;
+    dragOverUnassigned = false;
     const draft = profilesStore.draft;
     if (!d || !draft) return;
-    if (d.area === "parking") {
-      // parking → set: the p:-keyed report is area-scoped, clear it.
+    if (d.area === "unassigned") {
+      // unassigned → set: the p:-keyed report is area-scoped, clear it.
       const id = draft.parking?.[d.fromIdx]?.id;
       if (id) profileReports.delete(`p:${id}`);
-      profilesStore.draft = moveFromParking(draft, d.fromIdx, toSet);
-      void refreshParkedLive();
+      profilesStore.draft = moveFromUnassigned(draft, d.fromIdx, toSet);
+      void refreshUnassignedLive();
       return;
     }
     if (d.fromSet !== null && d.fromSet !== toSet) {
@@ -290,42 +290,43 @@
     }
   }
 
-  function onDropParking(): void {
+  function onDropUnassigned(): void {
     const d = drag;
     drag = null;
     dragOverSet = null;
-    dragOverParking = false;
+    dragOverUnassigned = false;
     const draft = profilesStore.draft;
     if (!d || !draft || d.area !== "set" || d.fromSet === null) return;
-    // set → parking: clear the set-scoped source entry; the card will
-    // re-key its report as p:<id> on the next parking Test.
+    // set → unassigned: clear the set-scoped source entry; the card will
+    // re-key its report as p:<id> on the next unassigned Test.
     const id = draft.sets[d.fromSet]?.profiles[d.fromIdx]?.id;
     if (id) clearProfileResult(profileReports, d.fromSet, id);
-    profilesStore.draft = moveToParking(draft, d.fromSet, d.fromIdx);
-    void refreshParkedLive();
+    profilesStore.draft = moveToUnassigned(draft, d.fromSet, d.fromIdx);
+    void refreshUnassignedLive();
   }
 
-  // --- parked-live warn snapshot (event-driven, advisory) ---
+  // --- unassigned-live warn snapshot (event-driven, advisory) ---
 
-  /** Parked ids some live agent still runs, from the last snapshot.
-   * Null = no snapshot yet (or nothing parked-live); the banner and the
-   * apply-confirm extension both render from it. Refreshed by parking/
-   * unparking mutations, cleared on discard — never polled (a later
-   * always-on variant needs the list endpoint to carry the active profile
-   * id; that is a backend change, not a frontend poll). */
-  let parkedLive = $state<{ agentCount: number; profileIds: string[] } | null>(
-    null,
-  );
+  /** Unassigned ids some live agent still runs, from the last snapshot.
+   * Null = no snapshot yet (or nothing unassigned-live); the banner and the
+   * apply-confirm extension both render from it. Refreshed when a card
+   * enters or leaves the unassigned area, cleared on discard. Never polled:
+   * an always-on variant needs the list endpoint to carry the active profile
+   * id; that is a backend change, not a frontend poll. */
+  let unassignedLive = $state<{
+    agentCount: number;
+    profileIds: string[];
+  } | null>(null);
 
-  // parkedLive.ts owns the roster fetch and the allSettled fan-out; the
+  // unassignedLive.ts owns the roster fetch and the allSettled fan-out; the
   // wrapper keeps the previous snapshot when the roster itself fails
   // (advisory only).
-  async function refreshParkedLive(): Promise<void> {
-    const res = await fetchParkedLive(
+  async function refreshUnassignedLive(): Promise<void> {
+    const res = await fetchUnassignedLive(
       managementBackend(),
       profilesStore.draft?.parking ?? [],
     );
-    if (res.refreshed) parkedLive = res.snapshot;
+    if (res.refreshed) unassignedLive = res.snapshot;
   }
 
   // --- dialogs ---
@@ -530,29 +531,29 @@
     profileProbeReport = reportAfterProbe(outcome, profileProbeReport);
   }
 
-  // Parking dialog: single-profile form (see ProfileDialog). idx indexes
-  // the draft's parked list in edit mode.
-  let parkingDialog = $state<{
+  // Unassigned dialog: single-profile form (see ProfileDialog). idx indexes
+  // the draft's unassigned list in edit mode.
+  let unassignedDialog = $state<{
     open: boolean;
     mode: "new" | "edit";
     idx: number;
   }>({ open: false, mode: "new", idx: 0 });
   // Latest in-form probe result, rendered inside the dialog.
-  let parkingProbeReport = $state<InlineProbeReport | null>(null);
+  let unassignedProbeReport = $state<InlineProbeReport | null>(null);
 
-  function openParkingNew() {
-    parkingProbeReport = null;
+  function openUnassignedNew() {
+    unassignedProbeReport = null;
     profilesStore.resetProbe();
-    parkingDialog = { open: true, mode: "new", idx: 0 };
+    unassignedDialog = { open: true, mode: "new", idx: 0 };
   }
 
-  function openParkingEdit(idx: number) {
-    parkingProbeReport = null;
+  function openUnassignedEdit(idx: number) {
+    unassignedProbeReport = null;
     profilesStore.resetProbe();
-    parkingDialog = { open: true, mode: "edit", idx };
+    unassignedDialog = { open: true, mode: "edit", idx };
   }
 
-  function onParkingSave(values: {
+  function onUnassignedSave(values: {
     id: string;
     endpoint: string;
     model: string;
@@ -564,11 +565,11 @@
     const draft = profilesStore.draft;
     if (!draft) return;
     const list = [...(draft.parking ?? [])];
-    if (parkingDialog.mode === "new") list.push(values);
-    else list[parkingDialog.idx] = values;
-    profilesStore.draft = replaceParkingProfiles(draft, list);
-    parkingDialog.open = false;
-    void refreshParkedLive();
+    if (unassignedDialog.mode === "new") list.push(values);
+    else list[unassignedDialog.idx] = values;
+    profilesStore.draft = replaceUnassignedProfiles(draft, list);
+    unassignedDialog.open = false;
+    void refreshUnassignedLive();
   }
 
   function onRemoveSetProfile(
@@ -580,35 +581,35 @@
     clearProfileResult(profileReports, setName, profileId);
   }
 
-  function onRemoveParked(idx: number, profileId: string) {
+  function onRemoveUnassigned(idx: number, profileId: string) {
     const draft = profilesStore.draft;
     if (!draft) return;
-    profilesStore.draft = replaceParkingProfiles(
+    profilesStore.draft = replaceUnassignedProfiles(
       draft,
       (draft.parking ?? []).filter((_, i) => i !== idx),
     );
     profileReports.delete(`p:${profileId}`);
-    void refreshParkedLive();
+    void refreshUnassignedLive();
   }
 
-  function onParkingRemove() {
+  function onUnassignedRemove() {
     const draft = profilesStore.draft;
-    if (draft && parkingDialog.mode === "edit") {
-      const id = draft.parking?.[parkingDialog.idx]?.id;
-      profilesStore.draft = replaceParkingProfiles(
+    if (draft && unassignedDialog.mode === "edit") {
+      const id = draft.parking?.[unassignedDialog.idx]?.id;
+      profilesStore.draft = replaceUnassignedProfiles(
         draft,
-        (draft.parking ?? []).filter((_, i) => i !== parkingDialog.idx),
+        (draft.parking ?? []).filter((_, i) => i !== unassignedDialog.idx),
       );
       if (id) profileReports.delete(`p:${id}`);
     }
-    void refreshParkedLive();
-    parkingDialog.open = false;
+    void refreshUnassignedLive();
+    unassignedDialog.open = false;
   }
 
   /** Probe the dialog's current form values without touching the draft:
-   * stage them into a throwaway copy and reuse the parked-profile request
+   * stage them into a throwaway copy and reuse the unassigned-profile request
    * builder (committed config passed for the masked-key rule). */
-  async function onParkingTest(values: {
+  async function onUnassignedTest(values: {
     id: string;
     endpoint: string;
     model: string;
@@ -618,11 +619,11 @@
   }) {
     const draft = profilesStore.draft;
     if (!draft) return;
-    const staged = replaceParkingProfiles(draft, [
+    const staged = replaceUnassignedProfiles(draft, [
       ...(draft.parking ?? []),
       values,
     ]);
-    const body = singleParkingProfileProbeRequest(
+    const body = singleUnassignedProfileProbeRequest(
       profilesStore.config,
       staged,
       (staged.parking?.length ?? 1) - 1,
@@ -634,14 +635,14 @@
     }
     // Only a failure clears the report: an abandoned call belongs to a
     // dialog a newer probe already owns.
-    parkingProbeReport = reportAfterProbe(outcome, parkingProbeReport);
+    unassignedProbeReport = reportAfterProbe(outcome, unassignedProbeReport);
   }
 
-  /** Kebab Test on a parked card: same request shape, from the draft. */
-  async function onTestParking(idx: number) {
+  /** Kebab Test on an unassigned card: same request shape, from the draft. */
+  async function onTestUnassigned(idx: number) {
     const draft = profilesStore.draft;
     if (!draft) return;
-    const body = singleParkingProfileProbeRequest(
+    const body = singleUnassignedProfileProbeRequest(
       profilesStore.config,
       draft,
       idx,
@@ -850,7 +851,7 @@
     <ProfilesToolbar
       store={profilesStore}
       {applyResult}
-      {parkedLive}
+      {unassignedLive}
       {onTestAll}
       {onSave}
       {onDiscard}
@@ -1152,7 +1153,7 @@
                 {manage_profiles_local_disk_summary({
                   sets: Object.keys(localDisk.sets ?? {}).length,
                   providers: Object.keys(localDisk.endpoints ?? {}).length,
-                  parked: (localDisk.parking ?? []).length,
+                  unassigned: (localDisk.parking ?? []).length,
                 })}
               </p>
               <button
@@ -1215,21 +1216,21 @@
               {readOnly}
             />
 
-            <ParkingSection
-              parking={profilesStore.draft.parking ?? []}
+            <UnassignedSection
+              unassigned={profilesStore.draft.parking ?? []}
               reports={profileReports}
               isProbing={profilesStore.isProbing}
-              {dragOverParking}
+              {dragOverUnassigned}
               onCardDragStart={(fromIdx) =>
-                (drag = { area: "parking", fromSet: null, fromIdx })}
+                (drag = { area: "unassigned", fromSet: null, fromIdx })}
               onCardDragEnd={clearDrag}
-              onParkingDragOver={() => (dragOverParking = true)}
-              onParkingDragLeave={() => (dragOverParking = false)}
-              onParkingDrop={onDropParking}
-              onTest={onTestParking}
-              onEdit={openParkingEdit}
-              onAdd={openParkingNew}
-              onRemove={onRemoveParked}
+              onUnassignedDragOver={() => (dragOverUnassigned = true)}
+              onUnassignedDragLeave={() => (dragOverUnassigned = false)}
+              onUnassignedDrop={onDropUnassigned}
+              onTest={onTestUnassigned}
+              onEdit={openUnassignedEdit}
+              onAdd={openUnassignedNew}
+              onRemove={onRemoveUnassigned}
               {readOnly}
             />
           {/if}
@@ -1243,9 +1244,9 @@
   busy={profilesStore.isSaving}
   open={showApplyDialog}
   title={manage_profiles_apply_title()}
-  description={parkedLive
-    ? `${manage_profiles_apply_desc()} ${manage_profiles_apply_desc_parked({
-        count: parkedLive.agentCount,
+  description={unassignedLive
+    ? `${manage_profiles_apply_desc()} ${manage_profiles_apply_desc_unassigned({
+        count: unassignedLive.agentCount,
       })}`
     : manage_profiles_apply_desc()}
   confirmLabel={manage_profiles_apply()}
@@ -1295,21 +1296,21 @@
 />
 
 <ProfileDialog
-  open={parkingDialog.open}
-  mode={parkingDialog.mode}
-  description={manage_profiles_parking_dialog_desc()}
-  title={parkingDialog.mode === "new"
-    ? manage_profiles_parking_dialog_new_title()
-    : manage_profiles_parking_dialog_edit_title()}
-  profile={profilesStore.draft?.parking?.[parkingDialog.idx] ?? null}
+  open={unassignedDialog.open}
+  mode={unassignedDialog.mode}
+  description={manage_profiles_unassigned_dialog_desc()}
+  title={unassignedDialog.mode === "new"
+    ? manage_profiles_unassigned_dialog_new_title()
+    : manage_profiles_unassigned_dialog_edit_title()}
+  profile={profilesStore.draft?.parking?.[unassignedDialog.idx] ?? null}
   {providerIds}
   {occupiedIds}
-  probeReport={parkingProbeReport}
+  probeReport={unassignedProbeReport}
   probeError={profilesStore.probeError}
-  onSave={onParkingSave}
-  onCancel={() => (parkingDialog.open = false)}
-  onTest={onParkingTest}
-  onRemove={parkingDialog.mode === "edit" ? onParkingRemove : null}
+  onSave={onUnassignedSave}
+  onCancel={() => (unassignedDialog.open = false)}
+  onTest={onUnassignedTest}
+  onRemove={unassignedDialog.mode === "edit" ? onUnassignedRemove : null}
 />
 <ProfileDialog
   open={profileDialog.open}

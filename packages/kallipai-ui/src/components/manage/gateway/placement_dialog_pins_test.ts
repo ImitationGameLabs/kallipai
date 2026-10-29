@@ -1,10 +1,10 @@
 import { assert } from "@std/assert";
 
-// Source pins for the draft placement fallback: the dialog owns a
+// Source pins for the unassigned placement fallback: the dialog owns a
 // two-step pick (collection, then member set), the cascade narrows
 // the set list through the shared membership helper, a collection
 // change resets the set pick instead of waiting for a blur, the
-// draft profile's identity rides the dialog head, and the confirm
+// unassigned profile's identity rides the dialog head, and the confirm
 // carries both picks to the caller.
 const DIALOG = new URL("./PlacementDialog.svelte", import.meta.url);
 const HELPER = new URL("../../../lib/gateway/collections.ts", import.meta.url);
@@ -47,18 +47,18 @@ Deno.test(
       src.includes(
         "manage_gateway_placement_profile_label({ name: profileId })",
       ),
-      "the dialog head names the draft profile being placed",
+      "the dialog head names the unassigned profile being placed",
     );
   },
 );
 
 Deno.test(
-  "a placed draft keeps the collection it belongs to",
+  "a placed unassigned profile keeps the collection it belongs to",
   { permissions: { read: [DIALOG] } },
   () => {
     const src = source(DIALOG);
-    // A draft can only join a set of its own collection (the server
-    // refuses the rest), so a drop that names one pins the pick to it.
+    // An unassigned profile can only join a set of its own collection (the
+    // server refuses the rest), so a drop that names one pins the pick to it.
     assert(
       src.includes("sourceCollection?: string") &&
         src.includes("sourceCollection === undefined"),
@@ -69,7 +69,7 @@ Deno.test(
         src.includes(
           "{#each pickedCollections as collection (collection.name)}",
         ),
-      "the collection pick offers only the draft's own collection",
+      "the collection pick offers only the profile's own collection",
     );
     assert(
       src.includes("disabled={busy || sourceCollection !== undefined}"),

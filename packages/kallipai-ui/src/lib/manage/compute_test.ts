@@ -30,9 +30,9 @@ import {
   filterEpoch,
   formatModalities,
   isBudgetPaused,
-  moveFromParking,
+  moveFromUnassigned,
   moveProfile,
-  moveToParking,
+  moveToUnassigned,
   normalizeModalities,
   profileConfigEqual,
   profileConfigToWire,
@@ -42,13 +42,13 @@ import {
   removeProvider,
   removeSet,
   renameSet,
-  replaceParkingProfiles,
+  replaceUnassignedProfiles,
   replaceSetProfile,
   replaceSetProfiles,
   setDefaultSet,
   setEffectiveModalities,
   setHasShadowedMembers,
-  singleParkingProfileProbeRequest,
+  singleUnassignedProfileProbeRequest,
   singleProfileProbeRequest,
   singleProviderProbeRequest,
   timelinePayloadView,
@@ -957,50 +957,56 @@ Deno.test(
     );
   },
 );
-// --- parking (draft space out of rotation) ---
+// --- unassigned (draft space out of rotation) ---
 
-function parkedConfig(): ProfileConfig {
+function unassignedConfig(): ProfileConfig {
   return {
     ...multiSetConfig(),
     parking: [
       {
         id: "spare",
         endpoint: "main",
-        model: "parked-m",
+        model: "unassigned-m",
         max_context_window: 8,
       },
     ],
   };
 }
 
-Deno.test("moveToParking: appends the set profile to the parked list", () => {
-  const r = moveToParking(multiSetConfig(), "s1", 0);
-  assertEquals(r.sets["s1"].profiles.length, 0);
-  assertEquals(r.parking?.length, 1);
-  assertEquals(r.parking?.[0].id, "p1");
-});
-
-Deno.test("moveToParking: appends after existing parked profiles", () => {
-  const r = moveToParking(parkedConfig(), "s2", 0); // p2 from s2
-  assertEquals(
-    r.parking?.map((p) => p.id),
-    ["spare", "p2"],
-  );
-});
-
 Deno.test(
-  "moveToParking: unknown set or bad index leave the config unchanged",
+  "moveToUnassigned: appends the set profile to the unassigned list",
   () => {
-    const c = parkedConfig();
-    assertEquals(moveToParking(c, "ghost", 0), c);
-    assertEquals(moveToParking(c, "s1", 9), c);
+    const r = moveToUnassigned(multiSetConfig(), "s1", 0);
+    assertEquals(r.sets["s1"].profiles.length, 0);
+    assertEquals(r.parking?.length, 1);
+    assertEquals(r.parking?.[0].id, "p1");
   },
 );
 
 Deno.test(
-  "moveFromParking: lands the parked profile at the target set end",
+  "moveToUnassigned: appends after existing unassigned profiles",
   () => {
-    const r = moveFromParking(parkedConfig(), 0, "s1");
+    const r = moveToUnassigned(unassignedConfig(), "s2", 0); // p2 from s2
+    assertEquals(
+      r.parking?.map((p) => p.id),
+      ["spare", "p2"],
+    );
+  },
+);
+
+Deno.test(
+  "moveToUnassigned: unknown set or bad index leave the config unchanged",
+  () => {
+    const c = unassignedConfig();
+    assertEquals(moveToUnassigned(c, "ghost", 0), c);
+    assertEquals(moveToUnassigned(c, "s1", 9), c);
+  },
+);
+
+Deno.test(
+  "moveFromUnassigned: lands the unassigned profile at the target set end",
+  () => {
+    const r = moveFromUnassigned(unassignedConfig(), 0, "s1");
     assertEquals(r.parking, undefined); // empty list normalizes to the absent key
     assertEquals(
       r.sets["s1"].profiles[r.sets["s1"].profiles.length - 1].id,
@@ -1010,28 +1016,34 @@ Deno.test(
 );
 
 Deno.test(
-  "moveFromParking: unknown set or bad index leave the config unchanged",
+  "moveFromUnassigned: unknown set or bad index leave the config unchanged",
   () => {
-    const c = parkedConfig();
-    assertEquals(moveFromParking(c, 0, "ghost"), c); // target set unknown
-    assertEquals(moveFromParking(c, 9, "s1"), c); // parked index out of range
+    const c = unassignedConfig();
+    assertEquals(moveFromUnassigned(c, 0, "ghost"), c); // target set unknown
+    assertEquals(moveFromUnassigned(c, 9, "s1"), c); // unassigned index out of range
     // A config that never carried the key (GET omitted it) is a no-op too.
-    assertEquals(moveFromParking(multiSetConfig(), 0, "s1"), multiSetConfig());
+    assertEquals(
+      moveFromUnassigned(multiSetConfig(), 0, "s1"),
+      multiSetConfig(),
+    );
   },
 );
 
-Deno.test("park then unpark everything compares equal to the original", () => {
-  const c = multiSetConfig();
-  const parked = moveToParking(c, "s1", 0);
-  const back = moveFromParking(parked, 0, "s1");
-  assertEquals(profileConfigEqual(c, back), true);
-});
+Deno.test(
+  "moving every profile out and back in compares equal to the original",
+  () => {
+    const c = multiSetConfig();
+    const moved = moveToUnassigned(c, "s1", 0);
+    const back = moveFromUnassigned(moved, 0, "s1");
+    assertEquals(profileConfigEqual(c, back), true);
+  },
+);
 
 Deno.test(
-  "replaceParkingProfiles: replaces wholesale; empty normalizes absent",
+  "replaceUnassignedProfiles: replaces wholesale; empty normalizes absent",
   () => {
-    const c = parkedConfig();
-    const r = replaceParkingProfiles(c, [
+    const c = unassignedConfig();
+    const r = replaceUnassignedProfiles(c, [
       { id: "n1", endpoint: "main", model: "m", max_context_window: 1 },
       { id: "n2", endpoint: "main", model: "m", max_context_window: 2 },
     ]);
@@ -1039,29 +1051,29 @@ Deno.test(
       r.parking?.map((p) => p.id),
       ["n1", "n2"],
     );
-    const cleared = replaceParkingProfiles(r, []);
+    const cleared = replaceUnassignedProfiles(r, []);
     assertEquals(cleared.parking, undefined);
   },
 );
 
 Deno.test("profileConfigToWire: always sends the parking key", () => {
-  // Absent in the draft (never parked) → explicit empty list on the wire;
+  // Absent in the draft (never moved out of a set) → explicit empty list on the wire;
   // absent on the wire would mean "keep live" server-side.
   const wire = profileConfigToWire(multiSetConfig());
   assertEquals(wire.parking, []);
-  const parkedWire = profileConfigToWire(parkedConfig());
+  const unassignedWire = profileConfigToWire(unassignedConfig());
   assertEquals(
-    parkedWire.parking?.map((p) => p.id),
+    unassignedWire.parking?.map((p) => p.id),
     ["spare"],
   );
 });
 
 Deno.test(
-  "singleParkingProfileProbeRequest: provider inline, masked key → null",
+  "singleUnassignedProfileProbeRequest: provider inline, masked key → null",
   () => {
-    const req = singleParkingProfileProbeRequest(
+    const req = singleUnassignedProfileProbeRequest(
       draftConfig(maskedKey),
-      parkedConfig(),
+      unassignedConfig(),
       0,
     );
     assertEquals(req!.endpoints.length, 1);
@@ -1073,9 +1085,9 @@ Deno.test(
 );
 
 Deno.test(
-  "singleParkingProfileProbeRequest: dangling endpoint still probes",
+  "singleUnassignedProfileProbeRequest: dangling endpoint still probes",
   () => {
-    const dangling = replaceParkingProfiles(multiSetConfig(), [
+    const dangling = replaceUnassignedProfiles(multiSetConfig(), [
       {
         id: "ghost-ep",
         endpoint: "nowhere",
@@ -1083,22 +1095,31 @@ Deno.test(
         max_context_window: 1,
       },
     ]);
-    const req = singleParkingProfileProbeRequest(null, dangling, 0);
+    const req = singleUnassignedProfileProbeRequest(null, dangling, 0);
     assertEquals(req!.endpoints, []); // no provider rides along; server reports invalid_config
     assertEquals(req!.sets[0].profiles[0].id, "ghost-ep");
   },
 );
-Deno.test("singleParkingProfileProbeRequest: out of range returns null", () => {
-  assertEquals(singleParkingProfileProbeRequest(null, parkedConfig(), 3), null);
-  // A draft whose parking key was never present is out of range too.
-  assertEquals(
-    singleParkingProfileProbeRequest(null, multiSetConfig(), 0),
-    null,
-  );
+Deno.test(
+  "singleUnassignedProfileProbeRequest: out of range returns null",
+  () => {
+    assertEquals(
+      singleUnassignedProfileProbeRequest(null, unassignedConfig(), 3),
+      null,
+    );
+    // A draft whose parking key was never present is out of range too.
+    assertEquals(
+      singleUnassignedProfileProbeRequest(null, multiSetConfig(), 0),
+      null,
+    );
 
-  assertEquals(singleParkingProfileProbeRequest(null, parkedConfig(), 3), null);
-  // A draft whose parking key was never present is out of range too.
-});
+    assertEquals(
+      singleUnassignedProfileProbeRequest(null, unassignedConfig(), 3),
+      null,
+    );
+    // A draft whose parking key was never present is out of range too.
+  },
+);
 
 // --- profile modality helpers ---
 

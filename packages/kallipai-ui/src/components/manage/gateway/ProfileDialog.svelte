@@ -1,11 +1,11 @@
 <script lang="ts" module>
-  // The gateway admin's draft-profile dialog: identity and the
+  // The gateway admin's unassigned-profile dialog: identity and the
   // anchoring collection (both creation only -- a row's collection never
-  // moves), the referenced provider (frozen on edit -- the draft update
+  // moves), the referenced provider (frozen on edit -- the update
   // re-points nothing; the family is derived display), the model, and
   // the limits. Create hands back the full ProfileCreate shape; edit
   // hands back the ProfilePut replacement fields (the page sends a
-  // created row as a draft).
+  // created row as an unassigned row).
 </script>
 
 <script lang="ts">
@@ -26,8 +26,8 @@
     manage_gateway_provider_family,
     manage_gateway_provider_label,
     manage_gateway_provider_pool_empty,
-    manage_gateway_draft_dialog_edit_title,
-    manage_gateway_draft_dialog_new_title,
+    manage_gateway_unassigned_dialog_edit_title,
+    manage_gateway_unassigned_dialog_new_title,
     user_gateway_profile_budget,
     user_gateway_profile_context,
     user_gateway_profile_effort,
@@ -59,7 +59,7 @@
     /**
      * The collection a create takes, and whether the pick is the user's:
      * a name seeds the field and locks the picker (the open detail owns
-     * the draft), null leaves both blank and open (the list's entry).
+     * the buffer), null leaves both blank and open (the list's entry).
      */
     pinnedCollection?: string | null;
     /** The row under edit (null = the create form). */
@@ -135,7 +135,7 @@
   );
 
   // The family is derived display: it reads the selected provider's
-  // row (create) or the draft row's own link (edit, where the
+  // row (create) or the edited row's own link (edit, where the
   // provider is frozen).
   const familyShown = $derived(
     providers.find((p) => p.provider_id === providerDraft)?.family ??
@@ -207,8 +207,8 @@
       >
         <Dialog.Title class="text-lg font-semibold">
           {creating
-            ? manage_gateway_draft_dialog_new_title()
-            : manage_gateway_draft_dialog_edit_title()}
+            ? manage_gateway_unassigned_dialog_new_title()
+            : manage_gateway_unassigned_dialog_edit_title()}
         </Dialog.Title>
 
         <form

@@ -1,11 +1,11 @@
 <script lang="ts">
-  // The draft drop's fallback: when a draft is dropped on the console
-  // while no collection detail is open, this dialog takes the placement
-  // (a collection pick, then a member-set pick). Both selects are
-  // required; a collection without sets disables the confirm with a
-  // hint instead of a dead submit. A draft belongs to one collection,
-  // so a drop that names its own collection pins the first pick: the
-  // server would refuse a membership across collections.
+  // The unassigned drop's fallback: when an unassigned profile is dropped
+  // on the console while no collection detail is open, this dialog takes
+  // the placement (a collection pick, then a member-set pick). Both
+  // selects are required; a collection without sets disables the confirm
+  // with a hint instead of a dead submit. An unassigned profile belongs
+  // to one collection, so a drop that names its own collection pins the
+  // first pick: the server would refuse a membership across collections.
   import { Dialog, Portal } from "@skeletonlabs/skeleton-svelte";
   import ReqMark from "../../ReqMark.svelte";
   import type {
@@ -35,13 +35,13 @@
     onCancel,
   }: {
     open: boolean;
-    /** The draft being placed (carried from the drop). */
+    /** The unassigned profile being placed (carried from the drop). */
     profileId: string | null;
     /** The catalog's collections, in list order. */
     collections: readonly AdminCollectionRow[];
     /** The catalog's sets: the member picks come from here. */
     sets: readonly AdminSetRow[];
-    /** The dragged draft's collection: pins the collection pick. */
+    /** The dragged profile's collection: pins the collection pick. */
     sourceCollection?: string;
     busy?: boolean;
     error?: string | null;
@@ -60,7 +60,7 @@
     lastOpen = open;
   });
 
-  // One collection's sets can take this draft; the others would be
+  // One collection's sets can take this profile; the others would be
   // refused, so the pick offers only them when the drop named one.
   const pickedCollections = $derived(
     sourceCollection === undefined

@@ -41,7 +41,7 @@ Deno.test(
     const src = source(PROFILES_PAGE);
     assert(
       src.split("<ProfileDialog").length - 1 === 2,
-      "the parking and set-member contexts each mount ProfileDialog once",
+      "the unassigned and set-member contexts each mount ProfileDialog once",
     );
     assert(
       src.includes("manage_profiles_profile_dialog_edit_title()"),

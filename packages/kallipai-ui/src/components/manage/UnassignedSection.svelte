@@ -1,5 +1,5 @@
 <script lang="ts">
-  // Parking pool for the profiles page: profiles held out of rotation, same
+  // Unassigned pool for the profiles page: profiles held out of rotation, same
   // card language as the sets above, but the container stays dashed (not a
   // rotation slot) and its add button opens the single-profile
   // ProfileDialog. Drag state and drop mutations stay in the page.
@@ -10,38 +10,38 @@
     ProfileModelProbeReport,
   } from "@kallipai/kallipai-client";
   import {
-    manage_profiles_parking,
-    manage_profiles_parking_add,
-    manage_profiles_parking_desc_l1,
-    manage_profiles_parking_desc_l2,
+    manage_profiles_unassigned,
+    manage_profiles_unassigned_add,
+    manage_profiles_unassigned_desc_l1,
+    manage_profiles_unassigned_desc_l2,
   } from "../../paraglide/messages.js";
   import ProfileCard from "./ProfileCard.svelte";
 
   let {
-    parking,
+    unassigned,
     reports,
     isProbing,
-    dragOverParking,
+    dragOverUnassigned,
     onCardDragStart,
     onCardDragEnd,
-    onParkingDragOver,
-    onParkingDragLeave,
-    onParkingDrop,
+    onUnassignedDragOver,
+    onUnassignedDragLeave,
+    onUnassignedDrop,
     onTest,
     onEdit,
     onAdd,
     onRemove,
     readOnly = false,
   }: {
-    parking: readonly ProfileModel[];
+    unassigned: readonly ProfileModel[];
     reports: SvelteMap<string, ProfileModelProbeReport>;
     isProbing: boolean;
-    dragOverParking: boolean;
+    dragOverUnassigned: boolean;
     onCardDragStart: (fromIdx: number, id: string, e: DragEvent) => void;
     onCardDragEnd: () => void;
-    onParkingDragOver: () => void;
-    onParkingDragLeave: () => void;
-    onParkingDrop: () => void;
+    onUnassignedDragOver: () => void;
+    onUnassignedDragLeave: () => void;
+    onUnassignedDrop: () => void;
     onTest: (idx: number) => void;
     onEdit: (idx: number) => void;
     onAdd: () => void;
@@ -52,33 +52,33 @@
 
 <section class="space-y-3">
   <h2 class="text-sm font-medium uppercase opacity-60 tracking-wide">
-    {manage_profiles_parking()}
+    {manage_profiles_unassigned()}
   </h2>
   <div class="text-xs opacity-60 mt-1 space-y-0.5">
-    <p>{manage_profiles_parking_desc_l1()}</p>
-    <p>{manage_profiles_parking_desc_l2()}</p>
+    <p>{manage_profiles_unassigned_desc_l1()}</p>
+    <p>{manage_profiles_unassigned_desc_l2()}</p>
   </div>
   <div
     role="list"
-    class="card preset-tonal-surface border-2 border-dashed border-surface-400 p-4 space-y-3 {dragOverParking
+    class="card preset-tonal-surface border-2 border-dashed border-surface-400 p-4 space-y-3 {dragOverUnassigned
       ? 'outline-2 outline-dashed outline-primary-500'
       : ''}"
     ondragover={(e) => {
       if (readOnly) return;
       e.preventDefault();
-      onParkingDragOver();
+      onUnassignedDragOver();
     }}
     ondragleave={() => {
       if (readOnly) return;
-      onParkingDragLeave();
+      onUnassignedDragLeave();
     }}
     ondrop={(e) => {
       if (readOnly) return;
       e.preventDefault();
-      onParkingDrop();
+      onUnassignedDrop();
     }}
   >
-    {#each parking as profile, idx (idx)}
+    {#each unassigned as profile, idx (idx)}
       {@const report = reports.get(`p:${profile.id}`)}
       <ProfileCard
         {profile}
@@ -104,7 +104,7 @@
     >
       <Plus class="size-6 opacity-70" />
       <span class="text-sm opacity-70">
-        {manage_profiles_parking_add()}
+        {manage_profiles_unassigned_add()}
       </span>
     </button>
   </div>

@@ -35,7 +35,7 @@
   "user_gateway_profile_budget": "Max budget",
   "user_gateway_profile_tpm": "TPM limit",
   "user_gateway_profile_rpm": "RPM limit",
-  "user_gateway_profile_draft": "Draft",
+  "user_gateway_profile_unassigned": "Unassigned",
   "user_gateway_remove_profile_body": "Delete profile {name} in {collection}?",
   "user_gateway_sets": "Profile sets",
   "user_gateway_set_add": "New profile set",

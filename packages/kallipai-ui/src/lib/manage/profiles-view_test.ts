@@ -19,7 +19,7 @@ import {
   mergeProviderScope,
   modelsCountLabel,
   occupiedIdsOf,
-  parkedLiveSnapshot,
+  unassignedLiveSnapshot,
   probeStatusAdvice,
   probeStatusColor,
   probeStatusKey,
@@ -198,7 +198,7 @@ Deno.test("providerIdsOf: missing draft yields []", () => {
   assertEquals(providerIdsOf(undefined), []);
 });
 
-Deno.test("occupiedIdsOf: sets then parking, in order", () => {
+Deno.test("occupiedIdsOf: sets then unassigned, in order", () => {
   const ids = occupiedIdsOf(
     draft(
       {},
@@ -317,7 +317,7 @@ Deno.test("modelsCountLabel: 1 is singular, 2 is plural", () => {
   assertEquals(modelsCountLabel(1) !== modelsCountLabel(2), true);
 });
 
-// --- parkedLiveSnapshot ---
+// --- unassignedLiveSnapshot ---
 
 function settled(
   profileId: string | undefined,
@@ -333,9 +333,9 @@ function settled(
 const rejected = { status: "rejected" as const, reason: new Error("x") };
 
 Deno.test(
-  "parkedLiveSnapshot: counts agents and dedupes ids at the intersection",
+  "unassignedLiveSnapshot: counts agents and dedupes ids at the intersection",
   () => {
-    const snap = parkedLiveSnapshot(
+    const snap = unassignedLiveSnapshot(
       ["p1", "p2"],
       [
         settled("p1"),
@@ -350,17 +350,17 @@ Deno.test(
 );
 
 Deno.test(
-  "parkedLiveSnapshot: rejected statuses are skipped, not fatal",
+  "unassignedLiveSnapshot: rejected statuses are skipped, not fatal",
   () => {
-    const snap = parkedLiveSnapshot(["p1"], [rejected, settled("p1")]);
+    const snap = unassignedLiveSnapshot(["p1"], [rejected, settled("p1")]);
     assertEquals(snap, { agentCount: 1, profileIds: ["p1"] });
   },
 );
 
-Deno.test("parkedLiveSnapshot: no intersection yields null", () => {
-  assertEquals(parkedLiveSnapshot(["p1"], [settled("other")]), null);
-  assertEquals(parkedLiveSnapshot(["p1"], [rejected]), null);
-  assertEquals(parkedLiveSnapshot([], [settled("p1")]), null);
+Deno.test("unassignedLiveSnapshot: no intersection yields null", () => {
+  assertEquals(unassignedLiveSnapshot(["p1"], [settled("other")]), null);
+  assertEquals(unassignedLiveSnapshot(["p1"], [rejected]), null);
+  assertEquals(unassignedLiveSnapshot([], [settled("p1")]), null);
 });
 
 // --- reportAfterProbe: what a dialog keeps after one probe call ---

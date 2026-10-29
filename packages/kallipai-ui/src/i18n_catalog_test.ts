@@ -513,7 +513,22 @@ const SYNONYMS: string[][] = [
     "manage_gateway_provider_actions_aria",
     "manage_profiles_provider_actions_aria",
   ],
-  ["manage_gateway_draft_badge", "user_gateway_profile_draft"],
+  [
+    "manage_gateway_unassigned",
+    "manage_gateway_unassigned_badge",
+    "manage_profiles_unassigned",
+    "user_gateway_profile_unassigned",
+  ],
+  [
+    "manage_gateway_unassigned_add",
+    "manage_gateway_unassigned_dialog_new_title",
+    "manage_profiles_unassigned_add",
+    "manage_profiles_unassigned_dialog_new_title",
+  ],
+  [
+    "manage_gateway_unassigned_dialog_edit_title",
+    "manage_profiles_unassigned_dialog_edit_title",
+  ],
   [
     "manage_gateway_placement_collection_label",
     "user_gateway_profile_collection",

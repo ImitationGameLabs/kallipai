@@ -5,8 +5,8 @@
   // The console serves two routes: the list view (/admin/gateway)
   // and a collection's detail subface
   // (/admin/gateway/collections/<name>, reached by the `collection`
-  // prop); groups, the drafts, and providers render on both, so a
-  // draft drag always has its drop targets in view -- on the set
+  // prop); groups, the unassigned panel, and providers render on both, so an
+  // unassigned drag always has its drop targets in view -- on the set
   // cards in the detail, or the placement dialog fallback on the
   // list.
   let { collection = null }: { collection?: string | null } = $props();
@@ -53,7 +53,7 @@
     manage_gateway_remove_set_body,
     manage_gateway_remove_collection_body,
     manage_gateway_remove_provider_body,
-    manage_gateway_remove_draft_body,
+    manage_gateway_remove_unassigned_body,
     manage_gateway_remove_group_body,
     manage_gateway_providers,
     manage_gateway_subtitle,
@@ -61,7 +61,7 @@
   } from "../../../paraglide/messages.js";
   import ProvidersSection from "../../../components/manage/gateway/ProvidersSection.svelte";
   import ProviderDialog from "../../../components/manage/gateway/ProviderDialog.svelte";
-  import DraftsSection from "../../../components/manage/gateway/DraftsSection.svelte";
+  import UnassignedSection from "../../../components/manage/gateway/UnassignedSection.svelte";
   import ProfileDialog from "../../../components/manage/gateway/ProfileDialog.svelte";
   import ProviderCredentialDialog from "../../../components/manage/gateway/ProviderCredentialDialog.svelte";
   import SetCreateDialog from "../../../components/manage/gateway/SetCreateDialog.svelte";
@@ -92,28 +92,28 @@
     if (!detailRow) return [];
     return memberSetsOf(gatewayStore.sets ?? [], detailRow);
   });
-  // The detail's drafts: read for the open collection, so the panel can
-  // never offer a draft whose sets live elsewhere.
-  let detailDrafts = $state<AdminProfileRow[] | null>(null);
-  let detailDraftRequest = 0;
+  // The detail's unassigned: read for the open collection, so the panel can
+  // never offer a profile whose sets live elsewhere.
+  let detailUnassigned = $state<AdminProfileRow[] | null>(null);
+  let detailUnassignedRequest = 0;
   // Which collection the panel's rows belong to (plain state: the
   // effect must not track its own bookkeeping and re-read twice).
-  let detailDraftsFor: string | null = null;
-  async function reloadDetailDrafts(): Promise<void> {
-    const request = ++detailDraftRequest;
+  let detailUnassignedFor: string | null = null;
+  async function reloadDetailUnassigned(): Promise<void> {
+    const request = ++detailUnassignedRequest;
     const name = detailRow?.name ?? null;
-    if (name !== detailDraftsFor) {
+    if (name !== detailUnassignedFor) {
       // A switch clears first: a slow or failed read must not leave
       // the previous collection's rows under the new detail.
-      detailDrafts = null;
-      detailDraftsFor = name;
+      detailUnassigned = null;
+      detailUnassignedFor = name;
     }
     if (name === null) return;
-    const rows = await gatewayStore.draftsIn(name);
+    const rows = await gatewayStore.unassignedIn(name);
     // Only the newest read may land; a late answer for a collection
     // that already left would otherwise repaint it.
-    if (rows !== undefined && request === detailDraftRequest) {
-      detailDrafts = rows;
+    if (rows !== undefined && request === detailUnassignedRequest) {
+      detailUnassigned = rows;
     }
   }
   // The re-read keys on the collection name, never on the row object:
@@ -123,7 +123,7 @@
   $effect(() => {
     // Re-read whenever the open collection changes.
     void detailRow?.name;
-    void reloadDetailDrafts();
+    void reloadDetailUnassigned();
   });
   const groupName = (groupId: string): string =>
     (gatewayStore.groups ?? []).find((g) => g.group_id === groupId)?.name ??
@@ -148,12 +148,12 @@
   let setCreateOpen = $state(false);
   let setCreateBusy = $state(false);
   let setCreateError = $state<string | null>(null);
-  // Draft→set drop wiring: the page owns the drag state (the
+  // Unassigned-to-set drop wiring: the page owns the drag state (the
   // sections report the raw lifecycle), and a busy latch keeps a
   // second drop from racing the in-flight member update.
   let dragProfileId = $state<string | null>(null);
-  // The dragged row's collection: a draft can only join a set of its own
-  // collection, so the drop names the one collection the placement can
+  // The dragged row's collection: an unassigned row can only join a set
+  // of its own collection, so the drop names the one collection the
   // land in.
   let dragSourceCollection = $state<string | null>(null);
   let dragOverSet = $state<string | null>(null);
@@ -161,8 +161,8 @@
   // Each edit click takes a request token; only the newest token's
   // response may seed the dialog. A slow loadSet answering after a
   // later click (or after the dialog already opened) would otherwise
-  // swap the edit target under the open draft, and a save would PATCH
-  // one row's draft onto another's registry entry.
+  // swap the edit target under the open dialog, and a save would PATCH
+  // one set's members onto another's registry entry.
 
   async function onEditSet(set: AdminSetRow): Promise<void> {
     const request = ++editRequest;
@@ -185,9 +185,9 @@
       description: result.description,
       members: result.members,
     });
-    // Dropping a set's last member flips that profile back to a draft
-    // server-side, so a member edit moves the drafts panel too.
-    if (gatewayStore.error === null) await reloadDetailDrafts();
+    // Dropping a set's last member flips that profile back to unassigned
+    // server-side, so a member edit moves the unassigned panel too.
+    if (gatewayStore.error === null) await reloadDetailUnassigned();
   }
 
   // The provider pool's dialog state. editProvider null = the create
@@ -202,11 +202,11 @@
   let providerBusy = $state(false);
   let providerError = $state<string | null>(null);
   let removeProviderTarget = $state<string | null>(null);
-  let editDraft = $state<AdminProfileRow | null>(null);
-  let draftDialogOpen = $state(false);
-  let draftBusy = $state(false);
-  let draftError = $state<string | null>(null);
-  let removeDraftTarget = $state<AdminProfileRow | null>(null);
+  let editUnassigned = $state<AdminProfileRow | null>(null);
+  let unassignedDialogOpen = $state(false);
+  let unassignedBusy = $state(false);
+  let unassignedError = $state<string | null>(null);
+  let removeUnassignedTarget = $state<AdminProfileRow | null>(null);
 
   function openProviderDialog(
     row: {
@@ -267,13 +267,13 @@
     }
   }
 
-  function openDraftDialog(row: AdminProfileRow | null): void {
-    editDraft = row;
-    draftError = null;
-    draftDialogOpen = true;
+  function openUnassignedDialog(row: AdminProfileRow | null): void {
+    editUnassigned = row;
+    unassignedError = null;
+    unassignedDialogOpen = true;
   }
 
-  async function saveDraft(result: {
+  async function saveUnassigned(result: {
     collection: string;
     profile_id: string;
     provider_id: string;
@@ -285,10 +285,10 @@
     tpm_limit: number | null;
     rpm_limit: number | null;
   }): Promise<void> {
-    draftBusy = true;
-    draftError = null;
-    if (editDraft === null) {
-      const ok = await gatewayStore.addDraft(result.collection, {
+    unassignedBusy = true;
+    unassignedError = null;
+    if (editUnassigned === null) {
+      const ok = await gatewayStore.addUnassigned(result.collection, {
         profile_id: result.profile_id,
         provider_id: result.provider_id,
         model: result.model,
@@ -296,15 +296,15 @@
         effort: result.effort,
         modalities: result.modalities,
       });
-      draftBusy = false;
+      unassignedBusy = false;
       if (!ok) {
-        draftError = gatewayStore.error;
+        unassignedError = gatewayStore.error;
         return;
       }
     } else {
-      const ok = await gatewayStore.saveDraft(
-        editDraft.collection_name,
-        editDraft.profile_id,
+      const ok = await gatewayStore.saveUnassigned(
+        editUnassigned.collection_name,
+        editUnassigned.profile_id,
         {
           model: result.model,
           max_context_window: result.max_context_window,
@@ -312,29 +312,29 @@
           modalities: result.modalities,
         },
       );
-      draftBusy = false;
+      unassignedBusy = false;
       if (!ok) {
-        draftError = gatewayStore.error;
+        unassignedError = gatewayStore.error;
         return;
       }
     }
-    await reloadDetailDrafts();
-    draftDialogOpen = false;
-    editDraft = null;
+    await reloadDetailUnassigned();
+    unassignedDialogOpen = false;
+    editUnassigned = null;
   }
 
-  async function confirmRemoveDraft(): Promise<void> {
-    const row = removeDraftTarget;
+  async function confirmRemoveUnassigned(): Promise<void> {
+    const row = removeUnassignedTarget;
     if (row === null) return;
-    draftBusy = true;
-    draftError = null;
-    await gatewayStore.removeDraft(row.collection_name, row.profile_id);
-    draftBusy = false;
+    unassignedBusy = true;
+    unassignedError = null;
+    await gatewayStore.removeUnassigned(row.collection_name, row.profile_id);
+    unassignedBusy = false;
     if (gatewayStore.error !== null) {
-      draftError = gatewayStore.error;
+      unassignedError = gatewayStore.error;
     } else {
-      await reloadDetailDrafts();
-      removeDraftTarget = null;
+      await reloadDetailUnassigned();
+      removeUnassignedTarget = null;
     }
   }
 
@@ -351,7 +351,7 @@
       removeError = gatewayStore.error;
     } else {
       removeTarget = null;
-      await reloadDetailDrafts();
+      await reloadDetailUnassigned();
     }
   }
 
@@ -588,7 +588,7 @@
     if (profileId === null || dropBusy) return;
     dropBusy = true;
     try {
-      await gatewayStore.addDraftToSet(
+      await gatewayStore.addUnassignedToSet(
         detailRow?.name ?? "",
         profileId,
         setName,
@@ -596,7 +596,7 @@
       // Re-read only on success: the reload's own read nulls the error
       // first (store.run), so an unconditional reload would wipe the
       // failure banner before it paints.
-      if (gatewayStore.error === null) await reloadDetailDrafts();
+      if (gatewayStore.error === null) await reloadDetailUnassigned();
     } finally {
       dropBusy = false;
     }
@@ -625,7 +625,7 @@
     if (profileId === null || dropBusy) return;
     dropBusy = true;
     try {
-      await gatewayStore.addDraftToSet(collectionName, profileId, setName);
+      await gatewayStore.addUnassignedToSet(collectionName, profileId, setName);
       if (gatewayStore.error === null) {
         placementOpen = false;
         placementSourceCollection = null;
@@ -795,14 +795,16 @@
         }}
         onAdd={() => openGroupDialog(null)}
       />
-      <DraftsSection
-        drafts={detailRow ? (detailDrafts ?? []) : (gatewayStore.drafts ?? [])}
+      <UnassignedSection
+        unassigned={detailRow
+          ? (detailUnassigned ?? [])
+          : (gatewayStore.unassigned ?? [])}
         scope={detailRow?.name ?? null}
-        onCreate={() => openDraftDialog(null)}
-        onEdit={(row) => openDraftDialog(row)}
+        onCreate={() => openUnassignedDialog(null)}
+        onEdit={(row) => openUnassignedDialog(row)}
         onDelete={(row) => {
-          removeDraftTarget = row;
-          draftError = null;
+          removeUnassignedTarget = row;
+          unassignedError = null;
         }}
         onDragStart={(profile) => {
           dragProfileId = profile.profile_id;
@@ -900,36 +902,36 @@
 />
 
 <ProfileDialog
-  open={draftDialogOpen}
+  open={unassignedDialogOpen}
   providers={gatewayStore.providers ?? []}
   collections={gatewayStore.collections ?? []}
   pinnedCollection={detailRow?.name ?? null}
-  row={editDraft}
-  busy={draftBusy}
-  error={draftError}
-  onSave={(result) => void saveDraft(result)}
+  row={editUnassigned}
+  busy={unassignedBusy}
+  error={unassignedError}
+  onSave={(result) => void saveUnassigned(result)}
   onCancel={() => {
-    draftDialogOpen = false;
-    editDraft = null;
-    draftError = null;
+    unassignedDialogOpen = false;
+    editUnassigned = null;
+    unassignedError = null;
   }}
 />
 
 <ConfirmDialog
-  open={removeDraftTarget !== null}
-  title={removeDraftTarget?.profile_id ?? ""}
-  description={manage_gateway_remove_draft_body({
-    name: removeDraftTarget?.profile_id ?? "",
-    collection: removeDraftTarget?.collection_name ?? "",
+  open={removeUnassignedTarget !== null}
+  title={removeUnassignedTarget?.profile_id ?? ""}
+  description={manage_gateway_remove_unassigned_body({
+    name: removeUnassignedTarget?.profile_id ?? "",
+    collection: removeUnassignedTarget?.collection_name ?? "",
   })}
   confirmLabel={common_remove()}
   tone="danger"
-  busy={draftBusy}
-  error={draftError}
-  onConfirm={() => void confirmRemoveDraft()}
+  busy={unassignedBusy}
+  error={unassignedError}
+  onConfirm={() => void confirmRemoveUnassigned()}
   onCancel={() => {
-    removeDraftTarget = null;
-    draftError = null;
+    removeUnassignedTarget = null;
+    unassignedError = null;
   }}
 />
 

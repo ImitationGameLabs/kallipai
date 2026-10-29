@@ -426,8 +426,8 @@ export function moveProfile(
   });
 }
 
-/** The parked list with `undefined` normalized back to absent when empty,
- * so a draft that parks and unparks everything compares equal (isDirty)
+/** The unassigned list with `undefined` normalized back to absent when empty,
+ * so moving every profile out and back in compares equal (isDirty)
  * to a committed config that never carried the key.
  */
 function withParking(
@@ -437,7 +437,7 @@ function withParking(
   return parking.length > 0 ? { ...config, parking } : omitParking(config);
 }
 
-/** A copy of the config with the `parking` key removed (absent = empty).
+/** A copy of the config with the wire `parking` key removed (absent = empty).
  * `structuredClone`-safe and JSON.stringify-friendly: an undefined-valued
  * optional property is dropped, matching the GET shape.
  */
@@ -446,11 +446,11 @@ function omitParking(config: ProfileConfig): ProfileConfig {
   return rest;
 }
 
-/** Move a set profile into the parking area (drag-and-drop draft update).
- * The profile lands at the end of the parked list. Unknown set names or
+/** Move a set profile into the unassigned area (drag-and-drop draft update).
+ * The profile lands at the end of the unassigned list. Unknown set names or
  * an out-of-range index leave the config unchanged.
  */
-export function moveToParking(
+export function moveToUnassigned(
   config: ProfileConfig,
   fromSet: string,
   fromIdx: number,
@@ -461,11 +461,11 @@ export function moveToParking(
   return withParking(without, [...(without.parking ?? []), profile]);
 }
 
-/** Move a parked profile back into the named set (drag-and-drop draft
+/** Move an unassigned profile back into the named set (drag-and-drop draft
  * update). The profile lands at the end of the target set. Unknown set
  * names or an out-of-range index leave the config unchanged.
  */
-export function moveFromParking(
+export function moveFromUnassigned(
   config: ProfileConfig,
   fromIdx: number,
   toSet: string,
@@ -483,10 +483,10 @@ export function moveFromParking(
   );
 }
 
-/** Replace the parked list wholesale (the parking dialog Save path).
+/** Replace the unassigned list wholesale (the unassigned dialog Save path).
  * An empty list normalizes to the absent key (draft-equality rule above).
  */
-export function replaceParkingProfiles(
+export function replaceUnassignedProfiles(
   config: ProfileConfig,
   profiles: readonly ProfileModel[],
 ): ProfileConfig {
@@ -536,8 +536,8 @@ export function profileConfigToWire(
   const wire: ProfileConfigPutRequest = {
     sets,
     endpoints,
-    // Always send the parking key: an explicit empty list is the only way
-    // to clear the parked area (the server keeps live parking when the
+    // Always send the wire `parking` key: an explicit empty list is the only way
+    // to clear the unassigned area (the server keeps the stored list when
     // key is absent, so an omitted key would silently mean "keep").
     parking: draft.parking ?? [],
   };
@@ -656,20 +656,20 @@ export function singleProfileProbeRequest(
     ],
   };
 }
-/** Probe-set name for parked profiles: `:` is invalid in a real set name
+/** Wire probe-set name for unassigned profiles: `:` is invalid in a real set name
  * (the server restricts names to `[A-Za-z0-9_-]`), so this placeholder
  * can never collide with a named set's reports. */
 const PARKING_PROBE_SET = ":parking";
 
 /**
- * Build a single-profile probe request for a parked profile (the parking
+ * Build a single-profile probe request for an unassigned profile (the unassigned
  * card Test button): same shape as the set variant — the profile rides
  * in a one-profile probe set, its provider inline under the shared key
  * rule. A dangling provider reference still probes (server verdict:
- * invalid_config), and an undefined parked list (GET omitted the key) is
+ * invalid_config), and an undefined unassigned list (GET omitted the key) is
  * simply out of range. Null when idx is out of range.
  */
-export function singleParkingProfileProbeRequest(
+export function singleUnassignedProfileProbeRequest(
   committed: ProfileConfig | null,
   draft: ProfileConfig,
   idx: number,

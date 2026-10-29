@@ -1,13 +1,13 @@
 <script lang="ts" module>
   // Single-profile create/edit dialog shared by the Profiles page's
-  // parking section and its set-member profile cards: one field per
+  // unassigned section and its set-member profile cards: one field per
   // block, vertical (the ProviderDialog pattern), deliberately NOT
   // the SetDialog row editor (which edits a whole set at once).
   // Prop-driven (CreateRoomDialog pattern): the dialog never touches
   // a store; the page applies the result to its draft. Title and
   // description come from the call site — each context speaks with
   // its own i18n keys. In edit mode the id is locked — the id is the
-  // profile's identity in the sets ∪ parking uniqueness rule, and
+  // profile's identity in the sets ∪ unassigned uniqueness rule, and
   // renaming would dangle probe reports keyed by it.
   import type {
     Modality,
@@ -84,11 +84,11 @@
   }: {
     open: boolean;
     mode: "new" | "edit";
-    /** The parked profile being edited (edit mode's initial values). */
+    /** The unassigned profile being edited (edit mode's initial values). */
     profile?: ProfileModel | null;
     /** Provider ids available in the draft (the endpoint dropdown). */
     providerIds?: string[];
-    /** Every profile id visible in the draft, sets ∪ parking (the
+    /** Every profile id visible in the draft, sets ∪ unassigned (the
      * new-mode duplicate check — advisory; PUT stays authoritative). */
     occupiedIds?: string[];
     /** Latest probe report for the in-form Test (rendered inline). */

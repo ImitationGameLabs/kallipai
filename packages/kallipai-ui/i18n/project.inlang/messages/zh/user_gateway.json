@@ -35,7 +35,7 @@
   "user_gateway_profile_budget": "预算上限",
   "user_gateway_profile_tpm": "TPM 限制",
   "user_gateway_profile_rpm": "RPM 限制",
-  "user_gateway_profile_draft": "草稿",
+  "user_gateway_profile_unassigned": "未分配",
   "user_gateway_remove_profile_body": "删除 {collection} 内的配置 {name}？",
   "user_gateway_sets": "配置集",
   "user_gateway_set_add": "新建配置集",
