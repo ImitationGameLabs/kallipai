@@ -33,7 +33,7 @@ pub struct Model {
     pub effort: Option<String>,
     /// JSON-encoded modality list (e.g. `["text"]`).
     pub modalities: Option<String>,
-    /// Draft flag. In the catalog space a set member is never parked; the
+    /// Parked flag. In the catalog space a set member is never parked; the
     /// membership and the flag are written together. The user face has no
     /// promote step, so a set edit there can leave a member parked.
     pub parked: bool,

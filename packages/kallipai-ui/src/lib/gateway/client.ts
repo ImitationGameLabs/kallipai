@@ -124,7 +124,7 @@ export interface UserCollectionRow {
   name: string;
   description: string;
   sets: string[];
-  /** How many profile rows the collection holds (drafts included). */
+  /** How many profile rows the collection holds (unassigned rows included). */
   profile_count: number;
   /** How many sets the collection anchors. */
   set_count: number;
@@ -241,7 +241,7 @@ export function listProfiles(
 }
 
 /** POST /user/collections/{collection}/profiles: a row born in the named
- * collection, always a draft (the user face has no promote step). */
+ * collection, always unassigned (the user face has no promote step). */
 export function createProfile(
   collection: string,
   body: {

@@ -38,8 +38,8 @@ pub struct AdminCollectionView {
     pub publications: Vec<String>,
     /// The collection's default-set anchor (null = none chosen yet).
     pub default_set: Option<String>,
-    /// How many profile rows the collection holds (drafts included): the
-    /// delete confirmation states this number, so the cost is never a
+    /// How many profile rows the collection holds (unassigned rows included):
+    /// the delete confirmation states this number, so the cost is never a
     /// guess.
     pub profile_count: u64,
     /// How many sets the collection anchors (the cascade's other half).

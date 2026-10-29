@@ -957,7 +957,7 @@ Deno.test(
     );
   },
 );
-// --- unassigned (draft space out of rotation) ---
+// --- unassigned (rows out of rotation) ---
 
 function unassignedConfig(): ProfileConfig {
   return {

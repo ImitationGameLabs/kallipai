@@ -174,7 +174,7 @@ async fn sanitized_set(
     })
 }
 
-/// GET /parking: the drafts of the collection this tagma selected. The
+/// GET /parking: the unassigned rows of the collection this tagma selected. The
 /// container is the selection pointer's -- the URL carries none. A pointer
 /// this viewer cannot see answers an empty list, never a 403: visibility is
 /// `GET /selected-collection`'s verdict, kept in one place.
@@ -192,17 +192,18 @@ pub async fn get_parking(
         .one(&state.db)
         .await
         .map_err(db::map_db_err)?;
-    // No selection = no collection to hold drafts: an empty answer, not a
-    // 404. The tagma reads this endpoint as required (a 404 means a
-    // transport fault to its client), and "nothing selected" is an empty
-    // mirror, not a failure.
+    // No selection = no collection to hold unassigned rows: an empty
+    // answer, not a 404. The tagma reads this endpoint as required (a 404
+    // means a transport fault to its client), and "nothing selected" is an
+    // empty mirror, not a failure.
     let Some(pointer) = pointer else {
         return Ok(Json(Parking { profiles: vec![] }));
     };
     // Visibility is the sibling's verdict alone: a pointer outside this
-    // viewer's domain answers the same empty list as an empty draft space, so
-    // the two faces never disagree about one pointer and the tagma keeps its
-    // non-200-is-a-transport-fault contract (the sibling still 404s/403s).
+    // viewer's domain answers the same empty list as an empty unassigned
+    // space, so the two faces never disagree about one pointer and the
+    // tagma keeps its non-200-is-a-transport-fault contract (the sibling
+    // still 404s/403s).
     if !visibility::collection_visible(
         &state.db,
         &identity.viewer,
@@ -549,9 +550,9 @@ mod tests {
         assert_eq!(body["sets"][0]["profiles"][0]["model"], "bound-model");
         assert_eq!(body["default_set"], "user-set");
 
-        // /parking: the drafts of the selected collection. Back on the
-        // catalog baseline, p4 is the one draft; its members are served
-        // and never list.
+        // /parking: the unassigned rows of the selected collection. Back on
+        // the catalog baseline, p4 is the one unassigned row; its members are
+        // served and never list.
         let response = app
             .clone()
             .oneshot(req_with_body(
@@ -571,10 +572,10 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = json_of(response).await;
         assert_eq!(body["profiles"].as_array().unwrap().len(), 1);
-        assert_eq!(body["profiles"][0]["model"], "draft-x");
+        assert_eq!(body["profiles"][0]["model"], "unassigned-x");
 
-        // No selection = no collection to hold drafts: an empty mirror,
-        // never a 404 (the tagma reads this endpoint as required).
+        // No selection = no collection to hold unassigned rows: an empty
+        // mirror, never a 404 (the tagma reads this endpoint as required).
         let response = app
             .clone()
             .oneshot(req_with_body(
@@ -1203,7 +1204,7 @@ mod tests {
         assert_eq!(body["collection_name"], "baseline");
     }
 
-    /// Insert a parked draft into one collection (the fixtures park none
+    /// Insert a parked row into one collection (the fixtures park none
     /// outside the catalog baseline).
     async fn park(
         db: &sea_orm::DatabaseConnection,
@@ -1277,20 +1278,27 @@ mod tests {
     }
 
     /// `/parking` never speaks about visibility: a pointer the viewer cannot
-    /// see answers the same empty list as an empty draft space (no row of the
-    /// hidden collection leaks), and so does a pointer whose collection row
-    /// is gone. The 403 lives on the sibling alone, which the tagma reads
-    /// first -- one verdict, one place.
+    /// see answers the same empty list as an empty unassigned space (no row
+    /// of the hidden collection leaks), and so does a pointer whose
+    /// collection row is gone. The 403 lives on the sibling alone, which the
+    /// tagma reads first -- one verdict, one place.
     #[tokio::test]
     async fn parking_answers_empty_for_an_invisible_or_deleted_pointer() {
         let db = migrated_test_db().await;
         crate::test_support::seed_registry(&db, "https://api.upstream.test").await;
-        // A draft in a collection the viewer cannot see: leaking it is the
-        // temptation this test measures.
-        park(&db, "acc-bound", "own-col", "hidden-draft", "hidden-model").await;
-        // A draft the viewer may see, so an empty answer above cannot be a
-        // broken query.
-        park(&db, "acc-other", "other-col", "own-draft", "own-model").await;
+        // An unassigned row in a collection the viewer cannot see: leaking it
+        // is the temptation this test measures.
+        park(
+            &db,
+            "acc-bound",
+            "own-col",
+            "hidden-unassigned",
+            "hidden-model",
+        )
+        .await;
+        // An unassigned row the viewer may see, so an empty answer above
+        // cannot be a broken query.
+        park(&db, "acc-other", "other-col", "own-unassigned", "own-model").await;
 
         let management = crate::management::AdminAuth::Platform(std::sync::Arc::new(
             crate::test_support::MockVerifier::enrolled(&[("tagma-park", "acc-other")])
@@ -1337,7 +1345,7 @@ mod tests {
             "no row of the invisible collection may leak: {text}"
         );
 
-        // The visible pointer serves exactly its own draft.
+        // The visible pointer serves exactly its own unassigned row.
         point_at(&db, "tagma-park", "acc-other", "other-col").await;
         let response = app
             .clone()

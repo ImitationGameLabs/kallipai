@@ -34,7 +34,7 @@ pub struct ProfileConfig {
     pub default: String,
     /// Named provider instances keyed by [`Provider::id`].
     pub endpoints: HashMap<String, Provider>,
-    /// Profiles parked out of rotation: draft space the runtime never
+    /// Profiles parked out of rotation: the unassigned rows the runtime never
     /// reads (selection is sets-only), kept so a parked profile survives
     /// without a set. Empty defaults and omitted from the serialized file
     /// when empty.

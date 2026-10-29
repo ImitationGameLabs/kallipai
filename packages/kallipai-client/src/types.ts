@@ -334,7 +334,7 @@ export interface ProfileConfig {
   /** The default set's name (GET omits it when no sets exist). */
   readonly default?: string;
   readonly endpoints: Readonly<Record<string, ProfileProvider>>;
-  /** Profiles parked out of rotation (draft space, absent = empty).
+  /** Profiles parked out of rotation (unassigned space, absent = empty).
    * GET omits the key when empty; on PUT an absent key keeps the live
    * parking (tri-state — see the Rust merge), while the UI always sends it.
    */

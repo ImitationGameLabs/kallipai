@@ -462,7 +462,7 @@ pub(crate) async fn migrated_test_db() -> Db {
 /// - set `alpha` (profiles p1, p2, p6 in failover order) -- the
 ///   baseline catalog set (p6 carries the responses wire family)
 /// - set `beta` (profile p3) -- the second catalog set
-/// - profile p4 parked in `baseline` (a draft: in no set)
+/// - profile p4 parked in `baseline` (unassigned: in no set)
 /// - set `pro-set` (profile p7) in the `catalog-pro` collection
 /// - provider credentials for p1/p2/p3/p6 against `upstream_base_url`
 ///
@@ -524,7 +524,7 @@ pub(crate) async fn seed_registry(db: &Db, upstream_base_url: &str) {
         mk_profile("p1", "deepseek-chat", false, "baseline"),
         mk_profile("p2", "deepseek-researcher", false, "baseline"),
         mk_profile("p3", "gpt-x", false, "baseline"),
-        mk_profile("p4", "draft-x", true, "baseline"),
+        mk_profile("p4", "unassigned-x", true, "baseline"),
         mk_profile("p6", "gpt-x-responses", false, "baseline"),
         mk_profile("p7", "gpt-pro", false, "catalog-pro"),
     ];

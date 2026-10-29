@@ -599,7 +599,7 @@ mod tests {
     #[tokio::test]
     async fn deleting_a_referenced_provider_conflicts() {
         let state = seeded_state().await;
-        catalog_profile(&state, "a4", "draft-x", true).await;
+        catalog_profile(&state, "a4", "unassigned-x", true).await;
         let (status, body) = send(
             app(state),
             req(
@@ -680,7 +680,7 @@ mod tests {
     #[tokio::test]
     async fn multibyte_key_masks_across_every_exit() {
         let state = seeded_state().await;
-        catalog_profile(&state, "a4", "draft-x", true).await;
+        catalog_profile(&state, "a4", "unassigned-x", true).await;
         catalog_provider(&state, "a2", "deepseek").await;
         catalog_set(&state, "beta2").await;
         catalog_member(&state, "beta2", "a4", 0).await;
@@ -830,11 +830,11 @@ mod tests {
         assert_eq!(status, StatusCode::NOT_FOUND);
     }
 
-    /// The domain is a wall, not a filter: the draft and provider
+    /// The domain is a wall, not a filter: the profile and provider
     /// routes are pinned to the catalog space, so rows planted one
     /// space over answer 404 on every route.
     #[tokio::test]
-    async fn draft_and_provider_routes_refuse_cross_space_rows() {
+    async fn profile_and_provider_routes_refuse_cross_space_rows() {
         let state = seeded_state().await;
         foreign_parked(&state, "fx").await;
         for (method, path, body) in [
@@ -843,7 +843,7 @@ mod tests {
                 "PUT",
                 "/admin/collections/baseline/profiles/fx",
                 Some(serde_json::json!({
-                    "model": "draft-x",
+                    "model": "unassigned-x",
                     "max_context_window": 8192,
                     "effort": null,
                     "modalities": ["text"],

@@ -495,19 +495,19 @@ mod tests {
     }
 
     /// The pre-migration fixture: two collections, one profile shared
-    /// by both sets, one memberless draft, and a space that carries a
+    /// by both sets, one memberless unassigned row, and a space that carries a
     /// profile but never created a collection.
     async fn seed_legacy(db: &sea_orm::DatabaseConnection) {
         exec(db, "INSERT INTO collections (owner, name, description) VALUES ('system', 'alpha', 'd'), ('system', 'beta', 'd')").await;
         exec(db, "INSERT INTO profile_sets (owner, name, description, collection_name) VALUES ('system', 's-alpha', 'd', 'alpha'), ('system', 's-beta', 'd', 'beta')").await;
         exec(db, "INSERT INTO providers (owner, provider_id, family) VALUES ('system', 'p', 'deepseek'), ('user-a', 'p', 'deepseek')").await;
-        exec(db, "INSERT INTO profiles (owner, profile_id, provider_id, model, parked) VALUES ('system', 'shared', 'p', 'm', false), ('system', 'draft', 'p', 'm', true), ('user-a', 'solo', 'p', 'm', true)").await;
+        exec(db, "INSERT INTO profiles (owner, profile_id, provider_id, model, parked) VALUES ('system', 'shared', 'p', 'm', false), ('system', 'unassigned-row', 'p', 'm', true), ('user-a', 'solo', 'p', 'm', true)").await;
         exec(db, "INSERT INTO set_members (owner, set_name, profile_id, position) VALUES ('system', 's-alpha', 'shared', 0), ('system', 's-beta', 'shared', 0)").await;
     }
 
     /// Old-shape rows move into the new shape: the profile that two
     /// collections' sets share becomes one row per collection, a
-    /// memberless draft keeps its flag, and a space that never created
+    /// memberless unassigned row keeps its flag, and a space that never created
     /// a collection gains one named default.
     #[tokio::test]
     async fn collection_isolation_homes_every_profile() {
@@ -520,7 +520,7 @@ mod tests {
         assert_eq!(
             count(&db, "SELECT count(*) AS n FROM profiles").await,
             4,
-            "the shared profile splits; the draft and the user profile land once"
+            "the shared profile splits; the unassigned row and the user profile land once"
         );
         let split = "SELECT count(*) AS n FROM profiles WHERE owner = 'system' AND profile_id = 'shared' AND collection_name IN ('alpha', 'beta') AND NOT parked";
         assert_eq!(
@@ -528,11 +528,11 @@ mod tests {
             2,
             "the shared profile serves both collections"
         );
-        let draft = "SELECT count(*) AS n FROM profiles WHERE owner = 'system' AND profile_id = 'draft' AND collection_name = 'alpha' AND parked";
+        let unassigned = "SELECT count(*) AS n FROM profiles WHERE owner = 'system' AND profile_id = 'unassigned-row' AND collection_name = 'alpha' AND parked";
         assert_eq!(
-            count(&db, draft).await,
+            count(&db, unassigned).await,
             1,
-            "the draft lies in the smallest collection and stays a draft"
+            "the unassigned row lies in the smallest collection and stays unassigned"
         );
         let home = "SELECT count(*) AS n FROM collections WHERE owner = 'user-a' AND name = 'default' AND default_set_name IS NULL";
         assert_eq!(
@@ -554,8 +554,12 @@ mod tests {
         );
         let dangled = "SELECT count(*) AS n FROM set_members m WHERE NOT EXISTS (SELECT 1 FROM profiles p WHERE p.owner = m.owner AND p.collection_name = m.collection_name AND p.profile_id = m.profile_id)";
         assert_eq!(count(&db, dangled).await, 0, "no membership dangles");
-        let drafts = "SELECT count(*) AS n FROM profiles p WHERE p.parked AND EXISTS (SELECT 1 FROM set_members m WHERE m.owner = p.owner AND m.collection_name = p.collection_name AND m.profile_id = p.profile_id)";
-        assert_eq!(count(&db, drafts).await, 0, "a served row is never a draft");
+        let parked_members = "SELECT count(*) AS n FROM profiles p WHERE p.parked AND EXISTS (SELECT 1 FROM set_members m WHERE m.owner = p.owner AND m.collection_name = p.collection_name AND m.profile_id = p.profile_id)";
+        assert_eq!(
+            count(&db, parked_members).await,
+            0,
+            "a served row is never parked"
+        );
     }
 
     /// The downgrade merges back to the old shape -- one row per
@@ -686,7 +690,7 @@ mod tests {
     /// One profile id, two collections, one copy parked and one served: the
     /// merge keeps the row served (`bool_and` over the parked flags), the
     /// same invariant `up` keeps -- a rollback must not turn a served row
-    /// into a draft, and a row every copy parked must stay a draft.
+    /// unassigned, and a row every copy parked must stay unassigned.
     #[tokio::test]
     async fn down_keeps_a_row_served_when_one_copy_was() {
         let db = raw_test_db().await;
@@ -733,7 +737,7 @@ mod tests {
             )
             .await,
             1,
-            "a row every copy parked comes back as a draft"
+            "a row every copy parked comes back unassigned"
         );
     }
 }

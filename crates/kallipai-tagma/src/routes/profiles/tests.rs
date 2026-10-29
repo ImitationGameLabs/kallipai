@@ -523,7 +523,8 @@ fn live_config() -> ProfileConfig {
                 model_list_base_url: Some("https://list.live.example/v1".into()),
             },
         )]),
-        // Live draft space: one parked profile (dangling-free but out of rotation).
+        // Live unassigned space: one parked profile (dangling-free but out of
+        // rotation).
         parking: vec![Profile {
             id: "parked".into(),
             endpoint: "main".into(),

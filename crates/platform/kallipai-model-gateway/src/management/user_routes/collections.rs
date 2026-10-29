@@ -32,8 +32,8 @@ pub(crate) struct UserCollectionView {
     pub sets: Vec<String>,
     /// The collection's default-set anchor (null = none chosen yet).
     pub default_set: Option<String>,
-    /// How many profile rows the collection holds (drafts included): the
-    /// delete confirmation states this number, so the cost is never a
+    /// How many profile rows the collection holds (unassigned rows included):
+    /// the delete confirmation states this number, so the cost is never a
     /// guess.
     pub profile_count: u64,
     /// How many sets the collection anchors (the cascade's other half).
@@ -606,7 +606,7 @@ pub(crate) async fn collection_default_guard<C: sea_orm::ConnectionTrait>(
 /// holds, auditing every deleted row. Collection isolation makes the sweep
 /// exact: a profile belongs to exactly one collection and membership never
 /// leaves it, so deleting the collection takes every profile it holds --
-/// members and drafts alike -- and nothing outside it. The member rows
+/// members and unassigned rows alike -- and nothing outside it. The member rows
 /// cascade with the set and profile rows; each deletion lands its own audit
 /// event inside the caller's transaction. The collection row itself is the
 /// caller's to delete (its audit shape is face-specific).

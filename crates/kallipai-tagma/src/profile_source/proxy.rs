@@ -727,7 +727,7 @@ mod tests {
                 get(|| async {
                     axum::Json(json!({ "profiles": [
                         { "family": "deepseek", "base_url": "http://gw.test:7501/v1",
-                          "model": "draft-1", "max_context_window": 32000,
+                          "model": "unassigned-1", "max_context_window": 32000,
                           "effort": null, "store": null, "modalities": [],
                           "api_key": "tagma-token-1" }
                     ]}))
@@ -821,9 +821,9 @@ mod tests {
             cfg.endpoints["deepseek"].base_url.as_deref(),
             Some("http://gw.test:7501/v1")
         );
-        // Parking adapted into the draft space.
+        // Parking adapted into the unassigned space.
         assert_eq!(cfg.parking.len(), 1);
-        assert_eq!(cfg.parking[0].id, "draft-1");
+        assert_eq!(cfg.parking[0].id, "unassigned-1");
         // A successful refresh lands in the health block (last_refresh
         // moves off the boot value).
         let health = source.health().await;

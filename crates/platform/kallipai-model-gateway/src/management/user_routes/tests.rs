@@ -115,7 +115,7 @@ async fn user_domain_crud_round_trip() {
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["members"], serde_json::json!(["p-user"]));
-    // A second row in the same collection stays a draft; the counts the
+    // A second row in the same collection stays unassigned; the counts the
     // delete confirmation states carry both rows.
     let (status, body) = send(
         app(state.clone()),
@@ -125,7 +125,7 @@ async fn user_domain_crud_round_trip() {
             user,
             true,
             Some(serde_json::json!({
-                "profile_id": "p-draft",
+                "profile_id": "p-unassigned",
                 "provider_id": "up1",
                 "model": "deepseek-chat"
             })),

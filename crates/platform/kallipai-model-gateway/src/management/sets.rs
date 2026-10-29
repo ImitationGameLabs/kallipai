@@ -318,7 +318,7 @@ pub async fn update_set(
         // rewritten list is promoted -- a set member is served, that
         // is the invariant, so a stale parked row heals on the next
         // save -- and a member leaving its last set in this collection
-        // returns to a draft. The same transaction keeps both
+        // becomes unassigned again. The same transaction keeps both
         // faces consistent; each flip lands its own profile update
         // event (the set event records the membership change, this row
         // records the served-face flip it caused).
@@ -624,13 +624,13 @@ mod tests {
     }
 
     /// The membership rewrite drives the served face: joining a set
-    /// promotes a parked draft, leaving the last set re-parks it, and
+    /// promotes an unassigned row, leaving the last set re-parks it, and
     /// leaving one of several sets keeps it served. The set event's
     /// member rows carry the flip (the audit record).
     #[tokio::test]
     async fn set_member_rewrites_promote_and_re_park() {
         let state = seeded_state().await;
-        // p4 is the seeded parked draft; alpha holds p1/p2/p6, beta p3.
+        // p4 is the seeded unassigned row; alpha holds p1/p2/p6, beta p3.
         // Join: p4 enters alpha and is promoted on the same request.
         let (status, body) = send(
             app(state.clone()),
@@ -644,7 +644,7 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK, "{body}");
         assert!(!parked_flag(&state, "baseline", "p4").await);
-        // Leave the only set: p4 becomes a draft again.
+        // Leave the only set: p4 becomes unassigned again.
         let (status, body) = send(
             app(state.clone()),
             req(
@@ -1094,12 +1094,12 @@ mod tests {
         assert_eq!(status, StatusCode::CONFLICT, "{body}");
     }
 
-    /// The same-space member path: a catalog parked draft joins a set
+    /// The same-space member path: a catalog unassigned row joins a set
     /// through the membership rewrite, and the rewrite promotes it (a
-    /// set member is served). Parking a draft in the catalog space and
+    /// set member is served). Parking a row in the catalog space and
     /// joining a set is the one path into the served face.
     #[tokio::test]
-    async fn set_membership_promotes_a_catalog_parked_draft() {
+    async fn set_membership_promotes_a_catalog_unassigned_row() {
         let state = seeded_state().await;
         catalog_provider(&state, "up1", "deepseek").await;
         let (status, body) = send(
@@ -1109,9 +1109,9 @@ mod tests {
                 "/admin/collections/baseline/profiles",
                 Some(TEST_ADMIN_BEARER),
                 Some(serde_json::json!({
-                    "profile_id": "draft-1",
+                    "profile_id": "unassigned-1",
                     "provider_id": "up1",
-                    "model": "draft-model"
+                    "model": "unassigned-model"
                 })),
             ),
         )
@@ -1124,21 +1124,21 @@ mod tests {
                 "PATCH",
                 "/admin/collections/baseline/sets/alpha",
                 Some(TEST_ADMIN_BEARER),
-                Some(serde_json::json!({"members": ["draft-1"]})),
+                Some(serde_json::json!({"members": ["unassigned-1"]})),
             ),
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{body}");
-        assert_eq!(body["profiles"][0]["profile_id"], "draft-1");
+        assert_eq!(body["profiles"][0]["profile_id"], "unassigned-1");
         let member = profile::Entity::find_by_id((
             registry::CATALOG_OWNER.to_owned(),
             "baseline".to_owned(),
-            "draft-1".to_owned(),
+            "unassigned-1".to_owned(),
         ))
         .one(&state.db)
         .await
         .expect("profile read")
-        .expect("the draft joined the set");
+        .expect("the unassigned row joined the set");
         assert!(!member.parked, "a member is served");
         // The join is audited twice: the set event for the membership
         // rewrite and a profile update for the served-face flip.
@@ -1149,24 +1149,24 @@ mod tests {
         );
         assert!(
             rows.iter()
-                .any(|r| r.entity == "profile" && r.entity_id == "draft-1")
+                .any(|r| r.entity == "profile" && r.entity_id == "unassigned-1")
         );
     }
 
     /// A foreign space's row cannot ride along: the membership rewrite
-    /// resolves member ids in the set's space only, so a draft parked
+    /// resolves member ids in the set's space only, so a row parked
     /// one space over is a miss (404, never a silent move).
     #[tokio::test]
-    async fn set_membership_refuses_a_foreign_space_draft() {
+    async fn set_membership_refuses_a_foreign_space_row() {
         let state = seeded_state().await;
-        foreign_parked(&state, "draft-x").await;
+        foreign_parked(&state, "unassigned-x").await;
         let (status, body) = send(
             app(state.clone()),
             req(
                 "PATCH",
                 "/admin/collections/baseline/sets/alpha",
                 Some(TEST_ADMIN_BEARER),
-                Some(serde_json::json!({"members": ["draft-x"]})),
+                Some(serde_json::json!({"members": ["unassigned-x"]})),
             ),
         )
         .await;
@@ -1174,12 +1174,12 @@ mod tests {
         let stayed = profile::Entity::find_by_id((
             LOCAL_ADMIN_OWNER.to_owned(),
             "personal".to_owned(),
-            "draft-x".to_owned(),
+            "unassigned-x".to_owned(),
         ))
         .one(&state.db)
         .await
         .expect("profile read")
-        .expect("the foreign draft stays where it is");
+        .expect("the foreign row stays where it is");
         assert!(stayed.parked);
     }
 

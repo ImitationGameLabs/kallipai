@@ -1,5 +1,5 @@
-//! The profile face: rows live inside their collection. A draft is a
-//! profile with `parked = true` -- the park flag is a filter, not a
+//! The profile face: rows live inside their collection. An unassigned
+//! profile is a row with `parked = true` -- the park flag is a filter, not a
 //! resource; promotion is a plain PUT and joining a set flips the flag in
 //! the membership rewrite. The row identity is `(owner, collection_name,
 //! profile_id)`, so every route names the collection it addresses and the
@@ -36,7 +36,7 @@ pub struct ProfileCreate {
     pub max_context_window: Option<i64>,
     pub effort: Option<String>,
     pub modalities: Option<Vec<String>>,
-    /// The state the row is born in; absent means a draft (`true`).
+    /// The state the row is born in; absent means unassigned (`true`).
     #[serde(default)]
     pub parked: Option<bool>,
 }
@@ -44,7 +44,7 @@ pub struct ProfileCreate {
 /// PUT /admin/collections/{collection}/profiles/{id}: full-field
 /// replacement (plain PUT semantics -- the body is the complete desired
 /// state, `parked` included, so a promote to served and a demote back to
-/// draft are the same endpoint). The one refusal is a demote the sets
+/// unassigned are the same endpoint). The one refusal is a demote the sets
 /// forbid: a row a set carries is served, so `parked: true` on it is a 409
 /// until its memberships are gone.
 #[derive(Deserialize)]
@@ -114,8 +114,8 @@ pub async fn create_profile(
         max_context_window: Set(body.max_context_window),
         effort: Set(body.effort.clone()),
         modalities: Set(encode_modalities(&body.modalities)),
-        // Born a draft unless the caller says otherwise: serving is an
-        // explicit choice, and a draft joins the face only through a set.
+        // Born unassigned unless the caller says otherwise: serving is an
+        // explicit choice, and only a set membership serves the row.
         parked: Set(body.parked.unwrap_or(true)),
         store: Set(None),
         owner: Set(owner),
@@ -168,9 +168,9 @@ pub async fn list_profiles(
 }
 
 /// GET /admin/collections/{collection}/profiles/{profile_id}: the row
-/// read. Drafts and served rows are the same resource here -- the park
+/// read. Unassigned and served rows are the same resource here -- the park
 /// flag is an attribute, and the list's `parked` filter is how a caller
-/// asks for the draft set.
+/// asks for the unassigned rows.
 pub async fn get_profile(
     State(state): State<AppState>,
     _admin: AdminToken,
@@ -213,7 +213,7 @@ pub async fn update_profile(
     // member rows without parking or locking a profile row, so a parked
     // member there stays parked. The faces then split on purpose: the
     // distribution face serves the selected collection without reading the
-    // flag and `/parking` lists that member as a draft, while the
+    // flag and `/parking` lists that member as unassigned, while the
     // forwarding face reads it and refuses the row (403,
     // `GateError::parking`).
     let current = resolve_profile_for_update(&txn, &owner, &collection, &profile_id).await?;
@@ -229,7 +229,7 @@ pub async fn update_profile(
             .map_err(db::map_db_err)?;
         if member.is_some() {
             return Err(ApiError::conflict(
-                "a profile in a set is not a draft; remove it from its sets first",
+                "a set member cannot be unassigned; remove it from its sets first",
             ));
         }
     }
@@ -461,7 +461,7 @@ pub async fn delete_profile(
 
 /// POST /admin/collections/{collection}/profiles/{profile_id}/move body:
 /// the source collection the row leaves and the set it joins in the
-/// target collection (`None` = the copy lands there as a draft).
+/// target collection (`None` = the copy lands there unassigned).
 #[derive(Deserialize)]
 pub struct MoveProfile {
     pub from_collection_name: String,
@@ -546,8 +546,8 @@ pub async fn move_profile(
             .unwrap_or(0),
         None => 0,
     };
-    // The copy: content verbatim, the new container, and a draft only when
-    // it arrives without a set (a member is served by definition).
+    // The copy: content verbatim, the new container, and unassigned when it
+    // arrives without a set (a member is served by definition).
     let copy = profile::ActiveModel {
         profile_id: Set(current.profile_id.clone()),
         collection_name: Set(collection.clone()),
@@ -648,10 +648,10 @@ mod tests {
     use sea_orm::{ConnectionTrait, EntityTrait, Statement};
 
     #[tokio::test]
-    async fn draft_crud_promotes_and_audits() {
+    async fn unassigned_crud_promotes_and_audits() {
         let state = seeded_state().await;
         catalog_provider(&state, "up1", "openai-compatible").await;
-        let draft = serde_json::json!({
+        let unassigned_body = serde_json::json!({
             "profile_id": "p9",
             "provider_id": "up1",
             "model": "m9",
@@ -664,7 +664,7 @@ mod tests {
                 "POST",
                 "/admin/collections/baseline/profiles",
                 Some(TEST_ADMIN_BEARER),
-                Some(draft),
+                Some(unassigned_body),
             ),
         )
         .await;
@@ -738,7 +738,7 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK, "{body}");
         assert_eq!(body["parked"], false);
-        // The draft set is the park filter: p9 left it.
+        // The unassigned listing is the park filter: p9 left it.
         let (status, body) = send(
             app(state.clone()),
             req(
@@ -750,14 +750,17 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{body}");
-        let drafts: Vec<&str> = body
+        let unassigned: Vec<&str> = body
             .as_array()
-            .expect("draft array")
+            .expect("unassigned array")
             .iter()
             .map(|p| p["profile_id"].as_str().expect("profile id"))
             .collect();
-        assert!(!drafts.contains(&"p9"), "a promoted row is not a draft");
-        // The distribution draft listing follows the selection pointer:
+        assert!(
+            !unassigned.contains(&"p9"),
+            "a promoted row is not unassigned"
+        );
+        // The distribution unassigned list follows the selection pointer:
         // anchored to the catalog baseline, p4 alone is parked there.
         let (status, _) = send(
             app(state.clone()),
@@ -777,10 +780,11 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         let models = body["profiles"].as_array().expect("profiles array");
-        assert_eq!(models.len(), 1); // only the seeded p4 draft remains
+        // Only the seeded p4 unassigned row remains.
+        assert_eq!(models.len(), 1);
         // The distribution payload is the sanitized shape (no profile_id;
-        // the model name identifies the draft).
-        assert_eq!(models[0]["model"], "draft-x");
+        // the model name identifies the unassigned row).
+        assert_eq!(models[0]["model"], "unassigned-x");
         // The audit trail now matches the name: one create (before=None,
         // after parked) and one promote (parked true -> false), per field.
         let rows = audit_rows(&state.db).await;
@@ -806,10 +810,10 @@ mod tests {
         );
     }
 
-    /// A draft references a provider: the family derives from the
+    /// An unassigned row references a provider: the family derives from the
     /// referenced row and the provider table gains nothing.
     #[tokio::test]
-    async fn create_draft_references_a_provider_and_derives_its_family() {
+    async fn create_unassigned_references_a_provider_and_derives_its_family() {
         let state = seeded_state().await;
         catalog_provider(&state, "up1", "deepseek").await;
         let before = provider::Entity::find()
@@ -844,10 +848,10 @@ mod tests {
 
     // The management UI's flow, regression-guarded: the provider dialog
     // and the profile dialog both send no `?owner=`, so the pool row
-    // and the referencing draft must land in one space (the catalog
+    // and the referencing unassigned row must land in one space (the catalog
     // space this face manages).
     #[tokio::test]
-    async fn provider_then_parked_draft_share_the_catalog_space_without_owner_params() {
+    async fn provider_and_unassigned_land_in_one_space_without_owner_params() {
         let state = seeded_state().await;
         let (status, body) = send(
             app(state.clone()),
@@ -891,7 +895,7 @@ mod tests {
         assert_eq!(body["family"], "openai-compatible");
     }
 
-    /// Deleting a parked draft removes it from the domain's faces and
+    /// Deleting an unassigned row removes it from the domain's faces and
     /// lands one profile delete row; deleting a served profile (a row
     /// the admin space owns outright, planted with its own membership
     /// edge) additionally lands the cascading credential's own masked
@@ -899,19 +903,19 @@ mod tests {
     /// member order (the membership edge leaves via the FK cascade, but
     /// the audit trail keeps it).
     #[tokio::test]
-    async fn delete_draft_audits_the_cascade() {
+    async fn delete_unassigned_audits_the_cascade() {
         let state = seeded_state().await;
-        // The whole walk stays in the catalog space: the drafts, the
+        // The whole walk stays in the catalog space: the unassigned rows, the
         // served row, its credential, and a set holding the membership
         // edge.
-        catalog_profile(&state, "a4", "draft-x", true).await;
+        catalog_profile(&state, "a4", "unassigned-x", true).await;
         catalog_profile(&state, "a1", "m1", false).await;
         catalog_profile(&state, "a2", "m2", false).await;
         catalog_credential(&state, "a1", "sk-served-under-test").await;
         catalog_set(&state, "alpha2").await;
         catalog_member(&state, "alpha2", "a1", 0).await;
         catalog_member(&state, "alpha2", "a2", 1).await;
-        // The planted draft a4 has no credential: one audit row only.
+        // The planted unassigned row a4 has no credential: one audit row only.
         let (status, body) = send(
             app(state.clone()),
             req(
@@ -1054,7 +1058,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "{body}");
 
         // Join the seeded set through the membership rewrite: the
-        // promote moves the draft into the catalog in the same
+        // promote moves the unassigned row into the catalog in the same
         // transaction (the catalog read serves members), and the
         // fixture's members keep their places ahead of it.
         let (status, body) = send(
@@ -1106,12 +1110,12 @@ mod tests {
             "absent in the payload means unknown, never false"
         );
 
-        // A fresh parked draft carries the same guarantee: set the
-        // column directly, then replace the full desired state through
-        // the profile PUT (parked included -- the promote is a side
-        // effect of this call, not the point). The moved sx1 now
-        // lives in the catalog space with its provider (the promote
-        // move carried both), so a second provider hosts the new draft.
+        // A fresh unassigned row carries the same guarantee: set the
+        // column directly, then replace the full desired state through the
+        // profile PUT (parked included -- the promote is a side effect of
+        // this call, not the point). The moved sx1 now lives in the catalog
+        // space with its provider (the promote move carried both), so a
+        // second provider hosts the new unassigned row.
         catalog_provider(&state, "up2", "openai-compatible").await;
         let (status, body) = send(
             app(state.clone()),
@@ -1159,7 +1163,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "{body}");
 
         // The update preserved store=true: the column is not part of
-        // ProfilePut, so the replacement must not zero it. The draft
+        // ProfilePut, so the replacement must not zero it. The unassigned row
         // never joins a set, so the witness is the row itself.
         let stored = state
             .db
@@ -1175,13 +1179,13 @@ mod tests {
         assert!(stored.try_get::<bool>("", "store").expect("store value"));
     }
 
-    /// The draft listing is the park filter over the catalog space: a
-    /// draft created on this face and the seeded catalog draft answer
+    /// The unassigned listing is the park filter over the catalog space: a
+    /// row created on this face and the seeded catalog row answer
     /// together, and a served row never joins them.
     #[tokio::test]
-    async fn the_draft_list_is_the_parked_filter() {
+    async fn the_unassigned_list_is_the_parked_filter() {
         let state = seeded_state().await;
-        // The fixture's p4 is the catalog's seeded parked draft.
+        // The fixture's p4 is the catalog's seeded parked row.
         catalog_provider(&state, "up1", "deepseek").await;
         let (status, body) = send(
             app(state.clone()),
@@ -1190,9 +1194,9 @@ mod tests {
                 "/admin/collections/baseline/profiles",
                 Some(TEST_ADMIN_BEARER),
                 Some(serde_json::json!({
-                    "profile_id": "draft-2",
+                    "profile_id": "unassigned-2",
                     "provider_id": "up1",
-                    "model": "draft-model"
+                    "model": "unassigned-model"
                 })),
             ),
         )
@@ -1215,8 +1219,14 @@ mod tests {
             .iter()
             .map(|p| p["profile_id"].as_str().expect("profile id"))
             .collect();
-        assert!(ids.contains(&"p4"), "the seeded catalog draft lists");
-        assert!(ids.contains(&"draft-2"), "the created draft lists");
+        assert!(
+            ids.contains(&"p4"),
+            "the seeded catalog unassigned row lists"
+        );
+        assert!(
+            ids.contains(&"unassigned-2"),
+            "the created unassigned row lists"
+        );
     }
 
     /// The same id in another collection is a different row: creation is
@@ -1227,7 +1237,7 @@ mod tests {
         let state = seeded_state().await;
         seed_collection(&state, "system", "extra").await;
         catalog_provider(&state, "up1", "deepseek").await;
-        let draft = serde_json::json!({
+        let unassigned_body = serde_json::json!({
             "profile_id": "twin",
             "provider_id": "up1",
             "model": "m-a"
@@ -1239,7 +1249,7 @@ mod tests {
                     "POST",
                     &format!("/admin/collections/{collection}/profiles"),
                     Some(TEST_ADMIN_BEARER),
-                    Some(draft.clone()),
+                    Some(unassigned_body.clone()),
                 ),
             )
             .await;
@@ -1252,7 +1262,7 @@ mod tests {
                 "POST",
                 "/admin/collections/baseline/profiles",
                 Some(TEST_ADMIN_BEARER),
-                Some(draft),
+                Some(unassigned_body),
             ),
         )
         .await;
@@ -1293,14 +1303,14 @@ mod tests {
     }
 
     /// Membership drives the parked flag, and the flip is scoped to the
-    /// set's own collection: a same-id draft elsewhere stays a draft, and
+    /// set's own collection: a same-id row elsewhere stays unassigned, and
     /// the audit row the flip lands names the collection it touched.
     #[tokio::test]
     async fn a_membership_flip_touches_only_this_collections_row() {
         let state = seeded_state().await;
         seed_collection(&state, "system", "extra").await;
         catalog_provider(&state, "up1", "deepseek").await;
-        let draft = serde_json::json!({
+        let unassigned_body = serde_json::json!({
             "profile_id": "twin",
             "provider_id": "up1",
             "model": "m"
@@ -1312,7 +1322,7 @@ mod tests {
                     "POST",
                     &format!("/admin/collections/{collection}/profiles"),
                     Some(TEST_ADMIN_BEARER),
-                    Some(draft.clone()),
+                    Some(unassigned_body.clone()),
                 ),
             )
             .await;
@@ -1348,7 +1358,7 @@ mod tests {
     }
 
     /// The move endpoint re-anchors one row: the copy lands in the target
-    /// collection as a draft (no set carries it), the source row leaves,
+    /// collection unassigned (no set carries it), the source row leaves,
     /// and the trail records the pair.
     #[tokio::test]
     async fn move_lands_the_row_in_the_target_collection() {
@@ -1414,7 +1424,7 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK, "{body}");
         assert_eq!(body["model"], "m");
-        // The trail: this row's create as a draft, its delete, and the
+        // The trail: this row's create as unassigned, its delete, and the
         // landing create.
         let rows = audit_rows(&state.db).await;
         let mv1: Vec<_> = rows.iter().filter(|r| r.entity_id == "mv1").collect();
@@ -1477,7 +1487,7 @@ mod tests {
             body["error"]["message"]
                 .as_str()
                 .expect("message")
-                .contains("not a draft"),
+                .contains("cannot be unassigned"),
             "{body}"
         );
         assert!(

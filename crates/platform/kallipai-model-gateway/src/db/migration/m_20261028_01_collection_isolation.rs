@@ -68,16 +68,16 @@
 //!   row inside its own collection, which is what the composite foreign
 //!   keys then enforce for every future write too.
 //! - `parked` obeys the container's invariant after the move: a row that
-//!   is a set member is not a draft. The insert derives the flag from
+//!   is a set member is not unassigned. The insert derives the flag from
 //!   the membership list instead of trusting the stored column, because
 //!   old data maintained the invariant incrementally (`flip_parked`);
 //!   copying a stale `true` onto a served row would turn a served
-//!   profile back into a draft.
+//!   profile back into an unassigned row.
 //!
 //! `down` is a merging rollback, not a byte-for-byte undo. Every row a
 //! space holds for one profile id merges back into one; the merged flag
 //! is `bool_and(parked)`, so a row any collection served stays served and
-//! only a row every copy had parked returns as a draft -- copies and rows
+//! only a row every copy had parked returns unassigned -- copies and rows
 //! created later in another collection alike. A mixed store is reachable
 //! (one collection parks a copy where the id is not served while another
 //! serves it), and `bool_and` is what keeps that row served on the way
@@ -511,9 +511,9 @@ const DOWN_TABLES: &[&str] = &[
 
 /// The merge: one row per `(owner, profile_id)`, keeping the smallest
 /// collection's row (the row `up` homed there, when one exists) and the
-/// merged draft flag. `DISTINCT ON` runs after the window function, so the
+/// merged parked flag. `DISTINCT ON` runs after the window function, so the
 /// flag sees every row of the profile: `bool_and(parked)` makes the merged
-/// row a draft only when every copy was one, the invariant `up` keeps.
+/// row unassigned only when every copy was one, the invariant `up` keeps.
 const DOWN_PROFILES: &str = "INSERT INTO profiles_downgraded \
      (owner, profile_id, provider_id, model, max_context_window, effort, modalities, parked, store) \
      SELECT DISTINCT ON (owner, profile_id) \
@@ -965,7 +965,7 @@ mod tests {
             .collect();
         assert_eq!(placed, vec![("beta", "x", 0), ("alpha", "x", 0)]);
         for row in &placement.profiles {
-            assert!(!row.parked, "a served row is never a draft");
+            assert!(!row.parked, "a served row is never unassigned");
             assert_eq!(row.provider_id, "p");
             assert_eq!(row.model, "m");
             assert_eq!(row.max_context_window, Some(128_000));
@@ -973,12 +973,12 @@ mod tests {
         }
     }
 
-    /// A draft in no set lands in the space's smallest collection and
-    /// keeps its flag; a stale draft flag on a served row is cleared.
+    /// An unassigned row in no set lands in the space's smallest collection and
+    /// keeps its flag; a stale parked flag on a served row is cleared.
     #[test]
-    fn homes_are_deterministic_and_drafts_do_not_leak_onto_served_rows() {
+    fn homes_are_deterministic_and_unassigned_rows_stay_off_served() {
         let profiles = vec![
-            profile("system", "draft", true),
+            profile("system", "unassigned-row", true),
             profile("system", "x", true),
         ];
         let sets = vec![set("system", "zeta", "s")];
@@ -988,13 +988,13 @@ mod tests {
         let placement =
             plan_placement(&profiles, &sets, &members, &collections).expect("plan lands");
 
-        let draft = placement
+        let unassigned = placement
             .profiles
             .iter()
-            .find(|row| row.profile_id == "draft")
+            .find(|row| row.profile_id == "unassigned-row")
             .expect("the memberless row lands");
-        assert_eq!(draft.collection_name, "alpha");
-        assert!(draft.parked, "a memberless row keeps its flag");
+        assert_eq!(unassigned.collection_name, "alpha");
+        assert!(unassigned.parked, "a memberless row keeps its flag");
         let served = placement
             .profiles
             .iter()
@@ -1113,7 +1113,7 @@ mod tests {
     fn the_refusal_names_the_ids_two_spaces_share() {
         let rows = vec![
             ("system".to_owned(), "shared".to_owned()),
-            ("system".to_owned(), "draft".to_owned()),
+            ("system".to_owned(), "unassigned-row".to_owned()),
             ("user-a".to_owned(), "solo".to_owned()),
             ("user-b".to_owned(), "solo".to_owned()),
         ];

@@ -332,14 +332,14 @@ pub async fn set_head_for_families(
     Ok(None)
 }
 
-// -- the parked-draft read family -------------------------------------------
+// -- the parked-row read family ---------------------------------------------
 //
-// The distribution face reads one collection's drafts: the one its selection
-// pointer names, in that collection's own space. The filter is in the query
-// (owner + collection), never a post-filter, so a draft in another
+// The distribution face reads one collection's unassigned rows: the one its
+// selection pointer names, in that collection's own space. The filter is in
+// the query (owner + collection), never a post-filter, so a row in another
 // collection is outside this read by construction.
 
-/// The parked drafts of one collection: what the distribution face's
+/// The parked rows of one collection: what the distribution face's
 /// `/parking` answer carries for the pointer's collection.
 pub async fn catalog_parked_profiles(
     db: &DatabaseConnection,
