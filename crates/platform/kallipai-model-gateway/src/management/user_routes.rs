@@ -33,7 +33,7 @@ use self::providers::{
     create_provider, delete_provider, delete_provider_credential, list_providers,
     put_provider_credential, update_provider,
 };
-use self::sets::{delete_set, get_set, list_sets, update_set};
+use self::sets::{delete_set, get_set, list_sets, reorder_set, update_set};
 use crate::state::AppState;
 use axum::routing::{delete, get, patch, post, put};
 
@@ -70,6 +70,10 @@ pub(crate) fn router() -> axum::Router<AppState> {
         .route(
             "/collections/{collection}/sets/{name}",
             get(get_set).patch(update_set).delete(delete_set),
+        )
+        .route(
+            "/collections/{collection}/sets/{name}/order",
+            put(reorder_set),
         )
         // -- collections ----------------------------------------------------
         .route(

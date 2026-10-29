@@ -18,9 +18,9 @@
 //! one outside the domain -- visibility is the sibling's verdict, so a
 //! non-200 would read to the tagma as a transport fault.
 //!
-//! The list itself is the park flag, not the absence of a set: a user-face
-//! set edit writes member rows without touching the flag, so a parked row
-//! can be a member there and is listed here while that set carries it.
+//! The list is the unassigned rows: `set_name IS NULL`. Membership is the
+//! row's own column, so a row a set carries is not listed here and one no
+//! set carries is -- the same answer the set face's member reads give.
 
 pub mod visibility;
 use axum::Json;
@@ -219,12 +219,12 @@ pub async fn get_parking(
     {
         return Ok(Json(Parking { profiles: vec![] }));
     }
-    let parked =
-        registry::catalog_parked_profiles(&state.db, &pointer.owner, &pointer.collection_name)
+    let unassigned =
+        registry::catalog_unassigned_profiles(&state.db, &pointer.owner, &pointer.collection_name)
             .await
             .map_err(db::map_db_err)?;
     Ok(Json(Parking {
-        profiles: parked
+        profiles: unassigned
             .into_iter()
             .map(|p| sanitize(&state, p, identity.bearer.clone()))
             .collect(),
@@ -1208,9 +1208,9 @@ mod tests {
         assert_eq!(body["collection_name"], "baseline");
     }
 
-    /// Insert a parked row into one collection (the fixtures park none
-    /// outside the catalog baseline).
-    async fn park(
+    /// Insert an unassigned row into one collection (the fixtures leave
+    /// the catalog baseline's p4 as its unassigned row).
+    async fn plant_unassigned(
         db: &sea_orm::DatabaseConnection,
         owner: &str,
         collection: &str,
@@ -1237,12 +1237,13 @@ mod tests {
             max_context_window: Set(Some(128_000)),
             effort: Set(None),
             modalities: Set(Some("[\"text\"]".to_string())),
-            parked: Set(true),
+            set_name: Set(None),
+            position: Set(0),
             store: Set(None),
         }
         .insert(db)
         .await
-        .expect("insert parked profile");
+        .expect("insert unassigned profile");
     }
 
     /// Point a tagma's store at a collection directly: the selection route
@@ -1292,7 +1293,7 @@ mod tests {
         crate::test_support::seed_registry(&db, "https://api.upstream.test").await;
         // An unassigned row in a collection the viewer cannot see: leaking it
         // is the temptation this test measures.
-        park(
+        plant_unassigned(
             &db,
             "acc-bound",
             "own-col",
@@ -1302,7 +1303,7 @@ mod tests {
         .await;
         // An unassigned row the viewer may see, so an empty answer above
         // cannot be a broken query.
-        park(&db, "acc-other", "other-col", "own-unassigned", "own-model").await;
+        plant_unassigned(&db, "acc-other", "other-col", "own-unassigned", "own-model").await;
 
         let management = crate::management::AdminAuth::Platform(std::sync::Arc::new(
             crate::test_support::MockVerifier::enrolled(&[("tagma-park", "acc-other")])

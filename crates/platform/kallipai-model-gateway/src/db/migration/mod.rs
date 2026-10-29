@@ -1,8 +1,10 @@
 //! Programmatic sea-orm migrations for the gateway store.
 //!
-//! The schema is built by two migrations: [`m_20260918_01_init`] lays the
+//! The schema is built by three migrations: [`m_20260918_01_init`] lays the
 //! base tables, [`m_20261028_01_collection_isolation`] rebuilds profiles,
-//! sets and members with their collection keys; new migrations append to
+//! sets and members with their collection keys, and
+//! [`m_20261030_01_profile_set_single`] moves membership onto the profile
+//! row and retires `set_members`; new migrations append to
 //! `Migrator` from here.
 //! Applied at boot via `Migrator::up` (see [`crate::db::connect_and_migrate`]).
 
@@ -10,6 +12,7 @@ pub use sea_orm_migration::prelude::*;
 
 mod m_20260918_01_init;
 mod m_20261028_01_collection_isolation;
+mod m_20261030_01_profile_set_single;
 
 /// The kallipai-model-gateway migrator. New migrations are appended to `migrations`.
 pub struct Migrator;
@@ -19,6 +22,7 @@ impl MigratorTrait for Migrator {
         vec![
             Box::new(m_20260918_01_init::Migration),
             Box::new(m_20261028_01_collection_isolation::Migration),
+            Box::new(m_20261030_01_profile_set_single::Migration),
         ]
     }
 }
@@ -80,7 +84,6 @@ mod tests {
         for table in [
             "profiles",
             "profile_sets",
-            "set_members",
             "providers",
             "provider_credentials",
             "collections",
@@ -105,6 +108,7 @@ mod tests {
             "registry_meta",
             "user_defaults",
             "collection_sets",
+            "set_members",
         ] {
             assert!(!present(gone).await, "{gone} should not exist");
         }
@@ -185,7 +189,7 @@ mod tests {
         assert!(cross.is_err(), "a cross-space anchor is refused");
 
         // Both down steps together drop the whole store.
-        Migrator::down(&db, Some(2)).await.expect("drop the store");
+        Migrator::down(&db, Some(3)).await.expect("drop the store");
         for table in ["profiles", "profile_sets", "collections", "groups"] {
             assert!(!present(table).await, "{table} is gone after down");
         }
@@ -215,21 +219,21 @@ mod tests {
         let result = db
             .execute(Statement::from_string(
                 db.get_database_backend(),
-                "INSERT INTO profiles (owner, collection_name, profile_id, provider_id, model, parked) VALUES ('admin', 'c0', 'x9', 'p9', 'm', false)"
+                "INSERT INTO profiles (owner, collection_name, profile_id, provider_id, model) VALUES ('admin', 'c0', 'x9', 'p9', 'm')"
                     .to_owned(),
             ))
             .await;
         assert!(result.is_err(), "the cross-space reference is refused");
     }
 
-    /// Set names and positions are unique inside a collection, not
-    /// inside a space: one name lands in two collections of a space
-    /// and in another space's collection, while a second copy inside
-    /// one collection is refused. A membership row cannot reach a
-    /// profile of another collection -- the composite foreign key is
-    /// the only enforcement point, so no write path can bypass it.
+    /// Set names are unique inside a collection, not inside a space: one name
+    /// lands in two collections of a space and in another space's collection,
+    /// while a second copy inside one collection is refused. A profile's
+    /// membership column is a composite foreign key into its own collection,
+    /// so a row cannot name another collection's set, and `position` carries
+    /// no uniqueness claim at all (two joins may land on one number).
     #[tokio::test]
-    async fn set_names_and_positions_are_unique_per_collection() {
+    async fn set_names_are_unique_per_collection_and_positions_are_not() {
         let db = raw_test_db().await;
         Migrator::up(&db, None).await.expect("apply");
         for (owner, name) in [("system", "c1"), ("system", "c2"), ("admin", "c1")] {
@@ -258,6 +262,7 @@ mod tests {
             .await;
         assert!(dup.is_err(), "one name per collection");
 
+        // Each row joins the same-named set of its own collection.
         for (owner, collection_name, profile_id) in [("system", "c1", "px"), ("system", "c2", "qx")]
         {
             db.execute(Statement::from_string(
@@ -268,18 +273,14 @@ mod tests {
             .expect("seed the provider");
             db.execute(Statement::from_string(
                 db.get_database_backend(),
-                format!("INSERT INTO profiles (owner, collection_name, profile_id, provider_id, model, parked) VALUES ('{owner}', '{collection_name}', '{profile_id}', '{profile_id}', 'm', false)"),
+                format!("INSERT INTO profiles (owner, collection_name, profile_id, provider_id, model, set_name, position) VALUES ('{owner}', '{collection_name}', '{profile_id}', '{profile_id}', 'm', 'dup', 0)"),
             ))
             .await
-            .expect("seed the profile");
-            db.execute(Statement::from_string(
-                db.get_database_backend(),
-                format!("INSERT INTO set_members (owner, collection_name, set_name, profile_id, position) VALUES ('{owner}', '{collection_name}', 'dup', '{profile_id}', 0)"),
-            ))
-            .await
-            .expect("the slot lands in each collection");
+            .expect("the row joins the set of its own collection");
         }
 
+        // A second row in one set may hold the same position: the order breaks
+        // the tie by id, and no index claims otherwise.
         db.execute(Statement::from_string(
             db.get_database_backend(),
             "INSERT INTO providers (owner, provider_id, family) VALUES ('system', 'py', 'deepseek')"
@@ -289,32 +290,29 @@ mod tests {
         .expect("a second system provider lands");
         db.execute(Statement::from_string(
             db.get_database_backend(),
-            "INSERT INTO profiles (owner, collection_name, profile_id, provider_id, model, parked) VALUES ('system', 'c1', 'py', 'py', 'm', false)"
+            "INSERT INTO profiles (owner, collection_name, profile_id, provider_id, model, set_name, position) VALUES ('system', 'c1', 'py', 'py', 'm', 'dup', 0)"
                 .to_owned(),
         ))
         .await
-        .expect("a second c1 profile lands");
+        .expect("a shared position lands");
 
-        let taken = db
-            .execute(Statement::from_string(
-                db.get_database_backend(),
-                "INSERT INTO set_members (owner, collection_name, set_name, profile_id, position) VALUES ('system', 'c1', 'dup', 'py', 0)"
-                    .to_owned(),
-            ))
-            .await;
-        assert!(taken.is_err(), "one row per position inside a collection");
-
+        // The same name in another collection is not a target: the foreign key
+        // carries the row's own collection.
+        db.execute(Statement::from_string(
+            db.get_database_backend(),
+            "INSERT INTO profile_sets (owner, collection_name, name, description) VALUES ('system', 'c2', 'only-c2', 'd')"
+                .to_owned(),
+        ))
+        .await
+        .expect("the second collection gains a set of its own");
         let cross = db
             .execute(Statement::from_string(
                 db.get_database_backend(),
-                "INSERT INTO set_members (owner, collection_name, set_name, profile_id, position) VALUES ('system', 'c1', 'dup', 'qx', 1)"
+                "UPDATE profiles SET set_name = 'only-c2' WHERE owner = 'system' AND collection_name = 'c1' AND profile_id = 'px'"
                     .to_owned(),
             ))
             .await;
-        assert!(
-            cross.is_err(),
-            "a member cannot reach another collection's profile"
-        );
+        assert!(cross.is_err(), "a row cannot name another collection's set");
     }
 
     /// Group names are unique per owner (uq_groups_owner_name): a second
@@ -418,7 +416,9 @@ mod tests {
     #[tokio::test]
     async fn collection_isolation_shape() {
         let db = raw_test_db().await;
-        Migrator::up(&db, None).await.expect("apply");
+        Migrator::up(&db, Some(2))
+            .await
+            .expect("init and isolation");
 
         let global = "SELECT count(*) AS n FROM pg_indexes WHERE indexname IN ('uq_profiles_profile_id_global', 'uq_profile_sets_name_global')";
         assert_eq!(
@@ -515,7 +515,9 @@ mod tests {
         Migrator::up(&db, Some(1)).await.expect("init only");
         seed_legacy(&db).await;
 
-        Migrator::up(&db, None).await.expect("isolate");
+        Migrator::up(&db, Some(1))
+            .await
+            .expect("one more step: isolation");
 
         assert_eq!(
             count(&db, "SELECT count(*) AS n FROM profiles").await,
@@ -570,7 +572,9 @@ mod tests {
         let db = raw_test_db().await;
         Migrator::up(&db, Some(1)).await.expect("init only");
         seed_legacy(&db).await;
-        Migrator::up(&db, None).await.expect("isolate");
+        Migrator::up(&db, Some(1))
+            .await
+            .expect("one more step: isolation");
 
         Migrator::down(&db, Some(1))
             .await
@@ -597,7 +601,9 @@ mod tests {
             "no membership dangles after the merge"
         );
 
-        Migrator::up(&db, None).await.expect("isolate again");
+        Migrator::up(&db, Some(1))
+            .await
+            .expect("the isolation step again");
         assert_eq!(
             count(&db, "SELECT count(*) AS n FROM profiles").await,
             4,
@@ -612,7 +618,9 @@ mod tests {
     async fn down_suffixes_a_set_name_two_spaces_share() {
         let db = raw_test_db().await;
         Migrator::up(&db, Some(1)).await.expect("init only");
-        Migrator::up(&db, None).await.expect("isolate");
+        Migrator::up(&db, Some(1))
+            .await
+            .expect("one more step: isolation");
         exec(
             &db,
             "INSERT INTO collections (owner, name, description) VALUES ('system', 'c1', 'd'), ('user-a', 'c1', 'd')",
@@ -655,7 +663,9 @@ mod tests {
     async fn down_refuses_two_spaces_sharing_a_profile_id() {
         let db = raw_test_db().await;
         Migrator::up(&db, Some(1)).await.expect("init only");
-        Migrator::up(&db, None).await.expect("isolate");
+        Migrator::up(&db, Some(1))
+            .await
+            .expect("one more step: isolation");
         exec(
             &db,
             "INSERT INTO collections (owner, name, description) VALUES ('system', 'c1', 'd'), ('user-a', 'c1', 'd')",
@@ -695,7 +705,9 @@ mod tests {
     async fn down_keeps_a_row_served_when_one_copy_was() {
         let db = raw_test_db().await;
         Migrator::up(&db, Some(1)).await.expect("init only");
-        Migrator::up(&db, None).await.expect("isolate");
+        Migrator::up(&db, Some(1))
+            .await
+            .expect("one more step: isolation");
         exec(
             &db,
             "INSERT INTO collections (owner, name, description) VALUES ('system', 'c1', 'd'), ('system', 'c2', 'd')",
@@ -738,6 +750,145 @@ mod tests {
             .await,
             1,
             "a row every copy parked comes back unassigned"
+        );
+    }
+
+    /// The single-column backfill: a row with several member rows keeps the
+    /// smallest `(position, name)` pick, a parked row lands unassigned even
+    /// though member rows exist for it, and a row that never had one stays
+    /// unassigned. The member table is gone afterwards.
+    #[tokio::test]
+    async fn profile_set_single_backfills_membership_and_order() {
+        let db = raw_test_db().await;
+        Migrator::up(&db, Some(2))
+            .await
+            .expect("init and isolation");
+        exec(
+            &db,
+            "INSERT INTO collections (owner, name, description) VALUES ('system', 'c1', 'd')",
+        )
+        .await;
+        exec(
+            &db,
+            "INSERT INTO profile_sets (owner, collection_name, name, description) VALUES ('system', 'c1', 'beta', 'd'), ('system', 'c1', 'alpha', 'd')",
+        )
+        .await;
+        exec(
+            &db,
+            "INSERT INTO providers (owner, provider_id, family) VALUES ('system', 'p', 'deepseek')",
+        )
+        .await;
+        exec(
+            &db,
+            "INSERT INTO profiles (owner, collection_name, profile_id, provider_id, model, parked) VALUES ('system', 'c1', 'multi', 'p', 'm', false), ('system', 'c1', 'third', 'p', 'm', true), ('system', 'c1', 'lone', 'p', 'm', false)",
+        )
+        .await;
+        exec(
+            &db,
+            "INSERT INTO set_members (owner, collection_name, set_name, profile_id, position) VALUES ('system', 'c1', 'beta', 'multi', 0), ('system', 'c1', 'alpha', 'multi', 0), ('system', 'c1', 'alpha', 'third', 1)",
+        )
+        .await;
+
+        Migrator::up(&db, None)
+            .await
+            .expect("collapse to one column");
+
+        assert_eq!(
+            count(
+                &db,
+                "SELECT count(*) AS n FROM profiles WHERE profile_id = 'multi' AND set_name = 'alpha' AND position = 0"
+            )
+            .await,
+            1,
+            "the smallest (position, name) pick wins"
+        );
+        assert_eq!(
+            count(
+                &db,
+                "SELECT count(*) AS n FROM profiles WHERE profile_id = 'third' AND set_name IS NULL"
+            )
+            .await,
+            1,
+            "a parked member lands unassigned"
+        );
+        assert_eq!(
+            count(
+                &db,
+                "SELECT count(*) AS n FROM profiles WHERE profile_id = 'lone' AND set_name IS NULL AND position = 0"
+            )
+            .await,
+            1,
+            "a row with no member row stays unassigned"
+        );
+        assert_eq!(
+            count(
+                &db,
+                "SELECT count(*) AS n FROM information_schema.tables WHERE table_name = 'set_members'"
+            )
+            .await,
+            0,
+            "the up step leaves no set_members table"
+        );
+    }
+
+    /// `down` rebuilds the member rows from the column: the set and the
+    /// position come back, a member comes back served, and an unassigned row
+    /// comes back parked.
+    #[tokio::test]
+    async fn profile_set_single_round_trips_through_down() {
+        let db = raw_test_db().await;
+        Migrator::up(&db, None).await.expect("apply");
+        exec(
+            &db,
+            "INSERT INTO collections (owner, name, description) VALUES ('system', 'c1', 'd')",
+        )
+        .await;
+        exec(
+            &db,
+            "INSERT INTO profile_sets (owner, collection_name, name, description) VALUES ('system', 'c1', 'alpha', 'd')",
+        )
+        .await;
+        exec(
+            &db,
+            "INSERT INTO providers (owner, provider_id, family) VALUES ('system', 'p', 'deepseek')",
+        )
+        .await;
+        exec(
+            &db,
+            "INSERT INTO profiles (owner, collection_name, profile_id, provider_id, model, set_name, position) VALUES ('system', 'c1', 'inside', 'p', 'm', 'alpha', 2), ('system', 'c1', 'outside', 'p', 'm', NULL, 0)",
+        )
+        .await;
+
+        Migrator::down(&db, Some(1))
+            .await
+            .expect("roll the collapse back");
+
+        assert_eq!(
+            count(
+                &db,
+                "SELECT count(*) AS n FROM set_members WHERE profile_id = 'inside' AND set_name = 'alpha' AND position = 2"
+            )
+            .await,
+            1,
+            "membership and order survive the rollback"
+        );
+        assert_eq!(
+            count(
+                &db,
+                "SELECT count(*) AS n FROM profiles WHERE profile_id = 'inside' AND parked = false"
+            )
+            .await,
+            1,
+            "a member comes back served"
+        );
+        assert_eq!(
+            count(
+                &db,
+                "SELECT count(*) AS n FROM profiles WHERE profile_id = 'outside' AND parked = true"
+            )
+            .await,
+            1,
+            "an unassigned row comes back parked"
         );
     }
 }

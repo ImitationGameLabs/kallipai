@@ -63,9 +63,6 @@ pub(crate) enum ForwardOutcome {
     /// The target profile or default set is outside the caller's
     /// visibility domain (403).
     GatedVisibility,
-    /// The target profile is parked (403): a platform state, not an
-    /// error.
-    GatedParking,
     /// The declared request body exceeded the forwarding bound (413).
     GatedPayload,
     /// The upstream answered 2xx.
@@ -106,7 +103,6 @@ impl ForwardOutcome {
             Self::GatedAuth => "gated_auth",
             Self::GatedRoute => "gated_route",
             Self::GatedVisibility => "gated_visibility",
-            Self::GatedParking => "gated_parking",
             Self::GatedPayload => "gated_payload",
             Self::Upstream2xx => "upstream_2xx",
             Self::Upstream4xx => "upstream_4xx",
@@ -120,7 +116,7 @@ impl ForwardOutcome {
         }
     }
     /// Whether the outcome is a gate refusal: the selection gates
-    /// answered the request before an upstream was reached. The five
+    /// answered the request before an upstream was reached. The four
     /// variants are enumerated here, beside the enum, so a new gate
     /// variant cannot silently escape the warrant and counter faces; the
     /// outcomes it answers itself are the non-refusal pair, enumerated
@@ -128,11 +124,7 @@ impl ForwardOutcome {
     pub(crate) fn is_gate(self) -> bool {
         matches!(
             self,
-            Self::GatedAuth
-                | Self::GatedRoute
-                | Self::GatedVisibility
-                | Self::GatedParking
-                | Self::GatedPayload
+            Self::GatedAuth | Self::GatedRoute | Self::GatedVisibility | Self::GatedPayload
         )
     }
 
@@ -757,7 +749,6 @@ mod tests {
             ForwardOutcome::GatedAuth,
             ForwardOutcome::GatedRoute,
             ForwardOutcome::GatedVisibility,
-            ForwardOutcome::GatedParking,
             ForwardOutcome::GatedPayload,
             ForwardOutcome::Upstream2xx,
             ForwardOutcome::Upstream4xx,
@@ -776,7 +767,6 @@ mod tests {
                 "gated_auth",
                 "gated_route",
                 "gated_visibility",
-                "gated_parking",
                 "gated_payload",
                 "upstream_2xx",
                 "upstream_4xx",
@@ -969,14 +959,12 @@ mod tests {
     #[test]
     fn render_exposes_the_families() {
         let metrics = Metrics::private();
-        metrics.record_forward(Endpoint::Responses, ForwardOutcome::GatedParking);
+        metrics.record_forward(Endpoint::Responses, ForwardOutcome::GatedRoute);
         let text = metrics.render();
         assert!(text.contains("# HELP kallipai_model_gateway_forward_total"));
-        assert!(
-            text.contains(
-                "kallipai_model_gateway_forward_total{endpoint=\"responses\",outcome=\"gated_parking\"} 1"
-            )
-        );
+        assert!(text.contains(
+            "kallipai_model_gateway_forward_total{endpoint=\"responses\",outcome=\"gated_route\"} 1"
+        ));
         // The build stamp carries the crate version and the constant 1.
         assert!(text.contains(&format!(
             "kallipai_model_gateway_build_info{{version=\"{}\"}} 1",

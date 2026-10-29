@@ -5,9 +5,9 @@
 //! layering: registry data serves distribution, secrets stay isolated):
 //!
 //! - Registry domain (distribution-face data, no secrets): `profiles`
-//!   (model profiles with a `parked` flag -- an unassigned row sits outside
-//!   every set -- and a `store` tri-state the distribution face passes
-//!   through),
+//!   (model profiles with a `parked` flag, which keeps a profile from
+//!   being served through a set, and a `store` tri-state the distribution
+//!   passes through),
 //!   `profile_sets` + `set_members` (ordered
 //!   membership -- `position` carries the failover order and the
 //!   distribution face returns it verbatim; a set is born anchored to

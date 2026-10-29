@@ -513,7 +513,7 @@ const DOWN_TABLES: &[&str] = &[
 /// collection's row (the row `up` homed there, when one exists) and the
 /// merged parked flag. `DISTINCT ON` runs after the window function, so the
 /// flag sees every row of the profile: `bool_and(parked)` makes the merged
-/// row unassigned only when every copy was one, the invariant `up` keeps.
+/// row parked only when every copy was parked, the invariant `up` keeps.
 const DOWN_PROFILES: &str = "INSERT INTO profiles_downgraded \
      (owner, profile_id, provider_id, model, max_context_window, effort, modalities, parked, store) \
      SELECT DISTINCT ON (owner, profile_id) \
@@ -973,8 +973,8 @@ mod tests {
         }
     }
 
-    /// An unassigned row in no set lands in the space's smallest collection and
-    /// keeps its flag; a stale parked flag on a served row is cleared.
+    /// A row in no set lands in the space's smallest collection and stays
+    /// parked; a parked flag on a served row is cleared.
     #[test]
     fn homes_are_deterministic_and_unassigned_rows_stay_off_served() {
         let profiles = vec![

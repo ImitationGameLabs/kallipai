@@ -458,7 +458,7 @@ async fn forward_injects_upstream_authorization_and_passes_through() {
 /// none) carrying the observation.
 #[tokio::test]
 async fn upstream_histograms_label_the_url_authority() {
-    use crate::registry::{profile, provider, set_member};
+    use crate::registry::{profile, provider};
     use sea_orm::ActiveModelTrait;
     use sea_orm::Set;
 
@@ -495,23 +495,14 @@ async fn upstream_histograms_label_the_url_authority() {
         max_context_window: Set(Some(128_000)),
         effort: Set(Some("high".to_string())),
         modalities: Set(Some("[\"text\"]".to_string())),
-        parked: Set(false),
+        set_name: Set(Some("alpha".to_string())),
+        position: Set(9),
         store: Set(None),
         owner: Set(crate::registry::CATALOG_OWNER.to_string()),
     }
     .insert(&db)
     .await
     .expect("insert the distinct profile");
-    set_member::ActiveModel {
-        collection_name: Set("baseline".to_string()),
-        set_name: Set("alpha".to_string()),
-        profile_id: Set("pf-9".to_string()),
-        position: Set(9),
-        owner: Set(crate::registry::CATALOG_OWNER.to_string()),
-    }
-    .insert(&db)
-    .await
-    .expect("insert the distinct member");
 
     let (base, metrics) = spawn_plane_with_metrics(db).await;
     let response = post_generation(
@@ -940,67 +931,36 @@ async fn forward_strips_client_credential_headers() {
     );
 }
 
-/// The parking gate: a parked profile inside the
-/// domain passes authorization but fails availability -- 403 on the
-/// override path.
+/// The unassigned gate: a row no set carries is not addressable on the
+/// override path -- it answers the same 404 a missing id does, and the
+/// request never reaches the upstream.
 #[tokio::test]
-async fn forward_rejects_parked_profiles_inside_the_domain() {
+async fn forward_answers_unassigned_rows_like_a_missing_profile() {
     let db = migrated_test_db().await;
-    let (upstream_base, _seen) = spawn_mock_upstream().await;
+    let (upstream_base, seen) = spawn_mock_upstream().await;
     crate::test_support::seed_registry(&db, &upstream_base).await;
     // The selected collection: the override path resolves its ids
     // inside it, so every forward here needs the pointer.
     seed_selection(&db).await;
-    // Park p5 into the baseline set `alpha` (position 2; the failover
-    // slots 0/1 are taken).
-    use sea_orm::{ActiveModelTrait, ConnectionTrait, Set, Statement};
-    // The provider row lands first: the profile's FK needs it.
-    crate::registry::provider::ActiveModel {
-        owner: Set("system".to_string()),
-        provider_id: Set("p5".to_string()),
-        family: Set("deepseek".to_string()),
-        ..Default::default()
-    }
-    .insert(&db)
-    .await
-    .expect("insert parked provider");
-    crate::registry::profile::ActiveModel {
-        collection_name: Set("baseline".to_string()),
-        profile_id: Set("p5".to_string()),
-        provider_id: Set("p5".to_string()),
-        model: Set("deepseek-parked".to_string()),
-        max_context_window: Set(None),
-        effort: Set(None),
-        modalities: Set(None),
-        parked: Set(true),
-        store: Set(None),
-        owner: Set("system".to_string()),
-    }
-    .insert(&db)
-    .await
-    .expect("insert parked profile");
-    db.execute(Statement::from_string(
-        sea_orm::DatabaseBackend::Postgres,
-        "INSERT INTO set_members (owner, collection_name, set_name, profile_id, position) \
-         VALUES ('system', 'baseline', 'alpha', 'p5', 3)",
-    ))
-    .await
-    .expect("park the parked profile into the allowed set");
+    // p4 is the fixture's unassigned row: the row and its provider are
+    // real, and no set carries it.
     let (base, metrics) = spawn_plane_with_metrics(db).await;
 
     let response = post_generation(
         &base,
         "/chat/completions",
         TEST_TAGMA_BEARER,
-        Some("p5"),
+        Some("p4"),
         "{}",
         &[],
     )
     .await;
-    assert_eq!(response.status(), axum::http::StatusCode::FORBIDDEN);
-    // Parking is its own observable class: a platform state, not an
-    // error.
-    await_forward_count(&metrics, crate::metrics::ForwardOutcome::GatedParking, 1).await;
+    assert_eq!(response.status(), axum::http::StatusCode::NOT_FOUND);
+    assert!(
+        seen.lock().await.is_none(),
+        "no request reaches the upstream"
+    );
+    await_forward_count(&metrics, crate::metrics::ForwardOutcome::GatedRoute, 1).await;
 }
 
 /// The family gate: an endpoint refuses profiles whose family it
@@ -1121,7 +1081,7 @@ async fn spawn_mock_anthropic_stream() -> String {
 /// of the pinned 0..2 order). Direct SQL-layer seeding: the shared
 /// fixture's member order is pinned by other tests.
 async fn seed_anthropic_profile(db: &crate::db::Db, upstream_base: &str) {
-    use crate::registry::{profile, provider, set_member};
+    use crate::registry::{profile, provider};
     use crate::secret::provider_credential;
     use sea_orm::{ActiveModelTrait, Set};
 
@@ -1143,7 +1103,8 @@ async fn seed_anthropic_profile(db: &crate::db::Db, upstream_base: &str) {
         max_context_window: Set(Some(128_000)),
         effort: Set(None),
         modalities: Set(Some("[\"text\"]".to_string())),
-        parked: Set(false),
+        set_name: Set(Some("alpha".to_string())),
+        position: Set(9),
         store: Set(None),
         owner: Set("system".to_string()),
     }
@@ -1158,16 +1119,6 @@ async fn seed_anthropic_profile(db: &crate::db::Db, upstream_base: &str) {
     .insert(db)
     .await
     .expect("insert anthropic credential");
-    set_member::ActiveModel {
-        collection_name: Set("baseline".to_string()),
-        set_name: Set("alpha".to_string()),
-        profile_id: Set("pa".to_string()),
-        position: Set(9),
-        owner: Set("system".to_string()),
-    }
-    .insert(db)
-    .await
-    .expect("insert anthropic member");
 }
 
 /// The anthropic endpoint drives the credential's x-api-key shape:

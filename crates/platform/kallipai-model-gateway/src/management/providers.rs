@@ -599,7 +599,7 @@ mod tests {
     #[tokio::test]
     async fn deleting_a_referenced_provider_conflicts() {
         let state = seeded_state().await;
-        catalog_profile(&state, "a4", "unassigned-x", true).await;
+        catalog_profile(&state, "a4", "unassigned-x", None).await;
         let (status, body) = send(
             app(state),
             req(
@@ -674,13 +674,14 @@ mod tests {
     }
 
     /// A multi-byte upstream key rides every masked exit without panicking:
-    /// store, list, overwrite, plain delete, and the delete-parked cascade.
+    /// store, list, overwrite, plain credential delete, and the profile
+    /// delete, whose `profile_set` audit row names the set the member left.
     /// Byte 3 and byte len-3 of the key both fall inside a character --
     /// masking must stay character-safe at every exit.
     #[tokio::test]
     async fn multibyte_key_masks_across_every_exit() {
         let state = seeded_state().await;
-        catalog_profile(&state, "a4", "unassigned-x", true).await;
+        catalog_profile(&state, "a4", "unassigned-x", None).await;
         catalog_provider(&state, "a2", "deepseek").await;
         catalog_set(&state, "beta2").await;
         catalog_member(&state, "beta2", "a4", 0).await;
@@ -756,7 +757,7 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK);
-        // The cascade exit: the seeded beta2 membership rides the parked
+        // The cascade exit: the seeded beta2 membership rides the profile
         // delete, which masks the credential snapshot inside the cascade;
         // the delete succeeds with the stored value in place.
         let (status, deleted) = send(
@@ -776,8 +777,8 @@ mod tests {
             let raw = format!("{:?}", (&r.before, &r.after));
             assert!(!raw.contains(key), "plaintext leaked: {r:?}");
         }
-        // The cascade's membership row: beta's order before and after.
-        let member_rows: Vec<_> = rows.iter().filter(|r| r.entity == "set_member").collect();
+        // The profile_set audit row: beta's order before and after.
+        let member_rows: Vec<_> = rows.iter().filter(|r| r.entity == "profile_set").collect();
         assert_eq!(member_rows.len(), 1);
         assert_eq!(member_rows[0].entity_id, "beta2");
         assert_eq!(
@@ -836,7 +837,7 @@ mod tests {
     #[tokio::test]
     async fn profile_and_provider_routes_refuse_cross_space_rows() {
         let state = seeded_state().await;
-        foreign_parked(&state, "fx").await;
+        foreign_profile(&state, "fx").await;
         for (method, path, body) in [
             ("GET", "/admin/collections/baseline/profiles/fx", None),
             (
@@ -846,8 +847,7 @@ mod tests {
                     "model": "unassigned-x",
                     "max_context_window": 8192,
                     "effort": null,
-                    "modalities": ["text"],
-                    "parked": false
+                    "modalities": ["text"]
                 })),
             ),
             ("DELETE", "/admin/collections/baseline/profiles/fx", None),

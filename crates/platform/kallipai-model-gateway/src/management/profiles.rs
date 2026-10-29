@@ -1,22 +1,15 @@
-//! The profile face: rows live inside their collection. An unassigned
-//! profile is a row with `parked = true` -- the park flag is a filter, not a
-//! resource; promotion is a plain PUT and joining a set flips the flag in
-//! the membership rewrite. The row identity is `(owner, collection_name,
-//! profile_id)`, so every route names the collection it addresses and the
-//! cross-collection move is the one operation that spans two of them.
+//! The profile face: rows live inside their collection. A row's set is a
+//! column (`set_name`): `NULL` is unassigned, a name is membership, and the
+//! composite foreign key keeps the set inside the row's own collection.
+//! Position follows the membership (`position`, ordered with `profile_id` as
+//! the tie-break), so a set's failover order is one query over these rows.
+//! The row identity is `(owner, collection_name, profile_id)`, so every route
+//! names the collection it addresses and the cross-collection move is the one
+//! operation that spans two of them.
 //!
-//! The flag follows membership when this face rewrites a set's members: a
-//! member is served, and a row leaving its last set turns unassigned again.
-//! Only the member-list save heals a flag as a side effect; a write that
-//! names the flag stores the value it asks for. Deleting a set takes its
-//! member rows with it and leaves their flags alone, so a row can end up in
-//! no set and still not be parked.
-//!
-//! The user face's set edit writes member rows without touching the flag, so
-//! a parked row can be a member there: `/parking` lists it while that set
-//! carries it, and the forwarding face refuses it (`403`, "profile is
-//! parked"), so it is visible in the set and never serves a turn. The next
-//! save of that set here heals the flag.
+//! A row joins or leaves a set through this face's `set` field: the set face
+//! carries no member list (its POST and PATCH take the description), and the
+//! order inside a set is the set face's `/order` route.
 
 use axum::Json;
 use axum::extract::{Path, Query, State};
@@ -28,17 +21,17 @@ use crate::management::AdminToken;
 use crate::management::providers;
 use crate::management::sets::AdminProfile;
 use crate::management::{
-    Deleted, encode_modalities, resolve_profile, resolve_profile_for_update, set_state_json,
-    validate_modalities, validate_profile_id,
+    Deleted, deserialize_explicit_option, encode_modalities, resolve_profile,
+    resolve_profile_for_update, set_state_json, set_state_required, validate_modalities,
+    validate_profile_id,
 };
-use crate::registry::{self, collection, profile, provider, set_member};
+use crate::registry::{self, collection, profile, provider};
 use crate::secret::provider_credential;
 use crate::state::AppState;
 use kallipai_common::protocol::ApiError;
 
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder, Set,
-    TransactionTrait,
+    ActiveModelTrait, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, Set, TransactionTrait,
 };
 
 #[derive(Deserialize)]
@@ -49,32 +42,36 @@ pub struct ProfileCreate {
     pub max_context_window: Option<i64>,
     pub effort: Option<String>,
     pub modalities: Option<Vec<String>>,
-    /// The state the row is born in; absent means unassigned (`true`).
-    #[serde(default)]
-    pub parked: Option<bool>,
 }
 
 /// PUT /admin/collections/{collection}/profiles/{id}: full-field
 /// replacement (plain PUT semantics -- the body is the complete desired
-/// state, `parked` included, so a promote to served and a demote back to
-/// unassigned are the same endpoint). The one refusal is a demote the sets
-/// forbid: a row a set carries is served, so `parked: true` on it is a 409
-/// until its memberships are gone.
+/// state). `set` is three-state on the wire: a name joins that set (last
+/// place), `null` leaves the row unassigned, and a body without the key is a
+/// 400 -- a full replacement has no reading for "unchanged", and this field
+/// decides which set serves the row.
 #[derive(Deserialize)]
 pub struct ProfilePut {
     pub model: String,
     pub max_context_window: Option<i64>,
     pub effort: Option<String>,
     pub modalities: Option<Vec<String>>,
-    pub parked: bool,
+    #[serde(default, deserialize_with = "deserialize_explicit_option")]
+    pub set: Option<Option<String>>,
 }
 
 /// GET /admin/profiles query: the collection to read (`None` = every
-/// collection of the catalog space, the manage page's summary read) and
-/// the park filter (`None` = both).
+/// collection of the catalog space, the manage page's summary read) and the
+/// unassigned filter (`None` = both states). `parked` is present only to
+/// refuse: the state it asks about is the one `unassigned` asks about, so
+/// a caller that sends it is told so instead of serde dropping the key and
+/// the list answering every row.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProfileFilter {
     pub collection_name: Option<String>,
+    pub unassigned: Option<bool>,
+    #[serde(default)]
     pub parked: Option<bool>,
 }
 
@@ -127,9 +124,10 @@ pub async fn create_profile(
         max_context_window: Set(body.max_context_window),
         effort: Set(body.effort.clone()),
         modalities: Set(encode_modalities(&body.modalities)),
-        // Born unassigned unless the caller says otherwise: serving is an
-        // explicit choice, and only a set membership serves the row.
-        parked: Set(body.parked.unwrap_or(true)),
+        // Born unassigned: a set is a separate, explicit write, so the row
+        // cannot arrive already serving a set nobody named.
+        set_name: Set(None),
+        position: Set(0),
         store: Set(None),
         owner: Set(owner),
     };
@@ -158,7 +156,7 @@ pub async fn create_profile(
 }
 
 /// GET /admin/profiles: the catalog space's rows, filtered by collection
-/// and park state in the query (never after it). The rows carry
+/// and membership state in the query (never after it). The rows carry
 /// `collection_name`, so a cross-collection read still names each row's
 /// home.
 pub async fn list_profiles(
@@ -166,11 +164,18 @@ pub async fn list_profiles(
     _admin: AdminToken,
     Query(filter): Query<ProfileFilter>,
 ) -> Result<Json<Vec<AdminProfile>>, ApiError> {
+    // `parked` is refused rather than dropped: it asks the same state as
+    // `unassigned`, and the refusal names both directions of that filter.
+    if filter.parked.is_some() {
+        return Err(ApiError::bad_request(
+            "the parked filter is refused: `unassigned=true` selects the rows in no set, and `unassigned=false` selects the rows that belong to one",
+        ));
+    }
     let rows = registry::profiles_in_collection(
         &state.db,
         registry::CATALOG_OWNER,
         filter.collection_name.as_deref(),
-        filter.parked,
+        filter.unassigned,
     )
     .await
     .map_err(db::map_db_err)?;
@@ -181,9 +186,9 @@ pub async fn list_profiles(
 }
 
 /// GET /admin/collections/{collection}/profiles/{profile_id}: the row
-/// read. Unassigned and served rows are the same resource here -- the park
-/// flag is an attribute, and the list's `parked` filter is how a caller
-/// asks for the unassigned rows.
+/// read. Unassigned and served rows are the same resource here -- the set
+/// membership is an attribute, and the list's `unassigned` filter is how a
+/// caller asks for the rows that live in no set.
 pub async fn get_profile(
     State(state): State<AppState>,
     _admin: AdminToken,
@@ -199,9 +204,10 @@ pub async fn get_profile(
 }
 
 /// PUT /admin/collections/{collection}/profiles/{profile_id}: full-field
-/// replacement of the row's content. The identity (space, collection, id)
-/// is not payload: the body replaces the content and the row stays where
-/// it is -- a collection change is the move endpoint's job.
+/// replacement of the row's content, membership included. The identity
+/// (space, collection, id) is not payload: the body replaces the content and
+/// the row stays where it is -- a collection change is the move endpoint's
+/// job.
 pub async fn update_profile(
     State(state): State<AppState>,
     admin: AdminToken,
@@ -215,37 +221,58 @@ pub async fn update_profile(
     validate_modalities(&body.modalities)?;
     let owner = registry::CATALOG_OWNER.to_owned();
     let txn = state.db.begin().await.map_err(db::map_db_err)?;
-    // The gate opens on a locking read: this write owns the flag, a set
-    // rewrite flipping the same row owns the membership, and every writer
-    // that touches both takes the profile row first, its member rows
-    // after, never the reverse (see `resolve_profile_for_update`; the set
-    // rewrite locks the members plus the ids leaving it, by id, ascending).
-    // That is the module's one order and a new writer must keep it. The
-    // check below therefore reads a committed membership. The one write
-    // that can still slip past it is the user face's set edit: it rewrites
-    // member rows without parking or locking a profile row, so a parked
-    // member there stays parked. The faces then split on purpose: the
-    // distribution face serves the selected collection without reading the
-    // flag and `/parking` lists that member as unassigned, while the
-    // forwarding face reads it and refuses the row (403,
-    // `GateError::parking`).
+    // The row lock is this face's gate: two writes to one profile queue here.
+    // It does not serialize appends to one set (each profile has its own row),
+    // so `position` claims no uniqueness and `profile_id` breaks a tie in reads.
     let current = resolve_profile_for_update(&txn, &owner, &collection, &profile_id).await?;
-    // A row a set carries is served by definition: the flag follows the
-    // memberships, so this write parks nothing a set still holds.
-    if body.parked {
-        let member = set_member::Entity::find()
-            .filter(set_member::Column::Owner.eq(current.owner.clone()))
-            .filter(set_member::Column::CollectionName.eq(current.collection_name.clone()))
-            .filter(set_member::Column::ProfileId.eq(profile_id.clone()))
-            .one(&txn)
-            .await
-            .map_err(db::map_db_err)?;
-        if member.is_some() {
-            return Err(ApiError::conflict(
-                "a set member cannot be unassigned; remove it from its sets first",
-            ));
+    // A missing `set` key is not "leave it alone": a full replacement that
+    // declines to say where the row lives has no answer, and both legal forms
+    // are explicit (a set name, or null).
+    let Some(set) = body.set else {
+        return Err(ApiError::bad_request(
+            "the set field is required: name the set this profile joins, or pass null to leave it unassigned",
+        ));
+    };
+    // The position is computed under the row lock: joining a set appends to
+    // its end, staying put keeps the value it had. `position` carries no
+    // uniqueness claim (two concurrent joins may land on the same number and
+    // the read order breaks the tie by `profile_id`).
+    let position = match &set {
+        Some(set_name) => {
+            if registry::set_by_id(&txn, &owner, &collection, set_name)
+                .await
+                .map_err(db::map_db_err)?
+                .is_none()
+            {
+                return Err(ApiError::not_found(format!(
+                    "no such set: {set_name} in collection {collection}"
+                )));
+            }
+            if current.set_name.as_deref() == Some(set_name.as_str()) {
+                current.position
+            } else {
+                registry::set_next_position(&txn, &owner, &collection, set_name)
+                    .await
+                    .map_err(db::map_db_err)?
+            }
+        }
+        None => current.position,
+    };
+    // A membership move reorders two sets: the one the row leaves and the
+    // one it joins. Both before-states are captured here, under the row
+    // lock and before the membership column moves; a same-set PUT reorders
+    // nothing and lands no set row.
+    let mut set_befores: Vec<(String, serde_json::Value)> = Vec::new();
+    if current.set_name != set {
+        for name in [current.set_name.as_deref(), set.as_deref()]
+            .into_iter()
+            .flatten()
+        {
+            let before_state = set_state_required(&txn, &owner, &collection, name).await?;
+            set_befores.push((name.to_owned(), before_state));
         }
     }
+
     // The management payloads do not carry the store tri-state: updates
     // preserve whatever the profile holds.
     let before_served = registry::served_profile(&txn, current.clone())
@@ -263,7 +290,8 @@ pub async fn update_profile(
         max_context_window: Set(body.max_context_window),
         effort: Set(body.effort.clone()),
         modalities: Set(encode_modalities(&body.modalities)),
-        parked: Set(body.parked),
+        set_name: Set(set.clone()),
+        position: Set(position),
         store: Set(prev_store),
         owner: Set(current.owner.clone()),
     }
@@ -282,50 +310,47 @@ pub async fn update_profile(
             action: "update",
             entity: "profile",
             entity_id: profile_id.clone(),
-            actor,
+            actor: actor.clone(),
             before: Some(before),
             after: Some(after),
         },
     )
     .await
     .map_err(db::map_db_err)?;
+    // One row per set whose member order this write moved.
+    record_set_state_updates(&txn, &owner, &collection, actor, set_befores).await?;
     txn.commit().await.map_err(db::map_db_err)?;
     Ok(Json(AdminProfile::from(served)))
 }
 
-/// The before-state of every set this row belongs to, captured while its
-/// membership rows still stand: the audit's before half for a write that
-/// removes them (a delete, a move).
+/// The before-state of the set this row belongs to, captured while the
+/// membership column still names it: the audit's before half for a write that
+/// takes the row out of its set (a delete, a move).
 async fn source_set_befores<C: sea_orm::ConnectionTrait>(
     txn: &C,
     owner: &str,
     collection_name: &str,
     profile_id: &str,
 ) -> Result<Vec<(String, serde_json::Value)>, ApiError> {
-    let members = set_member::Entity::find()
-        .filter(set_member::Column::Owner.eq(owner))
-        .filter(set_member::Column::CollectionName.eq(collection_name))
-        .filter(set_member::Column::ProfileId.eq(profile_id))
-        .order_by_asc(set_member::Column::SetName)
-        .all(txn)
+    let set_name = registry::profile_by_id(txn, owner, collection_name, profile_id)
         .await
-        .map_err(db::map_db_err)?;
-    let mut befores = Vec::with_capacity(members.len());
-    for member in &members {
-        let state = set_state_json(txn, owner, collection_name, &member.set_name)
-            .await?
-            .ok_or_else(|| {
-                ApiError::internal("a member row outlived its set within this transaction")
-            })?;
-        befores.push((member.set_name.clone(), state));
-    }
-    Ok(befores)
+        .map_err(db::map_db_err)?
+        .and_then(|row| row.set_name);
+    let Some(set_name) = set_name else {
+        return Ok(Vec::new());
+    };
+    let state = set_state_json(txn, owner, collection_name, &set_name)
+        .await?
+        .ok_or_else(|| {
+            ApiError::internal("the profile names a set that is gone within this transaction")
+        })?;
+    Ok(vec![(set_name, state)])
 }
 
 /// One audit row per set whose member order the write changed: the order
 /// the set held before, and the order left behind. Failover position is
 /// exactly the fact nothing else records.
-async fn record_set_state_updates<C: sea_orm::ConnectionTrait>(
+pub(super) async fn record_set_state_updates<C: sea_orm::ConnectionTrait>(
     txn: &C,
     owner: &str,
     collection_name: &str,
@@ -333,14 +358,12 @@ async fn record_set_state_updates<C: sea_orm::ConnectionTrait>(
     befores: Vec<(String, serde_json::Value)>,
 ) -> Result<(), ApiError> {
     for (set_name, before) in befores {
-        let after = set_state_json(txn, owner, collection_name, &set_name)
-            .await?
-            .expect("the set outlives its members within this transaction");
+        let after = set_state_required(txn, owner, collection_name, &set_name).await?;
         management_event::record(
             txn,
             ManagementEventRow {
                 action: "update",
-                entity: "set_member",
+                entity: "profile_set",
                 entity_id: set_name,
                 actor: actor.clone(),
                 before: Some(before),
@@ -354,11 +377,11 @@ async fn record_set_state_updates<C: sea_orm::ConnectionTrait>(
 }
 
 /// DELETE /admin/collections/{collection}/profiles/{profile_id}: the row,
-/// its set memberships (FK cascade), and -- when it was the provider's
-/// last rider in the space -- the provider with its credential. Every
-/// cascade lands its own audit row: the profile as the primary entry, the
-/// credential as its masked row, one row per affected set with the member
-/// order before and after.
+/// its set membership (the column goes with the row), and -- when it was the
+/// provider's last rider in the space -- the provider with its credential.
+/// Every cascade lands its own audit row: the profile as the primary entry,
+/// the credential as its masked row, the set the row left with its order
+/// before and after.
 pub async fn delete_profile(
     State(state): State<AppState>,
     admin: AdminToken,
@@ -367,8 +390,8 @@ pub async fn delete_profile(
     let actor = admin.operator.as_str();
     let owner = registry::CATALOG_OWNER.to_owned();
     let txn = state.db.begin().await.map_err(db::map_db_err)?;
-    // Locking read: the delete takes the profile row before the member
-    // rows it cascades -- the module's order.
+    // Locking read: the set's order and the row's membership are read under
+    // one lock, so the audit's before half cannot disagree with the delete.
     let current = resolve_profile_for_update(&txn, &owner, &collection, &profile_id).await?;
     let before_served = registry::served_profile(&txn, current.clone())
         .await
@@ -387,8 +410,8 @@ pub async fn delete_profile(
     .await
     .map_err(db::map_db_err)?;
 
-    // The membership rows die with the profile (FK cascade): capture each
-    // affected set's before-state first, while the members are still there.
+    // Deleting the row takes a member out of its set: capture that set's
+    // before-state first, while the member is still there.
     let member_befores =
         source_set_befores(&txn, &current.owner, &current.collection_name, &profile_id).await?;
     profile::Entity::delete_by_id((
@@ -522,8 +545,9 @@ pub async fn move_profile(
             "no such set: {set_name} in collection {collection}"
         )));
     }
-    // The source row is taken locked, before the member rows this move
-    // rewrites: the module's order.
+    // The source row is taken locked: the position the copy takes is computed
+    // and written inside this lock, and the row it reads is the one this move
+    // removes.
     let current =
         resolve_profile_for_update(&txn, &owner, &body.from_collection_name, &profile_id).await?;
     if registry::profile_by_id(&txn, &owner, &collection, &profile_id)
@@ -535,32 +559,23 @@ pub async fn move_profile(
             "the target collection already holds a profile with this id",
         ));
     }
-    // The target set's state before the row arrives (the audit's before
-    // half) and the position the row takes: one past the last member.
+    // The target set's state before the row arrives (the audit's before half)
+    // and the position the row takes: one past that set's last member.
     let target_set_befores = match &body.set {
         Some(set_name) => vec![(
             set_name.clone(),
-            set_state_json(&txn, &owner, &collection, set_name)
-                .await?
-                .expect("the target set was checked above"),
+            set_state_required(&txn, &owner, &collection, set_name).await?,
         )],
         None => Vec::new(),
     };
     let position = match &body.set {
-        Some(set_name) => set_member::Entity::find()
-            .filter(set_member::Column::Owner.eq(&owner))
-            .filter(set_member::Column::CollectionName.eq(&collection))
-            .filter(set_member::Column::SetName.eq(set_name))
-            .order_by_desc(set_member::Column::Position)
-            .one(&txn)
+        Some(set_name) => registry::set_next_position(&txn, &owner, &collection, set_name)
             .await
-            .map_err(db::map_db_err)?
-            .map(|m| m.position + 1)
-            .unwrap_or(0),
+            .map_err(db::map_db_err)?,
         None => 0,
     };
-    // The copy: content verbatim, the new container, and unassigned when it
-    // arrives without a set (a member is served by definition).
+    // The copy: content verbatim, the new container, and the arrival set
+    // (null when it arrives unassigned).
     let copy = profile::ActiveModel {
         profile_id: Set(current.profile_id.clone()),
         collection_name: Set(collection.clone()),
@@ -569,37 +584,25 @@ pub async fn move_profile(
         max_context_window: Set(current.max_context_window),
         effort: Set(current.effort.clone()),
         modalities: Set(current.modalities.clone()),
-        parked: Set(body.set.is_none()),
+        set_name: Set(body.set.clone()),
+        position: Set(position),
         store: Set(current.store),
         owner: Set(current.owner.clone()),
     }
     .insert(&txn)
     .await
     .map_err(db::map_db_err)?;
-    if let Some(set_name) = &body.set {
-        set_member::ActiveModel {
-            owner: Set(current.owner.clone()),
-            collection_name: Set(collection.clone()),
-            set_name: Set(set_name.clone()),
-            profile_id: Set(profile_id.clone()),
-            position: Set(position),
-        }
-        .insert(&txn)
-        .await
-        .map_err(db::map_db_err)?;
-    }
     let before_served = registry::served_profile(&txn, current.clone())
         .await
         .map_err(db::map_db_err)?
         .ok_or_else(|| ApiError::internal("profile row without its provider"))?;
     let source_before = serde_json::to_value(AdminProfile::from(before_served))
         .expect("AdminProfile always serializes");
-    // The source row's memberships cascade with it, so each source set
-    // loses a member exactly as it does on a delete: capture every set's
-    // order first, land one row per set below.
+    // The source row leaves its set, which loses a member exactly as it does
+    // on a delete: capture that set's order first, land the audit row below.
     let source_befores =
         source_set_befores(&txn, &current.owner, &current.collection_name, &profile_id).await?;
-    // The source row leaves; its membership rows cascade with it.
+    // The row itself goes; the set's other members keep their order.
     profile::Entity::delete_by_id((
         current.owner.clone(),
         current.collection_name.clone(),
@@ -661,7 +664,7 @@ mod tests {
     use sea_orm::{ConnectionTrait, EntityTrait, Statement};
 
     #[tokio::test]
-    async fn unassigned_crud_promotes_and_audits() {
+    async fn unassigned_crud_joins_a_set_and_audits() {
         let state = seeded_state().await;
         catalog_provider(&state, "up1", "openai-compatible").await;
         let unassigned_body = serde_json::json!({
@@ -682,7 +685,8 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{body}");
-        assert_eq!(body["parked"], true);
+        assert_eq!(body["set"], serde_json::Value::Null);
+        assert_eq!(body["position"], 0);
         // The family rides the referenced provider row (the derived view).
         assert_eq!(body["family"], "openai-compatible");
         // Duplicate ids conflict; path-unsafe ids, unknown providers, and
@@ -717,13 +721,13 @@ mod tests {
             .await;
             assert_eq!(status, expected);
         }
-        // Promote: parked=false through the same PUT.
-        let promote = serde_json::json!({
-            "profile_id": "p9",
+        // Joining a set is the same PUT: the row keeps its identity and only
+        // the membership moves, appending to the end of alpha's order.
+        let join = serde_json::json!({
             "model": "m9",
             "modalities": ["text"],
             "max_context_window": 8192,
-            "parked": false
+            "set": "alpha"
         });
         let (status, body) = send(
             app(state.clone()),
@@ -731,14 +735,15 @@ mod tests {
                 "PUT",
                 "/admin/collections/baseline/profiles/p9",
                 Some(TEST_ADMIN_BEARER),
-                Some(promote),
+                Some(join),
             ),
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{body}");
-        assert_eq!(body["parked"], false);
-        // The promote flipped the flag, not the resource: the row still
-        // reads, as a served row.
+        assert_eq!(body["set"], "alpha");
+        assert_eq!(body["position"], 3);
+        // The join moved the membership column, not the resource: the row
+        // still reads, now as a member of alpha.
         let (status, body) = send(
             app(state.clone()),
             req(
@@ -750,13 +755,13 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{body}");
-        assert_eq!(body["parked"], false);
-        // The unassigned listing is the park filter: p9 left it.
+        assert_eq!(body["set"], "alpha");
+        // The unassigned listing is the set filter: p9 left it.
         let (status, body) = send(
             app(state.clone()),
             req(
                 "GET",
-                "/admin/profiles?collection_name=baseline&parked=true",
+                "/admin/profiles?collection_name=baseline&unassigned=true",
                 Some(TEST_ADMIN_BEARER),
                 None,
             ),
@@ -771,10 +776,10 @@ mod tests {
             .collect();
         assert!(
             !unassigned.contains(&"p9"),
-            "a promoted row is not unassigned"
+            "a row in a set is not unassigned"
         );
         // The distribution unassigned list follows the selection pointer:
-        // anchored to the catalog baseline, p4 alone is parked there.
+        // anchored to the catalog baseline, p4 alone sits in no set.
         let (status, _) = send(
             app(state.clone()),
             req(
@@ -799,7 +804,7 @@ mod tests {
         // the model name identifies the unassigned row).
         assert_eq!(models[0]["model"], "unassigned-x");
         // The audit trail now matches the name: one create (before=None,
-        // after parked) and one promote (parked true -> false), per field.
+        // after unassigned) and one join (set null -> alpha), per field.
         let rows = audit_rows(&state.db).await;
         let p9_rows: Vec<_> = rows
             .iter()
@@ -809,17 +814,21 @@ mod tests {
         assert_eq!(p9_rows[0].action, "create");
         assert!(p9_rows[0].before.is_none());
         assert_eq!(
-            p9_rows[0].after.as_ref().expect("create after")["parked"],
-            true
+            p9_rows[0].after.as_ref().expect("create after")["set"],
+            serde_json::Value::Null
         );
         assert_eq!(p9_rows[1].action, "update");
         assert_eq!(
-            p9_rows[1].before.as_ref().expect("promote before")["parked"],
-            true
+            p9_rows[1].before.as_ref().expect("join before")["set"],
+            serde_json::Value::Null
         );
         assert_eq!(
-            p9_rows[1].after.as_ref().expect("promote after")["parked"],
-            false
+            p9_rows[1].after.as_ref().expect("join after")["set"],
+            "alpha"
+        );
+        assert_eq!(
+            p9_rows[1].after.as_ref().expect("join after")["position"],
+            3
         );
     }
 
@@ -910,20 +919,18 @@ mod tests {
 
     /// Deleting an unassigned row removes it from the domain's faces and
     /// lands one profile delete row; deleting a served profile (a row
-    /// the admin space owns outright, planted with its own membership
-    /// edge) additionally lands the cascading credential's own masked
-    /// delete row and one row per affected set with its before/after
-    /// member order (the membership edge leaves via the FK cascade, but
-    /// the audit trail keeps it).
+    /// the admin space owns outright, planted with its own set membership)
+    /// additionally lands the cascading credential's own masked delete row.
+    /// The membership column goes with the row, but the set keeps its own
+    /// audit row with the order it held before and after.
     #[tokio::test]
     async fn delete_unassigned_audits_the_cascade() {
         let state = seeded_state().await;
         // The whole walk stays in the catalog space: the unassigned rows, the
-        // served row, its credential, and a set holding the membership
-        // edge.
-        catalog_profile(&state, "a4", "unassigned-x", true).await;
-        catalog_profile(&state, "a1", "m1", false).await;
-        catalog_profile(&state, "a2", "m2", false).await;
+        // served row, its credential, and two members of one set.
+        catalog_profile(&state, "a4", "unassigned-x", None).await;
+        catalog_profile(&state, "a1", "m1", None).await;
+        catalog_profile(&state, "a2", "m2", None).await;
         catalog_credential(&state, "a1", "sk-served-under-test").await;
         catalog_set(&state, "alpha2").await;
         catalog_member(&state, "alpha2", "a1", 0).await;
@@ -965,19 +972,19 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK);
-        // The set lost the member... the catalog set face cannot see the
+        // The deleted row left the set... the catalog set face cannot see the
         // admin space, so the membership is asserted at the row level.
-        let member_rows_left = state
+        let rows_left = state
             .db
             .query_all(Statement::from_string(
                 sea_orm::DatabaseBackend::Postgres,
-                "SELECT profile_id FROM set_members \
+                "SELECT profile_id FROM profiles \
                  WHERE collection_name = 'baseline' AND set_name = 'alpha2' ORDER BY position"
                     .to_owned(),
             ))
             .await
-            .expect("member rows read");
-        let ids_left: Vec<String> = member_rows_left
+            .expect("profile rows read");
+        let ids_left: Vec<String> = rows_left
             .iter()
             .map(|r| r.try_get::<String>("", "profile_id").expect("profile id"))
             .collect();
@@ -1025,9 +1032,9 @@ mod tests {
         let raw = format!("{:?}", p1_deletes);
         assert!(!raw.contains("sk-served-under-test"));
 
-        // The membership edge is audited per set: alpha2's order with
+        // The set keeps its own audit row: alpha2's order with
         // a1 at the head before, a2 alone after.
-        let member_rows: Vec<_> = rows.iter().filter(|r| r.entity == "set_member").collect();
+        let member_rows: Vec<_> = rows.iter().filter(|r| r.entity == "profile_set").collect();
         assert_eq!(member_rows.len(), 1);
         assert_eq!(member_rows[0].entity_id, "alpha2");
         assert_eq!(member_rows[0].action, "update");
@@ -1070,39 +1077,26 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK, "{body}");
 
-        // Join the seeded set through the membership rewrite: the
-        // promote moves the unassigned row into the catalog in the same
-        // transaction (the catalog read serves members), and the
-        // fixture's members keep their places ahead of it.
+        // Join the seeded set through the same profile PUT: the row keeps
+        // its identity, the fixture's members keep their places, and the row
+        // appends to the end of the order.
         let (status, body) = send(
             app(state.clone()),
             req(
-                "GET",
-                "/admin/collections/baseline/sets/alpha",
+                "PUT",
+                "/admin/collections/baseline/profiles/sx1",
                 Some(TEST_ADMIN_BEARER),
-                None,
+                Some(serde_json::json!({
+                    "model": "m",
+                    "max_context_window": 8192,
+                    "modalities": ["text"],
+                    "set": "alpha"
+                })),
             ),
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{body}");
-        let mut members: Vec<String> = body["profiles"]
-            .as_array()
-            .expect("profiles array")
-            .iter()
-            .map(|p| p["profile_id"].as_str().expect("id").to_owned())
-            .collect();
-        members.push("sx1".to_owned());
-        let (status, body) = send(
-            app(state.clone()),
-            req(
-                "PATCH",
-                "/admin/collections/baseline/sets/alpha",
-                Some(TEST_ADMIN_BEARER),
-                Some(serde_json::json!({ "members": members })),
-            ),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["set"], "alpha");
 
         let stored = state
             .db
@@ -1125,10 +1119,10 @@ mod tests {
 
         // A fresh unassigned row carries the same guarantee: set the
         // column directly, then replace the full desired state through the
-        // profile PUT (parked included -- the promote is a side effect of
-        // this call, not the point). The moved sx1 now lives in the catalog
-        // space with its provider (the promote move carried both), so a
-        // second provider hosts the new unassigned row.
+        // profile PUT (the `set` key included -- the body is the complete
+        // desired state, and this row stays in no set). That moved row now
+        // lives in the catalog space with its provider, so a second provider
+        // hosts the new unassigned row.
         catalog_provider(&state, "up2", "openai-compatible").await;
         let (status, body) = send(
             app(state.clone()),
@@ -1168,7 +1162,7 @@ mod tests {
                     "max_context_window": 8192,
                     "effort": null,
                     "modalities": ["text"],
-                    "parked": false
+                    "set": null
                 })),
             ),
         )
@@ -1192,13 +1186,13 @@ mod tests {
         assert!(stored.try_get::<bool>("", "store").expect("store value"));
     }
 
-    /// The unassigned listing is the park filter over the catalog space: a
+    /// The unassigned listing is the set filter over the catalog space: a
     /// row created on this face and the seeded catalog row answer
-    /// together, and a served row never joins them.
+    /// together, and a row in a set never joins them.
     #[tokio::test]
-    async fn the_unassigned_list_is_the_parked_filter() {
+    async fn unassigned_filter_lists_the_rows_in_no_set() {
         let state = seeded_state().await;
-        // The fixture's p4 is the catalog's seeded parked row.
+        // The fixture's p4 is the catalog's seeded unassigned row.
         catalog_provider(&state, "up1", "deepseek").await;
         let (status, body) = send(
             app(state.clone()),
@@ -1219,7 +1213,7 @@ mod tests {
             app(state.clone()),
             req(
                 "GET",
-                "/admin/profiles?collection_name=baseline&parked=true",
+                "/admin/profiles?collection_name=baseline&unassigned=true",
                 Some(TEST_ADMIN_BEARER),
                 None,
             ),
@@ -1240,6 +1234,121 @@ mod tests {
             ids.contains(&"unassigned-2"),
             "the created unassigned row lists"
         );
+    }
+    /// This route takes no `parked` filter: a request that names it is
+    /// refused rather than silently ignored, and the refusal points at the
+    /// filter that answers the same question.
+    #[tokio::test]
+    async fn the_parked_filter_is_refused() {
+        let state = seeded_state().await;
+        let (status, body) = send(
+            app(state.clone()),
+            req(
+                "GET",
+                "/admin/profiles?collection_name=baseline&parked=true",
+                Some(TEST_ADMIN_BEARER),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        let message = body["error"]["message"].as_str().expect("message");
+        for side in ["unassigned=true", "unassigned=false"] {
+            assert!(
+                message.contains(side),
+                "the refusal names both directions of `unassigned`: {body}"
+            );
+        }
+        // Each half keeps its direction: swapping them would leave both
+        // names in place and both filters reading the wrong way.
+        let assigned_half = message
+            .split("`unassigned=false`")
+            .nth(1)
+            .expect("the refusal names the assigned half");
+        // Cut at the next clause, so a swapped pair cannot leave the other
+        // half's verb inside this slice.
+        let assigned_clause = assigned_half
+            .split('`')
+            .next()
+            .expect("a split yields one piece at least");
+        assert!(
+            assigned_clause.contains("belong"),
+            "`unassigned=false` names the rows in a set: {body}"
+        );
+    }
+
+    /// The unassigned filter answers both directions: `true` names the rows
+    /// in no set, `false` names the rows that belong to one, and the two
+    /// reads are disjoint halves of the unfiltered list.
+    #[tokio::test]
+    async fn the_unassigned_filter_answers_both_directions() {
+        async fn listed(state: AppState, query: &str) -> Vec<String> {
+            let (status, body) =
+                send(app(state), req("GET", query, Some(TEST_ADMIN_BEARER), None)).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            body.as_array()
+                .expect("profiles array")
+                .iter()
+                .map(|p| p["profile_id"].as_str().expect("profile id").to_string())
+                .collect()
+        }
+
+        let state = seeded_state().await;
+        catalog_provider(&state, "up1", "deepseek").await;
+        let (status, body) = send(
+            app(state.clone()),
+            req(
+                "POST",
+                "/admin/collections/baseline/profiles",
+                Some(TEST_ADMIN_BEARER),
+                Some(serde_json::json!({
+                    "profile_id": "member",
+                    "provider_id": "up1",
+                    "model": "member-model"
+                })),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let (status, body) = send(
+            app(state.clone()),
+            req(
+                "PUT",
+                "/admin/collections/baseline/profiles/member",
+                Some(TEST_ADMIN_BEARER),
+                Some(serde_json::json!({
+                    "model": "member-model",
+                    "set": "alpha"
+                })),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        let whole = listed(state.clone(), "/admin/profiles?collection_name=baseline").await;
+        let unassigned = listed(
+            state.clone(),
+            "/admin/profiles?collection_name=baseline&unassigned=true",
+        )
+        .await;
+        let assigned = listed(
+            state,
+            "/admin/profiles?collection_name=baseline&unassigned=false",
+        )
+        .await;
+
+        assert!(unassigned.contains(&"p4".to_string()), "{unassigned:?}");
+        assert!(assigned.contains(&"member".to_string()), "{assigned:?}");
+        assert!(
+            !assigned.iter().any(|id| unassigned.contains(id)),
+            "the two reads split the rows: {assigned:?} / {unassigned:?}"
+        );
+        let mut halves = assigned.clone();
+        halves.extend(unassigned);
+        halves.sort();
+        let mut all = whole;
+        all.sort();
+        assert_eq!(halves, all, "the two halves cover the unfiltered list");
     }
 
     /// The same id in another collection is a different row: creation is
@@ -1292,7 +1401,7 @@ mod tests {
                     "model": "m-b",
                     "modalities": ["text"],
                     "max_context_window": 8192,
-                    "parked": false
+                    "set": null
                 })),
             ),
         )
@@ -1312,12 +1421,12 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK, "{body}");
         assert_eq!(body["model"], "m-a");
-        assert_eq!(body["parked"], true);
+        assert_eq!(body["set"], serde_json::Value::Null);
     }
 
-    /// Membership drives the parked flag, and the flip is scoped to the
-    /// set's own collection: a same-id row elsewhere stays unassigned, and
-    /// the audit row the flip lands names the collection it touched.
+    /// Set membership is scoped to the row's own collection: a same-id
+    /// row elsewhere stays in no set, and the audit row the join lands
+    /// names the collection it touched.
     #[tokio::test]
     async fn a_membership_flip_touches_only_this_collections_row() {
         let state = seeded_state().await;
@@ -1340,23 +1449,30 @@ mod tests {
             )
             .await;
             assert_eq!(status, StatusCode::OK, "{body}");
-            assert_eq!(body["parked"], true);
+            assert_eq!(body["set"], serde_json::Value::Null);
         }
         let (status, body) = send(
             app(state.clone()),
             req(
-                "PATCH",
-                "/admin/collections/baseline/sets/alpha",
+                "PUT",
+                "/admin/collections/baseline/profiles/twin",
                 Some(TEST_ADMIN_BEARER),
-                Some(serde_json::json!({"members": ["twin"]})),
+                Some(serde_json::json!({
+                    "model": "m",
+                    "modalities": ["text"],
+                    "max_context_window": 8192,
+                    "set": "alpha"
+                })),
             ),
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{body}");
-        assert_eq!(body["profiles"][0]["profile_id"], "twin");
-        assert_eq!(body["profiles"][0]["parked"], false);
-        assert!(!parked_flag(&state, "baseline", "twin").await);
-        assert!(parked_flag(&state, "extra", "twin").await);
+        assert_eq!(body["set"], "alpha");
+        assert_eq!(
+            set_of(&state, "baseline", "twin").await.as_deref(),
+            Some("alpha")
+        );
+        assert_eq!(set_of(&state, "extra", "twin").await, None);
         let rows = audit_rows(&state.db).await;
         let flips: Vec<_> = rows
             .iter()
@@ -1367,7 +1483,7 @@ mod tests {
         let after = flips[0].after.as_ref().expect("flip after");
         assert_eq!(before["collection_name"], "baseline");
         assert_eq!(after["collection_name"], "baseline");
-        assert_eq!(after["parked"], false);
+        assert_eq!(after["set"], "alpha");
     }
 
     /// The move endpoint re-anchors one row: the copy lands in the target
@@ -1388,7 +1504,6 @@ mod tests {
                     "profile_id": "mv1",
                     "provider_id": "up1",
                     "model": "m",
-                    "parked": false
                 })),
             ),
         )
@@ -1397,7 +1512,7 @@ mod tests {
         // The sets the row leaves: the movement has to record the order
         // each of them held, exactly as a delete does.
         catalog_set(&state, "origin").await;
-        catalog_profile(&state, "mate", "m", false).await;
+        catalog_profile(&state, "mate", "m", None).await;
         catalog_member(&state, "origin", "mv1", 0).await;
         catalog_member(&state, "origin", "mate", 1).await;
         let (status, body) = send(
@@ -1412,7 +1527,7 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK, "{body}");
         assert_eq!(body["collection_name"], "extra");
-        assert_eq!(body["parked"], true);
+        assert_eq!(body["set"], serde_json::Value::Null);
         // The source row left; the target row reads with its content.
         let (status, _) = send(
             app(state.clone()),
@@ -1449,7 +1564,10 @@ mod tests {
                     && r.after.as_ref().expect("create after")["collection_name"] == "extra"
             })
             .expect("the landing create");
-        assert_eq!(landed.after.as_ref().expect("create after")["parked"], true);
+        assert_eq!(
+            landed.after.as_ref().expect("create after")["set"],
+            serde_json::Value::Null
+        );
         let left = mv1
             .iter()
             .find(|r| r.action == "delete")
@@ -1462,7 +1580,7 @@ mod tests {
         // carries the audit pair: the order it held, and the order left.
         let order = rows
             .iter()
-            .find(|r| r.entity == "set_member" && r.entity_id == "origin" && r.action == "update")
+            .find(|r| r.entity == "profile_set" && r.entity_id == "origin" && r.action == "update")
             .expect("the source set's update");
         assert_eq!(
             order.before.as_ref().expect("update before")["members"],
@@ -1476,12 +1594,14 @@ mod tests {
         );
     }
 
-    /// A row a set carries is served by definition: parking it is a
-    /// refused write, and the refusal leaves the row untouched.
+    /// A full replacement has to say where the row lives: a body without the
+    /// `set` key is refused, and the refusal leaves the row untouched. Passing
+    /// `null` instead takes the row out of its set (unassigned is a state, not
+    /// a refusal).
     #[tokio::test]
-    async fn a_set_member_cannot_be_parked() {
+    async fn a_put_without_the_set_key_is_refused() {
         let state = seeded_state().await;
-        catalog_profile(&state, "pm1", "m", false).await;
+        catalog_profile(&state, "pm1", "m", None).await;
         catalog_set(&state, "hold").await;
         catalog_member(&state, "hold", "pm1", 0).await;
 
@@ -1491,20 +1611,21 @@ mod tests {
                 "PUT",
                 "/admin/collections/baseline/profiles/pm1",
                 Some(TEST_ADMIN_BEARER),
-                Some(serde_json::json!({"model": "m2", "parked": true})),
+                Some(serde_json::json!({"model": "m2"})),
             ),
         )
         .await;
-        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
         assert!(
             body["error"]["message"]
                 .as_str()
                 .expect("message")
-                .contains("cannot be unassigned"),
+                .contains("the set field is required"),
             "{body}"
         );
-        assert!(
-            !parked_flag(&state, "baseline", "pm1").await,
+        assert_eq!(
+            set_of(&state, "baseline", "pm1").await.as_deref(),
+            Some("hold"),
             "the refused write changed no column"
         );
         let (status, body) = send(
@@ -1519,6 +1640,20 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK, "{body}");
         assert_eq!(body["model"], "m", "the model survived the refusal too");
+        // An explicit null is the legal way out of the set.
+        let (status, body) = send(
+            app(state.clone()),
+            req(
+                "PUT",
+                "/admin/collections/baseline/profiles/pm1",
+                Some(TEST_ADMIN_BEARER),
+                Some(serde_json::json!({"model": "m2", "set": null})),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["set"], serde_json::Value::Null);
+        assert_eq!(set_of(&state, "baseline", "pm1").await, None);
     }
 
     /// A move into a set arrives served and takes the last position: the
@@ -1544,7 +1679,7 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK, "{body}");
         catalog_set_in(&state, "extra", "landing").await;
-        catalog_profile_in(&state, "extra", "seat", "m", false).await;
+        catalog_profile_in(&state, "extra", "seat", "m", None).await;
         catalog_member_in(&state, "extra", "landing", "seat", 0).await;
         let (status, body) = send(
             app(state.clone()),
@@ -1561,7 +1696,7 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK, "{body}");
         assert_eq!(body["collection_name"], "extra");
-        assert_eq!(body["parked"], false);
+        assert_eq!(body["set"], "landing");
         let (status, body) = send(
             app(state.clone()),
             req(
@@ -1584,7 +1719,7 @@ mod tests {
         let mut kinds: Vec<(&str, &str)> = rows
             .iter()
             .filter(|r| {
-                r.entity_id == "mv2" || (r.entity == "set_member" && r.entity_id == "landing")
+                r.entity_id == "mv2" || (r.entity == "profile_set" && r.entity_id == "landing")
             })
             .map(|r| (r.action.as_str(), r.entity.as_str()))
             .collect();
@@ -1595,9 +1730,76 @@ mod tests {
                 ("create", "profile"),
                 ("create", "profile"),
                 ("delete", "profile"),
-                ("update", "set_member"),
+                ("update", "profile_set"),
             ]
         );
+    }
+    /// A membership move reorders two sets and lands one audit row per set:
+    /// the join appends the row to the target's order, the leave drops it
+    /// from the source's. A PUT that keeps the row where it is reorders
+    /// nothing.
+    #[tokio::test]
+    async fn a_membership_move_audits_both_sets() {
+        let state = seeded_state().await;
+        // p4 is the seeded unassigned row; alpha holds p1, p2, p6.
+        let (status, body) = send(
+            app(state.clone()),
+            req(
+                "PUT",
+                "/admin/collections/baseline/profiles/p4",
+                Some(TEST_ADMIN_BEARER),
+                Some(serde_json::json!({"model": "unassigned-x", "set": "alpha"})),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        // Same set: the order does not move, so no set row.
+        let (status, body) = send(
+            app(state.clone()),
+            req(
+                "PUT",
+                "/admin/collections/baseline/profiles/p4",
+                Some(TEST_ADMIN_BEARER),
+                Some(serde_json::json!({"model": "unassigned-x", "set": "alpha"})),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        // Leaving: alpha loses p4 again.
+        let (status, body) = send(
+            app(state.clone()),
+            req(
+                "PUT",
+                "/admin/collections/baseline/profiles/p4",
+                Some(TEST_ADMIN_BEARER),
+                Some(serde_json::json!({"model": "unassigned-x", "set": null})),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let rows = audit_rows(&state.db).await;
+        let set_rows: Vec<_> = rows
+            .iter()
+            .filter(|r| r.entity == "profile_set" && r.entity_id == "alpha")
+            .collect();
+        assert_eq!(set_rows.len(), 2);
+        assert_eq!(
+            set_rows[0].before.as_ref().expect("join before")["members"],
+            serde_json::json!(["p1", "p2", "p6"])
+        );
+        assert_eq!(
+            set_rows[0].after.as_ref().expect("join after")["members"],
+            serde_json::json!(["p1", "p2", "p6", "p4"])
+        );
+        assert_eq!(
+            set_rows[1].before.as_ref().expect("leave before")["members"],
+            serde_json::json!(["p1", "p2", "p6", "p4"])
+        );
+        assert_eq!(
+            set_rows[1].after.as_ref().expect("leave after")["members"],
+            serde_json::json!(["p1", "p2", "p6"])
+        );
+        assert!(set_rows.iter().all(|r| r.actor == "admin"));
     }
 
     /// A move refuses a target it cannot honour: the same collection, a

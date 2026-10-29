@@ -3,7 +3,7 @@
 //! audit readers every domain module builds its tests on.
 
 use crate::registry;
-use crate::registry::{collection, profile, profile_set, provider, set_member};
+use crate::registry::{collection, profile, profile_set, provider};
 use crate::secret::provider_credential;
 use crate::state::AppState;
 pub(crate) use crate::test_support::{
@@ -81,9 +81,14 @@ pub(crate) async fn catalog_provider(state: &AppState, id: &str, family: &str) {
 }
 
 /// A profile row in the catalog space: the provider lands first
-/// (the FK needs it), then the profile with the given parked flag.
-pub(crate) async fn catalog_profile(state: &AppState, id: &str, model: &str, parked: bool) {
-    catalog_profile_in(state, TEST_COLLECTION, id, model, parked).await;
+/// (the FK needs it), then the profile in the given set, if any.
+pub(crate) async fn catalog_profile(
+    state: &AppState,
+    id: &str,
+    model: &str,
+    set: Option<(&str, i32)>,
+) {
+    catalog_profile_in(state, TEST_COLLECTION, id, model, set).await;
 }
 
 /// The same profile row anchored to a named collection.
@@ -92,7 +97,7 @@ pub(crate) async fn catalog_profile_in(
     collection: &str,
     id: &str,
     model: &str,
-    parked: bool,
+    set: Option<(&str, i32)>,
 ) {
     catalog_provider(state, id, "openai-compatible").await;
     profile::ActiveModel {
@@ -103,7 +108,8 @@ pub(crate) async fn catalog_profile_in(
         max_context_window: Set(Some(128_000)),
         effort: Set(Some("high".to_owned())),
         modalities: Set(Some("[\"text\"]".to_owned())),
-        parked: Set(parked),
+        set_name: Set(set.map(|(name, _)| name.to_owned())),
+        position: Set(set.map_or(0, |(_, position)| position)),
         store: Set(None),
         owner: Set(registry::CATALOG_OWNER.to_owned()),
     }
@@ -146,13 +152,13 @@ pub(crate) async fn catalog_set_in(state: &AppState, collection: &str, name: &st
     .expect("catalog set insert");
 }
 
-/// One membership edge for a planted set (the FK pair is the member
-/// profile, planted before this call in the same collection).
+/// Membership is a profile column: point the planted profile at the set
+/// (the set row must exist in the same collection first).
 pub(crate) async fn catalog_member(state: &AppState, set: &str, id: &str, position: i32) {
     catalog_member_in(state, TEST_COLLECTION, set, id, position).await;
 }
 
-/// The same membership edge for a set and a profile in a named collection.
+/// The same membership update for a set and a profile in a named collection.
 pub(crate) async fn catalog_member_in(
     state: &AppState,
     collection: &str,
@@ -160,22 +166,27 @@ pub(crate) async fn catalog_member_in(
     id: &str,
     position: i32,
 ) {
-    set_member::ActiveModel {
-        collection_name: Set(collection.to_owned()),
-        set_name: Set(set.to_owned()),
-        profile_id: Set(id.to_owned()),
+    let current = profile::Entity::find()
+        .filter(profile::Column::CollectionName.eq(collection))
+        .filter(profile::Column::ProfileId.eq(id))
+        .one(&state.db)
+        .await
+        .expect("profile read")
+        .expect("planted profile");
+    profile::ActiveModel {
+        set_name: Set(Some(set.to_owned())),
         position: Set(position),
-        owner: Set(registry::CATALOG_OWNER.to_owned()),
+        ..current.into()
     }
-    .insert(&state.db)
+    .update(&state.db)
     .await
-    .expect("catalog member insert");
+    .expect("catalog membership update");
 }
 
-/// A provider and a parked profile in the admin account's user
+/// A provider and an unassigned profile in the admin account's user
 /// space (a foreign space to this face), planted directly: no
 /// admin route reaches that space.
-pub(crate) async fn foreign_parked(state: &AppState, id: &str) {
+pub(crate) async fn foreign_profile(state: &AppState, id: &str) {
     seed_collection(state, LOCAL_ADMIN_OWNER, "personal").await;
     provider::ActiveModel {
         owner: Set(LOCAL_ADMIN_OWNER.to_owned()),
@@ -195,7 +206,8 @@ pub(crate) async fn foreign_parked(state: &AppState, id: &str) {
         max_context_window: Set(Some(128_000)),
         effort: Set(None),
         modalities: Set(Some("[\"text\"]".to_owned())),
-        parked: Set(true),
+        set_name: Set(None),
+        position: Set(0),
         store: Set(None),
         owner: Set(LOCAL_ADMIN_OWNER.to_owned()),
     }
@@ -245,7 +257,7 @@ pub(crate) async fn audit_rows(
         .expect("audit rows read")
 }
 
-pub(crate) async fn parked_flag(state: &AppState, collection: &str, id: &str) -> bool {
+pub(crate) async fn set_of(state: &AppState, collection: &str, id: &str) -> Option<String> {
     profile::Entity::find()
         .filter(profile::Column::CollectionName.eq(collection))
         .filter(profile::Column::ProfileId.eq(id))
@@ -253,7 +265,7 @@ pub(crate) async fn parked_flag(state: &AppState, collection: &str, id: &str) ->
         .await
         .expect("profile read")
         .expect("seeded row")
-        .parked
+        .set_name
 }
 
 // The folded shape: a1b rides a1's provider row, so every handler
@@ -274,7 +286,8 @@ pub(crate) async fn insert_co_rider(
         max_context_window: Set(Some(128_000)),
         effort: Set(Some("high".to_owned())),
         modalities: Set(Some("[\"text\"]".to_owned())),
-        parked: Set(false),
+        set_name: Set(None),
+        position: Set(0),
         store: Set(None),
         owner: Set(owner.to_owned()),
     }

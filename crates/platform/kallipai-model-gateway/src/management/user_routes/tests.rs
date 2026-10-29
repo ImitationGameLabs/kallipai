@@ -97,7 +97,8 @@ async fn user_domain_crud_round_trip() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    // Set with the profile as a member.
+    // Set with the profile as its member: the set is born empty, and the
+    // membership is the profile row's own write.
     let (status, body) = send(
         app(state.clone()),
         cookie_req(
@@ -105,11 +106,33 @@ async fn user_domain_crud_round_trip() {
             "/user/collections/scratch/sets",
             user,
             true,
-            Some(serde_json::json!({
-                "name": "mine",
-                "description": "d",
-                "members": ["p-user"]
-            })),
+            Some(serde_json::json!({"name": "mine", "description": "d"})),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["members"], serde_json::json!([]));
+    let (status, body) = send(
+        app(state.clone()),
+        cookie_req(
+            "PUT",
+            "/user/collections/scratch/profiles/p-user",
+            user,
+            true,
+            Some(serde_json::json!({"model": "deepseek-chat", "set": "mine"})),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["set"], "mine");
+    let (status, body) = send(
+        app(state.clone()),
+        cookie_req(
+            "GET",
+            "/user/collections/scratch/sets/mine",
+            user,
+            false,
+            None,
         ),
     )
     .await;
@@ -318,11 +341,11 @@ async fn user_face_unreachable_backend_fails_closed_503() {
     assert_eq!(body["error"]["code"], "auth_backend_unavailable");
 }
 
-/// A set's members live in the set's own collection: a user-face write
-/// naming a same-id row from another collection is refused, not silently
-/// resolved.
+/// The membership write is scoped to the path's collection: a row that lives
+/// in another collection cannot be addressed through this one, and it keeps
+/// its state while the refusal is answered.
 #[tokio::test]
-async fn user_set_members_must_live_in_the_sets_collection() {
+async fn user_membership_writes_are_scoped_to_the_paths_collection() {
     let state = seeded_state().await;
     let user = Some(TEST_USER_COOKIE);
     let (status, body) = send(
@@ -372,7 +395,6 @@ async fn user_set_members_must_live_in_the_sets_collection() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    // The row lives in `other`; a set in `scratch` cannot carry it.
     let (status, body) = send(
         app(state.clone()),
         cookie_req(
@@ -380,11 +402,84 @@ async fn user_set_members_must_live_in_the_sets_collection() {
             "/user/collections/scratch/sets",
             user,
             true,
-            Some(serde_json::json!({
-                "name": "s0",
-                "description": "d",
-                "members": ["p-other"]
-            })),
+            Some(serde_json::json!({"name": "s0", "description": "d"})),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    // The row lives in `other`; the scratch path has no such row.
+    let (status, body) = send(
+        app(state.clone()),
+        cookie_req(
+            "PUT",
+            "/user/collections/scratch/profiles/p-other",
+            user,
+            true,
+            Some(serde_json::json!({"model": "m", "set": "s0"})),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .expect("message")
+            .contains("no such profile: p-other in collection scratch"),
+        "{body}"
+    );
+    // The refused write joined nothing.
+    let (status, body) = send(
+        app(state.clone()),
+        cookie_req(
+            "GET",
+            "/user/collections/scratch/sets/s0",
+            user,
+            false,
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["members"], serde_json::json!([]));
+}
+
+/// The set face refuses a membership payload here too: membership is the
+/// profile PUT's `set` field and order is the set's `/order` route, so a
+/// body that carries `members` lands nothing.
+#[tokio::test]
+async fn user_set_writes_refuse_a_members_payload() {
+    let state = seeded_state().await;
+    let user = Some(TEST_USER_COOKIE);
+    for (path, payload) in [
+        (
+            "/user/providers",
+            serde_json::json!({"provider_id": "up1", "family": "deepseek", "api_key": "sk-x"}),
+        ),
+        (
+            "/user/collections",
+            serde_json::json!({"name": "scratch", "description": "d"}),
+        ),
+        (
+            "/user/collections/scratch/profiles",
+            serde_json::json!({"profile_id": "p-a", "provider_id": "up1", "model": "m"}),
+        ),
+    ] {
+        let (status, body) = send(
+            app(state.clone()),
+            cookie_req("POST", path, user, true, Some(payload)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{path}: {body}");
+    }
+    // Create with members: 400, and the set row does not land.
+    let (status, body) = send(
+        app(state.clone()),
+        cookie_req(
+            "POST",
+            "/user/collections/scratch/sets",
+            user,
+            true,
+            Some(serde_json::json!({"name": "s9", "description": "d", "members": ["p-a"]})),
         ),
     )
     .await;
@@ -393,7 +488,235 @@ async fn user_set_members_must_live_in_the_sets_collection() {
         body["error"]["message"]
             .as_str()
             .expect("message")
-            .contains("lives in collection other"),
+            .contains("members"),
         "{body}"
     );
+    let (status, body) = send(
+        app(state.clone()),
+        cookie_req("GET", "/user/sets", user, false, None),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["sets"], serde_json::json!([]), "{body}");
+    // A patch carrying members is refused too, and the set keeps both its
+    // description and its order.
+    let (status, body) = send(
+        app(state.clone()),
+        cookie_req(
+            "POST",
+            "/user/collections/scratch/sets",
+            user,
+            true,
+            Some(serde_json::json!({"name": "s1", "description": "d"})),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = send(
+        app(state.clone()),
+        cookie_req(
+            "PUT",
+            "/user/collections/scratch/profiles/p-a",
+            user,
+            true,
+            Some(serde_json::json!({"model": "m", "set": "s1"})),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = send(
+        app(state.clone()),
+        cookie_req(
+            "PATCH",
+            "/user/collections/scratch/sets/s1",
+            user,
+            true,
+            Some(serde_json::json!({"description": "rewritten", "members": ["p-a"]})),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let (status, body) = send(
+        app(state.clone()),
+        cookie_req(
+            "GET",
+            "/user/collections/scratch/sets/s1",
+            user,
+            false,
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["description"], "d", "{body}");
+    assert_eq!(body["members"], serde_json::json!(["p-a"]), "{body}");
+}
+
+/// The user face audits the set a profile's membership leaves and joins:
+/// the join appends the row to the target's order, the delete drops it
+/// from the source's.
+#[tokio::test]
+async fn user_membership_writes_audit_the_set_orders() {
+    let state = seeded_state().await;
+    let user = Some(TEST_USER_COOKIE);
+    for (path, payload) in [
+        (
+            "/user/providers",
+            serde_json::json!({"provider_id": "up1", "family": "deepseek", "api_key": "sk-x"}),
+        ),
+        (
+            "/user/collections",
+            serde_json::json!({"name": "scratch", "description": "d"}),
+        ),
+        (
+            "/user/collections/scratch/profiles",
+            serde_json::json!({"profile_id": "p-a", "provider_id": "up1", "model": "m"}),
+        ),
+        (
+            "/user/collections/scratch/sets",
+            serde_json::json!({"name": "s1", "description": "d"}),
+        ),
+    ] {
+        let (status, body) = send(
+            app(state.clone()),
+            cookie_req("POST", path, user, true, Some(payload)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{path}: {body}");
+    }
+    let (status, body) = send(
+        app(state.clone()),
+        cookie_req(
+            "PUT",
+            "/user/collections/scratch/profiles/p-a",
+            user,
+            true,
+            Some(serde_json::json!({"model": "m", "set": "s1"})),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = send(
+        app(state.clone()),
+        cookie_req(
+            "DELETE",
+            "/user/collections/scratch/profiles/p-a",
+            user,
+            true,
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let rows = audit_rows(&state.db).await;
+    let set_rows: Vec<_> = rows
+        .iter()
+        .filter(|r| r.action == "update" && r.entity == "profile_set" && r.entity_id == "s1")
+        .collect();
+    assert_eq!(set_rows.len(), 2);
+    assert_eq!(
+        set_rows[0].before.as_ref().expect("join before")["members"],
+        serde_json::json!([])
+    );
+    assert_eq!(
+        set_rows[0].after.as_ref().expect("join after")["members"],
+        serde_json::json!(["p-a"])
+    );
+    assert_eq!(
+        set_rows[1].before.as_ref().expect("delete before")["members"],
+        serde_json::json!(["p-a"])
+    );
+    assert_eq!(
+        set_rows[1].after.as_ref().expect("delete after")["members"],
+        serde_json::json!([])
+    );
+    assert!(set_rows.iter().all(|r| r.actor == "user-plain"));
+}
+/// The user query shapes are closed: a key the face does not read answers
+/// 400 instead of being ignored.
+#[tokio::test]
+async fn user_query_shapes_refuse_unknown_keys() {
+    let state = seeded_state().await;
+    let user = Some(TEST_USER_COOKIE);
+    for path in [
+        "/user/profiles?collection_name=own-col&parked=true",
+        "/user/sets?collection_name=own-col&set=s1",
+    ] {
+        let (status, body) = send(
+            app(state.clone()),
+            cookie_req("GET", path, user, false, None),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{path}: {body}");
+    }
+}
+
+/// The user `/order` route answers through the same protocol as the admin
+/// one: a list that is not a permutation of the membership is a 400, and a
+/// set the caller has no row for is a 404.
+#[tokio::test]
+async fn user_set_order_refuses_a_non_permutation_and_a_missing_set() {
+    let state = seeded_state().await;
+    let user = Some(TEST_USER_COOKIE);
+    for (path, payload) in [
+        (
+            "/user/providers",
+            serde_json::json!({"provider_id": "up1", "family": "deepseek", "api_key": "sk-x"}),
+        ),
+        (
+            "/user/collections",
+            serde_json::json!({"name": "scratch", "description": "d"}),
+        ),
+        (
+            "/user/collections/scratch/profiles",
+            serde_json::json!({"profile_id": "p-a", "provider_id": "up1", "model": "m"}),
+        ),
+        (
+            "/user/collections/scratch/sets",
+            serde_json::json!({"name": "s1", "description": "d"}),
+        ),
+    ] {
+        let (status, body) = send(
+            app(state.clone()),
+            cookie_req("POST", path, user, true, Some(payload)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{path}: {body}");
+    }
+    let (status, body) = send(
+        app(state.clone()),
+        cookie_req(
+            "PUT",
+            "/user/collections/scratch/profiles/p-a",
+            user,
+            true,
+            Some(serde_json::json!({"model": "m", "set": "s1"})),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = send(
+        app(state.clone()),
+        cookie_req(
+            "PUT",
+            "/user/collections/scratch/sets/s1/order",
+            user,
+            true,
+            Some(serde_json::json!({"members": ["p-a", "p-b"]})),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let (status, body) = send(
+        app(state.clone()),
+        cookie_req(
+            "PUT",
+            "/user/collections/scratch/sets/gone/order",
+            user,
+            true,
+            Some(serde_json::json!({"members": []})),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
 }

@@ -33,10 +33,15 @@ pub struct Model {
     pub effort: Option<String>,
     /// JSON-encoded modality list (e.g. `["text"]`).
     pub modalities: Option<String>,
-    /// Parked flag. In the catalog space a set member is never parked; the
-    /// membership and the flag are written together. The user face has no
-    /// promote step, so a set edit there can leave a member parked.
-    pub parked: bool,
+    /// The set this profile is a member of, if any. `NULL` = unassigned
+    /// (the distribution face does not serve it); a name = the profile's
+    /// one and only set, pinned inside the same collection by the
+    /// composite foreign key `(owner, collection_name, set_name)`.
+    pub set_name: Option<String>,
+    /// Failover order inside `set_name` (meaningless while unassigned):
+    /// reads order by `(position, profile_id)`, deterministic but not
+    /// enforced distinct.
+    pub position: i32,
     /// The responses wire's server-side transcript tri-state: `true`
     /// persists the response upstream, `false` does not, `NULL` = no
     /// explicit choice (the client's request body decides). Carried

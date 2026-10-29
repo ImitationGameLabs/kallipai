@@ -1,6 +1,6 @@
 //! The registry domain: the provider pool, model profiles, their ordered
-//! sets, collections, and groups; a collection's parked rows are the same
-//! table read through a flag.
+//! sets, collections, and groups; a collection's unassigned rows are the same
+//! table read through a nullable column.
 //!
 //! This is the distribution face's data: no credential columns live here
 //! (the key half of the pool is the secret domain's `provider_credentials`,
@@ -18,7 +18,7 @@
 //! that takes a bare profile id is the diagnostic below, which asks where
 //! an id lives instead of resolving it.
 //!
-//! `position` in `set_members` is failover semantics (the first member
+//! `position` on the profile row is failover semantics (the first member
 //! active deployment, `FailoverState` walks the Vec); every read path
 //! returns members verbatim in position order and must never reorder.
 //!
@@ -47,7 +47,6 @@ pub mod platform_publications;
 pub mod profile;
 pub mod profile_set;
 pub mod provider;
-pub mod set_member;
 
 use sea_orm::prelude::*;
 use sea_orm::{ConnectionTrait, DatabaseConnection, DbErr, QueryOrder, QuerySelect};
@@ -56,7 +55,6 @@ use std::collections::{HashMap, HashSet};
 use profile::Entity as Profiles;
 use profile_set::Entity as ProfileSets;
 use provider::Entity as Providers;
-use set_member::Entity as SetMembers;
 
 /// The platform catalog owner: the public space the distribution face
 /// serves (`owner = 'system'` is the catalog read family's filter).
@@ -152,19 +150,21 @@ pub async fn served_many<C: ConnectionTrait>(
 /// out by the caller, of every collection in the space. Both filters ride
 /// the query (never a post-filter), the rule every read in this module
 /// follows. The management face's summary read
-/// (`GET /admin/profiles?collection_name=&parked=`) is this function.
+/// (`GET /admin/profiles?collection_name=&unassigned=`) is this function.
 pub async fn profiles_in_collection<C: ConnectionTrait>(
     db: &C,
     owner: &str,
     collection_name: Option<&str>,
-    parked: Option<bool>,
+    unassigned: Option<bool>,
 ) -> Result<Vec<profile::Model>, DbErr> {
     let mut query = Profiles::find().filter(profile::Column::Owner.eq(owner.to_owned()));
     if let Some(collection_name) = collection_name {
         query = query.filter(profile::Column::CollectionName.eq(collection_name.to_owned()));
     }
-    if let Some(parked) = parked {
-        query = query.filter(profile::Column::Parked.eq(parked));
+    match unassigned {
+        Some(true) => query = query.filter(profile::Column::SetName.is_null()),
+        Some(false) => query = query.filter(profile::Column::SetName.is_not_null()),
+        None => {}
     }
     query
         .order_by_asc(profile::Column::CollectionName)
@@ -208,29 +208,6 @@ pub async fn profile_by_id_for_update<C: ConnectionTrait>(
     .await
 }
 
-/// The collections in one space that hold a row with this id: the
-/// diagnostic behind one management answer. A scoped read answers 404
-/// when the id lives elsewhere; this read names where it actually
-/// lives, so the caller can say so instead of guessing. The user face's
-/// set edit is the only caller.
-pub async fn profile_collections<C: ConnectionTrait>(
-    db: &C,
-    owner: &str,
-    profile_id: &str,
-) -> Result<Vec<String>, DbErr> {
-    let mut collections: Vec<String> = Profiles::find()
-        .filter(profile::Column::Owner.eq(owner.to_owned()))
-        .filter(profile::Column::ProfileId.eq(profile_id.to_owned()))
-        .all(db)
-        .await?
-        .into_iter()
-        .map(|p| p.collection_name)
-        .collect();
-    collections.sort();
-    collections.dedup();
-    Ok(collections)
-}
-
 /// The set in one collection. Set names are unique per collection, so the
 /// triple is the identity: a same-name set in another collection is a
 /// different row, and every container-addressed path names its collection.
@@ -259,57 +236,61 @@ pub async fn provider_by_id<C: ConnectionTrait>(
     provider_of(db, owner, provider_id).await
 }
 
-/// The set names `profile_id` belongs to inside one collection (membership
-/// never leaves the collection, so the container is the whole scope). The
-/// visibility predicate intersects the result with the viewer's domain.
-pub async fn profile_set_names_of<C: ConnectionTrait>(
+/// The set `profile_id` belongs to inside one collection, if any
+/// (membership never leaves the collection, so the container is the whole
+/// scope). The visibility predicate intersects the result with the viewer's
+/// domain: an unassigned row grants nothing.
+pub async fn profile_set_name_of<C: ConnectionTrait>(
     db: &C,
     profile_owner: &str,
     collection_name: &str,
     profile_id: &str,
-) -> Result<Vec<String>, DbErr> {
-    Ok(SetMembers::find()
-        .filter(set_member::Column::Owner.eq(profile_owner.to_owned()))
-        .filter(set_member::Column::CollectionName.eq(collection_name.to_owned()))
-        .filter(set_member::Column::ProfileId.eq(profile_id.to_owned()))
-        .all(db)
-        .await?
-        .into_iter()
-        .map(|m| m.set_name)
-        .collect())
+) -> Result<Option<String>, DbErr> {
+    Ok(
+        profile_by_id(db, profile_owner, collection_name, profile_id)
+            .await?
+            .and_then(|profile| profile.set_name),
+    )
+}
+/// The position a row joining `set_name` takes: one past the last member,
+/// or 0 when the set is empty. Callers read it inside the transaction that
+/// writes the row, so a join never lands behind an existing member.
+pub async fn set_next_position<C: ConnectionTrait>(
+    db: &C,
+    owner: &str,
+    collection_name: &str,
+    set_name: &str,
+) -> Result<i32, DbErr> {
+    let last = Profiles::find()
+        .filter(profile::Column::Owner.eq(owner))
+        .filter(profile::Column::CollectionName.eq(collection_name))
+        .filter(profile::Column::SetName.eq(set_name))
+        .order_by_desc(profile::Column::Position)
+        .one(db)
+        .await?;
+    Ok(last.map_or(0, |profile| profile.position + 1))
 }
 
-/// The members of `(owner, collection_name, set_name)` in `position` order,
-/// joined with their profiles and provider families. A member row whose
-/// profile vanished cannot exist (the FK cascades), so the two-step read
-/// cannot lose rows; a vanished provider is skipped (cannot happen, but a
-/// corrupted store degrades to a shorter order, never a panic).
-pub async fn set_members_ordered(
-    db: &DatabaseConnection,
+/// The members of `(owner, collection_name, set_name)` in `(position,
+/// profile_id)` order, joined with their provider families. One query over
+/// the profile rows: membership is the column, so there is no second read to
+/// restore an order across. A vanished provider is skipped (cannot happen,
+/// but a corrupted store degrades to a shorter order, never a panic).
+pub async fn set_members_ordered<C: ConnectionTrait>(
+    db: &C,
     owner: &str,
     collection_name: &str,
     set_name: &str,
 ) -> Result<Vec<ServedProfile>, DbErr> {
-    let members = SetMembers::find()
-        .filter(set_member::Column::Owner.eq(owner))
-        .filter(set_member::Column::CollectionName.eq(collection_name))
-        .filter(set_member::Column::SetName.eq(set_name))
-        .order_by_asc(set_member::Column::Position)
-        .all(db)
-        .await?;
-    let ids: Vec<String> = members.into_iter().map(|m| m.profile_id).collect();
-    if ids.is_empty() {
-        return Ok(vec![]);
-    }
-    let mut profiles = Profiles::find()
+    let members = Profiles::find()
         .filter(profile::Column::Owner.eq(owner))
         .filter(profile::Column::CollectionName.eq(collection_name))
-        .filter(profile::Column::ProfileId.is_in(ids.clone()))
+        .filter(profile::Column::SetName.eq(set_name))
+        .order_by_asc(profile::Column::Position)
+        .order_by_asc(profile::Column::ProfileId)
         .all(db)
         .await?;
-    // Restore the position order the second query lost.
-    profiles.sort_by_key(|p| ids.iter().position(|id| *id == p.profile_id));
-    served_many(db, profiles).await
+    served_many(db, members).await
 }
 
 /// The head profile of one collection's set `set_name` among the families a
@@ -331,31 +312,29 @@ pub async fn set_head_for_families(
     }
     Ok(None)
 }
-
-// -- the parked-row read family ---------------------------------------------
+// -- the unassigned-row read family ----------------------------------------
 //
 // The distribution face reads one collection's unassigned rows: the one its
 // selection pointer names, in that collection's own space. The filter is in
 // the query (owner + collection), never a post-filter, so a row in another
 // collection is outside this read by construction.
 //
-// The flag is the only test: a row a user-face set edit left parked stays a
-// member of its set and is still listed here, so this read answers the
-// flag, not the absence of a set.
+// The column is the only test: unassigned means no set, so this read answers
+// `set_name IS NULL` and nothing else.
 
-/// The parked rows of one collection: what the distribution face's
+/// The unassigned rows of one collection: what the distribution face's
 /// `/parking` answer carries for the pointer's collection.
-pub async fn catalog_parked_profiles(
+pub async fn catalog_unassigned_profiles(
     db: &DatabaseConnection,
     owner: &str,
     collection_name: &str,
 ) -> Result<Vec<ServedProfile>, DbErr> {
-    let parked = Profiles::find()
+    let unassigned = Profiles::find()
         .filter(profile::Column::Owner.eq(owner))
         .filter(profile::Column::CollectionName.eq(collection_name))
-        .filter(profile::Column::Parked.eq(true))
+        .filter(profile::Column::SetName.is_null())
         .order_by_asc(profile::Column::ProfileId)
         .all(db)
         .await?;
-    served_many(db, parked).await
+    served_many(db, unassigned).await
 }

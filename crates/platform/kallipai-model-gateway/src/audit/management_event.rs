@@ -17,8 +17,8 @@ pub struct Model {
     /// "create" | "update" | "delete" (free text by design, see the
     /// migration's vocabulary comment).
     pub action: String,
-    /// "profile_set" | "set_member" | "profile" |
-    /// "provider_credential".
+    /// "profile_set" | "profile" | "provider" |
+    /// "provider_credential" | "collection" | "group".
     pub entity: String,
     /// The row identity the action targeted (set name, profile id --
     /// natural keys, so the log reads without joins).

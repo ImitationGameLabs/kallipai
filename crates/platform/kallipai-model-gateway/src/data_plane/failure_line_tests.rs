@@ -26,7 +26,6 @@ fn failure_levels_split_the_gates_from_the_forward_failures() {
         ForwardOutcome::GatedAuth,
         ForwardOutcome::GatedRoute,
         ForwardOutcome::GatedVisibility,
-        ForwardOutcome::GatedParking,
         ForwardOutcome::GatedPayload,
         ForwardOutcome::Upstream2xx,
         ForwardOutcome::Upstream4xx,
@@ -148,7 +147,6 @@ fn the_failure_line_warrants_on_errors_and_gates_only() {
         ForwardOutcome::GatedAuth,
         ForwardOutcome::GatedRoute,
         ForwardOutcome::GatedVisibility,
-        ForwardOutcome::GatedParking,
         ForwardOutcome::GatedPayload,
     ] {
         assert!(
@@ -396,10 +394,6 @@ fn the_constructors_stage_reason_and_detail_by_kind() {
                 "not visible to the caller",
             )),
         ),
-        (
-            ForwardOutcome::GatedParking,
-            GateError::parking(crate::routes::ApiError::forbidden("profile is parked")),
-        ),
     ];
     for (outcome, error) in rejections {
         assert_eq!(error.outcome, outcome);
@@ -420,7 +414,6 @@ fn the_outcome_vocabulary_splits_gates_from_gateway_side_failures() {
         ForwardOutcome::GatedAuth,
         ForwardOutcome::GatedRoute,
         ForwardOutcome::GatedVisibility,
-        ForwardOutcome::GatedParking,
         ForwardOutcome::GatedPayload,
         ForwardOutcome::Upstream2xx,
         ForwardOutcome::Upstream4xx,
@@ -437,7 +430,6 @@ fn the_outcome_vocabulary_splits_gates_from_gateway_side_failures() {
             ForwardOutcome::GatedAuth
             | ForwardOutcome::GatedRoute
             | ForwardOutcome::GatedVisibility
-            | ForwardOutcome::GatedParking
             | ForwardOutcome::GatedPayload => (true, false),
             ForwardOutcome::InternalError | ForwardOutcome::ResolveError => (false, true),
             ForwardOutcome::Upstream2xx

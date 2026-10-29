@@ -53,23 +53,30 @@ pub fn map_db_err(e: DbErr) -> kallipai_common::protocol::ApiError {
         );
     }
     if is_foreign_key_violation(&e) {
-        // Two rules trip 23503, so the answer names the one the store
-        // actually enforced. The registry's references are collection
-        // scoped: a row can only name a provider, set, or profile that
-        // shares its space and its collection, and a trip there is a caller
-        // mistake the handlers check for first, so the answer stays a
-        // client conflict and names the rule rather than the constraint.
-        // The provider arm is the exception: its sentence covers both
-        // directions -- a provider missing from the profile's space, and a
-        // delete the store blocks because a profile still names it (ON
-        // DELETE RESTRICT). An unknown constraint keeps the container
-        // sentence instead of guessing.
+        // A 23503 trip stays a client conflict, so the answer names the
+        // rule rather than the constraint the store reported. Two arms
+        // name their rule. The provider arm covers both directions -- a
+        // provider missing from the profile's space, and a delete the
+        // store blocks because a profile still names it (ON DELETE
+        // RESTRICT). The set arm covers a write naming a set that is not
+        // there, which includes the set a concurrent delete removed.
+        // Scoping follows the key: a provider row is keyed by owner and
+        // id, so a profile's provider only has to share its space, while
+        // a set is keyed by collection too, so a profile's set must share
+        // both. A trip there is a caller mistake the handlers check for
+        // first. Every other trip -- a reference pointing at a row the
+        // store does not hold, or a constraint this build does not name --
+        // lands in the fallback sentence below, which says where the
+        // reference points instead of guessing at the rule.
         let message = match pg_constraint_name(&e) {
             Some("fk_profiles_provider") => {
                 "a provider must exist in the profile's space and cannot be deleted while a profile names it"
             }
+            Some("fk_profiles_set") => {
+                "a profile's set must exist in its own collection, and a set deleted while that write was in flight answers the same way"
+            }
             _ => {
-                "the reference points outside its own collection (a profile, set, or provider in another collection or space)"
+                "the reference names a row that is not there, or a constraint this build does not name"
             }
         };
         return kallipai_common::protocol::ApiError::conflict(message);
@@ -110,17 +117,15 @@ pub(crate) fn is_unique_violation(e: &DbErr) -> bool {
 }
 
 /// Whether the error is a Postgres foreign-key violation (SQLSTATE 23503).
-/// Two rules trip it and [`map_db_err`] answers both as a client conflict:
-/// the composite keys are the isolation mechanism, so a reference outside
-/// the row's own collection names that rule, while the provider reference
-/// names its own.
+/// [`map_db_err`] answers it as a client conflict: two arms name their rule
+/// (the provider reference and the profile's set reference), and every other
+/// trip falls to the fallback sentence.
 pub(crate) fn is_foreign_key_violation(e: &DbErr) -> bool {
     sqlstate(e).as_deref() == Some("23503")
 }
 
 /// The constraint a Postgres foreign-key violation tripped, when the
-/// driver shape carries it: the one fact that tells the two 23503 rules
-/// apart.
+/// driver shape carries it: the fact that tells the two named arms apart.
 fn pg_constraint_name(e: &DbErr) -> Option<&str> {
     pg_database_error(e)
         .and_then(|db| db.try_downcast_ref::<sqlx::postgres::PgDatabaseError>())
@@ -303,6 +308,35 @@ mod tests {
                 .message
                 .contains("cannot be deleted while a profile names it"),
             "the rule names the delete-blocked direction: {}",
+            mapped.message
+        );
+    }
+
+    /// The set arm of the same split, on a real driver error: a profile write
+    /// naming a set the collection does not hold reaches the constraint when
+    /// the handler's name check loses the race, and the answer names the set
+    /// rule rather than a cross-collection reference.
+    #[tokio::test]
+    async fn a_profile_naming_a_vanished_set_names_the_set_reference() {
+        use sea_orm::ConnectionTrait;
+
+        let db = crate::test_support::migrated_test_db().await;
+        db.execute_unprepared(
+            "INSERT INTO providers (owner, provider_id, family) VALUES ('system', 'p', 'deepseek')",
+        )
+        .await
+        .expect("provider insert");
+        let err = db
+            .execute_unprepared(
+                "INSERT INTO profiles (owner, collection_name, profile_id, provider_id, model, set_name) VALUES ('system', 'baseline', 'p8', 'p', 'm', 'no-such-set')",
+            )
+            .await
+            .expect_err("the named set is not in the collection");
+        let mapped = map_db_err(err);
+        assert_eq!(mapped.status, 409);
+        assert!(
+            mapped.message.contains("must exist in its own collection"),
+            "the rule names the set reference: {}",
             mapped.message
         );
     }

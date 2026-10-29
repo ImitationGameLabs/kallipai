@@ -4,8 +4,8 @@
 //!
 //! Phase map:
 //! - `request_filter`: the CORS preflight, the admin short-circuit,
-//!   tagma-identity authentication, profile selection (the visibility /
-//!   parking / family gates) and the upstream-credential resolution.
+//!   tagma-identity authentication, profile selection (the visibility
+//!   contract and the family gate) and the upstream-credential resolution.
 //!   Everything that can answer 4xx/5xx without an upstream happens
 //!   here.
 //! - `upstream_peer`: builds the dial target for the selection's next
@@ -769,7 +769,6 @@ fn failure_level(outcome: ForwardOutcome) -> tracing::Level {
         ForwardOutcome::GatedAuth
         | ForwardOutcome::GatedRoute
         | ForwardOutcome::GatedVisibility
-        | ForwardOutcome::GatedParking
         | ForwardOutcome::GatedPayload
         | ForwardOutcome::Upstream2xx
         | ForwardOutcome::Upstream4xx

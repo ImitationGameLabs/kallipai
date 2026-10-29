@@ -569,7 +569,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::db;
 use crate::forward::dialect::WIRE_FAMILIES;
-use crate::registry::{self, profile, profile_set, set_member};
+use crate::registry::{self, profile, profile_set};
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder};
 
 /// The response wrapper for successful deletions. `warning` carries the
@@ -679,6 +679,18 @@ where
     Ok(Some(Option::<String>::deserialize(deserializer)?))
 }
 
+/// The `members` key is refused rather than dropped: membership is the
+/// profile's `set` field, so a dropped key would leave the write
+/// landing with nothing changed and the caller none the wiser.
+pub(crate) fn refuse_set_members(members: &Option<serde_json::Value>) -> Result<(), ApiError> {
+    if members.is_some() {
+        return Err(ApiError::bad_request(
+            "a set has no members of its own: a profile joins a set through that profile's own PUT (`set` field), and the order inside a set is its /order route",
+        ));
+    }
+    Ok(())
+}
+
 /// The audit JSON for a set: identity plus ordered member ids. `None` =
 /// no such set (the handler turns that into the face's 404). The identity
 /// is the collection-scoped triple, echoed so the audit row names the
@@ -700,11 +712,12 @@ pub(crate) async fn set_state_json<C: sea_orm::ConnectionTrait>(
     else {
         return Ok(None);
     };
-    let members = set_member::Entity::find()
-        .filter(set_member::Column::Owner.eq(owner))
-        .filter(set_member::Column::CollectionName.eq(collection_name))
-        .filter(set_member::Column::SetName.eq(name))
-        .order_by_asc(set_member::Column::Position)
+    let members = profile::Entity::find()
+        .filter(profile::Column::Owner.eq(owner))
+        .filter(profile::Column::CollectionName.eq(collection_name))
+        .filter(profile::Column::SetName.eq(name))
+        .order_by_asc(profile::Column::Position)
+        .order_by_asc(profile::Column::ProfileId)
         .all(txn)
         .await
         .map_err(db::map_db_err)?;
@@ -713,8 +726,148 @@ pub(crate) async fn set_state_json<C: sea_orm::ConnectionTrait>(
         "collection_name": set.collection_name,
         "description": set.description,
         "owner": set.owner,
-        "members": members.into_iter().map(|m| m.profile_id).collect::<Vec<_>>(),
+        "members": members.into_iter().map(|row| row.profile_id).collect::<Vec<_>>(),
     })))
+}
+
+/// The ids of this set's rows. A caller that needs an order sorts them
+/// itself; the read's own order is not a contract here.
+pub(crate) async fn set_member_ids<C: sea_orm::ConnectionTrait>(
+    txn: &C,
+    owner: &str,
+    collection_name: &str,
+    name: &str,
+) -> Result<Vec<String>, ApiError> {
+    Ok(
+        registry::set_members_ordered(txn, owner, collection_name, name)
+            .await
+            .map_err(db::map_db_err)?
+            .into_iter()
+            .map(|served| served.profile.profile_id)
+            .collect(),
+    )
+}
+
+/// The audit state of a set, or the 404 a missing set answers when another
+/// request deleted it after this transaction looked at it. A profile write
+/// takes no lock on the set row, so that window is real, and the handlers
+/// that read a set's state after resolving it go through here. The other
+/// reader, `source_set_befores`, runs under the profile row's lock, where
+/// the set's delete has to wait for that row's own foreign-key action, so
+/// it keeps its internal error.
+pub(crate) async fn set_state_required<C: sea_orm::ConnectionTrait>(
+    txn: &C,
+    owner: &str,
+    collection_name: &str,
+    name: &str,
+) -> Result<serde_json::Value, ApiError> {
+    set_state_json(txn, owner, collection_name, name)
+        .await?
+        .ok_or_else(|| {
+            ApiError::not_found(format!(
+                "no such set: {name} in collection {collection_name}"
+            ))
+        })
+}
+
+/// Hold every row a reorder may touch -- the set's current members plus every
+/// id the request names -- locked by id, ascending, so two reorders over
+/// overlapping sets queue instead of deadlocking, then check the request is a
+/// permutation of the membership read again under those locks. Both faces'
+/// `/order` handlers share this: the lock protocol has one home, so the two
+/// cannot drift apart.
+pub(crate) async fn lock_set_order<C: sea_orm::ConnectionTrait>(
+    txn: &C,
+    owner: &str,
+    collection_name: &str,
+    name: &str,
+    members: &[String],
+) -> Result<(), ApiError> {
+    let mut seen = std::collections::HashSet::new();
+    for id in members {
+        if !seen.insert(id.clone()) {
+            return Err(ApiError::bad_request(format!(
+                "duplicate member {id:?} in the members list"
+            )));
+        }
+    }
+    // The lock set is read unlocked: it only has to cover every row whose
+    // order this write could touch.
+    let mut lock_ids = set_member_ids(txn, owner, collection_name, name).await?;
+    lock_ids.extend(members.iter().cloned());
+    lock_profile_rows(txn, owner, collection_name, lock_ids).await?;
+    // Under the locks: a row that left the set while this request was in
+    // flight fails the permutation here instead of being renumbered by it.
+    let mut current = set_member_ids(txn, owner, collection_name, name).await?;
+    let mut requested = members.to_vec();
+    current.sort();
+    requested.sort();
+    if current != requested {
+        return Err(ApiError::bad_request(
+            "the members list must be exactly this set's current members, in the order they should fail over",
+        ));
+    }
+    Ok(())
+}
+
+/// Lock a group of profile rows in the module's one lock order: ascending
+/// byte value of the id, duplicates dropped, each row taken through
+/// `registry::profile_by_id_for_update`, the same row lock
+/// [`resolve_profile_for_update`] takes. A row that is gone by the time its
+/// turn comes is skipped rather than answered 404: a caller may hand over
+/// ids it read a moment ago, and a concurrent delete is not its error.
+/// Every writer that takes more than one row enters here -- `lock_set_order`
+/// for a set's rows, `delete_collection_cascade` for a collection's -- so
+/// their orders cannot drift apart. Byte value decides it, not the
+/// database's collation, which would sort some ids differently. No writer
+/// needs both groups today; one that ever does must take every row in one
+/// pass of this order, never this row first and the rest after.
+pub(crate) async fn lock_profile_rows<C: sea_orm::ConnectionTrait>(
+    txn: &C,
+    owner: &str,
+    collection_name: &str,
+    ids: impl IntoIterator<Item = String>,
+) -> Result<(), ApiError> {
+    let mut ids: Vec<String> = ids.into_iter().collect();
+    ids.sort();
+    ids.dedup();
+    for id in &ids {
+        registry::profile_by_id_for_update(txn, owner, collection_name, id)
+            .await
+            .map_err(db::map_db_err)?;
+    }
+    Ok(())
+}
+
+/// Write `members` as the set's failover order, one position per id. The
+/// `set_name` filter makes each write land only on a row still in this set.
+/// A row that fails it answers 409: `lock_set_order` holds every id here, so
+/// that answer is a guard against a lock that missed a row rather than a
+/// race either face can reach.
+pub(crate) async fn write_set_order<C: sea_orm::ConnectionTrait>(
+    txn: &C,
+    owner: &str,
+    collection_name: &str,
+    name: &str,
+    members: &[String],
+) -> Result<(), ApiError> {
+    for (position, id) in members.iter().enumerate() {
+        let written = profile::Entity::update_many()
+            .col_expr(profile::Column::Position, (position as i32).into())
+            .filter(profile::Column::Owner.eq(owner.to_owned()))
+            .filter(profile::Column::CollectionName.eq(collection_name.to_owned()))
+            .filter(profile::Column::ProfileId.eq(id.clone()))
+            .filter(profile::Column::SetName.eq(name.to_owned()))
+            .exec(txn)
+            .await
+            .map_err(db::map_db_err)?;
+        if written.rows_affected != 1 {
+            return Err(ApiError::conflict(
+                "the set's membership changed while its order was being written",
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Resolve one profile row inside one collection of a fixed space. Every
@@ -738,9 +891,8 @@ pub(crate) async fn resolve_profile<C: sea_orm::ConnectionTrait>(
 
 /// [`resolve_profile`], with the row locked for the caller's transaction:
 /// the gate a write takes when another writer flips the same row. A writer
-/// that also touches the row's member rows takes this lock first and the
-/// member rows after: that is the module's one lock order, and a new writer
-/// must keep it.
+/// that touches only this row stops here; one that takes several rows goes
+/// through [`lock_profile_rows`], the module's one lock order.
 pub(crate) async fn resolve_profile_for_update<C: sea_orm::ConnectionTrait>(
     txn: &C,
     owner: &str,
@@ -808,6 +960,10 @@ pub fn router() -> Router<AppState> {
             get(sets::get_set)
                 .patch(sets::update_set)
                 .delete(sets::delete_set),
+        )
+        .route(
+            "/collections/{collection}/sets/{name}/order",
+            put(sets::reorder_set),
         )
         // -- the profile face: the collection-scoped items, the filtered
         //    list, and the cross-collection move ------------------------

@@ -162,8 +162,8 @@ pub async fn create_collection(
 }
 
 /// PATCH /admin/collections/{name}: `description` only (absent means
-/// unchanged); the set membership is not a collection attribute.
-/// Set membership changes only by creating or deleting a set.
+/// unchanged); membership lives on the profile row, so this write never
+/// touches it.
 pub async fn update_collection(
     State(state): State<AppState>,
     admin: AdminToken,
@@ -212,8 +212,8 @@ pub async fn update_collection(
     Ok(Json(after))
 }
 
-/// DELETE /admin/collections/{name}: the membership and publication rows
-/// cascade with it.
+/// DELETE /admin/collections/{name}: the sets it anchors and the profiles it
+/// holds go with it, and so do the collection's publication rows.
 pub async fn delete_collection(
     State(state): State<AppState>,
     admin: AdminToken,
@@ -438,7 +438,7 @@ mod tests {
     use crate::management::testkit::*;
     use crate::registry::{
         self, EVERYONE_GROUP_ID, collection, collection_publication, group, platform_group_members,
-        platform_groups, platform_publications, profile, profile_set, set_member,
+        platform_groups, platform_publications, profile, profile_set,
     };
     use axum::http::StatusCode;
     use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, Set};
@@ -1019,9 +1019,6 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{body}");
-        // The profile lands in the collection whose set carries it:
-        // membership never crosses a collection.
-        user_provider_profile(&state, "c1", "up1", "pA").await;
         for name in ["s1", "s2"] {
             let (status, body) = send(
                 app(state.clone()),
@@ -1032,8 +1029,7 @@ mod tests {
                     true,
                     Some(serde_json::json!({
                         "name": name,
-                        "description": "d",
-                        "members": ["pA"],
+                        "description": "d"
                     })),
                 ),
             )
@@ -1236,12 +1232,12 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "{body}");
     }
 
-    /// The cascade: deleting a collection removes its anchored sets, their
-    /// member rows, and the collection's own profiles (a profile belongs
-    /// to one collection, so nothing outside it can still reference them);
-    /// the publication rows go with the collection row, another
-    /// collection's profiles and sets stay untouched, and each deletion
-    /// lands its audit row.
+    /// The cascade: deleting a collection removes its anchored sets and
+    /// the collection's own profiles, membership included (a profile
+    /// belongs to one collection, so nothing outside it can still
+    /// reference them); the publication rows go with the collection row,
+    /// another collection's profiles and sets stay untouched, and each
+    /// deletion lands its audit row.
     #[tokio::test]
     async fn user_collection_deletion_takes_its_sets_and_profiles() {
         let state = seeded_state().await;
@@ -1272,10 +1268,10 @@ mod tests {
         ] {
             user_provider_profile(&state, collection, provider, profile).await;
         }
-        for (path, name, members) in [
-            ("/user/collections/c1/sets", "sA", vec!["pA", "pB"]),
-            ("/user/collections/c2/sets", "sB2", vec!["pC"]),
-            ("/user/collections/c2/sets", "sC", vec!["pD"]),
+        for (path, name) in [
+            ("/user/collections/c1/sets", "sA"),
+            ("/user/collections/c2/sets", "sB2"),
+            ("/user/collections/c2/sets", "sC"),
         ] {
             let (status, body) = send(
                 app(state.clone()),
@@ -1284,7 +1280,28 @@ mod tests {
                     path,
                     user,
                     true,
-                    Some(serde_json::json!({"name": name, "description": "d", "members": members})),
+                    Some(serde_json::json!({"name": name, "description": "d"})),
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+        }
+        // Membership is a profile field, so it lands through the profile
+        // face: each row joins its collection's set by name.
+        for (collection, set, id) in [
+            ("c1", "sA", "pA"),
+            ("c1", "sA", "pB"),
+            ("c2", "sB2", "pC"),
+            ("c2", "sC", "pD"),
+        ] {
+            let (status, body) = send(
+                app(state.clone()),
+                cookie_req(
+                    "PUT",
+                    &format!("/user/collections/{collection}/profiles/{id}"),
+                    user,
+                    true,
+                    Some(serde_json::json!({"model": "m", "set": set})),
                 ),
             )
             .await;
@@ -1315,13 +1332,14 @@ mod tests {
             .await
             .expect("set count");
         assert_eq!(n, 0, "the anchored set goes with its collection");
-        let n = set_member::Entity::find()
-            .filter(set_member::Column::Owner.eq(owner))
-            .filter(set_member::Column::SetName.eq("sA"))
+        let kept = profile::Entity::find()
+            .filter(profile::Column::Owner.eq(owner))
+            .filter(profile::Column::CollectionName.eq("c2"))
+            .filter(profile::Column::SetName.eq("sC"))
             .count(&state.db)
             .await
-            .expect("member count");
-        assert_eq!(n, 0, "member rows cascade with the set");
+            .expect("membership count");
+        assert_eq!(kept, 1, "the survivor keeps its membership");
         let n = profile_set::Entity::find()
             .filter(profile_set::Column::Owner.eq(owner))
             .filter(profile_set::Column::CollectionName.eq("c2"))
@@ -1361,7 +1379,7 @@ mod tests {
         assert_eq!(c2.default_set_name.as_deref(), Some("sB2"));
         let rows = audit_rows(&state.db).await;
         for (entity, id) in [
-            ("set", "sA"),
+            ("profile_set", "sA"),
             ("profile", "pA"),
             ("profile", "pB"),
             ("collection", "c1"),
@@ -1442,11 +1460,11 @@ mod tests {
     }
 
     /// The admin cascade: deleting a catalog collection removes its set
-    /// (with the member rows and the platform publication) and the
-    /// collection's own profiles -- a profile belongs to one collection,
-    /// so a surviving set cannot still hold one -- while the baseline
-    /// collection stays untouched; each deleted entity lands its audit
-    /// row, named per profile.
+    /// (with the platform publication) and the collection's own profiles,
+    /// membership included -- a profile belongs to one collection, so no
+    /// surviving set can still hold one -- while the baseline collection
+    /// stays untouched; each deleted entity lands its audit row, named per
+    /// profile.
     #[tokio::test]
     async fn admin_collection_deletion_takes_its_sets_and_profiles() {
         let state = seeded_state().await;
@@ -1463,8 +1481,8 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK, "{body}");
         // The doomed collection's own profiles ride its set.
-        catalog_profile_in(&state, "cx", "cx1", "m-cx", false).await;
-        catalog_profile_in(&state, "cx", "cx2", "m-cx2", false).await;
+        catalog_profile_in(&state, "cx", "cx1", "m-cx", None).await;
+        catalog_profile_in(&state, "cx", "cx2", "m-cx2", None).await;
         let (status, body) = send(
             app(state.clone()),
             req(
@@ -1476,17 +1494,8 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{body}");
-        let (status, body) = send(
-            app(state.clone()),
-            req(
-                "PATCH",
-                "/admin/collections/cx/sets/sxA",
-                admin,
-                Some(serde_json::json!({"members": ["cx1", "cx2"]})),
-            ),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK, "{body}");
+        catalog_member_in(&state, "cx", "sxA", "cx1", 0).await;
+        catalog_member_in(&state, "cx", "sxA", "cx2", 1).await;
         let (status, body) = send(
             app(state.clone()),
             req(
@@ -1511,13 +1520,6 @@ mod tests {
             .await
             .expect("set count");
         assert_eq!(n, 0, "the anchored set goes with its collection");
-        let n = set_member::Entity::find()
-            .filter(set_member::Column::Owner.eq("system"))
-            .filter(set_member::Column::SetName.eq("sxA"))
-            .count(&state.db)
-            .await
-            .expect("member count");
-        assert_eq!(n, 0, "member rows cascade with the set");
         for (collection, profile, expected) in
             [("cx", "cx1", 0), ("cx", "cx2", 0), ("baseline", "p1", 1)]
         {

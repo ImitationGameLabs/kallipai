@@ -300,9 +300,9 @@ pub struct Grant {
 /// Whether the profile (in its own collection) is inside the viewer's
 /// domain, and if so through what. `Ok(None)` = invisible. The set the
 /// profile sits in must itself be in the domain -- membership never leaves
-/// the collection, so the container is one read's worth of scope -- and the
-/// attribution is the alphabetically first granting collection (the store
-/// may hold several).
+/// the collection, so the container is the read's whole scope -- and the
+/// attribution is that same collection: a set lives in exactly one, so
+/// every publication row that reaches it names that one.
 pub async fn profile_grant(
     db: &DatabaseConnection,
     viewer: &Viewer,
@@ -314,23 +314,20 @@ pub async fn profile_grant(
     if domain.is_empty() {
         return Ok(None);
     }
-    // The profile's own sets, intersected with the domain on the full key.
-    let members =
-        registry::profile_set_names_of(db, profile_owner, collection_name, profile_id).await?;
-    let mut granting: Vec<String> = members
-        .into_iter()
-        .filter(|name| {
-            domain.contains(&SetKey {
-                owner: profile_owner.to_owned(),
-                collection_name: collection_name.to_owned(),
-                name: name.clone(),
-            })
-        })
-        .collect();
-    granting.sort();
-    let Some(set_name) = granting.first() else {
+    // The profile's own set, intersected with the domain on the full key:
+    // an unassigned row grants nothing.
+    let Some(set_name) =
+        registry::profile_set_name_of(db, profile_owner, collection_name, profile_id).await?
+    else {
         return Ok(None);
     };
+    if !domain.contains(&SetKey {
+        owner: profile_owner.to_owned(),
+        collection_name: collection_name.to_owned(),
+        name: set_name.clone(),
+    }) {
+        return Ok(None);
+    }
     if profile_owner == registry::CATALOG_OWNER {
         // A catalog profile: the platform reach attributes nothing --
         // the catalog is its own space on the face.

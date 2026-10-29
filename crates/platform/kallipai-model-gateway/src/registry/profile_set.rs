@@ -2,8 +2,8 @@
 
 use sea_orm::entity::prelude::*;
 
-/// A named, ordered profile set. Membership and order live in
-/// `set_members`; this row is the set's identity + description.
+/// A named, ordered profile set. Membership and order live on the member
+/// profile rows (`set_name`, `position`); this row is identity + description.
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
 #[sea_orm(table_name = "profile_sets")]
 pub struct Model {

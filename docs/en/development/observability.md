@@ -79,7 +79,7 @@ path, not a preflight.
 
 | Attribute | Meaning |
 | --- | --- |
-| `gateway.outcome` | how the request ended, one value per such request: `gated_auth`, `gated_route`, `gated_visibility`, `gated_parking`, `gated_payload`, `upstream_2xx`, `upstream_4xx`, `upstream_5xx`, `upstream_other`, `connect_error`, `resolve_error`, `upstream_error`, `downstream_error`, `internal_error` |
+| `gateway.outcome` | how the request ended, one value per such request: `gated_auth`, `gated_route`, `gated_visibility`, `gated_payload`, `upstream_2xx`, `upstream_4xx`, `upstream_5xx`, `upstream_other`, `connect_error`, `resolve_error`, `upstream_error`, `downstream_error`, `internal_error` |
 | `upstream.authority` | the selected credential's URL authority, which is also the label its metrics carry: an address, host and port, never a key or a token |
 | `upstream.api_family` | the registry family of the selected provider |
 

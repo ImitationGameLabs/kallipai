@@ -1,19 +1,17 @@
-//! The `/user/collections` face: the caller's collections, their publications
-//! and their set members, plus the cascade helpers the admin face borrows when
-//! a collection, group or set disappears.
+//! The `/user/collections` face: the caller's collections and their
+//! publications, plus the cascade helpers the admin face borrows when a
+//! collection, group or set disappears.
 
 use super::profiles::user_profile_view;
-use super::sets::{UserSetView, replace_set_members, user_set_view};
+use super::sets::{UserSetView, user_set_view};
 use super::shared::owner_of;
 
 use crate::audit::management_event::{self, ManagementEventRow};
 use crate::db;
 use crate::management::UserSession;
-use crate::management::validate_set_name;
+use crate::management::{lock_profile_rows, refuse_set_members, validate_set_name};
 use crate::registry::EVERYONE_GROUP_ID;
-use crate::registry::{
-    self, collection, collection_publication, group, profile, profile_set, set_member,
-};
+use crate::registry::{self, collection, collection_publication, group, profile, profile_set};
 use crate::state::AppState;
 use axum::Json;
 use axum::extract::{Path, State};
@@ -54,8 +52,8 @@ pub(crate) struct UserCollectionCreate {
 }
 
 /// PATCH /user/collections/{name}: `description` only (absent means
-/// unchanged); the set membership is not a collection attribute.
-/// Set membership changes only by creating or deleting a set.
+/// unchanged). Membership is a profile row's `set` field, not a
+/// collection attribute.
 #[derive(Deserialize)]
 pub(crate) struct UserCollectionUpdate {
     pub description: Option<String>,
@@ -67,7 +65,10 @@ pub(crate) struct UserCollectionUpdate {
 pub(super) struct UserCollectionSetCreate {
     pub name: String,
     pub description: String,
-    pub members: Option<Vec<String>>,
+    /// Present only to refuse: membership is the profile's own `set` field
+    /// (who belongs to a set), and order is the set's `/order` route.
+    #[serde(default)]
+    pub members: Option<serde_json::Value>,
 }
 
 /// PATCH /user/collections/{name}/default body: the member set that
@@ -146,6 +147,8 @@ pub(super) async fn create_collection(
     .insert(&txn)
     .await
     .map_err(db::map_db_err)?;
+    // Inserted by this transaction just above: no other request can remove
+    // the row before this read, so the read cannot miss it.
     let row = collection::Entity::find_by_id((owner.clone(), body.name.clone()))
         .one(&txn)
         .await
@@ -375,6 +378,7 @@ pub(super) async fn create_collection_set(
 ) -> Result<Json<UserSetView>, ApiError> {
     let owner = owner_of(&usr);
     let actor = std::borrow::Cow::Owned(owner.clone());
+    refuse_set_members(&body.members)?;
     validate_set_name(&body.name)?;
     let txn = state.db.begin().await.map_err(db::map_db_err)?;
     collection::Entity::find_by_id((owner.clone(), collection.clone()))
@@ -399,9 +403,8 @@ pub(super) async fn create_collection_set(
     .await
     .map_err(db::map_db_err)?;
     anchor_collection_default(&txn, &owner, &collection, &body.name).await?;
-    if let Some(members) = &body.members {
-        replace_set_members(&txn, &owner, &collection, &body.name, members).await?;
-    }
+    // Inserted by this transaction, with only the anchor write in between:
+    // no other request can remove the row before this read can miss it.
     let set = registry::set_by_id(&txn, &owner, &collection, &body.name)
         .await
         .map_err(db::map_db_err)?
@@ -411,7 +414,7 @@ pub(super) async fn create_collection_set(
         &txn,
         ManagementEventRow {
             action: "create",
-            entity: "set",
+            entity: "profile_set",
             entity_id: body.name.clone(),
             actor,
             before: None,
@@ -532,23 +535,14 @@ pub(crate) async fn user_collection_view<C: sea_orm::ConnectionTrait>(
     })
 }
 
-/// Which face a collection cascade runs for: the audit shapes and
-/// entity spellings follow the face the delete came through (the
-/// user face's `set` over the user view, the admin face's
-/// `profile_set` over the state json).
+/// Which face a collection cascade runs for: the audit before/after shapes
+/// follow the face the delete came through (the user face's `UserSetView`,
+/// the admin face's state json). The entity spelling does not: both faces
+/// audit a set row as `profile_set`.
 #[derive(Copy, Clone, Debug)]
 pub(crate) enum CascadeFace {
     User,
     Admin,
-}
-
-impl CascadeFace {
-    fn set_entity(self) -> &'static str {
-        match self {
-            CascadeFace::User => "set",
-            CascadeFace::Admin => "profile_set",
-        }
-    }
 }
 
 /// Take the default-set anchor when the collection has none: the
@@ -604,11 +598,10 @@ pub(crate) async fn collection_default_guard<C: sea_orm::ConnectionTrait>(
 
 /// Delete a collection's anchored sets and the profiles the collection
 /// holds, auditing every deleted row. Collection isolation makes the sweep
-/// exact: a profile belongs to exactly one collection and membership never
-/// leaves it, so deleting the collection takes every profile it holds --
-/// members and unassigned rows alike -- and nothing outside it. The member rows
-/// cascade with the set and profile rows; each deletion lands its own audit
-/// event inside the caller's transaction. The collection row itself is the
+/// exact: a profile belongs to exactly one collection, so deleting the
+/// collection takes every profile it holds -- members and unassigned rows
+/// alike -- and nothing outside it. Each deletion lands its own audit event
+/// inside the caller's transaction. The collection row itself is the
 /// caller's to delete (its audit shape is face-specific).
 pub(crate) async fn delete_collection_cascade<C: sea_orm::ConnectionTrait>(
     txn: &C,
@@ -624,20 +617,21 @@ pub(crate) async fn delete_collection_cascade<C: sea_orm::ConnectionTrait>(
         .all(txn)
         .await
         .map_err(db::map_db_err)?;
-    // Before-views while the rows exist: the member lists go with the set
-    // rows (the FK cascade), so they are read first.
+    // Before-views while the rows exist: a set's members are its profile
+    // rows, and those go with the collection, so the ids are read first.
     let mut before_sets = Vec::with_capacity(sets.len());
     for set in &sets {
-        let members: Vec<String> = set_member::Entity::find()
-            .filter(set_member::Column::Owner.eq(owner))
-            .filter(set_member::Column::CollectionName.eq(name))
-            .filter(set_member::Column::SetName.eq(&set.name))
-            .order_by_asc(set_member::Column::Position)
+        let members: Vec<String> = profile::Entity::find()
+            .filter(profile::Column::Owner.eq(owner))
+            .filter(profile::Column::CollectionName.eq(name))
+            .filter(profile::Column::SetName.eq(set.name.clone()))
+            .order_by_asc(profile::Column::Position)
+            .order_by_asc(profile::Column::ProfileId)
             .all(txn)
             .await
             .map_err(db::map_db_err)?
             .into_iter()
-            .map(|m| m.profile_id)
+            .map(|row| row.profile_id)
             .collect();
         let view = match face {
             CascadeFace::User => serde_json::to_value(UserSetView {
@@ -666,15 +660,19 @@ pub(crate) async fn delete_collection_cascade<C: sea_orm::ConnectionTrait>(
         .all(txn)
         .await
         .map_err(db::map_db_err)?;
-    // The module's lock order reaches here too: profile rows first, taken
-    // in id order (the read above is ordered by id), before the cascade
-    // below takes the member rows with its set rows. The views below only
-    // read, so locking ahead of them costs nothing.
-    for row in &profiles {
-        registry::profile_by_id_for_update(txn, owner, name, &row.profile_id)
-            .await
-            .map_err(db::map_db_err)?;
-    }
+    // The module's lock order reaches here too: the shared entry takes every
+    // profile row this collection holds in id order, before the cascade below
+    // removes the set rows and then those profile rows. The read above still
+    // orders by id, but that is for the before-views to read in a stable
+    // order; the lock order belongs to the shared entry. The views themselves
+    // only read, so locking ahead of them costs nothing.
+    lock_profile_rows(
+        txn,
+        owner,
+        name,
+        profiles.iter().map(|row| row.profile_id.clone()),
+    )
+    .await?;
     let mut profile_befores = Vec::with_capacity(profiles.len());
     for row in profiles {
         let profile_id = row.profile_id.clone();
@@ -704,7 +702,7 @@ pub(crate) async fn delete_collection_cascade<C: sea_orm::ConnectionTrait>(
             txn,
             ManagementEventRow {
                 action: "delete",
-                entity: face.set_entity(),
+                entity: "profile_set",
                 entity_id: set.name.clone(),
                 actor: std::borrow::Cow::Owned(actor.to_owned()),
                 before: Some(before.clone()),

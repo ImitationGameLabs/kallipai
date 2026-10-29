@@ -319,11 +319,11 @@ async fn call(
 
 /// Bring one tagma to a forwardable state through the real faces: a
 /// provider pointed at the (fake) upstream, a collection published to
-/// the reserved everyone audience, a parked profile born inside the
-/// collection and promoted into its first set, and the tagma's selection
-/// pointing at that collection. Seven writes in dependency order; the first set of a
-/// collection anchors as its default, so the selection resolves
-/// without naming a set.
+/// the reserved everyone audience, a profile born unassigned inside the
+/// collection, its membership write into the collection's first set, and
+/// the tagma's selection pointing at that collection. Seven writes in
+/// dependency order; the first set of a collection anchors as its
+/// default, so the selection resolves without naming a set.
 async fn seed(mgmt: &str, upstream_base: &str) {
     let http = http();
     call(
@@ -373,10 +373,10 @@ async fn seed(mgmt: &str, upstream_base: &str) {
     .await;
     call(
         &http,
-        reqwest::Method::PATCH,
-        format!("{mgmt}/admin/collections/main/sets/alpha"),
+        reqwest::Method::PUT,
+        format!("{mgmt}/admin/collections/main/profiles/p1"),
         ADMIN_BEARER,
-        json!({"members": ["p1"]}),
+        json!({"model": "deepseek-chat", "set": "alpha"}),
     )
     .await;
     // The selection is the tagma's own write: the owner must be named

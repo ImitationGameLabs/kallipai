@@ -3,7 +3,7 @@
 //!
 //! Everything that can answer without an upstream answers in that first
 //! phase: every 4xx gate on the forwarding path (unknown profile,
-//! visibility domain, parking, family mismatch) is an axum-shaped
+//! visibility domain, family mismatch) is an axum-shaped
 //! error written through the bridge (`wire`). The forwarding selection
 //! lands a [`Selection`] in the request context; the peer and rewrite
 //! phases read it from there.
@@ -160,9 +160,9 @@ pub(crate) async fn authenticate(
 /// `request_filter` renders the response and stages the outcome; the
 /// `logging` phase is the single terminal record point.
 ///
-/// One type carries two kinds of content. The three rejection
-/// constructors ([`Self::route`], [`Self::visibility`],
-/// [`Self::parking`]) set neither `reason` nor `detail`; the failure
+/// One type carries two kinds of content. The two rejection
+/// constructors ([`Self::route`], [`Self::visibility`]) set neither
+/// `reason` nor `detail`; the failure
 /// constructors ([`Self::internal`], [`Self::internal_with_response`],
 /// [`Self::unavailable`]) set both, and each carries its own answer:
 /// a rendered 500 from [`Self::internal`], the store mapping's status
@@ -190,11 +190,6 @@ impl GateError {
     /// The visibility domain rejected the target (403).
     pub(crate) fn visibility(error: ApiError) -> Self {
         Self::gate(ForwardOutcome::GatedVisibility, error)
-    }
-
-    /// The target is parked: a platform state, not an error (403).
-    pub(crate) fn parking(error: ApiError) -> Self {
-        Self::gate(ForwardOutcome::GatedParking, error)
     }
 
     /// A gateway-side failure on the forward path (5xx): missing
@@ -289,9 +284,8 @@ fn store_failure(error: sea_orm::DbErr) -> GateError {
 }
 
 /// The forwarding selection: the explicit override, the visibility
-/// contract on it, the parking gate, the family gate, and the
-/// credential fetch. The outcome is
-/// everything the later phases need, so no phase after
+/// contract on it, the family gate, and the credential fetch. The
+/// outcome carries everything the later phases need, so no phase after
 /// `request_filter` touches the registry again. The error side is a
 /// [`GateError`]: the gate's `ApiError` travels to the client through
 /// the bridge, and the outcome class travels to the observability
@@ -304,9 +298,9 @@ pub(crate) async fn select_route(
     endpoint: dialect::Endpoint,
 ) -> Result<Selection, GateError> {
     // Profile resolution: the explicit override, authorized under the
-    // visibility domain -- then the parking gate. Availability is a
-    // second gate orthogonal to authorization: a parked profile inside
-    // the domain is still not forwardable.
+    // visibility domain. An unassigned row is not a profile this face
+    // serves: it answers the same 404 as a miss, before the grant
+    // predicate runs (there is no set to grant against).
     let served = match headers
         .get(forward::PROFILE_HEADER)
         .and_then(|v| v.to_str().ok())
@@ -338,6 +332,11 @@ pub(crate) async fn select_route(
             else {
                 return Err(GateError::route(ApiError::not_found("no such profile")));
             };
+            // An unassigned row is not addressable: the same 404 a
+            // missing id answers, so the client reads one vocabulary.
+            if profile.set_name.is_none() {
+                return Err(GateError::route(ApiError::not_found("no such profile")));
+            }
             let served = registry::served_profile(&state.db, profile)
                 .await
                 .map_err(store_failure)?
@@ -361,9 +360,6 @@ pub(crate) async fn select_route(
                     return Err(GateError::route(ApiError::not_found("no such profile")));
                 }
                 Some(_) => {}
-            }
-            if served.profile.parked {
-                return Err(GateError::parking(ApiError::forbidden("profile is parked")));
             }
             served
         }
@@ -430,9 +426,6 @@ pub(crate) async fn select_route(
                 return Err(GateError::visibility(ApiError::forbidden(
                     "default profile is outside the visibility domain",
                 )));
-            }
-            if served.profile.parked {
-                return Err(GateError::parking(ApiError::forbidden("profile is parked")));
             }
             served
         }

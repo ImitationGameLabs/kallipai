@@ -462,7 +462,7 @@ pub(crate) async fn migrated_test_db() -> Db {
 /// - set `alpha` (profiles p1, p2, p6 in failover order) -- the
 ///   baseline catalog set (p6 carries the responses wire family)
 /// - set `beta` (profile p3) -- the second catalog set
-/// - profile p4 parked in `baseline` (unassigned: in no set)
+/// - profile p4 unassigned in `baseline` (no set carries it)
 /// - set `pro-set` (profile p7) in the `catalog-pro` collection
 /// - provider credentials for p1/p2/p3/p6 against `upstream_base_url`
 ///
@@ -473,7 +473,7 @@ pub(crate) async fn migrated_test_db() -> Db {
 pub(crate) async fn seed_registry(db: &Db, upstream_base_url: &str) {
     use crate::registry::{
         collection, collection_publication, group, group_member, platform_group_members,
-        platform_groups, platform_publications, profile, profile_set, provider, set_member,
+        platform_groups, platform_publications, profile, profile_set, provider,
     };
     use sea_orm::ActiveModelTrait;
     use sea_orm::Set;
@@ -500,18 +500,72 @@ pub(crate) async fn seed_registry(db: &Db, upstream_base_url: &str) {
         .await
         .expect("insert collection");
     }
-    let mk_profile = |id: &str, model: &str, parked: bool, collection: &str| profile::ActiveModel {
-        collection_name: Set(collection.to_string()),
-        profile_id: Set(id.to_string()),
-        provider_id: Set(id.to_string()),
-        model: Set(model.to_string()),
-        max_context_window: Set(Some(128_000)),
-        effort: Set(Some("high".to_string())),
-        modalities: Set(Some("[\"text\"]".to_string())),
-        parked: Set(parked),
-        store: Set(None),
-        // The fixture registry is the platform catalog.
-        owner: Set(crate::registry::CATALOG_OWNER.to_string()),
+    let mk_set =
+        |owner: &str, collection: &str, name: &str, description: String| profile_set::ActiveModel {
+            name: Set(name.to_string()),
+            description: Set(description),
+            owner: Set(owner.to_string()),
+            collection_name: Set(collection.to_string()),
+        };
+    // The sets land before the profiles that name them: a row's
+    // `set_name` is a composite foreign key into its own collection.
+    for set in [
+        mk_set("system", "baseline", "alpha", "the allowed set".to_string()),
+        mk_set("system", "baseline", "beta", "not allowed".to_string()),
+        mk_set(
+            "system",
+            "catalog-pro",
+            "pro-set",
+            "the pro-only set".to_string(),
+        ),
+        mk_set(
+            "acc-bound",
+            "user-col",
+            "user-set",
+            "the user-set fixture set".to_string(),
+        ),
+        mk_set(
+            "acc-bound",
+            "own-col",
+            "own-set",
+            "the own-set fixture set".to_string(),
+        ),
+        mk_set(
+            "acc-bound",
+            "grp-col",
+            "grp-set",
+            "the grp-set fixture set".to_string(),
+        ),
+        mk_set(
+            "acc-other",
+            "other-col",
+            "other-set",
+            "the other-set fixture set".to_string(),
+        ),
+    ] {
+        set.insert(db).await.expect("insert set");
+    }
+    // A row's set is its membership, and its position is the failover
+    // slot inside that set: `None` is an unassigned row.
+    let mk_profile = |id: &str, model: &str, collection: &str, set: Option<(&str, i32)>| {
+        let (set_name, position) = match set {
+            Some((name, position)) => (Set(Some(name.to_string())), Set(position)),
+            None => (Set(None), Set(0)),
+        };
+        profile::ActiveModel {
+            collection_name: Set(collection.to_string()),
+            profile_id: Set(id.to_string()),
+            provider_id: Set(id.to_string()),
+            model: Set(model.to_string()),
+            max_context_window: Set(Some(128_000)),
+            effort: Set(Some("high".to_string())),
+            modalities: Set(Some("[\"text\"]".to_string())),
+            set_name,
+            position,
+            store: Set(None),
+            // The fixture registry is the platform catalog.
+            owner: Set(crate::registry::CATALOG_OWNER.to_string()),
+        }
     };
     let mk_provider = |id: &str, family: &str| provider::ActiveModel {
         owner: Set(crate::registry::CATALOG_OWNER.to_string()),
@@ -521,12 +575,12 @@ pub(crate) async fn seed_registry(db: &Db, upstream_base_url: &str) {
         ..Default::default()
     };
     let profiles = [
-        mk_profile("p1", "deepseek-chat", false, "baseline"),
-        mk_profile("p2", "deepseek-researcher", false, "baseline"),
-        mk_profile("p3", "gpt-x", false, "baseline"),
-        mk_profile("p4", "unassigned-x", true, "baseline"),
-        mk_profile("p6", "gpt-x-responses", false, "baseline"),
-        mk_profile("p7", "gpt-pro", false, "catalog-pro"),
+        mk_profile("p1", "deepseek-chat", "baseline", Some(("alpha", 0))),
+        mk_profile("p2", "deepseek-researcher", "baseline", Some(("alpha", 1))),
+        mk_profile("p3", "gpt-x", "baseline", Some(("beta", 0))),
+        mk_profile("p4", "unassigned-x", "baseline", None),
+        mk_profile("p6", "gpt-x-responses", "baseline", Some(("alpha", 2))),
+        mk_profile("p7", "gpt-pro", "catalog-pro", Some(("pro-set", 0))),
     ];
     let providers = [
         mk_provider("p1", "deepseek"),
@@ -540,34 +594,6 @@ pub(crate) async fn seed_registry(db: &Db, upstream_base_url: &str) {
         // The provider row lands first: the profile's FK needs it.
         prov.insert(db).await.expect("insert provider");
         p.insert(db).await.expect("insert profile");
-    }
-
-    for (name, description) in [("alpha", "the allowed set"), ("beta", "not allowed")] {
-        profile_set::ActiveModel {
-            name: Set(name.to_string()),
-            description: Set(description.to_string()),
-            owner: Set("system".to_string()),
-            collection_name: Set("baseline".to_string()),
-        }
-        .insert(db)
-        .await
-        .expect("insert set");
-    }
-    let mk_member =
-        |collection: &str, set: &str, id: &str, position: i32| set_member::ActiveModel {
-            collection_name: Set(collection.to_string()),
-            set_name: Set(set.to_string()),
-            profile_id: Set(id.to_string()),
-            position: Set(position),
-            owner: Set(crate::registry::CATALOG_OWNER.to_string()),
-        };
-    for m in [
-        mk_member("baseline", "alpha", "p1", 0),
-        mk_member("baseline", "alpha", "p2", 1),
-        mk_member("baseline", "beta", "p3", 0),
-        mk_member("baseline", "alpha", "p6", 2),
-    ] {
-        m.insert(db).await.expect("insert member");
     }
 
     for id in ["p1", "p2", "p3", "p7", "p6"] {
@@ -589,8 +615,8 @@ pub(crate) async fn seed_registry(db: &Db, upstream_base_url: &str) {
     // sits in that group. The bound tagmas carry no rows -- the
     // visibility tests bind their bearers through the mock verifier's
     // enrollment map.
-    let space_profile =
-        |owner: &str, collection: &str, id: &str, model: &str| profile::ActiveModel {
+    let space_profile = |owner: &str, collection: &str, id: &str, model: &str, set: (&str, i32)| {
+        profile::ActiveModel {
             collection_name: Set(collection.to_string()),
             profile_id: Set(id.to_string()),
             provider_id: Set(id.to_string()),
@@ -598,10 +624,12 @@ pub(crate) async fn seed_registry(db: &Db, upstream_base_url: &str) {
             max_context_window: Set(Some(128_000)),
             effort: Set(Some("high".to_string())),
             modalities: Set(Some("[\"text\"]".to_string())),
-            parked: Set(false),
+            set_name: Set(Some(set.0.to_string())),
+            position: Set(set.1),
             store: Set(None),
             owner: Set(owner.to_string()),
-        };
+        }
+    };
     let space_provider = |owner: &str, id: &str| provider::ActiveModel {
         owner: Set(owner.to_string()),
         provider_id: Set(id.to_string()),
@@ -609,12 +637,30 @@ pub(crate) async fn seed_registry(db: &Db, upstream_base_url: &str) {
         base_url: Set(Some(upstream_base_url.to_string())),
         ..Default::default()
     };
-    for (owner, collection, id, model) in [
-        ("acc-bound", "user-col", "u1", "bound-model"),
-        ("acc-bound", "user-col", "u3", "bound-light"),
-        ("acc-bound", "own-col", "u4", "bound-own"),
-        ("acc-bound", "grp-col", "u5", "bound-group"),
-        ("acc-other", "other-col", "u2", "other-model"),
+    for (owner, collection, id, model, set) in [
+        (
+            "acc-bound",
+            "user-col",
+            "u1",
+            "bound-model",
+            ("user-set", 0),
+        ),
+        (
+            "acc-bound",
+            "user-col",
+            "u3",
+            "bound-light",
+            ("user-set", 1),
+        ),
+        ("acc-bound", "own-col", "u4", "bound-own", ("own-set", 0)),
+        ("acc-bound", "grp-col", "u5", "bound-group", ("grp-set", 0)),
+        (
+            "acc-other",
+            "other-col",
+            "u2",
+            "other-model",
+            ("other-set", 0),
+        ),
     ] {
         space_provider(owner, id)
             .insert(db)
@@ -628,38 +674,10 @@ pub(crate) async fn seed_registry(db: &Db, upstream_base_url: &str) {
         .insert(db)
         .await
         .expect("insert space credential");
-        space_profile(owner, collection, id, model)
+        space_profile(owner, collection, id, model, set)
             .insert(db)
             .await
             .expect("insert space profile");
-    }
-    for (owner, collection_name, set_name, profile_id) in [
-        ("acc-bound", "user-col", "user-set", "u1"),
-        ("acc-bound", "own-col", "own-set", "u4"),
-        ("acc-bound", "grp-col", "grp-set", "u5"),
-        ("acc-other", "other-col", "other-set", "u2"),
-    ] {
-        // The set row carries its collection anchor directly (the
-        // membership authority lives on the set row).
-        profile_set::ActiveModel {
-            name: Set(set_name.to_string()),
-            description: Set(format!("the {set_name} fixture set")),
-            owner: Set(owner.to_string()),
-            collection_name: Set(collection_name.to_string()),
-        }
-        .insert(db)
-        .await
-        .expect("insert space set");
-        set_member::ActiveModel {
-            collection_name: Set(collection_name.to_string()),
-            set_name: Set(set_name.to_string()),
-            profile_id: Set(profile_id.to_string()),
-            position: Set(0),
-            owner: Set(owner.to_string()),
-        }
-        .insert(db)
-        .await
-        .expect("insert space member");
     }
     group::ActiveModel {
         group_id: Set("grp-bound".to_string()),
@@ -677,16 +695,6 @@ pub(crate) async fn seed_registry(db: &Db, upstream_base_url: &str) {
     .insert(db)
     .await
     .expect("insert group member");
-    set_member::ActiveModel {
-        collection_name: Set("user-col".to_string()),
-        set_name: Set("user-set".to_string()),
-        profile_id: Set("u3".to_string()),
-        position: Set(1),
-        owner: Set("acc-bound".to_string()),
-    }
-    .insert(db)
-    .await
-    .expect("insert the second user-set member");
     for publication in [
         collection_publication::ActiveModel {
             owner: Set("acc-bound".to_string()),
@@ -720,25 +728,6 @@ pub(crate) async fn seed_registry(db: &Db, upstream_base_url: &str) {
     .insert(db)
     .await
     .expect("insert platform group member");
-    profile_set::ActiveModel {
-        name: Set("pro-set".to_string()),
-        description: Set("the pro-only set".to_string()),
-        owner: Set("system".to_string()),
-        collection_name: Set("catalog-pro".to_string()),
-    }
-    .insert(db)
-    .await
-    .expect("insert pro-set");
-    set_member::ActiveModel {
-        collection_name: Set("catalog-pro".to_string()),
-        set_name: Set("pro-set".to_string()),
-        profile_id: Set("p7".to_string()),
-        position: Set(0),
-        owner: Set("system".to_string()),
-    }
-    .insert(db)
-    .await
-    .expect("insert pro-set member");
     platform_publications::ActiveModel {
         owner: Set("system".to_string()),
         collection_name: Set("catalog-pro".to_string()),
