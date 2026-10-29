@@ -117,8 +117,7 @@ Cross-owner → `404`.
 ### Delivery Semantics
 
 At-least-once. tagma's `post_message` does not dedup, so a daemon crash in the
-post → ack window can double-deliver one row; per-id ack + persisted 503-backoff
-narrow the window. On a 503 (agent prompt queue full), the row backs off
-exponentially (1s, 2s, 4s, … capped at 60s, persisted across restart) and the
-deliverer moves on. Fired reminders are delivered with the daemon's operator
-token and render `[From: operator]` in the conversation.
+post → ack window can double-deliver one row; per-id ack narrows the window.
+A failed post leaves the row `Triggered` and the deliverer retries it on the
+next tick. Fired reminders are delivered with the daemon's operator token and
+render `[From: operator]` in the conversation.

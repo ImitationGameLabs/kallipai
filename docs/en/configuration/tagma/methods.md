@@ -20,10 +20,13 @@ marker, and can run a connectivity probe against a set or a single profile.
 Saving applies immediately and writes the instance's `profiles.toml` on
 a best-effort basis (a failed write is logged).
 When the profile source is the model gateway, the page turns into a read-only
-mirror of the gateway's config; the tabs at the top switch between the two
-sources (one confirmation each way; see below). Deleting a set that still
-has bound agents requires a confirmation. The full field reference lives in
-the manual-editing section below.
+mirror of the gateway's config. The tabs at the top switch between the two
+sources (one confirmation each way; see below). The connected gateway tab
+lists the mirrored set names and links to both places where profiles and sets
+are edited: the gateway page for your own collections, and the gateway admin
+page for the rest, open to administrators.
+Deleting a set that still has bound agents requires a confirmation. The full
+field reference lives in the manual-editing section below.
 
 ## The `kallip profile-set` Command
 
@@ -138,10 +141,10 @@ description = "cheap delegation"
 - `[[parking]]` (absent when empty) holds the profiles that belong to no
   set; the web interface lists them under Unassigned, and under the local
   source giving such a profile a set moves it out of this list. Under
-  `model-gateway` the list is whatever the gateway reports as parked, so a
-  row the gateway put in a set stays listed until its flag clears: saving
-  that set's members on the gateway's management face clears it, and so does
-  setting the row unparked there.
+  `model-gateway` the field, in the pulled config, holds the unassigned
+  profiles of the collection this tagma selected: membership is the profile's
+  `set` alone, written by the profile update on the gateway side, so a
+  profile that names a set is not listed here.
 - The config file should be `chmod 600` (the tagma warns if
   group/other-readable, since it may hold API keys).
 

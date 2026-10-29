@@ -11,7 +11,8 @@ order: 21
 管理区的模型配置页是日常配置入口。它维护「模型提供商」一栏（文件里的 `[endpoints.<id>]`：协议族、密钥、`base_url`，以及可选的 `model_list_base_url`），把 profile 卡片在命名 set 与未分配区之间拖拽组织，声明各 profile 的上下文窗口与模态，转移 default set 标记，并可对 set 或单个 profile 发起连通测试。
 
 保存后立即生效；写入实例的 `profiles.toml` 是尽力而为（写失败会记日志）。当配置来源是模型网关时，页面变为
-网关配置的只读镜像；顶部的标签页在两个来源之间切换（每个方向一次确认，见下文）。删除仍有 agent 绑定的 set 需要确认。字段的完整含义见下方 `profiles.toml` 手动编辑一节。
+网关配置的只读镜像。顶部的标签页在两个来源之间切换（每个方向一次确认，见下文）。连接后的网关标签页列出镜像中的 set 名，并给出两处编辑入口：自己的合集在网关页面编辑，其余的都在网关管理页，且仅管理员能打开。
+删除仍有 agent 绑定的 set 需要确认。字段的完整含义见下方 `profiles.toml` 手动编辑一节。
 
 ## `kallip profile-set` 命令
 
@@ -94,7 +95,7 @@ description = "cheap delegation"
 - `store`（可选，默认 `true`）保持服务端会话存储开启，`openai-responses` 因此每轮从存储链继续；`store = false`（或任何非 Responses 族）每轮重放完整会话。
 - `effort`（可选）请求推理力度：`low`、`medium`、`high`、`xhigh` 或 `max`。provider 在自身限度内尊重它（DeepSeek 官方把 `medium` 与 `xhigh` 降为 `high`，见其 [API 参考](https://api-docs.deepseek.com/api/create-chat-completion)）。
 - 值一律字面：API 密钥直接写在文件里。
-- `[[parking]]`（为空时不写出）存放不属于任何 set 的 profile；网页界面把它们列在「未分配」下，本地源下给它指定一个 set 就会把它移出这张表。网关源下这张表跟的是 parked（未分配标记）：网关侧给了 set 的行会一直留在这里，直到标记被清——管理面重存那个 set 的成员会清，管理面把该行设成非 parked 也会清。
+- `[[parking]]`（为空时不写出）存放不属于任何 set 的 profile；网页界面把它们列在「未分配」下，本地源下给它指定一个 set 就会把它移出这张表。网关源下拉取到的配置里，这张表列出本 tagma 选定的合集里未分配的 profile：归属只看该 profile 自己的 `set`，由网关侧对该 profile 的那次写入带上，所以带 set 的 profile 不列在这里。
 - 配置文件应为 `chmod 600`（组/其他可读时 tagma 会警告，因其可能含 API 密钥）。
 
 ### Set 选择

@@ -22,7 +22,7 @@ kallip message <ID>
 {"kallipai.message.sent":{"to":"<id>","text":"<message>","queue_depth":0}}
 ```
 
-`queue_depth` 统计排在这条消息之前的条数（0 = 立即处理）；tagma 也可能附带一条 `"warning"` 注记（例如消息为下班状态的 agent 暂存时）。回显键与 lesche 标记刻意不同，本地客户端因此不会把 agent 间发送渲染成用户聊天行。
+`queue_depth` 是保留字段，每次发送都回显 `0`。tagma 也可能附带一条 `"warning"` 注记（例如消息为下班状态的 agent 暂存时）。回显键与 lesche 标记刻意不同，本地客户端因此不会把 agent 间发送渲染成用户聊天行。
 
 建议用引号包裹的 heredoc（`<<'EOF'`，定界符带引号），shell 就完全不做展开：反引号与 `$` 保持字面量，多行文本无需转义。程序化生成的文本也可以走管道（`echo 'text' | kallip message <ID>`）。空 stdin 发送空消息，成功回显会让这一点立刻可见。
 

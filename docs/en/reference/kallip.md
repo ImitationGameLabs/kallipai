@@ -30,11 +30,10 @@ a failed send never looks delivered):
 {"kallipai.message.sent":{"to":"<id>","text":"<message>","queue_depth":0}}
 ```
 
-`queue_depth` counts messages queued ahead of this one (0 = immediate
-processing); the tagma may also attach a `"warning"` note (e.g. when the
-message was buffered for an off-duty agent). The echo key is
-distinct from the lesche marker so local clients never render an
-agent-to-agent send as a user chat line.
+`queue_depth` is reserved: every send echoes `0`. The tagma may also attach
+a `"warning"` note (e.g. when the message was buffered for an off-duty
+agent). The echo key is distinct from the lesche marker so local clients
+never render an agent-to-agent send as a user chat line.
 
 Prefer a quoted heredoc (`<<'EOF'`, delimiter quoted) so the shell performs
 no expansion at all: backticks and `$` stay literal, and multiline text

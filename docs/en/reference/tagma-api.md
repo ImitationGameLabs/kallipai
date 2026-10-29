@@ -302,7 +302,8 @@ Takes one of two forms, chosen by what the agent is doing:
 - the agent is parked on a wake (a `break(wait)` fuse or a chain-transient
   retry): that wait is cancelled rather than woken. The fuse is dropped, the
   agent settles idle, and no round runs of its own, neither now nor when the
-  old timer would have fired. A message arriving later still wakes it.
+  old timer would have fired. A delivery arriving later still wakes it,
+  unless the agent is off duty.
 
 An idle agent, or one parked for operator action, has nothing to interrupt:
 the call is a clean no-op. Use `DELETE` to remove the agent entirely.
@@ -340,8 +341,9 @@ outcome can arrive with no such event.
 #### `POST /agents/{id}/message`: Send Message
 
 Sends a message to the agent's input queue. The tagma accepts the message
-immediately and processes it asynchronously. Returns queue depth feedback so
-callers can gauge expected latency.
+immediately and processes it asynchronously. Returns `queue_depth`,
+`delivery_mode`, and `warning` so callers can gauge when the message becomes
+visible.
 
 Auth: any authenticated identity. Inter-agent communication is peer-to-peer;
 no supervisor relationship is required. See [Authentication and authorization](auth.md).
@@ -350,7 +352,10 @@ no supervisor relationship is required. See [Authentication and authorization](a
 
 ```json
 {
-  "text": "string — the message to send"
+  "text": "string — the message to send",
+  "attachment": "object — a file the sender shared: record_id, name, size, and modality when declared (omitted when absent)",
+  "defer": "boolean — skip the in-round notice and the parked wake; the message still lands in the inbox (omitted when false)",
+  "quote": "integer — the 1:1 history position this message answers; only an operator message to the root agent renders as a quote, and a quote on any other pair is accepted and ignored (omitted when absent)"
 }
 ```
 
@@ -359,33 +364,55 @@ no supervisor relationship is required. See [Authentication and authorization](a
 ```json
 {
   "queue_depth": 0,
-  "warning": "string | null — present when messages are already queued"
+  "warning": "string | null — present when a gate held the delivery or a kick carries it; absent when there is nothing to name (in-round visibility, and the buffer while a dead task restarts)",
+  "delivery_mode": "in_round | kicked | deferred | buffered — how the message becomes visible to the receiver (omitted where none of the four applies)"
 }
 ```
 
-- `queue_depth == 0`: agent will process the message immediately.
-- `queue_depth > 0`: message is queued behind existing messages; `warning`
-  includes a human-readable note.
-- A parked target auto-wakes: the message is buffered to the inbox and a kick `[system]` turn (park reason + elapsed) is enqueued: the agent decides in its kick round, then pulls the message; `warning` notes the kick. There is no manual wake route (removed: messages are the only wake path).
+- `queue_depth` is reserved: every response reports `0`, and the tagma does not
+  count what sits ahead in the prompt queue. Read `delivery_mode` and `warning`
+  for where the delivery stands.
+- There is no manual wake route. A parked target wakes when a delivery lands
+  in its inbox: the message is buffered and a kick `[system]` turn (park
+  reason + elapsed) is enqueued, so the agent decides in its kick round and
+  then pulls the message (a kick round that ends without the message being
+  pulled drains nothing, and the message waits for the next wake); `warning`
+  notes the kick. Task prompts and shift reminders arrive the same way, and
+  an agent also wakes on its own armed timer (a `break(wait)` fuse or a
+  chain-transient retry). For a parked target, three gates keep a delivery
+  in the inbox without a wake: off duty, a sender that deferred delivery,
+  and a full prompt queue; `warning` names the gate that held it.
+- `delivery_mode` reports where the message's visibility comes from:
+  `in_round` (the receiver's prompt queue took the notice; visible within the
+  round that consumes it), `kicked` (a kick turn woke a parked
+  receiver; visible at the kick round), `deferred` (no in-round notice:
+  the sender deferred, the prompt queue was full, or the parked wake could not
+  be sent; a live receiver pulls it at the wake this delivery issues, at once
+  unless a round is running, while a parked one waits for its next wake;
+  `warning` distinguishes), `buffered` (the receiver is
+  off-duty, or dead and reactivating; the message waits in the inbox).
 
 Status: `202 Accepted`
 
-| Code | Condition                                                                          |
-| ---- | --------------------------------------------------------------------------------   |
-| 404  | Agent not found                                                                    |
-| 503  | Message queue is full (`KALLIPAI_PROMPT_QUEUE_SIZE` messages pending); retry later |
-| 500  | Agent reactivation failure                                                         |
+| Code | Condition |
+| ---- | --------- |
+| 404  | Agent not found |
+| 409  | The agent's profile set cannot be resolved (unbound or unknown); rebind it first — error code `profile_set_unusable` |
+| 409  | The agent is faulted; it cannot receive messages |
+| 409  | Reactivation refused: the workspace, or a path overlapping it, is write-locked by another agent; retry after release |
+| 500  | Reactivation failed |
 
 > **Reactivation:** If the agent's task has terminated (channel closed), the
-> tagma creates a fresh message channel, pre-queues the incoming message, then
-> respawns the agent from persisted state. Existing context, approvals, and auth
-> token are preserved. If reactivation fails, the agent remains in a dead state
-> and the next message attempt will retry.
+> tagma creates a fresh prompt queue with nothing pre-sent, then respawns the
+> agent from persisted state. The message waits in the inbox and the respawned
+> agent pulls it on its first wake. Existing context, approvals, and auth token
+> are preserved. If reactivation fails, the agent remains in a dead state and
+> the next message attempt will retry.
 >
-> **Backpressure:** The message queue has a configurable capacity
-> (`KALLIPAI_PROMPT_QUEUE_SIZE`, default 5). When the queue is full, the
-> tagma returns `503` instead of accepting the message. Callers should wait
-> and retry.
+> **Backpressure:** The prompt queue has a configurable capacity
+> (`KALLIPAI_PROMPT_QUEUE_SIZE`, default 5). A full queue does not fail the
+> request: the message is accepted, stays in the inbox, and its `delivery_mode`
+> reports `deferred`, visible at the next run boundary or wake.
 
 #### `GET /agents/{id}/events`: Internal Event Stream
 
@@ -1430,8 +1457,9 @@ These signal the end of the current assistant turn. Except for `cancelled`, the 
 varies: `idle`/`interrupted` return to idle, `waiting` parks on a wake timer,
 `tokenBudgetExceeded` re-arms the wait timer as a recovery probe, an armed
 `failoverChainExhausted` enters a retrying backoff, and the unarmed/error/max-rounds
-outcomes park the agent (the next incoming message auto-wakes it). Only `cancelled`
-(a lifecycle cancel) ends the stream.
+outcomes park the agent (the next inbox delivery wakes it, unless a gate holds
+it: off duty, sender defer, or a full prompt queue). Only `cancelled` (a
+lifecycle cancel) ends the stream.
 
 A cancel reaches the agent in one of two places, and `interrupted` says which.
 The event carries `was_waiting: true` when it landed on an armed wait or retry
@@ -1443,7 +1471,7 @@ the flag keeps the reading it always had.
 | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------                                                            | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------                                                                                                                 |
 | `idle`                   | _(none)_                                                                                                                                                                                        | Agent completed the turn and returned to idle (a `finished`-style content event is `assistantContent`)                                                                                                                                                                                                                                                                                                                                                            |
 | `maxRoundsExceeded`      | _(none)_                                                                                                                                                                                        | Hit the max tool rounds limit for this turn; the agent parks                                                                                                                                                                                                                                                                                                                                                                                                      |
-| `error`                  | `message: string`                                                                                                                                                                               | Turn failed with a fatal error; the agent parks (a message auto-wakes it)                                                                                                                                                                                                                                                                                                                                                                                         |
+| `error`                  | `message: string`                                                                                                                                                                               | Turn failed with a fatal error; the agent parks (an inbox delivery wakes it, unless a gate holds it: off duty, sender defer, or a full prompt queue)                                                                                                                                                                                                                                                                                                                                                                                         |
 | `failoverChainExhausted` | `reason: "noFailoverConfigured" \| "allBackupsExhausted" \| "allCandidatesUnbuildable" \| "allCandidatesInfeasible", detail: string, transient_retry: { attempt, max_attempts, retry_in_secs }` | Within-set failover chain exhausted: every profile in the set is unavailable; `reason` distinguishes the cause (`allCandidatesInfeasible` = every candidate's declared window violated the budget shape; tune `KALLIPAI_SUMMARY_MAX_TOKENS` / `KALLIPAI_PINNED_BUDGET_RATIO` or raise the window), `detail` is the original trigger. With `transient_retry` present the agent enters a retrying backoff (the timer re-runs the original prompt); absent, it parks |
 | `waiting`                | `timeout_secs: u64`                                                                                                                                                                             | Turn ended on `break(wait)`; the agent parks on a wake timer; the timer expiring or any external event resumes it                                                                                                                                                                                                                                                                                                                                                 |
 | `interrupted`            | `was_waiting?: boolean`                                                                                                                                                                                | A cancel landed on the agent while the task stayed alive: a running round was aborted, or an armed wait/retry was cancelled without running one; the agent stays alive and settles idle. Who asked for the cancel is not part of this event. `was_waiting: true` marks the armed-timer landing; absent (or `false`) is the round landing |
