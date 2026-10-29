@@ -17,6 +17,10 @@
 //! no pointer at all, with a pointer whose collection row is gone, and with
 //! one outside the domain -- visibility is the sibling's verdict, so a
 //! non-200 would read to the tagma as a transport fault.
+//!
+//! The list itself is the park flag, not the absence of a set: a user-face
+//! set edit writes member rows without touching the flag, so a parked row
+//! can be a member there and is listed here while that set carries it.
 
 pub mod visibility;
 use axum::Json;

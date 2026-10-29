@@ -12,12 +12,13 @@ and profile set are, and why each is its own layer), see
 ## Web Interface
 
 The Profiles page in the manage area is the day-to-day configuration surface.
-It maintains the endpoint pool (protocol family, key, `base_url`, and the
-optional `model_list_base_url`), organizes
-profile cards between named sets and a parking area by drag and drop, declares
-each profile's context window and modalities, transfers the default-set
+It maintains the provider pool (`[endpoints.<id>]` in the file: protocol
+family, key, `base_url`, and the optional `model_list_base_url`), organizes
+profile cards between named sets and the Unassigned section by drag and drop,
+declares each profile's context window and modalities, transfers the default-set
 marker, and can run a connectivity probe against a set or a single profile.
-Saving writes the instance's `profiles.toml` and takes effect immediately.
+Saving applies immediately and writes the instance's `profiles.toml` on
+a best-effort basis (a failed write is logged).
 When the profile source is the model gateway, the page turns into a read-only
 mirror of the gateway's config; the tabs at the top switch between the two
 sources (one confirmation each way; see below). Deleting a set that still
@@ -79,6 +80,18 @@ setting. The Profiles page's Gateway/Local tabs switch this setting at
 runtime; the gateway side is offered only when a relay entry carries an
 enrollment token.
 
+An upgraded gateway gives every gateway account space with profiles a home
+collection (the collection the row lives in): a space that carried profiles
+but no collection gets one named `default`, and a profile that belonged to
+no set lands in the space's lexicographically smallest collection. Both
+placements are fixed and repeatable, and neither is a decision anyone made:
+`default` is a constant in the migration, and a setless profile lands where
+the name order puts it. To put a profile in another collection, move it with
+`POST /admin/collections/{target}/profiles/{profile_id}/move`, whose body
+carries `from_collection_name` (where the row is now) and an optional `set`
+(a set in the target collection; giving one makes the arriving row a
+member). No web interface moves a row between collections.
+
 Example `profiles.toml`:
 
 ```toml
@@ -122,6 +135,13 @@ description = "cheap delegation"
 - `store` (optional, default `true`) keeps server-side conversation storage on, so `openai-responses` continues each turn from the stored chain; `store = false` (or any non-Responses family) replays the full conversation every turn.
 - `effort` (optional) requests a reasoning effort: `low`, `medium`, `high`, `xhigh`, or `max`. Providers honor it within their own limits (DeepSeek officially downgrades `medium` and `xhigh` to `high` per its [API reference](https://api-docs.deepseek.com/api/create-chat-completion)).
 - Values are literal: an API key is written into the file itself.
+- `[[parking]]` (absent when empty) holds the profiles that belong to no
+  set; the web interface lists them under Unassigned, and under the local
+  source giving such a profile a set moves it out of this list. Under
+  `model-gateway` the list is whatever the gateway reports as parked, so a
+  row the gateway put in a set stays listed until its flag clears: saving
+  that set's members on the gateway's management face clears it, and so does
+  setting the row unparked there.
 - The config file should be `chmod 600` (the tagma warns if
   group/other-readable, since it may hold API keys).
 

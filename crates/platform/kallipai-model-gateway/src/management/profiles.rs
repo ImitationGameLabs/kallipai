@@ -4,6 +4,19 @@
 //! the membership rewrite. The row identity is `(owner, collection_name,
 //! profile_id)`, so every route names the collection it addresses and the
 //! cross-collection move is the one operation that spans two of them.
+//!
+//! The flag follows membership when this face rewrites a set's members: a
+//! member is served, and a row leaving its last set turns unassigned again.
+//! Only the member-list save heals a flag as a side effect; a write that
+//! names the flag stores the value it asks for. Deleting a set takes its
+//! member rows with it and leaves their flags alone, so a row can end up in
+//! no set and still not be parked.
+//!
+//! The user face's set edit writes member rows without touching the flag, so
+//! a parked row can be a member there: `/parking` lists it while that set
+//! carries it, and the forwarding face refuses it (`403`, "profile is
+//! parked"), so it is visible in the set and never serves a turn. The next
+//! save of that set here heals the flag.
 
 use axum::Json;
 use axum::extract::{Path, Query, State};

@@ -338,6 +338,10 @@ pub async fn set_head_for_families(
 // selection pointer names, in that collection's own space. The filter is in
 // the query (owner + collection), never a post-filter, so a row in another
 // collection is outside this read by construction.
+//
+// The flag is the only test: a row a user-face set edit left parked stays a
+// member of its set and is still listed here, so this read answers the
+// flag, not the absence of a set.
 
 /// The parked rows of one collection: what the distribution face's
 /// `/parking` answer carries for the pointer's collection.

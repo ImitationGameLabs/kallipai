@@ -414,9 +414,22 @@ Status: `200 OK`
 ### Profile Sets
 
 Profile sets are the named model groups of `profiles.toml` (see
-[Model configuration methods](../configuration/tagma/methods.md)). Seven endpoints manage them at runtime; the file remains
-the source of truth, and every mutation persists to disk before it takes
-effect in memory.
+[Model configuration methods](../configuration/tagma/methods.md)). Seven
+endpoints manage them at runtime. Under a local source the file is the
+source of truth: every mutation tries to write it before the change takes
+effect in memory, and a failed write is logged while the memory swap goes
+ahead.
+Under `model-gateway` the endpoints read the in-memory snapshot of
+the served collection and refuse every edit with `409` (the refusal points to
+the gateway's management face), so the snapshot changes only on a refresh or
+when a selection move writes the pointer through; the file stops receiving
+updates; it stays readable as the local preview described under
+`GET /profiles`.
+
+A profile that sat in sets of several collections is split into one row per
+collection by the collection isolation upgrade: the copies are independent rows,
+so an edit in one collection does not reach the others, and a change meant for
+all of them has to be made in each.
 
 #### `PUT /agents/{id}/profile-set`: Rebind an Agent
 
@@ -523,12 +536,18 @@ readable is on disk.
 The response also carries `collection_ref` (`{owner, collection_name}`): the
 collection this mirror serves, filled from the gateway's selection on every
 successful refresh and kept in memory only — the file never stores it, and no
-`PUT` body can set it directly: the only mover is `source.collection`. The
-field is absent when the tagma serves no collection: a local source, a cold
+`PUT` body sets the field itself. The tagma-side input that moves it is the
+`source.collection` member, which writes the pointer through to the gateway;
+a selection changed on the gateway's own side lands here on the next refresh.
+The field is absent when the tagma serves no collection: a local source, a cold
 proxy boot whose fetch failed, a boot that came up without a selection, or a
 pointer whose collection is gone — that last shape empties `sets` too, not
 just this name. Absence alone does not mean "local source" — `source.mode`
 in the same response says which source is answering.
+
+Rebinding an agent (`PUT /agents/{id}/profile-set`) leaves this field alone:
+the bind carries a bare set name, resolved inside the collection this mirror
+already serves.
 
 An answer is not allowed to be half a collection: `SelectedCollection` requires
 both `owner` and `collection_name`, and missing either is a refresh failure,

@@ -105,7 +105,7 @@ $ kallip profile-set bind reviewer cheap
 Bound reviewer to profile set cheap.
 ```
 
-`list` 打印 default 标记、各 set 的 profile 与 agent 计数，以及每个 set 的生效模态（成员声明的交集）。当 tagma 由网关服务时，还会在 default 标记之后、各 set 行之前打印 `collection: owner/name`——这些 set 名在该集合内解析。`bind` 在 agent 下次唤醒时生效（停泊的 agent 在下次恢复时取新绑定）。
+`list` 打印 default 标记、各 set 的 profile 与 agent 计数，以及每个 set 的生效模态（成员声明的交集）。当 tagma 由网关服务时，还会在 default 标记之后、各 set 行之前打印 `collection: owner/name`——这些 set 名在该合集内解析。`bind` 在 agent 下次唤醒时生效（停泊的 agent 在下次恢复时取新绑定）。
 
 ### `approval`：管理 approval
 
