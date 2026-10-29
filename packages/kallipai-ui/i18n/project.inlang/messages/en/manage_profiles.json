@@ -111,6 +111,7 @@
   "manage_profiles_profile_effort_label": "thinking effort",
   "manage_profiles_profile_dialog_id_duplicate": "This id is already taken by a profile in a profile set or an unassigned profile",
   "manage_profiles_profile_dialog_invalid_window": "Enter a positive whole number of tokens.",
+  "manage_profiles_profile_dialog_invalid_model": "Enter a model id.",
   "manage_profiles_heading_desc_l1": "Four layers: providers form a global pool; named profile sets rotate; unassigned profiles sit outside rotation and can be dragged into a set",
   "manage_profiles_heading_desc_l2": "Provider Test = connectivity",
   "manage_profiles_heading_desc_l3": "Profile Test = one minimal real inference",

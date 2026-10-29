@@ -1481,4 +1481,88 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "{body}");
         assert_eq!(baseline_ids(&body), ["p1", "p2", "p6"]);
     }
+
+    /// The member order an admin writes is the order the data plane
+    /// selects in: `set_head_for_families` walks positions, so putting a
+    /// sibling first makes it the head for that family.
+    #[tokio::test]
+    async fn patch_order_drives_the_data_plane_head() {
+        let state = seeded_state().await;
+        // p1 and p2 both ride the deepseek family. The seeded order puts
+        // p1 first, so p1 is the head the data plane picks today.
+        let head = registry::set_head_for_families(
+            &state.db,
+            registry::CATALOG_OWNER,
+            TEST_COLLECTION,
+            "alpha",
+            &["deepseek"],
+        )
+        .await
+        .expect("head read")
+        .expect("a deepseek member is served");
+        assert_eq!(head.profile_id, "p1");
+        // Put p2 first through the admin face.
+        let (status, body) = send(
+            app(state.clone()),
+            req(
+                "PATCH",
+                "/admin/collections/baseline/sets/alpha",
+                Some(TEST_ADMIN_BEARER),
+                Some(serde_json::json!({"members": ["p2", "p1", "p6"]})),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["profiles"][0]["profile_id"], "p2");
+        assert_eq!(body["profiles"][1]["profile_id"], "p1");
+        // The data plane reads the same order back: p2 is the head now.
+        let head = registry::set_head_for_families(
+            &state.db,
+            registry::CATALOG_OWNER,
+            TEST_COLLECTION,
+            "alpha",
+            &["deepseek"],
+        )
+        .await
+        .expect("head read")
+        .expect("a deepseek member is served");
+        assert_eq!(head.profile_id, "p2");
+        assert_eq!(head.family, "deepseek");
+        let ordered: Vec<String> = registry::set_members_ordered(
+            &state.db,
+            registry::CATALOG_OWNER,
+            TEST_COLLECTION,
+            "alpha",
+        )
+        .await
+        .expect("members read")
+        .into_iter()
+        .map(|served| served.profile.profile_id)
+        .collect();
+        assert_eq!(ordered, ["p2", "p1", "p6"]);
+        // And back: the head follows the order rather than sticking to
+        // whichever member it picked first.
+        let (status, body) = send(
+            app(state.clone()),
+            req(
+                "PATCH",
+                "/admin/collections/baseline/sets/alpha",
+                Some(TEST_ADMIN_BEARER),
+                Some(serde_json::json!({"members": ["p1", "p2", "p6"]})),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let head = registry::set_head_for_families(
+            &state.db,
+            registry::CATALOG_OWNER,
+            TEST_COLLECTION,
+            "alpha",
+            &["deepseek"],
+        )
+        .await
+        .expect("head read")
+        .expect("a deepseek member is served");
+        assert_eq!(head.profile_id, "p1");
+    }
 }

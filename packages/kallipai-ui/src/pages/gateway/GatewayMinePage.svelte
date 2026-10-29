@@ -41,6 +41,17 @@
     user_gateway_title,
   } from "../../paraglide/messages.js";
 
+  import {
+    saveSetDraft,
+    saveStoppedBanner,
+  } from "../../lib/manage/gateway/saveSet.ts";
+  import {
+    setDetailFor,
+    userMemberBody,
+    type UserSetDetail,
+    type UserSetSaveDraft,
+  } from "../../lib/gateway/userSetDraft.ts";
+
   // One-shot read-side load when the page mounts (the store's
   // store's isLoading dedupes concurrent calls).
   let initialLoadDone = $state(false);
@@ -256,7 +267,7 @@
   // Each edit click takes a request token; only the newest token's
   // response may seed the dialog (the admin console's stale-response
   // guard).
-  let editSet = $state<UserSetRow | null>(null);
+  let editSet = $state<UserSetDetail | null>(null);
   let setDialogOpen = $state(false);
   let setEditRequest = $state(0);
   let removeSetTarget = $state<UserSetRow | null>(null);
@@ -265,35 +276,121 @@
   // The create dialog's pre-bound collection (set by the group the
   // create was opened from).
   let createCollection = $state("");
+  // The save in flight and what a stopped save reports: the dialog stays
+  // open on a failure, so these ride it rather than the page banner.
+  let setDialogBusy = $state(false);
+  let setDialogError = $state<string | null>(null);
+  let setDialogLanded = $state<readonly string[]>([]);
+  /** The collection the set dialog is working in: the row under edit, or
+   * the one a create was opened from. */
+  const activeCollection = $derived(
+    editSet === null ? createCollection : editSet.collection_name,
+  );
+
+  /** The collection's profile rows: the dialog's member pool and the rows
+   * a member id resolves to. Null while the store has not read the rows:
+   * rows never read are not rows known to be absent, and a member list
+   * projected onto unknown rows would read every member as deleted. */
+  function collectionProfiles(
+    collection: string,
+  ): readonly UserProfileRow[] | null {
+    const rows = userGatewayStore.profiles;
+    if (rows === null) return null;
+    return rows.filter((row) => row.collection_name === collection);
+  }
 
   async function onEditSet(set: UserSetRow): Promise<void> {
     const request = ++setEditRequest;
     const row = await userGatewayStore.loadSet(set.collection_name, set.name);
-    if (row && request === setEditRequest) {
-      editSet = row;
-      setDialogOpen = true;
+    if (row === undefined || request !== setEditRequest) return;
+    if (userGatewayStore.profiles === null) {
+      // The projection needs the rows: with them unread the detail comes
+      // out empty and the first save would clear the set. Read once, then
+      // open only when the rows are known; the page alert carries the
+      // read's reason.
+      await userGatewayStore.refreshAll();
+      if (request !== setEditRequest) return;
     }
+    const detail = setDetailFor(row, collectionProfiles(row.collection_name));
+    if (detail === null) return;
+    editSet = detail;
+    setDialogOpen = true;
   }
 
-  function onSaveSet(result: {
-    name: string;
-    description: string;
-    members: string[];
-  }): void {
+  // One save spans several requests, so the read side refreshes once, in
+  // the sequence (the settle port below), never per write: the store's
+  // saveSet and updateMember only write.
+  async function onSaveSet(result: UserSetSaveDraft): Promise<void> {
     const editing = editSet;
-    setDialogOpen = false;
-    editSet = null;
-    if (editing) {
-      void userGatewayStore.saveSet(editing.collection_name, editing.name, {
-        description: result.description,
-        members: result.members,
+    const collection =
+      editing === null ? createCollection : editing.collection_name;
+    setDialogBusy = true;
+    setDialogError = null;
+    try {
+      if (editing === null) {
+        // A create is one request and has no row to reseed: a refusal
+        // keeps the form open with the server's reason.
+        const ok = await userGatewayStore.addSet(collection, {
+          name: result.name,
+          description: result.description,
+          members: result.members,
+        });
+        if (!ok) {
+          setDialogError = userGatewayStore.error;
+          return;
+        }
+        setDialogOpen = false;
+        setDialogLanded = [];
+        return;
+      }
+      const outcome = await saveSetDraft(editing, result, {
+        putMember: async (profileId, body) => {
+          const ok = await userGatewayStore.updateMember(
+            editing.collection_name,
+            profileId,
+            userMemberBody(body),
+          );
+          return { ok, reason: ok ? null : userGatewayStore.error };
+        },
+        patchSet: async (body) => {
+          const ok = await userGatewayStore.saveSet(
+            editing.collection_name,
+            editing.name,
+            body,
+          );
+          return { ok, reason: ok ? null : userGatewayStore.error };
+        },
+        // The rows a PUT just changed are not in the page's cache yet: the
+        // re-read below projects them, so the refresh has to land first.
+        settle: () => userGatewayStore.refreshAll(),
+        reread: async () => {
+          const row = await userGatewayStore.loadSet(
+            editing.collection_name,
+            editing.name,
+          );
+          if (row === undefined) return undefined;
+          // Rows still unread answer undefined: the draft keeps what it has
+          // rather than reseeding from an empty member list.
+          return (
+            setDetailFor(row, collectionProfiles(editing.collection_name)) ??
+            undefined
+          );
+        },
       });
-    } else {
-      void userGatewayStore.addSet(createCollection, {
-        name: result.name,
-        description: result.description,
-        members: result.members,
-      });
+      if (outcome.phase !== "done") {
+        // The landed list lands before the re-read row: the dialog's
+        // effect short-circuits on set === seeded, so these two
+        // assignments are not interchangeable.
+        setDialogLanded = outcome.landed;
+        setDialogError = saveStoppedBanner(outcome);
+        if (outcome.row) editSet = outcome.row;
+        return;
+      }
+      setDialogOpen = false;
+      editSet = null;
+      setDialogLanded = [];
+    } finally {
+      setDialogBusy = false;
     }
   }
 
@@ -598,11 +695,20 @@
 <UserSetDialog
   open={setDialogOpen}
   set={editSet}
-  collection={editSet === null ? createCollection : ""}
-  onSave={onSaveSet}
+  collection={activeCollection}
+  profiles={collectionProfiles(activeCollection)}
+  siblings={(userGatewayStore.sets ?? []).filter(
+    (row) => row.collection_name === activeCollection,
+  )}
+  busy={setDialogBusy}
+  error={setDialogError}
+  landed={setDialogLanded}
+  onSave={(result) => void onSaveSet(result)}
   onCancel={() => {
+    if (setDialogBusy) return;
     setDialogOpen = false;
     editSet = null;
+    setDialogError = null;
   }}
 />
 

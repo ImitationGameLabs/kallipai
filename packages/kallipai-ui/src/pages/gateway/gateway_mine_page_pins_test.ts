@@ -35,6 +35,16 @@ function source(url: URL): string {
   return new TextDecoder().decode(Deno.readFileSync(url));
 }
 
+// The body of a top-level page function: a guard earns its pin inside
+// the function that must carry it.
+function functionBody(src: string, name: string): string {
+  const start = src.indexOf(`function ${name}(`);
+  assert(start >= 0, `the page declares ${name}`);
+  const end = src.indexOf("\n  }\n", start);
+  assert(end > start, `${name} closes at the file's top level`);
+  return src.slice(start, end);
+}
+
 Deno.test(
   "GatewayMinePage leaves the sign-in posture to the shell",
   { permissions: { read: [PAGE] } },
@@ -209,7 +219,9 @@ Deno.test(
       "the group's create trigger pre-binds the target collection",
     );
     assert(
-      src.includes("userGatewayStore.addSet(createCollection, {"),
+      src.includes(
+        "editing === null ? createCollection : editing.collection_name",
+      ) && src.includes("userGatewayStore.addSet(collection, {"),
       "the create lands inside the pre-bound collection",
     );
   },
@@ -257,6 +269,111 @@ Deno.test(
     assert(
       page.includes('collection: removeProfileTarget?.collection_name ?? ""'),
       "the delete confirm names the collection the row lives in",
+    );
+  },
+);
+
+Deno.test(
+  "a set save settles once, through the sequence's own port",
+  { permissions: { read: [PAGE] } },
+  () => {
+    const page = source(PAGE);
+    const body = functionBody(page, "onSaveSet");
+    // One save spans several requests: the read side refreshes once, in
+    // the sequence, before the re-read projects what it wrote.
+    assert(
+      body.includes("settle: () => userGatewayStore.refreshAll(),"),
+      "the sequence refreshes the read side through its settle port",
+    );
+    assert(
+      body.split("refreshAll").length - 1 === 1,
+      "no other refresh rides the save",
+    );
+    // The order of the two port declarations is only a proxy: what runs
+    // first at save time is pinned by saveSet_test's port log.
+    assert(
+      body.indexOf("settle:") < body.indexOf("reread:"),
+      "the refresh lands before the re-read",
+    );
+  },
+);
+
+Deno.test(
+  "an edit opens only over rows the page has read",
+  { permissions: { read: [PAGE] } },
+  () => {
+    const page = source(PAGE);
+    const body = functionBody(page, "onEditSet");
+    // The dialog projects member ids onto the collection's rows: with the
+    // rows unread every member would read as deleted, and the first save
+    // would clear the set. So the page reads once, then opens only over a
+    // detail that could be built.
+    assert(
+      body.includes("if (userGatewayStore.profiles === null) {") &&
+        body.includes("await userGatewayStore.refreshAll();"),
+      "unread rows trigger one read before the dialog opens",
+    );
+    assert(
+      body.indexOf("if (detail === null) return;") <
+        body.indexOf("editSet = detail;"),
+      "no detail, no seed",
+    );
+    assert(
+      body.indexOf("if (detail === null) return;") <
+        body.indexOf("setDialogOpen = true;"),
+      "no detail, no dialog",
+    );
+    // The page forbids the silent no-op: the store's reason is on screen.
+    assert(
+      page.includes("{#if userGatewayStore.error}") &&
+        !body.includes("userGatewayStore.error = null"),
+      "a refused read keeps its reason on the page alert",
+    );
+  },
+);
+
+Deno.test(
+  "a set edit rides the step function and keeps the form on a stop",
+  { permissions: { read: [PAGE] } },
+  () => {
+    const page = source(PAGE);
+    // The PUT-then-PATCH sequence and its failure handling are tested in
+    // lib/manage/gateway/saveSet_test.ts; the page wires the ports.
+    assert(
+      page.includes("saveSetDraft(editing, result, {"),
+      "the edit save runs through the tested step function",
+    );
+    assert(
+      page.includes("userGatewayStore.updateMember(") &&
+        page.includes("userMemberBody(body)") &&
+        page.includes("userGatewayStore.saveSet("),
+      "the ports wrap the store",
+    );
+    const body = functionBody(page, "onSaveSet");
+    // The member PUT on this face carries the shared four fields only: the
+    // served flag belongs to the admin route, so it must not appear in the
+    // save's member port.
+    const portStart = body.indexOf("putMember:");
+    const portEnd = body.indexOf("patchSet:", portStart);
+    assert(
+      portStart >= 0 && portEnd > portStart,
+      "the save wires a member PUT before the set PATCH",
+    );
+    assert(
+      !body.slice(portStart, portEnd).includes("parked"),
+      "no served flag rides the user face's PUT",
+    );
+    assert(
+      body.includes("setDialogLanded = outcome.landed;") &&
+        body.includes("setDialogError = saveStoppedBanner(outcome);"),
+      "a stopped save names what landed and why it stopped",
+    );
+    // A refusal returns before the close: a closed form has nowhere to
+    // paint the server's reason, and the draft is gone with it.
+    const stop = body.slice(body.indexOf('if (outcome.phase !== "done")'));
+    assert(
+      stop.indexOf("return;") < stop.indexOf("setDialogOpen = false;"),
+      "a stopped save returns before the dialog closes",
     );
   },
 );

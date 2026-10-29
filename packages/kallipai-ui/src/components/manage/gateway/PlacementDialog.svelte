@@ -50,12 +50,12 @@
   } = $props();
 
   let collectionDraft = $state("");
-  let setDraft = $state("");
+  let setNameDraft = $state("");
   let lastOpen = false;
   $effect(() => {
     if (open && !lastOpen) {
       collectionDraft = sourceCollection ?? collections[0]?.name ?? "";
-      setDraft = "";
+      setNameDraft = "";
     }
     lastOpen = open;
   });
@@ -77,7 +77,7 @@
   );
 
   const canSubmit = $derived(
-    collectionDraft !== "" && setDraft !== "" && memberSets.length > 0,
+    collectionDraft !== "" && setNameDraft !== "" && memberSets.length > 0,
   );
 
   function onOpenChange(e: { open: boolean }): void {
@@ -86,7 +86,7 @@
 
   function submit(): void {
     if (!canSubmit || busy) return;
-    onConfirm(collectionDraft, setDraft);
+    onConfirm(collectionDraft, setNameDraft);
   }
 </script>
 
@@ -121,7 +121,7 @@
             <select
               class="input text-sm font-mono"
               bind:value={collectionDraft}
-              onchange={() => (setDraft = "")}
+              onchange={() => (setNameDraft = "")}
               disabled={busy || sourceCollection !== undefined}
               aria-required="true"
             >
@@ -138,11 +138,11 @@
             </span>
             <select
               class="input text-sm font-mono"
-              bind:value={setDraft}
+              bind:value={setNameDraft}
               disabled={busy || memberSets.length === 0}
               aria-required="true"
             >
-              {#if setDraft === ""}
+              {#if setNameDraft === ""}
                 <option value="" disabled></option>
               {/if}
               {#each memberSets as set (set.name)}

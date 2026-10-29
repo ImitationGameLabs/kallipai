@@ -40,6 +40,7 @@ import {
   updateProfile,
   updateProvider,
 } from "./client.ts";
+import type { MemberUpdateBody } from "./setDraft.ts";
 
 class GatewayAdminStore {
   /** The catalog's sets; null until the first read lands. */
@@ -138,16 +139,33 @@ class GatewayAdminStore {
     return this.run(() => getCollectionSet(collection, name));
   }
 
-  /** PATCH description + member order in one request, then re-read. */
+  /** PATCH description + member order in one request. The write alone: a
+   * set save spans several requests, so the read side refreshes once at the
+   * end of the sequence (the dialog's settle port), never per write. */
   async saveSet(
     collection: string,
     name: string,
     body: { description?: string; members?: string[] },
-  ): Promise<void> {
-    await this.run(async () => {
+  ): Promise<boolean> {
+    const ok = await this.run(async () => {
       await updateCollectionSet(collection, name, body);
-      await this.refreshAll();
+      return true;
     });
+    return ok === true;
+  }
+
+  /** PUT one member row in place (the set dialog's member edit). The body
+   * carries the shared fields; the page's port adds the served flag. */
+  async updateMember(
+    collection: string,
+    profileId: string,
+    body: MemberUpdateBody & { parked: boolean },
+  ): Promise<boolean> {
+    const ok = await this.run(async () => {
+      await updateProfile(collection, profileId, body);
+      return true;
+    });
+    return ok === true;
   }
 
   /** Drop an unassigned profile into a set: re-read the set's live member list

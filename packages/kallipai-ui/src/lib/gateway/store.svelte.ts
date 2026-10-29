@@ -1,9 +1,9 @@
 // UserGatewayStore: the gateway user face's read/write state as a
 // class singleton (the manage store family shape). The client module
 // stays the wire authority; the store is a thin wrapper that owns the
-// error/loading state and re-reads every slice after each mutation --
-// the user face is small enough that one refresh keeps all
-// sections coherent.
+// error/loading state and re-reads every slice after a mutation -- with
+// one exception: a save that spans several requests (the set dialog) is
+// refreshed once by its sequence, so those writes only write.
 
 import {
   bakedGatewayUrl,
@@ -42,6 +42,7 @@ import {
   type UserProviderRow,
   type UserSetRow,
 } from "./client.ts";
+import type { UserMemberBody } from "./userSetDraft.ts";
 
 class UserGatewayStore {
   /** The baked gateway base URL (one origin for both faces). */
@@ -234,6 +235,21 @@ class UserGatewayStore {
     return ok === true;
   }
 
+  /** PUT one member row in place (a set dialog's member edit). The body
+   * is the shared fields alone: a user's own rows cannot carry the
+   * catalog's served flag. The caller re-reads what it needs. */
+  async updateMember(
+    collection: string,
+    profileId: string,
+    body: UserMemberBody,
+  ): Promise<boolean> {
+    const ok = await this.run(async () => {
+      await updateProfile(collection, profileId, body, this.gatewayUrl);
+      return true;
+    });
+    return ok === true;
+  }
+
   async removeProfile(collection: string, profileId: string): Promise<boolean> {
     const ok = await this.run(async () => {
       await deleteProfile(collection, profileId, this.gatewayUrl);
@@ -267,6 +283,9 @@ class UserGatewayStore {
     return ok === true;
   }
 
+  /** PATCH description + member order in one request. The write alone: a
+   * set save spans several requests, so the read side refreshes once at the
+   * end of the sequence (the dialog's settle port), never per write. */
   async saveSet(
     collection: string,
     name: string,
@@ -274,7 +293,6 @@ class UserGatewayStore {
   ): Promise<boolean> {
     const ok = await this.run(async () => {
       await updateCollectionSet(collection, name, body, this.gatewayUrl);
-      await this.refreshAll();
       return true;
     });
     return ok === true;

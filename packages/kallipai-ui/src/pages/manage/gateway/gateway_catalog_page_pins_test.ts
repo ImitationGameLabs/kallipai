@@ -68,6 +68,15 @@ function functionBody(src: string, name: string): string {
   return src.slice(start, end);
 }
 
+/** The non-comment lines of a body that touch the unassigned reload. */
+function reloadLines(body: string): string[] {
+  return body
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line !== "" && !line.startsWith("//"))
+    .filter((line) => line.includes("reloadDetailUnassigned("));
+}
+
 Deno.test(
   "GatewayCatalogPage leaves the session postures to the shell",
   { permissions: { read: [PAGE] } },
@@ -130,7 +139,7 @@ Deno.test(
 );
 
 Deno.test(
-  "GatewayCatalogPage edits the catalog through the store, one request per save",
+  "GatewayCatalogPage edits the catalog through the store, not the wire",
   { permissions: { read: [PAGE] } },
   () => {
     const src = source(PAGE);
@@ -140,7 +149,7 @@ Deno.test(
     );
     assert(
       src.includes("gatewayStore.saveSet(") && !src.includes("updateSet("),
-      "member and description edits land as the store's single PATCH",
+      "members land as PUTs; description and order as the store's one PATCH",
     );
     assert(
       src.includes("gatewayStore.removeSet("),
@@ -426,7 +435,7 @@ Deno.test(
 );
 
 Deno.test(
-  "an unassigned reload waits for the set edit it follows to succeed",
+  "an unassigned reload waits for the drop and the save it follows",
   { permissions: { read: [PAGE] } },
   () => {
     const page = source(PAGE);
@@ -435,35 +444,66 @@ Deno.test(
     // the call it reports on: ahead of it, a failure left over from before
     // blocks the reload this edit needs, and a clean verdict fires the
     // reload before this edit lands. Either way the panel keeps old rows.
-    const paths = [
-      ["onDropToSet", "await gatewayStore.addUnassignedToSet("],
-      ["onSaveSet", "await gatewayStore.saveSet("],
-    ] as const;
-    for (const [fn, call] of paths) {
-      const body = functionBody(page, fn);
-      assert(body.includes(call), `${fn} still calls ${call}`);
-      // One reload per path is today's convention, not an invariant: a
-      // second, conditional reload would be harmless, an unconditional one
-      // would not.
-      const reloads = body
-        .split("\n")
-        .map((line) => line.trim())
-        .filter((line) => line !== "" && !line.startsWith("//"))
-        .filter((line) => line.includes("reloadDetailUnassigned("));
-      const reload = reloads[0];
-      assert(reloads.length === 1, `${fn} reloads once`);
-      // The condition is the point: a reload gated on anything but a clean
-      // store verdict is the bug this pin keeps out.
-      assert(
-        reload.startsWith("if (") &&
-          body.includes("gatewayStore.error === null"),
-        `${fn} reloads only on a clean verdict`,
-      );
-      assert(
-        body.indexOf(reload) > body.indexOf(call),
-        `${fn} reloads after ${call} lands`,
-      );
-    }
+    const drop = functionBody(page, "onDropToSet");
+    const call = "await gatewayStore.addUnassignedToSet(";
+    assert(drop.includes(call), `onDropToSet still calls ${call}`);
+    // One reload per path is today's convention, not an invariant: a
+    // second, conditional reload would be harmless, an unconditional one
+    // would not.
+    const dropReloads = reloadLines(drop);
+    assert(dropReloads.length === 1, "onDropToSet reloads once");
+    // The condition is the point: a reload gated on anything but a clean
+    // store verdict is the bug this pin keeps out.
+    assert(
+      dropReloads[0] ===
+        "if (gatewayStore.error === null) await reloadDetailUnassigned();",
+      "onDropToSet reloads only on a clean verdict",
+    );
+    assert(
+      drop.indexOf("await reloadDetailUnassigned();") > drop.indexOf(call),
+      "onDropToSet reloads after the drop lands",
+    );
+    // A set save is the other way a profile gains or loses a set: the
+    // last member leaving flips that profile back to unassigned. The
+    // save succeeded here, so this reload runs unconditionally, and it
+    // is awaited, so the panel cannot read the store mid-refresh.
+    const save = functionBody(page, "onSaveSet");
+    const saveReloads = reloadLines(save);
+    assert(saveReloads.length === 1, "onSaveSet reloads once");
+    assert(
+      saveReloads[0] === "await reloadDetailUnassigned();",
+      "onSaveSet awaits the reload",
+    );
+    assert(
+      save.indexOf("await reloadDetailUnassigned();") >
+        save.indexOf("dialogOpen = false;"),
+      "onSaveSet reloads after the dialog closes",
+    );
+  },
+);
+
+Deno.test(
+  "a set save settles once, through the sequence's own port",
+  { permissions: { read: [PAGE] } },
+  () => {
+    const page = source(PAGE);
+    const save = functionBody(page, "onSaveSet");
+    // One save spans several requests: the read side refreshes once, in the
+    // sequence, before the re-read that projects what it wrote.
+    assert(
+      save.includes("settle: () => gatewayStore.refreshAll(),"),
+      "the sequence refreshes the read side through its settle port",
+    );
+    assert(
+      save.split("refreshAll").length - 1 === 1,
+      "no other refresh rides the save",
+    );
+    // The order of the two port declarations is only a proxy: what runs
+    // first at save time is pinned by saveSet_test's port log.
+    assert(
+      save.indexOf("settle:") < save.indexOf("reread:"),
+      "the refresh lands before the re-read",
+    );
   },
 );
 
@@ -478,6 +518,31 @@ Deno.test(
     assert(
       page.includes("pinnedCollection={detailRow?.name ?? null}"),
       "the page hands the detail's collection, or null",
+    );
+  },
+);
+
+Deno.test(
+  "the set save rides the lib's step function, not an inline sequence",
+  { permissions: { read: [PAGE] } },
+  () => {
+    const page = source(PAGE);
+    // The PUT-then-PATCH sequence and its failure handling are tested
+    // directly in lib/manage/gateway/saveSet_test.ts; the page only wires
+    // the ports to the store, so the two cannot drift apart.
+    assert(
+      page.includes("saveSetDraft(target, result, {"),
+      "the save runs through the tested step function",
+    );
+    assert(
+      page.includes("gatewayStore.updateMember(") &&
+        page.includes("gatewayStore.saveSet(") &&
+        !page.includes("failSetSave"),
+      "the ports wrap the store, and no page-local failure path remains",
+    );
+    assert(
+      page.includes("landed={setDialogLanded}"),
+      "a stopped save hands the dialog the rows that landed",
     );
   },
 );

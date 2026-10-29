@@ -53,6 +53,32 @@ Deno.test(
   },
 );
 
+Deno.test("a set save writes and does not read", async () => {
+  const realFetch = globalThis.fetch;
+  const seen: string[] = [];
+  // One PATCH and no read at all: the read side belongs to the save
+  // sequence, so a store write that refreshed behind its own back would
+  // double the reads the sequence already paid for.
+  globalThis.fetch = ((input: unknown, init?: { method?: string }) => {
+    seen.push(`${init?.method ?? "GET"} ${String(input)}`);
+    return Promise.resolve(
+      new Response(
+        JSON.stringify({ name: "s1", description: "d", members: [] }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+  }) as unknown as typeof fetch;
+  try {
+    assertEquals(
+      await store.saveSet("baseline", "s1", { description: "d" }),
+      true,
+    );
+    assertEquals(seen.length, 1);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
 Deno.test(
   "collection mutations surface failures on the store's error state and refreshAll populates the reach state",
   async () => {
@@ -314,6 +340,70 @@ Deno.test(
     try {
       assertEquals(await store.addUnassignedToSet("alpha", "b", "s1"), false);
       assertEquals(calls.filter((c) => c.method === "PATCH").length, 0);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  },
+);
+
+Deno.test(
+  "updateMember PUTs the row as a served member and answers whether it landed",
+  async () => {
+    const realFetch = globalThis.fetch;
+    const calls: { method: string; url: string; body: unknown }[] = [];
+    let status = 200;
+    globalThis.fetch = ((input: unknown, init?: RequestInit) => {
+      calls.push({
+        method: init?.method ?? "GET",
+        url: String(input),
+        body: typeof init?.body === "string" ? JSON.parse(init.body) : null,
+      });
+      return Promise.resolve(
+        new Response(JSON.stringify({}), {
+          status,
+          headers: { "content-type": "application/json" },
+        }),
+      );
+    }) as typeof fetch;
+    const body = {
+      model: "deepseek-next",
+      max_context_window: 128_000,
+      effort: "high",
+      modalities: ["text", "image"],
+      parked: false as const,
+    };
+    try {
+      assertEquals(await store.updateMember("alpha", "p1", body), true);
+      assertEquals(calls.length, 1);
+      assertEquals(calls[0]!.method, "PUT");
+      assertEquals(
+        calls[0]!.url.endsWith("/admin/collections/alpha/profiles/p1"),
+        true,
+      );
+      // The dialog edits a member, so the row stays served: a member PUT
+      // never carries the row back into the unassigned pool.
+      assertEquals(calls[0]!.body, body);
+
+      status = 404;
+      assertEquals(await store.updateMember("alpha", "p1", body), false);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  },
+);
+
+Deno.test(
+  "a refused set save answers false and records the reason",
+  async () => {
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = () =>
+      Promise.resolve(new Response(JSON.stringify({}), { status: 500 }));
+    try {
+      assertEquals(
+        await store.saveSet("baseline", "s1", { description: "d" }),
+        false,
+      );
+      assertEquals(store.error !== null, true);
     } finally {
       globalThis.fetch = realFetch;
     }

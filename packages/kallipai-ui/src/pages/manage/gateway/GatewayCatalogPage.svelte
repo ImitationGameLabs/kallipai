@@ -38,6 +38,15 @@
   import CollectionsSection from "../../../components/manage/gateway/CollectionsSection.svelte";
   import SetDialog from "../../../components/manage/gateway/SetDialog.svelte";
   import {
+    saveSetDraft,
+    saveStoppedBanner,
+  } from "../../../lib/manage/gateway/saveSet.ts";
+  import {
+    adminMemberBody,
+    setsAlsoHolding,
+    type SetSaveDraft,
+  } from "../../../lib/manage/gateway/setDraft.ts";
+  import {
     common_loading,
     common_retry,
     common_edit,
@@ -131,6 +140,15 @@
 
   let editSet = $state<AdminSetRow | null>(null);
   let dialogOpen = $state(false);
+  // The dialog's save wiring: a busy latch while the member PUTs and the
+  // set PATCH run, and the server's reason when one of them fails (the
+  // dialog stays open on the re-read row).
+  let setDialogBusy = $state(false);
+  let setDialogError = $state<string | null>(null);
+
+  // The rows whose PUT landed before a save stopped: the dialog reseeds
+  // those and keeps the rest of the draft.
+  let setDialogLanded = $state<string[]>([]);
   let editRequest = $state(0);
   let removeTarget = $state<AdminSetRow | null>(null);
   let removeBusy = $state(false);
@@ -169,25 +187,74 @@
     const row = await gatewayStore.loadSet(set.collection_name, set.name);
     if (row && request === editRequest) {
       editSet = row;
+      setDialogError = null;
+      setDialogBusy = false;
+      setDialogLanded = [];
       dialogOpen = true;
     }
   }
 
-  async function onSaveSet(result: {
-    description: string;
-    members: string[];
-  }): Promise<void> {
+  // A profile row can sit in more than one set of a collection: the
+  // dialog's cards name the other sets, so a change to a shared row is
+  // not silent about the second place it lands.
+  const setDialogAlsoIn = $derived.by(() => {
     const target = editSet;
-    dialogOpen = false;
-    editSet = null;
+    if (target === null) return {};
+    return setsAlsoHolding(target, gatewayStore.setsIn(target.collection_name));
+  });
+
+  // Land the dialog's draft: the member PUTs, then the description and
+  // order PATCH, through the lib's step function so the failure paths are
+  // tested without a browser. A stopped save keeps the dialog open, names
+  // what landed, and hands the re-read row back for the reseed. The read
+  // side belongs to the sequence (its settle port), not to any one write.
+  async function onSaveSet(result: SetSaveDraft): Promise<void> {
+    const target = editSet;
     if (!target) return;
-    await gatewayStore.saveSet(target.collection_name, target.name, {
-      description: result.description,
-      members: result.members,
-    });
-    // Dropping a set's last member flips that profile back to unassigned
-    // server-side, so a member edit moves the unassigned panel too.
-    if (gatewayStore.error === null) await reloadDetailUnassigned();
+    setDialogBusy = true;
+    setDialogError = null;
+    try {
+      const outcome = await saveSetDraft(target, result, {
+        putMember: async (profileId, body) => {
+          const ok = await gatewayStore.updateMember(
+            target.collection_name,
+            profileId,
+            adminMemberBody(body),
+          );
+          return { ok, reason: ok ? null : gatewayStore.error };
+        },
+        patchSet: async (body) => {
+          const ok = await gatewayStore.saveSet(
+            target.collection_name,
+            target.name,
+            body,
+          );
+          return { ok, reason: ok ? null : gatewayStore.error };
+        },
+        // One save spans several requests, so the read side refreshes once,
+        // here, after the last write and before the re-read below.
+        settle: () => gatewayStore.refreshAll(),
+        reread: () => gatewayStore.loadSet(target.collection_name, target.name),
+      });
+      if (outcome.phase !== "done") {
+        // The landed list lands before the re-read row: the dialog's
+        // effect short-circuits on set === seeded, so these two
+        // assignments are not interchangeable.
+        setDialogLanded = outcome.landed;
+        setDialogError = saveStoppedBanner(outcome);
+        if (outcome.row) editSet = outcome.row;
+        return;
+      }
+      dialogOpen = false;
+      editSet = null;
+      setDialogLanded = [];
+      // Dropping a set's last member flips that profile back to
+      // unassigned server-side, so a member edit moves the unassigned
+      // panel too.
+      await reloadDetailUnassigned();
+    } finally {
+      setDialogBusy = false;
+    }
   }
 
   // The provider pool's dialog state. editProvider null = the create
@@ -852,10 +919,15 @@
 <SetDialog
   open={dialogOpen}
   set={editSet}
+  busy={setDialogBusy}
+  error={setDialogError}
+  landed={setDialogLanded}
+  alsoIn={setDialogAlsoIn}
   onSave={(result) => void onSaveSet(result)}
   onCancel={() => {
     dialogOpen = false;
     editSet = null;
+    setDialogError = null;
   }}
 />
 

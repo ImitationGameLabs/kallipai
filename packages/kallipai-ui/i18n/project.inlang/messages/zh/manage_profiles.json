@@ -111,6 +111,7 @@
   "manage_profiles_profile_effort_label": "思考力度",
   "manage_profiles_profile_dialog_id_duplicate": "该 ID 已被占用：配置集内的配置或未分配的配置都不能再用它",
   "manage_profiles_profile_dialog_invalid_window": "请输入正整数（token 数）。",
+  "manage_profiles_profile_dialog_invalid_model": "填写模型 id。",
   "manage_profiles_heading_desc_l1": "四层模型：模型提供商为全局池，具名配置集负责轮换，未分配的配置在轮换之外，可拖进配置集",
   "manage_profiles_heading_desc_l2": "测试模型提供商=连通性",
   "manage_profiles_heading_desc_l3": "测试配置=一次最小真实推理",

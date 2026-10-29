@@ -31,8 +31,8 @@ Deno.test(
       "the member-set cascade rides the shared helper",
     );
     assert(
-      src.includes('onchange={() => (setDraft = "")}') &&
-        !src.includes("onblur={() => (setDraft"),
+      src.includes('onchange={() => (setNameDraft = "")}') &&
+        !src.includes("onblur={() => (setNameDraft"),
       "a collection change resets the set pick without waiting for blur",
     );
     assert(
@@ -40,7 +40,7 @@ Deno.test(
       "a collection without sets disables the set pick",
     );
     assert(
-      src.includes("onConfirm(collectionDraft, setDraft)"),
+      src.includes("onConfirm(collectionDraft, setNameDraft)"),
       "the confirm carries both picks to the caller",
     );
     assert(

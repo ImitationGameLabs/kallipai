@@ -12,6 +12,7 @@
     selected,
     label,
     onChange,
+    disabled = false,
   }: {
     /** The selected modalities (text is always in effect). */
     selected: readonly Modality[];
@@ -19,9 +20,12 @@
     label: string;
     /** The flipped selection after a toggle. */
     onChange: (next: readonly Modality[]) => void;
+    /** A save is in flight: the tags still read, they just cannot move. */
+    disabled?: boolean;
   } = $props();
 
   function toggle(m: Modality): void {
+    if (disabled) return;
     // The selection stays in canonical order (the manage dialog's
     // flip semantics: rebuild from MODALITY_ORDER on add).
     const next = selected.includes(m)
@@ -43,6 +47,7 @@
         <button
           type="button"
           aria-pressed={selected.includes(m)}
+          {disabled}
           class="badge rounded-full text-xs cursor-pointer transition {selected.includes(
             m,
           )
