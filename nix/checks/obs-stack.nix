@@ -1,9 +1,8 @@
 # Static proof for nix/obs-stack.nix: the stack expression is evaluated here
-# without arion (which is not a flake input), and every invariant the dev
-# compose relies on is asserted at eval time -- a broken shape fails the check
-# rather than the next `arion up`. What only a running stack can prove (the
-# arion option typing, the containers' uid, the real tempo layout) is not
-# asserted here.
+# as a pure function, and every invariant the dev compose relies on is
+# asserted at eval time -- a broken shape fails the check rather than the next
+# `docker compose up`. What only a running stack can prove (the containers'
+# uid, the real tempo layout) is not asserted here.
 {
   pkgs,
   lib,
@@ -17,7 +16,7 @@ let
   # The real defaults, not a copy of them: a second literal here would be the
   # second place to forget, and every port assertion below would then be
   # checking this file against itself. These are strings, the shape
-  # compose/dev/polis.nix passes after envOrDefault.
+  # nix/packages/stack.nix passes for the same values.
   ports = stack.defaults;
   # The container side, read from the same export the stack itself uses, so
   # these assertions move with the values instead of copying them.
@@ -36,21 +35,6 @@ let
     inherit pkgs root ports;
     containerPorts = movedPorts;
   };
-  # The dev tagma's host port default, read out of its source: the same move as
-  # reading the pruner's constants below, and the only way to pin both sides of
-  # "the UI does not land on the tagma's port".
-  tagmaPort =
-    let
-      line =
-        lib.findFirst (candidate: lib.hasInfix "else tagmaPortRaw" candidate)
-          (throw "obs-stack: compose/dev/tagma.nix has no tagma port default")
-          (lib.splitString "\n" (builtins.readFile ../../compose/dev/tagma.nix));
-      found = builtins.match ".*then \"([0-9]+)\" else tagmaPortRaw.*" line;
-    in
-    if found == null then
-      throw "obs-stack: cannot read the tagma port default out of compose/dev/tagma.nix"
-    else
-      lib.head found;
   inherit (built) services;
   names = builtins.attrNames services;
   get = name: attr: services.${name}.service.${attr};
@@ -181,12 +165,6 @@ let
     ))
     (expect "every container port is a string, the shape compose passes" (
       lib.all (name: builtins.isString containerPorts.${name}) (builtins.attrNames containerPorts)
-    ))
-    # Both sides of the UI port question: the stack's own host port and the
-    # one the dev tagma binds, read out of that file rather than assumed to be
-    # a literal.
-    (expect "the UI's default host port is not the one the dev tagma binds" (
-      stack.defaults.grafana != tagmaPort
     ))
     (expect "both stateful services bind their state under the telemetry root" (
       inVolumes "tempo" (rootOf root "tempo:/var/tempo")

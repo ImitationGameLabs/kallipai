@@ -14,5 +14,5 @@ as a step-by-step guide for its platform form.
   x86_64 distribution: per-user by default, with an optional systemd
   system-level form.
 
-A container-based form (arion compose) is also available; its guide is
-the repository-internal `docs/en/deployment/container.md`.
+A container-based form (docker compose) is also available; its guide is the
+repository-internal `docs/en/deployment/container.md`.

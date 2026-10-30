@@ -40,8 +40,8 @@ in
     rumdl
 
     # Local CA + leaf cert generation for the Caddy-fronted dev topology (see
-    # the mkcert step in docs/en/development/setup.md); used by arion-compose.nix +
-    # compose/dev/Caddyfile.dev.
+    # the mkcert step in docs/en/development/setup.md); the dev edge mounts the
+    # pair and names the paths through KALLIPAI_TLS_CERT / KALLIPAI_TLS_KEY.
     mkcert
 
     # cmake builds libz-ng-sys, flate2's zlib-ng backend hard-selected by pingora-core.

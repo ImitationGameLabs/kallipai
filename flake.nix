@@ -103,6 +103,16 @@
           };
           inherit (builds) workspace;
 
+          # Pre-built integration-test binaries, shared by the flake attribute
+          # and the container image that runs them.
+          integrationTests = import ./nix/packages/integration-tests.nix {
+            inherit
+              pkgs
+              common
+              workspace
+              ;
+          };
+
           # Pinned 22.11 instance for the FHS distribution tarball. It
           # supplies only the link layer: its stdenv cc is the cargo
           # linker, so crt objects, -L search order, the dynamic linker,
@@ -173,6 +183,12 @@
             # Retention for the local telemetry stack's data directory (the
             # dev compose's collector/tempo/grafana): see nix/obs-stack.nix.
             kallipai-telemetry-prune = builds.telemetry-prune;
+            # The config texts the docker compose stack mounts: the collector,
+            # tempo, grafana, the prometheus scrape config and the edge tls
+            # snippet, as one directory (see nix/packages/stack.nix).
+            kallipai-stack = import ./nix/packages/stack.nix {
+              inherit lib pkgs;
+            };
             # The FHS distribution tarball builds on the pinned 22.11
             kallipai-tarball = import ./nix/packages/tarball.nix {
               # Tool-side pkgs (patchelf/gnutar) from the main line; the
@@ -196,7 +212,7 @@
           # nix/packages/docker-images/.
           // (lib.optionalAttrs pkgs.stdenv.isLinux {
             # Purpose-built prod images for the split deploy
-            # (compose/prod/polis.nix / tagma.nix): archeion, lesche, keryx,
+            # (compose.prod.yaml): archeion, lesche, keryx,
             # and files are the server-side services (co-located, independent images);
             # carries no tagma-specific baked env.
             kallipai-archeion-image = import ./nix/packages/docker-images/archeion.nix {
@@ -234,15 +250,67 @@
                 ;
               inherit (builds) tagma;
             };
-            # Pre-built integration-test binaries + the agent binaries, for
-            # running the suite in a container (see compose/dev/test.nix).
-            # Linux-only like the image.
-            kallipai-integration-tests = import ./nix/packages/integration-tests.nix {
+            # The two remaining platform services and the observability trio,
+            # plus the store-less dev image the dev override points every
+            # application at: the same shapes as the four above.
+            kallipai-model-gateway-image = import ./nix/packages/docker-images/model-gateway.nix {
               inherit
                 pkgs
                 common
-                workspace
                 ;
+              inherit (builds) model-gateway;
+            };
+            kallipai-instances-image = import ./nix/packages/docker-images/instances.nix {
+              inherit
+                pkgs
+                common
+                ;
+              inherit (builds) instances;
+            };
+            kallipai-otelcol-image = import ./nix/packages/docker-images/otelcol.nix {
+              inherit pkgs common;
+            };
+            kallipai-tempo-image = import ./nix/packages/docker-images/tempo.nix {
+              inherit pkgs common;
+            };
+            kallipai-grafana-image = import ./nix/packages/docker-images/grafana.nix {
+              inherit pkgs common;
+            };
+            # The edge image carries the three Caddyfile entries, the shared site
+            # and the SPA bundle; the certificate directory stays a mount. Built here
+            # so the image and the flake's bundle cannot disagree about which
+            # revision is served.
+            kallipai-caddy-web-image = import ./nix/packages/docker-images/caddy-web.nix {
+              inherit pkgs common;
+              webDist = import ./nix/packages/kallipai-web.nix {
+                inherit pkgs;
+                src = self;
+                inherit (pkgs) deno;
+              };
+            };
+            kallipai-dev-image = import ./nix/packages/docker-images/dev-platform.nix {
+              inherit pkgs common;
+              inherit (builds)
+                archeion
+                lesche
+                files
+                keryx
+                model-gateway
+                instances
+                ;
+            };
+            # Pre-built integration-test binaries + the agent binaries the
+            # suites re-execute. Linux-only like the image.
+            kallipai-integration-tests = integrationTests;
+            # The image that runs those suites in a container: see
+            # scripts/integration-test.sh and compose.test.yaml.
+            kallipai-integration-tests-image = import ./nix/packages/docker-images/integration-tests.nix {
+              inherit
+                pkgs
+                common
+                integrationTests
+                ;
+              inherit (integrationTests.passthru) shippedTests;
             };
             # The kallipai-web static site (SPA bundle for a static file
             # server to serve; the NixOS module derives the site root,

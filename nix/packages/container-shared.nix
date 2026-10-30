@@ -11,7 +11,7 @@ let
   # `nix shell`. sed is deliberately omitted (prefer the harness's edit tools).
   #
   # Shared by the tagma docker image (nix/packages/docker-images/tagma.nix) and
-  # the dev compose (arion-compose.nix) so the two cannot drift.
+  # the dev compose override (compose.dev.yaml) so the two cannot drift.
   toolEnv = pkgs.buildEnv {
     name = "kallipai-path-env";
     paths = [

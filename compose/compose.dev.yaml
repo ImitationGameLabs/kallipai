@@ -1,0 +1,207 @@
+# Dev override: host-network edge, loopback ports, the dev data directories
+# and the /nix/store passthrough the store-less images need.
+#
+# The browser-facing values follow KALLIPAI_DOMAIN, the way compose.prod.yaml
+# derives them: the app origin is https://app.<domain> unless KALLIPAI_APP_ORIGIN
+# says otherwise, so a domain set in `compose/.env` alone still yields the CORS origins,
+# the session cookie domain and the WebAuthn relying party the browser expects.
+# Compose derives `app.<domain>` on 443, so a stack whose edge answers under
+# another host, off 443, or over http says the origin itself;
+# scripts/compose-up.sh refuses that combination without one.
+name: kallipai-dev
+
+services:
+  archeion-postgres:
+    image: postgres:17.5
+    environment:
+      POSTGRES_DB: kallipai
+      POSTGRES_USER: kallipai
+      POSTGRES_PASSWORD: kallipai
+
+  lesche-postgres:
+    image: postgres:17.5
+    environment:
+      POSTGRES_DB: kallipai
+      POSTGRES_USER: kallipai
+      POSTGRES_PASSWORD: kallipai
+
+  gateway-postgres:
+    image: postgres:17.5
+    environment:
+      POSTGRES_DB: kallipai
+      POSTGRES_USER: kallipai
+      POSTGRES_PASSWORD: kallipai
+
+  files-postgres:
+    image: postgres:17.5
+    environment:
+      POSTGRES_DB: kallipai
+      POSTGRES_USER: kallipai
+      POSTGRES_PASSWORD: kallipai
+
+  archeion:
+    image: ${KALLIPAI_DEV_IMAGE:?run scripts/compose-up.sh}
+    # One image carries all six binaries; PATH=/bin resolves the bare name.
+    command: ["kallipai-archeion"]
+    env_file: ["${KALLIPAI_ENV_FILE:-.env}"]
+    ports: ["127.0.0.1:7100:7100"]
+    environment:
+      KALLIPAI_ARCHEION_ADMIN_TOKEN: sk-admin-dev-0123456789abcdef0123456789abcdef
+      KALLIPAI_ARCHEION_ADMIN_USER_LOGIN: "true"
+      KALLIPAI_ARCHEION_COOKIE_SECURE: "true"
+      KALLIPAI_ARCHEION_CORS_ORIGINS: ${KALLIPAI_APP_ORIGIN:-https://app.${KALLIPAI_DOMAIN:?}}
+      KALLIPAI_ARCHEION_DATABASE_URL: postgres://kallipai:kallipai@archeion-postgres:5432/kallipai
+      KALLIPAI_ARCHEION_OAUTH_REDIRECT_BASE: ${KALLIPAI_APP_ORIGIN:-https://app.${KALLIPAI_DOMAIN:?}}
+      KALLIPAI_ARCHEION_SESSION_COOKIE_DOMAIN: ${KALLIPAI_DOMAIN:?}
+      KALLIPAI_ARCHEION_TRUSTED_PROXIES: 127.0.0.0/8, ::1/128
+      KALLIPAI_ARCHEION_WEBAUTHN_ALLOW_ANY_PORT: "false"
+      KALLIPAI_ARCHEION_WEBAUTHN_RP_ID: ${KALLIPAI_DOMAIN:?}
+      KALLIPAI_ARCHEION_WEBAUTHN_RP_NAME: kallipai
+      KALLIPAI_ARCHEION_WEBAUTHN_RP_ORIGIN: ${KALLIPAI_APP_ORIGIN:-https://app.${KALLIPAI_DOMAIN:?}}
+      NIX_REMOTE: ""
+    volumes:
+      - /nix/store:/nix/store:ro
+
+  lesche:
+    image: ${KALLIPAI_DEV_IMAGE:?run scripts/compose-up.sh}
+    command: ["kallipai-lesche"]
+    env_file: ["${KALLIPAI_ENV_FILE:-.env}"]
+    ports: ["127.0.0.1:7200:7200"]
+    environment:
+      KALLIPAI_LESCHE_CORS_ORIGINS: ${KALLIPAI_APP_ORIGIN:-https://app.${KALLIPAI_DOMAIN:?}}
+      KALLIPAI_LESCHE_DATABASE_URL: postgres://kallipai:kallipai@lesche-postgres:5432/kallipai
+      NIX_REMOTE: ""
+    volumes:
+      - /nix/store:/nix/store:ro
+
+  files:
+    image: ${KALLIPAI_DEV_IMAGE:?run scripts/compose-up.sh}
+    command: ["kallipai-files"]
+    env_file: ["${KALLIPAI_ENV_FILE:-.env}"]
+    ports: ["127.0.0.1:7400:7400"]
+    environment:
+      KALLIPAI_FILES_CORS_ORIGINS: ${KALLIPAI_APP_ORIGIN:-https://app.${KALLIPAI_DOMAIN:?}}
+      KALLIPAI_FILES_DATABASE_URL: postgres://kallipai:kallipai@files-postgres:5432/kallipai
+      KALLIPAI_FILES_NOTIFY_TOKEN: dev-notify-secret
+      KALLIPAI_FILES_NOTIFY_URL: http://keryx:7210
+      NIX_REMOTE: ""
+    volumes:
+      - /nix/store:/nix/store:ro
+
+  keryx:
+    image: ${KALLIPAI_DEV_IMAGE:?run scripts/compose-up.sh}
+    command: ["kallipai-keryx"]
+    env_file: ["${KALLIPAI_ENV_FILE:-.env}"]
+    ports: ["127.0.0.1:7210:7210"]
+    environment:
+      KALLIPAI_KERYX_CORS_ORIGINS: ${KALLIPAI_APP_ORIGIN:-https://app.${KALLIPAI_DOMAIN:?}}
+      KALLIPAI_KERYX_INTERNAL_TOKEN: dev-notify-secret
+      NIX_REMOTE: ""
+    volumes:
+      - /nix/store:/nix/store:ro
+
+  gateway:
+    image: ${KALLIPAI_DEV_IMAGE:?run scripts/compose-up.sh}
+    command: ["kallipai-model-gateway"]
+    env_file: ["${KALLIPAI_ENV_FILE:-.env}"]
+    ports: ["127.0.0.1:7501:7501", "127.0.0.1:7500:7500"]
+    environment:
+      KALLIPAI_MODEL_GATEWAY_DATABASE_URL: postgresql://kallipai:kallipai@gateway-postgres:5432/kallipai
+      NIX_REMOTE: ""
+    volumes:
+      - /nix/store:/nix/store:ro
+
+  instances:
+    image: ${KALLIPAI_DEV_IMAGE:?run scripts/compose-up.sh}
+    command: ["kallipai-instances"]
+    env_file: ["${KALLIPAI_ENV_FILE:-.env}"]
+    ports: ["127.0.0.1:7300:7300"]
+    environment:
+      # The daemon socket the host's daemon binds, bind-mounted at /state.
+      KALLIPAI_DAEMON_SOCKET: /state/control.sock
+      # The public name plus the service name: the status probe asks from
+      # inside the platform network, where the service answers to `instances`,
+      # and the guard compares Host verbatim. That name resolves to it only
+      # there, so the rebinding guard is untouched.
+      KALLIPAI_INSTANCES_ALLOWED_HOSTS: api.${KALLIPAI_DOMAIN:?},instances
+      KALLIPAI_INSTANCES_CORS_ORIGINS: ${KALLIPAI_APP_ORIGIN:-https://app.${KALLIPAI_DOMAIN:?}}
+      NIX_REMOTE: ""
+    volumes:
+      - /nix/store:/nix/store:ro
+      - ${KALLIPAI_DAEMON_STATE_DIR:?}:/state
+      - ${KALLIPAI_TAGMATA_DIR:?}:/data
+
+  otelcol:
+    image: ${KALLIPAI_IMAGE_PREFIX:-}kallipai-otelcol:${KALLIPAI_IMAGE_TAG:?}
+    ports: ["127.0.0.1:4318:4318", "127.0.0.1:13133:13133"]
+    environment:
+      NIX_REMOTE: ""
+    volumes:
+      - /nix/store:/nix/store:ro
+
+  tempo:
+    image: ${KALLIPAI_IMAGE_PREFIX:-}kallipai-tempo:${KALLIPAI_IMAGE_TAG:?}
+    ports: ["127.0.0.1:3200:3200"]
+    environment:
+      NIX_REMOTE: ""
+    volumes:
+      - /nix/store:/nix/store:ro
+
+  grafana:
+    image: ${KALLIPAI_IMAGE_PREFIX:-}kallipai-grafana:${KALLIPAI_IMAGE_TAG:?}
+    ports: ["127.0.0.1:3001:3000"]
+    environment:
+      NIX_REMOTE: ""
+    volumes:
+      - /nix/store:/nix/store:ro
+
+  prometheus:
+    image: prom/prometheus:v3.13.0
+    ports: ["127.0.0.1:9090:9090"]
+
+  caddy:
+    image: ${KALLIPAI_IMAGE_PREFIX:-}kallipai-caddy-web:${KALLIPAI_IMAGE_TAG:?}
+    # The dev entry proxies the app host to the host's vite server; production
+    # leaves the image's own Cmd on the bundle entry. The plain entry is the
+    # third choice: no certificate, the bundle served over http, picked by
+    # naming it here (KALLIPAI_EDGE_ENTRY=/etc/caddy/Caddyfile.plain).
+    command:
+      [
+        "caddy",
+        "run",
+        "--config",
+        "${KALLIPAI_EDGE_ENTRY:-/etc/caddy/Caddyfile.vite}",
+        "--adapter",
+        "caddyfile",
+      ]
+    # The services publish on loopback, so the edge shares the host network to
+    # reach them; the site address carries the port that shape needs.
+    network_mode: host
+    environment:
+      KALLIPAI_DOMAIN: ${KALLIPAI_DOMAIN:?}
+      # Both addresses keep a default this file derives and take an override:
+      # the plain entry serves them over http, on whatever port it was given.
+      KALLIPAI_EDGE_SITE: "${KALLIPAI_EDGE_SITE:-*.${KALLIPAI_DOMAIN:?}:${KALLIPAI_EDGE_PORT:-443}}"
+      # The mkcert pair the mount holds; a name caddy cannot find fails at the
+      # first handshake, not at load, so a wrong name surfaces only when a
+      # browser connects.
+      KALLIPAI_TLS_CERT: /certs/cert.pem
+      KALLIPAI_TLS_KEY: /certs/key.pem
+      KALLIPAI_API_BASE: "${KALLIPAI_API_BASE:-https://api.${KALLIPAI_DOMAIN:?}:${KALLIPAI_EDGE_PORT:-443}}"
+      # The shared /v1 route table takes its upstreams from the environment;
+      # dev publishes each service on loopback, so that is where they point.
+      KALLIPAI_ARCHEION_UPSTREAM: 127.0.0.1:7100
+      KALLIPAI_LESCHE_UPSTREAM: 127.0.0.1:7200
+      KALLIPAI_KERYX_UPSTREAM: 127.0.0.1:7210
+      KALLIPAI_FILES_UPSTREAM: 127.0.0.1:7400
+      KALLIPAI_INSTANCES_UPSTREAM: 127.0.0.1:7300
+      KALLIPAI_MODEL_GATEWAY_UPSTREAM: 127.0.0.1:7500
+      # These repeat the loopback ports the services publish: compose cannot
+      # read another service's ports, so the two lists exist twice with nothing
+      # comparing them. The status check probes the published ports directly and
+      # not through the edge, so a stale line here still reports every service
+      # healthy; move a port in one place and move it here too.
+    # The Caddyfile and the site live in the image; the mkcert pair is the
+    # host's, mounted read-only.
+    volumes:
+      - ./dev/.certs:/certs:ro

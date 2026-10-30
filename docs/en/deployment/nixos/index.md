@@ -9,8 +9,8 @@ host: the daemon as a system service, the six polis services (archeion:
 identity control plane; lesche: relay data plane; keryx: tagma-link
 relay; files: content transfer; instances: web instances proxy;
 model-gateway: model API gateway)
-behind the host's reverse proxy, and the web app. The container form (arion
-compose, Nix-native docker-compose) is a separate, complementary way to
+behind the host's reverse proxy, and the web app. The container form (docker
+compose) is a separate, complementary way to
 run the platform; this
 guide walks the NixOS module bring-up step by step. The
 module itself is `nix/nixos-modules.nix`, and its option descriptions are

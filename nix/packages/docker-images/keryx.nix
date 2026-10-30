@@ -17,7 +17,7 @@ in
 # The minimal keryx image: just the binary + the CA trust store. The keryx is
 # a pure HTTP service (axum) like the archeion -- no shell-out toolset, no
 # baked env (it reads everything from its env at runtime). The compose service
-# (compose/dev/polis.nix) supplies the command + environment. A separate image
+# (compose.yaml) supplies the command + environment. A separate image
 # from the lesche so the two relays rebuild and redeploy independently.
 pkgs.dockerTools.buildImage {
   name = "kallipai-keryx";
@@ -27,7 +27,7 @@ pkgs.dockerTools.buildImage {
   ]
   ++ cacert;
   config = {
-    Cmd = [ "${keryx}/bin/kallipai-keryx" ];
+    Cmd = [ "/bin/kallipai-keryx" ];
     ExposedPorts = {
       "7210/tcp" = { };
     };

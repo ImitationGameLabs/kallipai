@@ -9,8 +9,8 @@ let
 in
 # The minimal archeion image: the binary + the CA trust store + the `kallipai-admin`
 # CLI for in-container operator tasks. No shell toolset; archeion reads everything
-# else from its env at runtime. The compose service (compose/prod/polis.nix)
-# supplies the command + environment.
+# else from its env at runtime. The image carries the command, the compose files
+# carry the environment.
 pkgs.dockerTools.buildImage {
   name = "kallipai-archeion";
   tag = gitVersion;
@@ -20,8 +20,10 @@ pkgs.dockerTools.buildImage {
     pkgs.cacert
   ];
   config = {
-    Cmd = [ "${archeion}/bin/kallipai-archeion" ];
-    Env = [ "PATH=${admin}/bin" ];
+    Cmd = [ "/bin/kallipai-archeion" ];
+    # /bin is the tree copyToRoot merges and the one Cmd names, so the search
+    # path and the command point at the same place.
+    Env = [ "PATH=/bin" ];
     ExposedPorts = {
       "7100/tcp" = { };
     };

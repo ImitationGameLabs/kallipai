@@ -1,0 +1,14 @@
+# http, app and api served from the bundle in this image: a local stack with no
+# certificate to mount. Neither block carries a `tls` line, because caddy
+# refuses an http:// address that also configures TLS ("server is HTTP, but
+# attempts to configure TLS") -- that refusal is the only reason this entry
+# exists beside the other two.
+import site.caddy
+
+{$KALLIPAI_EDGE_SITE:http://localhost:8080} {
+	import app-bundle
+}
+
+{$KALLIPAI_API_BASE:http://api.localhost:8080} {
+	import kallipai-api-routes
+}

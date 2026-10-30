@@ -1,0 +1,19 @@
+# https, app proxied to the host's vite dev server: the front-end loop, where
+# HMR and passkeys have to share one TLS origin. The third block is the
+# plaintext loopback edge the dev tagma dials, because its reqwest cannot trust
+# the mkcert certificate.
+import site.caddy
+
+{$KALLIPAI_EDGE_SITE} {
+	tls {$KALLIPAI_TLS_CERT} {$KALLIPAI_TLS_KEY}
+	import app-vite
+}
+
+{$KALLIPAI_API_BASE} {
+	tls {$KALLIPAI_TLS_CERT} {$KALLIPAI_TLS_KEY}
+	import kallipai-api-routes
+}
+
+{$KALLIPAI_DEV_EDGE_SITE:http://127.0.0.1:7443} {
+	import kallipai-api-routes
+}

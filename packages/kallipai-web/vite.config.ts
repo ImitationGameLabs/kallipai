@@ -13,7 +13,7 @@ const here = import.meta.dirname;
 // in +layout.svelte from the browser location (config.js overrides).
 // The dev stack is fronted by the compose caddy edge (always on), and
 // these bindings name that edge so `deno task dev` points at the same
-// entry the containers do; they live in `.env` (direnv puts it in the
+// entry the containers do; they live in compose/.env (direnv puts it in
 // shell, and vite reads process.env from there).
 const devDomain = process.env.KALLIPAI_DOMAIN ?? "kallipai.com";
 const edgeTls = (process.env.KALLIPAI_EDGE_TLS ?? "on") === "on";

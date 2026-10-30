@@ -14,12 +14,12 @@ let
   shared = import ../container-shared.nix { inherit pkgs; };
   inherit (shared) cacert;
 in
-# The minimal lesche image: just the binary + the CA trust store. The lesche is
-# a pure HTTP service (axum) like the archeion -- no shell-out toolset, no baked env
-# (it reads everything from its env at runtime). The compose service
-# (compose/prod/polis.nix, arion-compose.nix dev) supplies the command +
-# environment. A separate image from the archeion so the two services can be
-# rebuilt/redeployed independently (the point of the control/data-plane split).
+# The minimal lesche image: just the binary + the CA trust store. The lesche
+# is a pure HTTP service (axum) like the archeion -- no shell-out toolset, no
+# baked env (it reads everything from its env at runtime). The image carries
+# the command, the compose files carry the environment. A separate image from
+# the archeion so the two services can be rebuilt/redeployed independently
+# (the point of the control/data-plane split).
 pkgs.dockerTools.buildImage {
   name = "kallipai-lesche";
   tag = gitVersion;
@@ -28,7 +28,7 @@ pkgs.dockerTools.buildImage {
   ]
   ++ cacert;
   config = {
-    Cmd = [ "${lesche}/bin/kallipai-lesche" ];
+    Cmd = [ "/bin/kallipai-lesche" ];
     ExposedPorts = {
       "7200/tcp" = { };
     };

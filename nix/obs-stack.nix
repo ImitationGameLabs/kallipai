@@ -1,9 +1,8 @@
 # The local observability stack for the dev compose: a collector, a trace
-# store and a UI. Written as a pure function -- no `services.*` references --
-# so `nix flake check` can evaluate it without arion, which is not a flake
-# input. compose/dev/polis.nix assigns the result onto arion's options; that
-# assignment is the one part no check can prove -- arion is not a
-# flake input, so only arion up sees it fail.
+# store and a UI. It is a pure function -- no `services.*` references -- so
+# both consumers evaluate it without a container runtime: nix/packages/stack.nix
+# renders the texts the compose services mount, and nix/checks/obs-stack.nix
+# asserts the ports and paths in them.
 #
 # What it starts
 #   otelcol  otelcol-contrib: the OTLP receiver (http published to the host,
@@ -13,15 +12,15 @@
 #            inside the network only; blocks retained for the age budget below.
 #   grafana  the UI, published on loopback, anonymous viewer, tempo
 #            pre-provisioned as the default datasource so a trace id pastes
-#            straight into Explore. Its host port stays clear of the dev tagma,
-#            which binds a port of its own on the host network
-#            (compose/dev/tagma.nix).
+#            straight into Explore. Its host port is an image default, not a
+#            literal: a deployment that moves it moves it in one place.
 #
 # Which port carries which role lives in the two tables below, not here:
 # `defaults` is the host side the user may move, `containerPorts` is what the
 # processes listen on and what every text and publish mapping is built from.
 #
-# Where the data lands (outside the project, so `arion down -v` cannot eat it)
+# Where the data lands (outside the project, so `docker compose down -v`
+# cannot eat it)
 #   <telemetryRoot>/tempo     blocks, wal
 #   <telemetryRoot>/grafana   grafana.db, plugins, logs
 #   <telemetryRoot> is $XDG_DATA_HOME/kallipai/telemetry, falling back to
@@ -45,7 +44,7 @@ let
 
   # Every container port the config texts and the publish mappings name. The
   # host side is `defaults` below: the user may move that one, while these are
-  # what the processes listen on and what polis.nix builds each endpoint from.
+  # what the processes listen on; the compose files repeat them on the host side.
   # 4317 is spelled once because the collector's receive side and the address it
   # forwards to move together here; the two containers are otherwise independent,
   # so a second entry is the edit if they ever diverge.
@@ -78,9 +77,9 @@ in
 {
   inherit maxBytes maxAgeHours containerPorts;
 
-  # The four host ports this stack publishes, and their defaults. Both compose
-  # files read them from here, so the collector's address cannot drift between
-  # two independent `arion` evaluations. Every one is loopback-only, and a host
+  # The four host ports this stack publishes, and their defaults. The compose
+  # files and the rendered texts read them from here, so the collector's address
+  # cannot drift between two renderings. Every one is loopback-only, and a host
   # override moves the published side only: the container side is a value, not
   # a literal, in every text and publish mapping below.
   defaults = {

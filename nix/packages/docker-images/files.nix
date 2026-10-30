@@ -16,10 +16,10 @@ let
   inherit (shared) cacert;
 in
 # The minimal files image: just the binary + the CA trust store. The files
-# service is a pure HTTP service (axum) like the archeion and the lesche -- no
-# shell-out toolset, no baked env (it reads everything from its env at
-# runtime). The compose service (compose/prod/polis.nix) supplies the command
-# and the environment. A separate image so the three server-side services
+# service is a pure HTTP service (axum) like the archeion and the lesche --
+# no shell-out toolset, no baked env (it reads everything from its env at
+# runtime). The image carries the command, the compose files carry the
+# environment. A separate image so the three server-side services
 # rebuild/redeploy independently.
 pkgs.dockerTools.buildImage {
   name = "kallipai-files";
@@ -29,7 +29,7 @@ pkgs.dockerTools.buildImage {
   ]
   ++ cacert;
   config = {
-    Cmd = [ "${files}/bin/kallipai-files" ];
+    Cmd = [ "/bin/kallipai-files" ];
     ExposedPorts = {
       "7400/tcp" = { };
     };

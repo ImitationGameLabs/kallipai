@@ -1,0 +1,46 @@
+# Integration-test composition: runs the pre-built `[[test]]` suites inside a
+# container to confirm the sandbox and shell backends behave in the
+# containerized environment the tagma ships in.
+#
+# Run it through the wrapper, never by hand:
+#   scripts/integration-test.sh
+#
+# That wrapper builds the image, loads it, exports KALLIPAI_TEST_IMAGE, and
+# reads the verdict from this file's `up` exit code. Standing alone, this file
+# has two requirements the wrapper supplies: the image reference above, and a
+# `/nix/store` on the host holding the image's symlink targets.
+name: kallipai-integration-tests
+
+services:
+  integration-tests:
+    image: ${KALLIPAI_TEST_IMAGE:?run scripts/integration-test.sh}
+    command: ["/bin/sh", "/integration-tests-runner"]
+    # The tagma's landlock/seccomp shell sandbox needs these privileges inside
+    # the container (see docs/en/deployment/container.md).
+    cap_add: [SYS_ADMIN]
+    security_opt: ["seccomp=unconfined"]
+    # /testdata holds the sandbox scenarios' home/data/workspace scratch dirs.
+    # It MUST stay outside libsandbox's baseline-writable set (/tmp, /var/tmp,
+    # $TMPDIR) or the write-denial assertions become dishonest. A dedicated
+    # tmpfs is the simplest such path.
+    # The /tmp tmpfs here is the authority for a real run: it bounds the
+    # scratch space the sandbox writes into. The image carries a 1777 /tmp
+    # only so it stands up without this mount.
+    tmpfs: ["/testdata:rw,size=64m", "/tmp:rw,size=64m"]
+    # Read-only store: the image carries symlinks into it, `includeStorePaths`
+    # is false, so the container needs the host store to resolve them.
+    volumes: ["/nix/store:/nix/store:ro"]
+    # PATH and KALLIPAI_BIN_DIR are not repeated here: the image's config.Env
+    # carries them (nix/packages/docker-images/integration-tests.nix). The
+    # harness re-executes kallipai-run/kallip by name, and current_exe()
+    # resolves the buildEnv symlink into a sub-store path holding only the
+    # suite, so that bin directory has to be stated somewhere -- it is stated
+    # in the artifact.
+    environment:
+      HOME: /var/lib/kallipai
+      KALLIPAI_TESTDATA_DIR: /testdata
+      # No nix daemon socket in here; inheriting the host's would make `nix`
+      # calls inside a test hang until they time out.
+      NIX_REMOTE: ""
+      RUST_LOG: info
+    restart: "no"

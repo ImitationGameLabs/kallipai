@@ -1,0 +1,114 @@
+# Prod override: prebuilt images by tag, the edge on the platform network,
+# and the TLS material the host mounts.
+name: kallipai-archeion
+
+services:
+  archeion:
+    image: ${KALLIPAI_IMAGE_PREFIX:-}kallipai-archeion:${KALLIPAI_IMAGE_TAG:?}
+    env_file: ["${KALLIPAI_ENV_FILE:?}"]
+    environment:
+      # The browser-facing values follow from the domain, the way the dev
+      # override derives them from the app origin: the app is served at
+      # app.<domain> and the API at api.<domain>, so CORS, the relying party,
+      # the session cookie and the OAuth return base cannot disagree with what
+      # the edge serves. KALLIPAI_DOMAIN is the one input.
+      KALLIPAI_ARCHEION_CORS_ORIGINS: https://app.${KALLIPAI_DOMAIN:?}
+      KALLIPAI_ARCHEION_SESSION_COOKIE_DOMAIN: ${KALLIPAI_DOMAIN:?}
+      KALLIPAI_ARCHEION_WEBAUTHN_RP_ID: ${KALLIPAI_DOMAIN:?}
+      KALLIPAI_ARCHEION_WEBAUTHN_RP_ORIGIN: https://app.${KALLIPAI_DOMAIN:?}
+      KALLIPAI_ARCHEION_OAUTH_REDIRECT_BASE: https://app.${KALLIPAI_DOMAIN:?}
+
+  lesche:
+    image: ${KALLIPAI_IMAGE_PREFIX:-}kallipai-lesche:${KALLIPAI_IMAGE_TAG:?}
+    env_file: ["${KALLIPAI_ENV_FILE:?}"]
+    environment:
+      KALLIPAI_LESCHE_CORS_ORIGINS: https://app.${KALLIPAI_DOMAIN:?}
+
+  files:
+    image: ${KALLIPAI_IMAGE_PREFIX:-}kallipai-files:${KALLIPAI_IMAGE_TAG:?}
+    env_file: ["${KALLIPAI_ENV_FILE:?}"]
+    environment:
+      KALLIPAI_FILES_CORS_ORIGINS: https://app.${KALLIPAI_DOMAIN:?}
+
+  keryx:
+    image: ${KALLIPAI_IMAGE_PREFIX:-}kallipai-keryx:${KALLIPAI_IMAGE_TAG:?}
+    env_file: ["${KALLIPAI_ENV_FILE:?}"]
+    environment:
+      KALLIPAI_KERYX_CORS_ORIGINS: https://app.${KALLIPAI_DOMAIN:?}
+
+  gateway:
+    image: ${KALLIPAI_IMAGE_PREFIX:-}kallipai-model-gateway:${KALLIPAI_IMAGE_TAG:?}
+    env_file: ["${KALLIPAI_ENV_FILE:?}"]
+    environment:
+      KALLIPAI_MODEL_GATEWAY_CORS_ORIGINS: https://app.${KALLIPAI_DOMAIN:?}
+
+  # The instance list is read from a daemon socket, so the socket directory is
+  # a deployment input: point KALLIPAI_INSTANCES_STATE_DIR at the directory the
+  # host's daemon binds ($XDG_RUNTIME_DIR/kallipai/daemon on a desktop host) and
+  # the service sees it at /state. Unset fails the start here rather than
+  # inside the service as an empty directory.
+  instances:
+    image: ${KALLIPAI_IMAGE_PREFIX:-}kallipai-instances:${KALLIPAI_IMAGE_TAG:?}
+    env_file: ["${KALLIPAI_ENV_FILE:?}"]
+    environment:
+      KALLIPAI_DAEMON_SOCKET: /state/control.sock
+      KALLIPAI_INSTANCES_CORS_ORIGINS: https://app.${KALLIPAI_DOMAIN:?}
+    volumes:
+      - ${KALLIPAI_INSTANCES_STATE_DIR:?set KALLIPAI_INSTANCES_STATE_DIR}:/state:ro
+
+  archeion-postgres:
+    image: postgres:17.5
+    env_file: ["${KALLIPAI_ENV_FILE:?}"]
+
+  lesche-postgres:
+    image: postgres:17.5
+    env_file: ["${KALLIPAI_ENV_FILE:?}"]
+
+  gateway-postgres:
+    image: postgres:17.5
+    env_file: ["${KALLIPAI_ENV_FILE:?}"]
+
+  files-postgres:
+    image: postgres:17.5
+    env_file: ["${KALLIPAI_ENV_FILE:?}"]
+
+  otelcol:
+    image: ${KALLIPAI_IMAGE_PREFIX:-}kallipai-otelcol:${KALLIPAI_IMAGE_TAG:?}
+
+  tempo:
+    image: ${KALLIPAI_IMAGE_PREFIX:-}kallipai-tempo:${KALLIPAI_IMAGE_TAG:?}
+
+  grafana:
+    image: ${KALLIPAI_IMAGE_PREFIX:-}kallipai-grafana:${KALLIPAI_IMAGE_TAG:?}
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GF_SECURITY_ADMIN_PASSWORD:?set GF_SECURITY_ADMIN_PASSWORD}
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+
+  prometheus:
+    image: prom/prometheus:v3.13.0
+
+  caddy:
+    image: ${KALLIPAI_IMAGE_PREFIX:-}kallipai-caddy-web:${KALLIPAI_IMAGE_TAG:?}
+    container_name: ${KALLIPAI_CADDY_CONTAINER:-kallipai-caddy}
+    ports: ["80:80", "443:443"]
+    environment:
+      KALLIPAI_DOMAIN: ${KALLIPAI_DOMAIN:?set KALLIPAI_DOMAIN}
+      # The wildcard covers app.<domain> and api.<domain> in one site block;
+      # the pair is the one the host renews, and `tls` with two paths keeps
+      # caddy from attempting issuance of its own.
+      KALLIPAI_EDGE_SITE: "*.${KALLIPAI_DOMAIN:?set KALLIPAI_DOMAIN}"
+      KALLIPAI_TLS_CERT: /certs/fullchain.pem
+      KALLIPAI_TLS_KEY: /certs/privkey.pem
+      KALLIPAI_API_BASE: https://api.${KALLIPAI_DOMAIN:?set KALLIPAI_DOMAIN}
+      # The shared /v1 route table takes its upstreams from the environment;
+      # on the platform network the service names resolve.
+      KALLIPAI_ARCHEION_UPSTREAM: archeion:7100
+      KALLIPAI_LESCHE_UPSTREAM: lesche:7200
+      KALLIPAI_KERYX_UPSTREAM: keryx:7210
+      KALLIPAI_FILES_UPSTREAM: files:7400
+      KALLIPAI_INSTANCES_UPSTREAM: instances:7300
+      KALLIPAI_MODEL_GATEWAY_UPSTREAM: gateway:7500
+    # The Caddyfile, the route table and the site are in the image; the
+    # certificates stay a mount because the host renews them.
+    volumes:
+      - ${KALLIPAI_TLS_DIR:?set KALLIPAI_TLS_DIR}:/certs:ro

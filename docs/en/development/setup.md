@@ -5,11 +5,11 @@ order: 30
 internal: true
 ---
 
-Local development runs the full kallipai stack under
-[Arion](https://docs.hercules-ci.com/arion/) (a Nix-native docker-compose). The
-dev archeion side lives at `compose/dev/polis.nix`; the repo-root
-`arion-compose.nix` is a one-line shim that re-exports it for arion's
-auto-discovery, so a plain `arion up` brings it up.
+Local development runs the full kallipai stack under docker compose:
+`compose/compose.yaml` plus `compose/compose.dev.yaml`, started by `scripts/compose-up.sh
+dev`, which builds the images this machine runs and loads them into its
+daemon. The edge in that stack proxies the app host to the vite dev server,
+so the browser loop keeps hot reload behind the same TLS origin.
 
 This doc covers the day-1 bring-up and the iteration loop. For the container
 images, the production split, and the integration-test mode, see
@@ -20,41 +20,54 @@ For the NixOS host deployment, see
 
 ## Prerequisites
 
-- Arion + a Docker (or Podman with the docker socket) daemon. Under rootless
-  docker, the Caddy service uses host networking and binds the edge port
+- Docker (or Podman with the docker socket) with compose v2. Under rootless
+  docker, the edge service uses host networking and binds the edge port
   (`KALLIPAI_EDGE_PORT`, default 443) on the host, which requires
   `sysctl net.ipv4.ip_unprivileged_port_start=80` (or
   running the daemon as root) when that port is below 1024.
 - [mkcert](https://github.com/FiloSottile/mkcert) for the dev TLS
   certificate (https edge only).
-- Copy `.env.example` to `.env` and fill in the deployment settings it
-  carries (domains, ports, tokens, relay credentials); Arion reads `.env`
-  via `service.env_file`. Model configuration lives in the instance's
-  `profiles.toml`; see
+- Copy `compose/.env.example` to `compose/.env` and fill in the deployment
+  settings it carries (domains, ports, tokens, relay credentials); compose
+  interpolates that file and `scripts/compose-up.sh` reads it too. The tagma's
+  own knobs are in the root `.env.example`, copied to `.env` the same way.
+  Model configuration lives in the instance's `profiles.toml`; see
   [Model configuration methods](../configuration/tagma/methods.md).
 
-### Plain-http Quick Start (KALLIPAI_EDGE_TLS=off)
+### Plain-http Quick Start
 
-Set `KALLIPAI_EDGE_TLS=off` in `.env` for a plain-http edge with no mkcert
-and no DNS-trust setup. Keep `KALLIPAI_DOMAIN=localhost` (the default is
-the prod domain; the quick start pins localhost) and move the edge off
-the privileged default port: `KALLIPAI_EDGE_PORT=8080`. Then `arion up -d`
+A plain-http edge needs no mkcert and no DNS trust. Keep
+`KALLIPAI_DOMAIN=localhost` and name the plain entry plus the two addresses it
+serves:
 
-- `deno task dev` and open `http://app.localhost:8080`: browsers
-resolve every `*.localhost` name to the loopback interface, so no
-hosts-file entry is needed. Login surface: admin key + GitHub oauth;
-passkeys work on localhost out of the box (a browser secure-context
-exemption). For multi-machine access set `KALLIPAI_DOMAIN` to the LAN
-host and resolve `*.<domain>` on your LAN DNS (passkey/Google then
-stay browser-blocked on plain http).
+```sh
+KALLIPAI_EDGE_ENTRY=/etc/caddy/Caddyfile.plain \
+KALLIPAI_EDGE_SITE=http://app.localhost:8080 \
+KALLIPAI_API_BASE=http://api.localhost:8080 \
+KALLIPAI_APP_ORIGIN=http://app.localhost:8080 \
+  scripts/compose-up.sh dev
+```
+
+The plain entry serves the bundle the image carries, so this shape has no hot
+reload: the vite loop needs the https edge below. `scripts/compose-up.sh` skips
+the mkcert check for this entry alone; the other two need the pair.
+
+- Open `http://app.localhost:8080`: browsers resolve every `*.localhost` name
+to the loopback interface, so no hosts-file entry is needed. What answers is
+the bundle the image carries, so `deno task dev` has nothing to serve here.
+Login surface: admin key + GitHub oauth; passkeys work on localhost out of the
+box (a browser secure-context exemption). For multi-machine access set
+`KALLIPAI_DOMAIN` to the LAN host and resolve `*.<domain>` on your LAN DNS
+(passkey/Google then stay browser-blocked on plain http).
 
 Gotchas on this shape:
 
 - A browser that has visited the same hostname over https keeps the old
   `Secure`-flagged `kallipai_session` cookie and then refuses to store the
   new non-`Secure` one: delete the old cookie first.
-- After editing `.env`, restart `deno task dev` and `arion up`: both
-  read the env at startup, not per request.
+- After editing `compose/.env`, restart the stack (`scripts/compose-up.sh dev`): it
+  reads the env at startup, not per request. This shape serves no vite loop
+  to restart (see above).
 - The host you browse must match `KALLIPAI_DOMAIN` (`localhost` here);
   any other host is rejected.
 
@@ -66,19 +79,19 @@ context, so plain HTTP + a raw LAN IP cannot work). This is a
 one-time setup, and the https edge is the default shape.
 
 The dev domain is `kallipai.lan`. The code default for `KALLIPAI_DOMAIN` is
-the production domain (`kallipai.com`); `.env.example` sets it to
+the production domain (`kallipai.com`); `compose/.env.example` sets it to
 `kallipai.lan` for local dev (so dev DNS/certs never clash with
-production), and you get that when you copy `.env.example` to `.env`.
-direnv's `dotenv` loads `.env` into the shell, so arion eval, `mkcert`,
-and vite all see it. The whole stack (the archeion/lesche/keryx env, the
-Caddyfile, and vite's dev-server shaping (allowedHosts, HMR websocket)
-) derives from `KALLIPAI_DOMAIN` plus the two edge knobs
-(`KALLIPAI_EDGE_TLS`, `KALLIPAI_EDGE_PORT`). The web app's own API URLs
+production), and the copy lands at `compose/.env`. direnv reads that file
+into the shell, so compose, `mkcert`, and vite all see it. The whole stack
+(the archeion/lesche/keryx env, the edge's site address and the browser-facing
+origin) derives from `KALLIPAI_DOMAIN` plus
+`KALLIPAI_EDGE_PORT`; the vite dev server reads `KALLIPAI_EDGE_TLS` for its
+HMR protocol. The web app's own API URLs
 read none of them: they derive at runtime from the browser location
 (see the offline-login notes below).
 
 1. Generate the leaf cert with `mkcert` (provided by the nix devShell). Run this
-   from the repo root; `$KALLIPAI_DOMAIN` comes from `.env` (`kallipai.lan`):
+   from the repo root; `$KALLIPAI_DOMAIN` comes from `compose/.env` (`kallipai.lan`):
 
    ```sh
    mkdir -p compose/dev/.certs && \
@@ -90,8 +103,8 @@ read none of them: they derive at runtime from the browser location
    `*.<devDomain>` + the bare domain, and creates the mkcert root CA at
    `~/.local/share/mkcert/rootCA.pem` on first use. It does **not** install the
    root into any trust store; that step is OS-specific (step 2).
-   `compose/dev/polis.nix` defaults the cert dir to `<repo>/compose/dev/.certs`,
-   so arion finds them with nothing further to do.
+   `compose.dev.yaml` mounts that directory at `/certs`, so the edge reads the
+   pair with nothing further to do.
 2. Install the mkcert root CA into the host trust store, so the leaf cert is
    accepted by the browser (no warning, and WebAuthn runs in a real secure
    context). This is a manual step: the `mkcert` command above does not do it:
@@ -112,8 +125,8 @@ read none of them: they derive at runtime from the browser location
    ```
 
 3. Resolve `*.<devDomain>` to the host's LAN IP. This is **host/LAN
-   infrastructure, not part of the dev stack**: keep it out of the arion
-   composition and configure it wherever your network DNS lives. The exact
+   infrastructure, not part of the dev stack**: keep it out of the compose
+   files and configure it wherever your network DNS lives. The exact
    mechanism depends on your host OS / network; pick one:
 
    - **Quickest (one or two clients only):** add an entry to each client's
@@ -144,7 +157,7 @@ read none of them: they derive at runtime from the browser location
      use your router's built-in DNS.
 
    Whatever you choose, the goal is the same: a browser on the client device
-   resolves every `*.<devDomain>` name to the host running the arion stack.
+   resolves every `*.<devDomain>` name to the host running the stack.
 4. On each **client device** that will open the app (e.g. another laptop on the
    LAN), install the mkcert root CA (`mkcert -CAROOT` prints the path; copy
    `rootCA.pem` into the device's trust store). Tauri Android/iOS builds need
@@ -166,18 +179,57 @@ agents; the lesche message route returns 503).
 #### Archeion Side
 
 ```sh
-arion up -d                # caddy + archeion + lesche + files + instances + archeion-postgres + lesche-postgres + files-postgres + gateway + gateway-postgres + prometheus + otelcol + tempo + grafana (arion builds the workspace via the flake)
+scripts/compose-up.sh dev   # fifteen containers: edge, eight services, four stores, two observability
 ```
+
+The stack is the compose pair at the repo root:
+
+```sh
+scripts/compose-up.sh dev          # build + load the images, render the files, up -d
+scripts/compose-up.sh dev -- down  # same stack, torn down
+```
+
+The compose files are the contract: each spells `${NAME:?...}` for a value it
+cannot invent, and `scripts/compose-up.sh` hands them to compose, which reads
+`compose/.env` beside them itself. `scripts/compose-env.sh --example dev` prints
+a starting `compose/.env`, and `--defaults dev` prints the values a dev stack
+derives for itself, the fallback compose-up passes to compose and a
+`compose/.env` overrides. A value compose cannot fill is reported by compose,
+by name, before any image is built.
+The images, the config texts and the edge's site come from a nix evaluation, so
+no build input is fetched from a registry.
+
+The edge terminates TLS with the mkcert pair at `compose/dev/.certs`
+(`cert.pem`, `key.pem`); `scripts/compose-up.sh dev` refuses to start without it.
+For a plain-http stack, name the plain entry, an http site and api base, and the
+origin the browser types: that is what makes the edge skip the check and serve
+the bundle instead of the vite server (see
+[Plain-http Quick Start](#plain-http-quick-start)).
+
+A change to a compose file or a Caddyfile is verified by starting the stack once:
+nothing static checks either. Run these in order:
+
+```sh
+scripts/compose-up.sh check-env dev   # environment guards and compose's render, no build
+scripts/compose-up.sh dev             # build, load, start
+scripts/compose-status.sh dev         # every service answers on its health path
+```
+
+A start proves the files render and the containers run; it does not prove the
+stack is healthy. Read `docker ps` for a service that keeps restarting, and open
+the site through the edge once: CORS, the session cookie and the WebAuthn
+relying party only show up on a browser path.
 
 The model gateway rides the same stack: `gateway` + `gateway-postgres` +
 `prometheus`. The gateway's data plane publishes loopback-only at
-`127.0.0.1:7501` (`KALLIPAI_ARION_GATEWAY_PORT` overrides it);
+`127.0.0.1:7501` (the port `compose.dev.yaml` publishes);
 prometheus serves `127.0.0.1:9090` and scrapes the gateway's metrics
 face every 30 seconds.
 
 The trace stack rides it too: `otelcol` takes OTLP on `127.0.0.1:4318` and
-forwards to `tempo`, and `grafana` serves the UI on `127.0.0.1:3001`, clear of
-the dev tagma's 3000. `kallipai-telemetry-prune` only prints; `--apply` deletes.
+forwards to `tempo`, and `grafana` serves the UI on `127.0.0.1:3001`; a tagma
+started by hand on this host takes 3000 unless its own arguments say otherwise.
+`kallipai-telemetry-prune` only prints; `--apply` deletes.
 What a request traces, and how to read one:
 [Traces (OpenTelemetry)](observability.md).
 
@@ -185,11 +237,11 @@ Dev is fronted by Caddy (see the one-time setup above): the browser loads the
 web app at `https://app.kallipai.lan` and calls the platform at
 `https://api.kallipai.lan`, all TLS-terminated by Caddy. Everything shares
 the one origin pair, so the session cookie stays first-party. The web app
-(`deno task dev` from `packages/kallipai-web`) derives its API base in the
+(`deno task dev` from `packages/kallipai-ui`) derives its API base in the
 browser from the origin it runs on: `https://app.kallipai.lan` yields
 `https://api.kallipai.lan`, and every client hangs its templates off the
 `/v1/<service>` paths under that base. The derived URLs already match the
-Caddy topology, so no `.env` override is needed for normal LAN dev;
+Caddy topology, so no `compose/.env` override is needed for normal LAN dev;
 
 archeion and lesche also publish `7100` / `7200` to the host for plain-HTTP
 tooling: `kallipai-admin` and curl keep using `http://localhost:7100` /
@@ -205,13 +257,14 @@ environment at boot.
 
 > **Passkeys and the RP id:** if a dev environment was ever brought up on
 > the old `localhost` topology, its registered passkeys are invalid under
-> the `kallipai.lan` RP id: reset the archeion volume (`arion down -v`)
-> and re-register before the first login.
+> the `kallipai.lan` RP id: reset the archeion volume
+> (`scripts/compose-up.sh dev -- down -v`) and re-register before the first
+> login.
 
 ##### Register a Test User (First Bring-Up Only)
 
 Signup is open (no invite code): a fresh database just needs someone to sign
-up. The `archeion_pgdata` volume persists across `arion down` / `up`, so this
+up. The `archeion_pgdata` volume persists across a `down` and `up`, so this
 sub-flow runs **once per volume** — check before doing it:
 
 ```sh
@@ -225,10 +278,10 @@ the enrollment code below. If the table is empty (fresh volume, or after a
 Open the web app at `https://app.kallipai.lan` and sign up with a username +
 passkey (or "Continue with GitHub/Google" once OAuth is configured). Once signed
 in, mint a `sk-enroll-...` enrollment code in the web UI and paste it into
-`.env` as `KALLIPAI_TAGMA_RELAY_ENROLLMENT_CODE`, and set `KALLIPAI_AUTH_TOKEN` to
-the tagma's operator token. (The tagma's platform edge origin is wired by arion
-to the loopback edge — `http://127.0.0.1:7443` — so it
-needs no `.env` override.)
+the root `.env` as `KALLIPAI_TAGMA_RELAY_ENROLLMENT_CODE`, and set
+`KALLIPAI_AUTH_TOKEN` to the tagma's operator token. (A tagma on this host
+can reach the platform through the edge's plaintext loopback face,
+`http://127.0.0.1:7443`, so its `KALLIPAI_POLIS_URL` needs no separate value.)
 
 Faster alternative without touching a browser: the dev stack enables the
 local-platform admin-login, so a plain curl exchanges the admin token for a
@@ -249,35 +302,32 @@ enrollment code at `POST /tagmata` on the same direct port (no
 
 `kallipai-admin` authenticates with the archeion's admin token. The clean path is to
 pin it **before** first boot so the same known value works on every run: make
-sure `.env` contains
+sure `compose/.env` contains
 
 ```text
 KALLIPAI_ARCHEION_ADMIN_TOKEN=sk-admin-dev-0123456789abcdef0123456789abcdef
 ```
 
-then run `arion up -d`. The dev compose pins this same fixture in the archeion
+then run `scripts/compose-up.sh dev`. The dev compose pins this same fixture in the archeion
 service's environment (a local-platform login is enabled there, and that
 route refuses to boot with an operator-set token shorter than 32 chars),
 so `kallipai-admin` authenticates with it — no log scraping.
 
-The dev compose pins the fixture itself (the `environment` block in
-`polis.nix` overrides any legacy `.env` value), so a stack booted from
-the current files already authenticates with it. A stack booted from
-older files, where the archeion generated a random token at startup,
-must be recreated (`arion up -d`) to pick up the pinned fixture.
+The pin lives in the archeion service's `environment` block in
+`compose.dev.yaml`, and an environment token wins over the one the archeion
+writes to `KALLIPAI_ARCHEION_ADMIN_TOKEN_OUT_FILE`, so every dev stack
+authenticates with the fixture, including one whose state directory already
+holds a generated token.
 
 The fixture is dev-only; prod must set a strong secret.
 
 #### Tagma Side
 
-The tagma (agent host + in-process relay connector) is a separate composition
-(`compose/dev/tagma.nix`) so its lifecycle does not entangle with the archeion
-side. It runs on the host network and reaches the platform edge at
-`http://127.0.0.1:7443` (the loopback plaintext face), so bring the archeion side up first, then:
-
-```sh
-arion -f compose/dev/tagma.nix up -d   # tagma; enrolls its relay
-```
+The tagma (agent host + in-process relay connector) is not part of the compose
+pair: it runs from `packages.kallipai-tagma-image` on this host, started the way
+[the tagma host section](../deployment/container.md#the-tagma-host) shows. It
+needs the platform up first, and reaches the dev edge's plaintext loopback face
+at `http://127.0.0.1:7443`.
 
 #### Multi-Edge Tagma (Multi-Relay)
 
@@ -310,12 +360,10 @@ both origins named. Outbound frames fan out to every online relay; the
 first entry with stored credentials is the "primary" edge (frontend
 cache key).
 
-Multi-edge acceptance runs on a second, parallel stack: the same compose
-file parameterized by env vars:
-`KALLIPAI_ARION_PROJECT_NAME=kallipai-dev2 KALLIPAI_ARION_ARCHEION_PORT=7101 KALLIPAI_ARION_LESCHE_PORT=7201 arion up -d archeion lesche`
--- with its own containers, volumes, and edge: the second stack's caddy
-routes its own `api.` host to those ports, giving the tagma a second
-platform origin. Enroll a code on each side, fill `polis.toml`, and watch the
+Multi-edge acceptance runs on a second, parallel stack: a second checkout with
+its own `.env`, its own project name and its own published ports in that
+checkout's `compose.dev.yaml`, and its own edge — the second stack's caddy
+routes its own `api.` host, giving the tagma a second platform origin. Enroll a code on each side, fill `polis.toml`, and watch the
 tagma log for two `relay connector active` lines (one per entry name); a
 message sent on either side must arrive on both.
 
@@ -434,48 +482,43 @@ opting out there is a hand-written key, not a module default.
 
 ### Iterating
 
-`arion up` re-evaluates the flake each time, so Rust changes are picked up just
-by running it again — arion builds the workspace transitively (via the image
-contents) and `useHostStore` shares that `/nix/store` into the containers:
+`scripts/compose-up.sh dev` re-evaluates the flake each time, so Rust changes
+are picked up by running it again: it rebuilds the dev image from the current
+tree, loads it, and restarts what it started.
 
 ```sh
-arion up -d                                # archeion side
-arion -f compose/dev/tagma.nix up -d       # tagma side, if you want it up
+scripts/compose-up.sh dev
 ```
 
-Tail logs with `arion logs -f <service>` (`archeion`, `archeion-postgres`,
-`lesche-postgres`); for the tagma use `arion -f compose/dev/tagma.nix logs -f
-tagma`.
-
-### Optional Bind Overrides
-
-By default the tagma data, the agent workspace, and shared skills live in
-docker volumes. Set these env vars (absolute, colon-free host paths) to
-bind-mount them on the host instead:
-
-| Env var                         | Mounts                                  | Use case                            |
-| -----------------------------   | ------------------------                | ----------------------------------- |
-| `KALLIPAI_ARION_DATA_PATH`      | `/var/lib/kallipai/tagmata/main`        | keep tagma state on a known disk    |
-| `KALLIPAI_ARION_WORKSPACE_PATH` | `/workspace`                            | make the agent's files host-visible |
-| `KALLIPAI_ARION_SKILLS_PATH`    | `/var/lib/kallipai/tagmata/main/skills` | curate shared skills on the host    |
-
-Leave `KALLIPAI_SKILLS_ROOT` unset when using `KALLIPAI_ARION_SKILLS_PATH` — the
-former redirects `skill_dir()` away from the bind-mount target.
+Tail logs with `docker compose -f compose/compose.yaml -f compose/compose.dev.yaml logs -f
+<service>` (`archeion`, `archeion-postgres`, `lesche-postgres`, and the edge as
+`caddy`).
 
 ### Integration Tests
 
 Runs the workspace's `[[test]]` targets **inside the container** to confirm the
 sandbox and shell backends behave in the containerized environment the tagma
-ships in; the service exits with the overall verdict (`arion ps -a`).
+ships in. The script's exit code is the verdict: it comes from
+`docker compose up --exit-code-from`, and a green run must also show one
+`=== integration test:` line per shipped suite and the runner's closing line.
 
 ```sh
-arion -f compose/dev/test.nix up
+scripts/integration-test.sh
 ```
+
+A zero exit code alone does not prove the suites ran: the verdict also requires
+one `=== integration test:` line per shipped suite and the runner's closing
+line, and a run missing either is reported as one that did not complete.
+Two scenarios fail inside the container (`dirlock::scenario3_dirlock`,
+`full_handoff::scenario5_full_handoff`; tracked in `pending/tagma.md`): expect a
+non-zero exit, and read the per-suite lines to see what ran.
 
 The suites today: the sandbox suite (a scripted end-to-end agent driving
   real landlock + seccomp + mount-ns shell sandbox) and the exec suite (real
-  `bash -c` cwd and process-group behavior); any `[[test]]` target added
-  later is picked up automatically.
+  `bash -c` cwd and process-group behavior). That pair is an allowlist: every
+  other test target is named in `nix/packages/integration-tests.nix` with the
+  reason it stays out, and the build fails when those lists drift from the
+  workspace's targets.
 
 Mutation testing is a separate on-demand workflow rather than part of this
 suite; see [Mutation testing](mutation-testing.md).
@@ -490,11 +533,9 @@ so the test user, the enrollment code, and all tagma state are gone — the
 sign-up sub-flow is needed again:
 
 ```sh
-arion down -v                                  # archeion side: stop AND delete volumes
-arion -f compose/dev/tagma.nix down -v         # tagma side: stop AND delete volumes
-arion up -d                                    # archeion side
-# ...sign up, mint enrollment code in the web UI, fill .env...
-arion -f compose/dev/tagma.nix up -d           # tagma side
+scripts/compose-up.sh dev -- down -v   # stop AND delete the stack's volumes
+scripts/compose-up.sh dev              # bring it back
+# ...sign up, mint an enrollment code in the web UI, fill compose/.env...
 ```
 
 The archeion side and the tagma are separate compose projects (`kallipai-dev` and

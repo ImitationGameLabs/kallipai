@@ -1,0 +1,100 @@
+# The one body every entry shares. Two axes vary and nothing else does: whether
+# the entry terminates TLS, and where the app host's content comes from (the
+# bundle in this image, or the host's vite dev server). The entries declare
+# their own site blocks from these snippets, so every address stays a decision
+# of the entry that serves it.
+
+# HTTP/3 stays off: caddy advertises h3 through alt-svc, and Firefox upgrades
+# the cross-subdomain SSE stream (/v1/lesche/me/events) to it and then hangs
+# the long-lived response. Every entry imports this file, so the pin is here
+# once rather than three times.
+{
+	servers {
+		protocols h1 h2
+	}
+}
+
+# The runtime config the SPA reads at startup. The compose stack always runs its
+# instances service, so the key is a constant; an unset key reads as true in the
+# SPA as well.
+(app-config) {
+	@config path /config.js
+	header @config Content-Type application/javascript
+	respond @config `window.KALLIPAI_CONFIG = {"domain":"{$KALLIPAI_DOMAIN}","apiBase":"{$KALLIPAI_API_BASE}","instancesServiceEnabled":true};`
+}
+
+# What every app host answers regardless of its content source.
+(app-headers) {
+	header {
+		X-Content-Type-Options nosniff
+		X-Frame-Options DENY
+		Referrer-Policy strict-origin-when-cross-origin
+	}
+}
+
+# The bundle this image carries: the config, then the files. One `route` keeps
+# the order written -- `try_files` rewrites a miss to /index.html, and a
+# responder beside it would never see /config.js afterwards. No such file is in
+# the bundle, so the edge answers it.
+(app-bundle) {
+	root * /srv/web
+	import app-headers
+	route {
+		import app-config
+		try_files {path} /index.html
+		file_server
+	}
+}
+
+# The host's vite dev server, for the front-end loop: same headers, same config,
+# HMR and all, behind the same TLS edge the browser needs for passkeys.
+(app-vite) {
+	import app-headers
+	route {
+		import app-config
+		reverse_proxy 127.0.0.1:5173
+	}
+}
+
+# The api host: /v1/<service>/* -> the stripped remainder, forwarded as-is.
+# Unlisted prefixes are a real 404 rather than an empty 200. The six upstreams
+# come from the environment because the stacks reach the same services
+# differently; an unset one fails the config load instead of surfacing as a 502
+# at request time.
+(kallipai-api-routes) {
+		@internal path /v1/archeion/internal /v1/archeion/internal/*
+		handle @internal {
+			respond 404
+		}
+		handle_path /v1/archeion/* {
+			reverse_proxy {$KALLIPAI_ARCHEION_UPSTREAM}
+		}
+		handle_path /v1/lesche/* {
+			reverse_proxy {$KALLIPAI_LESCHE_UPSTREAM} {
+				# SSE flushes by content type on its own; the pin is the safety
+				# net for any future streaming endpoint.
+				flush_interval -1
+			}
+		}
+		handle_path /v1/keryx/* {
+			reverse_proxy {$KALLIPAI_KERYX_UPSTREAM} {
+				flush_interval -1
+			}
+		}
+		# The files service also answers its bare root, which handle_path would
+		# miss; the named matcher covers both forms and strips the prefix.
+		@files path /v1/files /v1/files/*
+		handle @files {
+			uri strip_prefix /v1/files
+			reverse_proxy {$KALLIPAI_FILES_UPSTREAM}
+		}
+		handle_path /v1/instances/* {
+			reverse_proxy {$KALLIPAI_INSTANCES_UPSTREAM}
+		}
+		# The model gateway's management face. Every route on it carries its own
+		# family credential (an admin token or a proxy key), so the edge adds none.
+		handle_path /v1/model-gateway/* {
+			reverse_proxy {$KALLIPAI_MODEL_GATEWAY_UPSTREAM}
+		}
+		respond 404
+}

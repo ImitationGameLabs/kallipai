@@ -1,0 +1,271 @@
+# Platform skeleton: the services every deployment runs and how they relate.
+# Every `image:` lives in the two overrides -- compose.dev.yaml and
+# compose.prod.yaml -- never here: the app images carry this checkout's tag and
+# the base images pin a version, and both are deployment decisions the override
+# states. The stack is always started as a pair, this file plus one override:
+# `-f compose/compose.yaml -f compose/compose.dev.yaml` from the repository
+# root, or the same with `compose.prod.yaml`.
+#
+# Every service joins the project's default network, which the bottom of this
+# file declares to be the shared platform network: one name, fixed outside the
+# project, so two stacks (or a stack and a host) meet on it. The edge is the
+# one service whose network differs -- dev runs it on the host network, where
+# compose keeps it off the default one.
+# Two stacks at once (dev beside prod, or two checkouts) would ask for the same
+# network name: set KALLIPAI_PLATFORM_NETWORK on one of them before it starts.
+# The project name lives in each override for the same reason: it decides which
+# volumes the stack attaches.
+#
+# `command:` lines are bare binary names, and only where the image does not
+# already name its own. The six application images carry an absolute Cmd, so
+# prod runs them untouched; dev names the binary because one image holds all
+# six and its merged /bin is on PATH. Those six copy their own closure into
+# the image, which is what makes that /bin real; a store-less image would
+# leave the path dangling. The observability images need arguments, so they
+# name theirs too.
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "50m"
+    max-file: "5"
+
+x-otel-env: &otel-env
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://otelcol:4318
+
+services:
+  archeion-postgres:
+    volumes:
+      - archeion_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # The store's own verdict, so a service that needs it waits for a cluster
+      # that answers rather than for a container that started. The variables
+      # come from the service env file, which the postgres entrypoint reads too.
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U $${POSTGRES_USER:-postgres} -d $${POSTGRES_DB:-postgres}",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    logging: *logging
+    restart: unless-stopped
+
+  lesche-postgres:
+    volumes:
+      - lesche_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # The store's own verdict, so a service that needs it waits for a cluster
+      # that answers rather than for a container that started. The variables
+      # come from the service env file, which the postgres entrypoint reads too.
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U $${POSTGRES_USER:-postgres} -d $${POSTGRES_DB:-postgres}",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    logging: *logging
+    restart: unless-stopped
+
+  gateway-postgres:
+    volumes:
+      - gateway_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # The store's own verdict, so a service that needs it waits for a cluster
+      # that answers rather than for a container that started. The variables
+      # come from the service env file, which the postgres entrypoint reads too.
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U $${POSTGRES_USER:-postgres} -d $${POSTGRES_DB:-postgres}",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    logging: *logging
+    restart: unless-stopped
+
+  files-postgres:
+    volumes:
+      - files_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # The store's own verdict, so a service that needs it waits for a cluster
+      # that answers rather than for a container that started. The variables
+      # come from the service env file, which the postgres entrypoint reads too.
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U $${POSTGRES_USER:-postgres} -d $${POSTGRES_DB:-postgres}",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    logging: *logging
+    restart: unless-stopped
+
+  archeion:
+    depends_on:
+      archeion-postgres:
+        condition: service_healthy
+    environment:
+      <<: *otel-env
+      KALLIPAI_ARCHEION_ADDR: 0.0.0.0:7100
+      KALLIPAI_ARCHEION_INTERNAL_TOKEN_FILE: /var/lib/kallipai/internal/internal-token
+      RUST_LOG: info
+    volumes:
+      - polis_internal:/var/lib/kallipai/internal
+    logging: *logging
+    restart: unless-stopped
+
+  lesche:
+    depends_on:
+      archeion:
+        condition: service_started
+      lesche-postgres:
+        condition: service_healthy
+    environment:
+      <<: *otel-env
+      KALLIPAI_LESCHE_ADDR: 0.0.0.0:7200
+      KALLIPAI_LESCHE_ARCHEION_INTERNAL_URL: http://archeion:7100
+      KALLIPAI_POLIS_INTERNAL_TOKEN_FILE: /var/lib/kallipai/internal/internal-token
+      RUST_LOG: info
+    volumes:
+      - polis_internal:/var/lib/kallipai/internal:ro
+    logging: *logging
+    restart: unless-stopped
+
+  files:
+    depends_on:
+      archeion:
+        condition: service_started
+      files-postgres:
+        condition: service_healthy
+    environment:
+      <<: *otel-env
+      KALLIPAI_FILES_ADDR: 0.0.0.0:7400
+      KALLIPAI_FILES_ARCHEION_INTERNAL_URL: http://archeion:7100
+      KALLIPAI_FILES_BLOB_ROOT: /var/lib/kallipai/files/blobs
+      KALLIPAI_POLIS_INTERNAL_TOKEN_FILE: /var/lib/kallipai/internal/internal-token
+      RUST_LOG: info
+    volumes:
+      - kallipai_files_blobs:/var/lib/kallipai/files/blobs
+      - polis_internal:/var/lib/kallipai/internal:ro
+    logging: *logging
+    restart: unless-stopped
+
+  keryx:
+    depends_on: ["archeion"]
+    environment:
+      <<: *otel-env
+      KALLIPAI_KERYX_ADDR: 0.0.0.0:7210
+      KALLIPAI_KERYX_ARCHEION_INTERNAL_URL: http://archeion:7100
+      KALLIPAI_POLIS_INTERNAL_TOKEN_FILE: /var/lib/kallipai/internal/internal-token
+      RUST_LOG: info
+    volumes:
+      - polis_internal:/var/lib/kallipai/internal:ro
+    logging: *logging
+    restart: unless-stopped
+
+  gateway:
+    depends_on:
+      archeion:
+        condition: service_started
+      gateway-postgres:
+        condition: service_healthy
+    environment:
+      <<: *otel-env
+      KALLIPAI_MODEL_GATEWAY_ADDR: 0.0.0.0:7501
+      KALLIPAI_MODEL_GATEWAY_ARCHEION_URL: http://archeion:7100
+      KALLIPAI_MODEL_GATEWAY_INTERNAL_TOKEN_FILE: /var/lib/kallipai/internal/internal-token
+      KALLIPAI_MODEL_GATEWAY_MANAGEMENT_ADDR: 0.0.0.0:7500
+      RUST_LOG: info
+    volumes:
+      - polis_internal:/var/lib/kallipai/internal:ro
+    logging: *logging
+    restart: unless-stopped
+
+  instances:
+    depends_on: ["archeion"]
+    environment:
+      <<: *otel-env
+      KALLIPAI_INSTANCES_ADDR: 0.0.0.0:7300
+      KALLIPAI_INSTANCES_ARCHEION_URL: http://archeion:7100
+      KALLIPAI_POLIS_INTERNAL_TOKEN_FILE: /var/lib/kallipai/internal/internal-token
+      RUST_LOG: info
+    volumes:
+      - polis_internal:/var/lib/kallipai/internal:ro
+    logging: *logging
+    restart: unless-stopped
+
+  otelcol:
+    command: ["otelcol-contrib", "--config=/etc/otelcol/config.yaml"]
+    depends_on: ["tempo"]
+    volumes:
+      - ${KALLIPAI_STACK_DIR:?run scripts/compose-up.sh}/otelcol.yaml:/etc/otelcol/config.yaml:ro
+    logging: *logging
+    restart: unless-stopped
+
+  # ${TELEMETRY_BASE} is the telemetry root the prune tool derives on its own
+  # ($XDG_DATA_HOME/kallipai/telemetry, or $HOME/.local/share/kallipai/telemetry);
+  # the two data mounts below sit under it, so moving it away from that path
+  # means the pruner stops finding what the stack writes.
+  tempo:
+    command: ["tempo", "-config.file=/etc/tempo/config.yaml"]
+    volumes:
+      - ${KALLIPAI_STACK_DIR:?run scripts/compose-up.sh}/tempo.yaml:/etc/tempo/config.yaml:ro
+      - ${TELEMETRY_BASE:?set TELEMETRY_BASE}/tempo:/var/tempo
+    logging: *logging
+    restart: unless-stopped
+
+  grafana:
+    command: ["grafana-server", "--config=/etc/grafana/grafana.ini"]
+    depends_on: ["tempo"]
+    environment:
+      GF_PATHS_DATA: /var/lib/grafana
+      GF_PATHS_LOGS: /var/lib/grafana/logs
+      GF_PATHS_PLUGINS: /var/lib/grafana/plugins
+      GF_PATHS_PROVISIONING: /etc/grafana/provisioning
+    volumes:
+      - ${KALLIPAI_STACK_DIR:?run scripts/compose-up.sh}/grafana.ini:/etc/grafana/grafana.ini:ro
+      - ${KALLIPAI_STACK_DIR:?run scripts/compose-up.sh}/grafana-tempo-datasource.yaml:/etc/grafana/provisioning/datasources/tempo.yaml:ro
+      - ${TELEMETRY_BASE:?set TELEMETRY_BASE}/grafana:/var/lib/grafana
+    logging: *logging
+    restart: unless-stopped
+
+  prometheus:
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=30d
+    depends_on: ["gateway"]
+    volumes:
+      - prometheus_data:/prometheus
+      - ${KALLIPAI_STACK_DIR:?run scripts/compose-up.sh}/prometheus.yaml:/etc/prometheus/prometheus.yml:ro
+    logging: *logging
+    restart: unless-stopped
+
+  caddy:
+    depends_on: ["archeion", "lesche", "keryx", "files"]
+    logging: *logging
+    restart: unless-stopped
+
+volumes:
+  archeion_pgdata: {}
+  lesche_pgdata: {}
+  gateway_pgdata: {}
+  files_pgdata: {}
+  polis_internal: {}
+  kallipai_files_blobs: {}
+  prometheus_data: {}
+
+networks:
+  # The platform network IS the project's default network: no service spells a
+  # `networks:` key, and none can forget to join. It is external and named
+  # outside the project so a second stack, or a service on the host, reaches the
+  # same segments; `scripts/compose-up.sh` creates it when missing.
+  default:
+    external: true
+    name: ${KALLIPAI_PLATFORM_NETWORK:-kallipai-platform}

@@ -7,54 +7,44 @@ internal: true
 
 The platform's services ship as **scratch-based** container images built with
 `nixpkgs.dockerTools`: no Dockerfiles; each image embeds the nix store
-closure of its binaries. Only `x86_64-linux` images are published. Two
-purpose-built images cover the split production deploy:
+closure of its binaries. Only `x86_64-linux` images are published. Two of
+them have no compose service of their own:
 
 - `packages.kallipai-tagma-image`: the tagma service (the agent host with its
   relay connector) plus the `kallip` CLI and the tagma's shell toolset
-  (bash, coreutils, ripgrep, git, pgrep, kill). No baked-in configuration,
-  the compose `tagma` service sets its own command and env.
+  (bash, coreutils, ripgrep, git, pgrep, kill). No baked-in configuration:
+  whatever starts it supplies the command and the environment.
 - `packages.kallipai-archeion-image`: the platform's control-plane service:
   the service binary and the CA bundle, nothing else.
 
-The recommended way to run them is [Arion](https://docs.hercules-ci.com/arion/),
-a Nix-native docker-compose. Each composition is a flat, single-purpose file
-under `compose/` (`compose/dev/`, `compose/prod/`); the repo-root
-`arion-compose.nix` re-exports `compose/dev/polis.nix`, so a plain `arion up`
-brings up the dev platform side. The others are invoked with `arion -f`:
+The platform side runs from one compose pair in `compose/`: `compose.yaml`
+plus `compose.dev.yaml` for a workstation or `compose.prod.yaml` for a host
+that serves users. `scripts/compose-up.sh` is the entry point; it builds and
+loads what the chosen mode runs, then brings the stack up.
 
-| Composition    | Command                                | Services                                                        | Image source                               |
-| -------------- | -------------------------------------- | --------------------------------------------------------------- | ------------------------------------------ |
-| **dev**        | `arion up -d` (default)                | caddy + platform services + their postgres stores               | `packages.default`, run via `useHostStore` |
-| **dev** tagma  | `arion -f compose/dev/tagma.nix up -d` | tagma                                                           | `packages.default`, run via `useHostStore` |
-| **test**       | `arion -f compose/dev/test.nix up`     | tagma (integration suite)                                       | `packages.kallipai-integration-tests`      |
+| Stack    | Command                       | Services                                         |
+| -------- | ----------------------------- | ------------------------------------------------ |
+| **dev**  | `scripts/compose-up.sh dev`   | edge + platform services + their postgres stores |
+| **prod** | `scripts/compose-up.sh prod`  | the same services, from images built for them    |
+| **test** | `scripts/integration-test.sh` | the integration suites                           |
 
-Production is split into two **standalone compositions** under `compose/prod/`
-(run from the repo root so `.env` resolves):
-
-| Composition  | Command                                 | Services                                  | Image source                                                    |
-| ------------ | --------------------------------------- | ----------------------------------------- | ---------------------------------------------                   |
-| **tagma**    | `arion -f compose/prod/tagma.nix up -d` | tagma                                     | `packages.kallipai-tagma-image` (pre-built)                     |
-| **platform** | `arion -f compose/prod/polis.nix up -d` | platform services + their postgres stores | `packages.kallipai-archeion-image` + `postgres:17.5` + siblings |
-
-The two production halves run on **separate hosts** with distinct compose
-project names (`kallipai-tagma` / `kallipai-platform`) so their containers
-and volumes are unambiguous in `docker ps` / `docker volume ls`. The
-platform services can alternatively deploy on the NixOS host through
-`services.kallipai.polis` (see the NixOS module section below).
+The tagma is not part of either stack: it runs on its own host, started by
+whatever that host provides.
 
 ## Prerequisites
 
-Arion and a Docker (or Podman with docker socket) daemon. On NixOS:
+A Docker daemon with compose v2, and nix on the machine that builds: the
+default path builds every image locally and loads it into the daemon, so no
+registry is needed. The plain-docker flow is in
+[Plain Docker](#plain-docker).
 
-```nix
-environment.systemPackages = [ pkgs.arion ];
-virtualisation.docker.enable = true;   # or podman + dockerSocket
-```
-
-Copy `.env.example` to `.env` and fill in the deployment's tokens and relay
-credentials (Arion reads `.env` via `service.env_file`); model configuration is
-a file instead, see [Model Configuration](#model-configuration).
+Copy `compose/.env.example` to `compose/.env` and fill in the stack's own
+values; the compose files interpolate that file beside them. The relay
+credentials and the daemon's own settings live in the root `.env`, which a
+tagma host copies from the root `.env.example`. A prod deployment also fills
+the service env file `KALLIPAI_ENV_FILE` names, whose keys
+`compose/.env.prod.example` lists. Model configuration is a file instead, see
+[Model Configuration](#model-configuration).
 
 ### Development Compositions
 
@@ -67,39 +57,340 @@ read-only into the containers, so they run straight out of the workspace
 build (`packages.default`) and a rebuild needs no in-compose bake; postgres
 uses the official `postgres:17.5` image.
 
-The dev tagma lives in its own composition (`compose/dev/tagma.nix`), so a
-plain `arion up` brings up only the platform side; bring the tagma up with
-`arion -f compose/dev/tagma.nix up -d`. With
-`KALLIPAI_TAGMA_RELAY_ENROLLMENT_CODE` unset it degrades to local-only (it logs
-an error and keeps serving local agents; see
+Docker alone is enough for that side, with no registry in the picture:
+`scripts/compose-up.sh dev` builds the dev image and the observability trio
+(`otelcol`, `tempo`, `grafana`) on the machine that runs the stack, loads
+them, and takes `KALLIPAI_IMAGE_TAG` from what it loaded; `KALLIPAI_DEV_IMAGE`
+is the reference the compose files then name. Images loaded by hand under
+another tag are the mismatch the script reports rather than a stack that
+cannot find its image.
+
+The tagma is not in either compose file: it runs on the machine where its
+agents work, started by whatever that machine provides. Running it with
+`KALLIPAI_TAGMA_RELAY_ENROLLMENT_CODE` unset leaves it local-only (it logs an
+error and keeps serving local agents; see
 [Relay bootstrap](#relay-bootstrap)).
 
 Dev is fronted by a Caddy edge proxy that terminates TLS for
 `*.kallipai.lan` with an mkcert certificate, so the stack is reachable
 cross-machine on the LAN and the browser sees a secure context. The dev
-domain comes from `.env` (`.env.example` sets `KALLIPAI_DOMAIN=kallipai.lan`).
+domain comes from `compose/.env` (`compose/.env.example` sets `KALLIPAI_DOMAIN=kallipai.lan`).
 One-time host setup is covered in the
 [development setup guide](../development/setup.md).
 
 ### Production
 
-#### The Tagma Host: `arion -f compose/prod/tagma.nix up -d`
+#### The Platform Host: `docker compose`
 
-Brings up the tagma service from `packages.kallipai-tagma-image`. The relay
-connector talks to the deployed platform over the public internet through one
-origin (`KALLIPAI_POLIS_URL`, e.g. `https://api.kallipai.com`): enrollment
-happens once on first boot against that origin, and the relay connection is
-held through it afterwards.
+The pair `compose.yaml` + `compose.prod.yaml` runs the whole platform on one
+host: the four stores, the six application services, the observability stack,
+and the edge that terminates TLS and routes each `/v1/<service>` prefix.
+Image sources, in order of preference. The ten KallipAI images are built
+here by `scripts/compose-up.sh`, which runs `nix build` per image and loads
+the result into the docker store, so the default path needs no registry at
+all. The five upstream images are pulled on the first start: four
+`postgres:17.5` and `prometheus:v3.13.0`. On a host with no route to a
+registry, `docker save` those five on a machine that has one and
+`docker load` them here before the first step.
+
+A host without nix cannot follow the steps as written: `scripts/compose-up.sh`
+builds the images before it starts anything, and only `down`, `stop`, `ps` and
+`logs` skip the build. Such a host takes the registry route instead: build on a
+machine that has nix, push, and start the stack with compose itself. Both
+values have to name what was pushed — `KALLIPAI_IMAGE_PREFIX` (it ends in a
+slash; the script concatenates) and `KALLIPAI_IMAGE_TAG` (the flake revision,
+or `dirty` for a modified checkout) — set in `compose/.env` here, then
+`docker compose -f compose/compose.yaml -f compose/compose.prod.yaml up -d`. A private registry
+needs `docker login` on both sides.
+
+Two files carry the deployment's values:
+
+- `compose/.env`, which compose reads and interpolates;
+  `scripts/compose-env.sh --example prod` prints a starting point, and the
+  compose files themselves name every value they need, so a missing one is
+  reported by compose before anything is built;
+- the service environment file named by `KALLIPAI_ENV_FILE`, whose keys are
+  described in `compose/.env.prod.example`.
+
+Operational keys such as listen addresses, the internal token path and the
+archeion hop are pinned inside `compose.yaml`; the env file cannot override
+them.
+
+The browser-facing keys are not yours to write. CORS origins, the session
+cookie domain, the WebAuthn relying party and the OAuth return base follow
+`KALLIPAI_DOMAIN` in `compose.prod.yaml`, the way the dev override derives
+them from the same value: the app is served at `app.<domain>` and the API at
+`api.<domain>`, so none of them can disagree with what the edge serves.
+
+A change to a compose file or a Caddyfile is verified by starting the stack once
+here: nothing static checks either. Run these in order:
 
 ```sh
-arion -f compose/prod/tagma.nix up -d
-arion -f compose/prod/tagma.nix logs -f
+scripts/compose-up.sh check-env prod   # environment guards and compose's render, no build
+scripts/compose-up.sh prod             # build, load, start
+scripts/compose-status.sh prod         # every service answers on its health path
 ```
+
+A start proves the files render and the containers run; it does not prove the
+stack is healthy. Read `docker ps` for a service that keeps restarting, and open
+the site through the edge once: CORS, the session cookie and the WebAuthn
+relying party only show up on a browser path.
+
+Before the first step, have the certificate pair the edge serves
+([Certificates](#certificates)) and the directories the stack binds
+([Directories and volumes](#directories-and-volumes)) on the host. The site is
+not one of them: it travels inside the edge image
+([The site the edge serves](#the-site-the-edge-serves)).
+
+##### Certificates
+
+The host keeps issuing and renewing the certificates; nothing in the stack
+runs ACME. `KALLIPAI_TLS_DIR` holds `fullchain.pem` and `privkey.pem` and is
+mounted read-only at `/certs`, which is where `KALLIPAI_TLS_CERT` and
+`KALLIPAI_TLS_KEY` point.
+
+Caddy loads the pair when it starts and holds it until it reloads, so a
+renewed certificate reaches the browser only after:
+
+```sh
+docker compose -f compose/compose.yaml -f compose/compose.prod.yaml exec caddy \
+  caddy reload --config /etc/caddy/Caddyfile
+```
+
+Run that from the renewal hook, after the new files are in place. A hook that
+served this host before usually reloads its own caddy unit, which step three
+below stops and disables: point the hook here instead, or it keeps asking a
+process that no longer holds the port. A reload that fails (an invalid
+Caddyfile, a missing file) prints to the caller and leaves caddy serving the
+configuration and certificates it already had; `docker compose logs caddy`
+carries the same message. Renewal must not depend on binding port 80 or 443 on
+the host: those belong to the container, so use a DNS challenge or a webroot
+the edge serves.
+
+##### Directories and volumes
+
+Directories the host provides:
+
+| Variable                        | Mounted at | Contents                                            |
+| ------------------------------- | ---------- | --------------------------------------------------- |
+| `KALLIPAI_TLS_DIR`              | `/certs`   | `fullchain.pem`, `privkey.pem`                      |
+| `KALLIPAI_INSTANCES_STATE_DIR`  | `/state`   | the directory holding the daemon's control socket   |
+| `TELEMETRY_BASE`                | tempo, grafana | their data, written by the containers           |
+| `KALLIPAI_STACK_DIR`            | config files | the observability configs, produced by the script |
+
+`KALLIPAI_INSTANCES_STATE_DIR` is the daemon's runtime directory, not a
+directory the stack creates: point it at the directory the daemon listens in
+(`$XDG_RUNTIME_DIR/kallipai/daemon` on a desktop host) and the instances
+service finds its socket at `/state/control.sock`. The service resolves that
+socket before it binds, so a missing one ends the process and
+`restart: unless-stopped` starts it again: the container sits in
+`Restarting`, never `Up`. A socket that disappears after the start is the
+other shape: the service stays up and answers `/health` and `/list` with
+`503`. A directory docker creates empty gives the first shape, so check the
+mount before the first start.
+
+The daemon is the tagma host's, and this round leaves the tagma where it
+runs today. When that is another machine, leave `instances` out of the
+step-one list: the socket does not cross hosts, and the instance list has
+nothing to read until the two share one.
+
+Volumes, by name: `archeion_pgdata`, `lesche_pgdata`, `gateway_pgdata`,
+`files_pgdata`, `kallipai_files_blobs`, `polis_internal`, `prometheus_data`.
+The project name `kallipai-archeion` decides their names, and `polis_internal`
+is where the archeion writes the internal token its neighbours read. A host
+that has run this stack before already holds five of them under these names,
+and this pair adds `gateway_pgdata` and `prometheus_data`. On a fresh host,
+compose creates all seven on first use.
+
+##### The site the edge serves
+
+The bundle lives in the edge image (`packages.kallipai-caddy-web-image`):
+`nix/packages/docker-images/caddy-web.nix` copies `packages.kallipai-web-dist`
+into `/srv/web` beside the entries and the body they share, and the image's
+caddy serves it. Nothing is copied onto the host. The runtime config is not a
+file either: the edge answers `/config.js` with a response built from its own
+environment, so `KALLIPAI_DOMAIN` and `KALLIPAI_API_BASE` decide what the
+browser reads, and changing the domain restarts this container instead of
+rebuilding the site. The payload states `instancesServiceEnabled: true` as a
+constant: this stack always runs its instances service, and the SPA reads an
+unset key the same way. The api host is served at `KALLIPAI_API_BASE` itself,
+scheme and port included, so the address the browser is given and the one the
+edge answers on are one value.
+
+The image carries three entries and one body (`compose/site.caddy`):
+
+| Entry              | App host answers with            | TLS  |
+| ------------------ | -------------------------------- | ---- |
+| `Caddyfile`        | the bundle in the image          | yes  |
+| `Caddyfile.plain`  | the bundle in the image          | no   |
+| `Caddyfile.vite`   | `127.0.0.1:5173`, the vite server | yes  |
+
+Each entry declares its own two site blocks, the app host and the api host, and
+carries the body's snippets: that is the whole difference between them. The
+edge container picks one with its `command:`; the production override leaves the
+image's own default (`Caddyfile`), and the dev override names it through
+`KALLIPAI_EDGE_ENTRY`. `Caddyfile.plain` exists as a separate entry because
+caddy refuses an `http://` address that also configures TLS ("server is HTTP,
+but attempts to configure TLS"), so an https-less stack has to reach the body
+through a file without a `tls` line.
+
+All three import the one body, which pins `h1` and `h2`: caddy otherwise
+advertises h3 through `alt-svc`, and Firefox upgrades the cross-subdomain SSE
+stream (`/v1/lesche/me/events`) to it and hangs the long-lived response.
+
+Upgrading the site is a new image tag:
+
+```sh
+scripts/build-and-load-images.sh caddy-web
+docker compose -f compose/compose.yaml -f compose/compose.prod.yaml up -d caddy
+```
+
+The build loads the image under the flake revision (or `dirty`), and compose
+names it by `KALLIPAI_IMAGE_TAG`. Rolling back means pointing that tag at the
+previous build and running the same `up -d` again, which is why the previous
+image stays loaded (`docker image ls kallipai-caddy-web`). A store path
+printed by `nix build` is not the durable artifact here; the docker store is.
+
+Check: `curl -sS https://app.<domain>/config.js` shows the domain and the API
+base this deployment actually serves, so the browser does not fall back to
+deriving them from its own location.
+
+##### The handover (once)
+
+The host edge and the stack's caddy cannot both own ports 80 and 443, so
+caddy starts only after the host unit has let go. Everything else comes up
+first, which keeps the handover to the seconds between steps three and four.
+
+Steps one to four change the host over; the rest of this subsection is what
+keeps the stack running afterwards. The handover is not repeated on a
+restart: the compose project owns the ports from then on.
+
+Step one takes the host over rather than starting clean. The stack that runs
+there already uses the project name `kallipai-archeion` and the same volume
+names, so compose adopts the running containers and the data already in those
+volumes; the archeion migrates that schema at boot. The platform is down
+from the moment the old containers stop until the new ones answer, and step
+one is the longest part of that window.
+
+1. Start every service but the edge:
+
+   ```sh
+   scripts/compose-up.sh prod up -d archeion lesche files keryx gateway \
+     instances otelcol tempo grafana prometheus archeion-postgres \
+     lesche-postgres gateway-postgres files-postgres
+   ```
+
+   The service env file carries the old deployment's values: `KALLIPAI_ENV_FILE`,
+   named in `compose/.env`, points at the file the previous release used, and
+   that file's `POSTGRES_PASSWORD` and four `*_DATABASE_URL` entries are the
+   ones the existing volumes were initialised with. The example's `change-me`
+   values do not authenticate against them; `scripts/compose-up.sh` refuses to
+   start while one of them is still in the file.
+
+   Check in two ends. `docker compose -f compose/compose.yaml -f compose/compose.prod.yaml ps`
+   shows every service `running`, and that is only a sample: a service that
+   exits at boot is running at almost every instant, the gap being the restart
+   itself. So compare restart counts across a twenty-second window, from the
+   repository root:
+
+   ```sh
+   counts() {
+     for id in $(docker compose -f compose/compose.yaml -f compose/compose.prod.yaml ps -q -a); do
+       printf '%s %s\n' "$id" "$(docker inspect -f '{{.RestartCount}}' "$id")"
+     done
+   }
+   counts > /tmp/a; sleep 20; counts > /tmp/b; diff /tmp/a /tmp/b
+   ```
+
+   No difference is the verdict: every container held for the window.
+
+2. Probe the services: `scripts/compose-status.sh prod`.
+
+   Check: five services report `ok`, and instances reports `up` with a `401`.
+   Every instances route sits behind the platform token, so without the
+   credential a probe can prove only that much: the listener is up and the
+   guard is armed. instances also refuses a Host it was not configured for, and
+   from inside the platform network it answers to its service name, so that
+   name sits in `KALLIPAI_INSTANCES_ALLOWED_HOSTS` beside the public one. The
+   probe runs on the platform network and never crosses the edge: the edge
+   image carries busybox so that the edge container, or a one-shot container of
+   the same image, has a shell and `wget` to ask with.
+
+   The probe proves less than it looks like. `/healthz` answers `ok`
+   unconditionally, so a wrong database URL still reads `ok`;
+   `docker compose -f compose/compose.yaml -f compose/compose.prod.yaml logs archeion` shows
+   `connected to Postgres` once the store answers, and that is the store's
+   verdict.
+
+3. Stop and disable the unit that terminates TLS today. The port names the
+   process, the process names the unit, and the unit is what gets disabled:
+
+   ```sh
+   ssh-host# ss -ltnp '( sport = :443 )'   # the pid is in users:(("caddy",pid=1234,...))
+   ssh-host# systemctl status 1234         # the unit is in the first line
+   ssh-host# systemctl disable --now <unit>
+   ```
+
+   Check: `systemctl is-enabled <unit>` prints `disabled`, and
+   `ss -ltnp '( sport = :443 )'` lists no listener. Disabling a process name
+   instead of the unit it belongs to stops the wrong thing: read the unit off
+   the process, do not assume it.
+
+4. Start the edge: `scripts/compose-up.sh prod up -d caddy`.
+
+   Check: `curl -sSI https://app.<domain>/` returns `200`, and
+   `docker compose -f compose/compose.yaml -f compose/compose.prod.yaml ps caddy` is `Up`.
+
+Only steps three and four reverse on their own: stop the caddy container,
+then `systemctl enable --now <unit>`; the host has to own the ports before
+its unit can serve, so the container stops first. Confirm with
+`ss -ltnp '( sport = :443 )'` that the host process listens again.
+
+Step one does not reverse. The new containers write to the same volumes and
+the archeion has already migrated the schema, so the old stack would come
+back onto data it does not know. Take a backup before step one and keep it:
+`pg_dump` of each store from its running postgres container (archeion,
+lesche, files), plus a tar of the `kallipai_files_blobs` volume. Going back
+then means restoring those into the volumes and starting the old stack
+against them.
+
+##### Restarts
+
+The stack has no systemd unit of its own. Each service carries
+`restart: unless-stopped`, so the containers return with the docker daemon
+after a reboot; a host that reboots without docker enabled comes back with
+nothing running. Verify once with a reboot on the rehearsal host:
+`docker compose -f compose/compose.yaml -f compose/compose.prod.yaml ps` must show every
+container `Up` without a manual start.
+
+#### The Tagma Host
+
+The tagma runs from `packages.kallipai-tagma-image` on the machine where its
+agents work, and no composition in this repo starts it: the image carries the
+binaries (`kallipai-tagma` is the entry point) and the caller supplies the
+command, the env and the mounts. The relay connector talks to the deployed
+platform over the public internet through one origin (`KALLIPAI_POLIS_URL`,
+e.g. `https://api.kallipai.com`): enrollment happens once on first boot
+against that origin, and the relay connection is held through it afterwards.
+
+```sh
+docker run -d --name kallipai-tagma --restart unless-stopped \
+  -p 3000:3000 \
+  -v kallipai_tagma_data:/var/lib/kallipai/tagmata/main \
+  -v "$PWD/workspace":/workspace \
+  -e KALLIPAI_POLIS_URL=https://api.<your-domain> \
+  -e KALLIPAI_TAGMA_RELAY_ENROLLMENT_CODE=<code> \
+  kallipai-tagma:<tag> kallipai-tagma
+docker logs -f kallipai-tagma
+```
+
+The volume holds the agent state, logs, skills and the tagma's credentials, so
+it is the piece worth backing up.
 
 Secure the tagma's published `3000` port (the operator API): do not expose
 it on a public host without a firewall / TLS reverse proxy in front.
 
-#### The Platform Host: `arion -f compose/prod/polis.nix up -d`
+#### The Platform Host: `scripts/compose-up.sh prod`
 
 Brings up the platform's services (the archeion identity control plane, the
 lesche relay data plane, the keryx tagma-link relay, and the files service),
@@ -112,7 +403,7 @@ must not route `/v1/archeion/internal` or anything under it publicly (that
 is the archeion's `/internal` and `/internal/*` once the prefix is
 stripped): the relay, the tagma-link relay and the files service reach it
 over the private compose network.
-Secret-bearing env and the postgres credentials come from `.env`;
+Secret-bearing env and the postgres credentials come from `compose/.env`;
 operational env is pinned in `service.environment`, which overrides `env_file`.
 
 The path shape follows the clients: every client base is `{origin}/v1/{service}`
@@ -122,10 +413,10 @@ archeion's `/healthz`, `/me/*` and `/admin/*` carry no `/v1`). The `files`
 service also answers its bare root (`/v1/files`), which a
 `handle_path /v1/files/*` rule would miss, so it takes a named matcher
 on both forms and strips with `uri strip_prefix /v1/files`. The route
-table (Caddy; `compose/dev/Caddyfile.dev` adds instances and
-model-gateway segments to these, which the prod compose stack does not
-run but a NixOS deployment does; an unlisted `/v1/*` prefix is a real
-404):
+table lives in `compose/site.caddy`, the body both entries import; the six
+upstream addresses come from the environment, `compose.dev.yaml` pointing them
+at loopback and `compose.prod.yaml` at the service names.
+An unlisted `/v1/*` prefix is a real 404:
 
 ```caddy
 api.<your-domain> {
@@ -154,8 +445,8 @@ api.<your-domain> {
 ```
 
 ```sh
-arion -f compose/prod/polis.nix up -d
-arion -f compose/prod/polis.nix logs -f
+scripts/compose-up.sh prod up -d
+docker compose -f compose/compose.yaml -f compose/compose.prod.yaml logs -f
 ```
 
 #### The Platform Services: the NixOS Module
@@ -208,8 +499,8 @@ services.kallipai.web = {
 ```
 
 Unset keys fall back to the app-side derivation; the bundle itself is
-deployment-independent. The dev form of the same site is the host vite
-server behind the dev Caddyfile.
+deployment-independent. The dev form of the same site is the host's vite
+server, which the dev edge reaches through `Caddyfile.vite`.
 
 A deployment that serves the web app but runs no instance host (no
 polis instances service backed by a local daemon) declares that in the
@@ -234,16 +525,16 @@ signs up (`KALLIPAI_TAGMA_RELAY_ENROLLMENT_CODE`). The issued tagma token is
 persisted inside the `data` volume and reused after that; leave the code
 unset on subsequent boots. If enrollment cannot complete, the tagma logs an
 error, keeps serving local agents, and comes back to it on a later boot
-(`restart: unless-stopped`): check `arion logs tagma`.
+(`restart: unless-stopped`): check `docker logs kallipai-tagma`.
 
 ### Run-Time Privileges
 
 The tagma runs agent shells inside a sandbox (kernel-level filtering plus an
 isolated mount namespace), applied **fail-closed**: if any step is blocked,
-the spawned shell aborts. The three compositions that run the tagma:
-`compose/dev/tagma.nix`, `compose/dev/test.nix`, and
-`compose/prod/tagma.nix`: grant what this needs, on the `tagma` service
-only:
+the spawned shell aborts. Whatever starts the tagma container grants what this
+needs on that container only. The integration-test composition
+(`compose.test.yaml`) runs the suites under the same privileges, on its own
+service:
 
 - `service.capabilities.SYS_ADMIN = true` (→ `cap_add: [SYS_ADMIN]`)
 - `out.service.security_opt = [ "seccomp=unconfined" ]`
@@ -259,10 +550,10 @@ Where that is not an option, set
 service's environment and accept the per-boot warning; anything else:
 unset, empty, `0`, keeps the refusal.
 
-The grant lives on the compose `service.environment` line, not in `.env`:
-the tagma services also load `.env` (via `env_file`), but an explicit
-`service.environment` entry wins, so the consent is granted and revoked by
-editing the compose file, never the env file.
+The grant lives on the compose `service.environment` line, not in the env
+file: the tagma services also load `compose/.env` (via `env_file`), but an
+explicit `service.environment` entry wins, so the consent is granted and
+revoked by editing the compose file, never the env file.
 
 ### Volumes and Workspaces
 
@@ -273,28 +564,16 @@ volume's `skills/` subdir. The platform host and each postgres service add
 their own volumes in the compositions that run them. The test composition
 mounts none (its scratch tree is an ephemeral `/testdata` tmpfs).
 
-- `kallipai_tagma_data` named volume → `/var/lib/kallipai/tagmata/main`: agent state, logs, skills, and the tagma's credentials (persistent; survives `arion down`, removed by `arion down -v`).
+- `kallipai_tagma_data` named volume → `/var/lib/kallipai/tagmata/main`: agent state, logs, skills, and the tagma's credentials (persistent; it outlives the container, and `docker volume rm` is what removes it).
 - `workspace` named volume → `/workspace`: the agent workspace root.
 - `archeion_pgdata` named volume → `/var/lib/postgresql/data`: the identity control plane's Postgres store (dev + the prod-platform composition).
 - `lesche_pgdata` named volume → `/var/lib/postgresql/data`: the relay data plane's Postgres chat store (dev + the prod-platform composition).
 - `files_pgdata` named volume → `/var/lib/postgresql/data`: the files service's Postgres store (dev + the prod-platform composition).
 - `kallipai_files_blobs` named volume → `/var/lib/kallipai/files/blobs`: the files service's content-addressed blob store (dev + the prod-platform composition).
 
-**In dev only**, data and workspace can be bind-mounted to a host path via
-their env vars (inspect/persist tagma state, or have the agent work on a
-checkout); shared skills overlay the same way. Prod-tagma uses plain named
-volumes: to pin tagma state on a specific disk, edit the compose:
-
-```sh
-KALLIPAI_ARION_DATA_PATH=$PWD/data arion up -d        # /var/lib/kallipai/tagmata/main ← host ./data
-KALLIPAI_ARION_WORKSPACE_PATH=$PWD/ws arion up -d     # /workspace ← host ./ws
-KALLIPAI_ARION_SKILLS_PATH=$PWD/skills arion up -d    # /var/lib/kallipai/tagmata/main/skills ← host ./skills
-```
-
-Don't point `KALLIPAI_ARION_SKILLS_PATH` at the same host path as
-`KALLIPAI_ARION_DATA_PATH`; the skills subdir would shadow itself
-confusingly. The override value must be an absolute, colon-free path (the
-compose throws at eval otherwise).
+The tagma's data and workspace are mounts its starter chooses, so bind-mounting
+them to host paths is a property of the `docker run` above rather than of any
+file here: point `-v` at the directories that should outlive the container.
 
 `workspace_root` passed to the tagma API is always resolved as an
 in-container path (default `/workspace`); a host bind does not change what
@@ -307,11 +586,11 @@ tagma rejects a workspace that contains or is contained by the data dir.
 
 ### Environment
 
-The compose files hardcode per-service defaults, and `.env` supplies
+The compose files hardcode per-service defaults, and `compose/.env` supplies
 the rest: tokens and the prod-platform deploy secrets. Compose precedence
 means `service.environment` wins over
 `env_file`, so values the dev compose hardcodes are not overridable
-via `.env` in that mode. The full variable tables live in the
+via `compose/.env` in that mode. The full variable tables live in the
 [environment-variables reference](../reference/environment-variables/index.md).
 
 #### Model Configuration
@@ -329,10 +608,10 @@ shape is documented in
 deployment on the model-gateway source takes its profiles from there
 instead.
 
-### Without Arion (Plain Docker)
+### Plain Docker
 
-If you cannot use Arion, build and load the image(s) directly. The tagma
-runs from `kallipai-tagma-image`:
+Every image can be built and loaded by hand. The tagma runs from
+`kallipai-tagma-image`:
 
 ```sh
 nix build .#kallipai-tagma-image
@@ -384,19 +663,25 @@ The id cannot change later without invalidating every bound passkey.
 
 Then create an agent via the tagma API with `workspace_root: /workspace`.
 
-#### All Five Images At Once
+#### All Eleven Images At Once
 
-`scripts/build-and-load-images.sh` builds all five images and loads their
-tarballs into the local daemon in one run. It calls
-`nix build --no-link --print-out-paths` per attribute, so no `result`
-symlink is created or overwritten, and it stops at the first failure:
+`scripts/build-and-load-images.sh` builds every image the compose stack
+runs, plus the tagma, and loads their tarballs into the local daemon in
+one run. It calls `nix build --no-link --print-out-paths` per attribute, so
+no `result` symlink is created or overwritten, and it stops at the first
+failure:
 
 ```sh
-scripts/build-and-load-images.sh            # all five
+scripts/build-and-load-images.sh            # all eleven
 scripts/build-and-load-images.sh tagma      # one image
 ```
 
-The five attributes are `kallipai-archeion-image`, `kallipai-lesche-image`,
-`kallipai-keryx-image`, `kallipai-files-image` and `kallipai-tagma-image`. The
-selector is the middle word (`archeion`, `lesche`, `keryx`, `files`, `tagma`);
-`--help` prints the same list.
+The eleven attributes are `kallipai-archeion-image`,
+`kallipai-lesche-image`, `kallipai-keryx-image`, `kallipai-files-image`,
+`kallipai-model-gateway-image`, `kallipai-instances-image`,
+`kallipai-otelcol-image`, `kallipai-tempo-image`, `kallipai-grafana-image`,
+`kallipai-caddy-web-image` and `kallipai-tagma-image`. The selector is the
+middle word (`archeion`, `lesche`, `keryx`, `files`, `model-gateway`,
+`instances`, `otelcol`, `tempo`, `grafana`, `caddy-web`, `tagma`); `--help`
+prints the same list. The edge image is the one the production stack serves
+the browser from: it carries the site, so the two move together.

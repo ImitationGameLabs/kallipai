@@ -1,12 +1,23 @@
 # Rust build artifacts
 /target/
 
-# Environment files
+# Environment files: the tagma's own file is the root .env, the stack's is
+# compose/.env.
 /.env
 /.env.local
+/.env.prod
+/compose/.env
+/compose/.env.local
+/compose/.env.prod
+# Retired root names: a checkout from before the move kept its service env
+# file at /.env.local or /.env.prod, and nothing regenerates that file, so
+# both stay ignored rather than exposed to a stray `git add -A`.
 
 # Local drafts
 /.draft/
+
+# The compose stack directory a dev run builds into
+/.stack
 
 # Test scratch data (sandbox integration tests under kallipai-tagma)
 /.testdata/
