@@ -3,20 +3,16 @@
 //! `kairos-herald` process: kallipai has no archeion event hub, so the daemon
 //! owns delivery directly.
 //!
-//! Delivery is **serial, per-row fall-through** with **503-aware persisted
-//! backoff**. tagma's `post_message` returns 503 when the agent's prompt queue
-//! is full (drained ~once per LLM round); on 503 we bump a per-row `attempts`
-//! counter + `next_attempt_at = now + backoff` (persisted, so it survives
-//! restart) and move to the next row — one stuck agent cannot block others.
-//! On success we ack per-id (narrows the crash-replay window to one row). On a
-//! transport error we leave the row `Triggered` for the next tick.
+//! Delivery is **serial, per-row fall-through**: one row at a time. A failed
+//! post leaves that row `Triggered` and the sweep moves on; a failed ack
+//! ends the sweep, and that row and the rows behind it retry on the next
+//! tick. On success we ack per-id, which narrows the crash-replay window to
+//! one row.
 
 use std::time::Duration;
 
 use anyhow::Result;
 use kallipai_client::TagmaClient;
-use kallipai_common::protocol::ApiError;
-use time::OffsetDateTime;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
@@ -72,12 +68,11 @@ impl Deliverer {
         }
     }
 
-    /// One delivery sweep: drain all backoff-eligible triggered rows, serially.
-    /// Stops starting new posts when shutdown is cancelled, so a SIGTERM during
-    /// a sweep bounds the drain to the one post already in flight.
+    /// One delivery sweep: drain all triggered rows, serially. Stops starting
+    /// new posts when shutdown is cancelled, so a SIGTERM during a sweep
+    /// bounds the drain to the one post already in flight.
     async fn deliver_once(&self) -> Result<()> {
-        let now = OffsetDateTime::now_utc();
-        let rows = self.store.get_triggered(now).await?;
+        let rows = self.store.get_triggered().await?;
         for sched in rows {
             if self.shutdown.is_cancelled() {
                 break;
@@ -97,25 +92,13 @@ impl Deliverer {
                         info!(
                             schedule_id = %id,
                             agent_id = %agent_id,
-                            queue_depth = resp.queue_depth,
+                            delivery_mode = ?resp.delivery_mode,
                             "delivered"
                         );
                     }
                 }
                 Err(e) => {
-                    if let Some(api) = e.downcast_ref::<ApiError>()
-                        && api.status == 503
-                    {
-                        // Queue full: back off, do not block other rows.
-                        self.store.record_delivery_failure(&id, now).await?;
-                        warn!(
-                            schedule_id = %id,
-                            agent_id = %agent_id,
-                            "delivery deferred: agent queue full (503)"
-                        );
-                        continue;
-                    }
-                    // Transport/other error: leave Triggered, retry next tick.
+                    // Leave Triggered: the next tick retries it.
                     warn!(
                         schedule_id = %id,
                         agent_id = %agent_id,

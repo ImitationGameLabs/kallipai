@@ -68,7 +68,7 @@ pub(crate) enum DeliveryNotice {
 /// Assemble the fast-path response for a live (running or idle-waiting)
 /// agent: peer notices `try_send` the full payload onto the prompt channel
 /// for in-round visibility (honestly degrading to run-boundary when the
-/// queue is full), deferred sends skip the channel write, and surface
+/// prompt queue is full), deferred sends skip the channel write, and surface
 /// messages keep the historical notify-only behavior with no delivery-mode
 /// claim. Returns the response plus whether the injection was accepted —
 /// the caller marks the inbox row delivered only on `true`.
@@ -95,7 +95,7 @@ fn busy_peer_response(
             Err(_) => (
                 MessageResponse {
                     queue_depth: 0,
-                    warning: Some("notice queue full; visibility at run boundary".to_string()),
+                    warning: Some("prompt queue full; visibility at run boundary".to_string()),
                     delivery_mode: Some(DeliveryMode::Deferred),
                 },
                 false,
@@ -311,11 +311,11 @@ pub async fn deliver_message(
     // carry a different relation and are skipped) are recorded, via
     // the projector — the sole writer; both the direct and relay
     // paths funnel through here. Recording happens AFTER the enqueue
-    // accepts: a refused message (parked 409, queue-full) must not
-    // append a transcript row, or every client retry appends another
-    // (the frontend re-sends refused messages). Recording still wins
-    // the race that matters — an agent reply needs an LLM round-trip —
-    // and the crash window shrinks to the ms between accept and append.
+    // accepts: a refused message must not append a transcript row, or
+    // every client retry appends another (the frontend re-sends refused
+    // ones). Recording still wins the race that matters — an agent reply
+    // needs an LLM round-trip — and the crash window shrinks to the ms
+    // between accept and append.
     if is_root
         && matches!(relation, SenderRelation::Operator)
         && let Some(projector) = state.external.get()
@@ -612,13 +612,15 @@ pub(crate) async fn enqueue_prompt(
     //
     // Split into a reserve step and a spawn step so the write lock is not held
     // during spawn:
-    //   - Reserve step (write lock): abort old handles, create a fresh channel,
-    //     install the sender, and pre-send the message so it occupies a slot.
-    //     Concurrent requests then see an open channel and won't fall through.
+    //   - Reserve step (write lock): abort old handles, create a fresh channel
+    //     and install its sender, so concurrent requests see an open channel
+    //     and won't fall through. Nothing enters the channel on this path: this
+    //     message is already in the inbox, and the new incarnation pulls it on
+    //     its first wake.
     //   - Spawn step (no lock): spawn the new agent on the pre-created channel,
     //     then re-acquire the write lock to install the full Agent struct.
 
-    // Reserve step (under the write lock): install a fresh channel + message.
+    // Reserve step (under the write lock): install a fresh channel and its sender.
     let mut spawn_args = {
         let mut registry = state.registry.write().await;
         let entry = registry
@@ -688,7 +690,7 @@ pub(crate) async fn enqueue_prompt(
             approvals: live.agent.approvals.clone(),
             agent_dir: live.identity.agent_dir.clone().unwrap_or_default(),
             config,
-            initial_prompt: None, // message already pre-sent to the channel
+            initial_prompt: None, // message sits in the inbox; the first wake pulls it
             shutdown_cancel: state.shutdown.clone(),
             events_tx: live.agent.events_tx.clone(),
             // Hash preserved across reactivation → token_index stays consistent

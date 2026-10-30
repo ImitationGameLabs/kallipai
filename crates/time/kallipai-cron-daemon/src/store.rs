@@ -16,8 +16,8 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use sea_orm::entity::prelude::*;
 use sea_orm::{
-    ActiveValue::Set, Condition, Database, DatabaseConnection, EntityTrait, PaginatorTrait,
-    QueryFilter, QueryOrder,
+    ActiveValue::Set, Database, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter,
+    QueryOrder,
 };
 use sea_orm_migration::MigratorTrait;
 use std::time::Duration;
@@ -54,10 +54,6 @@ pub(crate) mod entities {
             pub created_at: i64,
             pub next_fire: Option<i64>,
             pub last_fire: Option<i64>,
-            /// Delivery-attempt count for 503 backoff.
-            pub attempts: i64,
-            /// Earliest next delivery attempt (unix seconds), for backoff.
-            pub next_attempt_at: Option<i64>,
         }
 
         #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -123,8 +119,6 @@ impl ScheduleStore {
             created_at: Set(to_unix(schedule.created_at)),
             next_fire: Set(schedule.next_fire.map(to_unix)),
             last_fire: Set(schedule.last_fire.map(to_unix)),
-            attempts: Set(0),
-            next_attempt_at: Set(None),
         };
         Entity::insert(model).exec(&self.db).await?;
         Ok(())
@@ -191,18 +185,11 @@ impl ScheduleStore {
             .map(decode))
     }
 
-    /// Triggered schedules whose backoff window has elapsed (or has never been
-    /// set), oldest-fire-first — the deliverer's work queue. Unscoped (the
-    /// deliverer fires across all agents).
-    pub async fn get_triggered(&self, now: OffsetDateTime) -> Result<Vec<Schedule>> {
-        let now_ts = to_unix(now);
+    /// Triggered schedules, oldest-fire-first — the deliverer's work queue.
+    /// Unscoped (the deliverer fires across all agents).
+    pub async fn get_triggered(&self) -> Result<Vec<Schedule>> {
         let rows = Entity::find()
             .filter(Column::Status.eq(ScheduleStatus::Triggered.to_string()))
-            .filter(
-                Condition::any()
-                    .add(Column::NextAttemptAt.is_null())
-                    .add(Column::NextAttemptAt.lte(now_ts)),
-            )
             .order_by_asc(Column::LastFire)
             .all(&self.db)
             .await?;
@@ -245,30 +232,8 @@ impl ScheduleStore {
         Ok(())
     }
 
-    /// Record a failed delivery (queue-full 503): bump `attempts` and set the
-    /// earliest next attempt to `now + backoff(attempts)`. The write is guarded
-    /// on `status='triggered'`, so a concurrent manual ack (which flips status
-    /// away from Triggered first) makes a stale read-then-write a no-op instead
-    /// of stamping a backoff onto a row that is no longer awaiting delivery.
-    pub async fn record_delivery_failure(&self, id: &str, now: OffsetDateTime) -> Result<()> {
-        let row = Entity::find_by_id(id).one(&self.db).await?;
-        let Some(row) = row else {
-            return Ok(());
-        };
-        let attempts = row.attempts + 1;
-        let next_attempt = to_unix(now) + backoff_seconds(attempts);
-        Entity::update_many()
-            .col_expr(Column::Attempts, attempts.into())
-            .col_expr(Column::NextAttemptAt, next_attempt.into())
-            .filter(Column::Id.eq(id))
-            .filter(Column::Status.eq(ScheduleStatus::Triggered.to_string()))
-            .exec(&self.db)
-            .await?;
-        Ok(())
-    }
-
     /// Acknowledge delivered schedules: recurring → reactivate (next_fire was
-    /// already advanced at trigger time; just flip status + reset backoff),
+    /// already advanced at trigger time; just flip status),
     /// one-time → Completed. Idempotent: a non-Triggered row is skipped.
     pub async fn ack_triggered_at(&self, ids: &[ScheduleId]) -> Result<usize> {
         let mut count = 0usize;
@@ -285,11 +250,8 @@ impl ScheduleStore {
             } else {
                 ScheduleStatus::Completed
             };
-            // Reset backoff so the next trigger cycle starts clean.
             Entity::update_many()
                 .col_expr(Column::Status, new_status.to_string().into())
-                .col_expr(Column::Attempts, 0i64.into())
-                .col_expr(Column::NextAttemptAt, Option::<i64>::None.into())
                 .filter(Column::Id.eq(id))
                 .exec(&self.db)
                 .await?;
@@ -394,13 +356,6 @@ fn from_unix(secs: i64) -> OffsetDateTime {
         warn!(secs, "corrupt unix timestamp; clamping to epoch");
         OffsetDateTime::UNIX_EPOCH
     })
-}
-
-/// Exponential backoff (seconds) for a 503 (queue-full) retry: 1, 2, 4, ...
-/// capped at 60s. `attempt` is 1-based (the count after increment).
-fn backoff_seconds(attempt: i64) -> i64 {
-    let shift = (attempt - 1).clamp(0, 6) as u32;
-    (1i64 << shift).min(60)
 }
 
 // ---------------------------------------------------------------------------
@@ -537,15 +492,6 @@ mod tests {
         assert_eq!(next, datetime!(2025-03-12 08:03 UTC));
     }
 
-    #[test]
-    fn backoff_caps_at_60s() {
-        assert_eq!(backoff_seconds(1), 1);
-        assert_eq!(backoff_seconds(2), 2);
-        assert_eq!(backoff_seconds(3), 4);
-        assert_eq!(backoff_seconds(7), 60);
-        assert_eq!(backoff_seconds(99), 60);
-    }
-
     // --- store round-trips ---
 
     #[tokio::test]
@@ -644,26 +590,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn record_delivery_failure_sets_backoff() {
+    async fn get_triggered_returns_triggered_rows_oldest_first() {
         let (store, _d) = open_tmp().await;
-        let mut s = once("rec", datetime!(2025-03-12 09:00 UTC));
-        s.trigger = TriggerSpec::Every {
-            duration_seconds: 3600,
-        };
-        s.status = ScheduleStatus::Triggered;
-        store.create(&s).await.unwrap();
-        store
-            .record_delivery_failure("rec", datetime!(2025-03-12 09:00 UTC))
-            .await
-            .unwrap();
-        let now = datetime!(2025-03-12 09:00 UTC);
-        // next_attempt_at = now + 1s; get_triggered before that excludes it.
-        let pre = store.get_triggered(now).await.unwrap();
-        assert!(pre.is_empty());
-        let post = store
-            .get_triggered(datetime!(2025-03-12 09:00:02 UTC))
-            .await
-            .unwrap();
-        assert_eq!(post.len(), 1);
+        // Created newest-first, so insertion order cannot pass for fire order.
+        let mut newer = once("newer", datetime!(2025-03-12 09:00 UTC));
+        newer.status = ScheduleStatus::Triggered;
+        newer.last_fire = Some(datetime!(2025-03-12 09:00 UTC));
+        store.create(&newer).await.unwrap();
+        let mut older = once("older", datetime!(2025-03-12 08:00 UTC));
+        older.status = ScheduleStatus::Triggered;
+        older.last_fire = Some(datetime!(2025-03-12 08:00 UTC));
+        store.create(&older).await.unwrap();
+        let mut idle = once("idle", datetime!(2025-03-12 07:00 UTC));
+        idle.status = ScheduleStatus::Active;
+        store.create(&idle).await.unwrap();
+
+        // The deliverer's work queue is every Triggered row, oldest fire
+        // first: nothing here waits out a wall clock, and no other status
+        // rides along.
+        let rows = store.get_triggered().await.unwrap();
+        let ids: Vec<&str> = rows.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, vec!["older", "newer"]);
     }
 }

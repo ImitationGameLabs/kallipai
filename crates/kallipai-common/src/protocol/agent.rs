@@ -613,15 +613,17 @@ pub struct MessageRequest {
 
 /// Response body for sending a message to an agent.
 ///
-/// Includes queue depth feedback so callers can gauge expected latency:
-/// - `queue_depth == 0`: agent will process the message immediately.
-/// - `queue_depth > 0`: message is queued behind existing messages; a
-///   warning is included.
+/// A `202` means the message is in the receiver's inbox; what varies is when
+/// the receiver meets it. `delivery_mode` names that moment and `warning` says
+/// what shaped it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MessageResponse {
-    /// Approximate number of messages queued ahead of this one (0 = immediate processing).
+    /// Reserved: always `0`. Nothing measures or reports a queue depth;
+    /// `delivery_mode` and `warning` say where the delivery stands.
     pub queue_depth: usize,
-    /// Human-readable note when queue is non-empty.
+    /// How the delivery was routed: the gate that held it, the wake that
+    /// carried it, or the state that explains why neither happened. Absent
+    /// when the delivery needs no explanation.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub warning: Option<String>,
     /// How the message will become visible to the receiver, when the tagma
@@ -634,13 +636,14 @@ pub struct MessageResponse {
 /// Where a delivered message's visibility comes from, reported on the
 /// [`MessageResponse`] so the sender can gauge expected latency.
 ///
-/// - `in_round`: the busy receiver's prompt channel took an in-round notice
-///   turn; visibility within the running round (minutes).
+/// - `in_round`: the receiver's prompt queue took the notice; visible within
+///   the round that consumes it.
 /// - `kicked`: the receiver was parked and a kick turn woke it; visibility
 ///   at the kick round.
-/// - `deferred`: visibility at the run boundary — the sender asked for it
-///   (`defer`), the notice queue was full, or the parked wake could not be
-///   sent; the receipt's `warning` distinguishes.
+/// - `deferred`: no in-round notice: the sender deferred, the prompt queue
+///   was full, or the parked wake could not be sent; a live receiver pulls it
+///   at the wake this delivery issues, at once unless a round is running,
+///   while a parked one waits for its next wake; `warning` distinguishes.
 /// - `buffered`: the receiver is off-duty (or dead and reactivating); the
 ///   message sits in the inbox until the agent next pulls.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

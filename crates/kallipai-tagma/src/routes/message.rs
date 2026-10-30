@@ -15,10 +15,12 @@ use kallipai_common::agentid::AgentId;
 /// This is intentional: inter-agent communication should not require a
 /// supervisor relationship. Agents cooperate as peers.
 ///
-/// Returns [`MessageResponse`] with queue depth feedback:
-/// - `queue_depth == 0`: agent will process the message immediately.
-/// - `queue_depth > 0`: message is queued behind existing messages (warning included).
-/// - `503`: message queue is full, caller should retry later.
+/// Returns [`MessageResponse`] describing the route the message took:
+/// `delivery_mode` says when it becomes visible and `warning` names the gate
+/// that held it or the wake that carried it. On a `202` the message is in the
+/// receiver's inbox; a refusal answers with no body of this shape.
+/// `queue_depth` is reserved and always `0`: a full prompt queue does not
+/// refuse the message, which lands in the inbox and comes back as `deferred`.
 pub async fn send_message(
     State(state): State<SharedState>,
     auth: crate::auth::AuthIdentity,

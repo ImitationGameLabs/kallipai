@@ -30,12 +30,11 @@ impl TagmaClient {
         Ok(resp.id)
     }
 
-    /// Send a message to an agent. Returns queue depth feedback.
+    /// Send a message to an agent. A `202` means it is in the receiver's inbox.
     ///
-    /// - `queue_depth == 0`: agent will process the message immediately.
-    /// - `queue_depth > 0`: message is queued behind existing messages (warning included).
-    /// - Returns an error on 503 if the message queue is full.
-    /// - `defer`: ask for run-boundary visibility on the receiver (wire `defer`).
+    /// - The response's `delivery_mode` says when the receiver first sees it.
+    /// - `defer`: skip the in-round notice and the parked kick, so the receiver
+    ///   meets the message at its next pull (wire `defer`).
     pub async fn post_message(
         &self,
         id: &AgentId,

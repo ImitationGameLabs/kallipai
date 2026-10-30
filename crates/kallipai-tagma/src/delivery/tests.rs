@@ -401,7 +401,7 @@ async fn busy_peer_injection_failure_leaves_inbox_row_undelivered() {
     assert_eq!(resp.delivery_mode, Some(DeliveryMode::Deferred));
     assert_eq!(
         resp.warning.as_deref(),
-        Some("notice queue full; visibility at run boundary")
+        Some("prompt queue full; visibility at run boundary")
     );
 
     let inbox = state.inboxes.get().expect("inbox installed");

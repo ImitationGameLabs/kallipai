@@ -3,10 +3,11 @@
 //! `CREATE ... IF NOT EXISTS` makes the migration idempotent: the daemon opens
 //! the DB from several tasks (scheduler + deliverer + HTTP handlers share the
 //! pool) and a re-open after migration must be a no-op (sea-orm-migration
-//! records the `seaql_migrations` row on first apply). Subsequent schema
-//! changes are new `m_*` files appended to `Migrator`, never in-place edits
-//! here. The filename is the recorded migration name (`DeriveMigrationName`),
-//! so it is immutable once deployed.
+//! records the `seaql_migrations` row on first apply). Once this schema has
+//! been deployed, later changes arrive as new `m_*` files appended to
+//! `Migrator`; until then this file is the shape itself. The filename is the
+//! recorded migration name (`DeriveMigrationName`), so a deployed database
+//! stays on the shape it applied.
 
 use sea_orm_migration::prelude::*;
 
@@ -30,9 +31,7 @@ impl MigrationTrait for Migration {
                     status TEXT NOT NULL DEFAULT 'active', \
                     created_at INTEGER NOT NULL, \
                     next_fire INTEGER, \
-                    last_fire INTEGER, \
-                    attempts INTEGER NOT NULL DEFAULT 0, \
-                    next_attempt_at INTEGER \
+                    last_fire INTEGER \
                  ); \
                  CREATE INDEX IF NOT EXISTS idx_schedules_status_next_fire \
                     ON schedules (status, next_fire); \
