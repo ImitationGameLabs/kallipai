@@ -5,7 +5,7 @@
   // its own: the dialog holds the order and the edit map, and the card
   // reports every change back. The row is the shared DraftRow: the fields
   // the form edits plus the read-only facts a face may carry (family,
-  // owner, parked), each shown only when that face's row has it. The read
+  // owner), each shown only when that face's row has it. The read
   // row keeps the wire's terms in mono; the form fields use the shared
   // profile copy (model, context window, effort, modalities).
   import {
@@ -23,8 +23,6 @@
     manage_gateway_set_member_edit_done,
     manage_gateway_set_member_move_down,
     manage_gateway_set_member_move_up,
-    manage_gateway_set_member_shared,
-    manage_gateway_unassigned_badge,
     manage_profiles_profile_dialog_invalid_window,
     manage_profiles_profile_dialog_invalid_model,
     manage_profiles_set_dialog_remove_member,
@@ -43,10 +41,8 @@
     isLast = false,
     editing = false,
     editDraft = null,
-    alsoIn = [],
     busy = false,
     editable = true,
-    showParked = true,
     onDragStart,
     onDragEnd,
     onDragOver,
@@ -69,16 +65,10 @@
     editing?: boolean;
     /** The row's editable projection while the form is open. */
     editDraft?: MemberEdit | null;
-    /** Other sets of the same collection that also carry this row. */
-    alsoIn?: readonly string[];
     busy?: boolean;
     /** Whether this face edits the row's fields at all: a create has no
      * registry row to PUT, so that dialog offers no form. */
     editable?: boolean;
-    /** Whether the parked badge can appear at all: a user's own rows are
-     * parked by construction and cannot be promoted, so that dialog hides
-     * the flag. */
-    showParked?: boolean;
     onDragStart: (e: DragEvent) => void;
     onDragEnd: () => void;
     onDragOver: (e: DragEvent) => void;
@@ -132,11 +122,6 @@
     <span class="font-mono text-sm truncate">
       {position}. {member.profile_id}
     </span>
-    {#if showParked && member.parked}
-      <span class="badge preset-tonal-surface text-xs shrink-0 font-mono">
-        {manage_gateway_unassigned_badge()}
-      </span>
-    {/if}
     <div class="flex items-center gap-1 shrink-0">
       <button
         type="button"
@@ -183,11 +168,6 @@
   </div>
   {#if editable && editing && editDraft !== null}
     <div class="flex flex-col gap-2 pt-1">
-      {#if alsoIn.length > 0}
-        <p class="text-xs opacity-70">
-          {manage_gateway_set_member_shared({ sets: alsoIn.join(", ") })}
-        </p>
-      {/if}
       <label class="flex flex-col gap-1">
         <span class="text-xs font-medium">{user_gateway_profile_model()}</span>
         <input

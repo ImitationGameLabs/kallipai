@@ -1,19 +1,17 @@
 import { assert, assertEquals, assertThrows } from "@std/assert";
-import type { AdminProfileRow, AdminSetRow } from "./client.ts";
+import type { AdminProfileRow } from "./client.ts";
 import {
-  adminMemberBody,
-  changedUpdates,
   contextProblem,
   editProblem,
   firstOffending,
   memberEditOf,
   memberIds,
+  membershipWrites,
   modelProblem,
   moveMember,
   orderChanged,
   parseContextWindow,
   reseed,
-  setsAlsoHolding,
   type MemberEdit,
 } from "./setDraft.ts";
 
@@ -35,7 +33,8 @@ function row(
     max_context_window: 128_000,
     effort: "high",
     modalities: ["text"],
-    parked: false,
+    set: "primary",
+    position: 0,
     max_budget: null,
     tpm_limit: null,
     rpm_limit: null,
@@ -105,12 +104,17 @@ Deno.test("contextProblem takes an empty field and whole counts", () => {
   }
 });
 
-Deno.test("changedUpdates sends only the rows whose content differs", () => {
+Deno.test("membershipWrites sends only the rows whose content differs", () => {
   const original = [row("p1"), row("p2"), row("p6")];
   // Nothing edited: no PUT at all, even though the order may have moved.
   assertEquals(
-    changedUpdates(original, [row("p6"), row("p1"), row("p2")], {}),
-    [],
+    membershipWrites(
+      original,
+      [row("p6"), row("p1"), row("p2")],
+      {},
+      "primary",
+    ),
+    { updates: [], joins: [], leaves: [] },
   );
 
   const edits: Record<string, MemberEdit> = {
@@ -118,52 +122,55 @@ Deno.test("changedUpdates sends only the rows whose content differs", () => {
     p2: { ...memberEditOf(original[1]!), model: "deepseek-next" },
     p6: { ...memberEditOf(original[2]!), modalities: ["text", "image"] },
   };
-  const updates = changedUpdates(
+  const writes = membershipWrites(
     original,
     [row("p6"), row("p1"), row("p2")],
     edits,
+    "primary",
   );
   // Display order, not the original order: p6 sits first in the draft.
   assertEquals(
-    updates.map((u) => u.profileId),
+    writes.updates.map((update) => update.profileId),
     ["p6", "p2"],
   );
-  assertEquals(updates[0]!.body.modalities, ["text", "image"]);
-  assertEquals(updates[1]!.body.model, "deepseek-next");
-  // The shared body carries the fields both faces own; the catalog adds
-  // the served flag at its own port.
-  assert(
-    updates.every((u) => !("parked" in u.body)),
-    "the shared PUT body has no parked key",
+  assertEquals(writes.updates[0]!.body.modalities, ["text", "image"]);
+  assertEquals(writes.updates[1]!.body.model, "deepseek-next");
+  // Every update names the set the row lands in.
+  assertEquals(
+    writes.updates.map((update) => update.body.set),
+    ["primary", "primary"],
   );
 });
-
-Deno.test("adminMemberBody adds the served flag at the catalog port", () => {
-  const original = [row("p1")];
-  const edits: Record<string, MemberEdit> = {
-    p1: { ...memberEditOf(original[0]!), model: "next" },
-  };
-  const [update] = changedUpdates(original, original, edits);
-  // The shared body carries only what both faces own; the catalog's
-  // profile route requires the flag, so its port adds it there.
-  assert(!("parked" in update!.body), "the shared body stays free of it");
-  assertEquals(adminMemberBody(update!.body), {
-    model: "next",
-    max_context_window: 128_000,
-    effort: "high",
-    modalities: null,
-    parked: false,
-  });
-});
-
 Deno.test(
-  "changedUpdates treats a reordered modality list as the same content",
+  "a row the draft adds joins, a row it drops leaves unassigned",
+  () => {
+    const original = [row("p1")];
+    const added = row("p9", { set: null });
+    const writes = membershipWrites(original, [added], {}, "backup");
+    assertEquals(
+      writes.joins.map((write) => write.profileId),
+      ["p9"],
+    );
+    assertEquals(writes.joins[0]!.body.set, "backup");
+    assertEquals(
+      writes.leaves.map((write) => write.profileId),
+      ["p1"],
+    );
+    assertEquals(writes.leaves[0]!.body.set, null);
+    assertEquals(writes.updates, []);
+  },
+);
+Deno.test(
+  "membershipWrites treats a reordered modality list as the same content",
   () => {
     const original = [row("p4", { modalities: ["text", "image"] })];
     const edits: Record<string, MemberEdit> = {
       p4: { ...memberEditOf(original[0]!), modalities: ["image", "text"] },
     };
-    assertEquals(changedUpdates(original, original, edits), []);
+    assertEquals(
+      membershipWrites(original, original, edits, "primary").updates,
+      [],
+    );
   },
 );
 
@@ -176,31 +183,33 @@ Deno.test("memberEditOf projects the stored tags into canonical order", () => {
   );
 });
 
-Deno.test("changedUpdates spells a text-only selection as null", () => {
+Deno.test("membershipWrites spells a text-only selection as null", () => {
   const original = [row("p5", { modalities: ["text", "image"] })];
   const edits: Record<string, MemberEdit> = {
     p5: { ...memberEditOf(original[0]!), modalities: ["text"] },
   };
-  const updates = changedUpdates(original, original, edits);
-  assertEquals(updates.length, 1);
+  const writes = membershipWrites(original, original, edits, "primary");
+  assertEquals(writes.updates.length, 1);
   // Text only is the server default and has no list spelling of its own.
-  assertEquals(updates[0]!.body.modalities, null);
+  assertEquals(writes.updates[0]!.body.modalities, null);
 });
 
-Deno.test("changedUpdates spells the window as the wire takes it", () => {
+Deno.test("membershipWrites spells the window as the wire takes it", () => {
   const original = [row("p1")];
   const cleared: Record<string, MemberEdit> = {
     p1: { ...memberEditOf(original[0]!), context_window: "" },
   };
   assertEquals(
-    changedUpdates(original, original, cleared)[0]!.body.max_context_window,
+    membershipWrites(original, original, cleared, "primary").updates[0]!.body
+      .max_context_window,
     null,
   );
   const raised: Record<string, MemberEdit> = {
     p1: { ...memberEditOf(original[0]!), context_window: "256000" },
   };
   assertEquals(
-    changedUpdates(original, original, raised)[0]!.body.max_context_window,
+    membershipWrites(original, original, raised, "primary").updates[0]!.body
+      .max_context_window,
     256_000,
   );
 });
@@ -211,7 +220,7 @@ Deno.test("a draft that never passed the gate cannot become a PUT", () => {
     p1: { ...memberEditOf(original[0]!), model: "next", context_window: "-5" },
   };
   assertThrows(
-    () => changedUpdates(original, original, bad),
+    () => membershipWrites(original, original, bad, "primary"),
     Error,
     "not a positive whole number",
   );
@@ -231,47 +240,26 @@ Deno.test("modelProblem wants a trimmed id the server can serve", () => {
   assert(!editProblem(edit("deepseek-chat")));
 });
 
-Deno.test("changedUpdates trims the model before it compares or sends", () => {
-  const original = [row("p1", { model: "deepseek-chat" })];
-  const padded: Record<string, MemberEdit> = {
-    p1: { ...memberEditOf(original[0]!), model: "  deepseek-chat  " },
-  };
-  // Trailing spaces are typing, not a new id: nothing to PUT.
-  assertEquals(changedUpdates(original, original, padded), []);
-  const typed: Record<string, MemberEdit> = {
-    p1: { ...memberEditOf(original[0]!), model: " deepseek-next " },
-  };
-  const updates = changedUpdates(original, original, typed);
-  assertEquals(updates.length, 1);
-  assertEquals(updates[0]!.body.model, "deepseek-next");
-});
-
-Deno.test("setsAlsoHolding names the other sets of the collection", () => {
-  const target: AdminSetRow = {
-    collection_name: "acme",
-    name: "primary",
-    description: "",
-    profiles: [row("p1"), row("p2")],
-  };
-  const siblings: AdminSetRow[] = [
-    target,
-    {
-      collection_name: "acme",
-      name: "backup",
-      description: "",
-      profiles: [row("p1"), row("p6")],
-    },
-    {
-      collection_name: "acme",
-      name: "spare",
-      description: "",
-      profiles: [row("p1")],
-    },
-  ];
-  assertEquals(setsAlsoHolding(target, siblings), {
-    p1: ["backup", "spare"],
-  });
-});
+Deno.test(
+  "membershipWrites trims the model before it compares or sends",
+  () => {
+    const original = [row("p1", { model: "deepseek-chat" })];
+    const padded: Record<string, MemberEdit> = {
+      p1: { ...memberEditOf(original[0]!), model: "  deepseek-chat  " },
+    };
+    // Trailing spaces are typing, not a new id: nothing to PUT.
+    assertEquals(
+      membershipWrites(original, original, padded, "primary").updates,
+      [],
+    );
+    const typed: Record<string, MemberEdit> = {
+      p1: { ...memberEditOf(original[0]!), model: " deepseek-next " },
+    };
+    const writes = membershipWrites(original, original, typed, "primary");
+    assertEquals(writes.updates.length, 1);
+    assertEquals(writes.updates[0]!.body.model, "deepseek-next");
+  },
+);
 
 Deno.test(
   "an untouched order comes back whole with the registry's rows",

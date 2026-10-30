@@ -3,20 +3,26 @@ import type { AdminProfileRow, AdminSetRow } from "./client.ts";
 import {
   saveSetDraft,
   saveStoppedBanner,
-  setPatchBody,
-  type SetPatchBody,
+  type SetSaveOutcome,
+  type SetSavePhase,
   type SetSavePorts,
   type StepResult,
 } from "./saveSet.ts";
 import {
-  changedUpdates,
   memberEditOf,
-  type MemberUpdate,
-  type MemberUpdateBody,
+  memberIds,
+  membershipWrites,
+  orderToSend,
+  type MemberEdit,
+  type MemberWriteBody,
   type SetSaveDraft,
 } from "./setDraft.ts";
 import {
+  manage_gateway_set_save_description,
+  manage_gateway_set_save_description_only,
   manage_gateway_set_save_members,
+  manage_gateway_set_save_order,
+  manage_gateway_set_save_order_only,
   manage_gateway_set_save_partial,
 } from "../../../paraglide/messages.js";
 
@@ -38,7 +44,8 @@ function row(
     max_context_window: 128_000,
     effort: null,
     modalities: ["text"],
-    parked: false,
+    set: "primary",
+    position: 0,
     max_budget: null,
     tpm_limit: null,
     rpm_limit: null,
@@ -53,20 +60,61 @@ function set(
   return { collection_name: "acme", name: "primary", description, profiles };
 }
 
-// A row whose model changed, through the same arithmetic the dialogs run,
-// so the fixture cannot drift from the body a save really sends.
-function change(id: string): MemberUpdate {
-  const original = row(id);
-  const updates = changedUpdates([original], [original], {
-    [id]: { ...memberEditOf(original), model: `${id}-next` },
+/** A member body as the wire spells it: a log line names the exact
+ * request, not a shape the test half-remembers. */
+function wire(
+  id: string,
+  membership: string | null,
+  overrides: Partial<MemberWriteBody> = {},
+): string {
+  return JSON.stringify({
+    model: `${id}-model`,
+    max_context_window: 128_000,
+    effort: null,
+    modalities: ["text"],
+    set: membership,
+    ...overrides,
   });
-  return updates[0]!;
+}
+
+/** The body an edited row sends: the form's fields, where a text-only tag
+ * selection rides as absent (the server's default). */
+function wireEdited(
+  id: string,
+  membership: string | null,
+  overrides: Partial<MemberWriteBody> = {},
+): string {
+  return wire(id, membership, { modalities: null, ...overrides });
+}
+
+/** A row's edit with its model renamed, through the same arithmetic the
+ * dialogs run, so a fixture cannot drift from a body a save sends. */
+function rename(id: string, model: string): MemberEdit {
+  return { ...memberEditOf(row(id)), model };
+}
+
+/** The draft a dialog hands back for a set: the shown order, plus the
+ * writes the shared arithmetic derives from it. */
+function draftOf(
+  original: AdminSetRow,
+  members: AdminProfileRow[],
+  edits: Record<string, MemberEdit> = {},
+  description = original.description,
+  name = original.name,
+): SetSaveDraft {
+  return {
+    name,
+    description,
+    members: memberIds(members),
+    ...membershipWrites(original.profiles, members, edits, name),
+  };
 }
 
 /** What the fake ports refuse, and whether the refresh throws. */
 interface RecorderOptions {
   refusePut?: (index: number) => boolean;
-  refusePatch?: boolean;
+  refuseDescription?: boolean;
+  refuseOrder?: boolean;
   throwOnSettle?: boolean;
 }
 
@@ -85,9 +133,9 @@ function recorder(options: RecorderOptions = {}): Recorder {
   let settles = 0;
   let puts = 0;
   const ports: SetSavePorts<AdminSetRow> = {
-    putMember: (profileId) => {
+    putMember: (profileId, body) => {
       const index = puts++;
-      log.push(`put ${profileId}`);
+      log.push(`put ${profileId} ${JSON.stringify(body)}`);
       const ok = !(options.refusePut?.(index) ?? false);
       const verdict: StepResult = {
         ok,
@@ -95,12 +143,21 @@ function recorder(options: RecorderOptions = {}): Recorder {
       };
       return Promise.resolve(verdict);
     },
-    patchSet: (body) => {
-      log.push(`patch ${JSON.stringify(body)}`);
-      const ok = !(options.refusePatch ?? false);
+    patchDescription: (description) => {
+      log.push(`description ${description}`);
+      const ok = !(options.refuseDescription ?? false);
       const verdict: StepResult = {
         ok,
-        reason: ok ? null : "the set was refused",
+        reason: ok ? null : "the description was refused",
+      };
+      return Promise.resolve(verdict);
+    },
+    reorder: (members) => {
+      log.push(`order ${members.join(",")}`);
+      const ok = !(options.refuseOrder ?? false);
+      const verdict: StepResult = {
+        ok,
+        reason: ok ? null : "the order was refused",
       };
       return Promise.resolve(verdict);
     },
@@ -120,313 +177,500 @@ function recorder(options: RecorderOptions = {}): Recorder {
   return { ports, log, rereads: () => rereads, settles: () => settles };
 }
 
-Deno.test("member rows land before the order they are named in", async () => {
-  const original = set([row("p1"), row("p2")]);
-  const draft: SetSaveDraft = {
-    description: original.description,
-    members: ["p2", "p1"],
-    updates: [change("p2"), change("p1")],
+/** An outcome as a test reads it: the failing fields, the two writes the
+ * draft carried, and a re-read the fake ports never answer. */
+function outcomeOf(
+  phase: SetSavePhase,
+  landed: string[],
+  total: number,
+  descriptionWrite: boolean,
+  orderWrite: boolean,
+  reason: string | null = null,
+): SetSaveOutcome<AdminSetRow> {
+  return {
+    phase,
+    landed,
+    total,
+    descriptionWrite,
+    orderWrite,
+    reason,
+    row: undefined,
   };
-  const rec = recorder();
-  const outcome = await saveSetDraft(original, draft, rec.ports);
-  assertEquals(outcome.phase, "done");
-  assertEquals(rec.log, [
-    "put p2",
-    "put p1",
-    'patch {"members":["p2","p1"]}',
+}
+
+Deno.test(
+  "kept edits, joins and leaves land before the description and the order",
+  async () => {
+    const original = set([row("p1"), row("p2"), row("p3")], "old");
+    const joined = row("p9", { set: null });
+    const draft = draftOf(
+      original,
+      [row("p2"), joined, row("p3")],
+      { p2: rename("p2", "p2-next") },
+      "new",
+    );
+    const fake = recorder();
+    const outcome = await saveSetDraft(original, draft, fake.ports);
+    assertEquals(fake.log, [
+      `put p2 ${wireEdited("p2", "primary", { model: "p2-next" })}`,
+      `put p9 ${wire("p9", "primary")}`,
+      `put p1 ${wire("p1", null)}`,
+      "description new",
+      "order p2,p9,p3",
+      "settle",
+    ]);
+    assertEquals(outcome, outcomeOf("done", ["p2", "p9", "p1"], 3, true, true));
+    assertEquals(fake.rereads(), 0);
+  },
+);
+
+Deno.test("a refused member PUT stops before the description", async () => {
+  const original = set([row("p1"), row("p2"), row("p3")], "old");
+  const draft = draftOf(
+    original,
+    [row("p1"), row("p2"), row("p3")],
+    {
+      p1: rename("p1", "p1-next"),
+      p2: rename("p2", "p2-next"),
+      p3: rename("p3", "p3-next"),
+    },
+    "new",
+  );
+  const fake = recorder({ refusePut: (index) => index === 1 });
+  const outcome = await saveSetDraft(original, draft, fake.ports);
+  assertEquals(fake.log, [
+    `put p1 ${wireEdited("p1", "primary", { model: "p1-next" })}`,
+    `put p2 ${wireEdited("p2", "primary", { model: "p2-next" })}`,
     "settle",
+    "reread",
   ]);
-  assertEquals(rec.settles(), 1);
-  assertEquals(rec.rereads(), 0);
+  assertEquals(
+    outcome,
+    outcomeOf("put", ["p1"], 3, true, false, "p2 was refused"),
+  );
+  assertEquals(fake.rereads(), 1);
 });
 
 Deno.test(
-  "a refused member PUT stops before the PATCH and re-reads once",
+  "a refused description stop names no order it never had",
   async () => {
-    const original = set([row("p1"), row("p2"), row("p3")]);
-    const draft: SetSaveDraft = {
-      description: original.description,
-      members: ["p1", "p2", "p3"],
-      updates: [change("p1"), change("p2"), change("p3")],
-    };
-    const rec = recorder({ refusePut: (index) => index === 1 });
-    const outcome = await saveSetDraft(original, draft, rec.ports);
-    assertEquals(outcome.phase, "put");
-    assertEquals(outcome.landed, ["p1"]);
-    assertEquals(outcome.total, 3);
-    assertEquals(outcome.reason, "p2 was refused");
-    assertEquals(outcome.patchPending, false);
-    // The third row and the order never leave the dialog.
-    assertEquals(rec.log, ["put p1", "put p2", "settle", "reread"]);
-    assertEquals(rec.settles(), 1);
-    assertEquals(rec.rereads(), 1);
+    const original = set([row("p1"), row("p2")]);
+    const draft = draftOf(original, [row("p1"), row("p2")], {}, "new");
+    const fake = recorder({ refuseDescription: true });
+    const outcome = await saveSetDraft(original, draft, fake.ports);
+    assertEquals(fake.log, ["description new", "settle", "reread"]);
+    assertEquals(
+      outcome,
+      outcomeOf(
+        "description",
+        [],
+        0,
+        true,
+        false,
+        "the description was refused",
+      ),
+    );
+    // Nothing landed, so the banner gives the reason alone: it cannot report a
+    // membership save, and there was no order write to mention.
+    assertEquals(saveStoppedBanner(outcome), "the description was refused");
   },
 );
 
-Deno.test(
-  "a refused PATCH keeps every landed row and reads the set back",
-  async () => {
-    const original = set([row("p1"), row("p2")], "old");
-    const draft: SetSaveDraft = {
-      description: "new",
-      members: ["p2", "p1"],
-      updates: [change("p1"), change("p2")],
-    };
-    const rec = recorder({ refusePatch: true });
-    const outcome = await saveSetDraft(original, draft, rec.ports);
-    assertEquals(outcome.phase, "patch");
-    assertEquals(outcome.landed, ["p1", "p2"]);
-    assertEquals(outcome.patchPending, true);
-    assertEquals(outcome.reason, "the set was refused");
-    assertEquals(rec.log, [
-      "put p1",
-      "put p2",
-      'patch {"description":"new","members":["p2","p1"]}',
-      "settle",
-      "reread",
-    ]);
-    assertEquals(rec.settles(), 1);
-    assertEquals(rec.rereads(), 1);
-  },
-);
+Deno.test("a refused order stops after the membership", async () => {
+  const original = set([row("p1"), row("p2")]);
+  const draft = draftOf(original, [row("p2"), row("p1")], {
+    p1: rename("p1", "p1-next"),
+  });
+  const fake = recorder({ refuseOrder: true });
+  const outcome = await saveSetDraft(original, draft, fake.ports);
+  assertEquals(fake.log, [
+    `put p1 ${wireEdited("p1", "primary", { model: "p1-next" })}`,
+    "order p2,p1",
+    "settle",
+    "reread",
+  ]);
+  assertEquals(
+    outcome,
+    outcomeOf("order", ["p1"], 1, false, true, "the order was refused"),
+  );
+  // The description never changed, so the banner names the order alone.
+  assertEquals(
+    saveStoppedBanner(outcome),
+    `${manage_gateway_set_save_order_only()} the order was refused`,
+  );
+});
+
+Deno.test("a reorder-only stop reports no membership save", async () => {
+  const original = set([row("p1"), row("p2")]);
+  const draft = draftOf(original, [row("p2"), row("p1")]);
+  const fake = recorder({ refuseOrder: true });
+  const outcome = await saveSetDraft(original, draft, fake.ports);
+  assertEquals(fake.log, ["order p2,p1", "settle", "reread"]);
+  assertEquals(
+    outcome,
+    outcomeOf("order", [], 0, false, true, "the order was refused"),
+  );
+  // No membership write ran and no description write existed: the reason is
+  // the whole report.
+  assertEquals(saveStoppedBanner(outcome), "the order was refused");
+});
+
+Deno.test("a description stop names the order it still owed", async () => {
+  const original = set([row("p1"), row("p2")], "old");
+  const draft = draftOf(
+    original,
+    [row("p2"), row("p1")],
+    { p1: rename("p1", "p1-next") },
+    "new",
+  );
+  const fake = recorder({ refuseDescription: true });
+  const outcome = await saveSetDraft(original, draft, fake.ports);
+  assertEquals(fake.log, [
+    `put p1 ${wireEdited("p1", "primary", { model: "p1-next" })}`,
+    "description new",
+    "settle",
+    "reread",
+  ]);
+  assertEquals(
+    outcome,
+    outcomeOf(
+      "description",
+      ["p1"],
+      1,
+      true,
+      true,
+      "the description was refused",
+    ),
+  );
+  assertEquals(
+    saveStoppedBanner(outcome),
+    `${manage_gateway_set_save_description()} the description was refused`,
+  );
+});
+
+Deno.test("a description stop with no order owed names it alone", async () => {
+  const original = set([row("p1"), row("p2")], "old");
+  const draft = draftOf(
+    original,
+    [row("p1"), row("p2")],
+    { p1: rename("p1", "p1-next") },
+    "new",
+  );
+  const fake = recorder({ refuseDescription: true });
+  const outcome = await saveSetDraft(original, draft, fake.ports);
+  assertEquals(
+    outcome,
+    outcomeOf(
+      "description",
+      ["p1"],
+      1,
+      true,
+      false,
+      "the description was refused",
+    ),
+  );
+  assertEquals(
+    saveStoppedBanner(outcome),
+    `${manage_gateway_set_save_description_only()} the description was refused`,
+  );
+});
 
 Deno.test("a draft that matches the row sends nothing", async () => {
-  const original = set([row("p1")]);
-  const draft: SetSaveDraft = {
-    description: original.description,
-    members: ["p1"],
-    updates: [],
-  };
-  const rec = recorder();
-  const outcome = await saveSetDraft(original, draft, rec.ports);
-  assertEquals(outcome.phase, "done");
-  assertEquals(outcome.patchPending, false);
-  assertEquals(rec.log, ["settle"]);
-  assertEquals(rec.settles(), 1);
-  assertEquals(rec.rereads(), 0);
+  const original = set([row("p1"), row("p2")]);
+  const draft = draftOf(original, [row("p1"), row("p2")]);
+  const fake = recorder();
+  const outcome = await saveSetDraft(original, draft, fake.ports);
+  assertEquals(fake.log, ["settle"]);
+  assertEquals(outcome, outcomeOf("done", [], 0, false, false));
 });
 
 Deno.test("a content-only save never sends the order", async () => {
   const original = set([row("p1"), row("p2")]);
-  const draft: SetSaveDraft = {
-    description: original.description,
-    members: ["p1", "p2"],
-    updates: [change("p1"), change("p2")],
-  };
-  const rec = recorder();
-  const outcome = await saveSetDraft(original, draft, rec.ports);
-  assertEquals(outcome.phase, "done");
-  assertEquals(outcome.patchPending, false);
-  assertEquals(rec.log, ["put p1", "put p2", "settle"]);
-  assertEquals(rec.settles(), 1);
+  const draft = draftOf(original, [row("p1"), row("p2")], {
+    p2: rename("p2", "p2-next"),
+  });
+  const fake = recorder();
+  const outcome = await saveSetDraft(original, draft, fake.ports);
+  assertEquals(fake.log, [
+    `put p2 ${wireEdited("p2", "primary", { model: "p2-next" })}`,
+    "settle",
+  ]);
+  assertEquals(outcome, outcomeOf("done", ["p2"], 1, false, false));
 });
 
-Deno.test("the PATCH carries only the part of the draft that changed", () => {
-  const original = set([row("p1"), row("p2")], "old");
-  const unchanged: SetSaveDraft = {
-    description: "old",
-    members: ["p1", "p2"],
-    updates: [],
-  };
-  // A stale draft cannot rewrite an untouched order: the members stay
-  // off the wire unless the dialog changes them.
-  assertEquals(setPatchBody(original, unchanged), null);
-  const described: SetPatchBody | null = setPatchBody(original, {
-    ...unchanged,
-    description: "new",
-  });
-  assertEquals(described, { description: "new" });
-  assertEquals(
-    setPatchBody(original, { ...unchanged, members: ["p2", "p1"] }),
-    { members: ["p2", "p1"] },
-  );
-  // A removal is a membership change like any other.
-  assertEquals(setPatchBody(original, { ...unchanged, members: ["p1"] }), {
-    members: ["p1"],
-  });
-});
-
-Deno.test("emptying the member list sends members: []", async () => {
+Deno.test("every member leaving sends the leaves and no order", async () => {
   const original = set([row("p1"), row("p2")]);
-  const draft: SetSaveDraft = {
-    description: original.description,
-    members: [],
-    updates: [],
-  };
-  const rec = recorder();
-  const outcome = await saveSetDraft(original, draft, rec.ports);
-  assertEquals(outcome.phase, "done");
-  assertEquals(outcome.patchPending, true);
-  // The last member leaving is a membership change: the description stays
-  // off the wire, and the empty order travels on its own.
-  assertEquals(rec.log, ['patch {"members":[]}', "settle"]);
-  assertEquals(rec.settles(), 1);
+  const draft = draftOf(original, []);
+  const fake = recorder();
+  const outcome = await saveSetDraft(original, draft, fake.ports);
+  assertEquals(fake.log, [
+    `put p1 ${wire("p1", null)}`,
+    `put p2 ${wire("p2", null)}`,
+    "settle",
+  ]);
+  assertEquals(outcome, outcomeOf("done", ["p1", "p2"], 2, false, false));
 });
+
+Deno.test("a row that leaves carries the draft's edit", async () => {
+  const original = set([row("p1"), row("p2")]);
+  const draft = draftOf(original, [row("p2")], { p1: rename("p1", "p1-next") });
+  const fake = recorder();
+  const outcome = await saveSetDraft(original, draft, fake.ports);
+  assertEquals(fake.log, [
+    `put p1 ${wireEdited("p1", null, { model: "p1-next" })}`,
+    "settle",
+  ]);
+  assertEquals(outcome, outcomeOf("done", ["p1"], 1, false, false));
+});
+
 Deno.test(
-  "a window field reaches the PUT as the count the wire takes",
-  async () => {
-    const original = set([row("p1")]);
-    const edit = { ...memberEditOf(row("p1")), context_window: " 200000 " };
-    const draft: SetSaveDraft = {
-      description: original.description,
-      members: ["p1"],
-      updates: changedUpdates(original.profiles, original.profiles, {
-        p1: edit,
-      }),
-    };
-    const bodies: MemberUpdateBody[] = [];
-    const ports: SetSavePorts<AdminSetRow> = {
-      putMember: (_id, body) => {
-        bodies.push(body);
-        return Promise.resolve({ ok: true, reason: null });
-      },
-      patchSet: () => Promise.resolve({ ok: true, reason: null }),
-      settle: () => {},
-      reread: () => Promise.resolve(undefined),
-    };
-    const outcome = await saveSetDraft(original, draft, ports);
-    assertEquals(outcome.phase, "done");
-    assertEquals(outcome.landed, ["p1"]);
-    assertEquals(bodies, [
-      {
-        model: "p1-model",
-        max_context_window: 200_000,
-        effort: null,
-        modalities: null,
-      },
-    ]);
+  "the order goes out only when the writes leave another sequence",
+  () => {
+    const cases: Array<[string[], string[], string[] | null]> = [
+      [["p1", "p2"], [], null],
+      [
+        ["p1", "p2", "p3"],
+        ["p3", "p1", "p2"],
+        ["p3", "p1", "p2"],
+      ],
+      [["p1", "p2"], ["p1", "p2", "p9"], null],
+      [
+        ["p1", "p2"],
+        ["p9", "p1", "p2"],
+        ["p9", "p1", "p2"],
+      ],
+    ];
+    for (const [originalIds, draftIds, expected] of cases) {
+      assertEquals(
+        orderToSend(originalIds, draftIds),
+        expected,
+        draftIds.join(","),
+      );
+    }
   },
 );
 
-Deno.test("a stop with nothing landed reports only the server's reason", () => {
-  assertEquals(
-    saveStoppedBanner({
-      landed: [],
-      total: 3,
-      patchPending: false,
-      reason: "p1 was refused",
-    }),
-    "p1 was refused",
-  );
-  // Nothing landed and no reason: nothing to say.
-  assertEquals(
-    saveStoppedBanner({
-      landed: [],
-      total: 0,
-      patchPending: false,
-      reason: null,
-    }),
-    null,
-  );
-});
+Deno.test(
+  "the context field reaches the PUT as the number it spells",
+  async () => {
+    const original = set([row("p1")]);
+    const edit = { ...memberEditOf(row("p1")), context_window: " 200000 " };
+    const draft = draftOf(original, [row("p1")], { p1: edit });
+    const fake = recorder();
+    const outcome = await saveSetDraft(original, draft, fake.ports);
+    assertEquals(fake.log, [
+      `put p1 ${wireEdited("p1", "primary", { max_context_window: 200_000 })}`,
+      "settle",
+    ]);
+    assertEquals(outcome, outcomeOf("done", ["p1"], 1, false, false));
+  },
+);
 
-Deno.test("a stop with rows landed counts them and names the step", () => {
-  const counts = { saved: 1, total: 3 };
-  assertEquals(
-    saveStoppedBanner({
-      landed: ["p1"],
-      total: 3,
-      patchPending: true,
-      reason: null,
-    }),
-    manage_gateway_set_save_partial(counts),
-  );
-  assertEquals(
-    saveStoppedBanner({
-      landed: ["p1"],
-      total: 3,
-      patchPending: false,
-      reason: null,
-    }),
-    manage_gateway_set_save_members(counts),
-  );
-  // The count comes first and the stopping reason follows it.
-  assertEquals(
-    saveStoppedBanner({
-      landed: ["p1"],
-      total: 3,
-      patchPending: true,
-      reason: "p2 was refused",
-    }),
-    `${manage_gateway_set_save_partial(counts)} p2 was refused`,
-  );
-});
+Deno.test(
+  "the banner names the step the save stopped at and what it left unsent",
+  () => {
+    const counts = { saved: 1, total: 3 };
+    // A save whose first write was refused has nothing landed to report.
+    assertEquals(
+      saveStoppedBanner({
+        phase: "put",
+        landed: [],
+        total: 3,
+        descriptionWrite: true,
+        orderWrite: true,
+        reason: "p1 was refused",
+      }),
+      "p1 was refused",
+    );
+    assertEquals(
+      saveStoppedBanner({
+        phase: "put",
+        landed: [],
+        total: 3,
+        descriptionWrite: true,
+        orderWrite: true,
+        reason: null,
+      }),
+      null,
+    );
+    assertEquals(
+      saveStoppedBanner({
+        phase: "put",
+        landed: ["p1"],
+        total: 3,
+        descriptionWrite: true,
+        orderWrite: true,
+        reason: null,
+      }),
+      manage_gateway_set_save_partial(counts),
+    );
+    assertEquals(
+      saveStoppedBanner({
+        phase: "put",
+        landed: ["p1"],
+        total: 3,
+        descriptionWrite: false,
+        orderWrite: false,
+        reason: null,
+      }),
+      manage_gateway_set_save_members(counts),
+    );
+    assertEquals(
+      saveStoppedBanner({
+        phase: "put",
+        landed: ["p1"],
+        total: 3,
+        descriptionWrite: false,
+        orderWrite: true,
+        reason: "the order was refused",
+      }),
+      `${manage_gateway_set_save_partial(counts)} the order was refused`,
+    );
+    // A description stop names the order only when the draft carried one.
+    assertEquals(
+      saveStoppedBanner({
+        phase: "description",
+        landed: ["p1"],
+        total: 3,
+        descriptionWrite: true,
+        orderWrite: true,
+        reason: "the order was refused",
+      }),
+      `${manage_gateway_set_save_description()} the order was refused`,
+    );
+    assertEquals(
+      saveStoppedBanner({
+        phase: "description",
+        landed: ["p1"],
+        total: 3,
+        descriptionWrite: true,
+        orderWrite: false,
+        reason: null,
+      }),
+      manage_gateway_set_save_description_only(),
+    );
+    // An order stop names the description only when the draft carried one.
+    assertEquals(
+      saveStoppedBanner({
+        phase: "order",
+        landed: ["p1"],
+        total: 3,
+        descriptionWrite: true,
+        orderWrite: true,
+        reason: "the order was refused",
+      }),
+      `${manage_gateway_set_save_order()} the order was refused`,
+    );
+    assertEquals(
+      saveStoppedBanner({
+        phase: "order",
+        landed: ["p1"],
+        total: 3,
+        descriptionWrite: false,
+        orderWrite: true,
+        reason: null,
+      }),
+      manage_gateway_set_save_order_only(),
+    );
+    // A stop that landed nothing, a reorder-only save among them, gives the
+    // reason alone: it cannot report a membership save that did not run.
+    assertEquals(
+      saveStoppedBanner({
+        phase: "order",
+        landed: [],
+        total: 0,
+        descriptionWrite: false,
+        orderWrite: true,
+        reason: "the order was refused",
+      }),
+      "the order was refused",
+    );
+    assertEquals(
+      saveStoppedBanner({
+        phase: "description",
+        landed: [],
+        total: 0,
+        descriptionWrite: true,
+        orderWrite: false,
+        reason: "the description was refused",
+      }),
+      "the description was refused",
+    );
+  },
+);
 
-// Every way the sequence can end, each with the port order it leaves
-// behind: the refresh sits after the last write and before the re-read
-// when there is one, and it runs on every exit exactly once.
-Deno.test("each exit settles once, after its last write", async (t) => {
+Deno.test("each exit settles once, after its last write", async () => {
+  const plain = set([row("p1")], "old");
+  const edited = set([row("p1"), row("p2")]);
   const cases: Array<{
-    name: string;
-    original: AdminSetRow;
-    draft: SetSaveDraft;
     options: RecorderOptions;
-    phase: "done" | "put" | "patch";
-    log: string[];
+    saved: AdminSetRow;
+    draft: SetSaveDraft;
+    phase: SetSavePhase;
   }> = [
     {
-      name: "every write lands, the PATCH last",
-      original: set([row("p1")], "old"),
-      draft: { description: "new", members: ["p1"], updates: [change("p1")] },
       options: {},
+      saved: plain,
+      draft: draftOf(plain, [row("p1")]),
       phase: "done",
-      log: ["put p1", 'patch {"description":"new"}', "settle"],
     },
     {
-      name: "nothing needs a PATCH",
-      original: set([row("p1")]),
-      draft: {
-        description: "the primary rotation",
-        members: ["p1"],
-        updates: [change("p1")],
-      },
       options: {},
+      saved: edited,
+      draft: draftOf(edited, [row("p1"), row("p2")], {
+        p2: rename("p2", "p2-next"),
+      }),
       phase: "done",
-      log: ["put p1", "settle"],
     },
     {
-      name: "a member PUT is refused",
-      original: set([row("p1"), row("p2")]),
-      draft: {
-        description: "the primary rotation",
-        members: ["p1", "p2"],
-        updates: [change("p1"), change("p2")],
-      },
       options: { refusePut: () => true },
+      saved: edited,
+      draft: draftOf(edited, [row("p1"), row("p2")], {
+        p1: rename("p1", "p1-next"),
+      }),
       phase: "put",
-      log: ["put p1", "settle", "reread"],
     },
     {
-      name: "the PATCH is refused",
-      original: set([row("p1")], "old"),
-      draft: { description: "new", members: ["p1"], updates: [] },
-      options: { refusePatch: true },
-      phase: "patch",
-      log: ['patch {"description":"new"}', "settle", "reread"],
+      options: { refuseDescription: true },
+      saved: edited,
+      draft: draftOf(edited, [row("p1"), row("p2")], {}, "new"),
+      phase: "description",
+    },
+    {
+      options: { refuseOrder: true },
+      saved: edited,
+      draft: draftOf(edited, [row("p2"), row("p1")]),
+      phase: "order",
     },
   ];
-  for (const item of cases) {
-    await t.step(item.name, async () => {
-      const rec = recorder(item.options);
-      const outcome = await saveSetDraft(item.original, item.draft, rec.ports);
-      assertEquals(outcome.phase, item.phase);
-      assertEquals(rec.log, item.log);
-      assertEquals(rec.settles(), 1);
-    });
+  for (const { options, saved, draft, phase } of cases) {
+    const fake = recorder(options);
+    const outcome = await saveSetDraft(saved, draft, fake.ports);
+    assertEquals(outcome.phase, phase);
+    assertEquals(fake.settles(), 1, `${phase} settles once`);
+    const at = fake.log.indexOf("settle");
+    // Only the failure's re-read may follow the refresh.
+    assertEquals(
+      fake.log.slice(at + 1).every((line) => line === "reread"),
+      true,
+    );
+    // The refresh follows the last write, so nothing ran after it.
+    assertEquals(
+      fake.log.indexOf("reread"),
+      outcome.phase === "done" ? -1 : at + 1,
+    );
   }
 });
 
 Deno.test("a refresh that throws does not take the outcome away", async () => {
   const original = set([row("p1")], "old");
-  const draft: SetSaveDraft = {
-    description: "new",
-    members: ["p1"],
-    updates: [],
-  };
-  const rec = recorder({ refusePatch: true, throwOnSettle: true });
-  const outcome = await saveSetDraft(original, draft, rec.ports);
-  assertEquals(outcome.phase, "patch");
-  assertEquals(outcome.reason, "the set was refused");
-  assertEquals(rec.settles(), 1);
-  assertEquals(rec.rereads(), 1);
+  const draft = draftOf(original, [row("p1")], {}, "new");
+  const fake = recorder({ refuseDescription: true, throwOnSettle: true });
+  const outcome = await saveSetDraft(original, draft, fake.ports);
+  assertEquals(
+    outcome,
+    outcomeOf("description", [], 0, true, false, "the description was refused"),
+  );
+  assertEquals(fake.settles(), 1);
+  assertEquals(fake.rereads(), 1);
 });

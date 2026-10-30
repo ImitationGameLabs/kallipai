@@ -1,23 +1,28 @@
-// The set dialogs' multi-step save. Changed member rows land as
-// their own PUTs, then the description and the member order ride one
-// PATCH. The sequence lives here, behind four ports, so a test can drive
-// the failure paths (which requests ran, how often the set was read back)
-// without a browser, and the page only wires the ports to the store.
+// The set dialogs' multi-step save. A membership change is one PUT per row:
+// a row that stays and changed, a row the draft adds, and a row it drops
+// each carry their own write. The description and the order follow as their
+// own writes, because the server takes a set's description alone and its
+// order only as a permutation of the membership it holds right then.
 //
-// One save spans several requests, so the read side belongs to the
-// sequence, not to any single write: `settle` runs exactly once, after the
-// last write and before the re-read, so the rows the re-read projects are
-// the ones this save left behind.
+// The sequence lives here, behind five ports, so a test can drive the
+// failure paths (which requests ran, where the save stopped, how often the
+// set was read back) without a browser, and the page only wires the ports
+// to the store.
 
 import {
   memberIds,
+  orderToSend,
   type DraftRow,
-  type MemberUpdateBody,
+  type MemberWriteBody,
   type SetSaveDraft,
 } from "./setDraft.ts";
 
 import {
+  manage_gateway_set_save_description,
+  manage_gateway_set_save_description_only,
   manage_gateway_set_save_members,
+  manage_gateway_set_save_order,
+  manage_gateway_set_save_order_only,
   manage_gateway_set_save_partial,
 } from "../../../paraglide/messages.js";
 
@@ -34,19 +39,16 @@ export interface DraftSet {
   profiles: readonly DraftRow[];
 }
 
-/** The PATCH body: only the parts of the draft that differ from the row
- * the dialog was seeded with. */
-export interface SetPatchBody {
-  description?: string;
-  members?: string[];
-}
-
 /** The requests the save makes, in the order it makes them. The re-read
  * answers the face's own detail row, so the page can hand it back to the
  * dialog it came from. */
 export interface SetSavePorts<S extends DraftSet = DraftSet> {
-  putMember(profileId: string, body: MemberUpdateBody): Promise<StepResult>;
-  patchSet(body: SetPatchBody): Promise<StepResult>;
+  putMember(profileId: string, body: MemberWriteBody): Promise<StepResult>;
+  patchDescription(description: string): Promise<StepResult>;
+  /** The complete membership in the order it should fail over in: the server
+   * refuses a list that adds or drops a member, so this runs only after every
+   * membership write landed. */
+  reorder(members: readonly string[]): Promise<StepResult>;
   /** Refresh the caller's read side, once per save, after the last write
    * and before `reread`: the re-read projects from what this call leaves
    * in the caller's cache, so it has to run first. The port reports
@@ -57,47 +59,23 @@ export interface SetSavePorts<S extends DraftSet = DraftSet> {
   reread(): Promise<S | undefined>;
 }
 
-/** What the save did: the step that stopped it (if any), the rows whose
- * PUT landed, and the re-read row after a failure. */
+/** Where a save stopped: a membership PUT, the description, the order, or
+ * nowhere (`done`: the whole draft landed). */
+export type SetSavePhase = "put" | "description" | "order" | "done";
+
+/** What the save did: the step that stopped it (if any), the rows whose PUTs
+ * landed, every membership request it planned, whether the draft carried a
+ * description write and an order write, and the re-read row after a failure.
+ * The two write flags are facts, not inferences from the step it stopped at:
+ * a description stop says nothing about an order the draft never had. */
 export interface SetSaveOutcome<S extends DraftSet = DraftSet> {
-  phase: "done" | "put" | "patch";
+  phase: SetSavePhase;
   landed: string[];
-  /** The rows whose content differed, so the rows a PUT had to reach. */
   total: number;
-  /** The PATCH had something to send (a description or order change). */
-  patchPending: boolean;
+  descriptionWrite: boolean;
+  orderWrite: boolean;
   reason: string | null;
   row: S | undefined;
-}
-
-/** The PATCH body for the draft, or null when the description and the
- * order both match the row: an untouched order stays off the wire, so a
- * dialog opened before someone else moved a member cannot rewrite that
- * membership on its way out. */
-export function setPatchBody(
-  original: DraftSet,
-  draft: SetSaveDraft,
-): SetPatchBody | null {
-  const body: SetPatchBody = {};
-  if (draft.description !== original.description) {
-    body.description = draft.description;
-  }
-  if (!sameIds(original.profiles, draft.members)) {
-    body.members = [...draft.members];
-  }
-  return body.description === undefined && body.members === undefined
-    ? null
-    : body;
-}
-
-function sameIds(
-  original: readonly DraftRow[],
-  members: readonly string[],
-): boolean {
-  const ids = memberIds(original);
-  return (
-    ids.length === members.length && ids.every((id, i) => id === members[i])
-  );
 }
 
 /** The refresh is a step of this sequence, not a request of its own: the
@@ -115,78 +93,112 @@ async function settleReadSide<S extends DraftSet>(
   }
 }
 
-/** Land the draft: each changed row as one PUT (in display order), then
- * the description and order as one PATCH. The first refusal stops the
- * save, settles the caller's read side, reads the set back once, and
- * reports what landed; nothing after the refusal runs. */
+/** The outcome of a save that stopped: the read side settles, then the set is
+ * read back once, so the dialog reseeds from what actually landed. */
+async function stopped<S extends DraftSet>(
+  ports: SetSavePorts<S>,
+  phase: Exclude<SetSavePhase, "done">,
+  landed: string[],
+  total: number,
+  rest: { description: boolean; order: boolean },
+  reason: string | null,
+): Promise<SetSaveOutcome<S>> {
+  await settleReadSide(ports);
+  return {
+    phase,
+    landed,
+    total,
+    descriptionWrite: rest.description,
+    orderWrite: rest.order,
+    reason,
+    row: await ports.reread(),
+  };
+}
+
+/** Land the draft: each membership row as one PUT (the kept edits, then the
+ * joins, then the leaves), then the description and the order as their own
+ * writes. The first refusal stops the save, settles the caller's read side,
+ * reads the set back once, and reports what landed; nothing after the refusal
+ * runs. The leaves go last because the order write needs the membership to be
+ * final: `/order` takes exactly the members the set holds right then. */
 export async function saveSetDraft<S extends DraftSet>(
   original: S,
   draft: SetSaveDraft,
   ports: SetSavePorts<S>,
 ): Promise<SetSaveOutcome<S>> {
+  const writes = [...draft.updates, ...draft.joins, ...draft.leaves];
+  const total = writes.length;
+  const order = orderToSend(memberIds(original.profiles), draft.members);
+  // What the save owes beyond the membership PUTs: a description that really
+  // changed, and an order the writes left as another sequence.
+  const rest = {
+    description: draft.description !== original.description,
+    order: order !== null,
+  };
   const landed: string[] = [];
-  for (const update of draft.updates) {
-    const step = await ports.putMember(update.profileId, update.body);
+  for (const write of writes) {
+    const step = await ports.putMember(write.profileId, write.body);
     if (!step.ok) {
-      await settleReadSide(ports);
-      return {
-        phase: "put",
-        landed,
-        total: draft.updates.length,
-        patchPending: setPatchBody(original, draft) !== null,
-        reason: step.reason,
-        row: await ports.reread(),
-      };
+      return stopped(ports, "put", landed, total, rest, step.reason);
     }
-    landed.push(update.profileId);
+    landed.push(write.profileId);
   }
-  const body = setPatchBody(original, draft);
-  if (body === null) {
-    await settleReadSide(ports);
-    return {
-      phase: "done",
-      landed,
-      total: draft.updates.length,
-      patchPending: false,
-      reason: null,
-      row: undefined,
-    };
+  if (rest.description) {
+    const step = await ports.patchDescription(draft.description);
+    if (!step.ok) {
+      return stopped(ports, "description", landed, total, rest, step.reason);
+    }
   }
-  const step = await ports.patchSet(body);
-  if (!step.ok) {
-    await settleReadSide(ports);
-    return {
-      phase: "patch",
-      landed,
-      total: draft.updates.length,
-      patchPending: true,
-      reason: step.reason,
-      row: await ports.reread(),
-    };
+  if (order !== null) {
+    const step = await ports.reorder(order);
+    if (!step.ok) {
+      return stopped(ports, "order", landed, total, rest, step.reason);
+    }
   }
   await settleReadSide(ports);
   return {
     phase: "done",
     landed,
-    total: draft.updates.length,
-    patchPending: true,
+    total,
+    descriptionWrite: rest.description,
+    orderWrite: rest.order,
     reason: null,
     row: undefined,
   };
 }
 
-/** The banner under a stopped save: what landed, and why it stopped.
- * The rows are the one part of the draft the dialog cannot show as saved,
- * so the sentence counts them. A stop with nothing landed has only the
- * server's reason; one with rows landed names the reason after the count
- * when there is one. Both faces show this same sentence. */
+/** The banner under a stopped save: what landed, and what it left unsent.
+ * The sentence follows the step that stopped it, because every step has its
+ * own truth: a save that stopped at the description already landed every
+ * membership write and cannot say the members did not save, and it cannot
+ * name an order write the draft never had. Both faces show this sentence. */
 export function saveStoppedBanner(
-  outcome: Pick<SetSaveOutcome, "landed" | "total" | "patchPending" | "reason">,
+  outcome: Pick<
+    SetSaveOutcome,
+    "phase" | "landed" | "total" | "descriptionWrite" | "orderWrite" | "reason"
+  >,
 ): string | null {
-  if (outcome.landed.length === 0) return outcome.reason;
+  // Nothing landed: the reason alone is the report. A description write that
+  // landed counts, so an order stop after it still names what saved.
+  const descriptionLanded =
+    outcome.phase === "order" && outcome.descriptionWrite;
+  if (outcome.landed.length === 0 && !descriptionLanded) {
+    return outcome.reason;
+  }
   const counts = { saved: outcome.landed.length, total: outcome.total };
-  const saved = outcome.patchPending
-    ? manage_gateway_set_save_partial(counts)
-    : manage_gateway_set_save_members(counts);
-  return outcome.reason === null ? saved : `${saved} ${outcome.reason}`;
+  let sentence: string;
+  if (outcome.phase === "description") {
+    sentence = outcome.orderWrite
+      ? manage_gateway_set_save_description()
+      : manage_gateway_set_save_description_only();
+  } else if (outcome.phase === "order") {
+    sentence = outcome.descriptionWrite
+      ? manage_gateway_set_save_order()
+      : manage_gateway_set_save_order_only();
+  } else if (outcome.descriptionWrite || outcome.orderWrite) {
+    sentence = manage_gateway_set_save_partial(counts);
+  } else {
+    sentence = manage_gateway_set_save_members(counts);
+  }
+  return outcome.reason === null ? sentence : `${sentence} ${outcome.reason}`;
 }

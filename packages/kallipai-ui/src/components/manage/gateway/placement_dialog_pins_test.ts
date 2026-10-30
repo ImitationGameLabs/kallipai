@@ -5,7 +5,7 @@ import { assert } from "@std/assert";
 // the set list through the shared membership helper, a collection
 // change resets the set pick instead of waiting for a blur, the
 // unassigned profile's identity rides the dialog head, and the confirm
-// carries both picks to the caller.
+// carries the set pick, the destination being the row's own collection.
 const DIALOG = new URL("./PlacementDialog.svelte", import.meta.url);
 const HELPER = new URL("../../../lib/gateway/collections.ts", import.meta.url);
 const USER_SECTION = new URL(
@@ -40,8 +40,9 @@ Deno.test(
       "a collection without sets disables the set pick",
     );
     assert(
-      src.includes("onConfirm(collectionDraft, setNameDraft)"),
-      "the confirm carries both picks to the caller",
+      src.includes("onConfirm(setNameDraft)") &&
+        !src.includes("onConfirm(collectionDraft"),
+      "the confirm carries the set pick; the collection is the row's own",
     );
     assert(
       src.includes(

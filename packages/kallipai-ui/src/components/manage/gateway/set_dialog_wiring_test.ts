@@ -72,13 +72,11 @@ Deno.test(
         src.includes("onclick={onMoveDown}"),
       "the down button is disabled on the last row and calls onMoveDown",
     );
-    // A member that also sits in another set says so inside the form,
-    // where the edit that changes both places happens.
+    // The card shows the row the set holds, and nothing about where else
+    // that row might sit: this dialog edits one set's membership.
     assert(
-      src.includes(
-        'manage_gateway_set_member_shared({ sets: alsoIn.join(", ") })',
-      ),
-      "the shared-set hint names the other sets",
+      src.includes("{member.family}") && src.includes("{member.model}"),
+      "the card shows the row's own facts",
     );
   },
 );
@@ -97,9 +95,9 @@ Deno.test(
       submit.includes("description: descriptionDraft,") &&
         submit.includes("members: memberIds(members),") &&
         submit.includes(
-          "updates: changedUpdates(set.profiles, members, edits),",
+          "...membershipWrites(set.profiles, members, edits, set.name),",
         ),
-      "submit hands the description, the order, and the changed rows",
+      "submit hands the description, the order, the membership writes",
     );
     // A re-read of the same set is a partial reseed, not a fresh one:
     // setDraft keeps a landed row and returns an untouched order whole.
@@ -135,7 +133,6 @@ Deno.test(
       "onMoveUp={() => step(idx, -1)}",
       "onMoveDown={() => step(idx, 1)}",
       "editDraft={edits[member.profile_id] ?? null}",
-      "alsoIn={alsoIn[member.profile_id] ?? []}",
     ]) {
       assert(src.includes(wiring), `the card receives ${wiring}`);
     }

@@ -92,10 +92,7 @@ Deno.test(
     const originalFetch = globalThis.fetch;
     globalThis.fetch = scriptedFetch({});
     try {
-      assertEquals(
-        await store.saveSet("c1", "s1", { description: "x" }),
-        false,
-      );
+      assertEquals(await store.patchDescription("c1", "s1", "x"), false);
       assertEquals(store.error !== null, true);
       assertEquals(await store.removeSet("c1", "s1"), false);
     } finally {
@@ -107,7 +104,7 @@ Deno.test(
 Deno.test("a set save writes and does not read", async () => {
   const originalFetch = globalThis.fetch;
   const seen: string[] = [];
-  // One PATCH and no read at all: the read side belongs to the save
+  // Two writes and no read at all: the read side belongs to the save
   // sequence, so a store write that refreshed behind its own back would
   // double the reads the sequence already paid for.
   globalThis.fetch = ((input: unknown, init?: { method?: string }) => {
@@ -120,8 +117,13 @@ Deno.test("a set save writes and does not read", async () => {
     );
   }) as unknown as typeof fetch;
   try {
-    assertEquals(await store.saveSet("c1", "s1", { description: "x" }), true);
-    assertEquals(seen.length, 1);
+    assertEquals(await store.patchDescription("c1", "s1", "x"), true);
+    assertEquals(await store.reorderSet("c1", "s1", ["p1", "p2"]), true);
+    assertEquals(seen.length, 2);
+    assertEquals(seen[0]?.startsWith("PATCH "), true);
+    assertEquals(seen[0]?.endsWith("/user/collections/c1/sets/s1"), true);
+    assertEquals(seen[1]?.startsWith("PUT "), true);
+    assertEquals(seen[1]?.endsWith("/user/collections/c1/sets/s1/order"), true);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -136,7 +138,7 @@ Deno.test("a PATCH that answers 204 still counts as saved", async () => {
       new Response(null, { status: 204 }),
     )) as unknown as typeof fetch;
   try {
-    assertEquals(await store.saveSet("c1", "s1", { description: "x" }), true);
+    assertEquals(await store.patchDescription("c1", "s1", "x"), true);
     assertEquals(store.error, null);
   } finally {
     globalThis.fetch = originalFetch;

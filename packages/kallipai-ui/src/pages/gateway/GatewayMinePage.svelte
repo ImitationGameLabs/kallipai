@@ -46,10 +46,15 @@
     saveStoppedBanner,
   } from "../../lib/manage/gateway/saveSet.ts";
   import {
+    membershipWrites,
+    rowBodyOf,
+    type DraftRow,
+    type SetSaveDraft,
+  } from "../../lib/manage/gateway/setDraft.ts";
+  import {
+    pickedRows,
     setDetailFor,
-    userMemberBody,
     type UserSetDetail,
-    type UserSetSaveDraft,
   } from "../../lib/gateway/userSetDraft.ts";
 
   // One-shot read-side load when the page mounts (the store's
@@ -236,7 +241,7 @@
         : await userGatewayStore.saveProfile(
             editProfile.collection_name,
             editProfile.profile_id,
-            body,
+            rowBodyOf(editProfile, body),
           );
     profileBusy = false;
     if (!ok) {
@@ -319,44 +324,78 @@
 
   // One save spans several requests, so the read side refreshes once, in
   // the sequence (the settle port below), never per write: the store's
-  // saveSet and updateMember only write.
-  async function onSaveSet(result: UserSetSaveDraft): Promise<void> {
+  // updateMember, patchDescription and reorderSet only write.
+  async function onSaveSet(result: SetSaveDraft): Promise<void> {
     const editing = editSet;
-    const collection =
-      editing === null ? createCollection : editing.collection_name;
     setDialogBusy = true;
     setDialogError = null;
     try {
-      if (editing === null) {
-        // A create is one request and has no row to reseed: a refusal
-        // keeps the form open with the server's reason.
-        const ok = await userGatewayStore.addSet(collection, {
+      let target: UserSetDetail | null = editing;
+      let draft = result;
+      if (target === null) {
+        // A create registers an empty set, then walks the same sequence:
+        // the member PUTs are what put rows in it. An empty set is a legal
+        // create, so the picks' rows are resolved only when there are
+        // picks: a pick names a row of the collection the set lands in,
+        // and rows never read are not rows known to be absent. Read once,
+        // then refuse before the write; the page alert carries the read's
+        // reason.
+        let picked: DraftRow[] = [];
+        if (result.members.length > 0) {
+          let source = collectionProfiles(createCollection);
+          if (source === null) {
+            await userGatewayStore.refreshAll();
+            source = collectionProfiles(createCollection);
+          }
+          if (source === null) {
+            setDialogError = userGatewayStore.error;
+            return;
+          }
+          picked = pickedRows(result.members, source);
+        }
+        const created = await userGatewayStore.addSet(createCollection, {
           name: result.name,
           description: result.description,
-          members: result.members,
         });
-        if (!ok) {
+        if (created === undefined) {
           setDialogError = userGatewayStore.error;
           return;
         }
-        setDialogOpen = false;
-        setDialogLanded = [];
-        return;
+        target = {
+          collection_name: created.collection_name,
+          name: created.name,
+          description: created.description,
+          profiles: [],
+        };
+        draft = {
+          ...result,
+          name: created.name,
+          ...membershipWrites([], picked, {}, created.name),
+        };
       }
-      const outcome = await saveSetDraft(editing, result, {
+      const anchor = target;
+      const outcome = await saveSetDraft(anchor, draft, {
         putMember: async (profileId, body) => {
           const ok = await userGatewayStore.updateMember(
-            editing.collection_name,
+            anchor.collection_name,
             profileId,
-            userMemberBody(body),
+            body,
           );
           return { ok, reason: ok ? null : userGatewayStore.error };
         },
-        patchSet: async (body) => {
-          const ok = await userGatewayStore.saveSet(
-            editing.collection_name,
-            editing.name,
-            body,
+        patchDescription: async (description) => {
+          const ok = await userGatewayStore.patchDescription(
+            anchor.collection_name,
+            anchor.name,
+            description,
+          );
+          return { ok, reason: ok ? null : userGatewayStore.error };
+        },
+        reorder: async (members) => {
+          const ok = await userGatewayStore.reorderSet(
+            anchor.collection_name,
+            anchor.name,
+            members,
           );
           return { ok, reason: ok ? null : userGatewayStore.error };
         },
@@ -365,14 +404,14 @@
         settle: () => userGatewayStore.refreshAll(),
         reread: async () => {
           const row = await userGatewayStore.loadSet(
-            editing.collection_name,
-            editing.name,
+            anchor.collection_name,
+            anchor.name,
           );
           if (row === undefined) return undefined;
           // Rows still unread answer undefined: the draft keeps what it has
           // rather than reseeding from an empty member list.
           return (
-            setDetailFor(row, collectionProfiles(editing.collection_name)) ??
+            setDetailFor(row, collectionProfiles(anchor.collection_name)) ??
             undefined
           );
         },
@@ -697,9 +736,6 @@
   set={editSet}
   collection={activeCollection}
   profiles={collectionProfiles(activeCollection)}
-  siblings={(userGatewayStore.sets ?? []).filter(
-    (row) => row.collection_name === activeCollection,
-  )}
   busy={setDialogBusy}
   error={setDialogError}
   landed={setDialogLanded}

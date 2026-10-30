@@ -9,25 +9,22 @@
   import ReqMark from "../ReqMark.svelte";
   import GatewayMemberCard from "./GatewayMemberCard.svelte";
   import {
-    changedUpdates,
     firstOffending,
     memberEditOf,
     memberIds,
+    membershipWrites,
     moveMember,
     reseed,
-    setsAlsoHolding,
     type DraftRow,
     type MemberEdit,
+    type SetSaveDraft,
   } from "../../lib/manage/gateway/setDraft.ts";
   import {
-    diffBase,
     draftRowOf,
     poolOf,
-    siblingSets,
     type UserSetDetail,
-    type UserSetSaveDraft,
   } from "../../lib/gateway/userSetDraft.ts";
-  import type { UserProfileRow, UserSetRow } from "../../lib/gateway/client.ts";
+  import type { UserProfileRow } from "../../lib/gateway/client.ts";
   import {
     common_add,
     common_cancel,
@@ -36,6 +33,7 @@
     user_gateway_set_add,
     user_gateway_set_add_member,
     user_gateway_set_add_member_empty,
+    user_gateway_set_add_member_moves,
     user_gateway_set_description,
     user_gateway_set_dialog_collection_label,
     user_gateway_set_edit_title,
@@ -47,7 +45,6 @@
     set,
     collection,
     profiles = null,
-    siblings = [],
     busy = false,
     error = null,
     landed = [],
@@ -64,8 +61,6 @@
      * read them yet: rows unread are not rows known to be absent, so the
      * picker stays quiet rather than claiming the pool is empty. */
     profiles?: readonly UserProfileRow[] | null;
-    /** The collection's sets: names the other sets a member also sits in. */
-    siblings?: readonly UserSetRow[];
     /** A save is in flight: the footer and the cards are locked. */
     busy?: boolean;
     /** The server's reason for the last failed save (the dialog stays). */
@@ -73,7 +68,7 @@
     /** The rows whose PUT landed before a save stopped: a re-read reseeds
      * these only, so a row that never reached the registry keeps its draft. */
     landed?: readonly string[];
-    onSave: (result: UserSetSaveDraft) => void;
+    onSave: (result: SetSaveDraft) => void;
     onCancel: () => void;
   } = $props();
 
@@ -159,25 +154,25 @@
     seededIds = next.seededIds;
   });
 
-  // The picker's pool, and which other sets carry each member: both are
-  // the lib's calls, so the rules are tested without a browser. An unread
-  // row set offers nothing to add.
+  // The picker's pool: the lib's call, so the rule is tested without a
+  // browser. An unread row set offers nothing to add.
   const pool = $derived(profiles === null ? [] : poolOf(profiles, members));
 
-  // Which other sets of the collection carry each member: an edit to a row
-  // lands in every set that holds it, and the card says which.
-  const alsoIn = $derived(
-    set === null
-      ? {}
-      : setsAlsoHolding(
-          { name: set.name, profiles: members },
-          siblingSets(siblings),
-        ),
+  // The row the picker selects, so the note under it can name the set the
+  // add would move it out of.
+  const pickedRow = $derived(
+    pool.find((row) => row.profile_id === pickedId) ?? null,
   );
+
+  // A picker row that already belongs to a set names it, so the move the
+  // add performs shows before the click.
+  function optionText(row: UserProfileRow): string {
+    return row.set === null ? row.profile_id : `${row.profile_id} (${row.set})`;
+  }
 
   // A save in flight greys the button; create also needs a name. An empty
   // member list is a legal membership, so it does not grey anything: the
-  // PATCH carries members: [] and clears the set.
+  // order write then carries the empty sequence.
   const canSubmit = $derived(
     !busy && (set !== null || nameDraft.trim() !== ""),
   );
@@ -188,8 +183,8 @@
   }
 
   function reorder(fromIdx: number, toIdx: number): void {
-    // A save in flight freezes the order: the PATCH already carries the
-    // sequence the draft had when it left.
+    // A save in flight freezes the order: the order write already carries
+    // the sequence the draft had when it left.
     if (busy) return;
     if (fromIdx === toIdx) return;
     const next = moveMember(members, fromIdx, toIdx - fromIdx);
@@ -268,19 +263,16 @@
       editingId = offending.profile_id;
       return;
     }
-    // A create has no registry rows, so it sends no updates at all: the
-    // create request carries the member list and nothing here has a row to
-    // PUT. The card closes its form in create mode too, but that gate
-    // protects the editing path; this ternary is what keeps a create from
-    // ever carrying a PUT body.
+    // A create has no registry rows yet: the page creates the set first and
+    // then walks the same sequence from an empty original, so the create
+    // request here carries the membership and no membership writes.
     onSave({
       name: set ? set.name : nameDraft.trim(),
       description: descriptionDraft,
       members: memberIds(members),
-      updates:
-        set === null
-          ? []
-          : changedUpdates(diffBase(set.profiles, members), members, edits),
+      ...(set === null
+        ? { updates: [], joins: [], leaves: [] }
+        : membershipWrites(set.profiles, members, edits, set.name)),
     });
   }
 </script>
@@ -344,8 +336,6 @@
                 isLast={idx === members.length - 1}
                 editing={editingId === member.profile_id}
                 editDraft={edits[member.profile_id] ?? null}
-                alsoIn={alsoIn[member.profile_id] ?? []}
-                showParked={false}
                 {busy}
                 onDragStart={() => (dragFrom = idx)}
                 onDragEnd={clearDrag}
@@ -381,7 +371,7 @@
                 >
                   <option value="">…</option>
                   {#each pool as row (row.profile_id)}
-                    <option value={row.profile_id}>{row.profile_id}</option>
+                    <option value={row.profile_id}>{optionText(row)}</option>
                   {/each}
                 </select>
                 <button
@@ -393,6 +383,11 @@
                   {common_add()}
                 </button>
               </div>
+              {#if pickedRow !== null && pickedRow.set !== null}
+                <p class="text-xs opacity-70">
+                  {user_gateway_set_add_member_moves({ set: pickedRow.set })}
+                </p>
+              {/if}
             {/if}
           </div>
 

@@ -108,7 +108,10 @@ export interface UserProfileRow {
   max_budget: number | null;
   tpm_limit: number | null;
   rpm_limit: number | null;
-  parked: boolean;
+  /** The set that carries this row; null leaves it unassigned. */
+  set: string | null;
+  /** Rank inside that set (0 while unassigned). */
+  position: number;
 }
 
 export interface UserSetRow {
@@ -261,7 +264,7 @@ export function createProfile(
 }
 
 /** PUT is a full-field replacement under the collection that anchors the
- * row (parked is not caller-settable). */
+ * row: `set` is the set that carries it, or null to leave it unassigned. */
 export function updateProfile(
   collection: string,
   profileId: string,
@@ -270,6 +273,7 @@ export function updateProfile(
     max_context_window?: number | null;
     effort?: string | null;
     modalities?: string[] | null;
+    set: string | null;
   },
   url?: string,
 ): Promise<UserProfileRow> {
@@ -324,7 +328,7 @@ export function getCollectionSet(
  * collection. */
 export function createCollectionSet(
   collection: string,
-  body: { name: string; description: string; members?: string[] },
+  body: { name: string; description: string },
   url?: string,
 ): Promise<UserSetRow> {
   return userFetch<UserSetRow>(
@@ -333,16 +337,35 @@ export function createCollectionSet(
   );
 }
 
-/** PATCH the set's description and member order under its collection. */
+/** PATCH the set's description; membership and order have their own writes. */
 export function updateCollectionSet(
   collection: string,
   name: string,
-  body: { description?: string; members?: string[] },
+  body: { description?: string },
   url?: string,
 ): Promise<UserSetRow> {
   return userFetch<UserSetRow>(
     `/user/collections/${encodeURIComponent(collection)}/sets/${encodeURIComponent(name)}`,
     { method: "PATCH", body, url },
+  );
+}
+
+/** PUT the set's member order. The body is the complete membership in the
+ * new order, so it has to be a permutation of what the set holds: the server
+ * refuses a list that adds or drops a member. */
+export function reorderCollectionSet(
+  collection: string,
+  name: string,
+  members: readonly string[],
+  url?: string,
+): Promise<UserSetRow> {
+  return userFetch<UserSetRow>(
+    `/user/collections/${encodeURIComponent(collection)}/sets/${encodeURIComponent(name)}/order`,
+    {
+      method: "PUT",
+      body: { members },
+      url,
+    },
   );
 }
 

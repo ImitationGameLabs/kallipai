@@ -4,7 +4,7 @@
   // as an inline form the card opens. This is the face's one composite
   // edit, so the dialog holds a local draft (dialog-scoped, not a page
   // draft session) and hands the whole of it back: the page lands changed
-  // rows as PUTs, then the order as one PATCH. Sets are never renamed
+  // rows as PUTs, then the description, then the order. Sets are never
   // here: the name is the registry key.
   import { Dialog, Portal } from "@skeletonlabs/skeleton-svelte";
   import {
@@ -20,7 +20,7 @@
     AdminSetRow,
   } from "../../../lib/manage/gateway/client.ts";
   import {
-    changedUpdates,
+    membershipWrites,
     firstOffending,
     memberEditOf,
     memberIds,
@@ -35,7 +35,6 @@
     set,
     busy = false,
     error = null,
-    alsoIn = {},
     landed = [],
     onSave,
     onCancel,
@@ -47,8 +46,6 @@
     busy?: boolean;
     /** The server's reason for the last failed save (the dialog stays). */
     error?: string | null;
-    /** The other sets of this collection that also carry a member row. */
-    alsoIn?: Readonly<Record<string, readonly string[]>>;
     /** The rows whose PUT landed before a save stopped: a re-read reseeds
      * these only, so a row that never reached the registry keeps its draft. */
     landed?: readonly string[];
@@ -116,12 +113,11 @@
     seededIds = next.seededIds;
   });
 
-  // Only a save in flight greys the button. The member list and the
-  // description are separate PATCH fields, so a set may be saved with no
-  // members at all: the PATCH carries members: [] and leaves the
-  // description alone. A malformed draft does not grey it either: a
-  // grey button over a closed form explains nothing, so save opens the
-  // offending row instead.
+  // Only a save in flight greys the button. The description is its own
+  // write and the order write carries the whole membership, so a set
+  // may be saved with no members at all. A malformed draft does not
+  // grey it either: a grey button over a closed form explains nothing,
+  // so save opens the offending row instead.
   const canSubmit = $derived(!busy);
 
   function clearDrag(): void {
@@ -130,7 +126,7 @@
   }
 
   function reorder(fromIdx: number, toIdx: number): void {
-    // A save in flight freezes the order: the PATCH already carries
+    // A save in flight freezes the order: the order write already carries
     // the sequence the draft had when it left.
     if (busy) return;
     if (fromIdx === toIdx) return;
@@ -197,9 +193,10 @@
       return;
     }
     onSave({
+      name: set.name,
       description: descriptionDraft,
       members: memberIds(members),
-      updates: changedUpdates(set.profiles, members, edits),
+      ...membershipWrites(set.profiles, members, edits, set.name),
     });
   }
 </script>
@@ -244,7 +241,6 @@
                 isLast={idx === members.length - 1}
                 editing={editingId === member.profile_id}
                 editDraft={edits[member.profile_id] ?? null}
-                alsoIn={alsoIn[member.profile_id] ?? []}
                 {busy}
                 onDragStart={() => (dragFrom = idx)}
                 onDragEnd={clearDrag}

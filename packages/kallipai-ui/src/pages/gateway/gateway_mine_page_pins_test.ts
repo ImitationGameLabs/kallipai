@@ -220,8 +220,8 @@ Deno.test(
     );
     assert(
       src.includes(
-        "editing === null ? createCollection : editing.collection_name",
-      ) && src.includes("userGatewayStore.addSet(collection, {"),
+        "editSet === null ? createCollection : editSet.collection_name",
+      ) && src.includes("userGatewayStore.addSet(createCollection, {"),
       "the create lands inside the pre-bound collection",
     );
   },
@@ -285,9 +285,27 @@ Deno.test(
       body.includes("settle: () => userGatewayStore.refreshAll(),"),
       "the sequence refreshes the read side through its settle port",
     );
+    // A create whose picks need rows reads once before it writes (the same
+    // guard onEditSet holds); once the sequence runs, the only refresh is
+    // its settle port. Each of the three literals below is checked for
+    // presence before any index is compared: indexOf answers -1 for a
+    // missing literal, and -1 is the smallest index.
+    const guard = "await userGatewayStore.refreshAll()";
+    const create = "await userGatewayStore.addSet(";
+    const picks = "if (result.members.length > 0) {";
     assert(
-      body.split("refreshAll").length - 1 === 1,
-      "no other refresh rides the save",
+      body.split("refreshAll").length - 1 === 2 &&
+        body.split(guard).length - 1 === 1 &&
+        body.split(create).length - 1 === 1,
+      "one guard call and the settle port carry every refresh",
+    );
+    // The guard sits inside the picks condition: a read hoisted out of it
+    // still precedes the create, so the nesting is part of the pin.
+    assert(
+      body.includes(picks) &&
+        body.indexOf(picks) < body.indexOf(guard) &&
+        body.indexOf(guard) < body.indexOf(create),
+      "the guard runs only for picks, and reads before the set exists",
     );
     // The order of the two port declarations is only a proxy: what runs
     // first at save time is pinned by saveSet_test's port log.
@@ -313,14 +331,17 @@ Deno.test(
         body.includes("await userGatewayStore.refreshAll();"),
       "unread rows trigger one read before the dialog opens",
     );
+    // A deleted guard answers -1, which is below every other index, so
+    // presence is asserted before the order means anything.
+    const guarded = "if (detail === null) return;";
     assert(
-      body.indexOf("if (detail === null) return;") <
-        body.indexOf("editSet = detail;"),
+      body.includes(guarded) &&
+        body.indexOf(guarded) < body.indexOf("editSet = detail;"),
       "no detail, no seed",
     );
     assert(
-      body.indexOf("if (detail === null) return;") <
-        body.indexOf("setDialogOpen = true;"),
+      body.includes(guarded) &&
+        body.indexOf(guarded) < body.indexOf("setDialogOpen = true;"),
       "no detail, no dialog",
     );
     // The page forbids the silent no-op: the store's reason is on screen.
@@ -340,24 +361,25 @@ Deno.test(
     // The PUT-then-PATCH sequence and its failure handling are tested in
     // lib/manage/gateway/saveSet_test.ts; the page wires the ports.
     assert(
-      page.includes("saveSetDraft(editing, result, {"),
+      page.includes("saveSetDraft(anchor, draft, {"),
       "the edit save runs through the tested step function",
     );
     assert(
       page.includes("userGatewayStore.updateMember(") &&
-        page.includes("userMemberBody(body)") &&
-        page.includes("userGatewayStore.saveSet("),
-      "the ports wrap the store",
+        page.includes("userGatewayStore.patchDescription(") &&
+        page.includes("userGatewayStore.reorderSet(") &&
+        !page.includes("userGatewayStore.saveSet("),
+      "the ports wrap the store's writes",
     );
     const body = functionBody(page, "onSaveSet");
     // The member PUT on this face carries the shared four fields only: the
     // served flag belongs to the admin route, so it must not appear in the
     // save's member port.
     const portStart = body.indexOf("putMember:");
-    const portEnd = body.indexOf("patchSet:", portStart);
+    const portEnd = body.indexOf("patchDescription:", portStart);
     assert(
       portStart >= 0 && portEnd > portStart,
-      "the save wires a member PUT before the set PATCH",
+      "the save wires a member PUT before the description PATCH",
     );
     assert(
       !body.slice(portStart, portEnd).includes("parked"),
@@ -371,8 +393,12 @@ Deno.test(
     // A refusal returns before the close: a closed form has nowhere to
     // paint the server's reason, and the draft is gone with it.
     const stop = body.slice(body.indexOf('if (outcome.phase !== "done")'));
+    // A deleted early return answers -1, below every other index, so
+    // presence is asserted before the order means anything.
+    const stopReturn = "return;";
     assert(
-      stop.indexOf("return;") < stop.indexOf("setDialogOpen = false;"),
+      stop.includes(stopReturn) &&
+        stop.indexOf(stopReturn) < stop.indexOf("setDialogOpen = false;"),
       "a stopped save returns before the dialog closes",
     );
   },

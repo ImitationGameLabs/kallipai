@@ -32,6 +32,7 @@ import {
   publishCollection,
   putProviderCredential,
   removeGroupMember,
+  reorderCollectionSet,
   setCollectionDefault,
   unpublishCollection,
   updateCollection,
@@ -40,14 +41,19 @@ import {
   updateProfile,
   updateProvider,
 } from "./client.ts";
-import type { MemberUpdateBody } from "./setDraft.ts";
+import {
+  contentOf,
+  type MemberContentBody,
+  type MemberWriteBody,
+  rowBodyOf,
+} from "./setDraft.ts";
 
 class GatewayAdminStore {
   /** The catalog's sets; null until the first read lands. */
   sets = $state<AdminSetRow[] | null>(null);
   /** The provider pool (the catalog space's rows); null until first read. */
   providers = $state<ProviderRow[] | null>(null);
-  /** The catalog space's unassigned profiles (the `parked` filter over the
+  /** The catalog space's unassigned profiles (the `unassigned` filter over the
    * list); null until the first read lands. */
   unassigned = $state<AdminProfileRow[] | null>(null);
   /** The catalog's collections with their live publications. */
@@ -72,7 +78,7 @@ class GatewayAdminStore {
   }
 
   /** Read the whole read side: sets (nested per collection),
-   * providers, unassigned (the `parked` slice). */
+   * providers, unassigned (the `unassigned` slice). */
   async refreshAll(): Promise<void> {
     this.isLoading = true;
     try {
@@ -129,7 +135,7 @@ class GatewayAdminStore {
    * panel scopes its read here instead of sifting the whole space. */
   unassignedIn(collection: string): Promise<AdminProfileRow[] | undefined> {
     return this.run(() =>
-      listProfiles({ collection_name: collection, parked: true }),
+      listProfiles({ collection_name: collection, unassigned: true }),
     );
   }
 
@@ -139,27 +145,41 @@ class GatewayAdminStore {
     return this.run(() => getCollectionSet(collection, name));
   }
 
-  /** PATCH description + member order in one request. The write alone: a
-   * set save spans several requests, so the read side refreshes once at the
-   * end of the sequence (the dialog's settle port), never per write. */
-  async saveSet(
+  /** PATCH the set's description. The write alone: a set save spans several
+   * requests, so the read side refreshes once at the end of the sequence
+   * (the dialog's settle port), never per write. */
+  async patchDescription(
     collection: string,
     name: string,
-    body: { description?: string; members?: string[] },
+    description: string,
   ): Promise<boolean> {
     const ok = await this.run(async () => {
-      await updateCollectionSet(collection, name, body);
+      await updateCollectionSet(collection, name, { description });
+      return true;
+    });
+    return ok === true;
+  }
+
+  /** PUT the set's member order. The membership lands first (each row's PUT
+   * carries its set), so this route only rewrites positions. */
+  async reorderSet(
+    collection: string,
+    name: string,
+    members: readonly string[],
+  ): Promise<boolean> {
+    const ok = await this.run(async () => {
+      await reorderCollectionSet(collection, name, members);
       return true;
     });
     return ok === true;
   }
 
   /** PUT one member row in place (the set dialog's member edit). The body
-   * carries the shared fields; the page's port adds the served flag. */
+   * carries the row's content and the set that holds it (`null` leaves it). */
   async updateMember(
     collection: string,
     profileId: string,
-    body: MemberUpdateBody & { parked: boolean },
+    body: MemberWriteBody,
   ): Promise<boolean> {
     const ok = await this.run(async () => {
       await updateProfile(collection, profileId, body);
@@ -168,26 +188,20 @@ class GatewayAdminStore {
     return ok === true;
   }
 
-  /** Drop an unassigned profile into a set: re-read the set's live member list
-   * (the drop appends to what the server has, not a stale cache), treat
-   * an id that is already inside as a no-op drop, and put the full
-   * ordered list back. The server adopts a member that still carries the
-   * `parked` flag in the caller's space: the membership rewrite moves it
-   * into the catalog in the same transaction.
-   */
+  /** Drop an unassigned profile into a set: one PUT of the row's own content
+   * with `set` naming the destination, which the server appends at the last
+   * place. A row already in that set is a no-op drop. */
   async addUnassignedToSet(
-    collection: string,
-    profileId: string,
+    row: AdminProfileRow,
     setName: string,
   ): Promise<boolean> {
-    const row = await this.loadSet(collection, setName);
-    if (!row) return false;
-    const members = row.profiles.map((p) => p.profile_id);
-    if (members.includes(profileId)) return true;
+    if (row.set === setName) return true;
     const ok = await this.run(async () => {
-      await updateCollectionSet(collection, setName, {
-        members: [...members, profileId],
-      });
+      await updateProfile(
+        row.collection_name,
+        row.profile_id,
+        rowBodyOf(row, contentOf(row), setName),
+      );
       await this.refreshAll();
       return true;
     });
@@ -225,7 +239,7 @@ class GatewayAdminStore {
     });
   }
 
-  /** Re-read just the unassigned slice (the `parked` filter). */
+  /** Re-read just the unassigned slice (the `unassigned` filter). */
   async refreshUnassigned(): Promise<void> {
     const body = await this.run(() => listUnassigned());
     if (body) this.unassigned = body;
@@ -245,26 +259,26 @@ class GatewayAdminStore {
     },
   ): Promise<boolean> {
     const ok = await this.run(async () => {
-      await createProfile(collection, { ...body, parked: true });
+      await createProfile(collection, body);
       await this.refreshUnassigned();
       return true;
     });
     return ok === true;
   }
 
-  /** PUT an unassigned profile's content in place, then re-read the slice. */
+  /** PUT an unassigned profile's content in place (a full replacement: the
+   * body carries the set the row holds, null for a row no set carries), then
+   * re-read the slice. */
   async saveUnassigned(
-    collection: string,
-    profileId: string,
-    body: {
-      model: string;
-      max_context_window?: number | null;
-      effort?: string | null;
-      modalities?: string[] | null;
-    },
+    row: AdminProfileRow,
+    fields: MemberContentBody,
   ): Promise<boolean> {
     const ok = await this.run(() =>
-      updateProfile(collection, profileId, { ...body, parked: true }),
+      updateProfile(
+        row.collection_name,
+        row.profile_id,
+        rowBodyOf(row, contentOf(fields)),
+      ),
     );
     if (ok === undefined) return false;
     await this.refreshUnassigned();

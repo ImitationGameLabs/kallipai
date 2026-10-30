@@ -53,7 +53,7 @@
               <span class="text-sm font-medium font-mono truncate">
                 {row.profile_id}
               </span>
-              {#if row.parked}
+              {#if row.set === null}
                 <span class="badge preset-filled-surface-500 text-xs shrink-0">
                   {user_gateway_profile_unassigned()}
                 </span>
@@ -62,6 +62,9 @@
             <p class="text-xs opacity-60 mt-0.5 truncate">
               {row.model} · {row.provider_id} ·
               <span class="font-mono">{row.collection_name}</span>
+              {#if row.set !== null}
+                · <span class="font-mono">{row.set}</span>
+              {/if}
             </p>
           </div>
           <ActionMenu

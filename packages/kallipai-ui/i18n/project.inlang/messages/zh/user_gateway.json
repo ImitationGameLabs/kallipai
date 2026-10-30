@@ -45,6 +45,7 @@
   "user_gateway_set_description": "描述",
   "user_gateway_set_add_member": "添加成员",
   "user_gateway_set_add_member_empty": "本合集里的每个配置都已经在这个配置集里了。",
+  "user_gateway_set_add_member_moves": "添加会把它从 {set} 移出。",
   "user_gateway_remove_set_body": "删除配置集 {name}？",
   "user_gateway_collections": "合集",
   "user_gateway_collection_add": "新建合集",

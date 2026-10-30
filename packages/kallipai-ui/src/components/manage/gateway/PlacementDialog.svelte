@@ -45,7 +45,10 @@
     sourceCollection?: string;
     busy?: boolean;
     error?: string | null;
-    onConfirm: (collection: string, setName: string) => void;
+    /** The chosen member set. The destination is the profile's own
+     * collection (the pick above is pinned to it), so the set name is the
+     * whole answer the caller needs. */
+    onConfirm: (setName: string) => void;
     onCancel: () => void;
   } = $props();
 
@@ -86,7 +89,7 @@
 
   function submit(): void {
     if (!canSubmit || busy) return;
-    onConfirm(collectionDraft, setNameDraft);
+    onConfirm(setNameDraft);
   }
 </script>
 

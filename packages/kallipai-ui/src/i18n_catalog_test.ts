@@ -515,7 +515,6 @@ const SYNONYMS: string[][] = [
   ],
   [
     "manage_gateway_unassigned",
-    "manage_gateway_unassigned_badge",
     "manage_profiles_unassigned",
     "user_gateway_profile_unassigned",
   ],

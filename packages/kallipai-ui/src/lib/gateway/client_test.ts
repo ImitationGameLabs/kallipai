@@ -33,6 +33,7 @@ import {
   updateGroup,
   updateProvider,
   updateCollectionSet,
+  reorderCollectionSet,
 } from "./client.ts";
 
 Deno.test(
@@ -197,6 +198,7 @@ Deno.test("profiles PUT carries the full-field replacement", async () => {
         max_context_window: 4096,
         effort: null,
         modalities: ["text"],
+        set: "primary",
       },
       "http://127.0.0.1:7500",
     );
@@ -212,6 +214,7 @@ Deno.test("profiles PUT carries the full-field replacement", async () => {
     assertEquals(body.model, "deepseek-chat");
     assertEquals(body.max_context_window, 4096);
     assertEquals(body.modalities, ["text"]);
+    assertEquals(body.set, "primary");
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -274,12 +277,13 @@ Deno.test(
         provider_id: "p1",
         model: "m",
       });
-      await updateProfile("c1", "pr1", { model: "m" });
+      await updateProfile("c1", "pr1", { model: "m", set: "s1" });
       await deleteProfile("c1", "pr1");
       await listSets();
       await getCollectionSet("c1", "s1");
       await createCollectionSet("c1", { name: "s1", description: "" });
       await updateCollectionSet("c1", "s1", { description: "" });
+      await reorderCollectionSet("c1", "s1", ["pr1", "p2"]);
       await deleteCollectionSet("c1", "s1");
       await listCollections();
       await getCollection("c1");
@@ -310,6 +314,7 @@ Deno.test(
         "GET /user/collections/c1/sets/s1",
         "POST /user/collections/c1/sets",
         "PATCH /user/collections/c1/sets/s1",
+        "PUT /user/collections/c1/sets/s1/order",
         "DELETE /user/collections/c1/sets/s1",
         "GET /user/collections",
         "GET /user/collections/c1",

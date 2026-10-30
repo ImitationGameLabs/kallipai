@@ -148,8 +148,11 @@ Deno.test(
       "the read side loads through the store",
     );
     assert(
-      src.includes("gatewayStore.saveSet(") && !src.includes("updateSet("),
-      "members land as PUTs; description and order as the store's one PATCH",
+      src.includes("gatewayStore.updateMember(") &&
+        src.includes("gatewayStore.patchDescription(") &&
+        src.includes("gatewayStore.reorderSet(") &&
+        !src.includes("gatewayStore.saveSet("),
+      "members land as PUTs; description and order ride the store's writes",
     );
     assert(
       src.includes("gatewayStore.removeSet("),
@@ -177,7 +180,7 @@ Deno.test(
       "the unassigned panel renders as a section component",
     );
     assert(!src.includes("_pending()"), "no pending placeholder rows render");
-    // The unassigned panel rides the store's parked wire filter; a drag
+    // The unassigned panel rides the store's unassigned wire filter; a drag
     // rides the same member write as every other placement.
     assert(
       src.includes("gatewayStore.addUnassigned(") &&
@@ -410,17 +413,17 @@ Deno.test(
     );
     assert(
       store.includes(
-        "listProfiles({ collection_name: collection, parked: true })",
+        "listProfiles({ collection_name: collection, unassigned: true })",
       ),
-      "the narrowed read asks the server for that collection",
+      "the narrowed read asks the server for that collection's unassigned",
     );
     // An unassigned profile can only join a set of its own collection, so the
     // drop names the collection and the dialog cannot pick another.
     assert(
       unassigned.includes("onDragStart(p)") &&
-        page.includes("dragSourceCollection = profile.collection_name") &&
+        page.includes("dragRow = profile;") &&
         page.includes(
-          "sourceCollection={placementSourceCollection ?? undefined}",
+          "sourceCollection={placementRow?.collection_name ?? undefined}",
         ),
       "a drag carries the row's collection out to the placement",
     );
@@ -536,9 +539,10 @@ Deno.test(
     );
     assert(
       page.includes("gatewayStore.updateMember(") &&
-        page.includes("gatewayStore.saveSet(") &&
+        page.includes("gatewayStore.patchDescription(") &&
+        page.includes("gatewayStore.reorderSet(") &&
         !page.includes("failSetSave"),
-      "the ports wrap the store, and no page-local failure path remains",
+      "each port wraps one store write, and no page-local failure path remains",
     );
     assert(
       page.includes("landed={setDialogLanded}"),

@@ -179,7 +179,10 @@ export interface AdminProfileRow {
   max_context_window: number | null;
   effort: string | null;
   modalities: string[];
-  parked: boolean;
+  /** The set that carries this row; null leaves it unassigned. */
+  set: string | null;
+  /** Rank inside that set (0 while unassigned). */
+  position: number;
   /** Absent from the wire: undefined at runtime. */
   max_budget: number | null;
   tpm_limit: number | null;
@@ -234,11 +237,11 @@ export function createCollectionSet(
   );
 }
 
-/** PATCH the set's description and member order under its collection. */
+/** PATCH the set's description; membership and order have their own writes. */
 export function updateCollectionSet(
   collection: string,
   name: string,
-  body: { description?: string; members?: string[] },
+  body: { description?: string },
   url?: string,
 ): Promise<AdminSetRow> {
   return adminFetch<AdminSetRow>(
@@ -246,6 +249,25 @@ export function updateCollectionSet(
     {
       method: "PATCH",
       body,
+      url,
+    },
+  );
+}
+
+/** PUT the set's member order. The body is the complete membership in the
+ * new order, so it has to be a permutation of what the set holds: the server
+ * refuses a list that adds or drops a member. */
+export function reorderCollectionSet(
+  collection: string,
+  name: string,
+  members: readonly string[],
+  url?: string,
+): Promise<AdminSetRow> {
+  return adminFetch<AdminSetRow>(
+    `/admin/collections/${encodeURIComponent(collection)}/sets/${encodeURIComponent(name)}/order`,
+    {
+      method: "PUT",
+      body: { members },
       url,
     },
   );
@@ -262,24 +284,25 @@ export function deleteCollectionSet(
   ).then(() => undefined);
 }
 
-/** The catalog space's unassigned profiles across every collection: the
- * `parked` query flag over the profiles list. */
+/** The catalog space's unassigned profiles across every collection:
+ * the `unassigned` query flag over the profiles list. */
 export function listUnassigned(url?: string): Promise<AdminProfileRow[]> {
-  return listProfiles({ parked: true }, url);
+  return listProfiles({ unassigned: true }, url);
 }
 
 /** GET /admin/profiles: the catalog space's rows, filtered in the query.
  * A collection-less read answers every collection of the space, so the
  * cross-collection panels keep one door. */
 export function listProfiles(
-  filter: { collection_name?: string; parked?: boolean } = {},
+  filter: { collection_name?: string; unassigned?: boolean } = {},
   url?: string,
 ): Promise<AdminProfileRow[]> {
   const parts: string[] = [];
   if (filter.collection_name !== undefined) {
     parts.push(`collection_name=${encodeURIComponent(filter.collection_name)}`);
   }
-  if (filter.parked !== undefined) parts.push(`parked=${filter.parked}`);
+  if (filter.unassigned !== undefined)
+    parts.push(`unassigned=${filter.unassigned}`);
   const suffix = parts.length === 0 ? "" : `?${parts.join("&")}`;
   return adminFetch<AdminProfileRow[]>(`/admin/profiles${suffix}`, { url });
 }
@@ -297,7 +320,6 @@ export function createProfile(
     max_context_window?: number | null;
     effort?: string | null;
     modalities?: string[] | null;
-    parked?: boolean;
   },
   url?: string,
 ): Promise<AdminProfileRow> {
@@ -307,9 +329,9 @@ export function createProfile(
   );
 }
 
-/** PUT the row's full content in place (plain PUT semantics; `parked`
- * moves the row between the unassigned pool and the served face). The
- * collection is the address, never the payload. */
+/** PUT the row's full content in place (plain PUT semantics: the body is
+ * the complete desired state). `set` is the set that carries the row, or
+ * null to leave it unassigned; a name joins that set at its last place. */
 export function updateProfile(
   collection: string,
   profileId: string,
@@ -318,7 +340,7 @@ export function updateProfile(
     max_context_window?: number | null;
     effort?: string | null;
     modalities?: string[] | null;
-    parked: boolean;
+    set: string | null;
   },
   url?: string,
 ): Promise<AdminProfileRow> {

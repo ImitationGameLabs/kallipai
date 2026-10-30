@@ -41,11 +41,7 @@
     saveSetDraft,
     saveStoppedBanner,
   } from "../../../lib/manage/gateway/saveSet.ts";
-  import {
-    adminMemberBody,
-    setsAlsoHolding,
-    type SetSaveDraft,
-  } from "../../../lib/manage/gateway/setDraft.ts";
+  import type { SetSaveDraft } from "../../../lib/manage/gateway/setDraft.ts";
   import {
     common_loading,
     common_retry,
@@ -140,9 +136,9 @@
 
   let editSet = $state<AdminSetRow | null>(null);
   let dialogOpen = $state(false);
-  // The dialog's save wiring: a busy latch while the member PUTs and the
-  // set PATCH run, and the server's reason when one of them fails (the
-  // dialog stays open on the re-read row).
+  // The dialog's save wiring: a busy latch while the membership PUTs, the
+  // description and the order run, and the server's reason when one of
+  // them fails (the dialog stays open on the re-read row).
   let setDialogBusy = $state(false);
   let setDialogError = $state<string | null>(null);
 
@@ -167,13 +163,10 @@
   let setCreateBusy = $state(false);
   let setCreateError = $state<string | null>(null);
   // Unassigned-to-set drop wiring: the page owns the drag state (the
-  // sections report the raw lifecycle), and a busy latch keeps a
-  // second drop from racing the in-flight member update.
-  let dragProfileId = $state<string | null>(null);
-  // The dragged row's collection: an unassigned row can only join a set
-  // of its own collection, so the drop names the one collection the
-  // land in.
-  let dragSourceCollection = $state<string | null>(null);
+  // sections report the raw lifecycle), and a busy latch keeps a second drop
+  // from racing the in-flight member update. The drop carries the whole row:
+  // the membership PUT sends the row's own content with the destination set.
+  let dragRow = $state<AdminProfileRow | null>(null);
   let dragOverSet = $state<string | null>(null);
   let dropBusy = $state(false);
   // Each edit click takes a request token; only the newest token's
@@ -194,17 +187,8 @@
     }
   }
 
-  // A profile row can sit in more than one set of a collection: the
-  // dialog's cards name the other sets, so a change to a shared row is
-  // not silent about the second place it lands.
-  const setDialogAlsoIn = $derived.by(() => {
-    const target = editSet;
-    if (target === null) return {};
-    return setsAlsoHolding(target, gatewayStore.setsIn(target.collection_name));
-  });
-
   // Land the dialog's draft: the member PUTs, then the description and
-  // order PATCH, through the lib's step function so the failure paths are
+  // order writes, through the lib's step function so the failure paths are
   // tested without a browser. A stopped save keeps the dialog open, names
   // what landed, and hands the re-read row back for the reseed. The read
   // side belongs to the sequence (its settle port), not to any one write.
@@ -219,15 +203,23 @@
           const ok = await gatewayStore.updateMember(
             target.collection_name,
             profileId,
-            adminMemberBody(body),
+            body,
           );
           return { ok, reason: ok ? null : gatewayStore.error };
         },
-        patchSet: async (body) => {
-          const ok = await gatewayStore.saveSet(
+        patchDescription: async (description) => {
+          const ok = await gatewayStore.patchDescription(
             target.collection_name,
             target.name,
-            body,
+            description,
+          );
+          return { ok, reason: ok ? null : gatewayStore.error };
+        },
+        reorder: async (members) => {
+          const ok = await gatewayStore.reorderSet(
+            target.collection_name,
+            target.name,
+            members,
           );
           return { ok, reason: ok ? null : gatewayStore.error };
         },
@@ -369,16 +361,8 @@
         return;
       }
     } else {
-      const ok = await gatewayStore.saveUnassigned(
-        editUnassigned.collection_name,
-        editUnassigned.profile_id,
-        {
-          model: result.model,
-          max_context_window: result.max_context_window,
-          effort: result.effort,
-          modalities: result.modalities,
-        },
-      );
+      // The row decides the set this PUT carries; the dialog edits content.
+      const ok = await gatewayStore.saveUnassigned(editUnassigned, result);
       unassignedBusy = false;
       if (!ok) {
         unassignedError = gatewayStore.error;
@@ -644,22 +628,17 @@
   }
 
   function clearDrag(): void {
-    dragProfileId = null;
-    dragSourceCollection = null;
+    dragRow = null;
     dragOverSet = null;
   }
 
   async function onDropToSet(setName: string): Promise<void> {
-    const profileId = dragProfileId;
+    const row = dragRow;
     clearDrag();
-    if (profileId === null || dropBusy) return;
+    if (row === null || dropBusy) return;
     dropBusy = true;
     try {
-      await gatewayStore.addUnassignedToSet(
-        detailRow?.name ?? "",
-        profileId,
-        setName,
-      );
+      await gatewayStore.addUnassignedToSet(row, setName);
       // Re-read only on success: the reload's own read nulls the error
       // first (store.run), so an unconditional reload would wipe the
       // failure banner before it paints.
@@ -670,32 +649,26 @@
   }
   // The list view's drop fallback: with no detail open there is no
   // set card to land on, so the drop opens the placement dialog
-  // (the dragged profile rides along; the busy latch is shared).
+  // (the dragged row rides along; the busy latch is shared).
   let placementOpen = $state(false);
-  let placementProfileId = $state<string | null>(null);
-  let placementSourceCollection = $state<string | null>(null);
+  let placementRow = $state<AdminProfileRow | null>(null);
   function onDropAnywhere(e: DragEvent): void {
     e.preventDefault();
-    const profileId = dragProfileId;
-    const sourceCollection = dragSourceCollection;
+    const row = dragRow;
     clearDrag();
-    if (profileId === null) return;
-    placementProfileId = profileId;
-    placementSourceCollection = sourceCollection;
+    if (row === null) return;
+    placementRow = row;
     placementOpen = true;
   }
-  async function confirmPlacement(
-    collectionName: string,
-    setName: string,
-  ): Promise<void> {
-    const profileId = placementProfileId;
-    if (profileId === null || dropBusy) return;
+  async function confirmPlacement(setName: string): Promise<void> {
+    const row = placementRow;
+    if (row === null || dropBusy) return;
     dropBusy = true;
     try {
-      await gatewayStore.addUnassignedToSet(collectionName, profileId, setName);
+      await gatewayStore.addUnassignedToSet(row, setName);
       if (gatewayStore.error === null) {
         placementOpen = false;
-        placementSourceCollection = null;
+        placementRow = null;
       }
     } finally {
       dropBusy = false;
@@ -874,8 +847,7 @@
           unassignedError = null;
         }}
         onDragStart={(profile) => {
-          dragProfileId = profile.profile_id;
-          dragSourceCollection = profile.collection_name;
+          dragRow = profile;
         }}
         onDragEnd={clearDrag}
       />
@@ -922,7 +894,6 @@
   busy={setDialogBusy}
   error={setDialogError}
   landed={setDialogLanded}
-  alsoIn={setDialogAlsoIn}
   onSave={(result) => void onSaveSet(result)}
   onCancel={() => {
     dialogOpen = false;
@@ -1101,17 +1072,15 @@
 
 <PlacementDialog
   open={placementOpen}
-  profileId={placementProfileId}
-  sourceCollection={placementSourceCollection ?? undefined}
+  profileId={placementRow?.profile_id ?? null}
+  sourceCollection={placementRow?.collection_name ?? undefined}
   collections={gatewayStore.collections ?? []}
   sets={gatewayStore.sets ?? []}
   busy={dropBusy}
   error={gatewayStore.error}
-  onConfirm={(collectionName, setName) =>
-    void confirmPlacement(collectionName, setName)}
+  onConfirm={(setName) => void confirmPlacement(setName)}
   onCancel={() => {
     placementOpen = false;
-    placementProfileId = null;
-    placementSourceCollection = null;
+    placementRow = null;
   }}
 />

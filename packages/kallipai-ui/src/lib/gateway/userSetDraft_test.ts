@@ -1,22 +1,21 @@
 import { assertEquals } from "@std/assert";
 import {
-  changedUpdates,
   memberEditOf,
+  membershipWrites,
   type MemberEdit,
 } from "../manage/gateway/setDraft.ts";
 import type { UserProfileRow, UserSetRow } from "./client.ts";
 import {
-  diffBase,
   draftRowOf,
+  pickedRows,
   poolOf,
   setDetailFor,
-  userMemberBody,
 } from "./userSetDraft.ts";
 
 // The user face's projection of its own rows: the shared draft arithmetic
 // receives these rows, so what is pinned here is the projection itself (a
-// row with no modality list, a set's member order) and the one place the
-// two faces differ on the wire: the member PUT body.
+// row with no modality list, a set's member order) and the writes the
+// projection makes possible.
 
 function row(
   id: string,
@@ -34,7 +33,8 @@ function row(
     max_budget: null,
     tpm_limit: null,
     rpm_limit: null,
-    parked: true,
+    set: "primary",
+    position: 0,
     ...overrides,
   };
 }
@@ -51,38 +51,38 @@ function set(members: string[], description = "rotation"): UserSetRow {
 Deno.test("a row with no modality list reads as text alone", () => {
   // The server spells text only as a null list; the tag group cannot show
   // null, so the form reads it as an empty selection.
-  const edit = memberEditOf(draftRowOf(row("p1", { modalities: null })));
+  const members = [draftRowOf(row("p1", { modalities: null }))];
+  const edit = { ...memberEditOf(members[0]!), model: "next" };
   assertEquals(edit.modalities, []);
-  const updates = changedUpdates(
-    [draftRowOf(row("p1", { modalities: null }))],
-    [draftRowOf(row("p1", { modalities: null }))],
-    { p1: { ...edit, model: "next" } },
-  );
-  assertEquals(updates[0]!.body.modalities, null);
+  const writes = membershipWrites(members, members, { p1: edit }, "primary");
+  // An empty tag selection is the server default and rides as absent.
+  assertEquals(writes.updates[0]!.body.modalities, null);
 });
 
 Deno.test(
-  "the member PUT body carries the shared fields and nothing else",
+  "the member PUT body carries the shared fields and the set that holds it",
   () => {
     const original = [draftRowOf(row("p1"))];
     const edits: Record<string, MemberEdit> = {
       p1: { ...memberEditOf(original[0]!), model: "next" },
     };
-    const updates = changedUpdates(original, original, edits);
-    const body = userMemberBody(updates[0]!.body);
+    const writes = membershipWrites(original, original, edits, "primary");
+    const body = writes.updates[0]!.body;
     assertEquals(body, {
       model: "next",
       max_context_window: 128_000,
       effort: "high",
       modalities: ["text", "image"],
+      set: "primary",
     });
-    // The catalog's promote flag is not this face's to send: the user route's
-    // profile body has no such field.
+    // Nothing beyond these fields: the row carries no budget, and the set
+    // is the only membership fact the PUT states.
     assertEquals(Object.keys(body).sort(), [
       "effort",
       "max_context_window",
       "modalities",
       "model",
+      "set",
     ]);
   },
 );
@@ -98,7 +98,7 @@ Deno.test("setDetailFor keeps the member order the wire names", () => {
   );
   // Both rows keep the facts the cards read.
   assertEquals(detail!.profiles[0]!.family, "deepseek");
-  assertEquals(detail!.profiles[0]!.parked, true);
+  assertEquals(detail!.profiles[0]!.set, "primary");
 });
 
 Deno.test("setDetailFor drops a member id its rows no longer answer", () => {
@@ -127,18 +127,42 @@ Deno.test("setDetailFor reads no rows as an empty membership", () => {
   });
 });
 
-Deno.test("diffBase adds the pool rows the draft picked up", () => {
-  const original = [draftRowOf(row("p1"))];
-  const added = draftRowOf(row("p9"));
-  const base = diffBase(original, [original[0]!, added]);
+Deno.test("a created set writes each picked row as a join on it", () => {
+  // The dialog is creating the set: the place it resolves picks into holds
+  // no registry rows, so every picked row is a join and nothing else.
+  const rows = [draftRowOf(row("p1")), draftRowOf(row("p9"))];
+  const writes = membershipWrites([], rows, {}, "primary");
   assertEquals(
-    base.map((profile) => profile.profile_id),
+    writes.joins.map((write) => write.profileId),
     ["p1", "p9"],
   );
-  // A create has no registry row to start from: the draft is its own base,
-  // so an edit made before the first save still diffs.
-  assertEquals(diffBase(null, [added]), [added]);
+  assertEquals(
+    writes.joins.map((write) => write.body.set),
+    ["primary", "primary"],
+  );
+  assertEquals(writes.updates, []);
+  assertEquals(writes.leaves, []);
 });
+
+Deno.test(
+  "pickedRows keeps the picks' order and leaves out a vanished row",
+  () => {
+    const source = [row("p1"), row("p2"), row("p3")];
+    // The picks are the failover order the dialog showed, not the collection's.
+    assertEquals(
+      pickedRows(["p3", "p1"], source).map((picked) => picked.profile_id),
+      ["p3", "p1"],
+    );
+    assertEquals(pickedRows(["p2"], source)[0]!.set, "primary");
+    // A pick the rows no longer answer is left out: its PUT would 404 and sink
+    // the save the create already started.
+    assertEquals(
+      pickedRows(["p1", "gone"], source).map((picked) => picked.profile_id),
+      ["p1"],
+    );
+    assertEquals(pickedRows([], source), []);
+  },
+);
 
 Deno.test("the picker's pool leaves out the rows the set already holds", () => {
   const profiles = [row("p1"), row("p2"), row("p3")];
@@ -155,11 +179,4 @@ Deno.test("the picker's pool leaves out the rows the set already holds", () => {
   );
   assertEquals(poolOf([], members), []);
   assertEquals(poolOf(profiles, []).length, 3);
-});
-
-Deno.test("a create draft carries no row to put", () => {
-  // A create diffs against itself: the dialog offers no form before the set
-  // exists, so the edit map stays empty and no PUT body can come out.
-  const members = [draftRowOf(row("p1")), draftRowOf(row("p2"))];
-  assertEquals(changedUpdates(diffBase(members, members), members, {}), []);
 });

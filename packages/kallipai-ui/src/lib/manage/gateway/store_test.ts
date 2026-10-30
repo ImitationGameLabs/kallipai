@@ -8,6 +8,8 @@
 // The store module is rune-bearing, but deno test runs it uncompiled,
 // so a passthrough $state shim lets it run with plain fields (the
 // user-family store_test pattern).
+import type { AdminProfileRow } from "./client.ts";
+
 declare global {
   function $state<T>(initial: T): T;
   function $state<T>(): T | undefined;
@@ -18,6 +20,32 @@ declare global {
 const { assertEquals } = await import("@std/assert");
 const mod = await import("./store.svelte.ts");
 const store: typeof mod.gatewayStore = mod.gatewayStore;
+
+/** A catalog row as the wire spells it: the fields a member PUT carries,
+ * and the set that holds it. */
+function row(
+  collection: string,
+  id: string,
+  overrides: Partial<AdminProfileRow> = {},
+): AdminProfileRow {
+  return {
+    profile_id: id,
+    collection_name: collection,
+    provider_id: `up-${id}`,
+    owner: "admin",
+    family: "deepseek",
+    model: `${id}-model`,
+    max_context_window: 128_000,
+    effort: null,
+    modalities: ["text"],
+    set: null,
+    position: 0,
+    max_budget: null,
+    tpm_limit: null,
+    rpm_limit: null,
+    ...overrides,
+  };
+}
 
 Deno.test(
   "mutation answers true when the wire lands, false when refused",
@@ -56,7 +84,7 @@ Deno.test(
 Deno.test("a set save writes and does not read", async () => {
   const realFetch = globalThis.fetch;
   const seen: string[] = [];
-  // One PATCH and no read at all: the read side belongs to the save
+  // Two writes and no read at all: the read side belongs to the save
   // sequence, so a store write that refreshed behind its own back would
   // double the reads the sequence already paid for.
   globalThis.fetch = ((input: unknown, init?: { method?: string }) => {
@@ -69,11 +97,19 @@ Deno.test("a set save writes and does not read", async () => {
     );
   }) as unknown as typeof fetch;
   try {
+    assertEquals(await store.patchDescription("baseline", "s1", "d"), true);
+    assertEquals(await store.reorderSet("baseline", "s1", ["a", "b"]), true);
+    assertEquals(seen.length, 2);
+    assertEquals(seen[0]?.startsWith("PATCH "), true);
     assertEquals(
-      await store.saveSet("baseline", "s1", { description: "d" }),
+      seen[0]?.endsWith("/admin/collections/baseline/sets/s1"),
       true,
     );
-    assertEquals(seen.length, 1);
+    assertEquals(seen[1]?.startsWith("PUT "), true);
+    assertEquals(
+      seen[1]?.endsWith("/admin/collections/baseline/sets/s1/order"),
+      true,
+    );
   } finally {
     globalThis.fetch = realFetch;
   }
@@ -99,7 +135,7 @@ Deno.test(
         const url = String(input);
         const payloads: [string, unknown][] = [
           ["/admin/providers", { providers: [] }],
-          ["/admin/profiles?parked=true", []],
+          ["/admin/profiles?unassigned=true", []],
           ["/admin/collections/alpha/sets", { sets: [] }],
           [
             "/admin/collections",
@@ -216,14 +252,27 @@ Deno.test(
   "unassigned mutations answer like the group family: create and save answer booleans, removal rides the error state",
   async () => {
     const realFetch = globalThis.fetch;
+    const calls: { method: string; url: string; body?: string }[] = [];
     const respond = (status: number) => {
-      globalThis.fetch = () =>
-        Promise.resolve(
+      globalThis.fetch = ((input: unknown, init?: RequestInit) => {
+        calls.push({
+          method: init?.method ?? "GET",
+          url: String(input),
+          body: typeof init?.body === "string" ? init.body : undefined,
+        });
+        return Promise.resolve(
           new Response(JSON.stringify({}), {
             status,
             headers: { "content-type": "application/json" },
           }),
         );
+      }) as typeof fetch;
+    };
+    const fields = {
+      model: "gpt",
+      max_context_window: null,
+      effort: null,
+      modalities: null,
     };
     try {
       respond(200);
@@ -236,8 +285,20 @@ Deno.test(
         true,
       );
       assertEquals(
-        await store.saveUnassigned("alpha", "p1", { model: "gpt" }),
+        await store.saveUnassigned(row("alpha", "p1"), fields),
         true,
+      );
+      // The PUT replaces the whole row, so the set rides the body too; this
+      // row is unassigned, so it is null.
+      assertEquals(
+        JSON.parse(
+          calls.find(
+            (call) =>
+              call.method === "PUT" &&
+              call.url.endsWith("/admin/collections/alpha/profiles/p1"),
+          )!.body ?? "{}",
+        ),
+        { ...fields, set: null },
       );
       await store.removeUnassigned("alpha", "p1");
       assertEquals(store.error, null);
@@ -251,7 +312,7 @@ Deno.test(
         false,
       );
       assertEquals(
-        await store.saveUnassigned("alpha", "p1", { model: "gpt" }),
+        await store.saveUnassigned(row("alpha", "p1"), fields),
         false,
       );
       await store.removeUnassigned("alpha", "p1");
@@ -262,17 +323,44 @@ Deno.test(
   },
 );
 
+Deno.test("saveUnassigned carries the set the row holds", async () => {
+  const realFetch = globalThis.fetch;
+  const bodies: string[] = [];
+  globalThis.fetch = ((_input: unknown, init?: RequestInit) => {
+    if ((init?.method ?? "GET") === "PUT" && typeof init?.body === "string") {
+      bodies.push(init.body);
+    }
+    return Promise.resolve(
+      new Response(JSON.stringify({}), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+  }) as typeof fetch;
+  try {
+    // The page opens this dialog on an unassigned row only, whose set is
+    // null; the test pins the rule rather than a reachable row: the body
+    // states the set the row holds, never a constant.
+    assertEquals(
+      await store.saveUnassigned(row("alpha", "p1", { set: "s1" }), {
+        model: "gpt",
+        max_context_window: null,
+        effort: null,
+        modalities: null,
+      }),
+      true,
+    );
+    assertEquals(JSON.parse(bodies[0] ?? "{}").set, "s1");
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
 Deno.test(
-  "addUnassignedToSet puts the appended member list and no-ops on an id already inside",
+  "addUnassignedToSet PUTs the row with its destination set and no-ops on a row already inside",
   async () => {
     const realFetch = globalThis.fetch;
     const calls: { method: string; url: string; body?: string }[] = [];
-    const row = (ids: string[]) => ({
-      name: "s1",
-      description: "",
-      owner: "admin",
-      profiles: ids.map((id) => ({ profile_id: id })),
-    });
     const json = (v: unknown, status = 200) =>
       new Response(JSON.stringify(v), {
         status,
@@ -286,17 +374,10 @@ Deno.test(
         url,
         body: typeof init?.body === "string" ? init.body : undefined,
       });
-      if (url.endsWith("/admin/collections/alpha/sets/s1")) {
-        return Promise.resolve(
-          json(method === "GET" ? row(["a"]) : row(["a", "b"])),
-        );
-      }
-      if (url.endsWith("/admin/profiles?parked=true")) {
-        return Promise.resolve(json([]));
-      }
       if (url.endsWith("/admin/providers")) {
         return Promise.resolve(json({ providers: [] }));
       }
+      if (url.includes("/admin/profiles")) return Promise.resolve(json([]));
       if (url.endsWith("/admin/collections")) {
         return Promise.resolve(json({ collections: [] }));
       }
@@ -306,46 +387,66 @@ Deno.test(
       return Promise.resolve(json({}));
     }) as typeof fetch;
     try {
-      assertEquals(await store.addUnassignedToSet("alpha", "b", "s1"), true);
-      const updates = calls.filter((c) => c.method === "PATCH");
-      assertEquals(updates.length, 1);
-      assertEquals(JSON.parse(updates[0].body ?? "{}"), {
-        members: ["a", "b"],
+      assertEquals(
+        await store.addUnassignedToSet(row("alpha", "b"), "s1"),
+        true,
+      );
+      const puts = calls.filter((c) => c.method === "PUT");
+      assertEquals(puts.length, 1);
+      assertEquals(
+        puts[0]!.url.endsWith("/admin/collections/alpha/profiles/b"),
+        true,
+      );
+      // One PUT of the row's own content, naming the destination set: the
+      // server appends the row at that set's last place.
+      assertEquals(JSON.parse(puts[0]!.body ?? "{}"), {
+        model: "b-model",
+        max_context_window: 128_000,
+        effort: null,
+        modalities: ["text"],
+        set: "s1",
       });
-      // An id already inside the set lands as a no-op drop: no second update.
+      // A row the set already carries lands as a no-op: no request at all.
       calls.length = 0;
-      assertEquals(await store.addUnassignedToSet("alpha", "a", "s1"), true);
-      assertEquals(calls.filter((c) => c.method === "PATCH").length, 0);
+      assertEquals(
+        await store.addUnassignedToSet(row("alpha", "a", { set: "s1" }), "s1"),
+        true,
+      );
+      assertEquals(calls.length, 0);
     } finally {
       globalThis.fetch = realFetch;
     }
   },
 );
-
 Deno.test(
-  "addUnassignedToSet skips the update when the set read fails",
+  "addUnassignedToSet answers false when its PUT is refused",
   async () => {
     const realFetch = globalThis.fetch;
     const calls: { method: string; url: string }[] = [];
-    globalThis.fetch = ((_input: unknown, init?: RequestInit) => {
-      const url = String(_input);
+    globalThis.fetch = ((input: unknown, init?: RequestInit) => {
+      const url = String(input);
       calls.push({ method: init?.method ?? "GET", url });
       return Promise.resolve(
         new Response(JSON.stringify({}), {
-          status: url.endsWith("/admin/collections/alpha/sets/s1") ? 404 : 200,
+          status: url.endsWith("/admin/collections/alpha/profiles/b")
+            ? 404
+            : 200,
           headers: { "content-type": "application/json" },
         }),
       );
     }) as typeof fetch;
     try {
-      assertEquals(await store.addUnassignedToSet("alpha", "b", "s1"), false);
-      assertEquals(calls.filter((c) => c.method === "PATCH").length, 0);
+      assertEquals(
+        await store.addUnassignedToSet(row("alpha", "b"), "s1"),
+        false,
+      );
+      assertEquals(calls.filter((c) => c.method === "PUT").length, 1);
+      assertEquals(typeof store.error, "string");
     } finally {
       globalThis.fetch = realFetch;
     }
   },
 );
-
 Deno.test(
   "updateMember PUTs the row as a served member and answers whether it landed",
   async () => {
@@ -370,7 +471,7 @@ Deno.test(
       max_context_window: 128_000,
       effort: "high",
       modalities: ["text", "image"],
-      parked: false as const,
+      set: "s1",
     };
     try {
       assertEquals(await store.updateMember("alpha", "p1", body), true);
@@ -380,7 +481,7 @@ Deno.test(
         calls[0]!.url.endsWith("/admin/collections/alpha/profiles/p1"),
         true,
       );
-      // The dialog edits a member, so the row stays served: a member PUT
+      // The body names the set that keeps the row served: a member PUT
       // never carries the row back into the unassigned pool.
       assertEquals(calls[0]!.body, body);
 
@@ -393,16 +494,13 @@ Deno.test(
 );
 
 Deno.test(
-  "a refused set save answers false and records the reason",
+  "a refused set description answers false and records the reason",
   async () => {
     const realFetch = globalThis.fetch;
     globalThis.fetch = () =>
       Promise.resolve(new Response(JSON.stringify({}), { status: 500 }));
     try {
-      assertEquals(
-        await store.saveSet("baseline", "s1", { description: "d" }),
-        false,
-      );
+      assertEquals(await store.patchDescription("baseline", "s1", "d"), false);
       assertEquals(store.error !== null, true);
     } finally {
       globalThis.fetch = realFetch;

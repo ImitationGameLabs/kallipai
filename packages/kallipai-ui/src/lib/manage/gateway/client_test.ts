@@ -182,8 +182,8 @@ Deno.test("set and unassigned reads speak the server's shapes", async () => {
       payload = {
         sets: [{ name: "alpha", description: "d", profiles: [] }],
       };
-    } else if (url.endsWith("/admin/profiles?parked=true")) {
-      // The unassigned read is the profiles list with the parked filter; it
+    } else if (url.endsWith("/admin/profiles?unassigned=true")) {
+      // The unassigned read is the profiles list with that filter; it
       // answers a bare AdminProfile[] (the one unwrap-less GET in the
       // family), and every row names its collection.
       payload = [
@@ -192,7 +192,7 @@ Deno.test("set and unassigned reads speak the server's shapes", async () => {
           collection_name: "baseline",
           family: "openai",
           model: "m",
-          parked: true,
+          set: null,
         },
       ];
     }
@@ -215,7 +215,7 @@ Deno.test("set and unassigned reads speak the server's shapes", async () => {
 });
 
 Deno.test(
-  "listUnassigned reads the unassigned list with the parked filter",
+  "listUnassigned reads the unassigned list with its own filter",
   async () => {
     const calls: string[] = [];
     const originalFetch = globalThis.fetch;
@@ -230,7 +230,9 @@ Deno.test(
     }) as unknown as typeof fetch;
     try {
       await listUnassigned("http://127.0.0.1:7500");
-      assertEquals(calls, ["http://127.0.0.1:7500/admin/profiles?parked=true"]);
+      assertEquals(calls, [
+        "http://127.0.0.1:7500/admin/profiles?unassigned=true",
+      ]);
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -435,10 +437,10 @@ Deno.test(
       return Promise.resolve(stub);
     }) as unknown as typeof fetch;
     try {
-      await listProfiles({ collection_name: "main", parked: true });
+      await listProfiles({ collection_name: "main", unassigned: true });
       assertEquals(
         calls[0]?.url,
-        "/admin/profiles?collection_name=main&parked=true",
+        "/admin/profiles?collection_name=main&unassigned=true",
       );
       await listProfiles();
       assertEquals(calls[1]?.url, "/admin/profiles");
@@ -449,9 +451,13 @@ Deno.test(
       });
       assertEquals(calls[2]?.url, "/admin/collections/main/profiles");
       assertEquals(calls[2]?.init?.method, "POST");
-      await updateProfile("main", "p1", { model: "m2", parked: false });
+      await updateProfile("main", "p1", { model: "m2", set: "alpha" });
       assertEquals(calls[3]?.url, "/admin/collections/main/profiles/p1");
       assertEquals(calls[3]?.init?.method, "PUT");
+      assertEquals(JSON.parse(String(calls[3]?.init?.body)), {
+        model: "m2",
+        set: "alpha",
+      });
       await deleteProfile("main", "p1");
       assertEquals(calls[4]?.url, "/admin/collections/main/profiles/p1");
       assertEquals(calls[4]?.init?.method, "DELETE");

@@ -29,6 +29,7 @@ import {
   listSets,
   publishCollection,
   putProviderCredential,
+  reorderCollectionSet,
   unpublishCollection,
   updateCollection,
   updateGroup,
@@ -42,7 +43,7 @@ import {
   type UserProviderRow,
   type UserSetRow,
 } from "./client.ts";
-import type { UserMemberBody } from "./userSetDraft.ts";
+import type { MemberWriteBody } from "../manage/gateway/setDraft.ts";
 
 class UserGatewayStore {
   /** The baked gateway base URL (one origin for both faces). */
@@ -225,6 +226,7 @@ class UserGatewayStore {
       max_budget?: number | null;
       tpm_limit?: number | null;
       rpm_limit?: number | null;
+      set: string | null;
     },
   ): Promise<boolean> {
     const ok = await this.run(async () => {
@@ -236,12 +238,12 @@ class UserGatewayStore {
   }
 
   /** PUT one member row in place (a set dialog's member edit). The body
-   * is the shared fields alone: a user's own rows cannot carry the
-   * catalog's served flag. The caller re-reads what it needs. */
+   * carries the row's content and the set that holds it (`null` leaves the
+   * row unassigned). The caller re-reads what it needs. */
   async updateMember(
     collection: string,
     profileId: string,
-    body: UserMemberBody,
+    body: MemberWriteBody,
   ): Promise<boolean> {
     const ok = await this.run(async () => {
       await updateProfile(collection, profileId, body, this.gatewayUrl);
@@ -267,32 +269,50 @@ class UserGatewayStore {
     return this.run(() => getCollectionSet(collection, name, this.gatewayUrl));
   }
 
+  /** POST a set into the collection, then re-read. Answers the created row;
+   * undefined means the write failed (a refresh failure rides the page
+   * alert, as on every other action here). */
   async addSet(
     collection: string,
-    body: {
-      name: string;
-      description: string;
-      members?: string[];
-    },
+    body: { name: string; description: string },
+  ): Promise<UserSetRow | undefined> {
+    const ok = await this.run(async () => {
+      const row = await createCollectionSet(collection, body, this.gatewayUrl);
+      await this.refreshAll();
+      return row;
+    });
+    return ok;
+  }
+
+  /** PATCH the set's description. The write alone: a set save spans several
+   * requests, so the read side refreshes once at the end of the sequence
+   * (the dialog's settle port), never per write. */
+  async patchDescription(
+    collection: string,
+    name: string,
+    description: string,
   ): Promise<boolean> {
     const ok = await this.run(async () => {
-      await createCollectionSet(collection, body, this.gatewayUrl);
-      await this.refreshAll();
+      await updateCollectionSet(
+        collection,
+        name,
+        { description },
+        this.gatewayUrl,
+      );
       return true;
     });
     return ok === true;
   }
 
-  /** PATCH description + member order in one request. The write alone: a
-   * set save spans several requests, so the read side refreshes once at the
-   * end of the sequence (the dialog's settle port), never per write. */
-  async saveSet(
+  /** PUT the set's member order. The membership lands first (each row's PUT
+   * carries its set), so this route only rewrites positions. */
+  async reorderSet(
     collection: string,
     name: string,
-    body: { description?: string; members?: string[] },
+    members: readonly string[],
   ): Promise<boolean> {
     const ok = await this.run(async () => {
-      await updateCollectionSet(collection, name, body, this.gatewayUrl);
+      await reorderCollectionSet(collection, name, members, this.gatewayUrl);
       return true;
     });
     return ok === true;

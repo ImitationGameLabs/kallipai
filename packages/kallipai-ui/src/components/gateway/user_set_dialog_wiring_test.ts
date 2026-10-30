@@ -1,8 +1,8 @@
 import { assert } from "@std/assert";
 
 // Source pins for the user face's set dialog: the member pool comes from
-// the collection, the parked badge stays off this face, and the create
-// form asks for a name an edit already has. The save sequence itself is
+// the collection, the picker names the set an add would take a row out of,
+// and the create form asks for a name an edit already has. The save sequence itself is
 // tested in lib/manage/gateway/saveSet_test.ts; what it hands over is
 // pinned here and in lib/gateway/userSetDraft_test.ts.
 const DIALOG = new URL("./UserSetDialog.svelte", import.meta.url);
@@ -85,17 +85,24 @@ Deno.test(
       src.includes("seededIds = next.seededIds;"),
       "the dialog takes back the seed the reseed hands it",
     );
-    // A create sends no updates at all: the ternary is what keeps a create
-    // from ever carrying a PUT body, whatever the card's form shows.
-    const updates = src.slice(src.indexOf("updates:"));
-    const submit = updates.slice(0, updates.indexOf("});"));
+    // A create hands no write at all: the page creates the set first and
+    // then walks the same sequence from an empty original, so the create
+    // request carries the membership and nothing else.
+    const submit = src.slice(src.indexOf("function submit()"));
     assert(
-      submit.includes("set === null") &&
-        submit.includes("? []") &&
+      submit.includes("{ updates: [], joins: [], leaves: [] }") &&
         submit.includes(
-          "changedUpdates(diffBase(set.profiles, members), members, edits)",
+          "membershipWrites(set.profiles, members, edits, set.name)",
         ),
-      "a create computes no updates, an edit diffs against the registry rows",
+      "a create hands no writes, an edit hands the shared three lists",
+    );
+    // The picker names the set an add would move the row out of, using the
+    // row's own field: no second reading of the registry.
+    assert(
+      src.includes(
+        "user_gateway_set_add_member_moves({ set: pickedRow.set })",
+      ) && src.includes("pickedRow !== null && pickedRow.set !== null"),
+      "the note appears only for a pick that belongs to a set",
     );
     assert(
       src.includes("editable={set !== null}") &&
@@ -106,18 +113,21 @@ Deno.test(
 );
 
 Deno.test(
-  "the user face never shows the parked badge",
+  "the card carries no membership badge and a pick says where it comes from",
   { permissions: { read: [DIALOG, CARD] } },
   () => {
+    const dialog = source(DIALOG);
+    // A row's set is the registry's fact, not a card badge: the member list
+    // only ever shows rows the set holds.
     assert(
-      source(DIALOG).includes("showParked={false}"),
-      "the user face turns the badge off",
+      !source(CARD).includes("badge"),
+      "the member card shows no membership badge",
     );
-    // The flag is the card's own: the card shows the badge only when the
-    // face asked for it.
     assert(
-      source(CARD).includes("{#if showParked && member.parked}"),
-      "the card gates the badge on the face's request",
+      dialog.includes(
+        "row.set === null ? row.profile_id : `${row.profile_id} (${row.set})`",
+      ),
+      "a picker row that belongs to a set names it",
     );
   },
 );

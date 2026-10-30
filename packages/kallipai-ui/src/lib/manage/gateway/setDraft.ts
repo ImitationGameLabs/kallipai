@@ -18,10 +18,11 @@ export interface DraftRow {
   max_context_window: number | null;
   effort: string | null;
   modalities: readonly string[] | null;
-  /** The catalog's rows name an owner and carry the served flag; a
-   * user's own collection has neither, so both are optional. */
+  /** The catalog's rows name an owner; a user's own collection has none, so
+   * it is optional. `set` is the set that carries the row (null = unassigned),
+   * which every face's row carries. */
   owner?: string;
-  parked?: boolean;
+  set: string | null;
 }
 
 /** What the membership arithmetic needs from a set row on either face:
@@ -43,30 +44,38 @@ export interface MemberEdit {
   modalities: Modality[];
 }
 
-/** One member's PUT body: the fields the form edits, in wire spelling.
- * `parked` is the catalog's promote flag; the shared diff never sets it,
- * and each face's port decides: the catalog adds it, a user's own
- * collection cannot send it at all. */
-export interface MemberUpdateBody {
+/** One member's content in wire spelling: the fields the form edits. */
+export interface MemberContentBody {
   model: string;
   max_context_window: number | null;
   effort: string | null;
   modalities: string[] | null;
-  parked?: false;
+}
+
+/** A member's PUT body: the content plus the set that carries the row (null
+ * leaves it unassigned). The PUT replaces the whole row, so the set is not
+ * optional on the wire and no call site can leave it out. */
+export interface MemberWriteBody extends MemberContentBody {
+  set: string | null;
 }
 
 /** One member's PUT: which row, and the body that lands on it. */
 export interface MemberUpdate {
   profileId: string;
-  body: MemberUpdateBody;
+  body: MemberWriteBody;
 }
 
-/** What the dialog hands back: the description, the order, and the rows
- * whose content changed (an untouched row needs no PUT). */
+/** What the dialog hands back: the set's name, its description, the order it
+ * shows, the rows whose content changed, the rows the draft adds, and the ones
+ * it drops. A name lands a row at its last place, so the set the writes leave
+ * behind is not always the order the dialog shows; `/order` settles that. */
 export interface SetSaveDraft {
+  name: string;
   description: string;
   members: string[];
   updates: MemberUpdate[];
+  joins: MemberUpdate[];
+  leaves: MemberUpdate[];
 }
 
 /** The editable projection of a member row: canonical order, and only
@@ -149,54 +158,133 @@ export function memberIds(members: SetLike["profiles"]): string[] {
   return members.map((member) => member.profile_id);
 }
 
-/** The rows whose content changed, in display order. A reordered list
- * yields nothing here: order travels in `members`, content in `updates`.
- * Modality order is not a difference, because the tag group rebuilds the
- * selection in canonical order. */
-export function changedUpdates<T extends DraftRow>(
+/** The content fields from a draft: the model trimmed (trailing spaces are
+ * typing, not the model's name), the window parsed, the tags canonical. */
+export function memberBodyOf(edit: MemberEdit): MemberContentBody {
+  return {
+    model: edit.model.trim(),
+    max_context_window: contextWindowOf(edit),
+    effort: edit.effort,
+    modalities: normalizeModalities(edit.modalities)?.slice() ?? null,
+  };
+}
+
+/** The four content fields a PUT carries (model, max_context_window,
+ * effort, modalities), taken from a draft row or from the value a dialog
+ * hands back, with the tags copied so the body cannot alias the array. */
+export function contentOf(fields: {
+  model: string;
+  max_context_window: number | null;
+  effort: string | null;
+  modalities: readonly string[] | null;
+}): MemberContentBody {
+  return {
+    model: fields.model,
+    max_context_window: fields.max_context_window,
+    effort: fields.effort,
+    modalities: fields.modalities === null ? null : [...fields.modalities],
+  };
+}
+
+/** A row's PUT body: the content it lands with, and the set it lands in. A
+ * PUT replaces the whole row, so no body omits the set: it is the row's own
+ * unless the caller moves the row. */
+export function rowBodyOf<T extends object>(
+  row: Pick<DraftRow, "set">,
+  content: T,
+  set: string | null = row.set,
+): T & { set: string | null } {
+  return { ...content, set };
+}
+
+/** The PUT for one row: the draft's edit when there is one, the row's own
+ * fields otherwise, carrying the set it lands in. */
+function memberWriteOf(
+  row: DraftRow,
+  edits: Readonly<Record<string, MemberEdit>>,
+  set: string | null,
+): MemberWriteBody {
+  const edit = edits[row.profile_id];
+  return rowBodyOf(
+    row,
+    edit === undefined ? contentOf(row) : memberBodyOf(edit),
+    set,
+  );
+}
+
+/** What a save has to PUT: the kept rows whose content changed (display
+ * order), the rows the draft adds (display order), and the rows it drops (the
+ * order the set held them). Every body carries its set: the draft's name for
+ * the first two, null for a row on its way out. A dropped row carries the
+ * draft's edit too, so editing a row and then removing it is not lost. */
+export interface MembershipWrites {
+  updates: MemberUpdate[];
+  joins: MemberUpdate[];
+  leaves: MemberUpdate[];
+}
+
+export function membershipWrites<T extends DraftRow>(
   original: readonly T[],
   members: readonly T[],
   edits: Readonly<Record<string, MemberEdit>>,
-): MemberUpdate[] {
-  const byId = new Map(original.map((row) => [row.profile_id, row]));
+  name: string,
+): MembershipWrites {
+  const before = new Map(original.map((row) => [row.profile_id, row]));
+  const kept = new Set(members.map((member) => member.profile_id));
   const updates: MemberUpdate[] = [];
+  const joins: MemberUpdate[] = [];
   for (const member of members) {
+    const row = before.get(member.profile_id);
+    if (row === undefined) {
+      joins.push({
+        profileId: member.profile_id,
+        body: memberWriteOf(member, edits, name),
+      });
+      continue;
+    }
     const edit = edits[member.profile_id];
-    if (edit === undefined) continue;
-    // Every member came out of the set's own rows, so a row missing here
-    // has nothing to diff against and nothing to PUT.
-    const before = byId.get(member.profile_id);
-    if (before === undefined) continue;
-    if (sameEdit(memberEditOf(before), edit)) continue;
+    // A row nobody edited, or one whose edit matches what it holds, needs no
+    // PUT: an untouched row stays off the wire.
+    if (edit === undefined || sameEdit(memberEditOf(row), edit)) continue;
     updates.push({
       profileId: member.profile_id,
-      body: {
-        // The server takes the trimmed id: trailing spaces are typing, not
-        // the model's name.
-        model: edit.model.trim(),
-        max_context_window: contextWindowOf(edit),
-        effort: edit.effort,
-        // The tag selection as the wire takes it: an empty selection is
-        // text only, which the server spells as null.
-        modalities: normalizeModalities(edit.modalities)?.slice() ?? null,
-      },
+      body: rowBodyOf(member, memberBodyOf(edit), name),
     });
   }
-  return updates;
+  const leaves: MemberUpdate[] = [];
+  for (const row of original) {
+    if (kept.has(row.profile_id)) continue;
+    leaves.push({
+      profileId: row.profile_id,
+      body: memberWriteOf(row, edits, null),
+    });
+  }
+  return { updates, joins, leaves };
 }
 
-/** The catalog's PUT body: the shared fields plus the promote flag its
- * profile route requires. A user's own collection cannot send the flag, so
- * its port sends the shared body alone. */
-export function adminMemberBody(
-  body: MemberUpdateBody,
-): MemberUpdateBody & { parked: boolean } {
-  return { ...body, parked: false };
+/** The sequence `/order` should carry, or null when the membership writes
+ * already leave the set in the draft's order. A name lands a row at its last
+ * place, so what the writes leave behind is the members the set already had,
+ * in their existing sequence, with the joins appended in draft order. */
+export function orderToSend(
+  originalIds: readonly string[],
+  draftIds: readonly string[],
+): string[] | null {
+  const draft = new Set(draftIds);
+  const before = new Set(originalIds);
+  const after = [
+    ...originalIds.filter((id) => draft.has(id)),
+    ...draftIds.filter((id) => !before.has(id)),
+  ];
+  const same =
+    after.length === draftIds.length &&
+    after.every((id, index) => id === draftIds[index]);
+  return same ? null : [...draftIds];
 }
 
 /** What a dialog holds after the page hands a re-read set back: the
  * member rows, their drafts, and the open form. */
-export interface Reseeded<T extends DraftRow> {
+interface Reseeded<T extends DraftRow> {
   members: T[];
   edits: Record<string, MemberEdit>;
   editingId: string | null;
@@ -303,24 +391,4 @@ function sameModalities(a: readonly string[], b: readonly string[]): boolean {
   const left = [...a].sort();
   const right = [...b].sort();
   return left.every((value, i) => value === right[i]);
-}
-
-/** The other sets of the same collection that also carry each member of
- * `target`, keyed by profile id. A row can sit in several sets, so an edit
- * to it lands in each of them; the dialog says which. */
-export function setsAlsoHolding(
-  target: SetLike,
-  siblings: readonly SetLike[],
-): Record<string, string[]> {
-  const others = siblings.filter((row) => row.name !== target.name);
-  const plan: Record<string, string[]> = {};
-  for (const member of target.profiles) {
-    const names = others
-      .filter((row) =>
-        row.profiles.some((p) => p.profile_id === member.profile_id),
-      )
-      .map((row) => row.name);
-    if (names.length > 0) plan[member.profile_id] = names;
-  }
-  return plan;
 }
