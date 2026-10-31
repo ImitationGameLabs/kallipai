@@ -7,11 +7,12 @@ use kallipai_common::AgentId;
 use kallipai_common::protocol::{RoleDisposition, TeamAction, TeamRejection, TeamRejectionKind};
 
 use super::plan::{LiveBody, PlannedAction};
+use crate::routes::agent::reserved_role_reason;
 use crate::routes::team::status::LockPair;
 use crate::state::SharedState;
 
 /// Preflight: the whole-batch refusal pass. Structural problems (an id
-/// keyed under two roles, a declared root role, duplicate live bodies,
+/// keyed under two roles, a declared reserved role, duplicate live bodies,
 /// invalid spawn declarations, capacity) and busy/childed deactivation
 /// targets reject with per-item guidance; only busy deactivation may be
 /// forced, every other rejection stands, zero actions are applied.
@@ -42,13 +43,18 @@ pub(crate) fn preflight_converge(
         }
     }
 
-    // The root is boot-built and outside the declaration's reach.
+    // Reserved roles no body can carry, checked where the batch can still
+    // refuse whole: the agent write routes apply the same rule per request.
     for a in plan {
-        if a.role == "root" && a.declared.is_some() {
+        if a.declared.is_some()
+            && let Some(reason) = reserved_role_reason(a.role.trim())
+        {
             rejections.push(TeamRejection {
                 kind: TeamRejectionKind::RootRole,
-                message: "declaration declares the reserved role \"root\": the root is boot-built and cannot converge; remove the role from the declaration"
-                    .to_string(),
+                message: format!(
+                    "declaration cannot claim the reserved role {:?}: {reason}",
+                    a.role
+                ),
             });
         }
     }

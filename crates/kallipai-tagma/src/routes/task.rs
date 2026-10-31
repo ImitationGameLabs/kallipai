@@ -48,31 +48,115 @@ fn blobs(state: &SharedState) -> Result<std::sync::Arc<dyn kallipai_task::BlobSt
 /// The tagma records who called; callers cannot claim an actor.
 fn acting_agent(auth: &crate::auth::AuthIdentity) -> String {
     match auth.identity() {
-        crate::auth::Identity::Operator => "operator".to_string(),
+        crate::auth::Identity::Operator => OPERATOR.to_string(),
         crate::auth::Identity::Agent { id } => id.to_string(),
     }
 }
 
-/// One id→role snapshot per request, cloned under the registry read lock
-/// and used afterwards with no lock held (the mapping body is sync).
-async fn role_snapshot(state: &SharedState) -> std::collections::HashMap<String, String> {
-    state
-        .registry
-        .read()
-        .await
-        .iter()
-        .map(|(id, entry)| (id.to_string(), entry.identity().config.role.clone()))
-        .collect()
+/// The operator token's own identity value: not an agent, but a sender and
+/// an owner the ledger records and shows.
+const OPERATOR: &str = "operator";
+
+/// One registry snapshot per request, cloned under the read lock and used
+/// afterwards with no lock held. It maps both ways because a task verb
+/// needs both: `by_id` turns a stored identity into its role name for the
+/// wire, `by_role` turns the word a caller typed into the identity to
+/// store. An alias keeps the request's two directions on one snapshot, so
+/// a create cannot resolve an assignee against one roster and show roles
+/// from another.
+struct Identities {
+    by_id: std::collections::HashMap<String, String>,
+    by_role: std::collections::HashMap<String, String>,
 }
 
-/// The one identity rule: a raw value that names a registered agent
-/// resolves to that agent's role, and everything else (a historical
-/// confirmer-name record, the literal `operator`, a role name typed into
-/// the free-text assignee, a deregistered id, nothing at all) resolves to
-/// `None`. Every wire field that carries a role calls this, so a new
-/// identity field calls it instead of copying the lookup.
-fn role_of(roles: &std::collections::HashMap<String, String>, raw: Option<&str>) -> Option<String> {
-    raw.and_then(|raw| roles.get(raw)).cloned()
+async fn identities(state: &SharedState) -> std::sync::Arc<Identities> {
+    let registry = state.registry.read().await;
+    let mut by_id = std::collections::HashMap::with_capacity(registry.len());
+    let mut by_role = std::collections::HashMap::with_capacity(registry.len());
+    for (id, entry) in registry.iter() {
+        let role = entry.identity().config.role.clone();
+        by_id.insert(id.to_string(), role.clone());
+        by_role.insert(role, id.to_string());
+    }
+    std::sync::Arc::new(Identities { by_id, by_role })
+}
+
+impl Identities {
+    /// The identity a caller's word names: an agent id passes through, a
+    /// role name resolves to the agent holding it, and the operator literal
+    /// names itself. The ledger stores what this returns, so a word it
+    /// cannot place never reaches a row. Create and the list filter share
+    /// this one vocabulary.
+    fn resolve(&self, raw: &str) -> Option<String> {
+        let raw = raw.trim();
+        if raw.is_empty() {
+            return None;
+        }
+        if raw == OPERATOR {
+            return Some(raw.to_owned());
+        }
+        // The ledger stores an id in its canonical spelling while a caller may
+        // type any spelling `Uuid::parse_str` accepts, so normalize before the
+        // lookup: a differently spelled id still names its agent.
+        let identity = match uuid::Uuid::parse_str(raw) {
+            Ok(id) => id.to_string(),
+            Err(_) => raw.to_owned(),
+        };
+        if self.by_id.contains_key(&identity) {
+            return Some(identity);
+        }
+        self.by_role.get(&identity).cloned()
+    }
+
+    /// The value a filter matches against: `resolve`, plus an id-shaped
+    /// word kept as typed. A row can outlive its agent (the ledger keeps
+    /// the id), and the wire shows that id when no role answers for it,
+    /// so a caller copying what it sees must find the row. Create does
+    /// not share this: assigning a new task to an identity no agent
+    /// holds is refused.
+    fn address(&self, raw: &str) -> Option<String> {
+        let raw = raw.trim();
+        if let Some(id) = self.resolve(raw) {
+            return Some(id);
+        }
+        // `resolve` normalizes what it can place; this arm keeps a well-formed
+        // id the registry has let go, in the canonical spelling the ledger
+        // would have stored.
+        uuid::Uuid::parse_str(raw).ok().map(|id| id.to_string())
+    }
+
+    /// The alternatives a refusal shows: the registered role names plus the
+    /// operator literal, sorted. An agent id also works and is not listed —
+    /// a caller who has one is already holding it.
+    fn names(&self) -> String {
+        let mut names: Vec<&str> = self.by_role.keys().map(String::as_str).collect();
+        names.push(OPERATOR);
+        names.sort_unstable();
+        names.join(", ")
+    }
+}
+
+/// A word typed as an assignee, a confirmer, or a filter names nothing the
+/// ledger knows. The refusal lists the role names and the operator literal
+/// that would have worked (an agent id works too, which is why the list need
+/// not carry one): the ledger stores identities, so every verb needs a word
+/// it can turn into one, and naming the alternatives is what makes the
+/// caller's next attempt work.
+fn no_such_identity(raw: &str, identities: &Identities) -> ApiError {
+    ApiError::bad_request(format!(
+        "no agent named '{}'; available: {}",
+        raw.trim(),
+        identities.names()
+    ))
+}
+
+/// The one identity rule: a value the registry holds resolves to that
+/// agent's role name, and everything else (the literal `operator`, an id the
+/// registry has let go, nothing at all) resolves to `None`. Every wire field
+/// that carries a role calls this, so a new identity field calls it instead
+/// of copying the lookup.
+fn role_of(identities: &Identities, raw: Option<&str>) -> Option<String> {
+    raw.and_then(|raw| identities.by_id.get(raw).cloned())
 }
 
 /// Fill `actor_role` on every event, `agent_role` on every usage row, and
@@ -82,25 +166,25 @@ fn role_of(roles: &std::collections::HashMap<String, String>, raw: Option<&str>)
 /// assignee, confirmers) cannot disagree with each other in a pane.
 fn inject_wire_roles(
     mut export: kallipai_task::TaskExport,
-    roles: &std::collections::HashMap<String, String>,
+    identities: &Identities,
 ) -> kallipai_task::TaskExport {
     for event in &mut export.events {
-        event.actor_role = role_of(roles, event.actor.as_deref());
+        event.actor_role = role_of(identities, event.actor.as_deref());
     }
     // The task's own identity fields follow the event policy exactly.
-    export.creator_role = role_of(roles, export.creator.as_deref());
-    export.assignee_role = role_of(roles, export.assignee.as_deref());
+    export.creator_role = role_of(identities, export.creator.as_deref());
+    export.assignee_role = role_of(identities, export.assignee.as_deref());
     export.confirmer_roles = export
         .confirmers
         .iter()
-        .map(|confirmer| role_of(roles, Some(confirmer.as_str())))
+        .map(|confirmer| role_of(identities, Some(confirmer.as_str())))
         .collect();
     if let Some(usage) = export.usage.as_mut() {
         // One fill for every agent row in the usage face: the top-level
         // sums and the per-window rows are the same wire field.
         let fill = |agents: &mut Vec<kallipai_common::protocol::UsageAgentExport>| {
             for agent in agents {
-                agent.agent_role = role_of(roles, Some(agent.agent_id.as_str()));
+                agent.agent_role = role_of(identities, Some(agent.agent_id.as_str()));
             }
         };
         fill(&mut usage.agents);
@@ -112,29 +196,14 @@ fn inject_wire_roles(
 }
 
 /// The list face carries the same assignee role as the detail export:
-/// the row's assignee shares the free-text rule, so a role name reads
-/// back as itself and an id reads back as its role.
+/// the row holds an identity, so it reads back as the role name that
+/// identity holds, or nothing when it holds none.
 fn inject_row_roles(
     mut row: kallipai_common::protocol::TaskRow,
-    roles: &std::collections::HashMap<String, String>,
+    identities: &Identities,
 ) -> kallipai_common::protocol::TaskRow {
-    row.assignee_role = role_of(roles, row.assignee.as_deref());
+    row.assignee_role = role_of(identities, row.assignee.as_deref());
     row
-}
-
-/// The create verb's confirmer resolver, from the same snapshot shape:
-/// role name → agent id. Unresolvable names yield `None` (the store
-/// reports `ConfirmerUnresolved`).
-async fn confirmer_resolver(
-    state: &SharedState,
-) -> std::sync::Arc<dyn Fn(&str) -> Option<String> + Send + Sync> {
-    let registry = state.registry.read().await;
-    let mut by_role: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-    for (id, entry) in registry.iter() {
-        by_role.insert(entry.identity().config.role.clone(), id.to_string());
-    }
-    drop(registry);
-    std::sync::Arc::new(move |name| by_role.get(name).cloned())
 }
 
 /// The store's error taxonomy to the HTTP face: state refusals are
@@ -146,7 +215,6 @@ fn api_error(err: kallipai_task::Error) -> ApiError {
         E::InvalidTransition { .. }
         | E::SerialGate { .. }
         | E::ConfirmationGate { .. }
-        | E::ConfirmerUnresolved { .. }
         | E::ArchiveGate { .. } => ApiError::conflict(err.to_string()),
         // Malformed association keys are a caller input problem, not a
         // server fault: 400, not 500.
@@ -196,12 +264,35 @@ fn notify(state: &SharedState, verb: &str, actor: &str, export: &kallipai_task::
 async fn create(
     State(state): State<SharedState>,
     auth: crate::auth::AuthIdentity,
-    Json(body): Json<TaskCreateRequest>,
+    Json(mut body): Json<TaskCreateRequest>,
 ) -> TaskResult<kallipai_task::TaskExport> {
     let actor = acting_agent(&auth);
-    let snapshot = role_snapshot(&state).await;
+    let snapshot = identities(&state).await;
+    // The caller's words are addresses, the rows store identities: resolve
+    // them here so no unresolvable word can reach the ledger. A blank word
+    // is a field left unfilled, not a name nobody answers to.
+    body.assignee = match body.assignee.as_deref().map(str::trim) {
+        Some(raw) if !raw.is_empty() => Some(
+            snapshot
+                .resolve(raw)
+                .ok_or_else(|| no_such_identity(raw, &snapshot))?,
+        ),
+        _ => None,
+    };
+    let roster: Vec<String> = body
+        .require
+        .iter()
+        .map(|raw| raw.trim())
+        .filter(|raw| !raw.is_empty())
+        .map(|raw| {
+            snapshot
+                .resolve(raw)
+                .ok_or_else(|| no_such_identity(raw, &snapshot))
+        })
+        .collect::<Result<Vec<_>, ApiError>>()?;
+    body.require = roster;
     let task = store(&state)?
-        .create(body, &actor, confirmer_resolver(&state).await)
+        .create(body, &actor)
         .await
         .map_err(api_error)?;
     let id = task.id;
@@ -218,7 +309,7 @@ async fn start(
     Json(body): Json<TaskForceRequest>,
 ) -> TaskResult<kallipai_task::TaskExport> {
     let actor = acting_agent(&auth);
-    let snapshot = role_snapshot(&state).await;
+    let snapshot = identities(&state).await;
     let usage = crate::usage_snapshot::capture_usage(&state).await;
     store(&state)?
         .start(id, &actor, body.force, Some(usage))
@@ -234,9 +325,21 @@ async fn list(
     State(state): State<SharedState>,
     Query(query): Query<TaskListQuery>,
 ) -> TaskResult<kallipai_common::protocol::TaskListPage> {
+    let snapshot = identities(&state).await;
+    // A filter word is an address: resolve a role name before matching,
+    // and keep an id-shaped word as typed, so a row left by a removed
+    // agent stays findable.
+    let assignee = match query.assignee.as_deref().map(str::trim) {
+        Some(raw) if !raw.is_empty() => Some(
+            snapshot
+                .address(raw)
+                .ok_or_else(|| no_such_identity(raw, &snapshot))?,
+        ),
+        _ => None,
+    };
     let filter = TaskFilter {
         status: query.status,
-        assignee: query.assignee,
+        assignee,
         archived: query.archived,
         time: query.time,
         since: query.since,
@@ -244,7 +347,6 @@ async fn list(
         limit: query.limit,
         offset: query.offset,
     };
-    let snapshot = role_snapshot(&state).await;
     let mut page = store(&state)?.list_page(filter).await.map_err(api_error)?;
     page.rows = page
         .rows
@@ -258,7 +360,7 @@ async fn show(
     State(state): State<SharedState>,
     Path(id): Path<i64>,
 ) -> TaskResult<kallipai_task::TaskExport> {
-    let snapshot = role_snapshot(&state).await;
+    let snapshot = identities(&state).await;
     let export = store(&state)?.export(id).await.map_err(api_error)?;
     Ok(Json(inject_wire_roles(export, &snapshot)))
 }
@@ -267,7 +369,7 @@ async fn export_one(
     State(state): State<SharedState>,
     Path(id): Path<i64>,
 ) -> TaskResult<kallipai_task::TaskExport> {
-    let snapshot = role_snapshot(&state).await;
+    let snapshot = identities(&state).await;
     let export = store(&state)?.export(id).await.map_err(api_error)?;
     Ok(Json(inject_wire_roles(export, &snapshot)))
 }
@@ -275,7 +377,7 @@ async fn export_one(
 async fn export_all(
     State(state): State<SharedState>,
 ) -> TaskResult<Vec<kallipai_task::TaskExport>> {
-    let snapshot = role_snapshot(&state).await;
+    let snapshot = identities(&state).await;
     let all = store(&state)?.export_all().await.map_err(api_error)?;
     Ok(Json(
         all.into_iter()
@@ -291,7 +393,7 @@ async fn confirm(
     Json(body): Json<TaskConfirmRequest>,
 ) -> TaskResult<kallipai_task::TaskExport> {
     let actor = acting_agent(&auth);
-    let snapshot = role_snapshot(&state).await;
+    let snapshot = identities(&state).await;
     store(&state)?
         .confirm(id, &actor, body, blobs(&state)?)
         .await
@@ -308,7 +410,7 @@ async fn review(
     Path(id): Path<i64>,
 ) -> TaskResult<kallipai_task::TaskExport> {
     let actor = acting_agent(&auth);
-    let snapshot = role_snapshot(&state).await;
+    let snapshot = identities(&state).await;
     store(&state)?.review(id, &actor).await.map_err(api_error)?;
     let export = store(&state)?.export(id).await.map_err(api_error)?;
     let export = inject_wire_roles(export, &snapshot);
@@ -322,7 +424,7 @@ async fn pause(
     Path(id): Path<i64>,
 ) -> TaskResult<kallipai_task::TaskExport> {
     let actor = acting_agent(&auth);
-    let snapshot = role_snapshot(&state).await;
+    let snapshot = identities(&state).await;
     let usage = crate::usage_snapshot::capture_usage(&state).await;
     store(&state)?
         .pause(id, &actor, Some(usage))
@@ -341,7 +443,7 @@ async fn resume(
     Json(body): Json<TaskForceRequest>,
 ) -> TaskResult<kallipai_task::TaskExport> {
     let actor = acting_agent(&auth);
-    let snapshot = role_snapshot(&state).await;
+    let snapshot = identities(&state).await;
     let usage = crate::usage_snapshot::capture_usage(&state).await;
     store(&state)?
         .resume(id, &actor, body.force, Some(usage))
@@ -360,7 +462,7 @@ async fn note(
     Json(body): Json<TaskNoteRequest>,
 ) -> TaskResult<kallipai_task::TaskExport> {
     let actor = acting_agent(&auth);
-    let snapshot = role_snapshot(&state).await;
+    let snapshot = identities(&state).await;
     store(&state)?
         .note(id, &actor, body.note)
         .await
@@ -378,7 +480,7 @@ async fn close(
     Json(body): Json<TaskCloseRequest>,
 ) -> TaskResult<kallipai_task::TaskExport> {
     let actor = acting_agent(&auth);
-    let snapshot = role_snapshot(&state).await;
+    let snapshot = identities(&state).await;
     let usage = crate::usage_snapshot::capture_usage(&state).await;
     // Captured before the store call: `close` ingests the dossier archive
     // first, and that ingest's spend lands in no window. The boundary is
@@ -392,7 +494,13 @@ async fn close(
         Err(kallipai_task::Error::ConfirmationGate { missing }) => {
             let names: Vec<String> = missing
                 .split(", ")
-                .map(|id| snapshot.get(id).cloned().unwrap_or_else(|| id.to_string()))
+                .map(|id| {
+                    snapshot
+                        .by_id
+                        .get(id)
+                        .cloned()
+                        .unwrap_or_else(|| id.to_string())
+                })
                 .collect();
             return Err(ApiError::conflict(format!(
                 "confirmation gate: missing confirmations from registered confirmers: {}; --force to override (escape is recorded)",
@@ -414,7 +522,7 @@ async fn reopen(
     Json(body): Json<TaskForceRequest>,
 ) -> TaskResult<kallipai_task::TaskExport> {
     let actor = acting_agent(&auth);
-    let snapshot = role_snapshot(&state).await;
+    let snapshot = identities(&state).await;
     let usage = crate::usage_snapshot::capture_usage(&state).await;
     store(&state)?
         .reopen(id, &actor, body.force, Some(usage))
@@ -433,7 +541,7 @@ async fn archive(
     Json(body): Json<TaskForceRequest>,
 ) -> TaskResult<kallipai_task::TaskExport> {
     let actor = acting_agent(&auth);
-    let snapshot = role_snapshot(&state).await;
+    let snapshot = identities(&state).await;
     store(&state)?
         .archive_task(id, &actor, body.force)
         .await
@@ -529,6 +637,22 @@ mod tests {
     use crate::test_helpers::*;
     use std::sync::Arc;
 
+    /// A registry snapshot for the pure helpers: (id, role) pairs, with
+    /// both directions derived from them, so a test cannot accidentally
+    /// pin a mapping the live snapshot would never build.
+    fn identities_of(pairs: &[(&str, &str)]) -> Identities {
+        Identities {
+            by_id: pairs
+                .iter()
+                .map(|(id, role)| (id.to_string(), role.to_string()))
+                .collect(),
+            by_role: pairs
+                .iter()
+                .map(|(id, role)| (role.to_string(), id.to_string()))
+                .collect(),
+        }
+    }
+
     /// The gate taxonomy is the 409 family: every state refusal maps to
     /// conflict, unknown ids to not-found, and anything else (storage,
     /// serialization) stays internal — a wrong arm here would turn "the
@@ -592,16 +716,6 @@ mod tests {
         assert_eq!(api_error(err).status, 400);
     }
 
-    /// A create-time confirmer name resolving to no registered identity is a
-    /// state refusal (409), not a caller mistake.
-    #[test]
-    fn confirmer_unresolved_maps_to_conflict() {
-        let err = kallipai_task::Error::ConfirmerUnresolved {
-            confirmer: "ghost".into(),
-        };
-        assert_eq!(api_error(err).status, 409);
-    }
-
     /// The actor is the authenticated identity: agent ids pass
     /// through, the operator token records the literal `operator`.
     #[test]
@@ -619,8 +733,7 @@ mod tests {
     /// ids, null actors) keeps actor_role null.
     #[test]
     fn actor_role_injection_covers_every_actor_shape() {
-        let roles =
-            std::collections::HashMap::from([("agent-1".to_string(), "reviewer-c".to_string())]);
+        let roles = identities_of(&[("agent-1", "reviewer-c")]);
         let export = inject_wire_roles(
             export_with_events(&[
                 Some("agent-1"),
@@ -645,8 +758,7 @@ mod tests {
     /// and length, so the page can pair them by index.
     #[test]
     fn creator_and_confirmer_roles_follow_the_same_policy() {
-        let roles =
-            std::collections::HashMap::from([("agent-1".to_string(), "reviewer-c".to_string())]);
+        let roles = identities_of(&[("agent-1", "reviewer-c")]);
         let mut export = export_with_events(&[]);
         export.creator = Some("agent-1".to_string());
         export.assignee = Some("agent-1".to_string());
@@ -671,21 +783,19 @@ mod tests {
     /// A null creator resolves to a null role rather than a fabricated one.
     #[test]
     fn a_null_creator_yields_a_null_role() {
-        let roles =
-            std::collections::HashMap::from([("agent-1".to_string(), "reviewer-c".to_string())]);
+        let roles = identities_of(&[("agent-1", "reviewer-c")]);
         let export = inject_wire_roles(export_with_events(&[]), &roles);
         assert_eq!(export.creator_role, None);
         assert!(export.confirmer_roles.is_empty());
         assert_eq!(export.assignee_role, None);
     }
 
-    /// The assignee is free text: a role name typed on the command line
-    /// arrives as the role name itself, so it gets no role of its own and
-    /// the wire value stands.
+    /// A value the registry does not know (the literal `operator`, an id
+    /// of a deregistered agent) gets no role and the wire value stands:
+    /// the display never fabricates a name.
     #[test]
     fn an_assignee_that_names_no_agent_gets_no_role() {
-        let roles =
-            std::collections::HashMap::from([("agent-1".to_string(), "reviewer-c".to_string())]);
+        let roles = identities_of(&[("agent-1", "reviewer-c")]);
         let mut export = export_with_events(&[]);
         export.assignee = Some("reviewer-c".to_string());
         let export = inject_wire_roles(export, &roles);
@@ -739,8 +849,7 @@ mod tests {
     /// only place a `TaskRow` gets one, so it carries its own assertions.
     #[test]
     fn the_list_row_fills_its_assignee_role() {
-        let roles =
-            std::collections::HashMap::from([("agent-1".to_string(), "reviewer-c".to_string())]);
+        let roles = identities_of(&[("agent-1", "reviewer-c")]);
         let by_id = inject_row_roles(row_with_assignee(Some("agent-1")), &roles);
         assert_eq!(by_id.assignee_role.as_deref(), Some("reviewer-c"));
         let by_name = inject_row_roles(row_with_assignee(Some("reviewer-c")), &roles);
@@ -812,10 +921,7 @@ mod tests {
             partial: false,
             non_monotonic: vec![],
         });
-        let roles: std::collections::HashMap<String, String> =
-            [("agent-1".to_string(), "reviewer-c".to_string())]
-                .into_iter()
-                .collect();
+        let roles = identities_of(&[("agent-1", "reviewer-c")]);
 
         let export = inject_wire_roles(export, &roles);
         let usage = export.usage.expect("usage");
@@ -1325,6 +1431,401 @@ mod tests {
             .expect("export_all succeeds");
         assert_eq!(all.0.len(), 1);
         assert_eq!(all.0[0].events[0].actor_role.as_deref(), Some("reviewer-c"));
+    }
+
+    /// A tagma state with an in-memory task ledger and one live agent
+    /// holding `role`: the two directions the task verbs need.
+    async fn state_with_agent(
+        role: &str,
+    ) -> (crate::state::SharedState, kallipai_common::agentid::AgentId) {
+        let state = make_state();
+        state
+            .tasks
+            .set(Arc::new(kallipai_task::TaskStore::open_in_memory().await))
+            .ok()
+            .expect("task store installs once");
+        let id = kallipai_common::agentid::AgentId::random();
+        let (mut entry, _rx) = make_entry_with_rx(None, format!("tok-{id}"));
+        entry.identity.config.role = role.to_string();
+        state
+            .registry
+            .write()
+            .await
+            .register(id.clone(), crate::state::RegistryEntry::Live(entry));
+        (state, id)
+    }
+
+    /// The create verb stores what the caller's word names: a role name
+    /// becomes its holder's id, an id passes through, and the response
+    /// fills the role from the same snapshot.
+    #[tokio::test]
+    async fn create_stores_the_identity_that_an_assignee_word_names() {
+        let (state, id) = state_with_agent("dev").await;
+        let auth =
+            crate::auth::AuthIdentity::test_new(crate::auth::Identity::Agent { id: id.clone() });
+        let by_role = create(
+            State(Arc::clone(&state)),
+            auth,
+            Json(TaskCreateRequest {
+                title: "named".into(),
+                assignee: Some("dev".into()),
+                ..Default::default()
+            }),
+        )
+        .await
+        .expect("create by role name succeeds");
+        assert_eq!(by_role.0.assignee.as_deref(), Some(id.as_ref()));
+        assert_eq!(by_role.0.assignee_role.as_deref(), Some("dev"));
+
+        let auth =
+            crate::auth::AuthIdentity::test_new(crate::auth::Identity::Agent { id: id.clone() });
+        let by_id = create(
+            State(Arc::clone(&state)),
+            auth,
+            Json(TaskCreateRequest {
+                title: "identified".into(),
+                assignee: Some(id.to_string()),
+                ..Default::default()
+            }),
+        )
+        .await
+        .expect("create by identity succeeds");
+        assert_eq!(by_id.0.assignee.as_deref(), Some(id.as_ref()));
+    }
+
+    /// A word that names no agent is refused at the door: the ledger
+    /// never sees it, and the refusal names the words that would work.
+    #[tokio::test]
+    async fn an_unknown_assignee_is_refused_with_the_names_that_would_work() {
+        let (state, _id) = state_with_agent("dev").await;
+        let caller = kallipai_common::agentid::AgentId::random();
+        let auth = crate::auth::AuthIdentity::test_new(crate::auth::Identity::Agent { id: caller });
+        let err = create(
+            State(Arc::clone(&state)),
+            auth,
+            Json(TaskCreateRequest {
+                title: "unknown".into(),
+                assignee: Some("nobody".into()),
+                ..Default::default()
+            }),
+        )
+        .await
+        .err()
+        .expect("an unplaceable word is refused");
+        assert_eq!(err.status, 400, "a bad word is caller input");
+        assert!(
+            err.message.contains("no agent named 'nobody'"),
+            "{}",
+            err.message
+        );
+        assert!(
+            err.message.contains("available: dev, operator"),
+            "{}",
+            err.message
+        );
+        // The filter and create are not one rule: a filter passes an
+        // id-shaped value through so an orphaned row stays findable, while
+        // create must not assign a task to an identity no agent holds.
+        let auth = crate::auth::AuthIdentity::test_new(crate::auth::Identity::Agent {
+            id: kallipai_common::agentid::AgentId::random(),
+        });
+        let orphan = kallipai_common::agentid::AgentId::random().to_string();
+        let err = create(
+            State(Arc::clone(&state)),
+            auth,
+            Json(TaskCreateRequest {
+                title: "orphan".into(),
+                assignee: Some(orphan),
+                ..Default::default()
+            }),
+        )
+        .await
+        .err()
+        .expect("an id no agent holds cannot be assigned");
+        assert_eq!(err.status, 400, "create stays strict about identities");
+        let all = export_all(State(Arc::clone(&state)))
+            .await
+            .expect("export_all succeeds");
+        assert!(all.0.is_empty(), "a refused create registers nothing");
+    }
+
+    /// The list filter is an address too: a role name matches the rows
+    /// its holder owns, and a word that names nobody is refused rather
+    /// than silently matching nothing.
+    #[tokio::test]
+    async fn the_list_filter_resolves_a_role_name_before_matching() {
+        let (state, id) = state_with_agent("dev").await;
+        for (title, assignee) in [("assigned", Some("dev".to_string())), ("loose", None)] {
+            let auth = crate::auth::AuthIdentity::test_new(crate::auth::Identity::Agent {
+                id: id.clone(),
+            });
+            let created = create(
+                State(Arc::clone(&state)),
+                auth,
+                Json(TaskCreateRequest {
+                    title: title.into(),
+                    assignee,
+                    ..Default::default()
+                }),
+            )
+            .await
+            .expect("create succeeds");
+            assert_eq!(created.0.title, title, "the fixture registers the row");
+        }
+
+        let page = list(
+            State(Arc::clone(&state)),
+            Query(kallipai_common::protocol::TaskListQuery {
+                assignee: Some("dev".into()),
+                ..Default::default()
+            }),
+        )
+        .await
+        .expect("the filter resolves");
+        assert_eq!(page.0.rows.len(), 1, "only the assigned row matches");
+        assert_eq!(page.0.rows[0].assignee.as_deref(), Some(id.as_ref()));
+        assert_eq!(page.0.rows[0].assignee_role.as_deref(), Some("dev"));
+
+        let err = list(
+            State(Arc::clone(&state)),
+            Query(kallipai_common::protocol::TaskListQuery {
+                assignee: Some("nobody".into()),
+                ..Default::default()
+            }),
+        )
+        .await
+        .expect_err("a filter word that names nobody is refused");
+        assert_eq!(err.status, 400);
+    }
+
+    /// A row can outlive its agent: the ledger keeps the id, and the wire
+    /// shows that id where no role answers for it. A caller who copies what
+    /// the row shows into the filter must land on that row. Create does not
+    /// share this looseness, so the fixture writes the orphan through the
+    /// store instead of the verb.
+    #[tokio::test]
+    async fn the_list_filter_finds_a_row_left_by_a_deregistered_agent() {
+        let (state, _id) = state_with_agent("dev").await;
+        let ghost = kallipai_common::agentid::AgentId::random();
+        store(&state)
+            .expect("the store is installed")
+            .create(
+                TaskCreateRequest {
+                    title: "orphan".into(),
+                    assignee: Some(ghost.to_string()),
+                    ..Default::default()
+                },
+                "operator",
+            )
+            .await
+            .expect("the ledger stores what it is handed");
+
+        let page = list(
+            State(Arc::clone(&state)),
+            Query(kallipai_common::protocol::TaskListQuery {
+                assignee: Some(ghost.to_string()),
+                ..Default::default()
+            }),
+        )
+        .await
+        .expect("an id-shaped word is accepted");
+        assert_eq!(page.0.rows.len(), 1, "the orphaned row is findable");
+        assert_eq!(page.0.rows[0].assignee.as_deref(), Some(ghost.as_ref()));
+        assert_eq!(
+            page.0.rows[0].assignee_role, None,
+            "no registry entry answers for a deregistered id"
+        );
+
+        let upper = list(
+            State(Arc::clone(&state)),
+            Query(kallipai_common::protocol::TaskListQuery {
+                assignee: Some(ghost.to_string().to_uppercase()),
+                ..Default::default()
+            }),
+        )
+        .await
+        .expect("a differently spelled id is still an id");
+        assert_eq!(
+            upper.0.rows.len(),
+            1,
+            "the filter compares the canonical spelling"
+        );
+
+        let blank = list(
+            State(Arc::clone(&state)),
+            Query(kallipai_common::protocol::TaskListQuery {
+                assignee: Some("   ".into()),
+                ..Default::default()
+            }),
+        )
+        .await
+        .expect("a blank word is a field left unfilled");
+        assert_eq!(blank.0.rows.len(), 1, "a blank filter matches every row");
+    }
+
+    /// A second registered agent, for rosters that need two identities.
+    async fn add_agent(
+        state: &crate::state::SharedState,
+        role: &str,
+    ) -> kallipai_common::agentid::AgentId {
+        let id = kallipai_common::agentid::AgentId::random();
+        let (mut entry, _rx) = make_entry_with_rx(None, format!("tok-{id}"));
+        entry.identity.config.role = role.to_string();
+        state
+            .registry
+            .write()
+            .await
+            .register(id.clone(), crate::state::RegistryEntry::Live(entry));
+        id
+    }
+
+    /// The roster runs through the same snapshot as the assignee, and the
+    /// store receives identities alone: a role name and an id both land as
+    /// the agent behind them, and a word that names nobody is refused with
+    /// the assignee refusal's own shape.
+    #[tokio::test]
+    async fn the_require_roster_reaches_the_registry_as_identities() {
+        let (state, dev) = state_with_agent("dev").await;
+        let quality = add_agent(&state, "reviewer-quality").await;
+        let caller =
+            crate::auth::AuthIdentity::test_new(crate::auth::Identity::Agent { id: dev.clone() });
+        let created = create(
+            State(Arc::clone(&state)),
+            caller,
+            Json(TaskCreateRequest {
+                title: "reviewed".into(),
+                require: vec!["dev".into(), quality.to_string()],
+                ..Default::default()
+            }),
+        )
+        .await
+        .expect("both words name an agent");
+        assert_eq!(
+            created.0.confirmers,
+            vec![dev.to_string(), quality.to_string()],
+            "the ledger holds identities, not the words that named them"
+        );
+        assert_eq!(
+            created.0.confirmer_roles,
+            vec![
+                Some("dev".to_string()),
+                Some("reviewer-quality".to_string())
+            ]
+        );
+
+        let caller =
+            crate::auth::AuthIdentity::test_new(crate::auth::Identity::Agent { id: dev.clone() });
+        let err = create(
+            State(Arc::clone(&state)),
+            caller,
+            Json(TaskCreateRequest {
+                title: "ghost roster".into(),
+                require: vec!["nobody".into()],
+                ..Default::default()
+            }),
+        )
+        .await
+        .err()
+        .expect("a roster word that names nobody is refused");
+        assert_eq!(err.status, 400, "the assignee refusal's own shape");
+        assert!(
+            err.message.contains("no agent named 'nobody'"),
+            "{}",
+            err.message
+        );
+    }
+
+    /// The operator literal is an identity this ledger records (an operator
+    /// pickup of an unassigned task), so create takes it and the filter finds
+    /// the row by the very word the wire shows.
+    #[tokio::test]
+    async fn the_operator_literal_is_an_identity_on_both_sides() {
+        let (state, _dev) = state_with_agent("dev").await;
+        let operator = crate::auth::AuthIdentity::test_new(crate::auth::Identity::Operator);
+        let created = create(
+            State(Arc::clone(&state)),
+            operator,
+            Json(TaskCreateRequest {
+                title: "claimed".into(),
+                assignee: Some("operator".into()),
+                require: vec!["operator".into()],
+                ..Default::default()
+            }),
+        )
+        .await
+        .expect("the operator is a sender this ledger knows");
+        assert_eq!(created.0.assignee.as_deref(), Some("operator"));
+        assert_eq!(created.0.assignee_role, None, "the operator holds no role");
+        assert_eq!(
+            created.0.confirmers,
+            vec!["operator".to_string()],
+            "the roster's one vocabulary reaches the operator too"
+        );
+        assert_eq!(
+            created.0.confirmer_roles,
+            vec![None],
+            "the operator is a confirmer with no role name"
+        );
+
+        let page = list(
+            State(Arc::clone(&state)),
+            Query(kallipai_common::protocol::TaskListQuery {
+                assignee: Some("operator".into()),
+                ..Default::default()
+            }),
+        )
+        .await
+        .expect("the filter knows the same vocabulary");
+        assert_eq!(page.0.rows.len(), 1, "the claimed row is findable");
+    }
+
+    /// Both identity fields read a blank word as unfilled: the assignee stays
+    /// unset and a blank roster entry never becomes a confirmer.
+    #[tokio::test]
+    async fn a_blank_identity_word_counts_as_not_given() {
+        let (state, dev) = state_with_agent("dev").await;
+        let caller =
+            crate::auth::AuthIdentity::test_new(crate::auth::Identity::Agent { id: dev.clone() });
+        let created = create(
+            State(Arc::clone(&state)),
+            caller,
+            Json(TaskCreateRequest {
+                title: "half filled".into(),
+                assignee: Some("   ".into()),
+                require: vec!["".into(), "dev".into()],
+                ..Default::default()
+            }),
+        )
+        .await
+        .expect("blank words are not names to refuse");
+        assert_eq!(created.0.assignee, None, "a blank assignee fills nothing");
+        assert_eq!(
+            created.0.confirmers,
+            vec![dev.to_string()],
+            "the blank roster entry is dropped, the named one is resolved"
+        );
+    }
+
+    /// The ledger stores an id one way; a caller may type another. Remembering
+    /// the canonical form is the store's job, so a create with an upper-case id
+    /// lands on the agent it names.
+    #[tokio::test]
+    async fn a_create_lands_an_id_in_its_canonical_spelling() {
+        let (state, dev) = state_with_agent("dev").await;
+        let caller =
+            crate::auth::AuthIdentity::test_new(crate::auth::Identity::Agent { id: dev.clone() });
+        let created = create(
+            State(Arc::clone(&state)),
+            caller,
+            Json(TaskCreateRequest {
+                title: "shouted".into(),
+                assignee: Some(dev.to_string().to_uppercase()),
+                ..Default::default()
+            }),
+        )
+        .await
+        .expect("a differently spelled id still names its agent");
+        assert_eq!(created.0.assignee.as_deref(), Some(dev.as_ref()));
     }
 
     /// The per-verb assertion: each successful verb advances the watch

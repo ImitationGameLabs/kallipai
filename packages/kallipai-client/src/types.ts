@@ -661,14 +661,16 @@ export interface TaskExport {
   readonly title: string;
   readonly status: TaskStatus;
   readonly creator: string | null;
+  /** The identity the task is assigned to: an agent id, or the literal
+   * `operator`. */
   readonly assignee: string | null;
   readonly confirmers: readonly string[];
   /** The creator's role name, filled by the tagma from its registry; null
    * when the creator is the operator, a deregistered id, or absent. */
   readonly creator_role: string | null;
   /** The assignee's role name, same fill and same degrade as
-   * `creator_role`; null when the free-text assignee names no
-   * registered agent. */
+   * `creator_role`; null when the task is unassigned or the id resolves
+   * to no role. */
   readonly assignee_role: string | null;
   /** Role names aligned with `confirmers` by index; null where an entry
    * names something the registry cannot resolve. */
@@ -750,6 +752,8 @@ export interface TaskRow {
   readonly title: string;
   readonly status: TaskStatus;
   readonly creator: string | null;
+  /** The identity the task is assigned to: an agent id, or the literal
+   * `operator`. */
   readonly assignee: string | null;
   readonly confirmers: readonly string[];
   /** The assignee's role name, filled like the detail export's own. */
@@ -784,8 +788,13 @@ export type TaskTimeAxis = "updated" | "closed";
 /** Body of `POST /tasks` (kallipai-common `TaskCreateRequest`). */
 export interface TaskCreateRequest {
   readonly title: string;
+  /** A role name, an agent id, or the literal `operator`; the tagma
+   * resolves it and refuses a word none of those answers to. A blank value
+   * counts as not given. */
   readonly assignee?: string;
-  /** The confirmer roster; empty means closing needs no confirmations. */
+  /** The confirmer roster; each entry resolves like an assignee, a blank
+   * entry counts as not given, and an empty list means closing needs no
+   * confirmations. */
   readonly require?: readonly string[];
   readonly inbox_id_start?: number;
   readonly inbox_id_end?: number;
@@ -824,6 +833,8 @@ export interface TaskCloseRequest {
  * `since`/`until` are unix epoch seconds. */
 export interface TaskListQuery {
   readonly status?: TaskStatus;
+  /** A role name, an agent id, or the literal `operator`, resolved before
+   * matching; a blank value filters nothing. */
   readonly assignee?: string;
   readonly archived?: boolean;
   readonly time?: TaskTimeAxis;

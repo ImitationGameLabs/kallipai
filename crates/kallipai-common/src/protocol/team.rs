@@ -183,7 +183,9 @@ pub struct TeamPlanRow {
 pub enum TeamRejectionKind {
     /// One id mapped to two roles in the submitted lock.
     LockAmbiguity,
-    /// The declaration claims the reserved `root` role.
+    /// The declaration claims a reserved role: `root` is boot-built, and
+    /// `operator` is the token's own identity value. The same two names are
+    /// refused when a subagent spawns or an agent is renamed.
     RootRole,
     /// Multiple live bodies carry one declared role.
     Duplicate,

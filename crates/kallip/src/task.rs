@@ -62,6 +62,20 @@ fn axis_stamp(
     }
 }
 
+/// The `--require` values, guarded locally before a request goes out. A value
+/// that trims to empty is a caller mistake — a shell variable that expanded to
+/// nothing — and the tagma reads a blank entry as "not given", so passing it
+/// along would narrow the close gate silently. Non-blank values travel
+/// unchanged for the tagma to resolve.
+fn checked_roster(words: &[String]) -> Result<Vec<String>> {
+    if words.iter().any(|w| w.trim().is_empty()) {
+        return Err(anyhow!(
+            "--require needs a role name, an agent id, or `operator`; an empty value is not a confirmer"
+        ));
+    }
+    Ok(words.to_vec())
+}
+
 pub async fn run_task(client: &TagmaClient, cmd: &TaskCommand) -> Result<()> {
     match cmd {
         TaskCommand::Create(args) => {
@@ -69,7 +83,7 @@ pub async fn run_task(client: &TagmaClient, cmd: &TaskCommand) -> Result<()> {
                 .task_create(&TaskCreateRequest {
                     title: args.title.clone(),
                     assignee: args.assignee.clone(),
-                    require: args.require.clone(),
+                    require: checked_roster(&args.require)?,
                     inbox_id_start: args.inbox_start,
                     inbox_id_end: args.inbox_end,
                     room_id: args.room.clone(),
@@ -243,7 +257,7 @@ pub async fn run_task(client: &TagmaClient, cmd: &TaskCommand) -> Result<()> {
                         "{:>4}  {:<11} {:<16} {:<24} {}",
                         t.id,
                         t.status,
-                        t.assignee.as_deref().unwrap_or("-"),
+                        shown_identity(t.assignee.as_deref(), t.assignee_role.as_deref()),
                         shown,
                         t.title
                     );
@@ -352,16 +366,44 @@ fn print_state_line(task: &TaskExport) {
     println!("task {} {} '{}'", task.id, task.status, task.title);
 }
 
+/// The display rule the JSON face spells out in two fields: the role name
+/// when the ledger's identity resolves to one, the identity otherwise, and
+/// a dash when the task has none.
+fn shown_identity<'a>(raw: Option<&'a str>, role: Option<&'a str>) -> &'a str {
+    role.or(raw).unwrap_or("-")
+}
+
+/// The confirmer roster as one line: every identity through `shown_identity`,
+/// aligned by index with `confirmer_roles`, so a missing or null role entry
+/// falls back to the identity the ledger stores.
+fn shown_roster(export: &TaskExport) -> String {
+    let shown: Vec<&str> = export
+        .confirmers
+        .iter()
+        .enumerate()
+        .map(|(index, identity)| {
+            shown_identity(
+                Some(identity.as_str()),
+                export
+                    .confirmer_roles
+                    .get(index)
+                    .and_then(|role| role.as_deref()),
+            )
+        })
+        .collect();
+    shown.join(", ")
+}
+
 fn print_show(e: &TaskExport) {
     println!("task {}: '{}'", e.id, e.title);
     println!(
         "status: {}  assignee: {}  creator: {}",
         e.status,
-        e.assignee.as_deref().unwrap_or("-"),
-        e.creator.as_deref().unwrap_or("-")
+        shown_identity(e.assignee.as_deref(), e.assignee_role.as_deref()),
+        shown_identity(e.creator.as_deref(), e.creator_role.as_deref())
     );
     if !e.confirmers.is_empty() {
-        println!("confirmers: {}", e.confirmers.join(", "));
+        println!("confirmers: {}", shown_roster(e));
     }
     if let Some(a) = &e.association {
         let mut parts = Vec::new();
@@ -403,10 +445,7 @@ fn print_show(e: &TaskExport) {
             ev.kind,
             ev.name,
             scope,
-            ev.actor_role
-                .as_deref()
-                .or(ev.actor.as_deref())
-                .unwrap_or("-")
+            shown_identity(ev.actor.as_deref(), ev.actor_role.as_deref())
         );
     }
 }
@@ -446,7 +485,7 @@ fn usage_line(usage: &TaskUsageExport) -> String {
         .agents
         .iter()
         .map(|agent| {
-            let name = agent.agent_role.as_deref().unwrap_or(&agent.agent_id);
+            let name = shown_identity(Some(agent.agent_id.as_str()), agent.agent_role.as_deref());
             format!("{name} {}", agent.consumed_tokens)
         })
         .collect();
@@ -859,5 +898,79 @@ mod usage_line_tests {
         usage.partial = true;
         usage.gaps = vec![gap("a")];
         assert_eq!(usage_line(&usage), "usage: 0 tokens, partial (1 gap)");
+    }
+
+    #[test]
+    fn the_confirmer_line_reads_roles_and_falls_back_by_index() {
+        // One roster entry has a role name, one resolves to nothing, and one is
+        // the operator: each cell follows the same rule as the assignee column,
+        // and an index past the end of `confirmer_roles` is not an off-by-one.
+        let export = kallipai_common::protocol::TaskExport {
+            id: 1,
+            title: "t".into(),
+            status: "review".into(),
+            creator: None,
+            assignee: None,
+            confirmers: vec!["agent-1".into(), "agent-2".into(), "operator".into()],
+            creator_role: None,
+            assignee_role: None,
+            confirmer_roles: vec![Some("reviewer-c".into()), None],
+            created_at: None,
+            updated_at: None,
+            started_at: None,
+            ended_at: None,
+            archived: false,
+            archived_at: None,
+            closed_reason: None,
+            close_summary: None,
+            association: None,
+            archive_hash: None,
+            archive_entries: None,
+            usage: None,
+            events: vec![],
+        };
+        assert_eq!(
+            shown_roster(&export),
+            "reviewer-c, agent-2, operator",
+            "role names where the registry has them, the identity otherwise"
+        );
+    }
+
+    #[test]
+    fn the_assignee_column_shows_the_role_and_falls_back_to_the_id() {
+        // The ledger stores identities; a reader wants names. A name the
+        // registry cannot supply is not invented, and an unassigned task
+        // reads as a dash.
+        assert_eq!(
+            shown_identity(Some("0e70ad8c-5340-41ba-b106-ea0050d86daf"), Some("dev")),
+            "dev"
+        );
+        assert_eq!(
+            shown_identity(Some("0e70ad8c-5340-41ba-b106-ea0050d86daf"), None),
+            "0e70ad8c-5340-41ba-b106-ea0050d86daf"
+        );
+        assert_eq!(shown_identity(None, None), "-");
+    }
+}
+
+#[cfg(test)]
+mod roster_guard_tests {
+    use super::*;
+
+    /// A blank `--require` value is a caller mistake, not an omission: the
+    /// tagma would drop it as "not given" and narrow the close gate silently,
+    /// so the CLI refuses before a request is built.
+    #[test]
+    fn a_blank_require_value_is_refused_before_the_request() {
+        let err = checked_roster(&["dev".to_string(), "  ".to_string()]).unwrap_err();
+        assert!(
+            err.to_string().contains("--require needs a role name"),
+            "{err}"
+        );
+        assert!(checked_roster(&[]).unwrap().is_empty());
+        assert_eq!(
+            checked_roster(&["operator".to_string()]).unwrap(),
+            vec!["operator".to_string()]
+        );
     }
 }

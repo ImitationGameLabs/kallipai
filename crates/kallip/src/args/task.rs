@@ -142,11 +142,15 @@ pub(crate) struct TaskCreateArgs {
     /// Title for the new task.
     #[arg(long)]
     pub title: String,
-    /// Assignee for the new task; defaults to whoever picks it up.
+    /// Assignee for the new task: an agent's role name, its id, or the
+    /// literal `operator`; a word none of those answers to is refused.
+    /// Defaults to whoever picks the task up.
     #[arg(long)]
     pub assignee: Option<String>,
-    /// Register a confirmer (repeatable). Every registered confirmer must
-    /// file a confirmation before the task can close.
+    /// Register a confirmer (repeatable), named by role name, agent id, or
+    /// `operator`: the tagma resolves it and stores the identity. Every
+    /// registered confirmer must file a confirmation before the task can
+    /// close.
     #[arg(long = "require")]
     pub require: Vec<String>,
     /// Association key: inbox id window start (the task's message trail).
@@ -227,7 +231,8 @@ pub(crate) struct TaskListArgs {
     /// Filter by status: queued, in_progress, paused, review, closed.
     #[arg(long)]
     pub status: Option<String>,
-    /// Filter by assignee.
+    /// Filter by assignee: a role name, an agent id, or the literal
+    /// `operator`, resolved the same way as `--assignee` on create.
     #[arg(long)]
     pub assignee: Option<String>,
     /// List archived tasks only (the default view is the active one).

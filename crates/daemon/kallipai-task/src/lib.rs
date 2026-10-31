@@ -20,7 +20,7 @@ pub use entities::task_event::Model as TaskEvent;
 pub use kallipai_blob_store::BlobStore;
 pub use kallipai_common::protocol::TaskExport;
 pub use model::{ClosedReason, EventKind, TaskStatus, Transition};
-pub use store::{ConfirmerResolver, TaskFilter, TaskStore};
+pub use store::{TaskFilter, TaskStore};
 
 use thiserror::Error;
 
@@ -78,8 +78,6 @@ pub enum Error {
     CorruptRecord { id: i64, field: &'static str },
     #[error("report is {size} bytes, over the {max}-byte limit")]
     ReportTooLarge { size: usize, max: usize },
-    #[error("create gate: confirmer '{confirmer}' does not resolve to a registered identity")]
-    ConfirmerUnresolved { confirmer: String },
 
     #[error(transparent)]
     Db(#[from] sea_orm::DbErr),

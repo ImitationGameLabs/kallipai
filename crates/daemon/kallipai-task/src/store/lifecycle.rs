@@ -2,12 +2,12 @@
 //! reopen and note. Each runs inside one transaction that takes the write
 //! lock with its first statement.
 
+use super::TaskStore;
 use super::tx::{
     BUSY_RETRIES, append_event_tx, apply_transition_tx, check_transition, confirm_payload,
     count_tar_entries, flat_txn, is_busy_conn, is_busy_err, load, note_payload, now, parse_status,
     take_write_lock, validate_association,
 };
-use super::{ConfirmerResolver, TaskStore};
 use crate::Error;
 use crate::Task;
 use crate::entities::task::{ActiveModel, Entity as TaskEntity};
@@ -20,29 +20,16 @@ use sea_orm::entity::prelude::*;
 use sea_orm::{ActiveValue::Set, TransactionError, TransactionTrait};
 
 impl TaskStore {
-    /// Registers a task in the queue (`queued`): the confirmer roster is
-    /// resolved to identity ids now, so the close gate can hold it
-    /// accountable later. The row and its `create` event land in one
-    /// transaction, so the event trail can always derive the flat table.
-    pub async fn create(
-        &self,
-        req: TaskCreateRequest,
-        actor: &str,
-        resolve_confirmer: ConfirmerResolver,
-    ) -> Result<Task, Error> {
+    /// Registers a task in the queue (`queued`). Both identity fields arrive
+    /// as identities: the caller resolves a role name, an id, or the operator
+    /// literal before it gets here, so the ledger never stores a word nobody
+    /// answers to and the close gate can hold the roster accountable later.
+    /// The row and its `create` event land in one transaction, so the event
+    /// trail can always derive the flat table.
+    pub async fn create(&self, req: TaskCreateRequest, actor: &str) -> Result<Task, Error> {
         validate_association(&req)?;
         let now = now();
-        // An unresolvable confirmer name is a failed create, not a
-        // dangling confirmer: the roster is fixed here, in identity-id space.
-        let confirmers: Vec<String> = req
-            .require
-            .iter()
-            .map(|confirmer| {
-                resolve_confirmer(confirmer).ok_or_else(|| Error::ConfirmerUnresolved {
-                    confirmer: confirmer.clone(),
-                })
-            })
-            .collect::<Result<Vec<_>, Error>>()?;
+        let confirmers: Vec<String> = req.require.clone();
         let confirmers_json = serde_json::to_string(&confirmers)?;
         for attempt in 0..=BUSY_RETRIES {
             let req = req.clone();

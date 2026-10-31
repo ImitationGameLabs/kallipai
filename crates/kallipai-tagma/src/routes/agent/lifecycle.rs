@@ -23,6 +23,7 @@ use serde::Deserialize;
 use tracing::{debug, error, info, warn};
 
 use super::parse_requested_class;
+use super::reserved_role_reason;
 use super::subagent::{SubagentSpawn, spawn_subagent};
 use crate::state::{AgentState, AgentSummary, SharedState};
 use crate::token::AGENT;
@@ -79,7 +80,9 @@ pub async fn create_agent(
             .set_context_keep_tokens_ratio(ratio)
             .map_err(|e| ApiError::bad_request(e.to_string()))?;
     }
-    config.role = req.role.clone();
+    // The role is an address: store the trimmed spelling the identity word
+    // will be compared against, so a stray space cannot hide the agent.
+    config.role = req.role.trim().to_string();
     config.description = req.description.clone();
     config.delegation_mode = req
         .delegation_mode
@@ -90,10 +93,19 @@ pub async fn create_agent(
     config.profile_set = Some(req.profile_set.clone());
     // Fleet discipline: a subagent spawn must carry a non-empty role so a
     // superior can tell its subagents apart.
-    if config.role.trim().is_empty() {
+    if config.role.is_empty() {
         return Err(ApiError::bad_request(
             "subagent requires a non-empty 'role'",
         ));
+    }
+    // A reserved name mints a role nothing can address: the identity word
+    // resolves to the tagma's own identity first, so the body would never be
+    // reachable by the role it was given.
+    if let Some(reason) = reserved_role_reason(&config.role) {
+        return Err(ApiError::bad_request(format!(
+            "a subagent's 'role' cannot be {:?}: {reason}",
+            config.role
+        )));
     }
 
     // Reject any workspace that overlaps the tagma data tree BEFORE reserving
@@ -274,11 +286,21 @@ pub async fn update_metadata(
     Path(id): Path<AgentId>,
     Json(body): Json<UpdateAgentMetadataRequest>,
 ) -> Result<Json<AgentSummary>, ApiError> {
-    // An explicit role set must not be empty (role is change-only, never clearable).
-    if let Some(role) = &body.role
-        && role.trim().is_empty()
-    {
+    let new_role = body.role.as_deref().map(str::trim);
+    // An explicit role set must not be empty (role is change-only, never
+    // clearable), and the stored value is the trimmed one: the role is an
+    // address, so a space cannot be the only difference between two names.
+    if new_role == Some("") {
         return Err(ApiError::bad_request("'role' must not be empty"));
+    }
+    // The rename hits the same reserved names as the spawn: a role the
+    // identity word overshadows makes the agent unaddressable by name.
+    if let Some(role) = new_role
+        && let Some(reason) = reserved_role_reason(role)
+    {
+        return Err(ApiError::bad_request(format!(
+            "'role' cannot be {role:?}: {reason}"
+        )));
     }
     if body.role.is_none() && body.description.is_none() {
         return Err(ApiError::bad_request("no fields to update"));
@@ -289,7 +311,7 @@ pub async fn update_metadata(
     // A rename must not collide with another agent's role (addressing stays
     // unambiguous); scanned under the same write-lock as the update, excluding
     // the renaming agent itself.
-    if let Some(new_role) = &body.role
+    if let Some(new_role) = new_role
         && let Some(holder) = registry
             .iter()
             .find(|(other, e)| *other != &id && e.identity().config.role == *new_role)
@@ -311,14 +333,14 @@ pub async fn update_metadata(
     // Persist first (disk is the source of truth across restarts), then memory.
     persistence::rewrite_meta(
         &agent_dir,
-        body.role.as_deref(),
+        new_role,
         body.description.as_deref(),
         None,
         None, // permissions_class: not updatable through this route
     )
     .map_err(ApiError::internal)?;
-    if let Some(role) = &body.role {
-        entry.identity_mut().config.role = role.clone();
+    if let Some(role) = new_role {
+        entry.identity_mut().config.role = role.to_string();
     }
     if let Some(desc) = &body.description {
         entry.identity_mut().config.description = desc.clone();

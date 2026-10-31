@@ -488,6 +488,20 @@ fn preflight_rejects_a_declaration_of_the_root_role() {
 }
 
 #[test]
+fn preflight_rejects_a_declaration_of_the_operator_role() {
+    let state = make_state();
+    let declaration = declaration("[[role]]\nname = \"operator\"\n");
+    let plan = converge_plan(&declaration, &[], &[]);
+    let rejections = preflight_converge(&state, &plan, &None, &[], &[], false);
+    assert!(
+        rejections
+            .iter()
+            .any(|r| r.kind == TeamRejectionKind::RootRole && r.message.contains("shadowed")),
+        "{rejections:?}"
+    );
+}
+
+#[test]
 fn preflight_rejects_duplicate_live_bodies_under_one_role() {
     let state = make_state();
     let declaration = declaration("[[role]]\nname = \"dev\"\n");

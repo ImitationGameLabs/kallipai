@@ -35,3 +35,21 @@ pub(crate) use permissions::{parse_requested_class, validate_subagent_request};
 
 #[cfg(test)]
 mod tests;
+
+/// Why a role name is reserved for the tagma itself, or `None` when a body may
+/// carry it. Callers pass the role already trimmed. `root` is boot-built and
+/// outside any other body's reach; `operator` is the token's own identity
+/// value, so a body holding that role would be shadowed by the literal
+/// wherever an identity word resolves.
+///
+/// Any entry that mints or rewrites a role name refuses both — a reserved name
+/// is unaddressable wherever an identity word resolves, so it must not be written.
+pub(crate) fn reserved_role_reason(role: &str) -> Option<&'static str> {
+    match role {
+        "root" => Some("the root is boot-built and no other body can carry its role"),
+        "operator" => Some(
+            "the `operator` literal is the operator token's own identity, so a body holding that role would be shadowed wherever an identity word resolves",
+        ),
+        _ => None,
+    }
+}

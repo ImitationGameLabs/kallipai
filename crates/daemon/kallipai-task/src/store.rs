@@ -23,10 +23,9 @@ mod query;
 mod rows;
 mod tx;
 
-/// The name→identity resolver the create verb uses: a sync lookup over a
-/// registry snapshot, injected per create call.
-pub type ConfirmerResolver = std::sync::Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
-
+/// What a list query narrows on. `assignee` compares identities: the caller
+/// hands in the value the ledger stores, so a role name is resolved before it
+/// gets here.
 #[derive(Debug, Clone, Default)]
 pub struct TaskFilter {
     pub status: Option<TaskStatus>,

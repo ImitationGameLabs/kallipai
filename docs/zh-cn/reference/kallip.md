@@ -265,7 +265,7 @@ kallip skill meta <PATH>
 
 | 子命令            | 用途                                                                                                                         |
 | ---            | ---                                                                                                                        |
-| `task create`  | 注册任务（`--title ...`）；`--require` 固定确认人名单（可重复），注册时解析为身份；`--assignee` 默认为认领人；另加关联键                                            |
+| `task create`  | 注册任务（`--title ...`）；`--require` 固定确认人名单（可重复），注册时解析为身份；`--assignee` 收角色名、编号或 `operator` 并同样解析（认不出的名字直接拒），缺省为认领人；另加关联键                                            |
 | `task start`   | 按 id 认领排队任务；串行门生效，`--force` 可越过                                                                                            |
 | `task confirm` | 为关单门交回确认，可附 `--note` 与从 `--file` 读取的报告正文                                                                                   |
 | `task review`  | 将进行中任务转入评审                                                                                                                 |
@@ -275,7 +275,7 @@ kallip skill meta <PATH>
 | `task close`   | 以 `--reason` 与可选 `--summary` 关闭任务；每个登记确认人都已确认，否则需 `--force`。带 `--dossier <目录>` 时该目录在关闭时规范化打包并随任务归档                         |
 | `task reopen`  | 重新打开已关闭任务；串行门生效，`--force` 可越过                                                                                              |
 | `task archive` | 归档已关闭任务，使其离开默认列表视图；closed-only 门生效，`--force` 可越过                                                                           |
-| `task list`    | 列出任务（`--status`、`--assignee`、`--archived`、时间窗过滤、分页、`--relative-time`）                                                      |
+| `task list`    | 列出任务（`--status`、`--assignee`（角色名、编号或 `operator`）、`--archived`、时间窗过滤、分页、`--relative-time`）                                                      |
 | `task show`    | 显示单个任务的状态、关联键、事件轨迹，以及活跃窗口内的 token 用量                                                                             |
 | `task export`  | 导出单个或全部任务；`--json` 输出供机器消费的 JSON                                                                                           |
 | `task extract` | 解包已关闭任务的内容寻址 dossier 归档                                                                                                    |

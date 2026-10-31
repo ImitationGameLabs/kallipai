@@ -102,9 +102,9 @@ impl Event for UnreadFrame {
 /// A task-ledger mutation worth waking the task's people for: published by
 /// the task routes after every write verb; consumed by the task watcher,
 /// which drops a wake hint into the prompt queue of every agent the people
-/// set names: an entry is an identity, and an entry that matches no agent id
-/// but equals a role name names that role's holder. The change's own agent
-/// is never woken, whether an entry names it by id or by its role name.
+/// set names. An entry is an identity and nothing else: the set is matched
+/// against agent ids, and a word that merely looks like a role name wakes
+/// nobody. The change's own agent is never woken.
 /// Live-only economics: a lost frame costs one missed hint, and the next
 /// verb on the task re-announces the current state.
 #[derive(Clone, Debug)]

@@ -8,7 +8,7 @@ use kallipai_common::protocol::{
     REPORT_MAX_BYTES, TaskCloseRequest, TaskConfirmFile, TaskConfirmRequest, TaskCreateRequest,
 };
 use kallipai_task::store::TaskFilter;
-use kallipai_task::{ClosedReason, ConfirmerResolver, Error, TaskStatus, TaskStore};
+use kallipai_task::{ClosedReason, Error, TaskStatus, TaskStore};
 use sea_orm::ConnectionTrait;
 
 fn confirm_req(note: Option<&str>, file: Option<(&str, &str)>) -> TaskConfirmRequest {
@@ -48,33 +48,17 @@ fn spec(title: &str, assignee: &str, require: &[&str]) -> TaskCreateRequest {
     }
 }
 
-/// No registry in these tests: confirmer names stay names (create with an
-/// empty resolver only works for an empty roster).
-fn no_resolver() -> ConfirmerResolver {
-    Arc::new(|_| None)
-}
-
-/// The canonical test roster: r1 and r2 map to agent ids, anything else
-/// (ghost confirmers) fails to resolve.
-fn roster_resolver() -> ConfirmerResolver {
-    Arc::new(|name| match name {
-        "r1" => Some("agent-r1".to_string()),
-        "r2" => Some("agent-r2".to_string()),
-        _ => None,
-    })
-}
-
-/// The create verb is the resolver's only caller now; every test that
-/// registers a roster goes through this helper.
+/// The create verb takes the roster as identity ids (the routing layer turns
+/// a caller's word into one); every test that registers a roster goes through
+/// this helper.
 async fn create(
     store: &TaskStore,
     title: &str,
     assignee: &str,
     require: &[&str],
-    resolver: ConfirmerResolver,
 ) -> kallipai_task::Task {
     store
-        .create(spec(title, assignee, require), "root", resolver)
+        .create(spec(title, assignee, require), "root")
         .await
         .unwrap()
 }
@@ -82,7 +66,7 @@ async fn create(
 #[tokio::test]
 async fn lifecycle_with_review_and_confirmations() {
     let store = TaskStore::open_in_memory().await;
-    let t = create(&store, "batch", "dev", &["r1", "r2"], roster_resolver()).await;
+    let t = create(&store, "batch", "dev", &["agent-r1", "agent-r2"]).await;
     assert_eq!(t.status, "queued");
 
     let t = store.start(t.id, "dev", false, None).await.unwrap();
@@ -165,9 +149,8 @@ async fn lifecycle_with_review_and_confirmations() {
 #[tokio::test]
 async fn serial_gate_blocks_second_in_progress_and_forces_through() {
     let store = TaskStore::open_in_memory().await;
-    let resolver = roster_resolver();
-    let a = create(&store, "a", "dev", &[], resolver.clone()).await;
-    let b = create(&store, "b", "dev", &[], resolver.clone()).await;
+    let a = create(&store, "a", "dev", &[]).await;
+    let b = create(&store, "b", "dev", &[]).await;
     store.start(a.id, "dev", false, None).await.unwrap();
 
     let err = store.start(b.id, "dev", false, None).await.unwrap_err();
@@ -186,7 +169,7 @@ async fn serial_gate_blocks_second_in_progress_and_forces_through() {
     );
 
     // A different assignee is not blocked.
-    let c = create(&store, "c", "qa", &[], resolver).await;
+    let c = create(&store, "c", "qa", &[]).await;
     store.start(c.id, "qa", false, None).await.unwrap();
 }
 
@@ -196,8 +179,8 @@ async fn start_gate_blocks_by_assignee_and_a_claim_fills_the_assignee() {
 
     // The gate blocks on the assignee's held task, not the actor's:
     // bob starts alice's pre-assigned task while alice holds one.
-    let held = create(&store, "held", "alice", &[], roster_resolver()).await;
-    let assigned = create(&store, "assigned", "alice", &[], roster_resolver()).await;
+    let held = create(&store, "held", "alice", &[]).await;
+    let assigned = create(&store, "assigned", "alice", &[]).await;
     store.start(held.id, "alice", false, None).await.unwrap();
     let err = store
         .start(assigned.id, "bob", false, None)
@@ -214,7 +197,7 @@ async fn start_gate_blocks_by_assignee_and_a_claim_fills_the_assignee() {
         assignee: None,
         ..Default::default()
     };
-    let t = store.create(req, "root", roster_resolver()).await.unwrap();
+    let t = store.create(req, "root").await.unwrap();
     let t = store.start(t.id, "carol", false, None).await.unwrap();
     assert_eq!(t.assignee, Some("carol".into()));
 }
@@ -222,10 +205,9 @@ async fn start_gate_blocks_by_assignee_and_a_claim_fills_the_assignee() {
 #[tokio::test]
 async fn confirm_on_queued_paused_or_closed_is_an_invalid_transition() {
     let store = TaskStore::open_in_memory().await;
-    let resolver = roster_resolver();
 
     // queued
-    let t = create(&store, "q", "dev", &[], resolver.clone()).await;
+    let t = create(&store, "q", "dev", &[]).await;
     let err = store
         .confirm(t.id, "dev", confirm_req(Some("wip"), None), blobs())
         .await
@@ -233,7 +215,7 @@ async fn confirm_on_queued_paused_or_closed_is_an_invalid_transition() {
     assert!(matches!(err, Error::InvalidTransition { .. }));
 
     // paused
-    let t = create(&store, "p", "dev", &[], resolver.clone()).await;
+    let t = create(&store, "p", "dev", &[]).await;
     store.start(t.id, "dev", false, None).await.unwrap();
     store.pause(t.id, "dev", None).await.unwrap();
     let err = store
@@ -243,7 +225,7 @@ async fn confirm_on_queued_paused_or_closed_is_an_invalid_transition() {
     assert!(matches!(err, Error::InvalidTransition { .. }));
 
     // closed
-    let t = create(&store, "d", "dev", &[], resolver).await;
+    let t = create(&store, "d", "dev", &[]).await;
     store.start(t.id, "dev", false, None).await.unwrap();
     store
         .close(
@@ -265,7 +247,7 @@ async fn confirm_on_queued_paused_or_closed_is_an_invalid_transition() {
 #[tokio::test]
 async fn pause_moves_to_paused_without_a_gate_and_resume_returns() {
     let store = TaskStore::open_in_memory().await;
-    let t = create(&store, "pausable", "dev", &[], roster_resolver()).await;
+    let t = create(&store, "pausable", "dev", &[]).await;
     store.start(t.id, "dev", false, None).await.unwrap();
 
     let t = store.pause(t.id, "dev", None).await.unwrap();
@@ -287,14 +269,13 @@ async fn pause_moves_to_paused_without_a_gate_and_resume_returns() {
 #[tokio::test]
 async fn resume_runs_the_serial_gate_and_force_is_audited() {
     let store = TaskStore::open_in_memory().await;
-    let resolver = roster_resolver();
-    let t = create(&store, "resumable", "dev", &[], resolver.clone()).await;
+    let t = create(&store, "resumable", "dev", &[]).await;
     store.start(t.id, "dev", false, None).await.unwrap();
     store.pause(t.id, "dev", None).await.unwrap();
 
     // While resumable is paused, another task takes the assignee's
     // only in_progress slot: resuming now hits the serial gate.
-    let held = create(&store, "held", "dev", &[], resolver).await;
+    let held = create(&store, "held", "dev", &[]).await;
     store.start(held.id, "dev", false, None).await.unwrap();
 
     let err = store.resume(t.id, "dev", false, None).await.unwrap_err();
@@ -314,7 +295,7 @@ async fn resume_runs_the_serial_gate_and_force_is_audited() {
 #[tokio::test]
 async fn resume_does_not_rebase_the_confirmation_window() {
     let store = TaskStore::open_in_memory().await;
-    let t = create(&store, "window", "dev", &["r1"], roster_resolver()).await;
+    let t = create(&store, "window", "dev", &["agent-r1"]).await;
     store.start(t.id, "dev", false, None).await.unwrap();
     store
         .confirm(t.id, "agent-r1", confirm_req(None, None), blobs())
@@ -341,7 +322,7 @@ async fn resume_does_not_rebase_the_confirmation_window() {
 #[tokio::test]
 async fn export_json_shape_is_stable() {
     let store = TaskStore::open_in_memory().await;
-    let t = create(&store, "exported", "dev", &["r1"], roster_resolver()).await;
+    let t = create(&store, "exported", "dev", &["agent-r1"]).await;
     store.start(t.id, "dev", false, None).await.unwrap();
     store
         .confirm(t.id, "agent-r1", confirm_req(None, None), blobs())
@@ -396,7 +377,7 @@ async fn close_archives_dossier_content_addressed() {
     std::fs::write(dossier.join("notes/a.md"), "a").unwrap();
 
     let t = store
-        .create(spec("archived", "dev", &[]), "root", roster_resolver())
+        .create(spec("archived", "dev", &[]), "root")
         .await
         .unwrap();
     store.start(t.id, "dev", false, None).await.unwrap();
@@ -443,8 +424,7 @@ async fn close_archives_dossier_content_addressed() {
 #[tokio::test]
 async fn reopen_runs_the_serial_gate_and_force_is_audited() {
     let store = TaskStore::open_in_memory().await;
-    let resolver = roster_resolver();
-    let done = create(&store, "done", "dev", &[], resolver.clone()).await;
+    let done = create(&store, "done", "dev", &[]).await;
     store.start(done.id, "dev", false, None).await.unwrap();
     store
         .close(
@@ -457,7 +437,7 @@ async fn reopen_runs_the_serial_gate_and_force_is_audited() {
         .await
         .unwrap();
 
-    let held = create(&store, "held", "dev", &[], resolver).await;
+    let held = create(&store, "held", "dev", &[]).await;
     store.start(held.id, "dev", false, None).await.unwrap();
 
     let err = store.reopen(done.id, "dev", false, None).await.unwrap_err();
@@ -477,7 +457,7 @@ async fn reopen_runs_the_serial_gate_and_force_is_audited() {
 #[tokio::test]
 async fn reopen_invalidates_prior_cycle_confirmations() {
     let store = TaskStore::open_in_memory().await;
-    let t = create(&store, "cycle", "dev", &["r1"], roster_resolver()).await;
+    let t = create(&store, "cycle", "dev", &["agent-r1"]).await;
     store.start(t.id, "dev", false, None).await.unwrap();
     store
         .confirm(t.id, "agent-r1", confirm_req(None, None), blobs())
@@ -533,7 +513,7 @@ async fn reopen_invalidates_prior_cycle_confirmations() {
 #[tokio::test]
 async fn force_close_escapes_the_confirmation_gate_and_is_audited() {
     let store = TaskStore::open_in_memory().await;
-    let t = create(&store, "urgent", "dev", &["r1"], roster_resolver()).await;
+    let t = create(&store, "urgent", "dev", &["agent-r1"]).await;
     store.start(t.id, "dev", false, None).await.unwrap();
 
     let err = store
@@ -589,7 +569,6 @@ async fn association_windows_are_validated() {
                 ..spec("inverted", "dev", &[])
             },
             "root",
-            no_resolver(),
         )
         .await
         .unwrap_err();
@@ -603,7 +582,6 @@ async fn association_windows_are_validated() {
                 ..spec("one-sided", "dev", &[])
             },
             "root",
-            no_resolver(),
         )
         .await
         .unwrap_err();
@@ -617,7 +595,6 @@ async fn association_windows_are_validated() {
                 ..spec("seq-without-room", "dev", &[])
             },
             "root",
-            no_resolver(),
         )
         .await
         .unwrap_err();
@@ -636,7 +613,6 @@ async fn association_accepts_a_legal_window() {
                 ..spec("legal-window", "dev", &[])
             },
             "root",
-            no_resolver(),
         )
         .await
         .unwrap();
@@ -668,14 +644,8 @@ async fn concurrent_starts_on_separate_pools_both_land() {
     )
     .await
     .unwrap();
-    let ta = a
-        .create(spec("a", "alice", &[]), "root", no_resolver())
-        .await
-        .unwrap();
-    let tb = b
-        .create(spec("b", "bob", &[]), "root", no_resolver())
-        .await
-        .unwrap();
+    let ta = a.create(spec("a", "alice", &[]), "root").await.unwrap();
+    let tb = b.create(spec("b", "bob", &[]), "root").await.unwrap();
 
     let (ra, rb) = tokio::join!(
         a.start(ta.id, "alice", false, None),
@@ -688,7 +658,7 @@ async fn concurrent_starts_on_separate_pools_both_land() {
 #[tokio::test]
 async fn note_records_a_note_in_any_state() {
     let store = TaskStore::open_in_memory().await;
-    let t = create(&store, "noted", "dev", &[], roster_resolver()).await;
+    let t = create(&store, "noted", "dev", &[]).await;
     store.start(t.id, "dev", false, None).await.unwrap();
 
     let t = store
@@ -720,20 +690,56 @@ async fn note_records_a_note_in_any_state() {
     assert_eq!(notes.len(), 2);
 }
 
+/// The operator literal is an identity the roster can name, and the close
+/// gate compares it like any other: the operator's own confirmation counts,
+/// an agent's does not stand in for it.
 #[tokio::test]
-async fn create_refuses_when_a_confirmer_name_resolves_to_nothing() {
+async fn an_operator_roster_entry_is_satisfied_by_the_operator_alone() {
     let store = TaskStore::open_in_memory().await;
+    let t = create(&store, "ops", "dev", &["operator"]).await;
+    store.start(t.id, "dev", false, None).await.unwrap();
+    store.review(t.id, "dev").await.unwrap();
+
+    store
+        .confirm(t.id, "agent-dev", confirm_req(None, None), blobs())
+        .await
+        .unwrap();
     let err = store
-        .create(spec("ghost", "dev", &["ghost"]), "root", no_resolver())
+        .close(
+            t.id,
+            "dev",
+            close_req(ClosedReason::Completed, None, false),
+            blobs(),
+            None,
+        )
         .await
         .unwrap_err();
-    assert!(matches!(err, Error::ConfirmerUnresolved { ref confirmer } if confirmer == "ghost"));
+    assert!(
+        matches!(err, Error::ConfirmationGate { ref missing } if missing.contains("operator")),
+        "{err}"
+    );
+
+    store
+        .confirm(t.id, "operator", confirm_req(None, None), blobs())
+        .await
+        .unwrap();
+    let closed = store
+        .close(
+            t.id,
+            "dev",
+            close_req(ClosedReason::Completed, None, false),
+            blobs(),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(closed.status, "closed");
 }
 
 #[tokio::test]
 async fn archive_gate_rejects_open_tasks_and_force_is_audited() {
     let store = TaskStore::open_in_memory().await;
-    let t = create(&store, "open", "dev", &[], roster_resolver()).await;
+    let t = create(&store, "open", "dev", &[]).await;
 
     let err = store.archive_task(t.id, "root", false).await.unwrap_err();
     assert!(
@@ -755,7 +761,7 @@ async fn archive_gate_rejects_open_tasks_and_force_is_audited() {
 #[tokio::test]
 async fn archived_tasks_leave_the_default_view() {
     let store = TaskStore::open_in_memory().await;
-    let t = create(&store, "done", "dev", &[], roster_resolver()).await;
+    let t = create(&store, "done", "dev", &[]).await;
     store.start(t.id, "dev", false, None).await.unwrap();
     store
         .close(
@@ -807,7 +813,7 @@ async fn close_with_a_damaged_stored_roster_fails_loudly() {
         .await
         .unwrap();
     let t = store
-        .create(spec("corrupt roster", "dev", &[]), "root", no_resolver())
+        .create(spec("corrupt roster", "dev", &[]), "root")
         .await
         .unwrap();
     store.start(t.id, "dev", false, None).await.unwrap();
@@ -846,8 +852,8 @@ async fn close_with_a_damaged_stored_roster_fails_loudly() {
 #[tokio::test]
 async fn export_all_groups_events_under_the_right_task() {
     let store = TaskStore::open_in_memory().await;
-    let a = create(&store, "alpha", "dev", &[], roster_resolver()).await;
-    let b = create(&store, "beta", "ops", &[], roster_resolver()).await;
+    let a = create(&store, "alpha", "dev", &[]).await;
+    let b = create(&store, "beta", "ops", &[]).await;
     store.start(a.id, "dev", false, None).await.unwrap();
     store.start(b.id, "ops", false, None).await.unwrap();
     store
@@ -879,10 +885,9 @@ async fn list_orders_newest_first_windows_and_pages() {
     use kallipai_common::protocol::TaskTimeAxis;
 
     let store = TaskStore::open_in_memory().await;
-    let resolver = roster_resolver();
-    let a = create(&store, "a-first", "dev", &[], resolver.clone()).await;
-    let b = create(&store, "b-second", "dev", &[], resolver.clone()).await;
-    let c = create(&store, "c-third", "dev", &[], resolver).await;
+    let a = create(&store, "a-first", "dev", &[]).await;
+    let b = create(&store, "b-second", "dev", &[]).await;
+    let c = create(&store, "c-third", "dev", &[]).await;
     // Close b and c so the closed axis has both values and NULLs
     // (close is only legal from in_progress|review, so start them first).
     store.start(c.id, "dev", false, None).await.unwrap();
@@ -976,12 +981,8 @@ async fn list_orders_newest_first_windows_and_pages() {
 // create, and confirmations may carry a report body.
 // ---------------------------------------------------------------------------
 
-async fn confirmed_task(store: &TaskStore, name: &str, id: &str) -> kallipai_task::Task {
-    let resolver: ConfirmerResolver = {
-        let (name, id) = (name.to_string(), id.to_string());
-        Arc::new(move |n| (n == name).then(|| id.clone()))
-    };
-    let t = create(store, "gate", "dev", &[name], resolver).await;
+async fn confirmed_task(store: &TaskStore, id: &str) -> kallipai_task::Task {
+    let t = create(store, "gate", "dev", &[id]).await;
     store.start(t.id, "dev", false, None).await.unwrap();
     t
 }
@@ -991,7 +992,7 @@ async fn confirmed_task(store: &TaskStore, name: &str, id: &str) -> kallipai_tas
 #[tokio::test]
 async fn close_gate_accepts_a_confirmation_filed_as_the_agent_id() {
     let store = TaskStore::open_in_memory().await;
-    let t = confirmed_task(&store, "reviewer-c", "agent-1").await;
+    let t = confirmed_task(&store, "agent-1").await;
     store
         .confirm(t.id, "agent-1", confirm_req(None, None), blobs())
         .await
@@ -1014,7 +1015,7 @@ async fn close_gate_accepts_a_confirmation_filed_as_the_agent_id() {
 #[tokio::test]
 async fn confirm_from_an_outside_actor_does_not_count() {
     let store = TaskStore::open_in_memory().await;
-    let t = confirmed_task(&store, "reviewer-c", "agent-1").await;
+    let t = confirmed_task(&store, "agent-1").await;
     store
         .confirm(t.id, "mystery", confirm_req(None, None), blobs())
         .await
@@ -1056,11 +1057,7 @@ async fn confirm_payload_shapes_follow_the_optional_fields() {
     ];
     for (i, (note, file)) in cases.into_iter().enumerate() {
         let t = store
-            .create(
-                spec("payload", &format!("dev{i}"), &[]),
-                "root",
-                roster_resolver(),
-            )
+            .create(spec("payload", &format!("dev{i}"), &[]), "root")
             .await
             .unwrap();
         store.start(t.id, "dev", false, None).await.unwrap();
@@ -1105,7 +1102,7 @@ async fn confirm_payload_shapes_follow_the_optional_fields() {
     }
 
     // Neither field: no payload at all.
-    let t = create(&store, "payload", "dev", &[], roster_resolver()).await;
+    let t = create(&store, "payload", "dev", &[]).await;
     store.start(t.id, "dev", false, None).await.unwrap();
     store
         .confirm(t.id, "dev", confirm_req(None, None), blobs.clone())
@@ -1123,7 +1120,7 @@ async fn confirm_payload_shapes_follow_the_optional_fields() {
 #[tokio::test]
 async fn confirm_report_over_cap_is_refused() {
     let store = TaskStore::open_in_memory().await;
-    let t = create(&store, "big", "dev", &[], roster_resolver()).await;
+    let t = create(&store, "big", "dev", &[]).await;
     store.start(t.id, "dev", false, None).await.unwrap();
     let oversized = "x".repeat(REPORT_MAX_BYTES + 1);
     let err = store
@@ -1153,9 +1150,8 @@ async fn confirm_report_over_cap_is_refused() {
 #[tokio::test]
 async fn list_page_reports_has_reports_and_total_by_filter() {
     let store = TaskStore::open_in_memory().await;
-    let resolver = roster_resolver();
-    let plain = create(&store, "plain", "dev", &[], resolver.clone()).await;
-    let reported = create(&store, "reported", "dev", &[], resolver.clone()).await;
+    let plain = create(&store, "plain", "dev", &[]).await;
+    let reported = create(&store, "reported", "dev", &[]).await;
     store.start(reported.id, "dev", false, None).await.unwrap();
     store
         .confirm(
@@ -1172,7 +1168,7 @@ async fn list_page_reports_has_reports_and_total_by_filter() {
         )
         .await
         .unwrap();
-    let done = create(&store, "done", "ops", &[], resolver).await;
+    let done = create(&store, "done", "ops", &[]).await;
     store.start(done.id, "ops", false, None).await.unwrap();
     store
         .close(
@@ -1230,7 +1226,7 @@ async fn close_gate_refusal_leaves_task_open_and_blob_ingested() {
     std::fs::write(dossier.join("plan.md"), "# plan\n").unwrap();
 
     let t = store
-        .create(spec("atomic", "dev", &["r1"]), "root", roster_resolver())
+        .create(spec("atomic", "dev", &["agent-r1"]), "root")
         .await
         .unwrap();
     store.start(t.id, "dev", false, None).await.unwrap();
@@ -1313,7 +1309,7 @@ async fn report_payload_migration_is_idempotent() {
     );
 
     let t = store
-        .create(spec("legacy report", "dev", &[]), "root", no_resolver())
+        .create(spec("legacy report", "dev", &[]), "root")
         .await
         .unwrap();
 
@@ -1397,7 +1393,7 @@ fn snap(entries: &[(&str, u64)]) -> kallipai_task::usage::UsageSnapshot {
 #[tokio::test]
 async fn export_sums_the_windows_the_snapshots_bracket() {
     let store = TaskStore::open_in_memory().await;
-    let t = create(&store, "accounting", "dev", &[], roster_resolver()).await;
+    let t = create(&store, "accounting", "dev", &[]).await;
 
     store
         .start(t.id, "dev", false, Some(snap(&[("a", 100)])))
@@ -1449,7 +1445,7 @@ async fn export_sums_the_windows_the_snapshots_bracket() {
 #[tokio::test]
 async fn a_task_without_snapshots_reports_no_usage() {
     let store = TaskStore::open_in_memory().await;
-    let t = create(&store, "legacy", "dev", &[], roster_resolver()).await;
+    let t = create(&store, "legacy", "dev", &[]).await;
     store.start(t.id, "dev", false, None).await.unwrap();
     store.pause(t.id, "dev", None).await.unwrap();
     let export = store.export(t.id).await.unwrap();

@@ -1100,6 +1100,47 @@ async fn create_agent_rejects_unknown_set_name() {
     );
 }
 
+/// A reserved role name is refused at the spawn, the same rule the converge
+/// declaration applies: the token's own identity word wins over any role, so a
+/// body holding it could never be addressed by name.
+#[tokio::test]
+async fn create_agent_refuses_a_reserved_role() {
+    let state = make_state();
+    let sup = AgentId::random();
+    let ws = ws_dir("sup-reserved-role");
+    {
+        let mut reg = state.registry.write().await;
+        add_root(&mut reg, &sup);
+    }
+    let resp = super::create_agent(
+        State(state.clone()),
+        AuthIdentity::test_new(Identity::Operator),
+        axum::Json(kallipai_common::protocol::CreateAgentRequest {
+            workspace_root: ws.to_string_lossy().into(),
+            skills: vec![],
+            prompt: None,
+            created_by: Some(sup),
+            role: "operator".into(),
+            description: String::new(),
+            max_tool_rounds: None,
+            context_keep_turns: None,
+            context_keep_tokens_ratio: None,
+            profile_set: "default".into(),
+            permission_class: "normal".into(),
+            delegation_mode: None,
+        }),
+    )
+    .await;
+    let err = match resp {
+        Err(e) => e,
+        Ok(_) => panic!("reserved role accepted"),
+    };
+    assert_eq!(err.status, 400, "a reserved role is a client error");
+    assert!(err.message.contains("shadowed"), "{}", err.message);
+    assert!(super::reserved_role_reason("root").is_some());
+    assert!(super::reserved_role_reason("dev").is_none());
+}
+
 /// A spawn stub that records the configuration each spawn is handed and counts
 /// the calls, so a request's effect on that configuration is observable without
 /// booting a runtime.
@@ -1317,6 +1358,157 @@ async fn update_metadata_enforces_role_uniqueness() {
     assert_eq!(summary.0.role, "junior-2");
     let meta = std::fs::read_to_string(dir.path().join("meta.json")).unwrap();
     assert!(meta.contains("junior-2"), "disk is the source of truth");
+}
+
+/// A rename cannot take a reserved name either: `operator` is the token's own
+/// identity word, so the agent would be unreachable by the role it carries.
+#[tokio::test]
+async fn update_metadata_refuses_a_reserved_role() {
+    let state = make_state();
+    let parent = seed_role_agent(&state, "lead").await;
+
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("meta.json"),
+        r#"{"workspace_root":"/tmp/whatever"}"#,
+    )
+    .unwrap();
+    let child = AgentId::random();
+    let (mut entry, _rx) = make_entry_with_rx(Some(parent.clone()), format!("tok-{child}"));
+    entry.identity.config.role = "junior".into();
+    entry.identity.agent_dir = Some(dir.path().to_path_buf());
+    state
+        .registry
+        .write()
+        .await
+        .register(child.clone(), RegistryEntry::Live(entry));
+
+    let resp = super::update_metadata(
+        State(state.clone()),
+        AuthIdentity::test_new(Identity::Agent { id: parent.clone() }),
+        Path(child.clone()),
+        axum::Json(kallipai_common::protocol::UpdateAgentMetadataRequest {
+            role: Some("operator".to_string()),
+            description: None,
+        }),
+    )
+    .await;
+    let err = match resp {
+        Err(e) => e,
+        Ok(_) => panic!("reserved rename accepted"),
+    };
+    assert_eq!(err.status, 400, "a reserved role is a client error");
+    assert!(err.message.contains("shadowed"), "{}", err.message);
+    let meta = std::fs::read_to_string(dir.path().join("meta.json")).unwrap();
+    assert!(!meta.contains("operator"), "nothing written: {meta}");
+}
+
+/// The stored role is the trimmed spelling: the role is an address, and a
+/// stray space would make the agent unfindable by name while showing the
+/// padded string on the wire. A role of spaces stays the empty-role error.
+#[tokio::test]
+async fn create_agent_stores_the_trimmed_role() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let state = make_state_with_spawn(recording_spawn(seen.clone(), calls.clone()));
+    let sup = AgentId::random();
+    {
+        let mut reg = state.registry.write().await;
+        add_root(&mut reg, &sup);
+    }
+    let trimmed_ws = ws_dir("child-trimmed-role");
+    let blank_ws = ws_dir("child-blank-role");
+    let trimmed_root = trimmed_ws.to_string_lossy().into_owned();
+    let blank_root = blank_ws.to_string_lossy().into_owned();
+    let request = |role: &str, workspace_root: &str| {
+        super::create_agent(
+            State(state.clone()),
+            AuthIdentity::test_new(Identity::Operator),
+            axum::Json(kallipai_common::protocol::CreateAgentRequest {
+                workspace_root: workspace_root.to_string(),
+                skills: vec![],
+                prompt: None,
+                created_by: Some(sup.clone()),
+                role: role.to_string(),
+                description: String::new(),
+                max_tool_rounds: None,
+                context_keep_turns: None,
+                context_keep_tokens_ratio: None,
+                profile_set: "default".into(),
+                permission_class: "normal".into(),
+                delegation_mode: None,
+            }),
+        )
+    };
+
+    match request(" dev ", &trimmed_root).await {
+        Ok(_) => {}
+        Err(e) => panic!("the spawn is accepted: {} ({})", e.status, e.message),
+    }
+    let config = seen
+        .lock()
+        .unwrap()
+        .pop()
+        .expect("the stubbed spawn received a config");
+    assert_eq!(config.role, "dev", "the stored role carries no padding");
+
+    let err = match request("   ", &blank_root).await {
+        Err(e) => e,
+        Ok(_) => panic!("a blank role was accepted"),
+    };
+    assert_eq!(err.status, 400);
+    assert!(err.message.contains("non-empty 'role'"), "{}", err.message);
+}
+
+/// A rename stores the trimmed spelling on both sides of the write: the
+/// summary and meta.json carry `dev2`, and so does the registry entry, which
+/// is what an identity word resolves against.
+#[tokio::test]
+async fn update_metadata_stores_the_trimmed_role() {
+    let state = make_state();
+    let parent = seed_role_agent(&state, "lead").await;
+
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("meta.json"),
+        r#"{"workspace_root":"/tmp/whatever"}"#,
+    )
+    .unwrap();
+    let child = AgentId::random();
+    let (mut entry, _rx) = make_entry_with_rx(Some(parent.clone()), format!("tok-{child}"));
+    entry.identity.config.role = "junior".into();
+    entry.identity.agent_dir = Some(dir.path().to_path_buf());
+    state
+        .registry
+        .write()
+        .await
+        .register(child.clone(), RegistryEntry::Live(entry));
+
+    let summary = super::update_metadata(
+        State(state.clone()),
+        AuthIdentity::test_new(Identity::Agent { id: parent.clone() }),
+        Path(child.clone()),
+        axum::Json(kallipai_common::protocol::UpdateAgentMetadataRequest {
+            role: Some(" dev2 ".to_string()),
+            description: None,
+        }),
+    )
+    .await
+    .expect("a unique trimmed rename is accepted");
+    assert_eq!(summary.0.role, "dev2");
+    let meta = std::fs::read_to_string(dir.path().join("meta.json")).unwrap();
+    assert!(meta.contains("dev2"), "disk carries the name: {meta}");
+    assert!(!meta.contains(" dev2 "), "disk carries no padding: {meta}");
+
+    let registry = state.registry.read().await;
+    let stored = registry
+        .get(&child)
+        .map(|entry| entry.identity().config.role.clone());
+    assert_eq!(
+        stored.as_deref(),
+        Some("dev2"),
+        "memory carries the trimmed name too"
+    );
 }
 
 /// The bind endpoint's live path: the record persists (disk first, then

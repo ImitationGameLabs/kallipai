@@ -125,7 +125,7 @@ Auth: operator or direct supervisor. See [Authentication and authorization](auth
   ],
   "prompt": "string — initial prompt (optional)",
   "created_by": "AgentId — supervisor ID (required)",
-  "role": "string — short display label, e.g. \"researcher\" (required, non-empty)",
+  "role": "string — short display label, e.g. \"researcher\" (required, non-empty; a reserved name (`root` / `operator`) is refused)",
   "description": "string — longer prose, what this agent is for (optional)",
   "max_tool_rounds": "null — use tagma default (see below)",
   "context_keep_turns": "null — use tagma default (see below)",
@@ -137,8 +137,11 @@ Auth: operator or direct supervisor. See [Authentication and authorization](auth
 
 **`role` / `description`**: display metadata, supervisor-owned. A subagent
 spawn **requires a non-empty `role`** (fleet discipline so a superior can tell
-its subagents apart). Both default to `""` and are never used as an address,
-`AgentId` is canonical. Mutable later via `PUT /agents/{id}/metadata`.
+its subagents apart), and `role` is trimmed before it is stored: the role is
+how a task names its assignee, so padding would make the agent unfindable by
+name. A reserved name (`root` or `operator`) is refused wherever a role is
+minted or renamed. `AgentId` stays the canonical address on agent routes.
+Mutable later via `PUT /agents/{id}/metadata`.
 
 **`max_tool_rounds`**: override the default/env-configured max tool-call rounds for this agent. Omit or `null` to use the tagma default (`KALLIPAI_MAX_TOOL_ROUNDS` env var, or unlimited). To set an explicit value:
 
@@ -198,7 +201,7 @@ Status: `201 Created`
 
 | Code | Condition                                                                                                         |
 | ---- | ----------------------------------------------------------------------------------------------------------------- |
-| 400  | Invalid `workspace_root`, skill loading failure, invalid skill name, or subagent spawn with an empty `role`       |
+| 400  | Invalid `workspace_root`, skill loading failure, invalid skill name, subagent spawn with an empty `role`, or a reserved `role` (`root` / `operator`) |
 | 403  | Not the supervisor; supervisor has no remaining delegation depth; `workspace_root` outside supervisor's workspace |
 | 404  | Supervisor agent not found                                                                                        |
 | 409  | `created_by` absent (the root is tagma-managed; use `GET /agents/root`)                                           |
@@ -1091,7 +1094,7 @@ Status: `200 OK`
 
 | Code | Condition                                                             |
 | ---- | --------------------------------------------------------------------- |
-| 400  | `role` provided but empty, or neither `role` nor `description` set    |
+| 400  | `role` provided but empty or reserved (`root` / `operator`), or neither `role` nor `description` set |
 | 403  | Caller is not the direct supervisor (or operator) of the target agent |
 | 404  | Agent not found                                                       |
 | 500  | No on-disk directory, or `meta.json` read/write failure               |
@@ -1354,9 +1357,27 @@ append-only event trail, and content-addressed closed-task
 archives. All list/show endpoints return `TaskExport` shapes; the
 write verbs return the updated `TaskExport`.
 
+Ownership is stored as the agent's identity. The vocabulary is a role
+name, an agent id, or the literal `operator` (the operator token's own
+value, recorded when the operator picks a task up). `POST /tasks`
+resolves `assignee` and every `require` word to the identity the ledger
+stores; a word none of those answers to is refused with the words that
+would work, and a blank `assignee` counts as not given. The `GET /tasks`
+filter speaks the same vocabulary and treats a blank value as no filter
+at all, and it additionally passes an id-shaped value through when no
+current agent carries it, so a row left behind by a removed agent stays
+findable by the id it shows.
+
+The operator is not a wake target (it is not an agent), so a task waiting on
+an operator confirmation notifies nobody; the operator sees it when it looks.
+
+The response carries the identity in `assignee` and its role name in
+`assignee_role` (null when the identity resolves to no role), so a
+reader displays the role and a program compares the id.
+
 | Endpoint                         | Purpose                                                                                                                            |
 | ----------------------------     | -----------------------------------------------------------------------                                                            |
-| `GET /tasks`                     | One page of lightweight rows plus the filter total (`status`, `assignee`, `archived`, `time`, `since`, `until`, `limit`, `offset`) |
+| `GET /tasks`                     | One page of lightweight rows plus the filter total (`status`, `assignee`, `archived`, `time`, `since`, `until`, `limit`, `offset`); `assignee` takes a role name, an id, or `operator` |
 | `GET /tasks/{id}`                | One task with its full event trail                                                                                                 |
 | `GET /tasks/export`              | Every task, including closed and archived                                                                                          |
 | `GET /tasks/{id}/export`         | One task's export                                                                                                                  |
@@ -1375,10 +1396,13 @@ write verbs return the updated `TaskExport`.
 
 Request bodies (all optional fields omitted rather than null):
 
-- `POST /tasks`: `title` (required), `assignee`, `require` (the
-  confirmer roster; empty means closing needs no confirmations), and
-  the association keys (`inbox_id_start`, `inbox_id_end`, `room_id`,
-  `room_seq_start`, `room_seq_end`).
+- `POST /tasks`: `title` (required), `assignee` (a role name, an agent
+  id, or `operator`, resolved at registration; an unknown word is refused,
+  and a blank value counts as not given), `require` (the confirmer roster,
+  each word resolved the same way and refused the same way; empty means
+  closing needs no confirmations), and the association keys
+  (`inbox_id_start`, `inbox_id_end`, `room_id`, `room_seq_start`,
+  `room_seq_end`).
 - `.../confirm`: `note`, `file` (`file_name` plus the base64 report
   body; the tagma stores it in the blob store, size-capped).
 - `.../start`, `.../resume`, `.../reopen`, `.../archive`: `force`.

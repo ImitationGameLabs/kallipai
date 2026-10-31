@@ -36,8 +36,9 @@ pub async fn serial_gate_blocked(
 
 /// Confirmation gate: every registered confirmer must have filed a
 /// confirm event (`kind=action`, `name=confirm`) in the current cycle.
-/// `confirmers` carries the identity ids fixed at create time; confirm
-/// actors are ids by construction, so no normalization pass is needed.
+/// `confirmers` carries the identity ids fixed at create time, and a
+/// confirm event's actor is the caller's identity, so the comparison is
+/// id against id on both sides.
 /// Returns the confirmer ids whose current-cycle confirmations are
 /// missing; the caller renders them into names for the error face.
 pub async fn missing_confirmations(

@@ -98,10 +98,15 @@ impl ClosedReason {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TaskCreateRequest {
     pub title: String,
+    /// The agent to assign at registration: a role name, an agent id, or the
+    /// literal `operator`, resolved to the identity the ledger stores. A word
+    /// none of those answers to is refused before anything is written.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub assignee: Option<String>,
-    /// The confirmer roster. Names are resolved to identities at
-    /// registration; an empty list means closing needs no confirmations.
+    /// The confirmer roster. Each entry names a role, an agent id, or
+    /// `operator` and is resolved to that identity at registration; a blank
+    /// entry counts as not given. An empty list means closing needs no
+    /// confirmations.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub require: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -172,6 +177,11 @@ pub struct TaskConfirmFile {
 pub struct TaskListQuery {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<TaskStatus>,
+    /// The assignee to filter by: a role name, an agent id, or the literal
+    /// `operator`, resolved to the identity the ledger stores. An id-shaped
+    /// word passes through even when no current agent carries it, so a row
+    /// that outlives its agent stays findable by the id it shows; a word
+    /// that names nobody is refused rather than matching nothing.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub assignee: Option<String>,
     /// The archive partition: false (default) lists active tasks only,
@@ -240,6 +250,9 @@ pub struct TaskExport {
     pub title: String,
     pub status: String,
     pub creator: Option<String>,
+    /// The identity the task is assigned to: an agent id, or the literal
+    /// `operator`; absent until someone is named at create or picks the task
+    /// up.
     pub assignee: Option<String>,
     pub confirmers: Vec<String>,
     /// The creator's role name, filled by the route from the same registry
@@ -251,8 +264,8 @@ pub struct TaskExport {
     /// not resolve.
     pub assignee_role: Option<String>,
     /// Role names aligned with `confirmers` by index; null where an entry
-    /// names something the registry cannot resolve (a historical
-    /// confirmer-name record, a deregistered agent).
+    /// names something the registry cannot resolve (a deregistered
+    /// agent).
     pub confirmer_roles: Vec<Option<String>>,
     pub created_at: Option<String>,
     pub updated_at: Option<String>,
@@ -384,12 +397,12 @@ pub struct TaskRow {
     pub title: String,
     pub status: String,
     pub creator: Option<String>,
+    /// The identity the task is assigned to: an agent id, or `operator`.
     pub assignee: Option<String>,
     pub confirmers: Vec<String>,
-    /// The assignee's role name, filled by the route from the same
-    /// registry snapshot; null when the free-text assignee names no
-    /// registered agent (a role name typed on the command line, the
-    /// literal `operator`, a deregistered id).
+    /// The assignee's role name, filled by the route from the registry
+    /// snapshot; null when the task is unassigned or the id resolves to
+    /// no role (a deregistered agent, the literal `operator`).
     pub assignee_role: Option<String>,
     pub created_at: Option<String>,
     pub updated_at: Option<String>,

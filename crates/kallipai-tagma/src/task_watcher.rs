@@ -1,8 +1,9 @@
 //! Task-ledger change watcher: subscribes to `TaskChanged` on the topic
 //! bus and drops a wake hint into the prompt queue of every agent the event's
-//! people set names (assignee, confirmers, creator), by identity or by the
-//! role name an entry holds. The change's own agent is never woken, whether
-//! an entry names it by id or by its role name.
+//! people set names (assignee, confirmers, creator). The set carries
+//! identities — the ledger stores nothing else — so a hint matches an id
+//! and never a word: role names are for reading, not for addressing. The
+//! change's own agent is never woken.
 //!
 //! Verbs that already carry an explicit message face (`close`)
 //! are silent here: the close summary reaches the affected agents
@@ -116,25 +117,19 @@ fn keep_last_per_task(events: Vec<TaskChanged>) -> Vec<TaskChanged> {
 }
 
 /// The agents one event wakes: every agent an entry in the people set names,
-/// except the one that caused the change. An entry is an identity; one that
-/// matches no agent id but equals a role name names that role's holder,
-/// because a role name is the registry's readable addressing alias and the
-/// registry keeps those unique. The exclusion runs on the resolved agent, so
-/// an entry naming the actor by its role name does not reach it either.
+/// except the one that caused the change. An entry is an identity, and the
+/// registry is read only to enumerate the ids that could match.
 fn targets_of<'a>(
     people: &[String],
     actor: &str,
-    agents: impl IntoIterator<Item = (&'a AgentId, &'a str)>,
+    agents: impl IntoIterator<Item = &'a AgentId>,
 ) -> Vec<AgentId> {
     let mut targets: Vec<AgentId> = Vec::new();
-    for (id, role) in agents {
+    for id in agents {
         if id.as_ref() == actor {
             continue;
         }
-        let named = people
-            .iter()
-            .any(|person| person.as_str() == id.as_ref() || person.as_str() == role);
-        if named {
+        if people.iter().any(|person| person.as_str() == id.as_ref()) {
             targets.push(id.clone());
         }
     }
@@ -153,13 +148,7 @@ async fn announce(state: &SharedState, ev: &TaskChanged) {
     );
     let targets: Vec<AgentId> = {
         let registry = state.registry.read().await;
-        targets_of(
-            &people,
-            &ev.actor,
-            registry
-                .iter()
-                .map(|(id, entry)| (id, entry.identity().config.role.as_str())),
-        )
+        targets_of(&people, &ev.actor, registry.iter().map(|(id, _entry)| id))
     };
     for id in targets {
         match enqueue_prompt(
@@ -228,20 +217,15 @@ mod tests {
         }
     }
 
-    /// Alice holds `dev`, bob `ops`, carol `root`: the registry keeps role
-    /// names unique, so no two agents share one. A Vec, not a map — the order
-    /// is what the wake assertions compare against.
-    fn roster() -> Vec<(AgentId, &'static str)> {
-        vec![(agent(1), "dev"), (agent(2), "ops"), (agent(3), "root")]
+    /// The registry's ids, in a fixed order: what the wake assertions
+    /// compare against.
+    fn roster() -> Vec<AgentId> {
+        vec![agent(1), agent(2), agent(3)]
     }
 
     fn wake(ev: &TaskChanged) -> Vec<AgentId> {
         let roster = roster();
-        targets_of(
-            &people_of(ev),
-            &ev.actor,
-            roster.iter().map(|(id, role)| (id, *role)),
-        )
+        targets_of(&people_of(ev), &ev.actor, roster.iter())
     }
 
     /// Confirmers, then assignee, then creator; a name listed twice keeps one
@@ -268,15 +252,6 @@ mod tests {
         assert!(wake(&ev).is_empty());
     }
 
-    /// The exclusion runs on the resolved agent, not on the string: an actor
-    /// reached by its own role name as the assignee's free text hears nothing.
-    #[test]
-    fn the_actor_never_reaches_itself_by_its_role_name() {
-        let alice = agent(1).to_string();
-        let ev = event_naming(&alice, None, Some("dev"), &[]);
-        assert!(wake(&ev).is_empty());
-    }
-
     /// The people set carries identities: an id wakes its holder, and a
     /// comparison against role names would wake nobody.
     #[test]
@@ -298,26 +273,25 @@ mod tests {
         );
     }
 
-    /// An entry that matches no agent id but equals a role name names that
-    /// role's holder: a free-text assignee can hold a role name.
-    #[test]
-    fn a_role_named_entry_wakes_its_holder() {
-        let actor = agent(5).to_string();
-        assert_eq!(
-            wake(&event_naming(&actor, None, Some("dev"), &[])),
-            [agent(1)]
-        );
-    }
-
-    /// One agent reached both by id and by its role wakes once.
+    /// One agent named in two seats of the people set (assignee and
+    /// confirmer) wakes once: the hint is per agent, not per entry.
     #[test]
     fn an_agent_named_twice_wakes_once() {
         let alice = agent(1).to_string();
         let actor = agent(5).to_string();
         assert_eq!(
-            wake(&event_naming(&actor, None, Some("dev"), &[&alice])),
+            wake(&event_naming(&actor, None, Some(&alice), &[&alice])),
             [agent(1)]
         );
+    }
+
+    /// A word that reads like a role name wakes nobody: the people set
+    /// carries identities, so an entry the registry does not hold is not a
+    /// target. This is the half that addresses by id only.
+    #[test]
+    fn a_word_that_is_not_an_identity_wakes_nobody() {
+        let actor = agent(5).to_string();
+        assert!(wake(&event_naming(&actor, None, Some("dev"), &[])).is_empty());
     }
 
     /// A name that resolves to no agent produces no target.
