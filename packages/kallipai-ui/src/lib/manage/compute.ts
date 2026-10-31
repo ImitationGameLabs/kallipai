@@ -896,3 +896,77 @@ export function associationText(
   }
   return parts.length > 0 ? parts.join(" · ") : "—";
 }
+
+/** The role a ledger renders for an identity, from the wire's own fill:
+ * `creator_role` / `confirmer_roles` when the tagma resolved it, the raw
+ * id when it did not (the operator literal, a deregistered agent, a
+ * historical confirmer-name record). One degrade rule for every column,
+ * matching what the trail already does with `actor_role`. */
+export function roleLabel(
+  id: string | null,
+  role: string | null | undefined,
+): string {
+  if (role) return role;
+  return id ?? "—";
+}
+
+/** Role per confirmer, keyed by the roster entry the wire aligned it to.
+ * Pairing is by index, so a `roles` list shorter than the roster leaves
+ * the extra entries null and they degrade to their id, the same rule
+ * `roleLabel` applies. */
+export function confirmerRoleMap(
+  confirmers: readonly string[],
+  roles: readonly (string | null)[] | null | undefined,
+): Map<string, string | null> {
+  return new Map(
+    confirmers.map((confirmer, index) => [confirmer, roles?.[index] ?? null]),
+  );
+}
+
+/** The span a task has run so far: `none` when it never started or its
+ * stamps will not parse, `open` when it started and has not closed, and
+ * `span` otherwise. Wall clock, first start to last close, so paused
+ * stretches count toward it. */
+export type DurationState =
+  | { readonly kind: "none" }
+  | { readonly kind: "open" }
+  | { readonly kind: "span"; readonly ms: number };
+
+export function durationState(
+  startIso: string | null,
+  endIso: string | null,
+): DurationState {
+  if (!startIso) return { kind: "none" };
+  const start = Date.parse(startIso);
+  if (Number.isNaN(start)) return { kind: "none" };
+  if (!endIso) return { kind: "open" };
+  const end = Date.parse(endIso);
+  if (Number.isNaN(end)) return { kind: "none" };
+  return { kind: "span", ms: Math.max(0, end - start) };
+}
+
+/** Compact span for the detail pane: leading units are dropped, minutes
+ * and seconds are zero-padded once a larger unit is present, and days win
+ * over seconds so a long task stays short. Unit letters are the same in
+ * both locales, which keeps the value one string with no plural keys. */
+export function formatDuration(ms: number): string {
+  const total = Math.max(0, Math.floor(ms / 1000));
+  const days = Math.floor(total / 86_400);
+  const hours = Math.floor((total % 86_400) / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const seconds = total % 60;
+  const pad = (n: number) => String(n).padStart(2, "0");
+  if (days > 0) return `${days}d ${hours}h ${pad(minutes)}m`;
+  if (hours > 0) return `${hours}h ${pad(minutes)}m ${pad(seconds)}s`;
+  if (minutes > 0) return `${minutes}m ${pad(seconds)}s`;
+  return `${seconds}s`;
+}
+
+/** Grouped token count in the reader's locale (1,234,567 or 1 234 567). */
+export function formatTokens(count: number, locale: string): string {
+  try {
+    return new Intl.NumberFormat(locale).format(count);
+  } catch {
+    return String(count);
+  }
+}

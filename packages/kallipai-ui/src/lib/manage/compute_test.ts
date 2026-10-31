@@ -24,11 +24,15 @@ import {
   clampPage,
   confirmationBoundary,
   confirmerConfirmationState,
+  confirmerRoleMap,
   consumedPct,
   cronHasFiveFields,
+  durationState,
   etaMinutes,
   filterEpoch,
   formatModalities,
+  formatDuration,
+  formatTokens,
   isBudgetPaused,
   moveFromUnassigned,
   moveProfile,
@@ -45,6 +49,7 @@ import {
   replaceUnassignedProfiles,
   replaceSetProfile,
   replaceSetProfiles,
+  roleLabel,
   setDefaultSet,
   setEffectiveModalities,
   setHasShadowedMembers,
@@ -1426,4 +1431,62 @@ Deno.test("associationText renders the set association keys compactly", () => {
     }),
     "—",
   );
+});
+
+Deno.test("roleLabel prefers the wire's role and falls back to the id", () => {
+  assertEquals(roleLabel("a1", "reviewer-c"), "reviewer-c");
+  assertEquals(roleLabel("operator", null), "operator");
+  assertEquals(roleLabel("a1", undefined), "a1");
+  assertEquals(roleLabel(null, null), "—");
+});
+
+Deno.test("durationState separates never started, open and closed", () => {
+  assertEquals(durationState(null, null), { kind: "none" });
+  assertEquals(durationState("2026-10-30T10:00:00Z", null), { kind: "open" });
+  assertEquals(durationState("2026-10-30T10:00:00Z", "2026-10-30T10:02:05Z"), {
+    kind: "span",
+    ms: 125_000,
+  });
+  assertEquals(durationState("not-a-date", null), { kind: "none" });
+  assertEquals(durationState("not-a-date", "2026-10-30T10:02:05Z"), {
+    kind: "none",
+  });
+  assertEquals(durationState("2026-10-30T10:00:00Z", "not-a-date"), {
+    kind: "none",
+  });
+});
+
+Deno.test("formatDuration drops leading units and pads the rest", () => {
+  assertEquals(formatDuration(9_000), "9s");
+  assertEquals(formatDuration(4 * 60_000 + 9_000), "4m 09s");
+  assertEquals(formatDuration(3600_000 + 7 * 60_000 + 9_000), "1h 07m 09s");
+  assertEquals(
+    formatDuration(3 * 86_400_000 + 4 * 3600_000 + 6 * 60_000 + 30_000),
+    "3d 4h 06m",
+  );
+  assertEquals(formatDuration(0), "0s");
+  assertEquals(formatDuration(-5_000), "0s");
+});
+
+Deno.test("formatTokens groups by the reader's locale", () => {
+  assertEquals(formatTokens(1_234_567, "en-US"), "1,234,567");
+  assertEquals(formatTokens(0, "en-US"), "0");
+});
+
+Deno.test("confirmerRoleMap pairs each confirmer with its own role", () => {
+  const map = confirmerRoleMap(["a1", "a2"], ["reviewer-c", "operator"]);
+  assertEquals(map.get("a1"), "reviewer-c");
+  assertEquals(map.get("a2"), "operator");
+});
+
+Deno.test("confirmerRoleMap leaves unaligned entries null", () => {
+  assertEquals(
+    confirmerRoleMap(["a1", "a2"], ["reviewer-c"]),
+    new Map([
+      ["a1", "reviewer-c"],
+      ["a2", null],
+    ]),
+  );
+  assertEquals(confirmerRoleMap(["a1"], null), new Map([["a1", null]]));
+  assertEquals(confirmerRoleMap([], undefined).size, 0);
 });

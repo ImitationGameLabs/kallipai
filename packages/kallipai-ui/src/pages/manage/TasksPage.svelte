@@ -7,8 +7,13 @@
   import {
     type ConfirmationState,
     confirmerConfirmationState,
+    confirmerRoleMap,
     associationText,
     timelinePayloadView,
+    durationState,
+    formatDuration,
+    formatTokens,
+    roleLabel,
   } from "../../lib/manage/compute.ts";
   import {
     common_loading,
@@ -46,10 +51,19 @@
     manage_tasks_export_json,
     manage_tasks_export_all,
     manage_tasks_downloads_offline,
+    manage_tasks_duration,
+    manage_tasks_duration_note,
+    manage_tasks_duration_open,
+    manage_tasks_usage,
+    manage_tasks_usage_note,
+    manage_tasks_usage_none,
+    manage_tasks_usage_partial,
   } from "../../paraglide/messages.js";
   import type { TaskStatus, TaskTimeAxis } from "@kallipai/kallipai-client";
   import { TASKS_PAGE_SIZE } from "../../lib/manage/tasks.svelte.ts";
   import { formatStamp } from "../../lib/time/stamp.svelte.ts";
+  import { STAMP_SECONDS } from "../../lib/time/stamp.ts";
+  import { getLocale } from "../../paraglide/runtime.js";
 
   $effect(() => {
     tasksStore.startPolling(30_000);
@@ -68,7 +82,7 @@
 
   function fmtTime(iso: string | null): string {
     if (!iso) return "—";
-    return formatStamp(iso);
+    return formatStamp(iso, STAMP_SECONDS);
   }
 
   // One merged stream, oldest first: transitions and actions are both
@@ -98,6 +112,35 @@
   // Headline vote badge: filed confirmations over the registered roster.
   const confirmedCount = $derived(
     [...confirmationByConfirmer.values()].filter((c) => c.filed).length,
+  );
+
+  // The detail pane's own numbers: both come from stamps the ledger already
+  // carries, so nothing is captured twice and nothing ticks on its own.
+  // A task that never started has no span, and stamps that will not parse
+  // read as unknown rather than open; only a start without an end is still
+  // on its wall clock.
+  const duration = $derived(
+    durationState(
+      tasksStore.detail?.started_at ?? null,
+      tasksStore.detail?.ended_at ?? null,
+    ),
+  );
+  const durationText = $derived(
+    duration.kind === "span"
+      ? formatDuration(duration.ms)
+      : duration.kind === "open"
+        ? manage_tasks_duration_open()
+        : "—",
+  );
+  const usage = $derived(tasksStore.detail?.usage ?? null);
+
+  // Confirmer identity pairs by roster index: entry N goes with
+  // confirmer_roles[N], whatever order the mount loop reaches them.
+  const confirmerRoles = $derived(
+    confirmerRoleMap(
+      tasksStore.detail?.confirmers ?? [],
+      tasksStore.detail?.confirmer_roles,
+    ),
   );
 
   const pages = $derived(Math.ceil(tasksStore.total / TASKS_PAGE_SIZE));
@@ -296,7 +339,7 @@
               </div>
               <div class="flex gap-3 text-xs opacity-60 mt-1 flex-wrap">
                 <span>{task.status}</span>
-                <span>{task.assignee ?? "—"}</span>
+                <span>{roleLabel(task.assignee, task.assignee_role)}</span>
                 <span>{fmtTime(task.created_at)}</span>
                 <span
                   >{manage_tasks_col_updated()}:
@@ -392,7 +435,10 @@
               <div class="text-xs opacity-60 flex gap-4 flex-wrap">
                 <span
                   >{manage_tasks_col_assignee()}:
-                  {tasksStore.detail.assignee ?? "—"}</span
+                  {roleLabel(
+                    tasksStore.detail.assignee,
+                    tasksStore.detail.assignee_role,
+                  )}</span
                 >
                 <span
                   >{manage_tasks_col_created()}:
@@ -401,7 +447,10 @@
                 {#if tasksStore.detail.creator}
                   <span
                     >{manage_tasks_creator()}:
-                    {tasksStore.detail.creator}</span
+                    {roleLabel(
+                      tasksStore.detail.creator,
+                      tasksStore.detail.creator_role,
+                    )}</span
                   >
                 {/if}
                 {#if tasksStore.detail.started_at}
@@ -454,6 +503,37 @@
                 {/if}
               </div>
 
+              <!-- duration and token spend: numbers plus their scope -->
+              <div class="grid gap-2 sm:grid-cols-2">
+                <div>
+                  <p class="text-xs opacity-60">{manage_tasks_duration()}</p>
+                  <p class="text-sm">
+                    {durationText}
+                  </p>
+                  <p class="text-xs opacity-60">
+                    {manage_tasks_duration_note()}
+                  </p>
+                </div>
+                <div>
+                  <p class="text-xs opacity-60">{manage_tasks_usage()}</p>
+                  <p class="text-sm">
+                    {usage === null
+                      ? manage_tasks_usage_none()
+                      : formatTokens(usage.total_tokens, getLocale())}
+                  </p>
+                  {#if usage !== null}
+                    <p class="text-xs opacity-60">
+                      {manage_tasks_usage_note()}
+                    </p>
+                  {/if}
+                  {#if usage !== null && usage.partial}
+                    <p class="text-xs text-warning-500 dark:text-warning-400">
+                      {manage_tasks_usage_partial()}
+                    </p>
+                  {/if}
+                </div>
+              </div>
+
               <!-- confirmers: the close gate at a glance -->
               <div>
                 <h3 class="text-sm font-medium mb-1">
@@ -479,7 +559,12 @@
                                     : confirmer)}
                             >
                               <span class="text-success-500">✓</span>
-                              <span class="font-mono text-xs">{confirmer}</span>
+                              <span class="font-mono text-xs"
+                                >{roleLabel(
+                                  confirmer,
+                                  confirmerRoles.get(confirmer),
+                                )}
+                              </span>
                               <span class="text-xs opacity-60"
                                 >{manage_tasks_confirm_done()}</span
                               >
@@ -491,7 +576,12 @@
                             </button>
                           {:else}
                             <span class="opacity-40">○</span>
-                            <span class="font-mono text-xs">{confirmer}</span>
+                            <span class="font-mono text-xs"
+                              >{roleLabel(
+                                confirmer,
+                                confirmerRoles.get(confirmer),
+                              )}
+                            </span>
                             <span class="text-xs opacity-60"
                               >{manage_tasks_confirm_pending()}</span
                             >
@@ -544,7 +634,7 @@
                       {/if}
                       {#if event.actor}
                         <span class="opacity-60 font-mono"
-                          >{event.actor_role ?? event.actor}</span
+                          >{roleLabel(event.actor, event.actor_role)}</span
                         >
                       {/if}
                       {#if pv.detail}

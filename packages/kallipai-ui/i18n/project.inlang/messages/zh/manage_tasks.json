@@ -1,7 +1,7 @@
 {
   "$schema": "https://inlang.com/schema/message-format",
-  "manage_tasks_title": "KallipAI · 任务",
-  "manage_tasks_heading": "任务",
+  "manage_tasks_title": "KallipAI · 任务面板",
+  "manage_tasks_heading": "任务面板",
   "manage_tasks_empty": "暂无任务。",
   "manage_tasks_load_failed": "无法加载任务台账。",
   "manage_tasks_col_assignee": "负责人",
@@ -35,5 +35,12 @@
   "manage_tasks_export_json": "导出 JSON",
   "manage_tasks_export_all": "导出全部",
   "manage_tasks_downloads_offline": "下载仅限离线：在线经隧道请使用 CLI（kallip task export/archive）或离线直连。",
-  "manage_tasks_download_failed": "下载失败。"
+  "manage_tasks_download_failed": "下载失败。",
+  "manage_tasks_duration": "耗时",
+  "manage_tasks_duration_note": "首次开始到最后一次关闭，含暂停。",
+  "manage_tasks_duration_open": "尚未结束",
+  "manage_tasks_usage": "Token 用量",
+  "manage_tasks_usage_note": "按任务已结束的活动窗口累加。仍在进行的窗口不计入；同一窗口内 agent 在别处消耗的 token 计入其中。",
+  "manage_tasks_usage_none": "本任务没有用量记录。",
+  "manage_tasks_usage_partial": "部分窗口的读数不完整。"
 }

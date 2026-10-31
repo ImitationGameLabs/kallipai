@@ -101,16 +101,21 @@ impl Event for UnreadFrame {
 
 /// A task-ledger mutation worth waking the task's people for: published by
 /// the task routes after every write verb; consumed by the task watcher,
-/// which drops a wake hint into the prompt queue of every agent whose role
-/// appears in the task's people set (assignee, confirmers, creator). Live-only
-/// economics: a lost frame costs one missed hint, and the next verb on the
-/// task re-announces the current state.
+/// which drops a wake hint into the prompt queue of every agent the people
+/// set names: an entry is an identity, and an entry that matches no agent id
+/// but equals a role name names that role's holder. The change's own agent
+/// is never woken, whether an entry names it by id or by its role name.
+/// Live-only economics: a lost frame costs one missed hint, and the next
+/// verb on the task re-announces the current state.
 #[derive(Clone, Debug)]
 pub(crate) struct TaskChanged {
     pub(crate) task_id: i64,
     pub(crate) title: String,
     pub(crate) status: String,
     pub(crate) verb: String,
+    /// The identity that caused the change: an agent's id, or the operator
+    /// literal. Every event has one, and the watcher never wakes it.
+    pub(crate) actor: String,
     pub(crate) creator: Option<String>,
     pub(crate) assignee: Option<String>,
     pub(crate) confirmers: Vec<String>,

@@ -1,7 +1,7 @@
 {
   "$schema": "https://inlang.com/schema/message-format",
-  "manage_tasks_title": "KallipAI · tasks",
-  "manage_tasks_heading": "Tasks",
+  "manage_tasks_title": "KallipAI · tasks panel",
+  "manage_tasks_heading": "Tasks panel",
   "manage_tasks_empty": "No tasks.",
   "manage_tasks_load_failed": "Could not load the task ledger.",
   "manage_tasks_col_assignee": "Assignee",
@@ -35,5 +35,12 @@
   "manage_tasks_export_json": "Export JSON",
   "manage_tasks_export_all": "Export all",
   "manage_tasks_downloads_offline": "Downloads are offline-only: over the relay tunnel use the CLI (kallip task export/archive) or a direct connection.",
-  "manage_tasks_download_failed": "Download failed."
+  "manage_tasks_download_failed": "Download failed.",
+  "manage_tasks_duration": "Duration",
+  "manage_tasks_duration_note": "First start to the last close, pause included.",
+  "manage_tasks_duration_open": "Not ended yet",
+  "manage_tasks_usage": "Token usage",
+  "manage_tasks_usage_note": "Summed over the task's closed windows. A window still open is not counted, and tokens an agent spent elsewhere during a window are included.",
+  "manage_tasks_usage_none": "No usage recorded for this task.",
+  "manage_tasks_usage_partial": "Some windows could not be fully read."
 }

@@ -95,6 +95,7 @@ async fn tagma_topics_roundtrip_preserve_payloads() {
         title: "ledger walk".into(),
         status: "in_progress".into(),
         verb: "start".into(),
+        actor: "root".into(),
         creator: Some("root".into()),
         assignee: Some("scout".into()),
         confirmers: vec!["scout".into()],

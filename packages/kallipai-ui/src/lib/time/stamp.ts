@@ -12,6 +12,18 @@ export const ROW_TIME: Intl.DateTimeFormatOptions = {
   minute: "2-digit",
 };
 
+/** The full stamp shape: date plus time to the second. Ledger views that
+ * put several events of one day in a column read this, so a row's position
+ * in the sequence is legible instead of repeating the same date. */
+export const STAMP_SECONDS: Intl.DateTimeFormatOptions = {
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  second: "2-digit",
+};
+
 export function formatStampInZone(
   value: string | number,
   opts: Intl.DateTimeFormatOptions | undefined,

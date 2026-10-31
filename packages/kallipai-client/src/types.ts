@@ -663,6 +663,16 @@ export interface TaskExport {
   readonly creator: string | null;
   readonly assignee: string | null;
   readonly confirmers: readonly string[];
+  /** The creator's role name, filled by the tagma from its registry; null
+   * when the creator is the operator, a deregistered id, or absent. */
+  readonly creator_role: string | null;
+  /** The assignee's role name, same fill and same degrade as
+   * `creator_role`; null when the free-text assignee names no
+   * registered agent. */
+  readonly assignee_role: string | null;
+  /** Role names aligned with `confirmers` by index; null where an entry
+   * names something the registry cannot resolve. */
+  readonly confirmer_roles: readonly (string | null)[];
   readonly created_at: string | null;
   readonly updated_at: string | null;
   readonly started_at: string | null;
@@ -676,7 +686,60 @@ export interface TaskExport {
   /** The closed archive: content address plus the frozen entry count. */
   readonly archive_hash: string | null;
   readonly archive_entries: number | null;
+  /** Token accounting over the task's active windows, derived at read time;
+   * absent on tasks that predate the feature. */
+  readonly usage?: TaskUsageExport;
   readonly events: readonly TaskEventExport[];
+}
+
+/** Why one agent is missing from a task's usage sum. */
+export type UsageGapReason = "missing_baseline" | "missing_terminal";
+
+/** One agent's counters over a window, or summed over every window. */
+export interface UsageAgentExport {
+  readonly agent_id: string;
+  /** The agent's role name at read time; null for an id that no longer
+   * resolves. */
+  readonly agent_role: string | null;
+  /** prompt + completion: the headline number. */
+  readonly consumed_tokens: number;
+  readonly prompt_tokens: number;
+  readonly completion_tokens: number;
+  readonly cache_read_tokens: number;
+  readonly cache_write_tokens: number;
+}
+
+/** One summed window: `[from_event, to_event)`. */
+export interface UsageSegmentExport {
+  readonly from_event: string;
+  readonly to_event: string;
+  readonly from_at: string;
+  readonly to_at: string;
+  readonly total_tokens: number;
+  readonly agents: readonly UsageAgentExport[];
+}
+
+/** An agent left out of a sum, and why. `segment` is a 1-based window
+ * ordinal, not an index into `segments`. */
+export interface UsageGapExport {
+  readonly agent_id: string;
+  readonly segment: number;
+  readonly reason: UsageGapReason;
+}
+
+/** Token accounting for one task, summed over its active windows. The
+ * total covers closed windows only: a window still open is reported by
+ * `open`, and work an agent did elsewhere during a window still lands in
+ * these numbers, so the total is not a per-task invoice. */
+export interface TaskUsageExport {
+  readonly total_tokens: number;
+  readonly open: boolean;
+  readonly open_since?: string;
+  readonly segments: readonly UsageSegmentExport[];
+  readonly agents: readonly UsageAgentExport[];
+  readonly gaps: readonly UsageGapExport[];
+  readonly partial: boolean;
+  readonly non_monotonic: readonly string[];
 }
 
 /** One lightweight list row (`GET /tasks` page item): a task without
@@ -689,6 +752,8 @@ export interface TaskRow {
   readonly creator: string | null;
   readonly assignee: string | null;
   readonly confirmers: readonly string[];
+  /** The assignee's role name, filled like the detail export's own. */
+  readonly assignee_role: string | null;
   readonly created_at: string | null;
   readonly updated_at: string | null;
   readonly started_at: string | null;

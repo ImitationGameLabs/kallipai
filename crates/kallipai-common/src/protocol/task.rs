@@ -242,6 +242,18 @@ pub struct TaskExport {
     pub creator: Option<String>,
     pub assignee: Option<String>,
     pub confirmers: Vec<String>,
+    /// The creator's role name, filled by the route from the same registry
+    /// snapshot as `actor_role`; null for the operator literal, a
+    /// deregistered id, or a null creator.
+    pub creator_role: Option<String>,
+    /// The assignee's role name, same policy and same snapshot as
+    /// `creator_role`; null when the task is unassigned or the id does
+    /// not resolve.
+    pub assignee_role: Option<String>,
+    /// Role names aligned with `confirmers` by index; null where an entry
+    /// names something the registry cannot resolve (a historical
+    /// confirmer-name record, a deregistered agent).
+    pub confirmer_roles: Vec<Option<String>>,
     pub created_at: Option<String>,
     pub updated_at: Option<String>,
     pub started_at: Option<String>,
@@ -374,6 +386,11 @@ pub struct TaskRow {
     pub creator: Option<String>,
     pub assignee: Option<String>,
     pub confirmers: Vec<String>,
+    /// The assignee's role name, filled by the route from the same
+    /// registry snapshot; null when the free-text assignee names no
+    /// registered agent (a role name typed on the command line, the
+    /// literal `operator`, a deregistered id).
+    pub assignee_role: Option<String>,
     pub created_at: Option<String>,
     pub updated_at: Option<String>,
     pub started_at: Option<String>,

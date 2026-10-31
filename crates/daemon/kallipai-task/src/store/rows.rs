@@ -84,6 +84,11 @@ pub(super) fn to_export(task: Task, events: Vec<TaskEvent>) -> Result<TaskExport
         creator: task.creator.clone(),
         assignee: task.assignee.clone(),
         confirmers,
+        // The role fields are read-time derivations: the store leaves them
+        // empty, the tagma route fills them from one registry snapshot.
+        creator_role: None,
+        assignee_role: None,
+        confirmer_roles: Vec::new(),
         created_at: iso(Some(task.created_at))?,
         updated_at: iso(Some(task.updated_at))?,
         started_at: iso(task.started_at)?,
@@ -116,6 +121,7 @@ pub(super) fn to_row(task: Task, has_reports: bool) -> Result<TaskRow, Error> {
         creator: task.creator.clone(),
         assignee: task.assignee.clone(),
         confirmers,
+        assignee_role: None,
         created_at: iso(Some(task.created_at))?,
         updated_at: iso(Some(task.updated_at))?,
         started_at: iso(task.started_at)?,

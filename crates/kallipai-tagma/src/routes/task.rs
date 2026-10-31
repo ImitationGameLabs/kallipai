@@ -65,29 +65,42 @@ async fn role_snapshot(state: &SharedState) -> std::collections::HashMap<String,
         .collect()
 }
 
-/// Fill `actor_role` on every event, and `agent_role` on every usage row:
-/// the role for a registered agent id, `None` for anything else (historical
-/// confirmer-name actors, the literal `operator`, deregistered ids, null
-/// actors, an agent that worked the task and has since been removed).
-/// Read and write responses share this one mapping, so the wire type has a
-/// single fill policy.
+/// The one identity rule: a raw value that names a registered agent
+/// resolves to that agent's role, and everything else (a historical
+/// confirmer-name record, the literal `operator`, a role name typed into
+/// the free-text assignee, a deregistered id, nothing at all) resolves to
+/// `None`. Every wire field that carries a role calls this, so a new
+/// identity field calls it instead of copying the lookup.
+fn role_of(roles: &std::collections::HashMap<String, String>, raw: Option<&str>) -> Option<String> {
+    raw.and_then(|raw| roles.get(raw)).cloned()
+}
+
+/// Fill `actor_role` on every event, `agent_role` on every usage row, and
+/// `creator_role` / `assignee_role` / `confirmer_roles` on the task, all
+/// through `role_of`. Read and write responses share this one mapping, so
+/// the identity fields it covers (event actors, usage agents, creator,
+/// assignee, confirmers) cannot disagree with each other in a pane.
 fn inject_wire_roles(
     mut export: kallipai_task::TaskExport,
     roles: &std::collections::HashMap<String, String>,
 ) -> kallipai_task::TaskExport {
     for event in &mut export.events {
-        event.actor_role = event
-            .actor
-            .as_deref()
-            .and_then(|actor| roles.get(actor))
-            .cloned();
+        event.actor_role = role_of(roles, event.actor.as_deref());
     }
+    // The task's own identity fields follow the event policy exactly.
+    export.creator_role = role_of(roles, export.creator.as_deref());
+    export.assignee_role = role_of(roles, export.assignee.as_deref());
+    export.confirmer_roles = export
+        .confirmers
+        .iter()
+        .map(|confirmer| role_of(roles, Some(confirmer.as_str())))
+        .collect();
     if let Some(usage) = export.usage.as_mut() {
         // One fill for every agent row in the usage face: the top-level
         // sums and the per-window rows are the same wire field.
         let fill = |agents: &mut Vec<kallipai_common::protocol::UsageAgentExport>| {
             for agent in agents {
-                agent.agent_role = roles.get(&agent.agent_id).cloned();
+                agent.agent_role = role_of(roles, Some(agent.agent_id.as_str()));
             }
         };
         fill(&mut usage.agents);
@@ -96,6 +109,17 @@ fn inject_wire_roles(
         }
     }
     export
+}
+
+/// The list face carries the same assignee role as the detail export:
+/// the row's assignee shares the free-text rule, so a role name reads
+/// back as itself and an id reads back as its role.
+fn inject_row_roles(
+    mut row: kallipai_common::protocol::TaskRow,
+    roles: &std::collections::HashMap<String, String>,
+) -> kallipai_common::protocol::TaskRow {
+    row.assignee_role = role_of(roles, row.assignee.as_deref());
+    row
 }
 
 /// The create verb's confirmer resolver, from the same snapshot shape:
@@ -154,13 +178,14 @@ type TaskResult<T> = Result<Json<T>, ApiError>;
 /// re-announces state.
 /// The generation is level-triggered: concurrent writers can coalesce
 /// onto one step, so a wake reads "state moved", not "exactly one write".
-fn notify(state: &SharedState, verb: &str, export: &kallipai_task::TaskExport) {
+fn notify(state: &SharedState, verb: &str, actor: &str, export: &kallipai_task::TaskExport) {
     state.invalidate();
     if let Err(err) = state.bus.publish(TaskChanged {
         task_id: export.id,
         title: export.title.clone(),
         status: export.status.to_string(),
         verb: verb.to_string(),
+        actor: actor.to_string(),
         creator: export.creator.clone(),
         assignee: export.assignee.clone(),
         confirmers: export.confirmers.clone(),
@@ -182,7 +207,7 @@ async fn create(
     let id = task.id;
     let export = store(&state)?.export(id).await.map_err(api_error)?;
     let export = inject_wire_roles(export, &snapshot);
-    notify(&state, "create", &export);
+    notify(&state, "create", &actor, &export);
     Ok(Json(export))
 }
 
@@ -201,7 +226,7 @@ async fn start(
         .map_err(api_error)?;
     let export = store(&state)?.export(id).await.map_err(api_error)?;
     let export = inject_wire_roles(export, &snapshot);
-    notify(&state, "start", &export);
+    notify(&state, "start", &actor, &export);
     Ok(Json(export))
 }
 
@@ -219,7 +244,13 @@ async fn list(
         limit: query.limit,
         offset: query.offset,
     };
-    let page = store(&state)?.list_page(filter).await.map_err(api_error)?;
+    let snapshot = role_snapshot(&state).await;
+    let mut page = store(&state)?.list_page(filter).await.map_err(api_error)?;
+    page.rows = page
+        .rows
+        .into_iter()
+        .map(|row| inject_row_roles(row, &snapshot))
+        .collect();
     Ok(Json(page))
 }
 
@@ -267,7 +298,7 @@ async fn confirm(
         .map_err(api_error)?;
     let export = store(&state)?.export(id).await.map_err(api_error)?;
     let export = inject_wire_roles(export, &snapshot);
-    notify(&state, "confirm", &export);
+    notify(&state, "confirm", &actor, &export);
     Ok(Json(export))
 }
 
@@ -281,7 +312,7 @@ async fn review(
     store(&state)?.review(id, &actor).await.map_err(api_error)?;
     let export = store(&state)?.export(id).await.map_err(api_error)?;
     let export = inject_wire_roles(export, &snapshot);
-    notify(&state, "review", &export);
+    notify(&state, "review", &actor, &export);
     Ok(Json(export))
 }
 
@@ -299,7 +330,7 @@ async fn pause(
         .map_err(api_error)?;
     let export = store(&state)?.export(id).await.map_err(api_error)?;
     let export = inject_wire_roles(export, &snapshot);
-    notify(&state, "pause", &export);
+    notify(&state, "pause", &actor, &export);
     Ok(Json(export))
 }
 
@@ -318,7 +349,7 @@ async fn resume(
         .map_err(api_error)?;
     let export = store(&state)?.export(id).await.map_err(api_error)?;
     let export = inject_wire_roles(export, &snapshot);
-    notify(&state, "resume", &export);
+    notify(&state, "resume", &actor, &export);
     Ok(Json(export))
 }
 
@@ -336,7 +367,7 @@ async fn note(
         .map_err(api_error)?;
     let export = store(&state)?.export(id).await.map_err(api_error)?;
     let export = inject_wire_roles(export, &snapshot);
-    notify(&state, "note", &export);
+    notify(&state, "note", &actor, &export);
     Ok(Json(export))
 }
 
@@ -372,7 +403,7 @@ async fn close(
     };
     let export = store(&state)?.export(id).await.map_err(api_error)?;
     let export = inject_wire_roles(export, &snapshot);
-    notify(&state, "close", &export);
+    notify(&state, "close", &actor, &export);
     Ok(Json(export))
 }
 
@@ -391,7 +422,7 @@ async fn reopen(
         .map_err(api_error)?;
     let export = store(&state)?.export(id).await.map_err(api_error)?;
     let export = inject_wire_roles(export, &snapshot);
-    notify(&state, "reopen", &export);
+    notify(&state, "reopen", &actor, &export);
     Ok(Json(export))
 }
 
@@ -409,7 +440,7 @@ async fn archive(
         .map_err(api_error)?;
     let export = store(&state)?.export(id).await.map_err(api_error)?;
     let export = inject_wire_roles(export, &snapshot);
-    notify(&state, "archive", &export);
+    notify(&state, "archive", &actor, &export);
     Ok(Json(export))
 }
 /// Serves the closed-task archive blob: canonical tar bytes, verbatim
@@ -608,6 +639,60 @@ mod tests {
         assert_eq!(got, vec![Some("reviewer-c"), None, None, None, None]);
     }
 
+    /// The task's own identity fields follow that same policy: the creator
+    /// and each confirmer resolve to a role when the registry knows them,
+    /// and stay null otherwise. The role vector keeps the roster's order
+    /// and length, so the page can pair them by index.
+    #[test]
+    fn creator_and_confirmer_roles_follow_the_same_policy() {
+        let roles =
+            std::collections::HashMap::from([("agent-1".to_string(), "reviewer-c".to_string())]);
+        let mut export = export_with_events(&[]);
+        export.creator = Some("agent-1".to_string());
+        export.assignee = Some("agent-1".to_string());
+        export.confirmers = vec![
+            "agent-1".to_string(),
+            "reviewer-c".to_string(),
+            "agent-gone".to_string(),
+        ];
+        let export = inject_wire_roles(export, &roles);
+        assert_eq!(export.creator_role.as_deref(), Some("reviewer-c"));
+        assert_eq!(export.assignee_role.as_deref(), Some("reviewer-c"));
+        assert_eq!(
+            export
+                .confirmer_roles
+                .iter()
+                .map(|r| r.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("reviewer-c"), None, None]
+        );
+    }
+
+    /// A null creator resolves to a null role rather than a fabricated one.
+    #[test]
+    fn a_null_creator_yields_a_null_role() {
+        let roles =
+            std::collections::HashMap::from([("agent-1".to_string(), "reviewer-c".to_string())]);
+        let export = inject_wire_roles(export_with_events(&[]), &roles);
+        assert_eq!(export.creator_role, None);
+        assert!(export.confirmer_roles.is_empty());
+        assert_eq!(export.assignee_role, None);
+    }
+
+    /// The assignee is free text: a role name typed on the command line
+    /// arrives as the role name itself, so it gets no role of its own and
+    /// the wire value stands.
+    #[test]
+    fn an_assignee_that_names_no_agent_gets_no_role() {
+        let roles =
+            std::collections::HashMap::from([("agent-1".to_string(), "reviewer-c".to_string())]);
+        let mut export = export_with_events(&[]);
+        export.assignee = Some("reviewer-c".to_string());
+        let export = inject_wire_roles(export, &roles);
+        assert_eq!(export.assignee.as_deref(), Some("reviewer-c"));
+        assert_eq!(export.assignee_role, None);
+    }
+
     /// Test fixture: an export whose events differ only in actor.
     fn export_with_events(actors: &[Option<&str>]) -> kallipai_task::TaskExport {
         kallipai_task::TaskExport {
@@ -617,6 +702,9 @@ mod tests {
             creator: None,
             assignee: None,
             confirmers: vec![],
+            creator_role: None,
+            assignee_role: None,
+            confirmer_roles: vec![],
             created_at: None,
             updated_at: None,
             started_at: None,
@@ -644,6 +732,44 @@ mod tests {
                     created_at: None,
                 })
                 .collect(),
+        }
+    }
+
+    /// The list face fills its own assignee role; `inject_row_roles` is the
+    /// only place a `TaskRow` gets one, so it carries its own assertions.
+    #[test]
+    fn the_list_row_fills_its_assignee_role() {
+        let roles =
+            std::collections::HashMap::from([("agent-1".to_string(), "reviewer-c".to_string())]);
+        let by_id = inject_row_roles(row_with_assignee(Some("agent-1")), &roles);
+        assert_eq!(by_id.assignee_role.as_deref(), Some("reviewer-c"));
+        let by_name = inject_row_roles(row_with_assignee(Some("reviewer-c")), &roles);
+        assert_eq!(by_name.assignee.as_deref(), Some("reviewer-c"));
+        assert_eq!(by_name.assignee_role, None);
+    }
+
+    /// Test fixture: a list row whose only interesting field is the assignee.
+    fn row_with_assignee(assignee: Option<&str>) -> kallipai_common::protocol::TaskRow {
+        kallipai_common::protocol::TaskRow {
+            id: 1,
+            title: "t".into(),
+            status: "queued".into(),
+            creator: None,
+            assignee: assignee.map(|s| s.to_string()),
+            confirmers: vec![],
+            assignee_role: None,
+            created_at: None,
+            updated_at: None,
+            started_at: None,
+            ended_at: None,
+            archived: false,
+            archived_at: None,
+            closed_reason: None,
+            close_summary: None,
+            association: None,
+            archive_hash: None,
+            archive_entries: None,
+            has_reports: false,
         }
     }
 
