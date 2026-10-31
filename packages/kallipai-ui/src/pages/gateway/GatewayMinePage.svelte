@@ -46,13 +46,11 @@
     saveStoppedBanner,
   } from "../../lib/manage/gateway/saveSet.ts";
   import {
-    membershipWrites,
     rowBodyOf,
-    type DraftRow,
     type SetSaveDraft,
   } from "../../lib/manage/gateway/setDraft.ts";
+  import { createSetDraft } from "../../lib/gateway/createSet.ts";
   import {
-    pickedRows,
     setDetailFor,
     type UserSetDetail,
   } from "../../lib/gateway/userSetDraft.ts";
@@ -333,45 +331,22 @@
       let target: UserSetDetail | null = editing;
       let draft = result;
       if (target === null) {
-        // A create registers an empty set, then walks the same sequence:
-        // the member PUTs are what put rows in it. An empty set is a legal
-        // create, so the picks' rows are resolved only when there are
-        // picks: a pick names a row of the collection the set lands in,
-        // and rows never read are not rows known to be absent. Read once,
-        // then refuse before the write; the page alert carries the read's
-        // reason.
-        let picked: DraftRow[] = [];
-        if (result.members.length > 0) {
-          let source = collectionProfiles(createCollection);
-          if (source === null) {
-            await userGatewayStore.refreshAll();
-            source = collectionProfiles(createCollection);
-          }
-          if (source === null) {
-            setDialogError = userGatewayStore.error;
-            return;
-          }
-          picked = pickedRows(result.members, source);
-        }
-        const created = await userGatewayStore.addSet(createCollection, {
-          name: result.name,
-          description: result.description,
+        // The create's pre-flight owns the picks: an empty draft needs no
+        // rows, and a draft whose rows stay unread after one read is
+        // refused there, before the set exists. The page alert carries the
+        // refusal's reason, as it carries a failed write's.
+        const start = await createSetDraft(result, {
+          rows: () => collectionProfiles(createCollection),
+          refresh: () => userGatewayStore.refreshAll(),
+          addSet: (name, description) =>
+            userGatewayStore.addSet(createCollection, { name, description }),
         });
-        if (created === undefined) {
+        if (start === undefined) {
           setDialogError = userGatewayStore.error;
           return;
         }
-        target = {
-          collection_name: created.collection_name,
-          name: created.name,
-          description: created.description,
-          profiles: [],
-        };
-        draft = {
-          ...result,
-          name: created.name,
-          ...membershipWrites([], picked, {}, created.name),
-        };
+        target = start.target;
+        draft = start.draft;
       }
       const anchor = target;
       const outcome = await saveSetDraft(anchor, draft, {

@@ -285,33 +285,33 @@ Deno.test(
       body.includes("settle: () => userGatewayStore.refreshAll(),"),
       "the sequence refreshes the read side through its settle port",
     );
-    // A create whose picks need rows reads once before it writes (the same
-    // guard onEditSet holds); once the sequence runs, the only refresh is
-    // its settle port. Each of the three literals below is checked for
-    // presence before any index is compared: indexOf answers -1 for a
-    // missing literal, and -1 is the smallest index.
-    const guard = "await userGatewayStore.refreshAll()";
-    const create = "await userGatewayStore.addSet(";
-    const picks = "if (result.members.length > 0) {";
-    assert(
-      body.split("refreshAll").length - 1 === 2 &&
-        body.split(guard).length - 1 === 1 &&
-        body.split(create).length - 1 === 1,
-      "one guard call and the settle port carry every refresh",
-    );
-    // The guard sits inside the picks condition: a read hoisted out of it
-    // still precedes the create, so the nesting is part of the pin.
-    assert(
-      body.includes(picks) &&
-        body.indexOf(picks) < body.indexOf(guard) &&
-        body.indexOf(guard) < body.indexOf(create),
-      "the guard runs only for picks, and reads before the set exists",
-    );
     // The order of the two port declarations is only a proxy: what runs
     // first at save time is pinned by saveSet_test's port log.
     assert(
       body.indexOf("settle:") < body.indexOf("reread:"),
       "the refresh lands before the re-read",
+    );
+  },
+);
+
+Deno.test(
+  "a create reads and re-reads the collection it lands in",
+  { permissions: { read: [PAGE] } },
+  () => {
+    const body = functionBody(source(PAGE), "onSaveSet");
+    // A pick names a row of the collection the set lands in. Rows read from
+    // any other collection resolve the picks against a foreign pool, and the
+    // save then writes members that collection does not hold.
+    assert(
+      body.includes("rows: () => collectionProfiles(createCollection),"),
+      "the rows a create's picks resolve against come from the collection the set lands in",
+    );
+    // Rows unread refuse the create, so the read side has to be read again
+    // before the refusal stands: a port that answers without reading turns
+    // every create over a cold cache into a refusal.
+    assert(
+      body.includes("refresh: () => userGatewayStore.refreshAll(),"),
+      "the read side is re-read when the picks' rows are not known",
     );
   },
 );
