@@ -33,7 +33,7 @@ let
 
   # Shell completions for the two operator CLIs. kallipctl takes the
   # dynamic hooks (COMPLETE=$shell, clap_complete CompleteEnv): its slug
-  # and --service candidates are runtime daemon queries, and the AOT
+  # candidates are runtime daemon queries, and the AOT
   # scripts the hidden generate verb emits bake the word lists at build
   # time, so the dynamic completer never runs there. kallipai-admin has
   # no dynamic candidates and keeps the AOT form. The three shells with

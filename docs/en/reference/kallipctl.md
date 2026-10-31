@@ -8,16 +8,12 @@ order: 75
 socket: spawn, adopt, start/stop/restart, persisted env, logs, and blob-store
 maintenance. See [deployment](../deployment/nixos/minimal.md) for the daemon
 setup; the socket's `0600` mode is the auth.
-For a polis service's own log file, `logs --service <name>` tails the
-rolling files under `/var/log/kallipai/<service>` through the daemon:
-the daemon reads the service user's files for the caller, so no sudo
-is needed. Bare `kallipctl logs` lists the services that have logs.
 
 ## Shell completions
 
 Completion is dynamic: the hooks query the daemon live as you type
-(instance slugs, service names) and degrade to no candidates when the
-daemon is unreachable, so typing is never blocked:
+(instance slugs) and degrade to no candidates when the daemon is unreachable,
+so typing is never blocked:
 
 ```bash
 echo "source <(COMPLETE=bash kallipctl)" >> ~/.bashrc

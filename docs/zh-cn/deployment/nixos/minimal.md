@@ -154,6 +154,8 @@ systemctl status kallipai-daemon kallipai-archeion kallipai-lesche \
   kallipai-keryx kallipai-files kallipai-instances kallipai-model-gateway
 ```
 
+写日志文件的服务会在 `/var/log/kallipai/<service>/` 下保留按天滚动的 `<service>.<date>.log`（保留七个）。该目录权限为 `0750`，属主是服务用户，组是 `services.kallipai.daemon.group`（默认 `kallipai-polis`）：以该组成员身份读取，或使用 `sudo`。
+
 然后确认三个域名都有响应：`api.kallipai.lan` 承载平台，`app.kallipai.lan` 承载 web 应用，`model-gw.kallipai.lan` 承载模型网关。部署健康的标志：应用能加载，能注册登录，能创建第一个 agent。网关提供健康端点：
 
 ```sh

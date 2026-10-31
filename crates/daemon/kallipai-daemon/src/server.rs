@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use kallipai_daemon_common::wire::{
     ErrorCode, InstanceState, MAX_LINE_BYTES, OkPayload, PROTOCOL_VERSION, RequestBody, Response,
-    decode_request, encode_response, err, ok,
+    decode_request, encode_response, err, ok, request_version,
 };
 use tokio::io::{AsyncBufReadExt, AsyncReadExt as _, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
@@ -17,26 +17,11 @@ use crate::scan;
 #[derive(Debug, Clone)]
 pub struct Daemon {
     pub record_root: PathBuf,
-    /// Where the polis services' rolling logs live (the systemd
-    /// `LogsDirectory` tree). A field so tests can point it at a
-    /// tempdir; production constructs the default.
-    pub service_log_root: PathBuf,
 }
 
 impl Daemon {
     pub fn new(record_root: PathBuf) -> Self {
-        Self {
-            record_root,
-            service_log_root: PathBuf::from(crate::log::SERVICE_LOG_ROOT),
-        }
-    }
-
-    /// Test seam: point the service log root somewhere else (the
-    /// production constructor always carries the default).
-    #[cfg(test)]
-    pub fn with_service_log_root(mut self, root: PathBuf) -> Self {
-        self.service_log_root = root;
-        self
+        Self { record_root }
     }
 
     /// Serve requests on `listener` until the process is stopped.
@@ -94,15 +79,28 @@ impl Daemon {
         if n == 0 {
             return Ok(()); // connected and left: nothing to answer
         }
-        let response = match decode_request(line.trim_end()) {
-            Ok(request) if request.v == PROTOCOL_VERSION => {
-                self.dispatch(request.body, peer_uid).await
-            }
-            Ok(_) => err(ErrorCode::BadRequest, "unsupported protocol version"),
+        let line = line.trim_end();
+        // The version is read before the verb, so a peer built against
+        // another protocol version gets one answer naming both versions,
+        // even for a verb this build no longer has.
+        let response = match request_version(line) {
             Err(error) => err(
                 ErrorCode::BadRequest,
                 format!("unparseable request: {error}"),
             ),
+            Ok(version) if version != PROTOCOL_VERSION => err(
+                ErrorCode::BadRequest,
+                format!(
+                    "unsupported protocol version: request v{version}, daemon v{PROTOCOL_VERSION}"
+                ),
+            ),
+            Ok(_) => match decode_request(line) {
+                Ok(request) => self.dispatch(request.body, peer_uid).await,
+                Err(error) => err(
+                    ErrorCode::BadRequest,
+                    format!("unparseable request: {error}"),
+                ),
+            },
         };
         let mut out = encode_response(&response)?.into_bytes();
         out.push(b'\n');
@@ -401,62 +399,6 @@ impl Daemon {
                     Err(join_error) => err(ErrorCode::Internal, format!("log task: {join_error}")),
                 }
             }
-            RequestBody::ServiceLog {
-                service,
-                lines,
-                cursor,
-            } => {
-                // The same blocking profile as the instance Log verb:
-                // the service tail is file I/O over the systemd
-                // LogsDirectory tree. Admission is the socket gate
-                // (the List precedent): a peer that may talk to the
-                // daemon may read the host's service logs, the way
-                // docker-group members read any container's logs.
-                match tokio::task::spawn_blocking({
-                    let service_log_root = self.service_log_root.clone();
-                    move || {
-                        crate::log::service_tail(
-                            &service_log_root,
-                            &service,
-                            lines,
-                            cursor.as_ref(),
-                        )
-                    }
-                })
-                .await
-                {
-                    Ok(Ok(outcome)) => ok(OkPayload::Log {
-                        text: outcome.text,
-                        next_cursor: outcome.next_cursor,
-                    }),
-                    Ok(Err(error)) => {
-                        let code = kallipai_daemon_common::wire::ErrorCode::from(&error);
-                        err(code, error.to_string())
-                    }
-                    Err(join_error) => err(
-                        ErrorCode::Internal,
-                        format!("service log task: {join_error}"),
-                    ),
-                }
-            }
-            RequestBody::ServiceLogList => {
-                match tokio::task::spawn_blocking({
-                    let service_log_root = self.service_log_root.clone();
-                    move || crate::log::list_services(&service_log_root)
-                })
-                .await
-                {
-                    Ok(Ok(services)) => ok(OkPayload::ServiceLogList { services }),
-                    Ok(Err(error)) => {
-                        let code = kallipai_daemon_common::wire::ErrorCode::from(&error);
-                        err(code, error.to_string())
-                    }
-                    Err(join_error) => err(
-                        ErrorCode::Internal,
-                        format!("service log list task: {join_error}"),
-                    ),
-                }
-            }
         }
     }
 }
@@ -597,89 +539,76 @@ mod tests {
             other => panic!("expected err, got {other:?}"),
         }
 
-        // A deliberately bad line gets bad_request, not a dropped connection.
-        let response = client
-            .raw_line("{\"v\":1,\"type\":\"nonsense\"}")
-            .await
-            .expect("connection still answers");
-        match response.body {
-            kallipai_daemon_common::wire::ResponseBody::Err { code, .. } => {
-                assert_eq!(code, ErrorCode::BadRequest);
-            }
-            other => panic!("expected bad request, got {other:?}"),
-        }
-
         task.abort();
     }
 
     #[tokio::test]
-    async fn service_log_verbs_serve_list_tail_and_not_found() {
+    async fn refuses_a_foreign_protocol_version_naming_both() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let logs = tempfile::tempdir().expect("logs tempdir");
-        let files_svc = logs.path().join("kallipai-files");
-        std::fs::create_dir_all(&files_svc).expect("mkdir files");
-        std::fs::write(
-            files_svc.join("kallipai-files.2026-10-09.log"),
-            "first\nsecond\n",
-        )
-        .expect("write");
-        std::fs::create_dir_all(logs.path().join("kallipai-lesche")).expect("mkdir lesche");
-
         let socket = dir.path().join("control.sock");
         let listener = UnixListener::bind(&socket).expect("bind");
-
-        let daemon =
-            Daemon::new(dir.path().to_path_buf()).with_service_log_root(logs.path().to_path_buf());
+        let daemon = Daemon::new(dir.path().to_path_buf());
         let task = tokio::spawn(daemon.serve(listener));
-
         let client = DaemonClient::new(&socket);
-        let list = client
-            .call(RequestBody::ServiceLogList)
-            .await
-            .expect("list");
-        match list.body {
-            ResponseBody::Ok { payload } => {
-                let OkPayload::ServiceLogList { services } = payload else {
-                    panic!("expected service list payload");
-                };
-                assert_eq!(services, vec!["kallipai-files", "kallipai-lesche"]);
+
+        // Either side of this build's version gets one answer naming both,
+        // whatever verb the line carries.
+        let cases = [
+            (1, r#"{"v":1,"type":"list"}"#.to_string()),
+            (1, r#"{"v":1,"type":"service_log"}"#.to_string()),
+            (
+                PROTOCOL_VERSION + 1,
+                format!(r#"{{"v":{},"type":"list"}}"#, PROTOCOL_VERSION + 1),
+            ),
+        ];
+        for (version, line) in cases {
+            let response = client.raw_line(&line).await.expect("version gate answers");
+            match response.body {
+                ResponseBody::Err { code, message } => {
+                    assert_eq!(code, ErrorCode::BadRequest, "{line}");
+                    assert!(
+                        message.contains(&format!("request v{version}")),
+                        "{line}: {message}"
+                    );
+                    assert!(
+                        message.contains(&format!("daemon v{PROTOCOL_VERSION}")),
+                        "{message}"
+                    );
+                }
+                other => panic!("expected bad request for {line}, got {other:?}"),
             }
-            other => panic!("expected ok, got {other:?}"),
         }
 
-        let tail = client
-            .call(RequestBody::ServiceLog {
-                service: "kallipai-files".into(),
-                lines: Some(1),
-                cursor: None,
-            })
-            .await
-            .expect("tail");
-        match tail.body {
-            ResponseBody::Ok { payload } => {
-                let OkPayload::Log { text, next_cursor } = payload else {
-                    panic!("expected log payload");
-                };
-                assert_eq!(text, "second");
-                assert!(next_cursor.is_some());
+        // This build's own version: an unknown token is a parse failure that
+        // names the token, not a version complaint.
+        let line = format!(r#"{{"v":{PROTOCOL_VERSION},"type":"service_log"}}"#);
+        let response = client.raw_line(&line).await.expect("answers");
+        match response.body {
+            ResponseBody::Err { code, message } => {
+                assert_eq!(code, ErrorCode::BadRequest);
+                assert!(message.contains("unparseable request"), "{message}");
             }
-            other => panic!("expected ok, got {other:?}"),
+            other => panic!("expected bad request, got {other:?}"),
         }
 
-        for bad in ["nope", "../evil", "with/slash"] {
-            let miss = client
-                .call(RequestBody::ServiceLog {
-                    service: bad.into(),
-                    lines: None,
-                    cursor: None,
-                })
-                .await
-                .expect("answered");
-            match miss.body {
-                ResponseBody::Err { code, .. } => assert_eq!(code, ErrorCode::NotFound),
-                other => panic!("expected err, got {other:?}"),
+        // A malformed line reports its parse failure, not a version.
+        let response = client.raw_line("not json").await.expect("answers");
+        match response.body {
+            ResponseBody::Err { code, message } => {
+                assert_eq!(code, ErrorCode::BadRequest);
+                assert!(message.contains("unparseable request"), "{message}");
             }
+            other => panic!("expected bad request, got {other:?}"),
         }
+
+        // The current version and a known verb still dispatch.
+        let line = format!(r#"{{"v":{PROTOCOL_VERSION},"type":"list"}}"#);
+        let response = client.raw_line(&line).await.expect("list answers");
+        assert!(
+            matches!(response.body, ResponseBody::Ok { .. }),
+            "{:?}",
+            response.body
+        );
 
         task.abort();
     }

@@ -99,11 +99,6 @@ pub(crate) fn print(response: Response, started: bool) -> Result<()> {
                         print_log_text(&text);
                     }
                 }
-                // The service-log verbs print their own output (the
-                // tail loop and the listing shape), so this payload
-                // never routes here; the arm keeps the match
-                // exhaustive.
-                OkPayload::ServiceLogList { .. } => {}
             }
             Ok(())
         }

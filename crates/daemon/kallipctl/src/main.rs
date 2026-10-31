@@ -1,23 +1,25 @@
 //! kallipctl: operator-side management CLI for the kallipai local daemon.
 //!
-//! Five verbs over the daemon's UDS protocol; the socket's 0600 mode is the
-//! auth. Deliberately NOT part of the `kallip` command family: `kallip` is
-//! the in-instance runtime, `kallipctl` manages instances from outside
-//! (separate installation surfaces).
+//! Instance-management verbs over the daemon's UDS protocol; the socket's
+//! 0600 mode is the auth. Deliberately NOT part of the `kallip` command
+//! family: `kallip` is the in-instance runtime, `kallipctl` manages
+//! instances from outside (separate installation surfaces).
 
 mod blobs;
 mod cli;
 mod completion;
 mod logs;
 mod print;
+mod restart;
 #[cfg(test)]
 mod tests;
 mod token;
 
 use crate::blobs::{RewriteInvocation, run_blobs_rewrite};
-use crate::cli::{BlobsCommand, Cli, Command, ConfigCommand, EnvCommand, RewriteTarget};
-use crate::logs::{run_logs, run_restart, run_service_log_list, run_service_logs};
+use crate::cli::{BlobsCommand, Cli, Command, ConfigCommand, EnvCommand};
+use crate::logs::run_logs;
 use crate::print::print;
+use crate::restart::run_restart;
 use crate::token::run_operator_token;
 use anyhow::Context as _;
 use anyhow::Result;
@@ -63,17 +65,12 @@ async fn run() -> Result<()> {
         Command::Spawn { slug, .. }
         | Command::Start { slug, .. }
         | Command::Adopt { slug, .. }
-        | Command::Logs {
-            slug: Some(slug), ..
-        }
+        | Command::Logs { slug, .. }
         | Command::Stop { slug } => Some(slug),
         Command::Restart { slug } => Some(slug),
         Command::Blobs {
-            command: BlobsCommand::Rewrite { target, slug, .. },
-        } => match target {
-            RewriteTarget::Tasks | RewriteTarget::Attachments => slug.as_ref(),
-            RewriteTarget::Files => None,
-        },
+            command: BlobsCommand::Rewrite { slug, .. },
+        } => Some(slug),
         Command::Config {
             command:
                 ConfigCommand::Env {
@@ -139,28 +136,11 @@ async fn run() -> Result<()> {
         Command::Health { slug } => RequestBody::Health { slug },
         Command::Logs {
             slug,
-            service,
             lines,
             file,
             follow,
-            level,
         } => {
-            // Both sources ride the daemon wire: an instance slug
-            // reads that instance's log directory, a polis service
-            // reads the host's /var/log/kallipai tree through the
-            // same socket, and neither argument lists the services.
-            return match (slug, service) {
-                (Some(slug), None) => {
-                    run_logs(&client, &slug, lines, file.as_deref(), follow).await
-                }
-                (None, Some(service)) => {
-                    run_service_logs(&client, &service, lines, follow, level).await
-                }
-                (None, None) => run_service_log_list(&client).await,
-                (Some(_), Some(_)) => {
-                    unreachable!("clap enforces slug/--service exclusion")
-                }
-            };
+            return run_logs(&client, &slug, lines, file.as_deref(), follow).await;
         }
         Command::Restart { slug } => {
             return run_restart(&client, &slug).await;
@@ -175,7 +155,6 @@ async fn run() -> Result<()> {
                 BlobsCommand::Rewrite {
                     target,
                     slug,
-                    blob_root,
                     above_bytes,
                     dry_run,
                     skip_corrupt,
@@ -187,7 +166,6 @@ async fn run() -> Result<()> {
                 RewriteInvocation {
                     target,
                     slug,
-                    blob_root,
                     above_bytes,
                     dry_run,
                     skip_corrupt,

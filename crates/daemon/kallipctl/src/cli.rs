@@ -1,7 +1,6 @@
 //! Command-line surface: the clap parser tree and its subcommand enums.
 
-use crate::completion::{complete_service, complete_slug};
-use crate::logs::LogLevel;
+use crate::completion::complete_slug;
 use clap::{Parser, Subcommand};
 use clap_complete::Shell;
 use clap_complete::engine::ArgValueCompleter;
@@ -40,9 +39,8 @@ pub(crate) enum Command {
         /// Extra env for the instance, KEY=VALUE (repeatable); only
         /// KALLIPAI_* keys plus RUST_LOG and PATH are accepted by the daemon.
         /// `KALLIPAI_TAGMA_ADDR=<addr>` pins the tagma's listen address
-        /// (default 127.0.0.1:0); prefer a concrete interface or the
-        /// polis proxy over 0.0.0.0 — the API is Bearer-gated but plain
-        /// HTTP on the LAN.
+        /// (default 127.0.0.1:0); prefer a concrete interface over
+        /// 0.0.0.0 — the API is Bearer-gated but plain HTTP on the LAN.
         #[arg(short = 'e', long = "env")]
         env: Vec<String>,
         /// Run the instance as this pre-declared system user (the
@@ -119,42 +117,26 @@ pub(crate) enum Command {
         #[arg(add = ArgValueCompleter::new(complete_slug))]
         slug: String,
     },
-    /// Tail an instance's or a polis service's logs. The argument
-    /// picks the source: `logs <slug>` tails a managed instance
-    /// through the daemon; `logs --service <name>` tails a polis
-    /// service's logs through the same daemon; with neither argument,
-    /// list the services that have logs.
+    /// Tail a managed instance's logs.
     Logs {
         /// Instance slug: same grammar as spawn's. Instance
         /// logs flow through the daemon.
         #[arg(add = ArgValueCompleter::new(complete_slug))]
-        slug: Option<String>,
-        /// The polis service whose rolling logs to read through
-        /// the daemon (the `/var/log/kallipai/<service>` tree on
-        /// the host, owned by the service user: the daemon reads
-        /// it for the caller, so no sudo is needed).
-        #[arg(long, conflicts_with = "slug", add = ArgValueCompleter::new(complete_service))]
-        service: Option<String>,
-        /// Lines from the tail (instance default 20, service
-        /// default 50, capped at 1000).
+        slug: String,
+        /// Lines from the tail (default 20, capped at 1000).
         #[arg(short = 'n', long = "lines")]
         lines: Option<u32>,
         /// Read this single file from the instance's log
-        /// directory instead of the merged tail. (Instance mode.)
-        #[arg(long, conflicts_with_all = ["service", "level"], requires = "slug")]
+        /// directory instead of the merged tail.
+        #[arg(long)]
         file: Option<String>,
         /// Keep polling for new lines (~500 ms beats) until Ctrl-C.
         #[arg(short = 'f', long = "follow")]
         follow: bool,
-        /// Keep only lines carrying this level word.
-        /// (Service mode.)
-        #[arg(long, value_enum, conflicts_with = "slug", requires = "service")]
-        level: Option<LogLevel>,
     },
-    /// Directly rewrite a content-addressed blob store's on-disk
-    /// representation (raw bytes -> zstd frames). Runs against the
-    /// store on disk -- never through the daemon's wire protocol and
-    /// never against the files metadata store.
+    /// Rewrite an instance's blob store on disk: raw bytes become zstd
+    /// frames. The store's directory comes from the instance record, so
+    /// the daemon must be reachable; the rewrite itself only touches disk.
     Blobs {
         #[command(subcommand)]
         command: BlobsCommand,
@@ -189,23 +171,12 @@ pub(crate) enum BlobsCommand {
         /// Which store to rewrite.
         #[arg(long, value_enum, default_value_t = RewriteTarget::Tasks)]
         target: RewriteTarget,
-        /// The instance owning the tasks/attachments blob store: its
-        /// daemon record supplies the data directory and the running
-        /// state for the warning. (The files target never reads this.)
-        #[arg(
-            long,
-            required_if_eq("target", "tasks"),
-            required_if_eq("target", "attachments")
-        )]
-        slug: Option<String>,
-        /// The files blob store root (the directory containing blobs/
-        /// and tmp/). Defaults to env KALLIPAI_FILES_BLOB_ROOT. Only the
-        /// files target reads this.
-        #[arg(long)]
-        blob_root: Option<String>,
+        /// The instance owning the store: its daemon record supplies
+        /// the data directory and the running state for the warning.
+        #[arg(add = ArgValueCompleter::new(complete_slug))]
+        slug: String,
         /// Raw objects whose stored size exceeds this many bytes stay
-        /// raw. Defaults to env KALLIPAI_FILES_BLOB_COMPRESSION_ABOVE_BYTES
-        /// (8 MiB) for the files target; 0 = no limit.
+        /// raw; 0 = no limit.
         #[arg(long)]
         above_bytes: Option<u64>,
         /// Report what would be rewritten without touching anything.
@@ -232,19 +203,14 @@ pub(crate) enum RewriteTarget {
     Tasks,
     /// The attachment-mirror blobs (`<data_dir>/blobs/attachments`).
     Attachments,
-    /// The files service's content store.
-    Files,
 }
 
 impl RewriteTarget {
-    /// The blob store directory name under a data dir (the two daemon
-    /// stores only; the files target resolves its root from --blob-root
-    /// or the environment and never calls this).
+    /// The blob store directory name under an instance data dir.
     pub(crate) fn dir_name(self) -> &'static str {
         match self {
             RewriteTarget::Tasks => "tasks",
             RewriteTarget::Attachments => "attachments",
-            RewriteTarget::Files => unreachable!("the files target has its own root"),
         }
     }
 }

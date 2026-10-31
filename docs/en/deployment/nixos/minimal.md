@@ -160,6 +160,12 @@ systemctl status kallipai-daemon kallipai-archeion kallipai-lesche \
   kallipai-keryx kallipai-files kallipai-instances kallipai-model-gateway
 ```
 
+Services that write log files keep daily-rolled `<service>.<date>.log`
+files under `/var/log/kallipai/<service>/` (seven kept). That directory
+is mode `0750`, owned by the service user with
+`services.kallipai.daemon.group` (default `kallipai-polis`) as its
+group, so read it as a member of that group or with `sudo`.
+
 Then confirm the three hosts answer: `api.kallipai.lan` for the
 platform, `app.kallipai.lan` for the web app, and
 `model-gw.kallipai.lan` for the model gateway. A healthy deployment: the

@@ -870,8 +870,12 @@ in
       # Dedicated users with the platform gate group as their primary.
       # Polis is a trust domain: the 0640 internal-token file and the
       # 0750 log directories are readable across the family by design
-      # (the archeion's state tree pioneered the shape, and management
-      # reads logs through the daemon socket, not group membership).
+      # (the archeion's state tree pioneered the shape). Each service
+      # unit declares LogsDirectory = "kallipai/<name>" with
+      # LogsDirectoryMode = "0750", User = its own system user and
+      # Group = cfg.group, so /var/log/kallipai/<name> is readable by
+      # that group: an operator joins services.kallipai.daemon.group
+      # (cfg.group, default kallipai-polis) or reads with sudo.
       # Private state stays private through mode, not group: the 0700
       # state trees deny group access, so no per-service primary group
       # is needed. The daemon-socket gate group (kallipai, declared in

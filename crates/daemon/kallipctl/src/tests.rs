@@ -68,45 +68,40 @@ fn error_prefix_is_the_scripting_vocabulary() {
     );
 }
 
-mod service_logs_tests {
+mod shape_tests {
     use crate::cli::Cli;
-    use crate::logs::{LogLevel, keep_level};
     use clap::Parser;
+    use clap::error::ErrorKind;
 
     #[test]
-    fn keep_level_filters_on_the_level_word() {
-        let lines = vec![
-            "2026-09-27T10:00:00Z  INFO ready".to_string(),
-            "2026-09-27T10:00:01Z ERROR boom".to_string(),
-            "2026-09-27T10:00:02Z  WARN careful".to_string(),
-        ];
-        assert_eq!(keep_level(&lines, None).len(), 3);
-        let errors = keep_level(&lines, Some(LogLevel::Error));
-        assert_eq!(errors, vec!["2026-09-27T10:00:01Z ERROR boom".to_string()]);
-        assert_eq!(keep_level(&lines, Some(LogLevel::Debug)).len(), 0);
+    fn logs_is_instance_only() {
+        // The verb names one instance; a bare call names nothing and is
+        // rejected.
+        let err = Cli::try_parse_from(["kallipctl", "logs"])
+            .err()
+            .expect("the bare verb names no instance");
+        assert_eq!(err.kind(), ErrorKind::MissingRequiredArgument, "{err}");
+
+        let err = Cli::try_parse_from(["kallipctl", "logs", "--service", "archeion"])
+            .err()
+            .expect("--service is not in the command's vocabulary");
+        assert_eq!(err.kind(), ErrorKind::UnknownArgument, "{err}");
+
+        assert!(Cli::try_parse_from(["kallipctl", "logs", "myinstance", "--file", "x"]).is_ok());
     }
 
     #[test]
-    fn logs_flag_sources_are_exclusive_and_bound_to_a_source() {
-        // --file and --level without any source stay rejected: the
-        // flags lock to their arm instead of falling through to the
-        // listing shape.
-        assert!(
-            Cli::try_parse_from(["kallipctl", "logs", "--file", "x", "--level", "error",]).is_err()
-        );
-        // --file belongs to the instance arm.
-        assert!(Cli::try_parse_from(["kallipctl", "logs", "myinstance", "--file", "x",]).is_ok());
-        // --level belongs to the service arm.
-        assert!(
-            Cli::try_parse_from([
-                "kallipctl",
-                "logs",
-                "--service",
-                "archeion",
-                "--level",
-                "error",
-            ])
-            .is_ok()
-        );
+    fn blobs_rewrite_accepts_instance_stores_only() {
+        // Every store belongs to an instance record: --slug is mandatory
+        // and `files` is not one of the targets.
+        let err = Cli::try_parse_from(["kallipctl", "blobs", "rewrite", "--target", "tasks"])
+            .err()
+            .expect("the slug is not optional");
+        assert_eq!(err.kind(), ErrorKind::MissingRequiredArgument, "{err}");
+
+        let err = Cli::try_parse_from(["kallipctl", "blobs", "rewrite", "--target", "files", "a"])
+            .err()
+            .expect("files is not a target");
+        assert_eq!(err.kind(), ErrorKind::InvalidValue, "{err}");
     }
 }

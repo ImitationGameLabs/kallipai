@@ -449,6 +449,11 @@ scripts/compose-up.sh prod up -d
 docker compose -f compose/compose.yaml -f compose/compose.prod.yaml logs -f
 ```
 
+Each platform service writes its events to stdout, and the compose `json-file`
+driver keeps them for the operator: 50 MB per file, five files per service,
+pinned at the `x-logging` anchor in `compose/compose.yaml`. Adding a service
+name to the `logs` call above narrows the output to that one service.
+
 #### The Platform Services: the NixOS Module
 
 For a step-by-step walkthrough of a full host deployment (module import,
