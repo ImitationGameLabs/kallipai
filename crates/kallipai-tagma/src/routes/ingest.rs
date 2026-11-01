@@ -1030,7 +1030,7 @@ mod tests {
             name: name.to_owned(),
             origin: origin.to_owned(),
             base: format!("{origin}/v1/model-gateway"),
-            token: token.map(|t| t.to_owned()),
+            credential: token.map(kallipai_common::credential::Credential::fixed),
         }
     }
 

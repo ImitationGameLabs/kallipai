@@ -135,7 +135,7 @@
   "manage_profiles_source_degraded": "Degraded",
   "manage_profiles_source_degraded_body": "The last refresh from the gateway failed; the page is serving the last good snapshot.",
   "manage_profiles_source_poisoned": "Unavailable",
-  "manage_profiles_source_poisoned_body": "The platform no longer accepts this daemon. Enroll it again from the tagmata page; the pull resumes after the new enrollment.",
+  "manage_profiles_source_poisoned_body": "The platform no longer accepts the stored credential. Write the new value into this tagma's credential file; the next request presents it and the pull resumes. No re-enrollment or restart is needed.",
   "manage_profiles_tab_gateway": "Gateway",
   "manage_profiles_tab_local": "Local",
   "manage_profiles_switch_entry_title": "The model gateway is available",

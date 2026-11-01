@@ -48,9 +48,9 @@ pub async fn refresh_profile_source(
         ));
     }
     let health = source.health().await;
-    if health.poisoned {
+    if health.poisoned && !source.clear_stale_latch().await {
         return Err(ApiError::conflict(
-            "the enrollment token is dead; re-enroll the tagma, then restart or round-trip the source mode (the token is read once at boot)",
+            "the gateway rejected the stored credential and the value has not changed since; write the new value into the credential file and the next request presents it, no restart needed",
         ));
     }
     let config = source.load().await.map_err(|error| {
@@ -87,7 +87,7 @@ pub(super) async fn profiles_body(state: &SharedState) -> Result<serde_json::Val
     let health = source.health().await;
     let mut source_block = serde_json::json!({ "mode": source.kind() });
     // proxy_available: the switchability signal — any configured
-    // platform entry stores an enrollment token, whatever the current
+    // platform entry stores a credential, whatever the current
     // mode (a local detour keeps the pin and the signal alike). The
     // UI hides the online face when it is false; the switch API
     // answers 400. polis names the active gateway face (null in
@@ -98,7 +98,7 @@ pub(super) async fn profiles_body(state: &SharedState) -> Result<serde_json::Val
     if let Some(obj) = source_block.as_object_mut() {
         obj.insert(
             "proxy_available".into(),
-            serde_json::json!(platforms.iter().any(|face| face.token.is_some())),
+            serde_json::json!(platforms.iter().any(|face| face.credential.is_some())),
         );
         obj.insert(
             "polis".into(),
@@ -112,7 +112,7 @@ pub(super) async fn profiles_body(state: &SharedState) -> Result<serde_json::Val
                     .map(|face| serde_json::json!({
                         "name": face.name,
                         "origin": face.origin,
-                        "enrolled": face.token.is_some(),
+                        "enrolled": face.credential.is_some(),
                     }))
                     .collect::<Vec<_>>()
             ),

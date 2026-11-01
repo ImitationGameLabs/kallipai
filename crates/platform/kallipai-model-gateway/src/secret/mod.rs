@@ -11,7 +11,7 @@
 //! distribution face's types never contain one.
 //!
 //! Consuming identities carry no gateway-side credential store at all:
-//! a tagma presents its platform enrollment token, the archeion's
+//! a tagma presents its platform credential, the archeion's
 //! verify-bearer answers `Principal::Tagma`, and the enrollment lookup
 //! names the owning account. Nothing is stored here -- not even a
 //! hash.

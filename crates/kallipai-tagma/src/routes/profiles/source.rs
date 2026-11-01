@@ -53,7 +53,7 @@ fn unresolvable_gateway_400(
     pinned: Option<&str>,
 ) -> ApiError {
     match pinned {
-        Some(pin) if platforms.iter().any(|face| face.token.is_some()) => {
+        Some(pin) if platforms.iter().any(|face| face.credential.is_some()) => {
             ApiError::bad_request(format!(
                 "the pinned platform origin {pin:?} no longer resolves to an enrolled platform; pass polis to switch to another configured platform, or re-enroll that platform first"
             ))
@@ -94,16 +94,16 @@ pub(super) async fn switch_profile_source(
                                     .join(", ")
                             ))
                         })?;
-                    let token = face.token.clone().ok_or_else(|| {
+                    let credential = face.credential.clone().ok_or_else(|| {
                         ApiError::bad_request(format!(
-                            "the tagma is not enrolled on {polis:?}: run the relay enrollment on that platform first (the entry {:?} stores no token), then switch",
+                            "the tagma is not enrolled on {polis:?}: run the relay enrollment on that platform first (the entry {:?} stores no credential), then switch",
                             face.name
                         ))
                     })?;
                     crate::profile_source::GatewayParams {
                         base: face.base.clone(),
                         origin: face.origin.clone(),
-                        token,
+                        credential,
                     }
                 }
                 None => {
@@ -121,11 +121,11 @@ pub(super) async fn switch_profile_source(
                         .ok_or_else(|| unresolvable_gateway_400(&platforms, pinned.as_deref()))?
                 }
             };
-            let candidate =
-                crate::profile_source::ProxyProfileSource::new(&params.base, &params.token)
-                    .map_err(|e| {
-                        ApiError::bad_request(format!("gateway enrollment unusable: {e:#}"))
-                    })?;
+            let candidate = crate::profile_source::ProxyProfileSource::new(
+                &params.base,
+                params.credential.clone(),
+            )
+            .map_err(|e| ApiError::bad_request(format!("gateway enrollment unusable: {e:#}")))?;
             // The request may point this tagma at another
             // collection. The write goes through to the gateway
             // first (the tagma pointer is the single store): a
@@ -296,8 +296,11 @@ pub(super) async fn update_profile_selection(
         .ok_or_else(|| {
             ApiError::internal("the gateway source is live without active platform parameters")
         })?;
-    let candidate = crate::profile_source::ProxyProfileSource::new(&params.base, &params.token)
-        .map_err(|e| ApiError::internal(format!("rebuilding the gateway source failed: {e:#}")))?;
+    let candidate =
+        crate::profile_source::ProxyProfileSource::new(&params.base, params.credential.clone())
+            .map_err(|e| {
+                ApiError::internal(format!("rebuilding the gateway source failed: {e:#}"))
+            })?;
     let written = candidate
         .put_selection(target.owner.as_deref(), &target.collection)
         .await

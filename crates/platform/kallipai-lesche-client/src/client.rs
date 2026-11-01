@@ -31,6 +31,7 @@ use anyhow::{Context, Result};
 use base64::Engine as _;
 use futures_util::StreamExt;
 use kallipai_archeion_common::ids::{ChannelId, ConversationId, TagmaId};
+use kallipai_common::credential::{Credential, retry_value_after_401};
 use kallipai_e2ee::DeviceKey;
 use kallipai_keryx_common::control::KeyExchangeResponse;
 use kallipai_keryx_common::tunnel::ManageRestReply;
@@ -48,7 +49,13 @@ struct Inner {
     http_post: reqwest::Client,
     /// Long-lived tunnel stream: NO total timeout (see crate docs).
     http_stream: reqwest::Client,
-    tagma_token: String,
+    /// The bearer every call presents. Fixed for [`LescheClient::builder`],
+    /// reloadable when the caller supplies a watching handle
+    /// ([`LescheClient::builder_with_credential`]).
+    credential: Credential,
+    /// The wall clock a tunnel proof timestamp starts from. Tests pin it, so
+    /// the step-past rule is asserted exactly.
+    clock: fn() -> i64,
     /// The keryx service root for the split-family routes (the tunnel,
     /// KEX, upstream, conversation-envelope and manage-reply paths). None
     /// keeps every route on `base_url` (the single-service shape).
@@ -128,14 +135,34 @@ impl LescheClient {
     /// Start building a [`LescheClient`]. `base_url` is the lesche service
     /// root (including the /v1/lesche service segment through the platform
     /// edge). `tagma_token` is the `sk-tagma-` bearer used on every
-    /// data-plane call.
+    /// data-plane call; this handle is fixed, so a token the platform
+    /// retires mid-run stays retired (use [`Self::builder_with_credential`]
+    /// for a handle that reloads).
     pub fn builder(base_url: &str, tagma_token: impl Into<String>) -> LescheClientBuilder {
         LescheClientBuilder {
             base_url: base_url.trim_end_matches('/').to_owned(),
-            tagma_token: tagma_token.into(),
+            credential: Credential::fixed(tagma_token.into()),
             http_post: None,
             http_stream: None,
             keryx_url: None,
+            clock: unix_secs_now,
+        }
+    }
+
+    /// Start building a [`LescheClient`] around a handle the caller keeps.
+    ///
+    /// Every request presents [`Credential::current`]; a 401 whose disk
+    /// value has moved since the request went out is retried once with the
+    /// new value. The handle is what makes the reload visible to every
+    /// caller sharing it.
+    pub fn builder_with_credential(base_url: &str, credential: Credential) -> LescheClientBuilder {
+        LescheClientBuilder {
+            base_url: base_url.trim_end_matches('/').to_owned(),
+            credential,
+            http_post: None,
+            http_stream: None,
+            keryx_url: None,
+            clock: unix_secs_now,
         }
     }
 
@@ -162,6 +189,37 @@ impl LescheClient {
         }
     }
 
+    /// Send one request built around the current credential, retrying once
+    /// when the answer is 401 and the credential on disk has changed.
+    ///
+    /// `build` receives the value to present and returns a fresh request, so
+    /// the retry rebuilds the whole request: a one-shot header (the tunnel's
+    /// device proof, which also carries a timestamp the peer requires to
+    /// increase) must be recomputed, never replayed.
+    ///
+    /// The retry happens only here, before the body is consumed: a caller
+    /// reads the returned response's status and then its stream, and a
+    /// stream that failed mid-flight never reaches this function again.
+    async fn send_authorized(
+        &self,
+        surface: &str,
+        build: impl Fn(&str) -> reqwest::RequestBuilder,
+    ) -> Result<reqwest::Response> {
+        let sent = self.inner.credential.current();
+        let resp = build(&sent).send().await.context("lesche request failed")?;
+        // The response is still unconsumed here, which is what makes the
+        // retry legitimate: no body byte has been read.
+        if resp.status() == reqwest::StatusCode::UNAUTHORIZED
+            && let Some(reloaded) = retry_value_after_401(&self.inner.credential, &sent, surface)
+        {
+            return build(&reloaded)
+                .send()
+                .await
+                .context("lesche request failed with the reloaded credential");
+        }
+        Ok(resp)
+    }
+
     /// Post an agent envelope, retrying on 503 (app offline) with a bounded
     /// backoff (500ms, 1s, 2s, 4s, 8s, 16s ~= 31s total). A dropped reply is
     /// recovered by the app's host-history re-pull on reconnect, so the retry
@@ -181,14 +239,14 @@ impl LescheClient {
         ));
         for wait in BACKOFF {
             let resp = self
-                .inner
-                .http_post
-                .post(&url)
-                .bearer_auth(&self.inner.tagma_token)
-                .json(envelope)
-                .send()
-                .await
-                .context("lesche POST failed")?;
+                .send_authorized("envelope POST", |token| {
+                    self.inner
+                        .http_post
+                        .post(&url)
+                        .bearer_auth(token)
+                        .json(envelope)
+                })
+                .await?;
             let status = resp.status();
             if status.is_success() {
                 return Ok(());
@@ -235,14 +293,14 @@ impl LescheClient {
         ));
         for wait in BACKOFF {
             let resp = self
-                .inner
-                .http_post
-                .post(&url)
-                .bearer_auth(&self.inner.tagma_token)
-                .json(&envelope)
-                .send()
-                .await
-                .context("lesche room POST failed")?;
+                .send_authorized("room envelope POST", |token| {
+                    self.inner
+                        .http_post
+                        .post(&url)
+                        .bearer_auth(token)
+                        .json(&envelope)
+                })
+                .await?;
             let status = resp.status();
             if status.is_success() {
                 return Ok(());
@@ -283,18 +341,19 @@ impl LescheClient {
         if let Some(l) = page.limit {
             query.push(("limit", l.to_string()));
         }
+        let url = self.url(&format!(
+            "/rooms/{}/messages",
+            path_segment(room_id.as_ref())?
+        ));
         let resp = self
-            .inner
-            .http_post
-            .get(self.url(&format!(
-                "/rooms/{}/messages",
-                path_segment(room_id.as_ref())?
-            )))
-            .query(&query)
-            .bearer_auth(&self.inner.tagma_token)
-            .send()
-            .await
-            .context("lesche room history GET failed")?;
+            .send_authorized("room history GET", |token| {
+                self.inner
+                    .http_post
+                    .get(&url)
+                    .query(&query)
+                    .bearer_auth(token)
+            })
+            .await?;
         let status = resp.status();
         if !status.is_success() {
             return Err(LescheHttpError {
@@ -312,17 +371,15 @@ impl LescheClient {
     /// routing cache. `tagma_id` should be the caller's own id (the route is
     /// self-only).
     pub async fn list_my_rooms(&self, tagma_id: &TagmaId) -> Result<Vec<TagmaRoomView>> {
+        let url = self.url(&format!(
+            "/tagmata/{}/rooms",
+            path_segment(tagma_id.as_ref())?
+        ));
         let resp = self
-            .inner
-            .http_post
-            .get(self.url(&format!(
-                "/tagmata/{}/rooms",
-                path_segment(tagma_id.as_ref())?
-            )))
-            .bearer_auth(&self.inner.tagma_token)
-            .send()
-            .await
-            .context("list-my-rooms fetch failed")?;
+            .send_authorized("list-my-rooms GET", |token| {
+                self.inner.http_post.get(&url).bearer_auth(token)
+            })
+            .await?;
         let status = resp.status();
         if !status.is_success() {
             anyhow::bail!("lesche list-my-rooms returned {status}");
@@ -341,14 +398,14 @@ impl LescheClient {
             path_segment(conv_id.as_ref())?
         ));
         let resp = self
-            .inner
-            .http_post
-            .post(&url)
-            .bearer_auth(&self.inner.tagma_token)
-            .json(response)
-            .send()
-            .await
-            .context("lesche POST failed")?;
+            .send_authorized("key-exchange response POST", |token| {
+                self.inner
+                    .http_post
+                    .post(&url)
+                    .bearer_auth(token)
+                    .json(response)
+            })
+            .await?;
         if !resp.status().is_success() {
             anyhow::bail!("lesche POST returned {}", resp.status());
         }
@@ -362,14 +419,14 @@ impl LescheClient {
     pub async fn post_manage_reply(&self, payload: &ManageRestReply) -> Result<()> {
         let url = self.keryx_route("/tunnel/manage-reply");
         let resp = self
-            .inner
-            .http_post
-            .post(&url)
-            .bearer_auth(&self.inner.tagma_token)
-            .json(payload)
-            .send()
-            .await
-            .context("lesche POST failed")?;
+            .send_authorized("manage reply POST", |token| {
+                self.inner
+                    .http_post
+                    .post(&url)
+                    .bearer_auth(token)
+                    .json(payload)
+            })
+            .await?;
         if !resp.status().is_success() {
             anyhow::bail!("lesche POST returned {}", resp.status());
         }
@@ -394,14 +451,14 @@ impl LescheClient {
             path_segment(tagma_id.as_ref())?
         ));
         let resp = self
-            .inner
-            .http_post
-            .post(&url)
-            .bearer_auth(&self.inner.tagma_token)
-            .json(&events)
-            .send()
-            .await
-            .context("lesche POST failed")?;
+            .send_authorized("upstream events POST", |token| {
+                self.inner
+                    .http_post
+                    .post(&url)
+                    .bearer_auth(token)
+                    .json(&events)
+            })
+            .await?;
         if !resp.status().is_success() {
             anyhow::bail!("lesche POST returned {}", resp.status());
         }
@@ -411,33 +468,37 @@ impl LescheClient {
     /// Open the tunnel SSE and return a stream of parsed inbound events.
     ///
     /// The reconnect proof (timestamp + signature over the tunnel transcript) is
-    /// generated once per call and validated by the keryx against the tagma's
+    /// generated per attempt and validated by the keryx against the tagma's
     /// monotonic high-water-mark. Callers MUST call `open_tunnel` fresh on each
     /// reconnect (do not cache/reuse the stream): the proof timestamp is
     /// single-use, and the keryx rejects timestamps that do not strictly
-    /// advance the per-tagma marker.
+    /// advance the per-tagma marker -- so a retry after a credential reload
+    /// recomputes timestamp and proof rather than replaying them.
     pub async fn open_tunnel(
         &self,
         device: &DeviceKey,
         tagma_id: &TagmaId,
     ) -> Result<impl futures_core::Stream<Item = Result<TunnelInbound>> + use<>> {
         let url = self.keryx_route("/tunnel");
-        let unix_secs = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
-        let proof = device.sign(&tunnel_transcript(tagma_id.as_ref(), unix_secs));
-        let proof_b64 = base64::engine::general_purpose::STANDARD.encode(proof);
+        // A retry rebuilds the request: the proof is single-use and the
+        // timestamp must advance the per-tagma high-water-mark, so a second
+        // attempt inside the same second steps past the first.
+        let last_secs = std::sync::atomic::AtomicI64::new(0);
         let resp = self
-            .inner
-            .http_stream
-            .get(&url)
-            .bearer_auth(&self.inner.tagma_token)
-            .header("X-Device-Timestamp", unix_secs.to_string())
-            .header("X-Device-Proof", proof_b64)
-            .send()
-            .await
-            .context("tunnel GET failed")?;
+            .send_authorized("tunnel GET", |token| {
+                let unix_secs = next_proof_timestamp(&last_secs, (self.inner.clock)());
+                let proof = device.sign(&tunnel_transcript(tagma_id.as_ref(), unix_secs));
+                self.inner
+                    .http_stream
+                    .get(&url)
+                    .bearer_auth(token)
+                    .header("X-Device-Timestamp", unix_secs.to_string())
+                    .header(
+                        "X-Device-Proof",
+                        base64::engine::general_purpose::STANDARD.encode(proof),
+                    )
+            })
+            .await?;
         if !resp.status().is_success() {
             anyhow::bail!("tunnel GET returned {}", resp.status());
         }
@@ -458,13 +519,10 @@ impl LescheClient {
             path_segment(tagma_id.as_ref())?
         ));
         let resp = self
-            .inner
-            .http_stream
-            .get(&url)
-            .bearer_auth(&self.inner.tagma_token)
-            .send()
-            .await
-            .context("agent-events GET failed")?;
+            .send_authorized("agent events GET", |token| {
+                self.inner.http_stream.get(&url).bearer_auth(token)
+            })
+            .await?;
         if !resp.status().is_success() {
             anyhow::bail!("agent-events GET returned {}", resp.status());
         }
@@ -486,17 +544,18 @@ impl LescheClient {
         struct Body<'a> {
             peer: &'a str,
         }
+        let url = self.url("/direct-sessions");
         let resp = self
-            .inner
-            .http_post
-            .post(self.url("/direct-sessions"))
-            .bearer_auth(&self.inner.tagma_token)
-            .json(&Body {
-                peer: peer.as_ref(),
+            .send_authorized("direct-session POST", |token| {
+                self.inner
+                    .http_post
+                    .post(&url)
+                    .bearer_auth(token)
+                    .json(&Body {
+                        peer: peer.as_ref(),
+                    })
             })
-            .send()
-            .await
-            .context("lesche direct-session POST failed")?;
+            .await?;
         let status = resp.status();
         if !status.is_success() {
             return Err(LescheHttpError {
@@ -511,14 +570,12 @@ impl LescheClient {
     /// List the calling tagma's direct sessions
     /// (`GET /direct-sessions`), each with the peer's identity.
     pub async fn list_direct_sessions(&self) -> Result<Vec<DirectSessionView>> {
+        let url = self.url("/direct-sessions");
         let resp = self
-            .inner
-            .http_post
-            .get(self.url("/direct-sessions"))
-            .bearer_auth(&self.inner.tagma_token)
-            .send()
-            .await
-            .context("lesche direct-session list GET failed")?;
+            .send_authorized("direct-session list GET", |token| {
+                self.inner.http_post.get(&url).bearer_auth(token)
+            })
+            .await?;
         let status = resp.status();
         if !status.is_success() {
             anyhow::bail!("lesche direct-session list returned {status}");
@@ -552,14 +609,14 @@ impl LescheClient {
         ));
         for wait in BACKOFF {
             let resp = self
-                .inner
-                .http_post
-                .post(&url)
-                .bearer_auth(&self.inner.tagma_token)
-                .json(&envelope)
-                .send()
-                .await
-                .context("lesche direct-session message POST failed")?;
+                .send_authorized("direct-session message POST", |token| {
+                    self.inner
+                        .http_post
+                        .post(&url)
+                        .bearer_auth(token)
+                        .json(&envelope)
+                })
+                .await?;
             let status = resp.status();
             if status.is_success() {
                 return Ok(());
@@ -597,18 +654,19 @@ impl LescheClient {
         if let Some(l) = limit {
             query.push(("limit", l.to_string()));
         }
+        let url = self.url(&format!(
+            "/direct-sessions/{}/messages",
+            path_segment(session_id.as_ref())?
+        ));
         let resp = self
-            .inner
-            .http_post
-            .get(self.url(&format!(
-                "/direct-sessions/{}/messages",
-                path_segment(session_id.as_ref())?
-            )))
-            .query(&query)
-            .bearer_auth(&self.inner.tagma_token)
-            .send()
-            .await
-            .context("lesche direct-session history GET failed")?;
+            .send_authorized("direct-session history GET", |token| {
+                self.inner
+                    .http_post
+                    .get(&url)
+                    .query(&query)
+                    .bearer_auth(token)
+            })
+            .await?;
         let status = resp.status();
         if !status.is_success() {
             return Err(LescheHttpError {
@@ -632,18 +690,19 @@ impl LescheClient {
         struct Body {
             last_read_seq: i64,
         }
+        let url = self.url(&format!(
+            "/direct-sessions/{}/read-cursor",
+            path_segment(session_id.as_ref())?
+        ));
         let resp = self
-            .inner
-            .http_post
-            .put(self.url(&format!(
-                "/direct-sessions/{}/read-cursor",
-                path_segment(session_id.as_ref())?
-            )))
-            .bearer_auth(&self.inner.tagma_token)
-            .json(&Body { last_read_seq })
-            .send()
-            .await
-            .context("lesche direct-session cursor PUT failed")?;
+            .send_authorized("direct-session cursor PUT", |token| {
+                self.inner
+                    .http_post
+                    .put(&url)
+                    .bearer_auth(token)
+                    .json(&Body { last_read_seq })
+            })
+            .await?;
         let status = resp.status();
         if !status.is_success() {
             return Err(LescheHttpError {
@@ -753,10 +812,11 @@ fn parse_data_payload(event: &str) -> Option<String> {
 /// Build a [`LescheClient`] with optional HTTP-client overrides.
 pub struct LescheClientBuilder {
     base_url: String,
-    tagma_token: String,
+    credential: Credential,
     http_post: Option<reqwest::Client>,
     http_stream: Option<reqwest::Client>,
     keryx_url: Option<String>,
+    clock: fn() -> i64,
 }
 
 impl LescheClientBuilder {
@@ -808,13 +868,42 @@ impl LescheClientBuilder {
                 base_url: self.base_url,
                 http_post,
                 http_stream,
-                tagma_token: self.tagma_token,
+                credential: self.credential,
                 keryx_url: self.keryx_url,
+                clock: self.clock,
             }),
         })
     }
 }
 
+#[cfg(test)]
+impl LescheClientBuilder {
+    /// Pin the wall clock, so a test can assert the exact timestamp step.
+    fn with_clock(mut self, clock: fn() -> i64) -> Self {
+        self.clock = clock;
+        self
+    }
+}
+
+/// The wall clock in unix seconds: the base a tunnel proof timestamp starts
+/// from.
+fn unix_secs_now() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// The timestamp one tunnel attempt carries: `now`, or one second past the
+/// previous attempt when the clock has not moved. The keryx requires a
+/// strictly advancing per-tagma marker, and a retry after a credential
+/// reload can land inside the same second.
+fn next_proof_timestamp(last: &std::sync::atomic::AtomicI64, now: i64) -> i64 {
+    use std::sync::atomic::Ordering;
+    let stamp = now.max(last.load(Ordering::Relaxed) + 1);
+    last.store(stamp, Ordering::Relaxed);
+    stamp
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1451,5 +1540,161 @@ mod tests {
             .await
             .expect("upstream dials the keryx base");
         assert_eq!(ack.faces, None, "ack parses from the keryx mock body");
+    }
+
+    /// A 401 whose disk value has moved is retried once, with that value.
+    #[tokio::test]
+    async fn a_rejected_token_is_retried_with_the_value_the_store_now_holds() {
+        let server = MockServer::start().await;
+        let tagma_id = TagmaId::from("tagma-1".to_string());
+        let rooms_path = format!("/tagmata/{}/rooms", tagma_id.as_ref());
+        Mock::given(method("GET"))
+            .and(path(rooms_path.clone()))
+            .and(header("authorization", "Bearer sk-tagma-old"))
+            .respond_with(ResponseTemplate::new(401))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(rooms_path))
+            .and(header("authorization", "Bearer sk-tagma-new"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let credential = Credential::watching("sk-tagma-old", || Some("sk-tagma-new".to_owned()));
+        let client = LescheClient::builder_with_credential(&server.uri(), credential)
+            .build()
+            .unwrap();
+        let rooms = client
+            .list_my_rooms(&tagma_id)
+            .await
+            .expect("retry succeeds");
+        assert!(rooms.is_empty());
+    }
+
+    /// No new value on disk means no second request: the 401 surfaces as it
+    /// always has.
+    #[tokio::test]
+    async fn a_rejected_token_with_no_new_value_is_not_retried() {
+        let server = MockServer::start().await;
+        let tagma_id = TagmaId::from("tagma-1".to_string());
+        Mock::given(method("GET"))
+            .and(path(format!("/tagmata/{}/rooms", tagma_id.as_ref())))
+            .and(header("authorization", "Bearer sk-tagma-old"))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(&server)
+            .await;
+
+        let credential = Credential::watching("sk-tagma-old", || Some("sk-tagma-old".to_owned()));
+        let client = LescheClient::builder_with_credential(&server.uri(), credential)
+            .build()
+            .unwrap();
+        let err = client
+            .list_my_rooms(&tagma_id)
+            .await
+            .expect_err("the 401 surfaces");
+        assert!(err.to_string().contains("401"), "got: {err}");
+        let requests = server.received_requests().await.unwrap_or_default();
+        assert_eq!(requests.len(), 1, "no second request without a new value");
+    }
+
+    /// Two requests rejected after one reload: each compares the value it sent
+    /// with the handle's current value, so neither is left failing on a value
+    /// that has already been replaced. (The first answer is delayed so both
+    /// requests are in flight before the reload happens.)
+    #[tokio::test]
+    async fn requests_rejected_after_one_reload_all_retry() {
+        let server = MockServer::start().await;
+        let tagma_id = TagmaId::from("tagma-1".to_string());
+        let rooms_path = format!("/tagmata/{}/rooms", tagma_id.as_ref());
+        Mock::given(method("GET"))
+            .and(path(rooms_path.clone()))
+            .and(header("authorization", "Bearer sk-tagma-old"))
+            .respond_with(ResponseTemplate::new(401).set_delay(Duration::from_millis(300)))
+            .expect(2)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(rooms_path))
+            .and(header("authorization", "Bearer sk-tagma-new"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+            .expect(2)
+            .mount(&server)
+            .await;
+
+        let credential = Credential::watching("sk-tagma-old", || Some("sk-tagma-new".to_owned()));
+        let client = LescheClient::builder_with_credential(&server.uri(), credential)
+            .build()
+            .unwrap();
+        let (first, second) = tokio::join!(
+            client.list_my_rooms(&tagma_id),
+            client.list_my_rooms(&tagma_id)
+        );
+        first.expect("first request retries");
+        second.expect("second request retries");
+    }
+
+    /// The tunnel carries a single-use device proof and a timestamp the keryx
+    /// requires to advance, so the retry after a reload recomputes both.
+    #[tokio::test]
+    async fn a_tunnel_retry_recomputes_the_device_proof() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/tunnel"))
+            .and(header("authorization", "Bearer sk-tagma-old"))
+            .respond_with(ResponseTemplate::new(401))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/tunnel"))
+            .and(header("authorization", "Bearer sk-tagma-new"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let credential = Credential::watching("sk-tagma-old", || Some("sk-tagma-new".to_owned()));
+        let client = LescheClient::builder_with_credential(&server.uri(), credential)
+            .with_clock(|| 1_700_000_000)
+            .build()
+            .unwrap();
+        let device = DeviceKey::generate();
+        let tagma_id = TagmaId::from("tagma-1".to_string());
+        drop(
+            client
+                .open_tunnel(&device, &tagma_id)
+                .await
+                .expect("the retried tunnel opens"),
+        );
+
+        let requests = server.received_requests().await.unwrap_or_default();
+        assert_eq!(requests.len(), 2);
+        let header = |i: usize, name: &str| {
+            requests[i]
+                .headers
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default()
+                .to_owned()
+        };
+        assert_ne!(
+            header(0, "x-device-proof"),
+            header(1, "x-device-proof"),
+            "the retry must not replay the first proof"
+        );
+        let first: u64 = header(0, "x-device-timestamp").parse().expect("stamp");
+        let second: u64 = header(1, "x-device-timestamp").parse().expect("stamp");
+        assert_eq!(
+            first, 1_700_000_000,
+            "the injected clock seeds the first stamp"
+        );
+        assert_eq!(
+            second,
+            first + 1,
+            "the retry steps exactly one second past the first"
+        );
     }
 }

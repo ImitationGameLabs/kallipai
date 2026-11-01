@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 kallipai-archeion-common = { workspace = true }
 kallipai-lesche-common = { workspace = true }
+kallipai-common = { workspace = true, default-features = false }
 kallipai-keryx-common = { workspace = true }
 kallipai-e2ee = { workspace = true }
 anyhow = { workspace = true }

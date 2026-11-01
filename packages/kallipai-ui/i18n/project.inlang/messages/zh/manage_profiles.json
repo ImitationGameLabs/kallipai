@@ -135,7 +135,7 @@
   "manage_profiles_source_degraded": "已降级",
   "manage_profiles_source_degraded_body": "上次从网关刷新失败，当前展示的是最近一次成功的快照。",
   "manage_profiles_source_poisoned": "不可用",
-  "manage_profiles_source_poisoned_body": "平台已不再接受此守护进程。请在智能体编队页重新接入，接入完成后拉取即恢复。",
+  "manage_profiles_source_poisoned_body": "平台已不再接受这台 tagma 存下的凭据。把新值写进这台 tagma 的凭据文件，下一次请求就会带上它，拉取随之恢复。无需重新接入，也无需重启。",
   "manage_profiles_tab_gateway": "网关",
   "manage_profiles_tab_local": "本地",
   "manage_profiles_switch_entry_title": "模型网关可用",

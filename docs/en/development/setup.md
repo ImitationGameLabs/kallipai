@@ -341,7 +341,7 @@ dev edge plus a remote one). Declare the entries in
 name    = "main"                # slug: [a-z0-9][a-z0-9-]*; keys the
                                 # credentials/<name>/ dir (stable across origin changes)
 url = "https://api.kallipai.com"   # the platform edge origin
-# enrollment_code = "sk-enroll-..."      # first run only; afterwards the stored token is reused
+# enrollment_code = "sk-enroll-..."      # first run only; afterwards the stored credential is reused
 
 [[polis]]
 name     = "second"

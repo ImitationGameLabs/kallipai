@@ -146,10 +146,11 @@ pub async fn update_profile_set(
                 .join(", ")
         )));
     };
-    // A dead enrollment token refuses new bindings: handing an agent a
-    // chain through a known-dead token just burns a failover chain at
-    // first use. A successful refresh (the signal consumer) clears the
-    // poison.
+    // A dead credential refuses new bindings: handing an agent a chain
+    // through a known-dead value just burns a failover chain at first use.
+    // This check passes once the credential file holds a new value because
+    // it asks the store on every call; the latch record itself outlives it,
+    // and clearing it is a separate path.
     state
         .profile_source
         .load_full()

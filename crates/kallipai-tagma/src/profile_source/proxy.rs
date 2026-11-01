@@ -8,17 +8,18 @@
 //! - Runtime refresh failure degrades without a TTL: the last good
 //!   snapshot keeps serving, a failure counter and warn logs observe.
 //!   Set-content drift is benign (the gateway re-authorizes every
-//!   request); the one fatal staleness is a dead enrollment token,
-//!   caught at use. A 401 from the face is that fatal staleness:
-//!   it propagates instead of degrading (a hard boot failure at
-//!   startup; the forward-path watcher drives poisoning).
+//!   request); the one fatal staleness is a dead credential, caught at
+//!   use. A 401 from the face is that fatal staleness: it is retried once
+//!   when the credential on disk has changed (the platform reset replaced
+//!   it) and otherwise propagates instead of degrading (a hard boot
+//!   failure at startup; the forward-path watcher drives poisoning).
 //! - At boot with an unreachable or erroring gateway the tagma degrades: the
 //!   boot load returns an empty config (the health block flags `degraded`)
 //!   and a background repull task retries until the gateway answers;
 //!   agents restore against the empty registry as unconfigured
-//!   placeholders. A dead enrollment token is still a hard boot error
-//!   (the token is read once at boot; recovery is re-enroll plus
-//!   restart). Runtime `load()` keeps the strict cold leg — a switch
+//!   placeholders. A dead credential is still a hard boot error; a reset
+//!   after boot is picked up from the credential directory on the next
+//!   rejected request. Runtime `load()` keeps the strict cold leg — a switch
 //!   to this source still requires a reachable gateway. The local
 //!   profiles.toml is never written in this mode: it belongs to the
 //!   local source alone.
@@ -30,6 +31,7 @@ use anyhow::{Context, Result, bail};
 use just_llm_client::types::generation::ReasoningEffort;
 use kallipai_adk::profile::{Profile, ProfileConfig, ProfileSet, Provider};
 use kallipai_common::collection::CollectionRef;
+use kallipai_common::credential::Credential;
 use kallipai_common::protocol::Modality;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -89,17 +91,41 @@ pub(crate) enum FetchError {
     KeyLifecycle {
         code: Option<String>,
         message: String,
+        /// The credential value the rejected request carried.
+        presented: PresentedValue,
     },
     /// Unreachable, 5xx, 403/404 on the face, malformed payload: stale
     /// content at worst, the token is not the problem.
     Refresh(String),
 }
 
+/// The credential value a rejected request carried. `FetchError` derives
+/// `Debug`, and an error is one `{:?}` away from a log, so this prints
+/// nothing of the value it holds.
+pub(crate) struct PresentedValue(String);
+
+impl PresentedValue {
+    pub(crate) fn new(value: String) -> Self {
+        Self(value)
+    }
+
+    /// The value itself: the latch record is the only consumer.
+    pub(crate) fn into_inner(self) -> String {
+        self.0
+    }
+}
+
+impl std::fmt::Debug for PresentedValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("[REDACTED]")
+    }
+}
+
 impl std::fmt::Display for FetchError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::KeyLifecycle { message, .. } => {
-                write!(f, "gateway rejected the enrollment token: {message}")
+                write!(f, "gateway rejected the stored credential: {message}")
             }
             Self::Refresh(reason) => write!(f, "{reason}"),
         }
@@ -137,21 +163,21 @@ pub struct ProxyProfileSource {
     /// profile carries comes from the gateway's own payload, not from
     /// this setting (clients append their own wire path to that one).
     base: String,
-    token: String,
+    credential: Credential,
     state: tokio::sync::Mutex<ProxyState>,
 }
 
-/// The token is gateway credential material and the cached snapshot
-/// carries provider api_keys that echo it: `Debug` redacts the token
+/// The credential is gateway credential material and the cached snapshot
+/// carries provider api_keys that echo it: `Debug` redacts the credential
 /// field and keeps the snapshot out of the output entirely.
 impl std::fmt::Debug for ProxyProfileSource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ProxyProfileSource")
             .field("client", &self.client)
             .field("base", &self.base)
-            .field("token", &"[REDACTED]")
+            .field("credential", &"[REDACTED]")
             // The mutex contents (last_good) carry api_keys that echo
-            // the token; the field reports presence only.
+            // credential; the field reports presence only.
             .field(
                 "state",
                 &self.state.try_lock().map(|s| s.last_good.is_some()),
@@ -164,10 +190,13 @@ impl std::fmt::Debug for ProxyProfileSource {
 struct ProxyState {
     last_good: Option<ProfileConfig>,
     refresh_failures: u64,
-    /// A refresh confirmed the enrollment token dead (401 again):
-    /// new spawns and profile-set binds refuse until a successful
-    /// refresh clears it.
+    /// A refresh confirmed the credential dead (401 again): new spawns
+    /// and profile-set binds refuse until the value behind the handle
+    /// moves (see `latch_state`).
     poisoned: bool,
+    /// The value the gateway rejected: the latch holds only while the
+    /// handle still carries it.
+    dead_value: Option<String>,
     /// A boot-time fetch failed with no snapshot: the source serves an
     /// empty config while the repull task retries; the first successful
     /// refresh clears it (record_success).
@@ -183,20 +212,49 @@ impl ProxyState {
         self.last_good = Some(cfg);
         self.refresh_failures = 0;
         self.poisoned = false;
+        self.dead_value = None;
         self.degraded = false;
         self.token_state = super::TokenState::Ok;
         self.last_refresh = Some(std::time::SystemTime::now());
     }
 
-    /// Record a confirmed-dead enrollment token and hand back the hard
-    /// error both load paths propagate.
-    fn record_key_death(&mut self, code: Option<String>, message: String) -> anyhow::Error {
+    /// Record a confirmed-dead credential value and hand back the hard
+    /// error both load paths propagate. `dead_value` is the value the
+    /// rejected request carried: a different value later means the platform
+    /// wrote a replacement, which is what lifts the latch.
+    fn record_key_death(
+        &mut self,
+        code: Option<String>,
+        message: String,
+        dead_value: String,
+    ) -> anyhow::Error {
+        self.dead_value = Some(dead_value);
         self.poisoned = true;
         self.token_state = super::TokenState::from_code(code.as_deref());
         anyhow::anyhow!(
-            "gateway rejected the enrollment token ({}): {message}",
+            "gateway rejected the stored credential ({}): {message}",
             code.as_deref().unwrap_or("unknown token")
         )
+    }
+
+    /// Whether the dead-credential latch still holds: the source is poisoned
+    /// and the handle still carries the value the gateway rejected. A
+    /// different value means the platform wrote a replacement, which is what
+    /// lifts the latch. A pure question — it never changes what it reads, so
+    /// every caller gets the same answer whatever else ran first.
+    fn latch_state(&self, current: &str) -> bool {
+        self.poisoned && self.dead_value.as_deref() == Some(current)
+    }
+
+    /// Clear the latch because the credential value moved, so the repull
+    /// round finds the lift waiting; asking whether it holds never consumes
+    /// it. The other clearing path is a successful refresh (`record_success`),
+    /// which zeroes the same flags for a different reason.
+    fn clear_latch(&mut self) {
+        self.poisoned = false;
+        self.dead_value = None;
+        self.token_state = super::TokenState::Ok;
+        info!("the stored credential changed since the gateway rejected it; the latch is cleared");
     }
 }
 
@@ -212,19 +270,12 @@ impl super::TokenState {
 }
 
 impl ProxyProfileSource {
-    /// Validate the enrollment token and the derived distribution
-    /// base. Both failures
-    /// are boot errors with actionable text. The token is the relay
-    /// enrollment token of the entry the boot resolved — there is no
-    /// separate key material (the caller scanned the stored
-    /// credentials, the same source the files-service token uses).
-    pub fn new(base: &str, token: &str) -> Result<Self> {
-        let token = token.trim();
-        if token.is_empty() {
-            bail!(
-                "the resolved relay entry stores an empty enrollment token; re-enroll the tagma on the platform and restart"
-            );
-        }
+    /// Validate the derived distribution base and take the credential
+    /// handle. The credential is the relay enrollment credential of the
+    /// entry the boot resolved — there is no separate key material (the
+    /// caller scanned the stored credentials, the same handle the
+    /// files-service fetch uses).
+    pub fn new(base: &str, credential: Credential) -> Result<Self> {
         let base = base.trim_end_matches('/');
         if !(base.starts_with("http://") || base.starts_with("https://")) {
             bail!(
@@ -239,25 +290,29 @@ impl ProxyProfileSource {
         Ok(Self {
             client,
             base: base.to_owned(),
-            token: token.to_owned(),
+            credential,
             state: tokio::sync::Mutex::new(ProxyState::default()),
         })
     }
 
     async fn get_json_opt<T: DeserializeOwned>(&self, path: &str) -> Result<Option<T>, FetchError> {
         let url = format!("{}{}", self.base, path);
-        let response = self
-            .client
-            .get(&url)
-            .bearer_auth(&self.token)
-            .send()
+        let presented =
+            crate::auth_send::send_authorized(&self.credential, "model gateway", |bearer| {
+                self.client.get(&url).bearer_auth(bearer)
+            })
             .await
             .map_err(|e| FetchError::Refresh(format!("GET {path}: {e}")))?;
+        let response = presented.response;
         let status = response.status();
         if status == reqwest::StatusCode::UNAUTHORIZED {
             let body = response.text().await.unwrap_or_default();
             let (message, code) = parse_api_error(&body);
-            return Err(FetchError::KeyLifecycle { code, message });
+            return Err(FetchError::KeyLifecycle {
+                code,
+                message,
+                presented: PresentedValue::new(presented.credential),
+            });
         }
         if status == reqwest::StatusCode::NOT_FOUND {
             return Ok(None);
@@ -285,30 +340,34 @@ impl ProxyProfileSource {
     /// the tagma pointer is the single store, so the local settings
     /// carry no copy. Ok(false) means the named collection is not
     /// visible to this account (the gateway 404s, no existence
-    /// oracle); token lifecycle and transport failures surface as the
-    /// matching FetchError.
+    /// oracle); a rejected credential is retried once when the value on
+    /// disk has moved, otherwise it surfaces as the matching FetchError.
     pub(crate) async fn put_selection(
         &self,
         owner: Option<&str>,
         collection: &str,
     ) -> Result<bool, FetchError> {
         let url = format!("{}/selection", self.base);
-        let response = self
-            .client
-            .put(&url)
-            .bearer_auth(&self.token)
-            .json(&serde_json::json!({
-                "owner": owner,
-                "collection_name": collection,
-            }))
-            .send()
+        let body = serde_json::json!({
+            "owner": owner,
+            "collection_name": collection,
+        });
+        let presented =
+            crate::auth_send::send_authorized(&self.credential, "model gateway", |bearer| {
+                self.client.put(&url).bearer_auth(bearer).json(&body)
+            })
             .await
             .map_err(|e| FetchError::Refresh(format!("PUT /selection: {e}")))?;
+        let response = presented.response;
         let status = response.status();
         if status == reqwest::StatusCode::UNAUTHORIZED {
             let body = response.text().await.unwrap_or_default();
             let (message, code) = parse_api_error(&body);
-            return Err(FetchError::KeyLifecycle { code, message });
+            return Err(FetchError::KeyLifecycle {
+                code,
+                message,
+                presented: PresentedValue::new(presented.credential),
+            });
         }
         if status == reqwest::StatusCode::NOT_FOUND {
             return Ok(false);
@@ -390,10 +449,15 @@ impl ProfileSource for ProxyProfileSource {
             Err(err) => {
                 state.refresh_failures += 1;
                 match err {
-                    FetchError::KeyLifecycle { code, message } => {
-                        // Mark the poison before propagating: the signal
-                        // consumer and ensure_usable read this flag.
-                        Err(state.record_key_death(code, message))
+                    FetchError::KeyLifecycle {
+                        code,
+                        message,
+                        presented,
+                    } => {
+                        // Mark the poison with the value the gateway
+                        // rejected, before propagating: the signal consumer
+                        // and the two gates read both.
+                        Err(state.record_key_death(code, message, presented.into_inner()))
                     }
                     FetchError::Refresh(reason) => {
                         if let Some(cfg) = state.last_good.clone() {
@@ -421,7 +485,7 @@ impl ProfileSource for ProxyProfileSource {
     /// except the cold start — a refresh-class failure with no snapshot
     /// degrades to an empty config (flagged in the health block) so the
     /// tagma still boots; the repull task owns recovery. A dead
-    /// enrollment token stays a hard error either way.
+    /// credential stays a hard error either way.
     async fn boot_load(&self) -> Result<ProfileConfig> {
         let mut state = self.state.lock().await;
         match self.fetch_and_adapt().await {
@@ -432,9 +496,11 @@ impl ProfileSource for ProxyProfileSource {
             Err(err) => {
                 state.refresh_failures += 1;
                 match err {
-                    FetchError::KeyLifecycle { code, message } => {
-                        Err(state.record_key_death(code, message))
-                    }
+                    FetchError::KeyLifecycle {
+                        code,
+                        message,
+                        presented,
+                    } => Err(state.record_key_death(code, message, presented.into_inner())),
                     FetchError::Refresh(reason) => {
                         if let Some(cfg) = state.last_good.clone() {
                             warn!(
@@ -464,10 +530,12 @@ impl ProfileSource for ProxyProfileSource {
     }
 
     async fn ensure_usable(&self) -> Result<()> {
+        self.credential.refresh();
+        let current = self.credential.current();
         let state = self.state.lock().await;
-        if state.poisoned {
+        if state.latch_state(&current) {
             bail!(
-                "the gateway enrollment token is dead ({}): re-enroll the tagma on the platform and restart (the token is read once at boot); spawns and profile-set binds stay refused until then",
+                "the gateway rejected the stored credential ({}); the value has not changed since, so spawns and profile-set binds stay refused — write the new value into the credential file and the next request presents it, no restart needed",
                 match state.token_state {
                     super::TokenState::Expired => "token expired",
                     super::TokenState::Revoked => "token revoked",
@@ -484,14 +552,32 @@ impl ProfileSource for ProxyProfileSource {
     }
 
     async fn health(&self) -> super::SourceHealth {
+        self.credential.refresh();
         let state = self.state.lock().await;
+        let current = self.credential.current();
+        let poisoned = state.latch_state(&current);
         super::SourceHealth {
-            poisoned: state.poisoned,
+            poisoned,
             degraded: state.degraded,
-            token_state: state.token_state,
+            token_state: if poisoned {
+                state.token_state
+            } else {
+                super::TokenState::Ok
+            },
             last_refresh: state.last_refresh,
             refresh_failures: state.refresh_failures,
         }
+    }
+
+    async fn clear_stale_latch(&self) -> bool {
+        self.credential.refresh();
+        let current = self.credential.current();
+        let mut state = self.state.lock().await;
+        if !state.poisoned || state.latch_state(&current) {
+            return false;
+        }
+        state.clear_latch();
+        true
     }
 
     async fn handle_gateway_signal(&self, signal: &kallipai_adk::GatewaySignal) {
@@ -509,7 +595,7 @@ impl ProfileSource for ProxyProfileSource {
             Err(error) if poisoned => error!(
                 status = signal.status,
                 error = %error,
-                "gateway auth signal: refresh confirms the enrollment token is dead — spawns and profile-set binds are refused until the tagma is re-enrolled and a refresh succeeds"
+                "gateway auth signal: refresh confirms the stored credential is dead; spawns and profile-set binds stay refused until the credential file holds a different value"
             ),
             Err(error) => warn!(
                 status = signal.status,
@@ -759,7 +845,11 @@ mod tests {
         tokio::spawn(async move {
             let _ = axum::serve(listener, app).await;
         });
-        let source = ProxyProfileSource::new(&format!("http://{addr}"), "tagma-token-1").unwrap();
+        let source = ProxyProfileSource::new(
+            &format!("http://{addr}"),
+            Credential::fixed("tagma-token-1"),
+        )
+        .unwrap();
         let err = source
             .load()
             .await
@@ -779,12 +869,43 @@ mod tests {
         format!("http://{addr}")
     }
 
+    /// A rejected credential is retried once when the store behind the
+    /// handle yields a new value: the platform reset lands on disk and the
+    /// next attempt presents it instead of failing the refresh.
     #[tokio::test]
-    async fn an_empty_enrollment_token_is_an_actionable_boot_error() {
-        let err = ProxyProfileSource::new("http://gw.test:7501", "  ").unwrap_err();
-        let text = format!("{err:#}");
-        assert!(text.contains("empty enrollment token"), "got: {text}");
-        assert!(text.contains("re-enroll"), "got: {text}");
+    async fn a_rejected_credential_is_retried_once_after_a_reload() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = axum::Router::new().route(
+            "/selected-collection",
+            get(|headers: axum::http::HeaderMap| async move {
+                let presented = headers
+                    .get("authorization")
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or_default();
+                if presented == "Bearer fresh-token" {
+                    (
+                        axum::http::StatusCode::OK,
+                        axum::Json(json!({ "collection_name": "user-col" })),
+                    )
+                } else {
+                    (
+                        axum::http::StatusCode::UNAUTHORIZED,
+                        axum::Json(json!({ "code": "unauthorized", "message": "unknown tagma credential" })),
+                    )
+                }
+            }),
+        );
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        let credential = Credential::watching("stale-token", || Some("fresh-token".to_owned()));
+        let source = ProxyProfileSource::new(&format!("http://{addr}"), credential).unwrap();
+        let answer = source
+            .get_json::<serde_json::Value>("/selected-collection")
+            .await
+            .expect("the reloaded credential must carry the request");
+        assert_eq!(answer["collection_name"], "user-col");
     }
 
     #[tokio::test]
@@ -795,7 +916,7 @@ mod tests {
         // not make the no-write assertion below a false negative.
         let _ = std::fs::remove_file(kallipai_adk::profile::config_path().unwrap());
         let base = spawn_mock_gateway().await;
-        let source = ProxyProfileSource::new(&base, "tagma-token-1").unwrap();
+        let source = ProxyProfileSource::new(&base, Credential::fixed("tagma-token-1")).unwrap();
         let cfg = source.load().await.unwrap();
         // Set + failover order + synthesized ids + default marker.
         let set = cfg.sets.get("alpha").unwrap();
@@ -905,13 +1026,13 @@ mod tests {
     async fn adapter_consumes_the_visibility_filtered_face() {
         crate::test_helpers::ensure_test_data_dir();
         let base = spawn_keyed_gateway().await;
-        let wide = ProxyProfileSource::new(&base, "token-wide").unwrap();
+        let wide = ProxyProfileSource::new(&base, Credential::fixed("token-wide")).unwrap();
         let cfg = wide.load().await.unwrap();
         let names: Vec<&str> = cfg.sets.keys().map(|s| s.as_str()).collect();
         assert_eq!(names, ["alpha", "beta"]);
         assert_eq!(cfg.default, "alpha");
 
-        let narrow = ProxyProfileSource::new(&base, "token-narrow").unwrap();
+        let narrow = ProxyProfileSource::new(&base, Credential::fixed("token-narrow")).unwrap();
         let cfg = narrow.load().await.unwrap();
         let names: Vec<&str> = cfg.sets.keys().map(|s| s.as_str()).collect();
         assert_eq!(names, ["alpha"]);
@@ -920,15 +1041,15 @@ mod tests {
         let _ = std::fs::remove_file(cache);
     }
 
-    /// The Debug face never echoes the enrollment token: the field is
+    /// The Debug face never echoes the stored credential: the field is
     /// redacted, and the cached snapshot (whose provider api_keys echo
-    /// the token) reports presence only.
+    /// it) reports presence only.
     #[tokio::test]
     #[serial_test::serial]
     async fn debug_output_stays_token_free_after_a_refresh() {
         crate::test_helpers::ensure_test_data_dir();
         let base = spawn_keyed_gateway().await;
-        let source = ProxyProfileSource::new(&base, "token-wide").unwrap();
+        let source = ProxyProfileSource::new(&base, Credential::fixed("token-wide")).unwrap();
         let cfg = source.load().await.unwrap();
         // The refresh populated the snapshot: its providers carry
         // credential material (the gateway-served api_keys), so a
@@ -984,7 +1105,7 @@ mod tests {
             let _ = axum::serve(listener, app).await;
         });
         let base = format!("http://{addr}");
-        let source = ProxyProfileSource::new(&base, "tagma-token-1").unwrap();
+        let source = ProxyProfileSource::new(&base, Credential::fixed("tagma-token-1")).unwrap();
         let cfg = source.load().await.unwrap();
         let names: Vec<&str> = cfg.sets.keys().map(|s| s.as_str()).collect();
         assert_eq!(names, ["beta"]);
@@ -1006,7 +1127,7 @@ mod tests {
             let _ = axum::serve(listener, app).await;
         });
         let base = format!("http://{addr}");
-        let fresh = ProxyProfileSource::new(&base, "tagma-token-1").unwrap();
+        let fresh = ProxyProfileSource::new(&base, Credential::fixed("tagma-token-1")).unwrap();
         let cfg = fresh.load().await.unwrap();
         assert!(cfg.sets.is_empty());
         assert_eq!(cfg.default, "");
@@ -1033,7 +1154,7 @@ mod tests {
             let _ = axum::serve(listener, app).await;
         });
         let base = format!("http://{addr}");
-        let source = ProxyProfileSource::new(&base, "tagma-token-1").unwrap();
+        let source = ProxyProfileSource::new(&base, Credential::fixed("tagma-token-1")).unwrap();
         let err = source.load().await.unwrap_err();
         assert!(format!("{err:#}").contains("key_revoked"), "got: {err:#}");
     }
@@ -1064,7 +1185,7 @@ mod tests {
         let cache = kallipai_adk::profile::config_path().unwrap();
         kallipai_adk::profile::save(&cached_config(), &cache).unwrap();
         let base = dead_base().await;
-        let source = ProxyProfileSource::new(&base, "tagma-token-1").unwrap();
+        let source = ProxyProfileSource::new(&base, Credential::fixed("tagma-token-1")).unwrap();
         let err = source.load().await.unwrap_err();
         let text = format!("{err:#}");
         assert!(text.contains("no fallback"), "got: {text}");
@@ -1082,7 +1203,7 @@ mod tests {
         let cache = kallipai_adk::profile::config_path().unwrap();
         let _ = std::fs::remove_file(&cache);
         let base = dead_base().await;
-        let source = ProxyProfileSource::new(&base, "tagma-token-1").unwrap();
+        let source = ProxyProfileSource::new(&base, Credential::fixed("tagma-token-1")).unwrap();
         let err = source.load().await.unwrap_err();
         assert!(format!("{err:#}").contains("no fallback"), "got: {err:#}");
     }
@@ -1112,7 +1233,7 @@ mod tests {
     async fn signal_401_with_a_rejecting_face_poisons_the_source() {
         crate::test_helpers::ensure_test_data_dir();
         let base = spawn_rejecting_gateway(StatusCode::UNAUTHORIZED, "key_revoked").await;
-        let source = ProxyProfileSource::new(&base, "tagma-token-1").unwrap();
+        let source = ProxyProfileSource::new(&base, Credential::fixed("tagma-token-1")).unwrap();
         assert!(!source.health().await.poisoned);
         source
             .handle_gateway_signal(&kallipai_adk::GatewaySignal {
@@ -1132,7 +1253,7 @@ mod tests {
     async fn signal_403_refreshes_without_poisoning() {
         crate::test_helpers::ensure_test_data_dir();
         let base = spawn_rejecting_gateway(StatusCode::FORBIDDEN, "quota").await;
-        let source = ProxyProfileSource::new(&base, "tagma-token-1").unwrap();
+        let source = ProxyProfileSource::new(&base, Credential::fixed("tagma-token-1")).unwrap();
         source
             .handle_gateway_signal(&kallipai_adk::GatewaySignal {
                 status: 403,
@@ -1150,7 +1271,7 @@ mod tests {
     async fn signal_with_a_healthy_face_refreshes_cleanly() {
         crate::test_helpers::ensure_test_data_dir();
         let base = spawn_mock_gateway().await;
-        let source = ProxyProfileSource::new(&base, "tagma-token-1").unwrap();
+        let source = ProxyProfileSource::new(&base, Credential::fixed("tagma-token-1")).unwrap();
         source
             .handle_gateway_signal(&kallipai_adk::GatewaySignal {
                 status: 401,
@@ -1235,7 +1356,7 @@ mod tests {
     async fn bare_401_without_envelope_poisons_with_unknown_state() {
         crate::test_helpers::ensure_test_data_dir();
         let base = spawn_plain_401_gateway().await;
-        let source = ProxyProfileSource::new(&base, "tagma-token-1").unwrap();
+        let source = ProxyProfileSource::new(&base, Credential::fixed("tagma-token-1")).unwrap();
         source
             .handle_gateway_signal(&kallipai_adk::GatewaySignal {
                 status: 401,
@@ -1258,7 +1379,7 @@ mod tests {
         use std::sync::atomic::Ordering;
         crate::test_helpers::ensure_test_data_dir();
         let (base, mode) = spawn_switchable_gateway().await;
-        let source = ProxyProfileSource::new(&base, "tagma-token-1").unwrap();
+        let source = ProxyProfileSource::new(&base, Credential::fixed("tagma-token-1")).unwrap();
         mode.store(1, Ordering::Relaxed);
         source
             .handle_gateway_signal(&kallipai_adk::GatewaySignal {
@@ -1280,13 +1401,161 @@ mod tests {
         assert!(source.ensure_usable().await.is_ok());
     }
 
+    /// A value that moved on disk since the rejection lifts the latch: the
+    /// platform reset wrote the replacement, so the gate passes before any
+    /// request carries it.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn a_replaced_credential_lifts_the_latch() {
+        crate::test_helpers::ensure_test_data_dir();
+        let base = spawn_rejecting_gateway(StatusCode::UNAUTHORIZED, "key_revoked").await;
+        let dir = tempfile::tempdir().expect("credential dir");
+        let path = dir.path().join("credential");
+        std::fs::write(&path, "tagma-token-1\n").expect("seed the credential file");
+        let watched = path.clone();
+        let credential = Credential::watching("tagma-token-1", move || {
+            std::fs::read_to_string(&watched)
+                .ok()
+                .map(|found| found.trim().to_owned())
+        });
+        let source = ProxyProfileSource::new(&base, credential).unwrap();
+        source
+            .handle_gateway_signal(&kallipai_adk::GatewaySignal {
+                status: 401,
+                code: Some("key_revoked".into()),
+            })
+            .await;
+        assert!(
+            source.ensure_usable().await.is_err(),
+            "the rejected value latches"
+        );
+        std::fs::write(&path, "tagma-token-2\n").expect("write the replacement");
+        source
+            .ensure_usable()
+            .await
+            .expect("a value that moved on disk lifts the latch");
+        // The gate passes on the pure question; the record itself waits for
+        // a clearing event: a lift, or the next successful refresh.
+        let lifted = source.health().await;
+        assert!(!lifted.poisoned, "the latch no longer holds");
+        assert_eq!(
+            lifted.token_state,
+            super::super::TokenState::Ok,
+            "a lifted latch cannot report a dead token"
+        );
+        assert!(
+            source.clear_stale_latch().await,
+            "the repull round finds the lift"
+        );
+        let health = source.health().await;
+        assert!(!health.poisoned);
+        assert_eq!(health.token_state, super::super::TokenState::Ok);
+    }
+
+    /// Asking whether the latch holds never changes the answer for the next
+    /// caller: the repull round depends on finding the lift still waiting.
+    #[test]
+    fn asking_about_the_latch_leaves_it_in_place() {
+        let mut state = ProxyState {
+            dead_value: Some("retired".to_owned()),
+            poisoned: true,
+            ..ProxyState::default()
+        };
+
+        assert!(
+            !state.latch_state("fresh"),
+            "a moved value lifts the answer"
+        );
+        assert!(state.poisoned, "but the latch is still recorded");
+        assert_eq!(state.dead_value.as_deref(), Some("retired"));
+        assert!(state.latch_state("retired"));
+
+        state.clear_latch();
+        assert!(!state.poisoned);
+        assert!(state.dead_value.is_none());
+        assert_eq!(state.token_state, super::super::TokenState::Ok);
+    }
+
+    /// `FetchError` derives `Debug`, so the rejected value must not render:
+    /// one `{:?}` would otherwise put a live secret in the log.
+    #[test]
+    fn a_rejected_credential_never_reaches_a_debug_render() {
+        let err = FetchError::KeyLifecycle {
+            code: Some("key_revoked".to_owned()),
+            message: "revoked".to_owned(),
+            presented: PresentedValue::new("sk-live-secret".to_owned()),
+        };
+        let rendered = format!("{err:?}");
+        assert!(!rendered.contains("sk-live-secret"));
+        assert!(rendered.contains("[REDACTED]"));
+    }
+
+    /// The file decides, not the handle's cache: a value written while the
+    /// latch is down is picked up by the next query, and the load that
+    /// follows really reaches the gateway.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn a_file_rewrite_lifts_the_latch_and_the_next_load_reaches_the_gateway() {
+        use std::sync::atomic::Ordering;
+        crate::test_helpers::ensure_test_data_dir();
+        let (base, mode) = spawn_switchable_gateway().await;
+        let dir = tempfile::tempdir().expect("credential dir");
+        let path = dir.path().join("credential");
+        std::fs::write(&path, "tagma-token-1\n").expect("seed the credential file");
+        let watched = path.clone();
+        let credential = Credential::watching("tagma-token-1", move || {
+            std::fs::read_to_string(&watched)
+                .ok()
+                .map(|found| found.trim().to_owned())
+        });
+        let source = ProxyProfileSource::new(&base, credential).unwrap();
+        mode.store(1, Ordering::Relaxed);
+        assert!(
+            source.load().await.is_err(),
+            "the gateway rejects the old secret"
+        );
+        assert!(
+            !source.clear_stale_latch().await,
+            "the value on disk has not moved"
+        );
+        std::fs::write(&path, "tagma-token-2\n").expect("write the replacement");
+        mode.store(0, Ordering::Relaxed);
+        assert!(
+            source.clear_stale_latch().await,
+            "the value on disk lifts the latch"
+        );
+        let config = source.load().await.expect("the load reaches the gateway");
+        assert_eq!(config.default, "alpha");
+    }
+
+    /// The reload source still reports the rejected value: the rejection
+    /// stands, so a spawn or bind stays refused instead of quietly retrying a
+    /// dead credential.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn an_unchanged_credential_keeps_the_latch() {
+        crate::test_helpers::ensure_test_data_dir();
+        let base = spawn_rejecting_gateway(StatusCode::UNAUTHORIZED, "key_revoked").await;
+        let credential = Credential::watching("tagma-token-1", || Some("tagma-token-1".to_owned()));
+        let source = ProxyProfileSource::new(&base, credential).unwrap();
+        source
+            .handle_gateway_signal(&kallipai_adk::GatewaySignal {
+                status: 401,
+                code: Some("key_revoked".into()),
+            })
+            .await;
+        assert!(source.ensure_usable().await.is_err(), "first gate refuses");
+        assert!(source.ensure_usable().await.is_err(), "still refused");
+        assert!(source.health().await.poisoned, "the latch still holds");
+    }
+
     #[tokio::test]
     #[serial_test::serial]
     async fn runtime_refresh_failure_serves_the_last_good_snapshot() {
         use std::sync::atomic::Ordering;
         crate::test_helpers::ensure_test_data_dir();
         let (base, mode) = spawn_switchable_gateway().await;
-        let source = ProxyProfileSource::new(&base, "tagma-token-1").unwrap();
+        let source = ProxyProfileSource::new(&base, Credential::fixed("tagma-token-1")).unwrap();
         let first = source.load().await.unwrap();
         mode.store(2, Ordering::Relaxed);
         let second = source.load().await.unwrap();
@@ -1312,7 +1581,7 @@ mod tests {
         crate::test_helpers::ensure_test_data_dir();
         let (base, mode) = spawn_switchable_gateway().await;
         mode.store(2, Ordering::Relaxed);
-        let source = ProxyProfileSource::new(&base, "tagma-token-1").unwrap();
+        let source = ProxyProfileSource::new(&base, Credential::fixed("tagma-token-1")).unwrap();
         let cfg = source.boot_load().await.unwrap();
         assert!(
             cfg.sets.is_empty(),
@@ -1338,7 +1607,7 @@ mod tests {
         crate::test_helpers::ensure_test_data_dir();
         let (base, mode) = spawn_switchable_gateway().await;
         mode.store(2, Ordering::Relaxed);
-        let source = ProxyProfileSource::new(&base, "tagma-token-1").unwrap();
+        let source = ProxyProfileSource::new(&base, Credential::fixed("tagma-token-1")).unwrap();
         source.boot_load().await.unwrap();
         assert!(source.health().await.degraded);
         mode.store(0, Ordering::Relaxed);
@@ -1359,10 +1628,10 @@ mod tests {
     async fn boot_load_still_fails_hard_on_a_dead_enrollment_token() {
         crate::test_helpers::ensure_test_data_dir();
         let base = spawn_rejecting_gateway(StatusCode::UNAUTHORIZED, "key_revoked").await;
-        let source = ProxyProfileSource::new(&base, "tagma-token-1").unwrap();
+        let source = ProxyProfileSource::new(&base, Credential::fixed("tagma-token-1")).unwrap();
         let err = source.boot_load().await.unwrap_err();
         assert!(
-            format!("{err:#}").contains("rejected the enrollment token"),
+            format!("{err:#}").contains("rejected the stored credential"),
             "got: {err:#}"
         );
         let health = source.health().await;

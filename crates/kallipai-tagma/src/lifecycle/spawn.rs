@@ -118,10 +118,11 @@ pub(crate) async fn spawn_agent(mut args: SpawnArgs) -> anyhow::Result<(Agent, A
         if profile.endpoint == crate::backend::UNCONFIGURED {
             crate::backend::unconfigured_client(Some(system_prompt.clone()))
         } else {
-            // A dead enrollment token refuses new spawns: serving a
-            // profile through a known-dead token just burns a failover
-            // chain per round. The signal consumer clears the poison on
-            // a successful refresh.
+            // A dead credential refuses new spawns: serving a profile
+            // through a known-dead value just burns a failover chain per
+            // round. This check passes once the credential file holds a new
+            // value because it asks the store on every call; the latch
+            // record itself outlives it, and clearing it is a separate path.
             args.shared_state
                 .profile_source
                 .load_full()

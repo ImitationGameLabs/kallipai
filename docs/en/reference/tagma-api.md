@@ -551,7 +551,7 @@ masked.
 
 The response carries an additive `source` block: `mode` (`local` or
 `model-gateway`), `proxy_available` (a configured platform entry carries an
-enrollment token, so a switch to the gateway is possible), `polis` (the
+stored credential, so a switch to the gateway is possible), `polis` (the
 active gateway face's origin, null in local mode), `platforms` (every
 configured entry's name, origin, and enrollment state: the
 switch-target list), `poisoned`, `token_state`,
@@ -651,10 +651,16 @@ Operator only. Re-fetches the selected collection from the model
 gateway and swaps the bundle in place, so gateway-side edits (a
 re-anchored default set, a newly added member) reach a running
 tagma without a restart; a healthy tagma otherwise serves the boot
-snapshot until it restarts or re-selects. Local sources are a 409
-(the local file is read on every use). A dead enrollment token is
-also a 409 (re-enroll the tagma, then restart or round-trip the source
-mode; the token is read once at boot).
+snapshot until it restarts or re-selects. Local sources are a 409 (the
+local file is read on every use).
+
+A credential the gateway has rejected is a 409 while the stored value has
+not changed: write the replacement into the credential file, and the next
+request presents it. Every reader reloads once on a rejection, and a source
+that stopped on the old credential stops refusing new spawns at its next gate
+check (it asks the store on every call); the pull itself resumes at the next
+pull round (the backoff between rounds tops out at five minutes) or at this
+endpoint, so no restart or source switch is needed.
 A failed fetch is a 502 and
 leaves the live bundle untouched. Responds with the same body as
 `GET /profiles`.

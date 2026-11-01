@@ -24,11 +24,10 @@ fn files_access_lists_enrolled_faces_in_config_order() {
         name: name.to_owned(),
         origin: format!("http://{name}"),
         base: format!("http://{name}/v1/model-gateway"),
-        token: token.map(|t| t.to_owned()),
+        credential: token.map(kallipai_common::credential::Credential::fixed),
     };
     inner.platforms = std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(vec![
         face("alpha", None),
-        face("blank", Some("   ")),
         face("beta", Some("b-token")),
         face("gamma", Some("g-token")),
     ]));
@@ -41,10 +40,10 @@ fn files_access_lists_enrolled_faces_in_config_order() {
     );
     assert_eq!(access[0].name, "beta");
     assert_eq!(access[0].origin, "http://beta");
-    assert_eq!(access[0].token, "b-token");
+    assert_eq!(access[0].credential.current(), "b-token");
     assert_eq!(access[1].name, "gamma");
     assert_eq!(access[1].origin, "http://gamma");
-    assert_eq!(access[1].token, "g-token");
+    assert_eq!(access[1].credential.current(), "g-token");
 }
 
 #[test]
@@ -80,7 +79,7 @@ fn gateway_params_pair_the_active_origin_with_its_enrollment_token() {
     let params = gateway_params_from(&faces, None).unwrap();
     assert_eq!(params.base, "http://api.other.test/v1/model-gateway");
     assert_eq!(params.origin, "http://api.other.test");
-    assert_eq!(params.token, "token-1");
+    assert_eq!(params.credential.current(), "token-1");
     // A pin decides even when it points at an UNENROLLED entry: no
     // silent fallback to the enrolled one — no enrollment, no gateway.
     assert!(gateway_params_from(&faces, Some("https://api.example.com")).is_none());
@@ -91,7 +90,47 @@ fn gateway_params_pair_the_active_origin_with_its_enrollment_token() {
     let faces = platform_faces(&entries, root.path());
     let params = gateway_params_from(&faces, Some("https://api.example.com")).unwrap();
     assert_eq!(params.origin, "https://api.example.com");
-    assert_eq!(params.token, "token-1");
+    assert_eq!(params.credential.current(), "token-1");
+}
+
+#[test]
+fn a_relay_entry_keeps_one_credential_handle_across_its_readers() {
+    // The face boot resolves carries the handle, and relay activation asks
+    // the state for it instead of making a second one: a replacement through
+    // one reader shows on the others, the reload source rides along, and the
+    // value activation read moves the handle forward when the file moved.
+    let root = tempfile::TempDir::new().unwrap();
+    let dir = root.path().join("beta");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("tagma.id"), "id-1").unwrap();
+    std::fs::write(dir.join("tagma.token"), "old-token").unwrap();
+    let entries = [RelayEntry {
+        name: "beta".to_owned(),
+        polis_url: "http://api.other.test".to_owned(),
+        enrollment_code: None,
+    }];
+    let mut inner = match std::sync::Arc::try_unwrap(crate::test_helpers::make_state()) {
+        Ok(inner) => inner,
+        Err(_) => panic!("make_state hands out the sole reference"),
+    };
+    inner.platforms = std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(platform_faces(
+        &entries,
+        root.path(),
+    )));
+    let state = std::sync::Arc::new(inner);
+    // Relay activation asks the state for the handle and moves it forward:
+    // the file was rewritten after the boot snapshot, so the activation read
+    // wins over the value the face took.
+    let relay = relay_credential(&state, "beta", &dir, "activation-token".to_owned());
+    assert_eq!(relay.current(), "activation-token");
+    relay.clone().replace("swapped-token".to_owned());
+    assert_eq!(
+        state.files_access()[0].credential.current(),
+        "swapped-token"
+    );
+    std::fs::write(dir.join("tagma.token"), "disk-token").unwrap();
+    state.files_access()[0].credential.refresh();
+    assert_eq!(state.files_access()[0].credential.current(), "disk-token");
 }
 #[test]
 fn boot_refuses_to_start_without_a_slug() {

@@ -80,8 +80,8 @@ without a selection pulls an empty config. The pulled config lives in
 memory only, `profiles.toml` stops receiving updates, and a cold start
 with the gateway unreachable fails with a pointer back to this
 setting. The Profiles page's Gateway/Local tabs switch this setting at
-runtime; the gateway side is offered only when a relay entry carries an
-enrollment token.
+runtime; the gateway side is offered only when a relay entry carries a
+stored credential.
 
 An upgraded gateway gives every gateway account space with profiles a home
 collection (the collection the row lives in): a space that carried profiles

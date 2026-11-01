@@ -99,10 +99,15 @@ and a write for each of three resources:
   with at least one string (the registry answers `400` otherwise). Ending a
   credential is a revocation or a reset, never an emptied set.
 - A change lands on the credential's next request; nothing caches the set.
-- A reset is the one place where the next request is not enough for the
-  tagma's own calls: the registry retires the old hash at once, while a
-  running tagma keeps presenting the secret it read at startup, so write the
-  new value into its credential file and it resumes at its next start.
+- A reset is the one place where the next request is not enough on its
+  own: the registry retires the old hash at once, and a running tagma holds
+  the value it read. Write the new value into its credential file: the
+  relay, file, and gateway calls reload once when a request is rejected,
+  so the next request runs on the new value. A gateway source that stopped
+  on the old credential stops refusing new spawns at its next gate check,
+  which asks the store on every call; the pull itself resumes at the next
+  pull round (the backoff between rounds tops out at five minutes) or at a
+  `POST /profiles/refresh`, so no restart is needed either way.
 - A tagma enrollment carries the three `files:*` strings. A new personal
   token starts checked with `archeion:tagma:read`,
   `archeion:account:read`, and `files:record:read`.

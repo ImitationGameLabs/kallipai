@@ -18,6 +18,7 @@ use kallipai_adk::context::ContextStore;
 use kallipai_adk::profile::{ProfileConfig, ProfileRegistry};
 pub use kallipai_common::agentid::AgentId;
 use kallipai_common::authtoken::TokenHash;
+use kallipai_common::credential::Credential;
 use kallipai_common::policy::{ExecPolicy, PolicyPreset};
 pub use kallipai_common::protocol::AgentState;
 pub use kallipai_common::protocol::AgentSummary;
@@ -315,7 +316,7 @@ pub struct AppState {
     /// Gateway connection parameters for the active model-gateway
     /// source, hot-swapped by a source switch (the pin rewrite):
     /// present exactly when the live source is the model gateway
-    /// and its face carries an enrollment token. `None` in local
+    /// and its face carries a stored credential. `None` in local
     /// mode (the persisted pin survives on disk) and when no entry
     /// resolves at boot. A switch never gates on this slot alone:
     /// a request carrying `polis` resolves against the platforms
@@ -327,7 +328,7 @@ pub struct AppState {
     /// target origin here). Boot order, the operator's declared
     /// order. Interior-mutable for one reason: a first-run enroll
     /// stores its token after this snapshot was taken, and
-    /// `set_platform_token` records it without a restart.
+    /// `set_platform_credential` records it without a restart.
     pub platforms: std::sync::Arc<arc_swap::ArcSwap<Vec<PlatformFace>>>,
     /// Gateway auth-signal intake: the adk acquisition loop
     /// publishes at most one signal per exhausted failover chain that ended in
@@ -423,15 +424,18 @@ pub struct AppState {
 /// One switchable platform face, resolved at boot from a relay entry:
 /// the origin (the platform edge, exactly as configured — the wire
 /// form a switch request matches), the derived model-gateway base,
-/// and the entry's stored enrollment token (`None` until relay
-/// enrollment on that platform).
+/// and the entry's stored enrollment credential (`None` until relay
+/// enrollment on that platform). An enrolled entry carries one handle:
+/// boot makes it, relay activation reuses it, and the files fetch and the
+/// gateway proxy clone it, so every reader presents the same value and a
+/// reload on disk reaches them all.
 #[derive(Clone)]
 pub struct PlatformFace {
     /// The relay entry's slug (`credentials/<name>/`).
     pub name: String,
     pub origin: String,
     pub base: String,
-    pub token: Option<String>,
+    pub credential: Option<Credential>,
 }
 
 /// The token is platform credential material: `Debug` prints it as
@@ -444,7 +448,7 @@ impl std::fmt::Debug for PlatformFace {
             .field("name", &self.name)
             .field("origin", &self.origin)
             .field("base", &self.base)
-            .field("token", &self.token.as_ref().map(|_| "[REDACTED]"))
+            .field("credential", &self.credential)
             .finish()
     }
 }
@@ -1023,43 +1027,49 @@ impl AppState {
     /// The platforms this tagma can fetch stored records from: every
     /// configured face carrying a usable enrollment, in configuration
     /// order, as the files-service access triple (name for attribution,
-    /// origin, token). A face with no stored credential — or with a blank
-    /// one, which the runtime `set_platform_token` path can hand over
-    /// independently of what the credential files say — cannot authenticate
-    /// a fetch, so it does not appear.
+    /// origin, credential handle). A face with no stored credential cannot
+    /// authenticate a fetch, so it does not appear.
     pub(crate) fn files_access(&self) -> Vec<crate::files::FilesAccess> {
         self.platforms
             .load()
             .iter()
             .filter_map(|face| {
-                let token = face.token.as_deref()?.trim();
-                if token.is_empty() {
-                    return None;
-                }
+                let credential = face.credential.clone()?;
                 Some(crate::files::FilesAccess {
                     name: face.name.clone(),
                     origin: face.origin.clone(),
-                    token: token.to_owned(),
+                    credential,
                 })
             })
             .collect()
     }
 
-    /// Record a just-stored enrollment token on its platform face.
+    /// Record a just-stored enrollment credential on its platform face.
     /// A first-run enroll writes the credential after the boot
     /// snapshot was taken (`platform_faces` runs before relay
     /// activation), so the switch-target list (GET /profiles, switch
     /// resolution) would keep showing the platform un-enrolled until
-    /// a restart. Only the token moves; the face's identity (name,
-    /// origin, base) is boot config.
-    pub fn set_platform_token(&self, entry_name: &str, token: String) {
+    /// a restart. Only the credential handle moves; the face's identity
+    /// (name, origin, base) is boot config.
+    pub fn set_platform_credential(&self, entry_name: &str, credential: Credential) {
         self.platforms.rcu(|faces| {
             let mut next = (**faces).clone();
             if let Some(face) = next.iter_mut().find(|f| f.name == entry_name) {
-                face.token = Some(token.clone());
+                face.credential = Some(credential.clone());
             }
             std::sync::Arc::new(next)
         });
+    }
+
+    /// The credential handle recorded on the named platform face. Boot makes
+    /// it and relay activation asks here before making one, so an entry keeps
+    /// a single handle rather than one per caller.
+    pub fn platform_credential(&self, entry_name: &str) -> Option<Credential> {
+        self.platforms
+            .load()
+            .iter()
+            .find(|face| face.name == entry_name)
+            .and_then(|face| face.credential.clone())
     }
 
     /// Clone the named relay connector out for a route (guard dropped before

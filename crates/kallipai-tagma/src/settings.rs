@@ -363,7 +363,7 @@ fn profile_source_section() -> anyhow::Result<Option<toml::value::Table>> {
 /// The pinned platform origin from `[profiles.source].polis`: the
 /// relay entry whose model gateway a model-gateway boot targets.
 /// Absent means not yet pinned — the boot then defaults to the first
-/// entry carrying a stored enrollment token, and the first switch
+/// entry carrying a stored credential, and the first switch
 /// rewrites this key. Only meaningful for model-gateway boots; a
 /// local switch keeps it (mode and pin stay decoupled), so a later
 /// gateway boot or polis-less switch resolves the recorded

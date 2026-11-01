@@ -400,7 +400,7 @@ export type ProfileSourceMode = "local" | "model-gateway";
 /** The additive `source` block on GET /profiles responses. */
 export interface ProfileSourceHealth {
   readonly mode: ProfileSourceMode;
-  /** Any configured platform entry stores an enrollment token
+  /** Any configured platform entry stores a platform credential
    * (the switch can be taken), whatever the current mode. */
   readonly proxy_available: boolean;
   readonly poisoned: boolean;

@@ -3263,6 +3263,7 @@ dependencies = [
  "futures-core",
  "futures-util",
  "kallipai-archeion-common",
+ "kallipai-common",
  "kallipai-e2ee",
  "kallipai-keryx-common",
  "kallipai-lesche-common",

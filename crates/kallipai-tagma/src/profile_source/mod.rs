@@ -22,6 +22,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use kallipai_adk::profile::ProfileConfig;
+use kallipai_common::credential::Credential;
 
 mod proxy;
 
@@ -81,7 +82,7 @@ pub trait ProfileSource: Send + Sync {
     /// no snapshot yet) degrades to an empty config instead of failing
     /// the boot — the tagma starts unconfigured, the health block flags
     /// `degraded`, and a background repull task retries. A dead
-    /// enrollment token stays a hard error, and runtime consumers keep
+    /// credential stays a hard error, and runtime consumers keep
     /// calling [`Self::load`], whose strict semantics are unchanged.
     /// Default: identical to `load` (a local source cannot be
     /// unreachable).
@@ -98,23 +99,36 @@ pub trait ProfileSource: Send + Sync {
     async fn snapshot(&self) -> Option<ProfileConfig> {
         None
     }
-    /// Refuse new work when the source is known-poisoned (proxy: a refresh
-    /// confirmed the enrollment token dead). Consulted before a spawn
-    /// resolves its profile and before a profile-set bind commits.
-    /// Default: always usable — local sources hold no enrollment token.
+    /// Refuse new work while the source is known-poisoned (proxy: a refresh
+    /// confirmed the credential dead) and the value behind it has not moved
+    /// since. Consulted before a spawn resolves its profile and before a
+    /// profile-set bind commits.
+    /// Default: always usable — a local source presents no credential.
     async fn ensure_usable(&self) -> Result<()> {
         Ok(())
     }
 
+    /// Lift a dead-credential latch when the value behind the source has
+    /// moved since the rejection, so the refresh loop can present the new
+    /// value without waiting for a request. Returns true when it lifted.
+    /// Default: no latch to lift — a local source presents no credential.
+    async fn clear_stale_latch(&self) -> bool {
+        false
+    }
+
     /// The management-face health view (the GET /profiles source block).
     /// Default: the local shape — nothing poisoned, no token.
+    ///
+    /// A proxy source reads the store before answering and reports the
+    /// resolved latch; the call clears nothing, so the view cannot differ
+    /// from what the gates decide.
     async fn health(&self) -> SourceHealth {
         SourceHealth::default()
     }
 
     /// React to one gateway auth signal (a provider 401/403 that survived
     /// a whole failover chain). Default: ignore — a local source has no
-    /// enrollment token, so the rejection belongs to the upstream
+    /// credential, so the rejection belongs to the upstream
     /// provider.
     async fn handle_gateway_signal(&self, _signal: &kallipai_adk::GatewaySignal) {}
 }
@@ -123,16 +137,16 @@ pub trait ProfileSource: Send + Sync {
 /// additive JSON members on the existing response shape.
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct SourceHealth {
-    /// A refresh confirmed the enrollment token dead: new spawns and
-    /// profile-set binds are refused until a successful refresh clears
-    /// the flag.
+    /// A refresh confirmed the credential dead while the value behind it
+    /// has not moved: new spawns and profile-set binds are refused until a
+    /// refresh succeeds or the value changes and the latch lifts.
     pub poisoned: bool,
     /// A boot-time fetch failed with no snapshot: the source serves an
     /// empty config while the repull task retries in the background;
     /// the first successful refresh clears it. Always false for a
     /// local source.
     pub degraded: bool,
-    /// Last observed enrollment-token state.
+    /// Last observed credential state.
     pub token_state: TokenState,
     /// When the last successful refresh landed (process clock),
     /// serialized as RFC 3339 for the management face.
@@ -198,7 +212,7 @@ pub fn spawn_gateway_signal_task(
 /// The gateway connection parameters a source switch needs. The
 /// base is derived from the active relay entry's platform origin
 /// (`{origin}/v1/model-gateway`); the token half is that entry's
-/// stored enrollment token (relay enrollment; no separate key
+/// stored platform credential (relay enrollment; no separate key
 /// material). Held on the AppState exactly when the live source
 /// is the model gateway; a switch re-resolves them from the
 /// platform table when the request carries no polis, so the slot
@@ -209,17 +223,17 @@ pub fn spawn_gateway_signal_task(
 pub struct GatewayParams {
     pub base: String,
     pub origin: String,
-    pub token: String,
+    pub credential: Credential,
 }
 
-/// The token is platform credential material: `Debug` prints it as
+/// The credential is platform credential material: `Debug` prints it as
 /// `[REDACTED]` (the TagmaIdentity precedent on the gateway side).
 impl std::fmt::Debug for GatewayParams {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GatewayParams")
             .field("base", &self.base)
             .field("origin", &self.origin)
-            .field("token", &"[REDACTED]")
+            .field("credential", &self.credential)
             .finish()
     }
 }
@@ -263,7 +277,7 @@ impl ProfileSource for LocalProfileSource {
 /// Resolve the source for `kind`. The mode comes from settings.toml
 /// (read by the caller at boot, or chosen by a PUT /profiles switch);
 /// the gateway source needs the boot-derived connection parameters
-/// (`None` when no relay entry carries a stored enrollment token),
+/// (`None` when no relay entry carries a stored credential),
 /// and the constructor
 /// validates them so a misconfigured boot fails fast with an
 /// actionable message.
@@ -276,12 +290,12 @@ pub fn build(
         ProfileSourceKind::Proxy => {
             let params = gateway.ok_or_else(|| {
                 anyhow::anyhow!(
-                    "settings mode model-gateway needs a relay entry with a stored enrollment token (relay enrollment on the platform; see KALLIPAI_POLIS_URL / polis.toml); the gateway base is derived from that entry's platform origin"
+                    "settings mode model-gateway needs a relay entry with a stored credential (relay enrollment on the platform; see KALLIPAI_POLIS_URL / polis.toml); the gateway base is derived from that entry's platform origin"
                 )
             })?;
             Ok(Arc::new(ProxyProfileSource::new(
                 &params.base,
-                &params.token,
+                params.credential.clone(),
             )?))
         }
     }
@@ -334,11 +348,11 @@ mod tests {
     }
 
     #[test]
-    fn proxy_without_params_names_the_enrollment_requirement() {
+    fn proxy_without_params_names_the_credential_requirement() {
         let err = build_err(ProfileSourceKind::Proxy, None);
         let text = format!("{err:#}");
         assert!(text.contains("KALLIPAI_POLIS_URL"), "got: {text}");
-        assert!(text.contains("enrollment token"), "got: {text}");
+        assert!(text.contains("a stored credential"), "got: {text}");
     }
 
     #[test]
@@ -346,7 +360,7 @@ mod tests {
         let params = GatewayParams {
             base: "api.example.com/v1/model-gateway".to_owned(),
             origin: "api.example.com".to_owned(),
-            token: "tagma-token-1".to_owned(),
+            credential: Credential::fixed("tagma-token-1"),
         };
         let err = build_err(ProfileSourceKind::Proxy, Some(&params));
         let text = format!("{err:#}");
@@ -382,9 +396,9 @@ mod tests {
         let params = GatewayParams {
             base: "http://gw.test:7501/v1/model-gateway".to_owned(),
             origin: "http://gw.test:7501".to_owned(),
-            token: "tagma-token-1".to_owned(),
+            credential: Credential::fixed("tagma-token-1"),
         };
         build(ProfileSourceKind::Proxy, Some(&params))
-            .expect("the proxy source constructs from a stored token");
+            .expect("the proxy source constructs from a stored credential");
     }
 }

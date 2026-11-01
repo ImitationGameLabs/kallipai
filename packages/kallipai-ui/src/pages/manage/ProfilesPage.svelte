@@ -677,7 +677,7 @@
   const sourceHealth = $derived(sourceBlock);
   const proxyAvailable = $derived(sourceBlock?.proxy_available === true);
   const readOnly = $derived(sourceMode === "model-gateway");
-  // The source posture: a rejected enrollment token poisons the face
+  // The source posture: a rejected stored credential poisons the face
   // (the gateway refuses refresh), refresh failures alone degrade it,
   // and local mode keeps the one-line footer.
   const sourceState = $derived(

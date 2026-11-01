@@ -4,17 +4,19 @@
 //! lives on; the restore path (re-assembly after a restart) reads the
 //! tagma's own attachment store instead.
 
+use kallipai_common::credential::Credential;
 use kallipai_common::protocol::ApiError;
 
 /// One platform the tagma can fetch records from: the relay entry's name
-/// (the error's attribution), that entry's origin, and the enrollment
-/// token stored for it. The origin and the bearer always come from the
-/// same entry: the token is that platform's credential, so an origin is
-/// never paired with a foreign credential.
+/// (the error's attribution), that entry's origin, and the credential
+/// handle for it. The origin and the bearer always come from the same
+/// entry: the credential is that platform's, so an origin is never paired
+/// with a foreign credential. The handle is shared, so a reload on disk
+/// reaches every fetch that follows.
 pub(crate) struct FilesAccess {
     pub(crate) name: String,
     pub(crate) origin: String,
-    pub(crate) token: String,
+    pub(crate) credential: Credential,
 }
 
 /// Fetch the record's bytes from the files service under the tagma's own
@@ -51,14 +53,16 @@ async fn fetch_from_face(
     access: &FilesAccess,
     record_id: uuid::Uuid,
 ) -> Result<Option<Vec<u8>>, ApiError> {
-    let response = http
-        .get(format!("{}/v1/files/{record_id}", access.origin))
-        .header("authorization", format!("Bearer {}", access.token))
-        .send()
+    let url = format!("{}/v1/files/{record_id}", access.origin);
+    let presented =
+        crate::auth_send::send_authorized(&access.credential, "files fetch", |bearer| {
+            http.get(&url).bearer_auth(bearer)
+        })
         .await
         .map_err(|e| {
             ApiError::unavailable(format!("files fetch failed via {}: {e}", access.name))
         })?;
+    let response = presented.response;
     let status = response.status();
     if status == reqwest::StatusCode::NOT_FOUND {
         return Ok(None);
@@ -242,7 +246,7 @@ mod tests {
         FilesAccess {
             name: name.to_owned(),
             origin: origin.to_owned(),
-            token: token.to_owned(),
+            credential: Credential::fixed(token),
         }
     }
 
@@ -271,6 +275,74 @@ mod tests {
             second[0].1.as_deref(),
             Some("Bearer beta-token"),
             "each platform carries its own bearer"
+        );
+    }
+
+    /// A rejected credential is retried once when the store behind the
+    /// handle yields a new value: the platform reset replaced it and the
+    /// fetch presents the new one instead of reporting the outage.
+    #[tokio::test]
+    async fn a_rejected_credential_is_retried_once_after_a_reload() {
+        let seen: std::sync::Arc<std::sync::Mutex<Vec<Option<String>>>> = Default::default();
+        let recorded = seen.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = axum::Router::new().route(
+            "/v1/files/{id}",
+            axum::routing::get(move |headers: axum::http::HeaderMap| {
+                let recorded = recorded.clone();
+                async move {
+                    let auth = headers
+                        .get("authorization")
+                        .and_then(|value| value.to_str().ok())
+                        .map(str::to_owned);
+                    let accepted = auth.as_deref() == Some("Bearer fresh-token");
+                    recorded.lock().unwrap().push(auth);
+                    if accepted {
+                        (axum::http::StatusCode::OK, b"the bytes".to_vec())
+                    } else {
+                        (axum::http::StatusCode::UNAUTHORIZED, Vec::new())
+                    }
+                }
+            }),
+        );
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        let accesses = [FilesAccess {
+            name: "alpha".to_owned(),
+            origin: format!("http://{addr}"),
+            credential: Credential::watching("stale-token", || Some("fresh-token".to_owned())),
+        }];
+        let bytes = fetch_record_bytes(&reqwest::Client::new(), &accesses, uuid::Uuid::nil())
+            .await
+            .expect("the reloaded credential must carry the fetch");
+        assert_eq!(bytes, b"the bytes".to_vec());
+        let asked = seen.lock().unwrap().clone();
+        assert_eq!(
+            asked,
+            vec![
+                Some("Bearer stale-token".to_owned()),
+                Some("Bearer fresh-token".to_owned())
+            ],
+            "one rejected attempt, then one with the reloaded value"
+        );
+    }
+
+    /// The retry is bounded by the store: a handle with nothing new to
+    /// present turns the rejection into the upstream fault on one request.
+    #[tokio::test]
+    async fn a_rejected_credential_with_no_new_value_is_one_attempt() {
+        let (origin, seen) = crate::test_helpers::spawn_files_stub(401, b"").await;
+        let accesses = [access("alpha", &origin, "dead-token")];
+        let err = fetch_record_bytes(&reqwest::Client::new(), &accesses, uuid::Uuid::nil())
+            .await
+            .unwrap_err();
+        assert_eq!(err.status, 502);
+        assert_eq!(
+            seen.lock().unwrap().len(),
+            1,
+            "a fixed credential has nothing new to present"
         );
     }
 

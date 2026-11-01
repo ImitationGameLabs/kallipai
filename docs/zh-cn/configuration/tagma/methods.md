@@ -48,7 +48,7 @@ mode = "local"  # 或 "model-gateway"
 本 tagma 选定的合集，一次读取取齐；尚未选定合集的 tagma 拉取到的是空配置。拉取的
 配置只保存在内存中，`profiles.toml` 不再更新，网关不可达时的冷启动会失败
 并指回此设置。模型配置页面的「网关/本地」标签页可以在运行期切换该设
-置；只有中继条目带有注册令牌时，网关一侧才会出现。
+置；只有中继条目带有已存凭据时，网关一侧才会出现。
 
 升级后的网关会给每个带 profile 的账户空间一个归属合集（这条 profile 记录所在的合集）：有 profile 却没有合集的空间会得到一个名为 `default` 的合集，不属于任何 set 的 profile 落在该空间字典序最小的合集里。这两处落点都是固定且可重复的，也都不是谁拍的决定：`default` 是迁移里写死的常量名，无 set 的 profile 按字典序落到最小的那个合集。要把 profile 换到别的合集，用管理面的 move 接口搬：`POST /admin/collections/{target}/profiles/{profile_id}/move`，body 写 `from_collection_name`（它现在所在的合集）与可选的 `set`（目标合集里的 set 名，给了就到站即成员）；界面没有跨合集搬动的入口。
 

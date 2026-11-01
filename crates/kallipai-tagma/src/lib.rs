@@ -6,6 +6,7 @@
 
 pub mod args;
 pub mod auth;
+mod auth_send;
 pub mod backend;
 pub mod bridge;
 pub mod bus;
@@ -135,9 +136,9 @@ pub async fn run(args: Args, operator_pin: Option<String>) -> Result<()> {
     let source_mode = settings::resolve_boot_profile_source_mode()
         .context("failed to resolve the profile source mode for boot")?;
     // The gateway connection: each relay entry contributes a platform
-    // face (origin plus its stored enrollment token — no enrollment,
+    // face (origin plus its stored platform credential — no credential,
     // no gateway). The active face is the pinned polis entry, or
-    // before the first pin the first entry that carries a token. The
+    // before the first pin the first entry that carries one. The
     // resolved pair is the switchability gate, not the mode signal; a
     // local-only boot (no relay entries) carries no platform face, so
     // the model-gateway mode is structurally unavailable there.
@@ -166,7 +167,7 @@ pub async fn run(args: Args, operator_pin: Option<String>) -> Result<()> {
     let profile_source = profile_slot.load_full().source();
     // The boot-shaped load: an unreachable or erroring gateway degrades to an
     // empty config (the health block flags degraded; the repull task retries)
-    // instead of failing the boot; a dead enrollment token still fails.
+    // instead of failing the boot; a dead credential still fails.
     let cfg = profile_source
         .boot_load()
         .await
@@ -954,23 +955,72 @@ fn resolve_primary_identity(
     Ok((None, None))
 }
 
+/// A credential handle for one relay entry: the value the boot read, plus a
+/// reload that re-reads that entry's credential directory. Boot makes one
+/// per enrolled entry and every reader clones it — the relay client, the
+/// files fetch, the gateway proxy — so a platform-side reset reaches them
+/// all without a restart.
+fn entry_credential(
+    entry_dir: &std::path::Path,
+    value: String,
+) -> kallipai_common::credential::Credential {
+    let dir = entry_dir.to_path_buf();
+    kallipai_common::credential::Credential::watching(value, move || {
+        credentials::load_tagma(&dir).map(|stored| stored.token)
+    })
+}
+
+/// The handle the relay client presents for one entry: the one the boot face
+/// already carries, or a new handle when the credential landed after the boot
+/// snapshot (a first-run enrollment). The state records it either way, so the
+/// files fetch and the gateway proxy clone the same handle. `value` is what
+/// activation read: when the handle already holds something else, the read
+/// value wins, because the file moved after the boot snapshot.
+fn relay_credential(
+    state: &state::AppState,
+    entry_name: &str,
+    entry_dir: &std::path::Path,
+    value: String,
+) -> kallipai_common::credential::Credential {
+    let credential = match state.platform_credential(entry_name) {
+        Some(existing) => {
+            // The file can move between the boot snapshot and this activation
+            // (a first-run enrollment, a platform reset). The one handle every
+            // reader clones has to carry what activation read.
+            if existing.current() != value {
+                existing.replace(value);
+            }
+            existing
+        }
+        None => entry_credential(entry_dir, value),
+    };
+    state.set_platform_credential(entry_name, credential.clone());
+    credential
+}
+
 /// Resolve every configured relay entry's platform face: entry order
 /// (the operator's declared order) is the fallback order the active
-/// resolution walks.
+/// resolution walks. An enrolled entry gets the one handle every later
+/// reader clones (`entry_credential`); relay activation asks the state for
+/// it rather than making a second one.
 fn platform_faces(entries: &[RelayEntry], root: &std::path::Path) -> Vec<state::PlatformFace> {
     entries
         .iter()
-        .map(|entry| state::PlatformFace {
-            name: entry.name.clone(),
-            origin: entry.polis_url.clone(),
-            base: kallipai_common::polis::service_base(&entry.polis_url, "model-gateway"),
-            token: credentials::load_tagma(&root.join(&entry.name)).map(|s| s.token),
+        .map(|entry| {
+            let dir = root.join(&entry.name);
+            state::PlatformFace {
+                name: entry.name.clone(),
+                origin: entry.polis_url.clone(),
+                base: kallipai_common::polis::service_base(&entry.polis_url, "model-gateway"),
+                credential: credentials::load_tagma(&dir)
+                    .map(|stored| entry_credential(&dir, stored.token)),
+            }
         })
         .collect()
 }
 
 /// The gateway connection parameters for the boot, or `None` when no
-/// platform face pairs its origin with a stored enrollment token. The
+/// platform face pairs its origin with a stored enrollment credential. The
 /// active face is the pinned polis entry (the one the last switch
 /// targeted); a pin matching no entry means no gateway — the boot does
 /// not silently fall back to another platform, because the pin is the
@@ -985,13 +1035,13 @@ pub(crate) fn gateway_params_from(
 ) -> Option<profile_source::GatewayParams> {
     let active = match pinned_polis {
         Some(polis) => faces.iter().find(|face| face.origin == polis)?,
-        None => faces.iter().find(|face| face.token.is_some())?,
+        None => faces.iter().find(|face| face.credential.is_some())?,
     };
-    let token = active.token.clone()?;
+    let credential = active.credential.clone()?;
     Some(profile_source::GatewayParams {
         base: active.base.clone(),
         origin: active.origin.clone(),
-        token,
+        credential,
     })
 }
 
@@ -1342,13 +1392,6 @@ async fn activate_relay(
             .enroll(&code, &device)
             .await?;
             credentials::save_tagma(&entry_dir, tagma_id.as_ref(), &token, &entry.polis_url)?;
-            // The boot snapshot predates this write (platform_faces
-            // runs before relay activation), so the switch-target
-            // list would show the platform un-enrolled until a
-            // restart: record the token on the face now. A failed save
-            // returned above, so the in-memory face is never told about an
-            // enrollment the disk did not accept.
-            state.set_platform_token(&entry.name, token.clone());
             info!(relay = %entry.name, tagma = %tagma_id, "relay: enrolled with archeion");
             // First-run enroll boot: the projector's write-once ids are
             // claimed by the first successful enrollee — the primary-archeion
@@ -1367,6 +1410,15 @@ async fn activate_relay(
         }
     };
 
+    // One handle per entry: a stored-credential boot already made it, and a
+    // first-run enrollment wrote the credential just above, so this boot
+    // makes it. Every reader clones this one — the relay client below, the
+    // files fetch, the gateway proxy — and a replacement on disk reaches all
+    // of them on their next rejected request.
+    // The save above returns its error, so a face never learns about an
+    // enrollment the disk refused.
+    let credential = relay_credential(state, &entry.name, &entry_dir, tagma_token);
+
     // Resolve the root agent id (always live: ensure_root_agent ?-propagates).
     let root_agent = {
         let registry = state.registry.read().await;
@@ -1380,10 +1432,10 @@ async fn activate_relay(
     // upstream and conversation-envelope POSTs dial the keryx base; the
     // rooms/direct routes and the agent SSE stream dial the lesche base.
     // Built once and shared by the room routes and the relay orchestrator (a
-    // cheap clone of the shared reqwest pool + bearer).
-    let lesche = kallipai_lesche_client::LescheClient::builder(
+    // cheap clone of the shared reqwest pool + credential handle).
+    let lesche = kallipai_lesche_client::LescheClient::builder_with_credential(
         &kallipai_common::polis::service_base(&entry.polis_url, "lesche"),
-        &tagma_token,
+        credential,
     )
     .with_keryx_url(&kallipai_common::polis::service_base(
         &entry.polis_url,

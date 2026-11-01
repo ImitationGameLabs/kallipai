@@ -134,9 +134,9 @@ pub(super) enum RepullOutcome {
     NotProxy,
     /// The gateway source carries no degraded flag: nothing to do.
     Healthy,
-    /// The enrollment token is confirmed dead: retrying cannot help
-    /// (the token is read once at boot); recovery is re-enroll plus
-    /// restart. The task idles at the backoff ceiling.
+    /// The credential is confirmed dead and the file still holds it: retrying
+    /// cannot help until a new value lands. The task idles at the backoff
+    /// ceiling and looks again, so the reset itself re-arms the loop.
     Poisoned,
     /// The fetch still fails, or the result was dropped because a
     /// switch replaced the source mid-fetch; retry later.
@@ -163,6 +163,16 @@ pub(super) async fn repull_once(state: &SharedState) -> RepullOutcome {
     if source.kind() != ProfileSourceKind::Proxy {
         return RepullOutcome::NotProxy;
     }
+    // Ask whether this round lifts the latch, unconditionally: a credential
+    // that moved since the rejection is exactly what that call detects, and
+    // it is the latch's lifting path. Putting a condition in front of it
+    // would skip that call, leave `lifted` false, and let the round match an
+    // equal snapshot without ever fetching.
+    let lifted = source.clear_stale_latch().await;
+    // A lifted latch skips the snapshot comparison below: the reset leaves
+    // the last good snapshot untouched, so an equal snapshot would report
+    // the round healthy without ever fetching, and the bundle would keep
+    // echoing the secret the platform just retired.
     let health = source.health().await;
     if health.poisoned {
         return RepullOutcome::Poisoned;
@@ -173,13 +183,15 @@ pub(super) async fn repull_once(state: &SharedState) -> RepullOutcome {
     // (an unknown family, say) clears the flag while the bundle
     // stays stale — without the snapshot comparison the task would
     // idle on an empty bundle after one retry.
-    let snapshot = source.snapshot().await;
-    if let Some(snapshot) = snapshot.as_ref() {
-        if config_matches(&state.profiles.load().config, snapshot) {
+    if !lifted {
+        let snapshot = source.snapshot().await;
+        if let Some(snapshot) = snapshot.as_ref() {
+            if config_matches(&state.profiles.load().config, snapshot) {
+                return RepullOutcome::Healthy;
+            }
+        } else if !health.degraded {
             return RepullOutcome::Healthy;
         }
-    } else if !health.degraded {
-        return RepullOutcome::Healthy;
     }
     match source.load().await {
         Ok(config) => {
@@ -214,9 +226,10 @@ pub(super) async fn repull_once(state: &SharedState) -> RepullOutcome {
 /// fetched nothing), retry the fetch on a doubling backoff; the first
 /// success rebuilds the profile bundle and broadcasts the reset signal
 /// to live agents, so a gateway that comes back is picked up without a
-/// restart. A poisoned source stops retrying (a dead enrollment token
-/// cannot recover in-process); a later switch re-arms the loop through
-/// the per-round slot load.
+/// restart. A poisoned source idles at the backoff ceiling: when the
+/// credential file holds a new value, the next round lifts the latch and
+/// fetches, so a platform reset recovers without a restart. A later switch
+/// re-arms the loop through the per-round slot load.
 pub(crate) fn spawn_degraded_repull_task(state: SharedState) {
     tokio::spawn(async move {
         let mut backoff = REPULL_RETRY_BASE;
@@ -231,7 +244,7 @@ pub(crate) fn spawn_degraded_repull_task(state: SharedState) {
                 RepullOutcome::Poisoned => {
                     if !poison_noted {
                         warn!(
-                            "degraded repull paused: the gateway enrollment token is dead; re-enroll the tagma on the platform and restart"
+                            "degraded repull paused: the gateway rejected the stored credential and the value has not changed; writing the new value into the credential file resumes this loop"
                         );
                         poison_noted = true;
                     }

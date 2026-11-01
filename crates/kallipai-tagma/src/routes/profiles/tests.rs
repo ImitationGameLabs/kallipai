@@ -839,8 +839,11 @@ fn conflict_dangling_envelope_round_trip() {
 async fn mutating_profile_routes_are_409_under_proxy_source() {
     let source = std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
         crate::profile_source::SourceSlot::new(std::sync::Arc::new(
-            crate::profile_source::ProxyProfileSource::new("http://gw.test:7501", "tagma-token-1")
-                .unwrap(),
+            crate::profile_source::ProxyProfileSource::new(
+                "http://gw.test:7501",
+                kallipai_common::credential::Credential::fixed("tagma-token-1"),
+            )
+            .unwrap(),
         )),
     ));
     let state = std::sync::Arc::new(crate::state::AppState::with_limits(
@@ -946,9 +949,9 @@ async fn refresh_under_local_source_is_refused() {
     assert!(err.message.contains("local"), "got: {}", err.message);
 }
 
-/// A poisoned source answers the refresh with the dead-token 409:
-/// the retry cannot succeed until the tagma re-enrolls and the
-/// token is read again (restart, or a source-mode round-trip).
+/// A poisoned source whose value did not move answers the refresh with the
+/// rejection 409: the retry cannot succeed until the credential file holds a
+/// different value.
 #[tokio::test]
 async fn refresh_under_a_poisoned_source_is_refused() {
     let state = make_state_with_source(std::sync::Arc::new(StubGatewaySource {
@@ -965,7 +968,7 @@ async fn refresh_under_a_poisoned_source_is_refused() {
     .unwrap_err();
     assert_eq!(err.status, 409);
     assert!(
-        err.message.contains("dead") && err.message.contains("restart"),
+        err.message.contains("rejected") && err.message.contains("credential file"),
         "got: {}",
         err.message
     );
@@ -980,7 +983,11 @@ async fn refresh_lands_the_anchored_default_without_a_restart() {
     let answer = std::sync::Arc::new(std::sync::RwLock::new(baseline_snapshot(Some("alpha"))));
     let base = spawn_swappable_gateway(answer).await;
     let state = make_state_with_source(std::sync::Arc::new(
-        crate::profile_source::ProxyProfileSource::new(&base, "tagma-token-1").unwrap(),
+        crate::profile_source::ProxyProfileSource::new(
+            &base,
+            kallipai_common::credential::Credential::fixed("tagma-token-1"),
+        )
+        .unwrap(),
     ));
     let response = refresh_profile_source(
         State(state.clone()),
@@ -1011,8 +1018,11 @@ async fn refresh_fetch_failure_leaves_the_bundle_alone() {
         let _ = axum::serve(listener, app).await;
     });
     let state = make_state_with_source(std::sync::Arc::new(
-        crate::profile_source::ProxyProfileSource::new(&format!("http://{addr}"), "tagma-token-1")
-            .unwrap(),
+        crate::profile_source::ProxyProfileSource::new(
+            &format!("http://{addr}"),
+            kallipai_common::credential::Credential::fixed("tagma-token-1"),
+        )
+        .unwrap(),
     ));
     let before = state.profiles.load_full();
     let err = refresh_profile_source(
@@ -1032,8 +1042,11 @@ fn make_proxy_state(
 ) -> crate::state::SharedState {
     let source = std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
         crate::profile_source::SourceSlot::new(std::sync::Arc::new(
-            crate::profile_source::ProxyProfileSource::new("http://127.0.0.1:1", "tagma-token-1")
-                .unwrap(),
+            crate::profile_source::ProxyProfileSource::new(
+                "http://127.0.0.1:1",
+                kallipai_common::credential::Credential::fixed("tagma-token-1"),
+            )
+            .unwrap(),
         )),
     ));
     std::sync::Arc::new(crate::state::AppState::with_limits(
@@ -1086,6 +1099,10 @@ struct StubGatewayFlags {
     poisoned: bool,
     degraded: bool,
     fail_load: bool,
+    /// Whether the credential behind the source has moved since the
+    /// rejection: the latch lifts on the next round (the proxy's own
+    /// rule, stubbed here so the repull wiring is testable without HTTP).
+    latch_lifts: bool,
     /// What a successful load returns and snapshot reports: the
     /// default shape is the recoverable config; a test can hold an
     /// unbuildable one here (the N-1 stall shape).
@@ -1157,13 +1174,32 @@ impl crate::profile_source::ProfileSource for StubGatewaySource {
         self.flags.lock().unwrap().loaded.clone()
     }
 
+    async fn ensure_usable(&self) -> anyhow::Result<()> {
+        let flags = self.flags.lock().unwrap();
+        if flags.poisoned && !flags.latch_lifts {
+            anyhow::bail!("the stub source rejected the credential");
+        }
+        Ok(())
+    }
+
     async fn health(&self) -> crate::profile_source::SourceHealth {
         let flags = self.flags.lock().unwrap();
+        // The proxy source reports the resolved latch, not the raw flag: a
+        // value that moved since the rejection reads as healthy.
         crate::profile_source::SourceHealth {
-            poisoned: flags.poisoned,
+            poisoned: flags.poisoned && !flags.latch_lifts,
             degraded: flags.degraded,
             ..Default::default()
         }
+    }
+
+    async fn clear_stale_latch(&self) -> bool {
+        let mut flags = self.flags.lock().unwrap();
+        if flags.poisoned && flags.latch_lifts {
+            flags.poisoned = false;
+            return true;
+        }
+        false
     }
 }
 
@@ -1253,7 +1289,7 @@ async fn repull_gates_on_kind_degraded_and_poison() {
         repull_once(&healthy).await,
         RepullOutcome::Healthy
     ));
-    // Poisoned: the fetch is skipped; recovery is re-enroll plus restart.
+    // Poisoned with the value unchanged: the fetch is skipped every round.
     let poisoned = make_state_with_source(std::sync::Arc::new(StubGatewaySource {
         flags: std::sync::Arc::new(std::sync::Mutex::new(StubGatewayFlags {
             poisoned: true,
@@ -1265,6 +1301,97 @@ async fn repull_gates_on_kind_degraded_and_poison() {
         repull_once(&poisoned).await,
         RepullOutcome::Poisoned
     ));
+}
+
+/// A credential that moved lifts the latch inside the repull round: the
+/// reset recovers with no request in flight and no restart.
+#[tokio::test]
+async fn repull_lifts_the_latch_when_the_credential_moved() {
+    let state = make_state_with_source(std::sync::Arc::new(StubGatewaySource {
+        flags: std::sync::Arc::new(std::sync::Mutex::new(StubGatewayFlags {
+            poisoned: true,
+            degraded: true,
+            latch_lifts: true,
+            loaded: Some(recovered_config()),
+            ..Default::default()
+        })),
+    }));
+    assert!(matches!(
+        repull_once(&state).await,
+        RepullOutcome::Recovered { .. }
+    ));
+    assert!(state.profiles.load().config.sets.contains_key("recovered"));
+}
+
+/// The value did not move: every round reports Poisoned and no fetch runs,
+/// so a dead credential never turns into a retry storm.
+#[tokio::test]
+async fn repull_stays_poisoned_while_the_credential_is_unchanged() {
+    let state = make_state_with_source(std::sync::Arc::new(StubGatewaySource {
+        flags: std::sync::Arc::new(std::sync::Mutex::new(StubGatewayFlags {
+            poisoned: true,
+            degraded: true,
+            loaded: Some(recovered_config()),
+            ..Default::default()
+        })),
+    }));
+    for _ in 0..3 {
+        assert!(matches!(repull_once(&state).await, RepullOutcome::Poisoned));
+    }
+    assert_eq!(
+        state.profiles.load().config.sets.len(),
+        1,
+        "no fetch ran: the initial bundle is untouched"
+    );
+}
+
+/// A reset leaves the last good snapshot where it was, so the live bundle
+/// already matches what the source reports: the snapshot comparison alone
+/// would call the round healthy and never fetch, leaving the bundle echoing
+/// the retired secret. A lifted latch reaches the gateway anyway.
+#[tokio::test]
+async fn repull_fetches_when_the_latch_lifts_even_with_a_matching_snapshot() {
+    let flags = std::sync::Arc::new(std::sync::Mutex::new(StubGatewayFlags {
+        poisoned: true,
+        latch_lifts: true,
+        ..Default::default()
+    }));
+    let state = make_state_with_source(std::sync::Arc::new(StubGatewaySource {
+        flags: flags.clone(),
+    }));
+    flags.lock().unwrap().loaded = Some(state.profiles.load().config.clone());
+    match repull_once(&state).await {
+        RepullOutcome::Recovered { .. } => {}
+        other => panic!("expected recovery, got {other:?}"),
+    }
+}
+
+/// The clearing right belongs to the latch's own paths: a health read and
+/// the spawn gate only ask whether the latch holds, so the repull round
+/// still finds a lift waiting for it. If either consumed it, this round
+/// would match the unchanged snapshot and never fetch.
+#[tokio::test]
+async fn a_health_read_does_not_consume_the_lift() {
+    use crate::profile_source::ProfileSource;
+    let flags = std::sync::Arc::new(std::sync::Mutex::new(StubGatewayFlags {
+        poisoned: true,
+        latch_lifts: true,
+        ..Default::default()
+    }));
+    let source = std::sync::Arc::new(StubGatewaySource {
+        flags: flags.clone(),
+    });
+    let state = make_state_with_source(source.clone());
+    flags.lock().unwrap().loaded = Some(state.profiles.load().config.clone());
+
+    // The management view asks first, then the spawn gate.
+    assert!(!ProfileSource::health(source.as_ref()).await.poisoned);
+    ProfileSource::ensure_usable(source.as_ref()).await.unwrap();
+
+    match repull_once(&state).await {
+        RepullOutcome::Recovered { .. } => {}
+        other => panic!("expected recovery after two pure reads, got {other:?}"),
+    }
 }
 
 /// The N-1 stall shape: a fetch that succeeds with a config that
@@ -1381,7 +1508,7 @@ async fn switch_fetch_failure_switches_nothing() {
         let params = crate::profile_source::GatewayParams {
             base: "http://127.0.0.1:1/v1/model-gateway".to_owned(),
             origin: "http://127.0.0.1:1".to_owned(),
-            token: "tagma-token-1".to_owned(),
+            credential: kallipai_common::credential::Credential::fixed("tagma-token-1"),
         };
         // The helper builds without gateway params; unwrap the sole
         // reference and set them (local source stays).
@@ -1545,7 +1672,7 @@ fn face(origin: &str, token: Option<&str>) -> crate::state::PlatformFace {
         name: "alpha".to_owned(),
         origin: origin.to_owned(),
         base: format!("{origin}/v1/model-gateway"),
-        token: token.map(|t| t.to_owned()),
+        credential: token.map(kallipai_common::credential::Credential::fixed),
     }
 }
 
@@ -1553,16 +1680,19 @@ fn face(origin: &str, token: Option<&str>) -> crate::state::PlatformFace {
 async fn an_enrollment_refresh_flips_the_face_without_a_restart() {
     // The first-run enroll writes the token after the boot
     // snapshot (platform_faces runs before relay activation);
-    // set_platform_token is the refresh, and the GET face
+    // set_platform_credential is the refresh, and the GET face
     // (enrolled, proxy_available) must see it without a restart.
     let beta = crate::state::PlatformFace {
         name: "beta".to_owned(),
         origin: "http://127.0.0.1:2".to_owned(),
         base: "http://127.0.0.1:2/v1/model-gateway".to_owned(),
-        token: None,
+        credential: None,
     };
     let state = local_state_with_platforms(vec![face("http://127.0.0.1:1", None), beta]);
-    state.set_platform_token("alpha", "tagma-token-1".to_owned());
+    state.set_platform_credential(
+        "alpha",
+        kallipai_common::credential::Credential::fixed("tagma-token-1"),
+    );
     let body = profiles_body(&state).await.unwrap();
     let source = body.get("source").expect("source block");
     assert_eq!(source["proxy_available"], serde_json::json!(true));
@@ -1664,7 +1794,7 @@ async fn a_same_mode_selection_write_through_narrows_the_live_source() {
     let state = make_proxy_state(Some(crate::profile_source::GatewayParams {
         base: format!("{origin}/v1/model-gateway"),
         origin: origin.clone(),
-        token: "tagma-token-1".to_owned(),
+        credential: kallipai_common::credential::Credential::fixed("tagma-token-1"),
     }));
     // Same-mode source member with a collection: the write goes
     // through to the gateway (the tagma pointer is the single
@@ -1714,7 +1844,7 @@ async fn a_gateway_set_with_no_members_is_a_request_error() {
     let state = make_proxy_state(Some(crate::profile_source::GatewayParams {
         base: format!("{origin}/v1/model-gateway"),
         origin: origin.clone(),
-        token: "tagma-token-1".to_owned(),
+        credential: kallipai_common::credential::Credential::fixed("tagma-token-1"),
     }));
     let wire: ProfileConfigWire = serde_json::from_value(serde_json::json!({
         "endpoints": {},
@@ -1776,7 +1906,7 @@ async fn a_same_mode_rebind_switches_the_pull_to_the_named_platform() {
             crate::profile_source::GatewayParams {
                 base: format!("{origin_a}/v1/model-gateway"),
                 origin: origin_a.clone(),
-                token: "tagma-token-1".to_owned(),
+                credential: kallipai_common::credential::Credential::fixed("tagma-token-1"),
             },
         ))) {
             Ok(inner) => inner,
@@ -2014,7 +2144,7 @@ async fn an_unknown_or_empty_collection_selection_is_a_400_not_a_silent_switch()
     let state = make_proxy_state(Some(crate::profile_source::GatewayParams {
         base: format!("{origin}/v1/model-gateway"),
         origin,
-        token: "tagma-token-1".to_owned(),
+        credential: kallipai_common::credential::Credential::fixed("tagma-token-1"),
     }));
     // A collection the account cannot see: the gateway 404s the
     // write, and the update is a 400 before anything moves.
@@ -2084,7 +2214,7 @@ async fn a_collections_narrowing_that_strands_a_bound_agent_confirms_via_force()
     let state = make_proxy_state(Some(crate::profile_source::GatewayParams {
         base: format!("{origin}/v1/model-gateway"),
         origin: origin.clone(),
-        token: "tagma-token-1".to_owned(),
+        credential: kallipai_common::credential::Credential::fixed("tagma-token-1"),
     }));
     let _sub = alt_bound_sub(&state).await;
     let wire: ProfileConfigWire = serde_json::from_value(serde_json::json!({
