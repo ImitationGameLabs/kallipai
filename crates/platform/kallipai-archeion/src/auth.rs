@@ -23,6 +23,11 @@
 //! (`credential: Some`). The record is what distinguishes the two user origins;
 //! it lives beside the principal rather than on it, so an identity stays the
 //! same thing across a token reset.
+//!
+//! A bearer never resolves to a `User` or a `Tagma` with no record: only the
+//! admin bearer is a bare secret, and the wire decode refuses every other
+//! recordless shape (`VerifiedBearer`'s `TryFrom`), so a personal access token
+//! cannot arrive here as the whole identity.
 
 use crate::control_plane::DbControlPlane;
 use crate::session::read_session_cookie;

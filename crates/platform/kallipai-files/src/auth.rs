@@ -6,14 +6,18 @@
 //! with no cache (the deliberate control-plane design): revocation latency
 //! is one round trip, not a TTL.
 //!
-//! Failure mapping: every `ControlPlaneError::Backend` covers the same
-//! family -- the registry could not be reached, answered a status this
-//! client does not read as part of the contract, or sent a body that
-//! will not decode -- and a registry that gives no usable answer must
-//! never open the door: it maps to 503. That is fail-closed, the degrade
-//! default; the `KALLIPAI_FILES_DEGRADE=soft` switch narrows which
-//! decisions degrade (`crate::api::tagma_facts` and `crate::api::send`
-//! carry the branch) and does not weaken verification.
+//! Failure mapping: the two control-plane error kinds answer apart, because
+//! the caller's next move differs. [`ControlPlaneError::Backend`] (the
+//! registry could not be reached, answered a status this client does not
+//! read as part of the contract, or sent a body that will not decode) may
+//! clear on a retry: it maps to 503 with code `auth_backend_unavailable`.
+//! [`ControlPlaneError::Contract`] (a `200` naming a user or tagma without
+//! the record behind it) never clears on a retry: it maps to 500 with code
+//! `auth_contract_violation`, and an upgrade answers it. Either way a
+//! registry that gives no usable answer never opens the door. That is
+//! fail-closed, the degrade default; the `KALLIPAI_FILES_DEGRADE=soft`
+//! switch narrows which decisions degrade (`crate::api::tagma_facts` and
+//! `crate::api::send` carry the branch) and does not weaken verification.
 
 use std::time::Duration;
 
@@ -139,10 +143,12 @@ impl ControlPlane for FilesControlPlane {
                 },
             )
             .await?;
-        // The wire body is the resolved identity plus its credential;
-        // `From<VerifyBearerResponse>` (in internal_api) is the single
-        // mapping site.
-        Ok(resp.map(VerifiedBearer::from))
+        // The wire body is the resolved identity plus its credential; the
+        // `TryFrom` in internal_api is the single mapping site, and it refuses a
+        // user or tagma bearer that arrives with no record behind it.
+        resp.map(VerifiedBearer::try_from)
+            .transpose()
+            .map_err(|e| ControlPlaneError::Contract(e.to_string()))
     }
 
     async fn tagma_profiles(
@@ -271,7 +277,7 @@ impl FromRequestParts<AppState> for AuthPrincipal {
                 .control
                 .verify_bearer(bearer)
                 .await
-                .map_err(control_unavailable)?
+                .map_err(control_failure)?
                 .ok_or_else(|| ApiError::unauthorized("invalid token"))?;
             return Ok(AuthPrincipal {
                 principal: verified.principal,
@@ -284,7 +290,7 @@ impl FromRequestParts<AppState> for AuthPrincipal {
                 .control
                 .verify_session(&cookie_value)
                 .await
-                .map_err(control_unavailable)?
+                .map_err(control_failure)?
                 .ok_or_else(|| ApiError::unauthorized("invalid session"))?;
             return Ok(AuthPrincipal::unscoped(Principal::User(user.user_id)));
         }
@@ -293,11 +299,26 @@ impl FromRequestParts<AppState> for AuthPrincipal {
 }
 
 /// Control-plane failures never open the door: the registry is a hard
-/// dependency of every authenticated decision, so a backend failure is a
-/// 503 (fail-closed) rather than a 500 -- the caller should retry, not
-/// report a bug.
-fn control_unavailable(e: ControlPlaneError) -> ApiError {
-    ApiError::unavailable(format!("registry unavailable: {e}"))
+/// dependency of every authenticated decision. The two kinds answer apart
+/// because the caller's next move differs (see the module docs): `Backend`
+/// is a retryable `503`, `Contract` a permanent `500` that no retry clears.
+pub(crate) fn control_failure(e: ControlPlaneError) -> ApiError {
+    match e {
+        ControlPlaneError::Backend(detail) => {
+            tracing::warn!(%detail, "registry backend failure");
+            ApiError::unavailable_with_code(
+                "the auth backend could not be verified; access is denied",
+                "auth_backend_unavailable",
+            )
+        }
+        ControlPlaneError::Contract(detail) => {
+            tracing::error!(%detail, "registry answered outside its contract");
+            ApiError::internal_with_code(
+                "the auth backend answered outside its contract; the services are running different versions",
+                "auth_contract_violation",
+            )
+        }
+    }
 }
 
 /// Read the session cookie value from a request's `Cookie` header, if

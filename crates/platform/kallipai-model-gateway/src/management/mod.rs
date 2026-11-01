@@ -17,8 +17,10 @@
 //! with the `kallipai_session` cookie of the fixed local-admin account
 //! (the browser channel, `verify_session`'s `local_admin` flag). A valid
 //! non-admin identity is authenticated but unauthorized (403); an invalid
-//! or absent credential is 401; an archeion that is unreachable or answers
-//! off-contract fails closed with 503. Security posture versus a shared
+//! or absent credential is 401; an archeion that cannot be reached, or that
+//! answers a status outside the call's contract, fails closed with 503, and
+//! an answer that contradicts the wire contract (a bearer with no record
+//! behind it) fails closed with 500. Security posture versus a shared
 //! static secret: equivalent strength (opaque session hashes, HttpOnly +
 //! SameSite=Strict cookies, the same admin-account gate as instances) with
 //! attribution strengthened -- a shared secret could not say who acted;
@@ -50,7 +52,7 @@ use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
 use axum::response::IntoResponse;
 use kallipai_archeion_common::control_plane::{
-    ControlPlaneError, EnrollmentLookup, UserIdentity, VerifiedSession,
+    ControlPlaneError, EnrollmentLookup, UserIdentity, VerifiedBearer, VerifiedSession,
 };
 use kallipai_archeion_common::internal_api::{
     EnrollmentLookupRequest, UserSearchRequest, UserSearchResponse, VerifyBearerRequest,
@@ -64,9 +66,9 @@ use kallipai_common::telemetry;
 use crate::state::AppState;
 
 /// What the admin face needs from the platform identity service: verify
-/// one bearer token or one session cookie. `Err` = the backend could not
-/// be reached or answered off-contract (the face fails closed on
-/// this); `Ok(None)` = the credential is simply not valid.
+/// one bearer token or one session cookie. `Err` = no usable answer (the
+/// face fails closed on both kinds: `Backend` answers 503, `Contract` 500);
+/// `Ok(None)` = the credential is simply not valid.
 #[async_trait::async_trait]
 pub trait AuthVerifier: Send + Sync {
     async fn verify_bearer(&self, token: &str) -> Result<Option<Principal>, ControlPlaneError>;
@@ -80,10 +82,10 @@ pub trait AuthVerifier: Send + Sync {
     /// full enrolled set of that user's space (the requested tagma
     /// normally included). `None` = the archeion cannot address the
     /// tagma (unknown, pending, revoked, owner-disabled -- one
-    /// collapsed answer, no oracle); `Err` = the backend could not be
-    /// reached or answered off-contract. An implementation that keeps
-    /// the last answer serves that answer instead, so `Err` reaches a
-    /// caller only when no cached answer exists (see below).
+    /// collapsed answer, no oracle); `Err` = no usable answer, split
+    /// the same way (`Backend` 503, `Contract` 500). An implementation
+    /// that keeps the last answer serves that answer instead, so `Err`
+    /// reaches a caller only when no cached answer exists (see below).
     async fn enrollment_lookup(
         &self,
         tagma_id: &str,
@@ -199,9 +201,8 @@ impl EnrollmentCache {
 /// tagma, read at call time. An unconfigured management face has no
 /// authority to ask, which reads as `None` (nothing resolves or
 /// mints -- the same closed posture as the face's own routes). `Err`
-/// = the backend could not be reached or answered off-contract (the
-/// caller fails closed); an implementation that keeps the last answer
-/// returns that one instead.
+/// = no usable answer, either kind (the caller answers `control_failure`);
+/// an implementation that keeps the last answer returns that one instead.
 pub(crate) async fn enrollment_lookup(
     state: &AppState,
     tagma_id: &str,
@@ -211,7 +212,7 @@ pub(crate) async fn enrollment_lookup(
         AdminAuth::Platform(verifier) => verifier
             .enrollment_lookup(tagma_id)
             .await
-            .map_err(|_| backend_unavailable()),
+            .map_err(control_failure),
     }
 }
 
@@ -229,11 +230,18 @@ impl AuthVerifier for ArcheionVerifier {
             .await
             .map_err(|e| ControlPlaneError::Backend(e.to_string()))?;
         match response.status().as_u16() {
-            200 => response
-                .json::<VerifyBearerResponse>()
-                .await
-                .map(|r| Some(Principal::from(r.principal)))
-                .map_err(|e| ControlPlaneError::Backend(e.to_string())),
+            200 => {
+                let body = response
+                    .json::<VerifyBearerResponse>()
+                    .await
+                    .map_err(|e| ControlPlaneError::Backend(e.to_string()))?;
+                // The record itself is not used here, but a bearer that
+                // carries none is not an identity: the shared decode
+                // refuses it, and the gate answers that with 500.
+                VerifiedBearer::try_from(body)
+                    .map(|verified| Some(verified.principal))
+                    .map_err(|e| ControlPlaneError::Contract(e.to_string()))
+            }
             404 => Ok(None),
             status => Err(ControlPlaneError::Backend(format!(
                 "archeion /internal/verify-bearer returned HTTP {status}"
@@ -366,7 +374,7 @@ impl Operator {
 }
 
 /// Extractor: authenticate the management request or fail closed with
-/// 401/503. Every management route takes this before touching state;
+/// 401/500/503. Every management route takes this before touching state;
 /// there is no unauthenticated management handler by construction.
 pub struct AdminToken {
     /// The authenticated operator, consumed by handlers that attribute
@@ -374,14 +382,38 @@ pub struct AdminToken {
     pub operator: Operator,
 }
 
-/// 503 fail-closed: the archeion could not be reached or answered
-/// off-contract (the instances fault twin).
-pub(crate) fn backend_unavailable() -> ApiError {
-    ApiError {
-        status: 503,
-        message: "the auth backend could not be reached; access is denied".to_owned(),
-        dangling: None,
-        code: Some("auth_backend_unavailable".to_owned()),
+/// The retryable-fault sentence: the archeion could not be reached.
+const BACKEND_UNAVAILABLE: &str = "the auth backend could not be verified; access is denied";
+
+/// The permanent-fault sentence: an answer that contradicts the wire
+/// contract stays unusable until the answering side is upgraded.
+const CONTRACT_VIOLATION: &str =
+    "the auth backend answered outside its contract; the services are running different versions";
+
+/// A control-plane failure never opens a face, and the two kinds answer
+/// apart because the caller's next move differs: `Backend` is a retryable
+/// `503` (`auth_backend_unavailable`), `Contract` a permanent `500`
+/// (`auth_contract_violation`) that only an upgrade clears.
+pub(crate) fn control_failure(error: ControlPlaneError) -> ApiError {
+    match error {
+        ControlPlaneError::Backend(detail) => {
+            tracing::warn!(%detail, "archeion call failed");
+            ApiError {
+                status: 503,
+                message: BACKEND_UNAVAILABLE.to_owned(),
+                dangling: None,
+                code: Some("auth_backend_unavailable".to_owned()),
+            }
+        }
+        ControlPlaneError::Contract(detail) => {
+            tracing::error!(%detail, "archeion answered outside its contract");
+            ApiError {
+                status: 500,
+                message: CONTRACT_VIOLATION.to_owned(),
+                dangling: None,
+                code: Some("auth_contract_violation".to_owned()),
+            }
+        }
     }
 }
 
@@ -410,11 +442,9 @@ impl FromRequestParts<AppState> for AdminToken {
                     ));
                 }
                 Ok(None) => return Err(ApiError::unauthorized("invalid bearer token")),
-                // Archeion unreachable or off-contract: fail closed.
-                Err(error) => {
-                    tracing::warn!(%error, "archeion verify_bearer failed");
-                    return Err(backend_unavailable());
-                }
+                // A control-plane failure never opens the door; the two
+                // kinds answer apart (see `control_failure`).
+                Err(error) => return Err(control_failure(error)),
             }
         } else if let Some(cookie) = read_session_cookie(&parts.headers) {
             match verifier.verify_session(&cookie).await {
@@ -433,10 +463,9 @@ impl FromRequestParts<AppState> for AdminToken {
                         "admin_session_required",
                     ));
                 }
-                Err(error) => {
-                    tracing::warn!(%error, "archeion verify_session failed");
-                    return Err(backend_unavailable());
-                }
+                // A control-plane failure never opens the door; the two
+                // kinds answer apart (see `control_failure`).
+                Err(error) => return Err(control_failure(error)),
             }
         } else {
             return Err(ApiError::unauthorized(
@@ -492,10 +521,9 @@ impl FromRequestParts<AppState> for UserSession {
                 "sign in to use the model gateway",
                 "user_session_required",
             )),
-            Err(error) => {
-                tracing::warn!(%error, "archeion verify_session failed");
-                Err(backend_unavailable())
-            }
+            // A control-plane failure never opens the door; the two kinds
+            // answer apart (see `control_failure`).
+            Err(error) => Err(control_failure(error)),
         }
     }
 }

@@ -72,7 +72,7 @@ impl FromRequestParts<SharedConvState> for AuthPrincipal {
                 .control
                 .verify_bearer(bearer)
                 .await
-                .map_err(control_to_internal)?
+                .map_err(control_failure)?
                 .ok_or_else(|| ApiError::unauthorized("invalid token"))?;
             // A tagma's own credential carries a record too; only a user behind
             // one is a personal access token (see `is_personal_token`).
@@ -89,7 +89,7 @@ impl FromRequestParts<SharedConvState> for AuthPrincipal {
                 .control
                 .verify_session(&cookie_value)
                 .await
-                .map_err(control_to_internal)?
+                .map_err(control_failure)?
                 .ok_or_else(|| ApiError::unauthorized("invalid session"))?;
             // Stash the authoritative display identity on the request so handlers
             // that stamp room identity (the rooms send path) can use it without a
@@ -105,8 +105,26 @@ impl FromRequestParts<SharedConvState> for AuthPrincipal {
     }
 }
 
-fn control_to_internal(e: ControlPlaneError) -> ApiError {
-    ApiError::internal(format_args!("registry error: {e}"))
+/// Control-plane failures never authenticate anyone. The two kinds answer
+/// apart because the caller's next move differs: `Backend` is a retryable
+/// `503`, `Contract` a permanent `500` that only an upgrade clears.
+fn control_failure(e: ControlPlaneError) -> ApiError {
+    match e {
+        ControlPlaneError::Backend(detail) => {
+            tracing::warn!(%detail, "registry backend failure");
+            ApiError::unavailable_with_code(
+                "the auth backend could not be verified; access is denied",
+                "auth_backend_unavailable",
+            )
+        }
+        ControlPlaneError::Contract(detail) => {
+            tracing::error!(%detail, "registry answered outside its contract");
+            ApiError::internal_with_code(
+                "the auth backend answered outside its contract; the services are running different versions",
+                "auth_contract_violation",
+            )
+        }
+    }
 }
 
 /// Read the session cookie value from a request's `Cookie` header, if present.
@@ -166,6 +184,19 @@ mod tests {
             .expect_err("a personal token is not accepted here");
         assert_eq!(err.status, 403);
         assert!(err.message.contains("personal access token"), "{err:?}");
+    }
+
+    /// The two control-plane failures answer with different statuses: a
+    /// backend outage may clear on a retry, a contract violation never does.
+    #[test]
+    fn a_backend_failure_is_retryable_and_a_contract_violation_is_not() {
+        let backend = control_failure(ControlPlaneError::Backend("down".to_owned()));
+        assert_eq!(backend.status, 503);
+        assert_eq!(backend.code.as_deref(), Some("auth_backend_unavailable"));
+
+        let contract = control_failure(ControlPlaneError::Contract("no record".to_owned()));
+        assert_eq!(contract.status, 500);
+        assert_eq!(contract.code.as_deref(), Some("auth_contract_violation"));
     }
 
     /// A tagma's own credential is a record as well, and it is the tagma: the

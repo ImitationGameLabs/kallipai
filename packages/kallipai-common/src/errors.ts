@@ -16,6 +16,9 @@ export interface ApiError {
   // Stranded profile-set bindings, present only on the tagma 409 that
   // `PUT /profiles` returns for a non-forced dangling save.
   readonly dangling?: readonly string[];
+  // Machine-readable reason from the envelope's `error.code`, present when
+  // the status line alone would let a caller draw the wrong conclusion.
+  readonly code?: string;
 }
 
 export class KallipaiError extends Error {
@@ -40,16 +43,21 @@ export class TransportError extends Error {
  * bodies (`OnlineBackend`) must agree on what the server sent, so the
  * extraction lives here instead of once per transport. */
 export function parseErrorEnvelope(body: unknown): {
-  message?: string;
   dangling?: readonly string[];
+  code?: string;
+  message?: string;
 } {
   const envelope = body as {
-    error?: { message?: string; dangling?: readonly string[] };
+    error?: { message?: string; dangling?: readonly string[]; code?: string };
   };
   const dangling = Array.isArray(envelope?.error?.dangling)
     ? envelope.error.dangling
     : undefined;
-  return { message: envelope?.error?.message, dangling };
+  return {
+    message: envelope?.error?.message,
+    dangling,
+    code: envelope?.error?.code,
+  };
 }
 
 /** Read an `ApiError` from a non-2xx `Response`. Shared by every HTTP client so
@@ -61,16 +69,20 @@ export function parseErrorEnvelope(body: unknown): {
 export async function readApiError(resp: Response): Promise<ApiError> {
   let message = resp.statusText;
   let dangling: readonly string[] | undefined;
+  let code: string | undefined;
   try {
     const text = await resp.text();
     if (text) {
       try {
-        const { message: msg, dangling: d } = parseErrorEnvelope(
-          JSON.parse(text),
-        );
+        const {
+          message: msg,
+          dangling: d,
+          code: c,
+        } = parseErrorEnvelope(JSON.parse(text));
         if (msg) message = msg;
         else message = text;
         dangling = d;
+        code = c;
       } catch {
         // Non-JSON body (e.g. a CSRF-guard plain string): use it verbatim.
         message = text;
@@ -79,7 +91,7 @@ export async function readApiError(resp: Response): Promise<ApiError> {
   } catch {
     // Empty or unreadable body: keep statusText.
   }
-  return { status: resp.status, message, dangling };
+  return { status: resp.status, message, dangling, code };
 }
 
 /**
@@ -92,11 +104,18 @@ export async function readApiError(resp: Response): Promise<ApiError> {
  * `kallipai_common::protocol::ApiError`, and stays distinct from the
  * tagma-transport error family above -- data-plane errors route through
  * the realtime/channels stores, not a transport classifier.
+ *
+ * `code` carries the envelope's machine-readable reason when the relay sent
+ * one. The consumers that read a status as a fact about the peer need it: a
+ * `503 auth_backend_unavailable` is the relay's own authentication backend
+ * failing, not the peer being offline, and the two must not collapse into
+ * the same guess.
  */
 export class DataPlaneApiError extends Error {
   constructor(
     readonly status: number,
     message: string,
+    readonly code?: string,
   ) {
     super(message);
     this.name = "DataPlaneApiError";

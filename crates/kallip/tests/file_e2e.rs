@@ -42,7 +42,8 @@ struct Registry {
 }
 
 /// What a bearer resolves to: the identity, plus the permission record it
-/// carries (`None` for the admin bearer, whose rights are its own).
+/// carries. `None` for the admin bearer, whose rights are its own, and for
+/// the recordless shape an older registry sends, which a data plane refuses.
 type BearerRecord = (WirePrincipal, Option<PermSet>);
 
 impl Registry {
@@ -60,6 +61,23 @@ impl Registry {
                     user_id: user.clone(),
                 },
                 Some(perms),
+            ),
+        );
+        plaintext
+    }
+
+    /// The shape a registry older than the credential field sends: the user's
+    /// identity with no record at all. A data plane meeting it must refuse the
+    /// call rather than read the absent record as no narrowing.
+    fn mint_recordless_pat(&self, user: &UserId) -> String {
+        let plaintext = format!("sk-pat-{}", uuid::Uuid::new_v4());
+        self.bearer.lock().expect("lock").insert(
+            plaintext.clone(),
+            (
+                WirePrincipal::User {
+                    user_id: user.clone(),
+                },
+                None,
             ),
         );
         plaintext
@@ -102,8 +120,9 @@ async fn verify_bearer_route(
         .cloned();
     match found {
         Some((principal, perms)) => {
-            // Every non-admin bearer is a record: the files service reads
-            // its permission set to decide what the caller may do.
+            // Every resolved bearer is a record, except the recordless shape
+            // an older registry sends; this route serves it verbatim so the
+            // service's refusal is exercised.
             let credential = perms.map(|perms| WireCredential {
                 token_id: kallipai_archeion_common::ids::TokenId::from(request.token.clone()),
                 perms,
@@ -151,6 +170,8 @@ struct World {
     /// carries reads only.
     pat_token: String,
     read_only_pat: String,
+    /// The shape an older registry sends: a personal token with no record.
+    recordless_pat: String,
     /// Keeps the blob root alive for the whole test.
     _blob_dir: TempDir,
 }
@@ -241,6 +262,9 @@ async fn spawn_world() -> World {
     // A second one, reads only: the record's set is what the service honors.
     let read_only_pat =
         registry.mint_pat(&user1, &[kallipai_archeion_common::perm::FILES_RECORD_READ]);
+    // The mixed-version shape: a personal token the registry answers without
+    // any record at all.
+    let recordless_pat = registry.mint_recordless_pat(&user1);
     let archeion_url = spawn_mini_archeion(registry).await;
 
     let db_url = common::test_db_url().await;
@@ -288,6 +312,7 @@ async fn spawn_world() -> World {
         admin_token,
         pat_token,
         read_only_pat,
+        recordless_pat,
         _blob_dir: blob_dir,
     }
 }
@@ -413,6 +438,34 @@ async fn an_unrecognized_bearer_is_rejected_before_any_path_logic() {
     let ghost = FilesClient::new(world.files_url.clone(), "sk-tagma-e2e-ghost".to_owned());
     let err = ghost.list_files("self", None, None).await.expect_err("401");
     assert!(err.to_string().contains("401"), "{err}");
+}
+
+/// A registry that predates the credential field answers every bearer with no
+/// record at all. The files service must fail closed instead of reading the
+/// absent record as no narrowing: the answer is a permanent 500 carrying
+/// `auth_contract_violation`, which no retry clears.
+#[tokio::test]
+async fn a_bearer_that_carries_no_record_is_refused() {
+    let world = spawn_world().await;
+    let client = FilesClient::new(world.files_url.clone(), world.recordless_pat.clone());
+    let err = client
+        .list_files("self", None, None)
+        .await
+        .expect_err("a recordless bearer is not a caller");
+    assert!(err.to_string().contains("500"), "{err}");
+
+    // The failure kind rides the body, not the client's message: ask the
+    // service directly for the code a caller can branch on.
+    let response = reqwest::Client::new()
+        .get(world.files_url.clone())
+        .query(&[("space", "self")])
+        .bearer_auth(&world.recordless_pat)
+        .send()
+        .await
+        .expect("call the files service");
+    assert_eq!(response.status(), 500);
+    let body: serde_json::Value = response.json().await.expect("error body");
+    assert_eq!(body["error"]["code"], "auth_contract_violation", "{body}");
 }
 
 /// The CLI's bearer is a personal access token: the test mints one (the

@@ -127,9 +127,11 @@ impl ControlPlane for HttpControlPlane {
             )
             .await?;
         // The wire body is the resolved identity plus the credential that
-        // carried it; `From<VerifyBearerResponse>` (in internal_api) is the
-        // single mapping site.
-        Ok(resp.map(VerifiedBearer::from))
+        // carried it; the `TryFrom` in internal_api is the single mapping site,
+        // and it refuses a user or tagma bearer that arrives with no record.
+        resp.map(VerifiedBearer::try_from)
+            .transpose()
+            .map_err(|e| ControlPlaneError::Contract(e.to_string()))
     }
 
     async fn tagma_profiles(
@@ -278,22 +280,40 @@ mod tests {
         let (server, cp) = mocked().await;
         Mock::given(method("POST"))
             .and(path("/internal/verify-bearer"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "principal": { "kind": "tagma", "tagma_id": "t1" },
+                "credential": {
+                    "token_id": "c1",
+                    "perms": ["files:delivery:write", "files:record:read", "files:record:write"],
+                },
+            })))
+            .mount(&server)
+            .await;
+
+        let verified = cp.verify_bearer("sk-tagma-y").await.unwrap().unwrap();
+        assert!(matches!(
+            verified.principal,
+            Principal::Tagma(id) if id == TagmaId::from("t1".to_string())
+        ));
+        assert!(verified.credential.is_some(), "a tagma bearer is a record");
+    }
+
+    #[tokio::test]
+    async fn verify_bearer_without_a_record_is_a_contract_error() {
+        // The shape an older registry sends: no `credential` key at all. A
+        // tagma bearer that resolves to no record is refused, never read as
+        // the whole identity.
+        let (server, cp) = mocked().await;
+        Mock::given(method("POST"))
+            .and(path("/internal/verify-bearer"))
             .respond_with(ResponseTemplate::new(200).set_body_json(
                 serde_json::json!({ "principal": { "kind": "tagma", "tagma_id": "t1" } }),
             ))
             .mount(&server)
             .await;
 
-        let principal = cp
-            .verify_bearer("sk-tagma-y")
-            .await
-            .unwrap()
-            .unwrap()
-            .principal;
-        assert!(matches!(
-            principal,
-            Principal::Tagma(id) if id == TagmaId::from("t1".to_string())
-        ));
+        let err = cp.verify_bearer("sk-tagma-y").await.expect_err("refused");
+        assert!(matches!(err, ControlPlaneError::Contract(_)), "{err}");
     }
 
     #[tokio::test]

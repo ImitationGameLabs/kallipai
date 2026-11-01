@@ -1,8 +1,10 @@
 // Tests for the automatic-open failure budget: cooldown-gated retries with
 // doubling backoff, the session terminal after six straight failures, the
-// the user-driven re-arm path (an explicit open bypasses and clears the
+// user-driven re-arm path (an explicit open bypasses and clears the
 // budget), success clearing the failure memory, and the offline-class
-// (503) failure asking the shell to correct stale presence.
+// (503) failure asking the shell to correct stale presence -- but only
+// when the 503 carries no authentication code: a relay whose own auth
+// backend failed reports 503 with nothing to say about the peer.
 //
 // Seams, and why they are safe: the module under test is rune-bearing, but
 // `deno test` runs it uncompiled, so a passthrough $state shim (the
@@ -39,12 +41,13 @@ class Harness extends ChannelsStore {
     this.setOfflineCorrection((tagmaId) => this.corrections.push(tagmaId));
   }
 
-  override async openRelay(_tagma: TagmaView): Promise<string> {
+  override openRelay(_tagma: TagmaView): Promise<string> {
     this.attempts++;
     const step = this.script.shift();
-    if (step === undefined) throw new Error("script exhausted");
-    if (step === "ok") return "conv-1";
-    throw step;
+    if (step === undefined)
+      return Promise.reject(new Error("script exhausted"));
+    if (step === "ok") return Promise.resolve("conv-1");
+    return Promise.reject(step);
   }
 
   protected override now(): number {
@@ -121,6 +124,50 @@ Deno.test(
     assertEquals(h.corrections.length, 1);
   },
 );
+
+Deno.test(
+  "an auth_backend_unavailable 503 is not read as an offline peer",
+  async () => {
+    const h = new Harness();
+    // The relay answered through its own broken authentication backend: the
+    // status is 503, but it says nothing about whether the tagma is up.
+    h.script = [
+      new DataPlaneApiError(
+        503,
+        "archeion unavailable",
+        "auth_backend_unavailable",
+      ),
+    ];
+    await h.ensureOpen(tagma);
+    assertEquals(h.attempts, 1);
+    assertEquals(h.corrections, []);
+  },
+);
+
+Deno.test(
+  "a contract-violation 500 is not read as an offline peer",
+  async () => {
+    const h = new Harness();
+    // The production answer for a contract violation is a 500: a bare 5xx
+    // is no evidence about the peer, whichever code rides on it.
+    h.script = [
+      new DataPlaneApiError(500, "contract", "auth_contract_violation"),
+    ];
+    await h.ensureOpen(tagma);
+    assertEquals(h.attempts, 1);
+    assertEquals(h.corrections, []);
+  },
+);
+
+Deno.test("a 503 without a code still retracts presence", async () => {
+  const h = new Harness();
+  // keryx's own refusal attaches no code, so the bare 503 is the offline
+  // signal; the optional chain is what lets it through.
+  h.script = [new DataPlaneApiError(503, "tagma offline")];
+  await h.ensureOpen(tagma);
+  assertEquals(h.attempts, 1);
+  assertEquals(h.corrections, ["t-1"]);
+});
 
 Deno.test(
   "tearDownAll clears the failure budget (it is session-scoped)",

@@ -5,9 +5,11 @@
 //! `axum` feature). The client library deserializes this envelope to produce
 //! typed errors instead of opaque status-code checks.
 //!
-//! An optional machine-readable `code` exists for rejections that must be
-//! distinguishable beyond the status line (the gateway's explicit
-//! key-lifecycle rejections); it is absent on every other error.
+//! An optional machine-readable `code` marks errors a caller must tell
+//! apart beyond the status line: the gateway's explicit key-lifecycle
+//! rejections, and the authentication failures that separate a retryable
+//! outage (`auth_backend_unavailable`) from a contract violation that
+//! only an upgrade clears (`auth_contract_violation`).
 
 use std::fmt;
 
@@ -29,9 +31,10 @@ pub struct ApiError {
     /// (absent on every other error). Serialized inside the error envelope.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dangling: Option<Vec<String>>,
-    /// Machine-readable rejection code (`key_expired`, `key_revoked` on
-    /// the gateway): the deferred `code` slot, added non-breaking for
-    /// the explicit key-rejection contract; absent on every other error.
+    /// Machine-readable reason (`key_expired` / `key_revoked` on the
+    /// gateway, `auth_backend_unavailable` / `auth_contract_violation` on
+    /// the internal-token failures); absent where the status line already
+    /// says everything.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub code: Option<String>,
 }
@@ -147,6 +150,32 @@ impl ApiError {
             message: "internal error".into(),
             dangling: None,
             code: None,
+        }
+    }
+
+    /// 500 Internal Server Error carrying a machine-readable code, with a
+    /// caller-facing message: the upstream answered, but its answer
+    /// contradicts its own wire contract, so a retry cannot help and only
+    /// an upgrade can. Distinct from [`Self::internal`], which hides the
+    /// detail behind a generic message; the caller logs the detail itself.
+    pub fn internal_with_code(msg: impl Into<String>, code: &str) -> Self {
+        Self {
+            status: 500,
+            message: msg.into(),
+            dangling: None,
+            code: Some(code.to_owned()),
+        }
+    }
+
+    /// 503 Service Unavailable carrying a machine-readable code: the
+    /// upstream could not be reached, so the same request may succeed
+    /// later.
+    pub fn unavailable_with_code(msg: impl Into<String>, code: &str) -> Self {
+        Self {
+            status: 503,
+            message: msg.into(),
+            dangling: None,
+            code: Some(code.to_owned()),
         }
     }
 

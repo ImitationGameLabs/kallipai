@@ -145,12 +145,24 @@ async fn closed_port_base() -> String {
 /// exercised: the fake trusts its caller, a posture this file states
 /// instead of simulating.
 async fn verify_bearer(Json(body): Json<serde_json::Value>) -> Response {
-    let principal = match body["token"].as_str() {
-        Some(t) if t == ADMIN_BEARER => json!({"kind": "admin"}),
-        Some(t) if t == TAGMA_BEARER => json!({"kind": "tagma", "tagma_id": TAGMA_ID}),
+    // Every non-admin bearer is a record; the admin bearer is the bare
+    // secret a registry answers with no credential at all.
+    let (principal, credential) = match body["token"].as_str() {
+        Some(t) if t == ADMIN_BEARER => (json!({"kind": "admin"}), serde_json::Value::Null),
+        Some(t) if t == TAGMA_BEARER => (
+            json!({"kind": "tagma", "tagma_id": TAGMA_ID}),
+            json!({
+                "token_id": "c1",
+                "perms": ["files:delivery:write", "files:record:read", "files:record:write"],
+            }),
+        ),
         _ => return StatusCode::NOT_FOUND.into_response(),
     };
-    (StatusCode::OK, Json(json!({"principal": principal}))).into_response()
+    (
+        StatusCode::OK,
+        Json(json!({"principal": principal, "credential": credential})),
+    )
+        .into_response()
 }
 
 /// `/internal/enrollment-lookup`: one enrolled tagma under one owner,

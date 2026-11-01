@@ -2,12 +2,14 @@
 //!
 //! The lesche, the keryx and the files service reach the archeion through
 //! their own control-plane clients (the full seven-method `ControlPlane`
-//! trait); this proxy needs exactly two calls (bearer + session verify), so
-//! it carries a verifier of its own rather than pulling a data-plane crate
-//! in or refactoring a shared client out (a tracked follow-up if another
-//! consumer appears).
+//! trait); this proxy and the model-gateway's verifier need exactly two
+//! calls (bearer + session verify) and carry a client of their own rather
+//! than pulling a data-plane crate in. Five services read the same
+//! `VerifyBearerResponse`, so the decode rule itself lives once, in
+//! `kallipai_archeion_common::internal_api` (`VerifiedBearer::try_from`);
+//! only the wire plumbing is repeated here.
 
-use kallipai_archeion_common::control_plane::{ControlPlaneError, VerifiedSession};
+use kallipai_archeion_common::control_plane::{ControlPlaneError, VerifiedBearer, VerifiedSession};
 use kallipai_archeion_common::internal_api::{
     VerifyBearerRequest, VerifyBearerResponse, VerifySessionRequest,
 };
@@ -76,11 +78,18 @@ impl AuthVerifier for ArcheionVerifier {
             .await
             .map_err(|e| ControlPlaneError::Backend(e.to_string()))?;
         match response.status().as_u16() {
-            200 => response
-                .json::<VerifyBearerResponse>()
-                .await
-                .map(|r| Some(Principal::from(r.principal)))
-                .map_err(|e| ControlPlaneError::Backend(e.to_string())),
+            200 => {
+                let body = response
+                    .json::<VerifyBearerResponse>()
+                    .await
+                    .map_err(|e| ControlPlaneError::Backend(e.to_string()))?;
+                // The record itself is not used here, but a bearer that
+                // carries none is not an identity: the shared decode
+                // refuses it, and the guard answers the refusal with 500.
+                VerifiedBearer::try_from(body)
+                    .map(|verified| Some(verified.principal))
+                    .map_err(|e| ControlPlaneError::Contract(e.to_string()))
+            }
             404 => Ok(None),
             status => Err(ControlPlaneError::Backend(format!(
                 "archeion /internal/verify-bearer returned HTTP {status}"

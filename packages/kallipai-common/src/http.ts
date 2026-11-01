@@ -153,6 +153,6 @@ export abstract class BaseClient {
  * shared (`readApiError`) so the plane clients cannot drift from the
  * `{"error":{"message":...}}` shape the services emit. */
 async function dataPlaneApiError(resp: Response): Promise<DataPlaneApiError> {
-  const { status, message } = await readApiError(resp);
-  return new DataPlaneApiError(status, message);
+  const { status, message, code } = await readApiError(resp);
+  return new DataPlaneApiError(status, message, code);
 }

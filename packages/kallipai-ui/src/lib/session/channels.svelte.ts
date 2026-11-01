@@ -562,10 +562,13 @@ export class ChannelsStore {
    *  capped at 60s) between automatic attempts, and a session terminal
    *  after OPEN_FAILURE_LIMIT straight failures so a flapping peer cannot
    *  drive a request storm. An offline-class failure (a `DataPlaneApiError`
-   *  with status 503) additionally asks the shell to correct stale presence:
-   *  the keryx just refused the KEX because the tagma is unreachable, which
-   *  is better evidence than a `tagma_offline` event missed during an SSE
-   *  gap. */
+   *  with status 503 and no authentication code) additionally asks the shell
+   *  to correct stale presence: the keryx just refused the KEX because the
+   *  tagma is unreachable, which is better evidence than a `tagma_offline`
+   *  event missed during an SSE gap. A 503 carrying `auth_backend_unavailable`
+   *  says the relay's own authentication backend failed, which is no evidence
+   *  about the peer, so it is not one. A contract violation is a 500 with
+   *  `auth_contract_violation`; it never reaches the 503 test below. */
   private recordOpenFailure(tagmaId: string, e: unknown): void {
     const failures = (this.openBudgets.get(tagmaId)?.failures ?? 0) + 1;
     const delay = Math.min(
@@ -577,7 +580,11 @@ export class ChannelsStore {
       cooldownUntil: this.now() + delay,
       terminal: failures >= OPEN_FAILURE_LIMIT,
     });
-    if (e instanceof DataPlaneApiError && e.status === 503) {
+    if (
+      e instanceof DataPlaneApiError &&
+      e.status === 503 &&
+      !e.code?.startsWith("auth_")
+    ) {
       this.offlineCorrection?.(tagmaId);
     }
   }

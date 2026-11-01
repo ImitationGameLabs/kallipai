@@ -192,14 +192,15 @@ async fn resolve_landing(
             {
                 Ok(found) if !found.is_empty() => {}
                 Ok(_) => return Err(ApiError::not_found("target user does not exist")),
-                // Same posture as the enrollment lookup: soft degrades the
-                // decision to a denial, closed surfaces the outage.
+                // Same posture as the enrollment lookup, and the same answer:
+                // soft degrades the decision to a denial, closed answers
+                // through `control_failure` (503 for an outage; the 500 arm
+                // is out of reach here, since `Contract` is built only from
+                // the verify-bearer decode, not from a user-identity read).
                 Err(_e) if state.config.degrade_fail_soft => {
                     return Err(ApiError::not_found("target user does not exist"));
                 }
-                Err(e) => {
-                    return Err(ApiError::unavailable(format!("registry unavailable: {e}")));
-                }
+                Err(e) => return Err(crate::auth::control_failure(e)),
             }
             Ok(Landing {
                 path: format!("/users/{to_user}/inbox/{filename}"),

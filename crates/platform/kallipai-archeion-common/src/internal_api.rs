@@ -92,15 +92,21 @@ impl From<WirePrincipal> for Principal {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VerifyBearerResponse {
     pub principal: WirePrincipal,
-    /// `None` means this path carried no record: the admin bearer, or a
-    /// registry that predates this field. Three things a reader must keep
-    /// apart: `None` (no record, so no narrowing), an empty set (a live
+    /// `None` means this path carried no record, and only the admin bearer
+    /// (a bare secret) has none: a tagma's credential and a personal access
+    /// token both arrive as `Some`. Three things a reader must keep apart:
+    /// `None` (the bare secret, no narrowing), an empty set (a live
     /// credential that authenticates and passes no permission gate, so its
     /// calls are refused one route at a time with `403`), and a `404` (no
     /// usable record: an unknown hash, an expired or revoked credential, a
     /// retired tagma, a disabled owner, an unknown owner kind, or a set with
-    /// a string outside the vocabulary -- all read as no credential, never as
-    /// half of one).
+    /// a string outside the vocabulary -- no credential, never half of one).
+    ///
+    /// A registry older than this field sends no `credential` for any bearer,
+    /// so such an answer decodes to `None` and is refused by the `TryFrom`
+    /// below. That closes one direction only: a data plane older than this
+    /// field still reads a bearer as the whole identity, and nothing on the
+    /// answering side can reach that.
     pub credential: Option<WireCredential>,
 }
 
@@ -119,17 +125,62 @@ impl From<&crate::control_plane::VerifiedBearer> for VerifyBearerResponse {
     }
 }
 
-impl From<VerifyBearerResponse> for crate::control_plane::VerifiedBearer {
-    fn from(response: VerifyBearerResponse) -> Self {
-        Self {
-            principal: response.principal.into(),
-            credential: response.credential.map(|credential| {
-                crate::control_plane::CredentialScope {
+/// A `200` body naming a `User` or a `Tagma` without the record that carried
+/// it. The registry cannot produce that shape itself: only the admin bearer
+/// (a bare secret) has no record. A registry older than the `credential` field
+/// produces it for every bearer, and reading that as no narrowing would hand a
+/// narrow personal token the whole identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordlessBearer {
+    /// The principal kind the answer named, for the failing caller's log line.
+    pub kind: &'static str,
+}
+
+impl std::fmt::Display for RecordlessBearer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the registry answered a {} bearer with no credential record",
+            self.kind
+        )
+    }
+}
+
+impl std::error::Error for RecordlessBearer {}
+
+/// Lift a [`VerifyBearerResponse`] into a [`VerifiedBearer`], refusing the one
+/// shape a same-version registry cannot produce: a user or a tagma with no
+/// credential. The admin bearer stays accepted, since a bare secret is the one
+/// identity with no record behind it.
+impl TryFrom<VerifyBearerResponse> for crate::control_plane::VerifiedBearer {
+    type Error = RecordlessBearer;
+
+    fn try_from(response: VerifyBearerResponse) -> Result<Self, Self::Error> {
+        use crate::principal::Principal;
+        let principal: Principal = response.principal.into();
+        let credential =
+            response
+                .credential
+                .map(|credential| crate::control_plane::CredentialScope {
                     token: credential.token_id,
                     perms: credential.perms,
-                }
-            }),
+                });
+        // Exhaustive on purpose: a new `Principal` variant must decide
+        // here whether it can arrive without a record, rather than fall
+        // into a catch-all and be refused under a wrong label.
+        let recordless = match &principal {
+            // A bare secret is the one identity with no record behind it.
+            Principal::Admin => None,
+            Principal::User(_) => credential.is_none().then_some("user"),
+            Principal::Tagma(_) => credential.is_none().then_some("tagma"),
+        };
+        if let Some(kind) = recordless {
+            return Err(RecordlessBearer { kind });
         }
+        Ok(Self {
+            principal,
+            credential,
+        })
     }
 }
 
@@ -420,7 +471,7 @@ mod tests {
             }),
         };
         let response = VerifyBearerResponse::from(&verified);
-        let back: VerifiedBearer = response.into();
+        let back = VerifiedBearer::try_from(response).expect("a record is a record");
         assert!(
             matches!(back.principal, Principal::User(id) if id == UserId::from("u1".to_string()))
         );
@@ -431,7 +482,33 @@ mod tests {
             principal: Principal::Admin,
             credential: None,
         };
-        let back: VerifiedBearer = VerifyBearerResponse::from(&admin).into();
+        let back = VerifiedBearer::try_from(VerifyBearerResponse::from(&admin))
+            .expect("the admin bearer carries no record");
+        assert!(matches!(back.principal, Principal::Admin));
+        assert!(back.credential.is_none());
+    }
+    #[test]
+    fn a_bearer_with_no_record_is_refused_at_decode() {
+        use crate::control_plane::VerifiedBearer;
+
+        // The shape an older registry sends: no `credential` key at all. A
+        // user or tagma bearer cannot resolve to no record, so reading that
+        // as an un-narrowed identity is exactly the widening to refuse.
+        for (body, kind) in [
+            (r#"{"principal":{"kind":"user","user_id":"u1"}}"#, "user"),
+            (r#"{"principal":{"kind":"tagma","tagma_id":"t1"}}"#, "tagma"),
+        ] {
+            let response: VerifyBearerResponse = serde_json::from_str(body).unwrap();
+            let err =
+                VerifiedBearer::try_from(response).expect_err("a recordless bearer is refused");
+            assert_eq!(err.kind, kind);
+        }
+
+        // The admin bearer is the one identity with no record behind it, and
+        // stays accepted.
+        let admin: VerifyBearerResponse =
+            serde_json::from_str(r#"{"principal":{"kind":"admin"}}"#).unwrap();
+        let back = VerifiedBearer::try_from(admin).expect("the admin bearer carries no record");
         assert!(matches!(back.principal, Principal::Admin));
         assert!(back.credential.is_none());
     }

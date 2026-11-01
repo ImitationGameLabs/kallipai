@@ -1608,7 +1608,11 @@ async fn spawn_fake_archeion() -> String {
             "/internal/verify-bearer",
             post(|Json(_body): Json<serde_json::Value>| async {
                 Json(serde_json::json!({
-                    "principal": {"kind": "tagma", "tagma_id": "tagma-unenrolled"}
+                    "principal": {"kind": "tagma", "tagma_id": "tagma-unenrolled"},
+                    "credential": {
+                        "token_id": "c1",
+                        "perms": ["files:delivery:write", "files:record:read", "files:record:write"],
+                    },
                 }))
             }),
         )

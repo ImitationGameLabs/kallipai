@@ -96,7 +96,8 @@ impl IdentityCache {
 /// lookup names its owner, and both reads stay behind the TTL caches
 /// (this one for the identity, the verifier's for the enrollment).
 /// `Unknown` is the bare 401 (no oracle for guessed tokens or guessed
-/// enrollments); a backend fault fails closed as the shared 503.
+/// enrollments); a backend fault fails closed through `control_failure`
+/// (503 for an outage, 500 for an answer that contradicts the contract).
 pub(crate) async fn resolve(
     state: &AppState,
     bearer: &str,
@@ -112,7 +113,7 @@ pub(crate) async fn resolve(
     let principal = verifier
         .verify_bearer(bearer)
         .await
-        .map_err(|_| crate::management::backend_unavailable())?;
+        .map_err(crate::management::control_failure)?;
     let tagma_id = match principal {
         Some(kallipai_archeion_common::principal::Principal::Tagma(id)) => id.to_string(),
         _ => return Ok(Resolution::Unknown),

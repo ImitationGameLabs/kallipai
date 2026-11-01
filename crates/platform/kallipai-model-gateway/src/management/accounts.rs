@@ -34,7 +34,7 @@ pub async fn search_accounts(
     let users = verifier
         .search_accounts(query, limit)
         .await
-        .map_err(|_| crate::management::backend_unavailable())?;
+        .map_err(crate::management::control_failure)?;
     Ok(Json(AccountSearchView {
         users: users
             .into_iter()

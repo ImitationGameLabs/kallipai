@@ -61,11 +61,16 @@ pub(crate) fn parse_record_path(space_path: &str) -> Result<SpacePath, ApiError>
 /// - lookup returns `None` (unknown / pending / revoked / owner-disabled --
 ///   e.g. a revocation that raced the just-passed authentication) ->
 ///   empty facts, which deny every decision;
-/// - lookup fails (unreachable, an off-contract answer, or a body that does
-///   not decode): fail-closed (the default) -> 503;
-///   fail-soft (`degrade_fail_soft`) -> empty facts, so tagma decisions
-///   deny with 403 instead of erroring. Verification is never degraded
-///   either way.
+/// - lookup fails: fail-closed (the default) -> `control_failure`'s answer
+///   (503 for an unreachable registry or a status outside the call's
+///   contract; 500 for an answer that contradicts the wire contract -- the
+///   `Contract` kind, which only `VerifiedBearer::try_from` builds, and this
+///   call reads an `EnrollmentLookupResponse`, so no answer here can produce
+///   it today; stated because that is what `control_failure` answers, and
+///   because a second wire rule would silently make the 500 reachable
+///   without touching this sentence); fail-soft (`degrade_fail_soft`) ->
+///   empty facts, so tagma decisions deny with 403 instead of erroring;
+///   verification is never degraded either way.
 ///
 /// The consumer discipline on the facts: absence from
 /// `enrolled` is denial; no code may unwrap or assume the requester's own
@@ -99,7 +104,7 @@ pub(crate) async fn tagma_facts(
                 );
                 Ok(deny_all())
             } else {
-                Err(ApiError::unavailable(format!("registry unavailable: {e}")))
+                Err(crate::auth::control_failure(e))
             }
         }
     }

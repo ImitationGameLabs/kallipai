@@ -209,9 +209,11 @@ passes either with an archeion admin bearer (the machine and CLI
 channel) or with the local admin's platform session cookie (the browser
 channel: the admin page signs in with the platform account). A valid
 non-admin identity is authenticated but unauthorized (403); an invalid
-or absent credential is rejected (401); an archeion that is unreachable,
-answers off-contract, or sends a body that will not decode fails closed
-(503). With no archeion wiring configured the whole face is closed, and the
+or absent credential is rejected (401); an archeion that cannot be
+reached, answers a status outside the call's contract, or sends a body
+that will not decode fails closed (503), and an answer that contradicts
+the wire contract (a bearer with no credential record) fails closed
+(500). With no archeion wiring configured the whole face is closed, and the
 distribution and forwarding faces run unaffected.
 
 The browser channel is hardened as a pair: session cookies are HttpOnly

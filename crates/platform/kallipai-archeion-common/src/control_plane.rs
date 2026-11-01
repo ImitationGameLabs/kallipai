@@ -179,13 +179,26 @@ pub struct EnrollmentLookup {
     pub enrolled_tagmas: Vec<TagmaId>,
 }
 
-/// Why a [`ControlPlane`] call failed. Surfaces as HTTP 500 at the caller; the
-/// caller maps "not found / unauthorized" outcomes to `Option::None` rather than
-/// to errors so they can become precise 404/401s.
+/// Why a [`ControlPlane`] call failed. The two kinds differ in what the
+/// caller can do about them, and every data plane answers them apart:
+/// [`Self::Backend`] is a `503` with code `auth_backend_unavailable` (the
+/// same request may succeed later), [`Self::Contract`] is a `500` with code
+/// `auth_contract_violation` (only an upgrade answers it, so a retry must
+/// not be invited). The caller maps "not found / unauthorized" outcomes to
+/// `Option::None` rather than to errors so they can become precise 404/401s.
 #[derive(Debug, thiserror::Error)]
 pub enum ControlPlaneError {
     #[error("registry backend failure: {0}")]
     Backend(String),
+    /// The registry answered, but the answer contradicts the wire contract:
+    /// `/internal/verify-bearer` named a user or a tagma with no credential
+    /// record behind it. A data plane fails closed rather than read the missing
+    /// record as no narrowing at all. Reaching this means the answering registry
+    /// predates the field, and a version mismatch never clears on its own:
+    /// the data plane answers `500` + `auth_contract_violation`, so clients see
+    /// a permanent fault rather than a retryable one.
+    #[error("registry contract violation: {0}")]
+    Contract(String),
 }
 
 /// The registry, as seen by the data-plane services. All methods are `async`

@@ -15,6 +15,7 @@ use axum::extract::State;
 use axum::http::{HeaderMap, Request, StatusCode};
 use axum::middleware::Next;
 use axum::response::Response;
+use kallipai_archeion_common::control_plane::ControlPlaneError;
 use kallipai_archeion_common::principal::Principal;
 use subtle::ConstantTimeEq;
 
@@ -112,15 +113,9 @@ pub async fn token_guard(
                     "unauthorized",
                     "invalid bearer token",
                 ),
-                // Archeion unreachable or off-contract: fail closed.
-                Err(error) => {
-                    tracing::warn!(%error, "archeion verify_bearer failed");
-                    fault(
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        "auth_backend_unavailable",
-                        "the auth backend could not be reached; access is denied",
-                    )
-                }
+                // A control-plane failure never opens the door; the two
+                // kinds answer apart (see `control_failure`).
+                Err(error) => control_failure(error, "verify_bearer"),
             },
             // No bearer: the browser channel. A session cookie belonging to
             // the fixed local-admin account carries instance rights (the
@@ -147,18 +142,42 @@ pub async fn token_guard(
                         "admin_session_required",
                         "sign in as the platform administrator to manage instances",
                     ),
-                    // Archeion unreachable or off-contract: fail closed.
-                    Err(error) => {
-                        tracing::warn!(%error, "archeion verify_session failed");
-                        fault(
-                            StatusCode::SERVICE_UNAVAILABLE,
-                            "auth_backend_unavailable",
-                            "the auth backend could not be reached; access is denied",
-                        )
-                    }
+                    // A control-plane failure never opens the door; the two
+                    // kinds answer apart (see `control_failure`).
+                    Err(error) => control_failure(error, "verify_session"),
                 }
             }
         },
+    }
+}
+
+/// The permanent-fault sentence for both channels: the answer is unusable and
+/// stays unusable until the answering side is upgraded.
+const CONTRACT_VIOLATION: &str =
+    "the auth backend answered outside its contract; the services are running different versions";
+
+/// A control-plane failure never opens the door, and the two kinds answer
+/// apart because the caller's next move differs: `Backend` is a retryable
+/// `503` (`auth_backend_unavailable`), `Contract` a permanent `500`
+/// (`auth_contract_violation`) that only an upgrade clears.
+fn control_failure(error: ControlPlaneError, call: &'static str) -> Response {
+    match error {
+        ControlPlaneError::Backend(detail) => {
+            tracing::warn!(%detail, call, "archeion call failed");
+            fault(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "auth_backend_unavailable",
+                "the auth backend could not be verified; access is denied",
+            )
+        }
+        ControlPlaneError::Contract(detail) => {
+            tracing::error!(%detail, call, "archeion answered outside its contract");
+            fault(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "auth_contract_violation",
+                CONTRACT_VIOLATION,
+            )
+        }
     }
 }
 

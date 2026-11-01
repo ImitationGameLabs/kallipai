@@ -65,9 +65,10 @@ pub struct Args {
     pub notify_token: String,
     /// Archeion degrade posture. `closed` (the default) fails every
     /// authorization decision with 503 when the registry cannot be reached
-    /// or answers off-contract; `soft` degrades the enrollment lookup to an
-    /// empty fact set, so tagma decisions deny with 403 instead of 503.
-    /// Neither posture weakens credential verification.
+    /// or answers a status outside the call's contract, and with 500 when
+    /// the answer contradicts the wire contract; `soft` degrades the
+    /// enrollment lookup to an empty fact set, so tagma decisions deny with
+    /// 403 instead of erroring. Neither posture weakens credential verification.
     #[arg(long, env = "KALLIPAI_FILES_DEGRADE", value_parser = ["closed", "soft"], default_value = "closed")]
     pub degrade: String,
     /// Delay between GC passes (sweep + reconcile), in seconds.
