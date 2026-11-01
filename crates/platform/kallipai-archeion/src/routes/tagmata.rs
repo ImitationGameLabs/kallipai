@@ -26,6 +26,7 @@ use axum::routing::{get, post};
 use kallipai_archeion_common::bytes::Ed25519PublicKey;
 use kallipai_archeion_common::control::{EnrollRequest, EnrollResponse};
 use kallipai_archeion_common::ids::{TagmaId, UserId};
+use kallipai_archeion_common::mint::MintEnrollmentCodeResponse;
 use kallipai_archeion_common::perm::{ARCHEION_TAGMA_READ, ARCHEION_TAGMA_WRITE};
 use kallipai_archeion_common::proof::{ProofError, verify_enroll_proof};
 use kallipai_common::authtoken::{MintedToken, TokenHash, mask_token};
@@ -38,7 +39,7 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use tracing::warn;
 
-use crate::auth::{AuthPrincipal, require_perm, require_session, require_user};
+use crate::auth::{AuthPrincipal, require_perm, require_user};
 use crate::credentials;
 use crate::state::SharedState;
 use crate::token::{ENROLLMENT, TAGMA};
@@ -203,82 +204,132 @@ fn proof_to_bad_request(e: ProofError) -> ApiError {
 // mint (create a pending tagma / enrollment code)
 // ---------------------------------------------------------------------------
 
-#[derive(Serialize)]
-struct MintResponse {
-    /// `sk-enroll-...` plaintext; returned once. The archeion retains only its
-    /// hash (the masked form is persisted on the row for the list endpoint).
-    code: String,
-    /// The new tagma's id. Stable across the enroll transition.
-    id: String,
-    #[serde(with = "time::serde::rfc3339")]
-    created_at: OffsetDateTime,
-    #[serde(with = "time::serde::rfc3339")]
-    expires_at: OffsetDateTime,
+/// Who asked for the code, for the audit row: the credential that carried the
+/// call and the user it acted for. An admin mint has no credential record, so
+/// it passes `None` and writes no row.
+pub(crate) struct MintAudit {
+    pub token_id: String,
+    pub actor: String,
+}
+
+/// What a minted pending tagma hands back.
+pub(crate) struct PendingMint {
+    pub id: TagmaId,
+    pub code: String,
+    pub created_at: OffsetDateTime,
+    pub expires_at: OffsetDateTime,
 }
 
 /// Mint a pending tagma (a single-use enrollment code) bound to `owner`.
 /// Enforces the per-owner live-pending cap. Shared by the self-service
 /// (`POST /tagmata`) and admin (`POST /admin/tagmata`) mints so the cap
-/// applies uniformly. Returns the new id + the once-shown plaintext + the
-/// created/expiry timestamps.
+/// applies uniformly. The rows the cap counts are the ones with
+/// `enrolled_at IS NULL AND revoked_at IS NULL`, so an expired code still
+/// holds a slot until it is revoked.
+///
+/// The pending row and, when `audit` is given, its `mint` row land in one
+/// transaction, and the plaintext leaves only after the commit: a mint that
+/// cannot record who asked must not spend the owner's slot on a row whose
+/// code nobody received.
 pub(crate) async fn mint_pending_tagma(
     state: &SharedState,
     owner: &UserId,
-) -> Result<(TagmaId, String, OffsetDateTime, OffsetDateTime), ApiError> {
+    audit: Option<MintAudit>,
+) -> Result<PendingMint, ApiError> {
     let now = OffsetDateTime::now_utc();
-
-    // Count live pending tagmas. The predicate matches `list_tagmata`'s pending
-    // filter exactly (enrolled_at IS NULL AND revoked_at IS NULL) so a user at
-    // the cap sees precisely the rows that count toward it -- including
-    // expired-but-unrevoked ones.
-    let live = tagmata::Entity::find()
-        .filter(tagmata::Column::OwnerUserId.eq(owner.to_string()))
-        .filter(tagmata::Column::EnrolledAt.is_null())
-        .filter(tagmata::Column::RevokedAt.is_null())
-        .count(&state.db)
-        .await
-        .map_err(map_db_err)?;
-    if live >= MAX_LIVE_PENDING_TAGMAS {
-        return Err(ApiError::too_many_requests(
-            "too many live enrollment codes",
-        ));
-    }
-
+    // Minted before the transaction: the code is a local secret, and a failed
+    // transaction never hands it out.
     let code = MintedToken::generate(ENROLLMENT).expect("getrandom failed");
     let plaintext = code.secret().to_string();
     let masked = mask_token(code.secret(), ENROLLMENT);
     let id = TagmaId::random();
+    let id_string = id.to_string();
     let expires_at = now + state.limits.enrollment_code_ttl;
-    tagmata::ActiveModel {
-        id: Set(id.to_string()),
-        owner_user_id: Set(owner.to_string()),
-        pinned_public_key: Set(None),
-        created_at: Set(now),
-        label: Set(None),
-        last_tunnel_proof_ts: Set(None),
-        revoked_at: Set(None),
-        enrolled_at: Set(None),
-        enrollment_code_hash: Set(Some(code.hash().as_bytes().to_vec())),
-        enrollment_code_masked: Set(Some(masked)),
-        expires_at: Set(Some(expires_at)),
-    }
-    .insert(&state.db)
-    .await
-    .map_err(map_db_err)?;
-    Ok((id, plaintext, now, expires_at))
+    let owner_id = owner.to_string();
+
+    let outcome = state
+        .db
+        .transaction::<_, (), TxnError>(|txn| {
+            Box::pin(async move {
+                // Count live pending tagmas. The predicate matches
+                // `list_tagmata`'s pending filter exactly (enrolled_at IS NULL
+                // AND revoked_at IS NULL) so a user at the cap sees precisely
+                // the rows that count toward it -- including
+                // expired-but-unrevoked ones.
+                let live = tagmata::Entity::find()
+                    .filter(tagmata::Column::OwnerUserId.eq(owner_id.as_str()))
+                    .filter(tagmata::Column::EnrolledAt.is_null())
+                    .filter(tagmata::Column::RevokedAt.is_null())
+                    .count(txn)
+                    .await?;
+                if live >= MAX_LIVE_PENDING_TAGMAS {
+                    return Err(TxnError::Api(ApiError::too_many_requests(
+                        "too many live enrollment codes",
+                    )));
+                }
+                tagmata::ActiveModel {
+                    id: Set(id_string.clone()),
+                    owner_user_id: Set(owner_id.clone()),
+                    pinned_public_key: Set(None),
+                    created_at: Set(now),
+                    label: Set(None),
+                    last_tunnel_proof_ts: Set(None),
+                    revoked_at: Set(None),
+                    enrolled_at: Set(None),
+                    enrollment_code_hash: Set(Some(code.hash().as_bytes().to_vec())),
+                    enrollment_code_masked: Set(Some(masked)),
+                    expires_at: Set(Some(expires_at)),
+                }
+                .insert(txn)
+                .await?;
+                if let Some(audit) = &audit {
+                    credentials::record_mint(
+                        txn,
+                        audit.token_id.as_str(),
+                        now,
+                        audit.actor.as_str(),
+                        &id_string,
+                    )
+                    .await
+                    .map_err(TxnError::Api)?;
+                }
+                Ok(())
+            })
+        })
+        .await;
+    flatten_txn(outcome)?;
+    Ok(PendingMint {
+        id,
+        code: plaintext,
+        created_at: now,
+        expires_at,
+    })
 }
 
+/// Mint a pending tagma for the calling user.
+///
+/// The same `archeion:tagma:write` string that renames and revokes a tagma.
+/// A personal access token carrying it mints under its owner; the session
+/// cookie and the admin bearer carry no record and pass the string check,
+/// but the admin bearer is not a user and stops at `require_user` -- the
+/// admin entry to this is `/admin/tagmata`.
 async fn mint(
     State(state): State<SharedState>,
     auth: AuthPrincipal,
-) -> Result<Json<MintResponse>, ApiError> {
-    let user_id = require_session(&auth)?;
-    let (id, plaintext, created_at, expires_at) = mint_pending_tagma(&state, user_id).await?;
-    Ok(Json(MintResponse {
-        code: plaintext,
-        id: id.to_string(),
-        created_at,
-        expires_at,
+) -> Result<Json<MintEnrollmentCodeResponse>, ApiError> {
+    require_perm(&auth, ARCHEION_TAGMA_WRITE)?;
+    let user_id = require_user(&auth.principal)?;
+    // A session mints with no record, so there is nothing to hang a row off.
+    let audit = auth.credential.as_ref().map(|credential| MintAudit {
+        token_id: credential.token.to_string(),
+        actor: user_id.to_string(),
+    });
+    let minted = mint_pending_tagma(&state, user_id, audit).await?;
+    Ok(Json(MintEnrollmentCodeResponse {
+        code: minted.code,
+        id: minted.id.to_string(),
+        created_at: minted.created_at,
+        expires_at: minted.expires_at,
     }))
 }
 
@@ -525,19 +576,47 @@ mod tests {
     use axum::http::StatusCode;
 
     use super::{
-        MAX_LIVE_PENDING_TAGMAS, MAX_TAGMA_LABEL_LEN, MintResponse, RenameTagmaRequest, TagmaState,
-        get_tagma, list_tagmata, mint, rename_tagma, revoke_tagma,
+        MAX_LIVE_PENDING_TAGMAS, MAX_TAGMA_LABEL_LEN, MintAudit, RenameTagmaRequest, TagmaState,
+        get_tagma, list_tagmata, mint, mint_pending_tagma, rename_tagma, revoke_tagma,
     };
     use crate::auth::{AuthPrincipal, Principal};
     use crate::db::entity::tagmata;
     use crate::test_helpers::{make_state, seed_tagma, seed_user};
     use kallipai_archeion_common::bytes::Ed25519PublicKey;
-    use sea_orm::{ActiveModelTrait, ActiveValue::Set, EntityTrait};
+    use kallipai_archeion_common::mint::MintEnrollmentCodeResponse as MintResponse;
+    use sea_orm::{ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, QueryFilter};
     use time::OffsetDateTime;
 
     /// A 32-byte zero key is fine for `list_tagmata` (it never verifies it).
     fn dummy_key() -> Ed25519PublicKey {
         Ed25519PublicKey([0u8; 32].to_vec())
+    }
+
+    /// Seed a personal token for `user` on `perms` and return its record id.
+    async fn seed_personal_token(
+        state: &crate::state::SharedState,
+        user: &kallipai_archeion_common::ids::UserId,
+        perms: &[&str],
+    ) -> String {
+        let set = kallipai_archeion_common::perm::PermSet::from_known(perms.iter().copied())
+            .expect("known strings");
+        crate::credentials::create(
+            &state.db,
+            crate::token::PAT,
+            crate::credentials::NewCredential {
+                owner: crate::credentials::Owner::User,
+                owner_id: user.as_ref(),
+                name: "script",
+                perms: &set,
+                created_by: user.as_ref(),
+                actor: Some(user.as_ref()),
+                expires_at: None,
+            },
+        )
+        .await
+        .expect("seed a personal token")
+        .record
+        .id
     }
 
     /// An owner with no tagmata gets `[]` (200, not 404).
@@ -876,19 +955,31 @@ mod tests {
 
     /// Every gated tagma route answers on its own permission string: the same
     /// call with the string is a success and without it a 403, so a route that
-    /// forgot its check fails here instead of shipping open. The mint route
-    /// mints credentials, so no record at all may pass it.
+    /// forgot its check fails here instead of shipping open. Mint is a write
+    /// too: a record needs the write string, not merely a valid token.
     #[tokio::test]
     async fn each_tagma_route_requires_its_string() {
         let state = make_state().await;
         let user = seed_user(&state, "alice").await;
         let (tagma_id, _) = seed_tagma(&state, &user, dummy_key()).await;
 
+        // The mint below writes its audit row against this token, so the
+        // record has to exist: a made-up id is a foreign-key violation.
+        let token_id = seed_personal_token(
+            &state,
+            &user,
+            &[
+                kallipai_archeion_common::perm::ARCHEION_TAGMA_READ,
+                kallipai_archeion_common::perm::ARCHEION_TAGMA_WRITE,
+            ],
+        )
+        .await;
+
         let scoped = |perms: &[&str]| {
             AuthPrincipal::scoped(
                 Principal::User(user.clone()),
                 kallipai_archeion_common::control_plane::CredentialScope {
-                    token: kallipai_archeion_common::ids::TokenId::from("fixture".to_string()),
+                    token: kallipai_archeion_common::ids::TokenId::from(token_id.clone()),
                     perms: kallipai_archeion_common::perm::PermSet::from_known(
                         perms.iter().copied(),
                     )
@@ -953,7 +1044,7 @@ mod tests {
 
         let err = revoke_tagma(
             State(state.clone()),
-            read_only,
+            read_only.clone(),
             axum::extract::Path(tagma_id.to_string()),
         )
         .await
@@ -961,16 +1052,163 @@ mod tests {
         assert_eq!(err.status, 403);
         revoke_tagma(
             State(state.clone()),
-            write,
+            write.clone(),
             axum::extract::Path(tagma_id.to_string()),
         )
         .await
         .expect("revoke with the write string");
 
-        let err = mint(State(state), scoped(nothing))
+        let err = mint(State(state.clone()), scoped(nothing))
             .await
             .map(|_| ())
-            .expect_err("a credential cannot mint an enrollment code");
+            .expect_err("mint without the write string");
         assert_eq!(err.status, 403);
+        let err = mint(State(state.clone()), read_only)
+            .await
+            .map(|_| ())
+            .expect_err("mint with only the read string");
+        assert_eq!(err.status, 403);
+        assert_eq!(
+            err.code.as_deref(),
+            Some("perm_missing"),
+            "a personal token without the write string names the missing one"
+        );
+        let minted = mint(State(state), write)
+            .await
+            .expect("mint with the write string");
+        assert!(minted.0.code.starts_with("sk-enroll-"), "{}", minted.0.code);
+    }
+
+    /// The two 403s here differ by `code`: a personal token without the write
+    /// string, and the admin bearer -- which carries every right but is not a
+    /// user, so it stops at `require_user`. A caller that only sees the status
+    /// cannot tell them apart, and only the second has an answer (use a token).
+    #[tokio::test]
+    async fn mint_forbidden_answers_carry_distinct_codes() {
+        let state = make_state().await;
+        let user = seed_user(&state, "alice").await;
+        let scoped = |perms: &[&str]| {
+            AuthPrincipal::scoped(
+                Principal::User(user.clone()),
+                kallipai_archeion_common::control_plane::CredentialScope {
+                    token: kallipai_archeion_common::ids::TokenId::from("fixture".to_string()),
+                    perms: kallipai_archeion_common::perm::PermSet::from_known(
+                        perms.iter().copied(),
+                    )
+                    .expect("known strings"),
+                },
+            )
+        };
+        let nothing: &[&str] = &[];
+
+        let err = mint(State(state.clone()), scoped(nothing))
+            .await
+            .map(|_| ())
+            .expect_err("no write string");
+        assert_eq!(err.status, 403);
+        assert_eq!(
+            err.code.as_deref(),
+            Some(kallipai_common::protocol::error::FORBIDDEN_PERM_MISSING)
+        );
+
+        let err = mint(State(state), AuthPrincipal::unscoped(Principal::Admin))
+            .await
+            .map(|_| ())
+            .expect_err("the admin bearer is not a user");
+        assert_eq!(err.status, 403);
+        assert_eq!(
+            err.code.as_deref(),
+            Some(kallipai_common::protocol::error::FORBIDDEN_USER_REQUIRED)
+        );
+    }
+
+    /// A mint through a personal token writes a `mint` row on that credential:
+    /// which token asked, on whose behalf, and for which pending tagma. The
+    /// pending row and the audit row share one transaction, so a successful
+    /// mint leaves both; the test below stages the rollback a failure needs.
+    #[tokio::test]
+    async fn mint_records_the_credential_that_asked() {
+        let state = make_state().await;
+        let user = seed_user(&state, "alice").await;
+        let perms = kallipai_archeion_common::perm::PermSet::from_known([
+            kallipai_archeion_common::perm::ARCHEION_TAGMA_READ,
+            kallipai_archeion_common::perm::ARCHEION_TAGMA_WRITE,
+        ])
+        .expect("known strings");
+        let token = crate::credentials::create(
+            &state.db,
+            crate::token::PAT,
+            crate::credentials::NewCredential {
+                owner: crate::credentials::Owner::User,
+                owner_id: user.as_ref(),
+                name: "laptop",
+                perms: &perms,
+                created_by: user.as_ref(),
+                actor: Some(user.as_ref()),
+                expires_at: None,
+            },
+        )
+        .await
+        .expect("seed a personal token");
+        let Json(MintResponse { id, .. }) = mint(
+            State(state.clone()),
+            AuthPrincipal::scoped(
+                Principal::User(user.clone()),
+                kallipai_archeion_common::control_plane::CredentialScope {
+                    token: kallipai_archeion_common::ids::TokenId::from(token.record.id.clone()),
+                    perms,
+                },
+            ),
+        )
+        .await
+        .expect("mint with the write string");
+        let trail = crate::credentials::events(&state.db, &token.record.id)
+            .await
+            .expect("events");
+        let row = trail
+            .iter()
+            .find(|e| e.kind == crate::credentials::EVENT_MINT)
+            .expect("a mint row on the credential that asked");
+        assert_eq!(row.target_id.as_deref(), Some(id.as_str()));
+        assert_eq!(row.actor_user_id.as_deref(), Some(user.as_ref()));
+        let pending = tagmata::Entity::find_by_id(id.clone())
+            .one(&state.db)
+            .await
+            .expect("query")
+            .expect("the pending row committed with its audit row");
+        assert_eq!(pending.owner_user_id, user.to_string());
+    }
+
+    /// The half a successful mint cannot show: when the audit row cannot
+    /// land, the pending row goes with it, so no slot is spent on a code
+    /// nobody receives. The foreign key on `credential_events.token_id` stages
+    /// the failure, and the transaction is what undoes the insert.
+    #[tokio::test]
+    async fn a_mint_whose_audit_row_cannot_land_leaves_no_pending_row() {
+        let state = make_state().await;
+        let user = seed_user(&state, "alice").await;
+        let err = match mint_pending_tagma(
+            &state,
+            &user,
+            Some(MintAudit {
+                token_id: "no-such-token".to_owned(),
+                actor: user.to_string(),
+            }),
+        )
+        .await
+        {
+            Ok(_) => panic!("a token row that does not exist fails the audit insert"),
+            Err(err) => err,
+        };
+        assert_eq!(err.status, 500);
+        let pending = tagmata::Entity::find()
+            .filter(tagmata::Column::OwnerUserId.eq(user.to_string()))
+            .all(&state.db)
+            .await
+            .expect("query");
+        assert!(
+            pending.is_empty(),
+            "a rolled-back mint leaves no pending row"
+        );
     }
 }

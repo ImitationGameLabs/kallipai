@@ -18,7 +18,14 @@
 //! [`require_user`] cannot: a token carrying the caller's own identity reaches
 //! every `/me` route a cookie does. The registry's `require_session` is the
 //! decision that separates them, and the routes that mint or destroy
-//! credentials, change the sign-in methods, or mint an enrollment code use it.
+//! credentials or change the sign-in methods use it. Minting an enrollment
+//! code does not: it answers on `archeion:tagma:write`, so a personal token
+//! may do it, and the admin bearer (which is not a user) stops at
+//! [`require_user`] instead.
+//!
+//! The two 403s above are told apart by [`ApiError::code`]: the string check
+//! answers `perm_missing`, [`require_user`] answers `user_required`, and a
+//! caller that only sees the status cannot pick the right recovery step.
 //!
 //! The bearer/cookie split still holds where it matters: `require_tagma` never
 //! sees a `User`, and a cookie never resolves to a `Tagma`.
@@ -75,7 +82,10 @@ pub fn require_admin(principal: &Principal) -> Result<(), ApiError> {
 pub fn require_user(principal: &Principal) -> Result<&UserId, ApiError> {
     match principal {
         Principal::User(id) => Ok(id),
-        _ => Err(ApiError::forbidden("user access required")),
+        _ => Err(ApiError::forbidden_with_code(
+            "user access required",
+            kallipai_common::protocol::error::FORBIDDEN_USER_REQUIRED,
+        )),
     }
 }
 

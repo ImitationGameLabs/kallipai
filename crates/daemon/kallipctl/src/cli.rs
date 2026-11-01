@@ -34,7 +34,8 @@ pub(crate) enum Command {
         /// Instance slug: lowercase letters, digits, and '-'; must start
         /// with a letter or digit.
         slug: String,
-        /// Absolute path of the instance workspace.
+        /// Path of the instance workspace; a relative path is resolved
+        /// against the current directory before it reaches the daemon.
         workspace: String,
         /// Extra env for the instance, KEY=VALUE (repeatable); only
         /// KALLIPAI_* keys plus RUST_LOG and PATH are accepted by the daemon.
@@ -47,6 +48,17 @@ pub(crate) enum Command {
         /// dedicated-user form; requires the daemon to run as root).
         #[arg(long)]
         user: Option<String>,
+        /// Platform edge origin: the value instances receive as
+        /// KALLIPAI_POLIS_URL, not a service's bare address. Setting it mints
+        /// a single-use enrollment code through {origin}/v1/archeion with the
+        /// access token, then launches the instance with this origin in its env.
+        #[arg(long, value_name = "URL")]
+        polis: Option<String>,
+        /// File carrying the platform access token the mint authenticates
+        /// with; it must hold archeion:tagma:write. Defaults to
+        /// $XDG_CONFIG_HOME/kallipai/access-token.
+        #[arg(long, value_name = "PATH")]
+        token_file: Option<String>,
     },
     /// Terminate an instance (TERM, grace, KILL).
     Stop {

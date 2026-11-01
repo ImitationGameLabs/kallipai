@@ -202,21 +202,24 @@ profile 与 set 记录归属账户。
 
 ## 管理令牌
 
-`adminTokenFile` 未设置时，archeion 首次启动在状态目录铸造管理令牌（`/var/lib/kallipai/archeion/admin-token.env`，权限 0600），此后只读取、不再改写。用 CLI 读取（本地读文件，不经过服务端）：
+`adminTokenFile` 未设置时，archeion 首次启动在状态目录铸造管理令牌
+（`/var/lib/kallipai/archeion/admin-token.env`，权限 0600），此后只读取、
+不再改写。没有任何命令打印现值：服务端从不返回它，轮换（回的是新值）是
+唯一取到的途径：
 
 ```sh
-sudo kallipai-admin admin-token show
+sudo kallipai-admin admin-token reset
 ```
 
-需要时轮换铸造令牌（用当前令牌认证，旧令牌随即失效）。reset 在调用服务端前也会本地读取状态文件，因此需在 archeion 主机上运行；`sudo` 需用 `-E` 保留环境中的令牌：
+reset 用当前令牌认证，令牌取自 `KALLIPAI_ARCHEION_ADMIN_TOKEN`，变量未设
+时直接读上面那个状态文件；调用服务端前它还会本地读一次该文件，供预检。
+因此可在 archeion 主机上直接运行，无需先导出（已导出时以导出值为准，`sudo -E` 可保留它）。新值只打印这一次，之后无处可取，务必当场保存。
 
-```sh
-export KALLIPAI_ARCHEION_ADMIN_TOKEN=$(sudo kallipai-admin admin-token show)
-sudo -E kallipai-admin admin-token reset
-```
-
-reset 打印的新值即当前有效令牌，后续命令需重新 export（sudo kallipai-admin admin-token show 再取，或直接捕获 reset 输出）。
+对接平台的日常操作应给 `kallipctl` 用个人访问令牌，而不是管理令牌：
+在 Web 界面按需勾选字符串创建，写入
+`$XDG_CONFIG_HOME/kallipai/access-token`（权限 0600），再用
+`kallipctl spawn <slug> <workspace> --polis <origin>`。完整流程见 kallipctl 参考手册。
 
 设置 `adminTokenFile` 时使用操作者钉住的令牌，轮换会被拒绝。
 
-从铸造切换到钉住：设置 `adminTokenFile` 并重新部署后，archeion 改用钉住的值；状态文件仍留在盘上但已失效，`show` 打印的是旧值，建议删除该文件以免误读。
+从铸造切换到钉住：设置 `adminTokenFile` 并重新部署后，archeion 改用钉住的值；状态文件仍留在盘上，不再被铸造，但环境变量未设时 `kallipai-admin` 仍会回落到它。建议删除该文件，免得留着一枚过期令牌被当作认证值。

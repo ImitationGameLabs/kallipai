@@ -5,12 +5,14 @@
 //! family: `kallip` is the in-instance runtime, `kallipctl` manages
 //! instances from outside (separate installation surfaces).
 
+mod archeion;
 mod blobs;
 mod cli;
 mod completion;
 mod logs;
 mod print;
 mod restart;
+mod spawn_env;
 #[cfg(test)]
 mod tests;
 mod token;
@@ -21,8 +23,7 @@ use crate::logs::run_logs;
 use crate::print::print;
 use crate::restart::run_restart;
 use crate::token::run_operator_token;
-use anyhow::Context as _;
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use clap::{CommandFactory, Parser};
 use kallipai_daemon_client::DaemonClient;
 use kallipai_daemon_common::wire::RequestBody;
@@ -97,19 +98,39 @@ async fn run() -> Result<()> {
     {
         eprintln!("listening address explicitly set; the reported port is the actual bind result");
     }
+    // Set when this invocation minted an enrollment code, so a failed
+    // spawn can still point at the pending tagma it left behind.
+    let mut pending_mint: Option<archeion::MintedCode> = None;
     let body = match cli.command {
         Command::Spawn {
             slug,
             workspace,
             env,
             user,
-        } => RequestBody::Spawn {
-            slug,
-            workspace,
-            env,
-            exe: cli.bin,
-            user,
-        },
+            polis,
+            token_file,
+        } => {
+            // The daemon resolves a relative workspace against its own cwd,
+            // which is not this process's, and it refuses a missing one only
+            // after an enrollment code would already be spent. Resolving here
+            // checks the path the daemon will actually use and sends that one.
+            let workspace = absolute_workspace(&workspace)?;
+            let (env, minted) = spawn_env::prepare(env, polis, token_file).await?;
+            if let Some(minted) = &minted {
+                eprintln!(
+                    "pending tagma {} (code expires at {})",
+                    minted.id, minted.expires_at
+                );
+            }
+            pending_mint = minted;
+            RequestBody::Spawn {
+                slug,
+                workspace,
+                env,
+                exe: cli.bin,
+                user,
+            }
+        }
         Command::Stop { slug } => RequestBody::Stop { slug },
         Command::Remove { slug } => RequestBody::Remove { slug },
         Command::Start { slug, env } => RequestBody::Start {
@@ -187,9 +208,66 @@ async fn run() -> Result<()> {
         // set up; the arm only keeps this match exhaustive.
         Command::Generate { .. } => unreachable!("handled in main"),
     };
-    let response = client
-        .call(body)
-        .await
-        .context("talking to the kallipai daemon")?;
-    print(response, started)
+    let response = match client.call(body).await {
+        Ok(response) => response,
+        Err(err) => {
+            return Err(pending_note(
+                pending_mint.as_ref(),
+                format!("talking to the kallipai daemon: {err}"),
+            ));
+        }
+    };
+    // A daemon-side refusal (a taken slug, an overlapping workspace, a spawn
+    // that timed out) arrives as an `Ok` response holding the error, so the
+    // note has to cover printing too, not just the call.
+    match print(response, started) {
+        Ok(()) => Ok(()),
+        Err(err) => Err(pending_note(pending_mint.as_ref(), format!("{err:#}"))),
+    }
+}
+
+/// Resolve a workspace path against this process's cwd and check it exists.
+///
+/// Joining rather than canonicalizing is deliberate: `canonicalize` resolves
+/// symlinks, so a workspace the operator wrote as a link would be recorded
+/// as its target -- a different stored path for the same command.
+fn absolute_workspace(workspace: &str) -> Result<String> {
+    let cwd = std::env::current_dir().context("reading the current directory")?;
+    absolute_workspace_in(workspace, &cwd)
+}
+
+/// [`absolute_workspace`] with the base directory passed in, so a test does
+/// not have to move the whole process's working directory.
+fn absolute_workspace_in(workspace: &str, cwd: &std::path::Path) -> Result<String> {
+    let path = std::path::Path::new(workspace);
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        cwd.join(path)
+    };
+    if !absolute.is_dir() {
+        anyhow::bail!(
+            "workspace {} is not an existing directory",
+            absolute.display()
+        );
+    }
+    Ok(absolute.to_string_lossy().into_owned())
+}
+
+/// Attach what the minted code left behind to a failure message.
+///
+/// The pending tagma keeps one of the owner's live-pending slots until it
+/// enrolls or is revoked, and an expired code does not free it, so a spawn
+/// that fails after the mint has to say which row to revoke.
+fn pending_note(minted: Option<&archeion::MintedCode>, message: String) -> anyhow::Error {
+    match minted {
+        Some(minted) => anyhow::anyhow!(
+            "{message} (minted an enrollment code for this spawn: pending tagma {} holds \
+             a live slot until it enrolls or is revoked, expiring at {}; an expired code \
+             keeps its slot, so revoke the pending tagma in the web UI if you are not retrying)",
+            minted.id,
+            minted.expires_at
+        ),
+        None => anyhow::anyhow!(message),
+    }
 }

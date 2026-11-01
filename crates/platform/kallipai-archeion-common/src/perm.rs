@@ -63,9 +63,10 @@ pub fn require(
     match credential {
         None => Ok(()),
         Some(scope) if scope.perms.contains(perm) => Ok(()),
-        Some(_) => Err(kallipai_common::protocol::ApiError::forbidden(format!(
-            "this credential does not carry {perm}"
-        ))),
+        Some(_) => Err(kallipai_common::protocol::ApiError::forbidden_with_code(
+            format!("this credential does not carry {perm}"),
+            kallipai_common::protocol::error::FORBIDDEN_PERM_MISSING,
+        )),
     }
 }
 

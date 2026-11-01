@@ -2,10 +2,12 @@
 //! client authenticated with the `sk-admin-` bearer, driving the `/admin/*`
 //! surface (enrollment codes, users, passkeys, admin-token lifecycle).
 //!
-//! The admin token is read from the `KALLIPAI_ARCHEION_ADMIN_TOKEN` environment
-//! variable only (no `--admin-token` flag): a flag would leak the secret into
-//! `ps`, `/proc/<pid>/cmdline`, and shell history, while an env var does not.
-//! The archeion URL may be passed as `--archeion-url` or `KALLIPAI_ARCHEION_URL`.
+//! The admin token comes from the `KALLIPAI_ARCHEION_ADMIN_TOKEN` environment
+//! variable, or -- when that is unset -- from the state file the archeion wrote
+//! (`/var/lib/kallipai/archeion/admin-token.env`), so `admin-token reset` works
+//! on the host without exporting the current value first. Neither path is a CLI
+//! flag: a flag would leak the secret into `ps`, `/proc/<pid>/cmdline`, and
+//! shell history.
 //!
 //! Example:
 //!   `KALLIPAI_ARCHEION_ADMIN_TOKEN=sk-admin-... kallipai-admin users list`
@@ -29,8 +31,9 @@ use kallipai_archeion_common::admin::{
     version,
     about = "Headless admin CLI for kallipai-archeion (HTTP client)",
     after_help = "The admin token (sk-admin-...) is read from the KALLIPAI_ARCHEION_ADMIN_TOKEN \
-                  environment variable. It is deliberately not a CLI flag: a flag leaks into \
-                  ps, /proc/<pid>/cmdline, and shell history, while an env var does not."
+                  environment variable, or from the state file the archeion wrote when the \
+                  variable is unset. Neither path is a CLI flag: a flag leaks into ps, \
+                  /proc/<pid>/cmdline, and shell history."
 )]
 struct Args {
     /// Archeion control-plane base URL (e.g. http://127.0.0.1:7100
@@ -124,13 +127,12 @@ enum PasskeysCmd {
 
 #[derive(Subcommand)]
 enum AdminTokenCmd {
-    /// Print the minted admin token's bare value from the token file (a
-    /// local read: no env var needed, no server round-trip).
-    Show,
     /// Rotate the minted admin token (authenticates with the current
     /// token). Prints the fresh sk-admin- value once; the old one stops
     /// working. Requires the local state file to be readable (the same
-    /// preflight as `show`), so run it on the archeion host.
+    /// preflight), so run it on the archeion host.
+    /// The current value comes from the environment or, unset, from that
+    /// file, so this works on the archeion host without exporting it first.
     Reset,
 }
 
@@ -142,22 +144,18 @@ async fn main() {
         clap_complete::generate(shell, &mut cmd, "kallipai-admin", &mut std::io::stdout());
         return;
     }
-    // `admin-token show` is a pure local file read: it cannot require the
-    // KALLIPAI_ARCHEION_ADMIN_TOKEN env var (that is what it recovers) and
-    // must not build an HTTP client. Dispatch before the env read.
-    if let Cmd::AdminToken(AdminTokenCmd::Show) = args.cmd {
-        if let Err(e) = admin_token_show() {
-            exit_err(&e);
-        }
-        return;
-    }
-    // The admin token is env-only (no flag) so it never lands in ps, cmdline,
-    // or shell history. See the Args `after_help` for the rationale.
+    // The admin token is never a flag (so it stays out of ps, cmdline, and
+    // shell history). The environment wins; when it is unset the state file the
+    // archeion wrote stands in, which is what lets `admin-token reset` run on
+    // the host without exporting the current value first.
     let admin_token = match std::env::var("KALLIPAI_ARCHEION_ADMIN_TOKEN") {
-        Ok(t) => t,
-        Err(_) => exit_err(&anyhow::anyhow!(
-            "KALLIPAI_ARCHEION_ADMIN_TOKEN required (the sk-admin- token)"
-        )),
+        Ok(token) => token,
+        Err(_) => match read_admin_token_file(&admin_token_path()) {
+            Ok(token) => token,
+            Err(err) => exit_err(&err.context(
+                "KALLIPAI_ARCHEION_ADMIN_TOKEN is not set and the state file cannot stand in",
+            )),
+        },
     };
     let client = ArcheionClient::builder(&args.archeion_url)
         .admin_token(admin_token)
@@ -183,9 +181,9 @@ fn exit_err(e: &anyhow::Error) -> ! {
 }
 
 /// Read and parse the minted admin token file: the bare secret from the
-/// `KALLIPAI_ARCHEION_ADMIN_TOKEN=` line. A pure local read: no env var
-/// needed (this is the recovery path for when the env var is not set),
-/// no HTTP client. Error messages are operator-facing (they land on the
+/// `KALLIPAI_ARCHEION_ADMIN_TOKEN=` line. A pure local read: no environment
+/// needed, no HTTP client, which is what makes it the recovery path when the
+/// variable is unset. Error messages are operator-facing (they land on the
 /// CLI's `error:` line); the ENOENT one names the pinned possibility.
 fn read_admin_token_file(path: &str) -> anyhow::Result<String> {
     let raw = std::fs::read_to_string(path).map_err(|e| match e.kind() {
@@ -205,26 +203,19 @@ fn read_admin_token_file(path: &str) -> anyhow::Result<String> {
 }
 
 /// The minted admin token file: `KALLIPAI_ARCHEION_ADMIN_TOKEN_OUT_FILE`
-/// if set, the NixOS default path otherwise. Shared by `show` and the
-/// `reset` preflight.
+/// if set, the NixOS default path otherwise. Used by the `reset`
+/// preflight.
 fn admin_token_path() -> String {
     std::env::var("KALLIPAI_ARCHEION_ADMIN_TOKEN_OUT_FILE")
         .unwrap_or_else(|_| "/var/lib/kallipai/archeion/admin-token.env".to_string())
 }
-/// `admin-token show`: print the minted token's bare value to stdout.
-fn admin_token_show() -> anyhow::Result<()> {
-    let path = admin_token_path();
-    let secret = read_admin_token_file(&path)?;
-    println!("{secret}");
-    Ok(())
-}
 
 /// Pre-flight check for `admin-token reset`: the local state file must
-/// be readable where this runs (same mechanics as `show`). A pinned
-/// operator has no minted file to rotate, and a caller off the archeion
-/// host sees no file either; both refuse before an HTTP round-trip can
-/// muddy the diagnosis. The value read here is a capability check only:
-/// the request still authenticates with the env token.
+/// be readable where this runs. A pinned operator has no minted file to
+/// rotate, and a caller off the archeion host sees no file either; both
+/// refuse before an HTTP round-trip can muddy the diagnosis. The value
+/// read here is only a capability check: the token that authenticates the
+/// rotation itself comes from the environment or, absent that, this same file.
 fn reset_local_gate(path: &str) -> anyhow::Result<()> {
     read_admin_token_file(path).map(|_| ())
 }
@@ -302,17 +293,12 @@ async fn run(client: &ArcheionClient, json: bool, cmd: Cmd) -> Result<()> {
             }
         },
         Cmd::AdminToken(AdminTokenCmd::Reset) => {
-            // Local capability gate (see `reset_local_gate`); the value is
-            // not used to authenticate.
+            // Local capability gate (see `reset_local_gate`); the request
+            // authenticates with the resolved admin token.
             let path = admin_token_path();
             reset_local_gate(&path)?;
             let resp = client.admin_rotate_token().await?;
             println!("{}", resp.token);
-        }
-        // `admin-token show` never reaches `run`: main dispatches it before
-        // the env read (it cannot require the token). Exhaustiveness only.
-        Cmd::AdminToken(AdminTokenCmd::Show) => {
-            unreachable!("admin-token show is handled in main")
         }
         // `generate` never reaches `run`: main dispatches it before the
         // env read. Exhaustiveness only.
@@ -407,7 +393,7 @@ fn fmt_ts(ts: time::OffsetDateTime) -> String {
 
 #[cfg(test)]
 mod tests {
-    //! The `admin-token show` file-read/error-mapping surface, as a pure
+    //! The admin token file's read/error-mapping surface, as a pure
     //! function of the file contents and the io error kind.
 
     use super::{read_admin_token_file, reset_local_gate};
@@ -415,7 +401,7 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     #[test]
-    fn show_reads_the_bare_value_from_key_value() {
+    fn the_bare_value_comes_from_the_key_value_line() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("admin-token.env");
         fs::write(&path, "OTHER=x\nKALLIPAI_ARCHEION_ADMIN_TOKEN=sk-admin-t\n").expect("write");
@@ -424,7 +410,7 @@ mod tests {
     }
 
     #[test]
-    fn show_missing_file_names_the_pinned_possibility() {
+    fn a_missing_file_names_the_pinned_possibility() {
         let err = read_admin_token_file("/nonexistent-kallipai-admin/env")
             .expect_err("missing file must fail");
         let msg = err.to_string();
@@ -433,7 +419,7 @@ mod tests {
     }
 
     #[test]
-    fn show_permission_denied_names_the_reader_fix() {
+    fn permission_denied_names_the_reader_fix() {
         // Root ignores permission bits, so this path is only exercisable
         // as a non-root user; under root the skip keeps the test honest.
         if unsafe { libc::geteuid() } == 0 {
@@ -450,7 +436,7 @@ mod tests {
     }
 
     #[test]
-    fn show_empty_value_fails_closed() {
+    fn an_empty_value_fails_closed() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("admin-token.env");
         fs::write(&path, "KALLIPAI_ARCHEION_ADMIN_TOKEN=\n").expect("write");

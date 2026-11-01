@@ -12,9 +12,14 @@
 //! Two functions decide what such a principal may do. [`require_perm`] asks
 //! whether the call carries one permission string; the routes that act on the
 //! caller's own data gate themselves that way. [`require_session`] asks for the
-//! cookie origin itself and backs the routes that mint or destroy credentials,
-//! change the account's sign-in methods, or mint an enrollment code -- a token
-//! that could reach those would mint its own successor.
+//! cookie origin itself and backs the routes that mint or destroy credentials
+//! or change the account's sign-in methods -- a token that could reach those
+//! would mint its own successor. Minting an enrollment code is not one of
+//! them: `POST /tagmata` answers on `archeion:tagma:write`, which a personal
+//! token can carry, because the code it returns is a fresh pending tagma under
+//! the caller's own cap, not a credential for an existing identity. The admin
+//! bearer passes that string check (it holds every right) and then stops at
+//! `require_user`; the admin entry to the same mint is `/admin/tagmata`.
 //!
 //! # Deputy guard
 //!

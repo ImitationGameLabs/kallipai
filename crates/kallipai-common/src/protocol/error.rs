@@ -15,6 +15,15 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+/// A 403 for a credential that does not carry the permission string a route
+/// requires. The caller's recovery is to edit that credential's set.
+pub const FORBIDDEN_PERM_MISSING: &str = "perm_missing";
+
+/// A 403 for a credential that carries the permission string but whose
+/// principal is not a user (an admin bearer or a tagma token). No edit to the
+/// set helps: the caller needs a credential of the other kind.
+pub const FORBIDDEN_USER_REQUIRED: &str = "user_required";
+
 /// Structured error returned by the tagma HTTP API.
 ///
 /// On the wire the body is `{"error":{"message":"..."}}` with the status code
@@ -82,6 +91,18 @@ impl ApiError {
             message: msg.into(),
             dangling: None,
             code: None,
+        }
+    }
+    /// 403 Forbidden carrying a machine-readable reason: a rejection the
+    /// caller has one specific recovery for (a missing permission string vs.
+    /// a principal of the wrong kind), where a single status line would
+    /// send it down the wrong one.
+    pub fn forbidden_with_code(msg: impl Into<String>, code: &str) -> Self {
+        Self {
+            status: 403,
+            message: msg.into(),
+            dangling: None,
+            code: Some(code.to_owned()),
         }
     }
 

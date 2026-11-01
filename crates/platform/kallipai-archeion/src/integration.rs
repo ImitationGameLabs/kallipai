@@ -266,11 +266,12 @@ const SESSION_FACES: &[(Method, &str, &str)] = &[
         "/tagmata/00000000-0000-0000-0000-000000000000/credential/reset",
         "",
     ),
-    (Method::POST, "/tagmata", "{}"),
 ];
 
 /// A personal access token holding every string is still the token origin, and
 /// these routes ask for the cookie origin: a full set buys nothing here.
+/// Minting a tagma is deliberately not on this list: `POST /tagmata`
+/// intersects on `archeion:tagma:write`, so both origins reach it.
 #[tokio::test]
 async fn a_full_personal_token_is_refused_on_every_session_face() {
     let state = make_state_with(100, 100).await;
@@ -613,13 +614,13 @@ async fn admin_probe_mounted_at_no_slash_path() {
     );
 }
 
-/// A personal token holding the tagma-write string is still refused at
-/// `POST /tagmata`: minting an enrollment code mints a credential, and a
-/// credential may not do that. The refusal is a 403, which says the token was
-/// understood and the route is closed to it; a well-formed but unknown bearer
-/// on the same request is a 401, so the two answers stay distinguishable.
+/// A personal token holding the tagma-write string mints an enrollment code at
+/// `POST /tagmata`: the write string is the one that renames and revokes a
+/// tagma, and the code it mints belongs to the token's owner. A well-formed but
+/// unknown bearer on the same request is a 401, so a rejected token and a
+/// refused one stay distinguishable.
 #[tokio::test]
-async fn a_write_scoped_personal_token_cannot_mint_an_enrollment_code() {
+async fn a_write_scoped_personal_token_can_mint_an_enrollment_code() {
     use kallipai_archeion_common::perm::{ARCHEION_TAGMA_READ, ARCHEION_TAGMA_WRITE, PermSet};
 
     use crate::credentials;
@@ -655,7 +656,15 @@ async fn a_write_scoped_personal_token_cannot_mint_an_enrollment_code() {
 
     let mut request = req(Method::POST, "/tagmata", "{}");
     authorize(&mut request, &minted.plaintext);
-    assert_eq!(run(app.clone(), request).await, StatusCode::FORBIDDEN);
+    let (status, body) = run_with_body(app.clone(), request).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let response: serde_json::Value = serde_json::from_str(&body).expect("mint body");
+    let code = response["code"].as_str().expect("code field");
+    assert!(code.starts_with("sk-enroll-"), "{code}");
+    assert!(
+        response["id"].as_str().is_some_and(|id| !id.is_empty()),
+        "{body}"
+    );
 
     let mut request = req(Method::POST, "/tagmata", "{}");
     authorize(&mut request, "sk-pat-not-a-real-token");

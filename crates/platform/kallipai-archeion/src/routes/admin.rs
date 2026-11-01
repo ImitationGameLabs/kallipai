@@ -151,9 +151,10 @@ async fn create_enrollment_code(
     if user.disabled_at.is_some() {
         return Err(ApiError::conflict("user is disabled"));
     }
-    let (_id, plaintext, _created_at, _expires_at) =
-        super::tagmata::mint_pending_tagma(&state, &user_id).await?;
-    Ok(Json(CreateEnrollmentCodeResponse { code: plaintext }))
+    // The admin bearer carries no credential record, so this mint writes no
+    // audit row; the tagma row's owner is the user the operator named.
+    let minted = super::tagmata::mint_pending_tagma(&state, &user_id, None).await?;
+    Ok(Json(CreateEnrollmentCodeResponse { code: minted.code }))
 }
 
 // ---------------------------------------------------------------------------

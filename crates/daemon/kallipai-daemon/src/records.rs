@@ -119,6 +119,22 @@ fn record_bytes(record: &InstanceRecord) -> std::io::Result<Vec<u8>> {
         .map_err(|e| std::io::Error::other(format!("serializing instance record: {e}")))
 }
 
+/// The record is owner-only. Its env can carry an enrollment code (a live
+/// credential until it is spent) or any other `-e` value, and the daemon is
+/// its only reader, so no other user on the host needs it.
+fn restrict_to_owner(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
+    Ok(())
+}
+
 /// Register a new record with an exclusive, atomic publish: the full
 /// JSON is staged beside the record, then `hard_link`ed into place.
 /// link(2) fails with `AlreadyExists` when a record for the slug
@@ -132,6 +148,7 @@ pub fn create_record(root: &Path, slug: &str, record: &InstanceRecord) -> std::i
     std::fs::create_dir_all(root)?;
     let staged = staging_path(root, slug);
     std::fs::write(&staged, record_bytes(record)?)?;
+    restrict_to_owner(&staged)?;
     let published = std::fs::hard_link(&staged, record_path(root, slug));
     let _ = std::fs::remove_file(&staged);
     published
@@ -146,6 +163,7 @@ pub fn write_record(root: &Path, slug: &str, record: &InstanceRecord) -> std::io
     std::fs::create_dir_all(root)?;
     let staged = staging_path(root, slug);
     std::fs::write(&staged, record_bytes(record)?)?;
+    restrict_to_owner(&staged)?;
     match std::fs::rename(&staged, record_path(root, slug)) {
         Ok(()) => Ok(()),
         Err(e) => {
@@ -295,5 +313,23 @@ mod tests {
         let a = staging_path(&root, "team");
         let b = staging_path(&root, "team");
         assert_ne!(a, b);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_record_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = tempfile::tempdir().expect("tempdir");
+        create_record(root.path(), "team", &sample(root.path())).expect("create");
+        let path = root.path().join("team.json");
+        let mode = std::fs::metadata(&path)
+            .expect("metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        // The env can carry an enrollment code, a live credential until it is
+        // spent; the record stays unreadable to every other user on the host.
+        assert_eq!(mode, 0o600, "record mode is {mode:04o}");
     }
 }

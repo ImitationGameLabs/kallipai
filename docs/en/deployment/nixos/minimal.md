@@ -227,30 +227,33 @@ it, and profiles and sets record the account that owns them.
 
 With `adminTokenFile` unset, the archeion mints an admin token into its
 state directory (`/var/lib/kallipai/archeion/admin-token.env`, mode 0600)
-on first boot and reads it, never rewriting it, after that. Read it with
-the CLI (a local file read, no server round-trip):
+on first boot and reads it, never rewriting it, after that. No command
+prints the current value: the server never returns it, so rotation (which
+answers with a new one) is the only way through:
 
 ```sh
-sudo kallipai-admin admin-token show
+sudo kallipai-admin admin-token reset
 ```
 
-Rotate the minted token when needed (authenticated with the current
-one; the old token stops working immediately). The reset command
-also reads the state file locally before calling the server, so run
-it on the archeion host; `sudo` must keep the token in the
-environment (`-E`):
+The reset authenticates with the current token, taken from
+`KALLIPAI_ARCHEION_ADMIN_TOKEN` or, when that is unset, from the state
+file, and it reads that file locally before calling the server as well.
+So it runs on the archeion host with no export first (an exported token
+still wins, and `sudo -E` keeps it). It prints the new value once: nothing
+prints it afterwards, so capture that output.
 
-```sh
-export KALLIPAI_ARCHEION_ADMIN_TOKEN=$(sudo kallipai-admin admin-token show)
-sudo -E kallipai-admin admin-token reset
-```
-
-The value that reset prints is the new active token; later commands must re-export it (run `sudo kallipai-admin admin-token show` again, or capture the reset output directly).
+For routine work against the platform, give `kallipctl` a personal access
+token instead of the admin token: create one in the web UI with the
+strings that work needs, write it to
+`$XDG_CONFIG_HOME/kallipai/access-token` (mode 0600), and give
+`kallipctl spawn <slug> <workspace> --polis <origin>` the token. See the
+kallipctl reference for the whole flow.
 
 With `adminTokenFile` set, the operator-pinned token is used as-is and
 rotation is refused.
 
 Switching from minted to pinned: set `adminTokenFile` and redeploy.
-The archeion then uses the pinned value; the state file stays on disk
-but is dead: `show` still prints its stale value, so delete the file
-to avoid reading the wrong token.
+The archeion then uses the pinned value; the state file stays on disk,
+nothing mints it any more, and `kallipai-admin` would still fall back to
+it whenever the environment variable is unset. Delete the file rather
+than leave a stale token around.

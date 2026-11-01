@@ -104,4 +104,47 @@ mod shape_tests {
             .expect("files is not a target");
         assert_eq!(err.kind(), ErrorKind::InvalidValue, "{err}");
     }
+
+    #[test]
+    fn a_minted_code_is_named_in_the_failure_note() {
+        let minted = crate::archeion::MintedCode {
+            code: "KLP-123".to_owned(),
+            id: "tgm_42".to_owned(),
+            expires_at: "2026-11-02T00:30:00Z".to_owned(),
+        };
+        let err = crate::pending_note(Some(&minted), "spawn failed".to_owned());
+        let text = format!("{err:#}");
+        assert!(text.starts_with("spawn failed"), "{text}");
+        assert!(text.contains("tgm_42"), "{text}");
+        assert!(text.contains("2026-11-02T00:30:00Z"), "{text}");
+        assert!(text.contains("revoke"), "{text}");
+        // The code is a credential until it is redeemed.
+        assert!(!text.contains("KLP-123"), "{text}");
+    }
+
+    #[test]
+    fn a_failure_without_a_mint_keeps_its_message() {
+        let err = crate::pending_note(None, "cannot reach archeion".to_owned());
+        assert_eq!(format!("{err:#}"), "cannot reach archeion");
+    }
+
+    #[test]
+    fn a_relative_workspace_resolves_against_the_given_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("nested")).unwrap();
+        let resolved = crate::absolute_workspace_in("nested", dir.path()).expect("resolves");
+        assert_eq!(
+            resolved,
+            dir.path().join("nested").to_string_lossy().into_owned()
+        );
+    }
+
+    #[test]
+    fn a_workspace_that_is_not_a_directory_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = crate::absolute_workspace_in("missing", dir.path()).expect_err("refused");
+        let text = format!("{err:#}");
+        assert!(text.contains("is not an existing directory"), "{text}");
+        assert!(text.contains(&dir.path().display().to_string()), "{text}");
+    }
 }

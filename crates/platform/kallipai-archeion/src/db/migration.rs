@@ -17,6 +17,7 @@ mod m_20260808_01_oauth_signup_username;
 mod m_20260826_01_user_providers;
 mod m_20261004_01_drop_user_providers;
 mod m_20261101_01_access_tokens;
+mod m_20261102_01_credential_event_target;
 
 /// The archeion migrator. New migrations are appended to [`MigratorTrait::migrations`].
 pub struct Migrator;
@@ -35,6 +36,7 @@ impl MigratorTrait for Migrator {
             Box::new(m_20260826_01_user_providers::Migration),
             Box::new(m_20261004_01_drop_user_providers::Migration),
             Box::new(m_20261101_01_access_tokens::Migration),
+            Box::new(m_20261102_01_credential_event_target::Migration),
         ]
     }
 }

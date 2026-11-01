@@ -3478,13 +3478,17 @@ dependencies = [
  "clap",
  "clap_complete",
  "dirs",
+ "kallipai-archeion-client",
  "kallipai-blob-store",
  "kallipai-common",
  "kallipai-daemon-client",
  "kallipai-daemon-common",
  "libc",
+ "reqwest",
  "tempfile",
+ "time",
  "tokio",
+ "url",
 ]
 
 [[package]]

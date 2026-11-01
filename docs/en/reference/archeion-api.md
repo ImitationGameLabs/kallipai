@@ -47,10 +47,18 @@ A rescope that changes nothing writes no row.
 
 An unknown permission string or an off-menu expiry is `400`; an empty set
 is accepted and narrows the credential to nothing rather than revoking it.
-Someone else's personal token or tagma answers `404`. Enrollment codes
-(`POST /tagmata`) belong to the same session-only surface. The write routes
-on this page are session-only too: called with the session cookie, they
-answer `403` unless the request carries `X-Requested-With: kallipai`.
+Someone else's personal token or tagma answers `404`. The write routes on
+this page are session-only: called with the session cookie, they answer
+`403` unless the request carries `X-Requested-With: kallipai`.
+
+Enrollment codes are the exception to the session-only rule: `POST
+/tagmata` mints one for the caller's own pending tagma, answering on
+`archeion:tagma:write`, so a personal token carrying that string may call
+it. The admin token passes the string check and then stops at the user
+check, and the `403` names which: `code: "perm_missing"` for a token
+without the string, `code: "user_required"` for a principal that is not a
+user. The response is `{code, id, created_at, expires_at}`; the code is
+single-use, and an expired one keeps holding its slot until it is revoked.
 
 The matrix below classifies agent and operator tokens. A personal token
 reaches none of it: it is limited to the routes its set names, documented

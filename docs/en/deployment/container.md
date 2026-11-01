@@ -526,7 +526,10 @@ object it already edits.
 
 The tagma enrolls with the platform on its **first** boot, using a
 single-use enrollment code minted via the platform dashboard after a user
-signs up (`KALLIPAI_TAGMA_RELAY_ENROLLMENT_CODE`). The issued tagma token is
+signs up (`KALLIPAI_TAGMA_RELAY_ENROLLMENT_CODE`). A machine holding a
+personal access token can mint the code and pass it along in one step:
+`kallipctl spawn <slug> <workspace> --polis <origin>` mints a code and
+starts the instance with it set. The issued tagma token is
 persisted inside the `data` volume and reused after that; leave the code
 unset on subsequent boots. If enrollment cannot complete, the tagma logs an
 error, keeps serving local agents, and comes back to it on a later boot

@@ -22,6 +22,7 @@ use kallipai_archeion_common::admin::{
 use kallipai_archeion_common::bytes::{Ed25519PublicKey, Ed25519Signature};
 use kallipai_archeion_common::control::{EnrollRequest, EnrollResponse};
 use kallipai_archeion_common::ids::TagmaId;
+use kallipai_archeion_common::mint::MintEnrollmentCodeResponse;
 use kallipai_archeion_common::proof::enroll_transcript;
 use kallipai_common::protocol::ApiError;
 use kallipai_e2ee::DeviceKey;
@@ -30,6 +31,10 @@ struct Inner {
     base_url: String,
     http: reqwest::Client,
     admin_token: Option<String>,
+    /// The caller's personal access token: what a user-facing method (the
+    /// self-service mint) authenticates with. Separate from `admin_token` so a
+    /// client cannot spend one where the other was meant.
+    access_token: Option<String>,
 }
 
 /// Async HTTP client for the kallipai-archeion relay.
@@ -50,6 +55,7 @@ impl ArcheionClient {
         ArcheionClientBuilder {
             base_url: base_url.trim_end_matches('/').to_owned(),
             admin_token: None,
+            access_token: None,
             http: None,
         }
     }
@@ -92,6 +98,28 @@ impl ArcheionClient {
                 .admin_token
                 .as_deref()
                 .expect("require_admin_token was not called"),
+        )
+    }
+
+    /// The configured access token, or an error if none was provided.
+    fn require_access_token(&self) -> Result<&str> {
+        self.inner
+            .access_token
+            .as_deref()
+            .context("access token required (set via builder.access_token)")
+    }
+
+    fn with_access_auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        // Same discipline as `with_admin_auth`: the caller must have gone
+        // through `require_access_token()` first, so a method that forgets the
+        // guard fails loudly in a debug build instead of sending an anonymous
+        // request.
+        debug_assert!(self.inner.access_token.is_some());
+        req.bearer_auth(
+            self.inner
+                .access_token
+                .as_deref()
+                .expect("require_access_token was not called"),
         )
     }
 
@@ -182,6 +210,25 @@ impl ArcheionClient {
             )
             .await?;
         Ok((resp.tagma_id, resp.tagma_token))
+    }
+    // -- user surface (personal access token) ----------------------------------
+
+    /// Mint an enrollment code for the token's owner: `POST /tagmata` with the
+    /// personal access token as the bearer.
+    ///
+    /// The code is single-use and short-lived; the pending tagma it names
+    /// occupies one of the owner's live-pending slots until it enrolls or is
+    /// revoked, and an expired code keeps holding its slot.
+    pub async fn mint_enrollment_code(&self) -> Result<MintEnrollmentCodeResponse> {
+        self.require_access_token()?;
+        self.handle_response(
+            self.with_access_auth(self.inner.http.post(self.url("/tagmata")))
+                .send()
+                .await
+                .context("enrollment-code mint failed")?,
+            "decode enrollment-code response",
+        )
+        .await
     }
 
     // -- admin surface (sk-admin- bearer) -------------------------------------
@@ -292,6 +339,7 @@ impl ArcheionClient {
 pub struct ArcheionClientBuilder {
     base_url: String,
     admin_token: Option<String>,
+    access_token: Option<String>,
     http: Option<reqwest::Client>,
 }
 
@@ -299,6 +347,14 @@ impl ArcheionClientBuilder {
     /// Set the `sk-admin-` bearer token (required for the admin methods).
     pub fn admin_token(mut self, token: impl Into<String>) -> Self {
         self.admin_token = Some(token.into());
+        self
+    }
+
+    /// Set the caller's personal access token (required for the user
+    /// methods). Distinct from [`Self::admin_token`]: the two credentials
+    /// reach different route families.
+    pub fn access_token(mut self, token: impl Into<String>) -> Self {
+        self.access_token = Some(token.into());
         self
     }
 
@@ -325,27 +381,43 @@ impl ArcheionClientBuilder {
                 base_url: self.base_url,
                 http,
                 admin_token: self.admin_token,
+                access_token: self.access_token,
             }),
         })
     }
 }
 
 /// Parse the archeion's `{"error":{"message":"..."}}` envelope into an [`ApiError`]
-/// (falling back to the raw body if it is not the expected shape).
+/// (falling back to the opening of the raw body if it is not the expected
+/// shape: a proxy in front of the archeion can answer with a whole HTML page).
 async fn parse_error(status: reqwest::StatusCode, response: reqwest::Response) -> anyhow::Error {
     let body = response.text().await.unwrap_or_default();
-    let message = serde_json::from_str::<ErrorEnvelope>(&body)
-        .map(|e| e.error.message)
-        .unwrap_or(body);
+    let (message, code) = match serde_json::from_str::<ErrorEnvelope>(&body) {
+        Ok(envelope) => (envelope.error.message, envelope.error.code),
+        Err(_) => (opening_of(&body), None),
+    };
     ApiError {
         status: status.as_u16(),
         message,
         dangling: None,
-        code: None,
+        code,
     }
     .into()
 }
 
+/// The opening of a body that is not the error envelope, bounded so one page
+/// of HTML cannot land in an error line. The status line already carries the
+/// fact an operator acts on.
+fn opening_of(body: &str) -> String {
+    const LIMIT: usize = 200;
+    let body = body.trim();
+    if body.chars().count() <= LIMIT {
+        return body.to_owned();
+    }
+    let mut opening: String = body.chars().take(LIMIT).collect();
+    opening.push('…');
+    opening
+}
 #[derive(serde::Deserialize)]
 struct ErrorEnvelope {
     error: ErrorBody,
@@ -354,6 +426,11 @@ struct ErrorEnvelope {
 #[derive(serde::Deserialize)]
 struct ErrorBody {
     message: String,
+    /// The machine-readable reason a caller may branch on (`perm_missing` /
+    /// `user_required`, the gateway's key-lifecycle codes), absent where the
+    /// status line says everything.
+    #[serde(default)]
+    code: Option<String>,
 }
 
 #[cfg(test)]
@@ -364,7 +441,7 @@ mod tests {
 
     use super::*;
     use kallipai_archeion_common::admin::CreateEnrollmentCodeRequest;
-    use wiremock::matchers::{method, path};
+    use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn client(server: &MockServer, admin: bool) -> ArcheionClient {
@@ -486,5 +563,95 @@ mod tests {
             .await
             .expect("ok");
         assert_eq!(resp.code, "sk-enroll-z");
+    }
+
+    #[tokio::test]
+    async fn mint_posts_tagmata_with_the_personal_token() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/tagmata"))
+            .and(header("authorization", "Bearer sk-user-test"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": "sk-enroll-z",
+                "id": "tagma-9",
+                "created_at": "2026-01-01T00:00:00Z",
+                "expires_at": "2026-01-01T01:00:00Z",
+            })))
+            .mount(&server)
+            .await;
+        let minted = ArcheionClient::builder(&server.uri())
+            .access_token("sk-user-test")
+            .build()
+            .unwrap()
+            .mint_enrollment_code()
+            .await
+            .expect("ok");
+        assert_eq!(minted.code, "sk-enroll-z");
+        assert_eq!(minted.id, "tagma-9");
+        assert!(minted.expires_at > minted.created_at);
+    }
+
+    #[tokio::test]
+    async fn mint_without_a_personal_token_errors() {
+        let server = MockServer::start().await;
+        let err = client(&server, true)
+            .mint_enrollment_code()
+            .await
+            .expect_err("no access token");
+        assert!(
+            format!("{err:#}").contains("access token required"),
+            "expected token-required error, got: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_forbidden_body_keeps_its_code() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/tagmata"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
+                "error": {
+                    "message": "missing permission: archeion:tagma:write",
+                    "code": "perm_missing",
+                }
+            })))
+            .mount(&server)
+            .await;
+        let err = ArcheionClient::builder(&server.uri())
+            .access_token("sk-user-test")
+            .build()
+            .unwrap()
+            .mint_enrollment_code()
+            .await
+            .expect_err("403");
+        // The two 403s are told apart by this code alone: dropping it here
+        // collapses "missing permission" and "not a user principal" into
+        // one message the caller cannot act on.
+        let api = err.downcast_ref::<ApiError>().expect("ApiError");
+        assert_eq!(api.status, 403);
+        assert_eq!(api.code.as_deref(), Some("perm_missing"));
+    }
+
+    #[tokio::test]
+    async fn a_non_envelope_body_is_cut_short() {
+        let server = MockServer::start().await;
+        let page = format!("<html><body>{}</body></html>", "x".repeat(400));
+        Mock::given(method("POST"))
+            .and(path("/tagmata"))
+            .respond_with(ResponseTemplate::new(502).set_body_string(page))
+            .mount(&server)
+            .await;
+        let err = ArcheionClient::builder(&server.uri())
+            .access_token("sk-user-test")
+            .build()
+            .unwrap()
+            .mint_enrollment_code()
+            .await
+            .expect_err("502");
+        let api = err.downcast_ref::<ApiError>().expect("ApiError");
+        assert_eq!(api.status, 502);
+        assert!(api.message.ends_with('…'), "{}", api.message);
+        assert_eq!(api.message.chars().count(), 201);
+        assert!(api.code.is_none());
     }
 }

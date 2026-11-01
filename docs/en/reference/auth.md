@@ -114,9 +114,15 @@ and a write for each of three resources:
 - Identities that carry no record are not narrowed: a browser session and
   the admin token pass every string check.
 
-Some routes belong to the session alone: minting, rescoping, or resetting
-a credential, passkeys, email addresses, OAuth links, unlinked identities,
-device pairing, logout, and `POST /tagmata` (enrollment codes). A personal
-token is refused there with `403` however many strings it holds, because a
-credential that can mint another, or add a way to sign in, can promote
-itself.
+Minting, rescoping, or resetting a credential, passkeys, email addresses,
+OAuth links, unlinked identities, device pairing, and logout belong to the
+session alone: a personal token is refused there with `403` however many
+strings it holds, because a credential that can mint another, or add a way to
+sign in, can promote itself.
+
+`POST /tagmata` (an enrollment code) is not on that list. It answers on
+`archeion:tagma:write`, so a personal token carrying the string can mint a
+pending tagma under its own owner and cap, and the admin token passes the
+string check but then stops at the user check, belonging to no user. The two
+`403`s are told apart by the error `code`: `perm_missing` when the token lacks
+the string, `user_required` when the principal is not a user.

@@ -37,6 +37,10 @@ pub const EVENT_RESET: &str = "reset";
 /// Event kind: the permission set changed.
 pub const EVENT_PERMS: &str = "perms";
 
+/// Event kind: the credential asked for an enrollment code. `target_id` on
+/// the row names the pending tagma; the set is untouched.
+pub const EVENT_MINT: &str = "mint";
+
 /// `access_tokens.owner_kind` values.
 const OWNER_TAGMA: &str = "tagma";
 const OWNER_USER: &str = "user";
@@ -314,8 +318,38 @@ async fn record_event<C: ConnectionTrait>(
         at: Set(at),
         actor_user_id: Set(actor.map(str::to_owned)),
         kind: Set(kind.to_string()),
+        target_id: Set(None),
         added: Set(serde_json::json!(added)),
         removed: Set(serde_json::json!(removed)),
+    }
+    .insert(conn)
+    .await
+    .map(|_| ())
+    .map_err(map_db_err)
+}
+
+/// Record that `token_id` minted an enrollment code for the pending tagma
+/// `target_id`, on whose behalf `actor` acted.
+///
+/// The audit row hangs off the token that asked, not the code: the code is
+/// gone the moment it is spent, while "this credential created tagma X" stays
+/// answerable for as long as the tagma row exists.
+pub async fn record_mint<C: ConnectionTrait>(
+    conn: &C,
+    token_id: &str,
+    at: OffsetDateTime,
+    actor: &str,
+    target_id: &str,
+) -> Result<(), ApiError> {
+    credential_events::ActiveModel {
+        id: Set(Uuid::new_v4().to_string()),
+        token_id: Set(token_id.to_string()),
+        at: Set(at),
+        actor_user_id: Set(Some(actor.to_string())),
+        kind: Set(EVENT_MINT.to_string()),
+        added: Set(serde_json::json!([])),
+        target_id: Set(Some(target_id.to_string())),
+        removed: Set(serde_json::json!([])),
     }
     .insert(conn)
     .await
