@@ -32,7 +32,7 @@
 //!   `external_identities` for the user (fixed order), so two concurrent
 //!   revokes of the last pair cannot leave the account credentialless.
 
-use crate::auth::{AuthPrincipal, require_user};
+use crate::auth::{AuthPrincipal, require_session};
 use crate::db::entity::{external_identities, oauth_states, users};
 use crate::db::{TxnError, flatten_txn, map_db_err};
 use crate::oauth::{self, OAuthProvider, ProviderId, ProviderInfo, sanitize_return_path};
@@ -318,12 +318,12 @@ async fn signin_begin(
 
 async fn link_begin(
     State(state): State<SharedState>,
-    AuthPrincipal(principal): AuthPrincipal,
+    auth: AuthPrincipal,
     headers: axum::http::HeaderMap,
     Path(provider): Path<String>,
     Json(body): Json<BeginBody>,
 ) -> Result<Json<BeginResponse>, ApiError> {
-    let user_id = require_user(&principal)?;
+    let user_id = require_session(&auth)?;
     let provider_handle = resolve_provider(&state, &provider)?;
     // Link requires PKCE: the verifier stored on the ceremony row is the only
     // thing cryptographically binding the exchanged `code` to this ceremony, so
@@ -895,10 +895,10 @@ async fn finish_link(
 
 async fn unlink_external_identity(
     State(state): State<SharedState>,
-    AuthPrincipal(principal): AuthPrincipal,
+    auth: AuthPrincipal,
     Path(id): Path<uuid::Uuid>,
 ) -> Result<StatusCode, ApiError> {
-    let user_id = require_user(&principal)?;
+    let user_id = require_session(&auth)?;
     let user_id_str = user_id.to_string();
     let outcome = state
         .db

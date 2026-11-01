@@ -16,9 +16,50 @@
 //! [`crate::internal_api`].
 
 use crate::bytes::Ed25519PublicKey;
-use crate::ids::{TagmaId, UserId};
+use crate::ids::{TagmaId, TokenId, UserId};
+use crate::perm::PermSet;
 use crate::principal::Principal;
 use serde::{Deserialize, Serialize};
+
+/// The credential a bearer resolved through: its record id and the permission
+/// set that record carries, exactly as stored. Nothing narrows it on the way
+/// out: an owner's own rights are the whole vocabulary today, so a bound would
+/// be the identity (see [`VerifiedBearer`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CredentialScope {
+    pub token: TokenId,
+    pub perms: PermSet,
+}
+
+/// What a bearer token resolved to: the identity it acts as, plus the
+/// credential that carried it. An admin bearer has no record behind it, so
+/// its `credential` is `None`; an empty set is a credential that
+/// authenticates and may do nothing, which is not the same thing.
+///
+/// The split is deliberate: the identity (`Principal`) is unchanged by a
+/// token reset, and a route that only needs to know who is calling does not
+/// have to care which credential said so.
+#[derive(Debug, Clone)]
+pub struct VerifiedBearer {
+    pub principal: Principal,
+    pub credential: Option<CredentialScope>,
+}
+
+impl VerifiedBearer {
+    /// Whether the caller presented a personal access token: a `User` identity
+    /// carried by a stored record. The cookie path carries no record and the
+    /// admin bearer is an identity without one; a tagma's own credential is a
+    /// record whose principal is the tagma.
+    ///
+    /// The relay asks this and refuses the token outright: the set governs the
+    /// registry and the files service, and reading the record as the whole user
+    /// would widen the grant to everything. The instance and model-gateway
+    /// management faces refuse every non-admin caller, so a set never decides
+    /// anything there.
+    pub fn is_personal_token(&self) -> bool {
+        self.credential.is_some() && matches!(self.principal, Principal::User(_))
+    }
+}
 
 /// A tagma's registry facts: the raw identity + usability state the caller reads
 /// to (a) verify a tunnel-reconnect proof against `pinned_public_key`, (b) stamp
@@ -154,8 +195,10 @@ pub enum ControlPlaneError {
 pub trait ControlPlane: Send + Sync + 'static {
     /// Verify a `kallipai_session` cookie value -> the owning user plus their
     /// authoritative display identity, or `None` if the session is absent /
-    /// expired / disabled. By construction this can only ever produce a `User`
-    /// (the deputy guard: a `User` is reachable ONLY via the cookie). The caller
+    /// expired / disabled. By construction this only ever produces a `User`
+    /// resolved from a cookie; a `User` can also arrive through a personal
+    /// access token on [`Self::verify_bearer`], and that origin is what the
+    /// registry's `require_session` separates. The caller
     /// resolves this once per connection-open and caches the display for the
     /// connection lifetime (it is NOT a per-message call).
     async fn verify_session(
@@ -163,11 +206,15 @@ pub trait ControlPlane: Send + Sync + 'static {
         cookie_value: &str,
     ) -> Result<Option<VerifiedSession>, ControlPlaneError>;
 
-    /// Verify an `Authorization: Bearer` token -> an `Admin` or `Tagma`
-    /// principal, or `None` if invalid / revoked / owner-disabled. (`Admin` is
+    /// Verify an `Authorization: Bearer` token -> the identity it acts as plus
+    /// the credential that carried it, or `None` if invalid / expired /
+    /// revoked / owner-disabled. A disabled or revoked owner answers `None`
+    /// rather than an emptied set: the caller then rejects the request (401),
+    /// which is the answer every surface agrees on. (An `Admin` principal is
     /// returned but rejected by the caller's `require_tagma` on data-plane
     /// routes, matching the registry's own behavior.)
-    async fn verify_bearer(&self, token: &str) -> Result<Option<Principal>, ControlPlaneError>;
+    async fn verify_bearer(&self, token: &str)
+    -> Result<Option<VerifiedBearer>, ControlPlaneError>;
 
     /// Batched tagma-facts resolve: one [`TagmaProfile`] per existing input id,
     /// UNFILTERED (raw enrolled/revoked/owner-disabled state + key + display

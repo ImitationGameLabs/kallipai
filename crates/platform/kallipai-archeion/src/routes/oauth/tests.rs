@@ -191,7 +191,6 @@ async fn finish_signin_login_mints_session() {
 struct NeedsUsernameBody {
     kind: String,
     signup_token: String,
-    #[allow(dead_code)]
     provider: String,
 }
 
@@ -212,6 +211,7 @@ async fn finish_needs_username(state: SharedState, state_plain: &str, code: &str
     let bytes = to_bytes(resp.into_body(), usize::MAX).await.expect("body");
     let body: NeedsUsernameBody = serde_json::from_slice(&bytes).expect("deserialize");
     assert_eq!(body.kind, "needs-username");
+    assert_eq!(body.provider, "github");
     body.signup_token
 }
 
@@ -510,7 +510,7 @@ async fn unlink_last_identity_blocked_without_a_passkey() {
     let id = rows[0].id;
     let err = unlink_external_identity(
         State(state),
-        AuthPrincipal(crate::auth::Principal::User(user_id)),
+        AuthPrincipal::unscoped(crate::auth::Principal::User(user_id)),
         Path(id),
     )
     .await
@@ -562,7 +562,7 @@ async fn concurrent_last_pair_revoke_and_unlink_keeps_one_credential() {
             async {
                 unlink_external_identity(
                     State(unlink_state),
-                    AuthPrincipal(crate::auth::Principal::User(unlink_user)),
+                    AuthPrincipal::unscoped(crate::auth::Principal::User(unlink_user)),
                     Path(identity_id),
                 )
                 .await

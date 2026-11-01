@@ -16,7 +16,7 @@
 //! `GET /tagmata/{id}` serves the pinned key to the owning user (TOFU with
 //! change-detection on the app side) and 404s for a still-pending tagma.
 
-use crate::db::entity::{tagma_tokens, tagmata, users};
+use crate::db::entity::{tagmata, users};
 use crate::db::{TxnError, flatten_txn, map_db_err};
 use axum::Json;
 use axum::Router;
@@ -26,6 +26,7 @@ use axum::routing::{get, post};
 use kallipai_archeion_common::bytes::Ed25519PublicKey;
 use kallipai_archeion_common::control::{EnrollRequest, EnrollResponse};
 use kallipai_archeion_common::ids::{TagmaId, UserId};
+use kallipai_archeion_common::perm::{ARCHEION_TAGMA_READ, ARCHEION_TAGMA_WRITE};
 use kallipai_archeion_common::proof::{ProofError, verify_enroll_proof};
 use kallipai_common::authtoken::{MintedToken, TokenHash, mask_token};
 use kallipai_common::protocol::ApiError;
@@ -37,7 +38,8 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use tracing::warn;
 
-use crate::auth::{AuthPrincipal, require_user};
+use crate::auth::{AuthPrincipal, require_perm, require_session, require_user};
+use crate::credentials;
 use crate::state::SharedState;
 use crate::token::{ENROLLMENT, TAGMA};
 
@@ -94,9 +96,6 @@ async fn enroll(
         .map_err(proof_to_bad_request)?;
 
     let code_hash = TokenHash::of(&req.code);
-    let tagma_token = MintedToken::generate(TAGMA).expect("getrandom failed");
-    let tagma_token_plaintext = tagma_token.secret().to_string();
-    let tagma_token_hash = tagma_token.hash().as_bytes().to_vec();
     let device_key = req.device_public_key.0.clone();
 
     // One transaction: lock the pending tagma row by enrollment-code hash FOR
@@ -107,7 +106,6 @@ async fn enroll(
         .db
         .transaction::<_, _, TxnError>(|txn| {
             let code_hash = code_hash.as_bytes().to_vec();
-            let tagma_token_hash = tagma_token_hash.clone();
             let device_key = device_key.clone();
             Box::pin(async move {
                 let row = tagmata::Entity::find()
@@ -164,18 +162,31 @@ async fn enroll(
                 am.expires_at = Set(None);
                 am.update(txn).await?;
 
-                tagma_tokens::ActiveModel {
-                    token_hash: Set(tagma_token_hash),
-                    tagma_id: Set(tagma_id.clone()),
-                    issued_at: Set(now),
-                }
-                .insert(txn)
-                .await?;
-                Ok(tagma_id)
+                // The tagma's one live credential record. Its permission set
+                // is the default three (files read, write, deliver): a tagma
+                // credential cannot reach the platform API, and this record
+                // does not widen that.
+                let perms = kallipai_archeion_common::perm::tagma_defaults();
+                let minted = credentials::create(
+                    txn,
+                    TAGMA,
+                    credentials::NewCredential {
+                        owner: credentials::Owner::Tagma,
+                        owner_id: &tagma_id,
+                        name: "enrollment",
+                        perms: &perms,
+                        created_by: &owner,
+                        actor: None,
+                        expires_at: None,
+                    },
+                )
+                .await
+                .map_err(TxnError::Api)?;
+                Ok((tagma_id, minted.plaintext))
             })
         })
         .await;
-    let tagma_id = flatten_txn(result)?;
+    let (tagma_id, tagma_token_plaintext) = flatten_txn(result)?;
 
     Ok(Json(EnrollResponse {
         tagma_id: TagmaId::from(tagma_id),
@@ -259,9 +270,9 @@ pub(crate) async fn mint_pending_tagma(
 
 async fn mint(
     State(state): State<SharedState>,
-    AuthPrincipal(principal): AuthPrincipal,
+    auth: AuthPrincipal,
 ) -> Result<Json<MintResponse>, ApiError> {
-    let user_id = require_user(&principal)?;
+    let user_id = require_session(&auth)?;
     let (id, plaintext, created_at, expires_at) = mint_pending_tagma(&state, user_id).await?;
     Ok(Json(MintResponse {
         code: plaintext,
@@ -280,7 +291,7 @@ async fn mint(
 /// concern, delivered to the app by the keryx on its `GET /me/events` stream as
 /// `TagmaOnline`/`TagmaOffline`. Note `tagmata.last_tunnel_proof_ts` is a replay
 /// guard, not a liveness signal, and is intentionally not surfaced.
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 struct TagmaView {
     tagma_id: String,
     label: Option<String>,
@@ -300,7 +311,7 @@ struct TagmaView {
     expires_at: Option<OffsetDateTime>,
 }
 
-#[derive(Serialize, Clone, Copy)]
+#[derive(Debug, Serialize, Clone, Copy)]
 #[serde(rename_all = "snake_case")]
 enum TagmaState {
     Pending,
@@ -311,9 +322,10 @@ enum TagmaState {
 /// Liveness is not included; the app learns it from the keryx `/me/events` stream.
 async fn list_tagmata(
     State(state): State<SharedState>,
-    AuthPrincipal(principal): AuthPrincipal,
+    auth: AuthPrincipal,
 ) -> Result<Json<Vec<TagmaView>>, ApiError> {
-    let user_id = require_user(&principal)?;
+    require_perm(&auth, ARCHEION_TAGMA_READ)?;
+    let user_id = require_user(&auth.principal)?;
     let rows = tagmata::Entity::find()
         .filter(tagmata::Column::OwnerUserId.eq(user_id.to_string()))
         .filter(tagmata::Column::RevokedAt.is_null())
@@ -362,10 +374,11 @@ struct TagmaInfo {
 
 async fn get_tagma(
     State(state): State<SharedState>,
-    AuthPrincipal(principal): AuthPrincipal,
+    auth: AuthPrincipal,
     Path(id): Path<String>,
 ) -> Result<Json<TagmaInfo>, ApiError> {
-    let user = require_user(&principal)?;
+    require_perm(&auth, ARCHEION_TAGMA_READ)?;
+    let user = require_user(&auth.principal)?;
     let tagma_id = TagmaId::from(id);
     let tagma = tagmata::Entity::find_by_id(tagma_id.to_string())
         .one(&state.db)
@@ -429,11 +442,12 @@ impl RenameTagmaRequest {
 /// card title falls back to "Unnamed tagma"); a value over the cap is a 400.
 async fn rename_tagma(
     State(state): State<SharedState>,
-    AuthPrincipal(principal): AuthPrincipal,
+    auth: AuthPrincipal,
     Path(id): Path<String>,
     Json(req): Json<RenameTagmaRequest>,
 ) -> Result<StatusCode, ApiError> {
-    let user = require_user(&principal)?;
+    require_perm(&auth, ARCHEION_TAGMA_WRITE)?;
+    let user = require_user(&auth.principal)?;
     let resolved = req.resolve()?;
     let tagma_id = TagmaId::from(id);
     let tagma = tagmata::Entity::find_by_id(tagma_id.to_string())
@@ -467,10 +481,11 @@ async fn rename_tagma(
 /// request; for a pending tagma it blocks redemption in `enroll`.
 async fn revoke_tagma(
     State(state): State<SharedState>,
-    AuthPrincipal(principal): AuthPrincipal,
+    auth: AuthPrincipal,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
-    let user = require_user(&principal)?;
+    require_perm(&auth, ARCHEION_TAGMA_WRITE)?;
+    let user = require_user(&auth.principal)?;
     let tagma_id = TagmaId::from(id);
     // Existence + ownership check first so an unknown / other-user id is a clean
     // 404 rather than a silent 204 (the conditional UPDATE alone could not tell
@@ -511,7 +526,7 @@ mod tests {
 
     use super::{
         MAX_LIVE_PENDING_TAGMAS, MAX_TAGMA_LABEL_LEN, MintResponse, RenameTagmaRequest, TagmaState,
-        list_tagmata, mint, rename_tagma, revoke_tagma,
+        get_tagma, list_tagmata, mint, rename_tagma, revoke_tagma,
     };
     use crate::auth::{AuthPrincipal, Principal};
     use crate::db::entity::tagmata;
@@ -530,7 +545,7 @@ mod tests {
     async fn empty_list() {
         let state = make_state().await;
         let user = seed_user(&state, "alice").await;
-        let Json(got) = list_tagmata(State(state), AuthPrincipal(Principal::User(user)))
+        let Json(got) = list_tagmata(State(state), AuthPrincipal::unscoped(Principal::User(user)))
             .await
             .expect("list");
         assert!(got.is_empty());
@@ -545,7 +560,7 @@ mod tests {
         let user = seed_user(&state, "alice").await;
         let (tagma, _) = seed_tagma(&state, &user, dummy_key()).await;
 
-        let Json(got) = list_tagmata(State(state), AuthPrincipal(Principal::User(user)))
+        let Json(got) = list_tagmata(State(state), AuthPrincipal::unscoped(Principal::User(user)))
             .await
             .expect("list");
         assert_eq!(got.len(), 1);
@@ -562,11 +577,14 @@ mod tests {
     async fn mint_then_list_round_trip() {
         let state = make_state().await;
         let user = seed_user(&state, "alice").await;
-        let principal = AuthPrincipal(Principal::User(user.clone()));
+        let principal = AuthPrincipal::unscoped(Principal::User(user.clone()));
 
-        let Json(MintResponse { code, id, .. }) = mint(State(state.clone()), principal.clone())
-            .await
-            .expect("mint");
+        let Json(MintResponse { code, id, .. }) = mint(
+            State(state.clone()),
+            AuthPrincipal::unscoped(Principal::User(user.clone())),
+        )
+        .await
+        .expect("mint");
         assert!(code.starts_with("sk-enroll-"));
         let expected_hash = kallipai_common::authtoken::TokenHash::of(&code)
             .as_bytes()
@@ -596,7 +614,6 @@ mod tests {
     async fn cap_counts_expired_pending_tagmas() {
         let state = make_state().await;
         let user = seed_user(&state, "bob").await;
-        let principal = AuthPrincipal(Principal::User(user.clone()));
         // Seed the cap (8) of already-expired, pending (unenrolled, unrevoked)
         // tagmas directly. Each needs a distinct code hash (partial unique
         // index).
@@ -621,7 +638,7 @@ mod tests {
             .await
             .expect("seed expired pending tagma");
         }
-        match mint(State(state), principal).await {
+        match mint(State(state), AuthPrincipal::unscoped(Principal::User(user))).await {
             Err(e) => assert_eq!(e.status, 429),
             Ok(_) => panic!("cap reached must 429"),
         }
@@ -635,7 +652,7 @@ mod tests {
         let user = seed_user(&state, "carol").await;
         let Json(MintResponse { id, .. }) = mint(
             State(state.clone()),
-            AuthPrincipal(Principal::User(user.clone())),
+            AuthPrincipal::unscoped(Principal::User(user.clone())),
         )
         .await
         .expect("mint");
@@ -643,7 +660,7 @@ mod tests {
 
         let s1 = revoke_tagma(
             State(state.clone()),
-            AuthPrincipal(Principal::User(user.clone())),
+            AuthPrincipal::unscoped(Principal::User(user.clone())),
             path(),
         )
         .await
@@ -659,7 +676,7 @@ mod tests {
 
         let s2 = revoke_tagma(
             State(state.clone()),
-            AuthPrincipal(Principal::User(user.clone())),
+            AuthPrincipal::unscoped(Principal::User(user.clone())),
             path(),
         )
         .await
@@ -681,13 +698,15 @@ mod tests {
         let state = make_state().await;
         let alice = seed_user(&state, "alice").await;
         let bob = seed_user(&state, "bob").await;
-        let Json(MintResponse { id, .. }) =
-            mint(State(state.clone()), AuthPrincipal(Principal::User(alice)))
-                .await
-                .expect("mint");
+        let Json(MintResponse { id, .. }) = mint(
+            State(state.clone()),
+            AuthPrincipal::unscoped(Principal::User(alice)),
+        )
+        .await
+        .expect("mint");
         match revoke_tagma(
             State(state),
-            AuthPrincipal(Principal::User(bob)),
+            AuthPrincipal::unscoped(Principal::User(bob)),
             axum::extract::Path(id),
         )
         .await
@@ -719,7 +738,7 @@ mod tests {
         // Set from None.
         let s = rename_tagma(
             State(state.clone()),
-            AuthPrincipal(Principal::User(alice.clone())),
+            AuthPrincipal::unscoped(Principal::User(alice.clone())),
             path(),
             Json(RenameTagmaRequest {
                 label: Some("laptop".to_string()),
@@ -733,7 +752,7 @@ mod tests {
         // Overwrite, with surrounding whitespace trimmed.
         rename_tagma(
             State(state.clone()),
-            AuthPrincipal(Principal::User(alice.clone())),
+            AuthPrincipal::unscoped(Principal::User(alice.clone())),
             path(),
             Json(RenameTagmaRequest {
                 label: Some("  server ".to_string()),
@@ -746,7 +765,7 @@ mod tests {
         // Whitespace-only clears the label.
         rename_tagma(
             State(state.clone()),
-            AuthPrincipal(Principal::User(alice.clone())),
+            AuthPrincipal::unscoped(Principal::User(alice.clone())),
             path(),
             Json(RenameTagmaRequest {
                 label: Some("   ".to_string()),
@@ -760,7 +779,7 @@ mod tests {
         let too_long = "x".repeat(MAX_TAGMA_LABEL_LEN + 1);
         match rename_tagma(
             State(state.clone()),
-            AuthPrincipal(Principal::User(alice.clone())),
+            AuthPrincipal::unscoped(Principal::User(alice.clone())),
             path(),
             Json(RenameTagmaRequest {
                 label: Some(too_long),
@@ -775,7 +794,7 @@ mod tests {
         // Non-owner -> 404 and no mutation.
         match rename_tagma(
             State(state.clone()),
-            AuthPrincipal(Principal::User(bob)),
+            AuthPrincipal::unscoped(Principal::User(bob)),
             path(),
             Json(RenameTagmaRequest {
                 label: Some("evil".to_string()),
@@ -787,5 +806,171 @@ mod tests {
             Ok(_) => panic!("non-owner must 404"),
         }
         assert!(row_label().await.is_none());
+    }
+    /// A full enrollment through the handler: the pending row becomes one
+    /// enrolled tagma holding exactly one live credential record, whose stored
+    /// hash is the returned plaintext's, carrying the tagma defaults and the
+    /// `create` event. The plaintext exists only in the response.
+    #[tokio::test]
+    async fn enroll_writes_one_credential_record() {
+        use ed25519_dalek::{Signer, SigningKey};
+        use kallipai_archeion_common::bytes::Ed25519Signature;
+        use kallipai_archeion_common::control::EnrollRequest;
+        use kallipai_archeion_common::proof::enroll_transcript;
+        use kallipai_common::authtoken::TokenHash;
+
+        use super::enroll;
+        use crate::credentials;
+
+        let state = make_state().await;
+        let user = seed_user(&state, "alice").await;
+        let Json(MintResponse { code, id, .. }) = mint(
+            State(state.clone()),
+            AuthPrincipal::unscoped(Principal::User(user.clone())),
+        )
+        .await
+        .expect("mint");
+
+        let signing = SigningKey::from_bytes(&[0x24; 32]);
+        let public = signing.verifying_key().to_bytes();
+        let signature = signing.sign(&enroll_transcript(&code, &public));
+
+        let Json(response) = enroll(
+            State(state.clone()),
+            Json(EnrollRequest {
+                code,
+                device_public_key: Ed25519PublicKey(public.to_vec()),
+                signature: Ed25519Signature(signature.to_bytes().to_vec()),
+            }),
+        )
+        .await
+        .expect("enroll");
+        assert_eq!(response.tagma_id.to_string(), id);
+
+        let record = credentials::live_tagma_record(&state.db, &id)
+            .await
+            .expect("lookup")
+            .expect("the enrolled tagma holds a record");
+        assert_eq!(record.name, "enrollment");
+        assert_eq!(
+            record.token_hash,
+            TokenHash::of(&response.tagma_token).as_bytes().to_vec()
+        );
+        assert_eq!(
+            credentials::perms_of(&record).expect("stored perms"),
+            kallipai_archeion_common::perm::tagma_defaults()
+        );
+        assert!(record.expires_at.is_none());
+        assert_eq!(record.created_by, user.to_string());
+
+        let trail = credentials::events(&state.db, &record.id)
+            .await
+            .expect("events");
+        assert_eq!(trail.len(), 1);
+        assert_eq!(trail[0].kind, credentials::EVENT_CREATE);
+        assert!(
+            trail[0].actor_user_id.is_none(),
+            "the tagma enrolled itself, so no user acted"
+        );
+    }
+
+    /// Every gated tagma route answers on its own permission string: the same
+    /// call with the string is a success and without it a 403, so a route that
+    /// forgot its check fails here instead of shipping open. The mint route
+    /// mints credentials, so no record at all may pass it.
+    #[tokio::test]
+    async fn each_tagma_route_requires_its_string() {
+        let state = make_state().await;
+        let user = seed_user(&state, "alice").await;
+        let (tagma_id, _) = seed_tagma(&state, &user, dummy_key()).await;
+
+        let scoped = |perms: &[&str]| {
+            AuthPrincipal::scoped(
+                Principal::User(user.clone()),
+                kallipai_archeion_common::control_plane::CredentialScope {
+                    token: kallipai_archeion_common::ids::TokenId::from("fixture".to_string()),
+                    perms: kallipai_archeion_common::perm::PermSet::from_known(
+                        perms.iter().copied(),
+                    )
+                    .expect("known strings"),
+                },
+            )
+        };
+        let read_only = scoped(&[kallipai_archeion_common::perm::ARCHEION_TAGMA_READ]);
+        let write = scoped(&[
+            kallipai_archeion_common::perm::ARCHEION_TAGMA_READ,
+            kallipai_archeion_common::perm::ARCHEION_TAGMA_WRITE,
+        ]);
+        let nothing: &[&str] = &[];
+
+        let err = list_tagmata(State(state.clone()), scoped(nothing))
+            .await
+            .expect_err("list without the read string");
+        assert_eq!(err.status, 403);
+        let _ = list_tagmata(State(state.clone()), read_only.clone())
+            .await
+            .expect("list with the read string");
+
+        let err = get_tagma(
+            State(state.clone()),
+            scoped(nothing),
+            axum::extract::Path(tagma_id.to_string()),
+        )
+        .await
+        .map(|_| ())
+        .expect_err("read without the read string");
+        assert_eq!(err.status, 403);
+        let _ = get_tagma(
+            State(state.clone()),
+            read_only.clone(),
+            axum::extract::Path(tagma_id.to_string()),
+        )
+        .await
+        .expect("read with the read string");
+
+        let rename = || {
+            axum::Json(RenameTagmaRequest {
+                label: Some("renamed".to_string()),
+            })
+        };
+        let err = rename_tagma(
+            State(state.clone()),
+            read_only.clone(),
+            axum::extract::Path(tagma_id.to_string()),
+            rename(),
+        )
+        .await
+        .expect_err("rename with only the read string");
+        assert_eq!(err.status, 403);
+        rename_tagma(
+            State(state.clone()),
+            write.clone(),
+            axum::extract::Path(tagma_id.to_string()),
+            rename(),
+        )
+        .await
+        .expect("rename with the write string");
+
+        let err = revoke_tagma(
+            State(state.clone()),
+            read_only,
+            axum::extract::Path(tagma_id.to_string()),
+        )
+        .await
+        .expect_err("revoke with only the read string");
+        assert_eq!(err.status, 403);
+        revoke_tagma(
+            State(state.clone()),
+            write,
+            axum::extract::Path(tagma_id.to_string()),
+        )
+        .await
+        .expect("revoke with the write string");
+
+        let err = mint(State(state), scoped(nothing))
+            .await
+            .map(|_| ())
+            .expect_err("a credential cannot mint an enrollment code");
+        assert_eq!(err.status, 403);
     }
 }

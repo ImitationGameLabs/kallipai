@@ -2,9 +2,10 @@
 //! resolves a request to a [`Principal`] by delegating credential
 //! verification to the registry through the
 //! [`ControlPlane`](kallipai_archeion_common::control_plane::ControlPlane)
-//! trait. The deputy guard (cookie -> User, bearer -> Tagma/Admin) is
-//! preserved by construction: `verify_session` can only return a user,
-//! `verify_bearer` only an admin or tagma.
+//! trait. A third origin exists: a personal access token resolves through
+//! `verify_bearer` to a `User` plus that token's permission set. This service
+//! judges identity and room membership, not permission strings, so it refuses
+//! that origin outright rather than reading it as the whole user.
 
 use axum::extract::FromRequestParts;
 use axum::http::HeaderMap;
@@ -35,13 +36,20 @@ impl FromRequestParts<SharedConvState> for AuthPrincipal {
     ) -> Result<Self, Self::Rejection> {
         // Prefer an explicit bearer credential when present.
         if let Ok(bearer) = extract_bearer_token(&parts.headers) {
-            let principal = state
+            let verified = state
                 .control
                 .verify_bearer(bearer)
                 .await
                 .map_err(control_to_internal)?
                 .ok_or_else(|| ApiError::unauthorized("invalid token"))?;
-            return Ok(AuthPrincipal(principal));
+            // A tagma's own credential carries a record too; only a user behind
+            // one is a personal access token (see `is_personal_token`).
+            if verified.is_personal_token() {
+                return Err(ApiError::forbidden(
+                    "a personal access token is not accepted here",
+                ));
+            }
+            return Ok(AuthPrincipal(verified.principal));
         }
         // Otherwise fall back to the session cookie.
         if let Some(cookie_value) = read_session_cookie(&parts.headers) {
@@ -86,3 +94,59 @@ pub(crate) fn read_session_cookie(headers: &HeaderMap) -> Option<String> {
 // (`require_admin` is never needed here: the keryx has no admin
 // routes.)
 pub use kallipai_archeion_common::principal::{require_tagma, require_user};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::Request;
+    use kallipai_archeion_common::bytes::Ed25519PublicKey;
+    use kallipai_archeion_common::ids::{TagmaId, UserId};
+
+    use crate::test_support::make_state;
+
+    fn parts_with_bearer(token: &str) -> axum::http::request::Parts {
+        Request::builder()
+            .uri("/rooms")
+            .header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"))
+            .body(())
+            .expect("build request")
+            .into_parts()
+            .0
+    }
+
+    /// A personal access token resolves to a user, and this service takes no
+    /// credentials: the extractor refuses it with 403 rather than reading it as
+    /// the whole user (its room routes judge membership, not permission strings).
+    #[tokio::test]
+    async fn a_personal_access_token_is_refused_outright() {
+        let (state, control) = make_state(5, std::time::Duration::from_secs(5));
+        control.seed_personal_token("sk-pat-mock", UserId::random());
+
+        let mut parts = parts_with_bearer("sk-pat-mock");
+        let err = AuthPrincipal::from_request_parts(&mut parts, &state)
+            .await
+            .expect_err("a personal token is not accepted here");
+        assert_eq!(err.status, 403);
+        assert!(err.message.contains("personal access token"), "{err:?}");
+    }
+
+    /// A tagma's own credential is a record as well, and it is the tagma: the
+    /// refusal keys on the user origin, never on "carries a record".
+    #[tokio::test]
+    async fn a_tagma_credential_still_resolves_to_its_tagma() {
+        let (state, control) = make_state(5, std::time::Duration::from_secs(5));
+        let tagma = TagmaId::from("t1".to_string());
+        control.enroll_tagma(
+            &tagma,
+            UserId::random(),
+            Ed25519PublicKey(vec![0u8; 32]),
+            "sk-tagma-mock",
+        );
+
+        let mut parts = parts_with_bearer("sk-tagma-mock");
+        let AuthPrincipal(principal) = AuthPrincipal::from_request_parts(&mut parts, &state)
+            .await
+            .expect("a tagma credential is how the tagma itself talks");
+        assert!(matches!(principal, Principal::Tagma(id) if id == tagma));
+    }
+}

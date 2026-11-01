@@ -11,10 +11,11 @@ use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 
 use crate::acl::{Action, SpacePath};
-use crate::auth::AuthPrincipal;
+use crate::auth::{AuthPrincipal, require_perm};
 use crate::state::AppState;
 use futures_util::FutureExt as _;
 use http_body_util::BodyExt as _;
+use kallipai_archeion_common::perm;
 use kallipai_archeion_common::principal::Principal;
 use kallipai_common::protocol::ApiError;
 
@@ -79,9 +80,11 @@ fn resolve_path(
 pub async fn put_file(
     State(state): State<AppState>,
     Query(query): Query<PutQuery>,
-    AuthPrincipal(principal): AuthPrincipal,
+    auth: AuthPrincipal,
     body: Body,
 ) -> Result<Response, ApiError> {
+    require_perm(&auth, perm::FILES_RECORD_WRITE)?;
+    let principal = auth.principal;
     // Tagma facts resolved once up front: a relative path needs the caller's
     // enrollment to resolve against, and the grant check reuses them.
     let facts = match &principal {

@@ -14,7 +14,7 @@
 //! be verified, so an attacker who only has a borrowed session cannot redirect
 //! the contact/recovery channel to an address they have not proven they control.
 
-use crate::auth::{AuthPrincipal, require_user};
+use crate::auth::{AuthPrincipal, require_session};
 use crate::db::entity::emails;
 use crate::db::map_db_err;
 use crate::email;
@@ -84,19 +84,19 @@ struct VerifyEmailRequest {
 
 async fn list_emails(
     State(state): State<SharedState>,
-    AuthPrincipal(principal): AuthPrincipal,
+    auth: AuthPrincipal,
 ) -> Result<Json<Vec<EmailSummary>>, ApiError> {
-    let user_id = require_user(&principal)?;
+    let user_id = require_session(&auth)?;
     let owned = load_owned(&state, user_id).await?;
     Ok(Json(owned.into_iter().map(EmailSummary::from).collect()))
 }
 
 async fn add_email(
     State(state): State<SharedState>,
-    AuthPrincipal(principal): AuthPrincipal,
+    auth: AuthPrincipal,
     Json(req): Json<AddEmailRequest>,
 ) -> Result<Json<EmailSummary>, ApiError> {
-    let user_id = require_user(&principal)?;
+    let user_id = require_session(&auth)?;
     let address = email::normalize(&req.address)?;
 
     // Per-account cap: bounds DB rows and (once SMTP is wired) outbound mail.
@@ -213,10 +213,10 @@ async fn verify_email(
 
 async fn make_primary(
     State(state): State<SharedState>,
-    AuthPrincipal(principal): AuthPrincipal,
+    auth: AuthPrincipal,
     Path(id): Path<Uuid>,
 ) -> Result<Json<EmailSummary>, ApiError> {
-    let user_id = require_user(&principal)?;
+    let user_id = require_session(&auth)?;
 
     // Clear-then-set under one txn with the account's emails locked FOR UPDATE,
     // so the partial unique index `WHERE is_primary` cannot reject a naive
@@ -259,10 +259,10 @@ async fn make_primary(
 
 async fn remove_email(
     State(state): State<SharedState>,
-    AuthPrincipal(principal): AuthPrincipal,
+    auth: AuthPrincipal,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Vec<EmailSummary>>, ApiError> {
-    let user_id = require_user(&principal)?;
+    let user_id = require_session(&auth)?;
 
     // Lock the account's emails FOR UPDATE so the delete + re-primary is atomic
     // and the at-most-one-primary invariant holds.

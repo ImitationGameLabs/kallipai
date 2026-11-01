@@ -2845,6 +2845,7 @@ dependencies = [
  "base64 0.22.1",
  "clap",
  "cookie",
+ "ed25519-dalek",
  "email_address",
  "getrandom 0.4.2",
  "hex",

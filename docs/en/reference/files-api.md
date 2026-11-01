@@ -19,6 +19,10 @@ The service reads its archeion connection from two required variables:
 | `KALLIPAI_FILES_ARCHEION_INTERNAL_URL` | yes (service) | _(unset)_ | Archeion internal base URL for `/internal/*` ControlPlane calls. Must NOT be publicly reachable.                                                                                                                 |
 | `KALLIPAI_POLIS_INTERNAL_TOKEN_FILE`   | yes (service) | _(unset)_ | File holding the platform-internal secret bearer for the archeion `/internal/*` API, provisioned by the archeion (0640 under its state directory) and read at boot by the lesche, keryx, files, instances, and model-gateway services. |
 
+That secret is outbound only: the service presents it on its `/internal/*`
+calls to the archeion. It is not an access token, no request into this
+service authenticates with it, and no permission set applies to it.
+
 ## Auth: Archeion-Verified Principals
 
 There is **no files-specific token**. Every content request carries
@@ -27,11 +31,26 @@ There is **no files-specific token**. Every content request carries
 principal:
 
 - `sk-tagma-…` (an enrolled tagma): the `kallip file` CLI's principal.
+  One live record per tagma, carrying a permission set.
+- `sk-pat-…` (a personal access token): a person acting as themselves from a
+  script or the CLI; the same record shape and the same gate.
 - `sk-admin-…` (operator): management surface only
   (`GET /v1/files/admin/delivery-events`); the admin principal is refused on
   every content operation.
 - User session tokens verify on the web face, not the bearer path: a User
   bearer resolves nowhere here.
+
+The record's permission set is a second gate on top of the per-path ACL
+below, never a replacement for it: `files:record:read` for list, download,
+and head, `files:record:write` for upload and delete,
+`files:delivery:write` for send. A call whose record lacks the route's
+string is `403` and the message names that string; an empty set is `403` on
+every content route; a record that no longer resolves (expired, revoked, or
+its tagma revoked) is `401`. The string check runs before the path
+resolves, so a caller short of a string hears the same answer on every path
+and cannot probe another space through 404s. A full set changes no path
+decision at all, and an identity that carries no record, the admin bearer,
+is not narrowed.
 
 Authorization is the per-path ACL matrix ([`acl.rs`](https://github.com/ImitationGameLabs/kallipai/blob/main/crates/platform/kallipai-files/src/acl.rs)):
 every path lives inside a user's space: `/users/{user}/shared` (the
@@ -125,7 +144,8 @@ Admin-only: the delivery log, newest first. Optional `blob_id` filter,
 The `kallip file` family (put/get/send/ls) is a thin face over these
 routes; credentials ride the environment (`KALLIPAI_POLIS_URL`, whose
 `/v1/files` derivation is the CLI's base URL, +
-`KALLIPAI_FILES_TOKEN`), never CLI flags. Server-side callers
+`KALLIPAI_FILES_TOKEN`, a personal access token or a tagma credential),
+never CLI flags. Server-side callers
 authenticate as themselves: the tagma asks each enrolled platform face
 in configuration order, presenting that face's stored credential and
 taking the origin from the same face — its own process environment

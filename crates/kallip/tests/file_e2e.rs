@@ -17,8 +17,10 @@ use kallip::file::FilesClient;
 use kallipai_archeion_common::control_plane::EnrollmentLookup;
 use kallipai_archeion_common::ids::{TagmaId, UserId};
 use kallipai_archeion_common::internal_api::{
-    EnrollmentLookupRequest, VerifyBearerRequest, VerifyBearerResponse, WirePrincipal,
+    EnrollmentLookupRequest, VerifyBearerRequest, VerifyBearerResponse, WireCredential,
+    WirePrincipal,
 };
+use kallipai_archeion_common::perm::PermSet;
 use kallipai_files::LocalBackend;
 use kallipai_files::auth::FilesControlPlane;
 use kallipai_files::gc::GcConfig;
@@ -33,8 +35,35 @@ use tempfile::TempDir;
 /// read serves the U->U delivery, unreachable with a tagma bearer.
 #[derive(Clone, Default)]
 struct Registry {
-    bearer: Arc<Mutex<HashMap<String, WirePrincipal>>>,
+    /// Bearer -> the identity it resolves to plus the record it carries (the
+    /// admin bearer has none, every other bearer is a record).
+    bearer: Arc<Mutex<HashMap<String, BearerRecord>>>,
     enrollment: Arc<Mutex<HashMap<TagmaId, EnrollmentLookup>>>,
+}
+
+/// What a bearer resolves to: the identity, plus the permission record it
+/// carries (`None` for the admin bearer, whose rights are its own).
+type BearerRecord = (WirePrincipal, Option<PermSet>);
+
+impl Registry {
+    /// Mint a personal access token for `user`: the plaintext comes back once,
+    /// the store keeps the record it resolves to. This is the create step the
+    /// CLI's bearer comes from; every call after it carries the plaintext.
+    fn mint_pat(&self, user: &UserId, perms: &[&str]) -> String {
+        let plaintext = format!("sk-pat-{}", uuid::Uuid::new_v4());
+        let perms =
+            PermSet::from_known(perms.iter().map(|p| (*p).to_owned())).expect("known perms");
+        self.bearer.lock().expect("lock").insert(
+            plaintext.clone(),
+            (
+                WirePrincipal::User {
+                    user_id: user.clone(),
+                },
+                Some(perms),
+            ),
+        );
+        plaintext
+    }
 }
 
 /// The mock ignores the internal shared secret the client presents (the
@@ -72,11 +101,22 @@ async fn verify_bearer_route(
         .get(&request.token)
         .cloned();
     match found {
-        Some(principal) => (
-            StatusCode::OK,
-            axum::Json(VerifyBearerResponse { principal }),
-        )
-            .into_response(),
+        Some((principal, perms)) => {
+            // Every non-admin bearer is a record: the files service reads
+            // its permission set to decide what the caller may do.
+            let credential = perms.map(|perms| WireCredential {
+                token_id: kallipai_archeion_common::ids::TokenId::from(request.token.clone()),
+                perms,
+            });
+            (
+                StatusCode::OK,
+                axum::Json(VerifyBearerResponse {
+                    principal,
+                    credential,
+                }),
+            )
+                .into_response()
+        }
         None => StatusCode::NOT_FOUND.into_response(),
     }
 }
@@ -107,6 +147,10 @@ struct World {
     t2_token: String,
     t3_token: String,
     admin_token: String,
+    /// A personal access token for user1 (files read + write), and one that
+    /// carries reads only.
+    pat_token: String,
+    read_only_pat: String,
     /// Keeps the blob root alive for the whole test.
     _blob_dir: TempDir,
 }
@@ -125,25 +169,44 @@ async fn spawn_world() -> World {
 
     // t1 and t2 are enrolled in user1's space; t3 in user2's.
     let mut bearers = HashMap::new();
+    let tagma_record = || {
+        Some(
+            PermSet::from_known(
+                kallipai_archeion_common::perm::TAGMA_DEFAULTS
+                    .iter()
+                    .map(|p| (*p).to_owned()),
+            )
+            .expect("known perms"),
+        )
+    };
     bearers.insert(
         t1_token.clone(),
-        WirePrincipal::Tagma {
-            tagma_id: t1.clone(),
-        },
+        (
+            WirePrincipal::Tagma {
+                tagma_id: t1.clone(),
+            },
+            tagma_record(),
+        ),
     );
     bearers.insert(
         t2_token.clone(),
-        WirePrincipal::Tagma {
-            tagma_id: t2.clone(),
-        },
+        (
+            WirePrincipal::Tagma {
+                tagma_id: t2.clone(),
+            },
+            tagma_record(),
+        ),
     );
     bearers.insert(
         t3_token.clone(),
-        WirePrincipal::Tagma {
-            tagma_id: t3.clone(),
-        },
+        (
+            WirePrincipal::Tagma {
+                tagma_id: t3.clone(),
+            },
+            tagma_record(),
+        ),
     );
-    bearers.insert(admin_token.clone(), WirePrincipal::Admin);
+    bearers.insert(admin_token.clone(), (WirePrincipal::Admin, None));
     let space1 = vec![t1.clone(), t2.clone()];
     let mut enrollments = HashMap::new();
     for tagma in [&t1, &t2] {
@@ -166,6 +229,18 @@ async fn spawn_world() -> World {
         bearer: Arc::new(Mutex::new(bearers)),
         enrollment: Arc::new(Mutex::new(enrollments)),
     };
+    // The CLI's own bearer: a personal token minted for user1, carrying the
+    // two files strings its calls need.
+    let pat_token = registry.mint_pat(
+        &user1,
+        &[
+            kallipai_archeion_common::perm::FILES_RECORD_READ,
+            kallipai_archeion_common::perm::FILES_RECORD_WRITE,
+        ],
+    );
+    // A second one, reads only: the record's set is what the service honors.
+    let read_only_pat =
+        registry.mint_pat(&user1, &[kallipai_archeion_common::perm::FILES_RECORD_READ]);
     let archeion_url = spawn_mini_archeion(registry).await;
 
     let db_url = common::test_db_url().await;
@@ -211,6 +286,8 @@ async fn spawn_world() -> World {
         t2_token,
         t3_token,
         admin_token,
+        pat_token,
+        read_only_pat,
         _blob_dir: blob_dir,
     }
 }
@@ -336,4 +413,55 @@ async fn an_unrecognized_bearer_is_rejected_before_any_path_logic() {
     let ghost = FilesClient::new(world.files_url.clone(), "sk-tagma-e2e-ghost".to_owned());
     let err = ghost.list_files("self", None, None).await.expect_err("401");
     assert!(err.to_string().contains("401"), "{err}");
+}
+
+/// The CLI's bearer is a personal access token: the test mints one (the
+/// plaintext comes back once) and every call after that carries only the
+/// plaintext, through the real files service. It stores, lists and reads in its
+/// owner's space; a second token minted with reads only is refused the store,
+/// so the record's set -- not the token's shape -- decides.
+#[tokio::test]
+async fn a_personal_token_drives_the_cli_in_its_owners_space() {
+    let world = spawn_world().await;
+    let client = FilesClient::new(world.files_url.clone(), world.pat_token.clone());
+    let blob_dir = TempDir::new().expect("scratch dir");
+    let content = b"pat-driven bytes";
+    let local = scratch_file(&blob_dir, "pat.txt", content);
+    let target = format!("/users/{}/shared/pat.txt", world.user1.as_ref());
+
+    let put = client
+        .put_file(&target, &local)
+        .await
+        .expect("put with a personal token");
+
+    let rows = client
+        // Relative to the space root, so the shared region is part of it.
+        .list_files("self", Some("shared/pat"), None)
+        .await
+        .expect("ls");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].path, target);
+    assert_eq!(rows[0].size, content.len() as i64);
+
+    let downloaded = client.get_file(put.record_id).await.expect("get");
+    assert_eq!(downloaded, content);
+
+    // Reads only: the read half still answers, the write half is refused.
+    let read_only = FilesClient::new(world.files_url.clone(), world.read_only_pat.clone());
+    assert_eq!(
+        read_only.get_file(put.record_id).await.expect("read half"),
+        content
+    );
+    let refused = read_only
+        .put_file(
+            &format!("/users/{}/shared/refused.txt", world.user1.as_ref()),
+            &local,
+        )
+        .await
+        .expect_err("a reads-only token cannot store");
+    let message = refused.to_string();
+    assert!(
+        message.contains("403") && message.contains("files:record:write"),
+        "{message}"
+    );
 }

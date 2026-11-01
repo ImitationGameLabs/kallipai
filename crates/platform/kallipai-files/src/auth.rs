@@ -20,7 +20,8 @@ use std::time::Duration;
 use axum::extract::FromRequestParts;
 use axum::http::HeaderMap;
 use kallipai_archeion_common::control_plane::{
-    ControlPlane, ControlPlaneError, EnrollmentLookup, TagmaProfile, UserIdentity, VerifiedSession,
+    ControlPlane, ControlPlaneError, CredentialScope, EnrollmentLookup, TagmaProfile, UserIdentity,
+    VerifiedBearer, VerifiedSession,
 };
 use kallipai_archeion_common::ids::{TagmaId, UserId};
 use kallipai_archeion_common::internal_api::{
@@ -126,7 +127,10 @@ impl ControlPlane for FilesControlPlane {
         Ok(resp)
     }
 
-    async fn verify_bearer(&self, token: &str) -> Result<Option<Principal>, ControlPlaneError> {
+    async fn verify_bearer(
+        &self,
+        token: &str,
+    ) -> Result<Option<VerifiedBearer>, ControlPlaneError> {
         let resp: Option<VerifyBearerResponse> = self
             .post(
                 "/internal/verify-bearer",
@@ -135,9 +139,10 @@ impl ControlPlane for FilesControlPlane {
                 },
             )
             .await?;
-        // The wire enum is the bearer-reachable subset of Principal; the
-        // From impl (in internal_api) is the single mapping site.
-        Ok(resp.map(|r| Principal::from(r.principal)))
+        // The wire body is the resolved identity plus its credential;
+        // `From<VerifyBearerResponse>` (in internal_api) is the single
+        // mapping site.
+        Ok(resp.map(VerifiedBearer::from))
     }
 
     async fn tagma_profiles(
@@ -223,12 +228,35 @@ impl ControlPlane for FilesControlPlane {
     }
 }
 
-/// The axum extractor resolving a request to a [`Principal`] via the
-/// registry. Bearer preferred, cookie fallback, neither -> 401. `None` from
-/// a verify call (revoked/unknown) -> 401: revocation takes effect on the
-/// very next request.
+/// The axum extractor resolving a request to a [`Principal`] and the credential
+/// record it presented, via the registry. Bearer preferred, cookie fallback,
+/// neither -> 401. `None` from a verify call (revoked/unknown) -> 401:
+/// revocation takes effect on the very next request.
 #[derive(Debug, Clone)]
-pub struct AuthPrincipal(pub Principal);
+pub struct AuthPrincipal {
+    pub principal: Principal,
+    /// `None` when no stored record carried the call: the session cookie is a
+    /// potency of the user's identity, not a grant a record can narrow.
+    pub credential: Option<CredentialScope>,
+}
+
+impl AuthPrincipal {
+    /// A caller with no credential record behind it (a session cookie, a
+    /// handler test).
+    pub fn unscoped(principal: Principal) -> Self {
+        Self {
+            principal,
+            credential: None,
+        }
+    }
+}
+
+/// Does this call carry `perm`? A caller with no record passes; a credential
+/// passes only the strings its set names, so an emptied set authenticates and
+/// does nothing.
+pub fn require_perm(auth: &AuthPrincipal, perm: &str) -> Result<(), ApiError> {
+    kallipai_archeion_common::perm::require(auth.credential.as_ref(), perm)
+}
 
 impl FromRequestParts<AppState> for AuthPrincipal {
     type Rejection = ApiError;
@@ -239,13 +267,16 @@ impl FromRequestParts<AppState> for AuthPrincipal {
     ) -> Result<Self, Self::Rejection> {
         // Prefer an explicit bearer credential when present.
         if let Ok(bearer) = extract_bearer_token(&parts.headers) {
-            let principal = state
+            let verified = state
                 .control
                 .verify_bearer(bearer)
                 .await
                 .map_err(control_unavailable)?
                 .ok_or_else(|| ApiError::unauthorized("invalid token"))?;
-            return Ok(AuthPrincipal(principal));
+            return Ok(AuthPrincipal {
+                principal: verified.principal,
+                credential: verified.credential,
+            });
         }
         // Otherwise fall back to the session cookie.
         if let Some(cookie_value) = read_session_cookie(&parts.headers) {
@@ -255,7 +286,7 @@ impl FromRequestParts<AppState> for AuthPrincipal {
                 .await
                 .map_err(control_unavailable)?
                 .ok_or_else(|| ApiError::unauthorized("invalid session"))?;
-            return Ok(AuthPrincipal(Principal::User(user.user_id)));
+            return Ok(AuthPrincipal::unscoped(Principal::User(user.user_id)));
         }
         Err(ApiError::unauthorized("authentication required"))
     }

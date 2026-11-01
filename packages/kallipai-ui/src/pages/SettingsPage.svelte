@@ -23,6 +23,7 @@
   import PasskeyManager from "../components/settings/PasskeyManager.svelte";
   import LinkedAccounts from "../components/settings/LinkedAccounts.svelte";
   import EmailManager from "../components/settings/EmailManager.svelte";
+  import AccessTokens from "../components/settings/AccessTokens.svelte";
   import LightSwitch from "../components/LightSwitch.svelte";
   import LanguageSwitch from "../components/LanguageSwitch.svelte";
   import { Switch } from "@skeletonlabs/skeleton-svelte";
@@ -109,6 +110,19 @@
       !archeionSession.passkeysLoaded
     ) {
       archeionSession.refreshPasskeys();
+    }
+  });
+
+  // Personal access tokens: one list fetch when the signed-in user resolves.
+  // The section itself re-renders from the store; the loaded flag keeps a
+  // transient failure from refetching on every render.
+  $effect(() => {
+    if (
+      mode === "online" &&
+      archeionSession.user &&
+      !archeionSession.tokensLoaded
+    ) {
+      archeionSession.refreshTokens();
     }
   });
 
@@ -386,6 +400,8 @@
           {onMint}
           onClear={() => (archeionSession.pairingCode = null)}
         />
+
+        <AccessTokens />
       {/if}
     {:else}
       <section class="space-y-3">

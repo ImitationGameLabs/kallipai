@@ -18,7 +18,6 @@ use kallipai_archeion_common::internal_api::{
     TunnelProofTsRequest, TunnelProofTsResponse, UserIdentitiesRequest, UserIdentitiesResponse,
     UserIdentityByUsernameRequest, UserIdentityResponse, UserSearchRequest, UserSearchResponse,
     VerifyBearerRequest, VerifyBearerResponse, VerifySessionRequest, VerifySessionResponse,
-    WirePrincipal,
 };
 
 use crate::control_plane::DbControlPlane;
@@ -87,22 +86,17 @@ async fn verify_bearer(
     State(state): State<SharedState>,
     axum::Json(req): axum::Json<VerifyBearerRequest>,
 ) -> Result<axum::Json<VerifyBearerResponse>, HandlerError> {
-    let principal = control(&state)
+    let verified = control(&state)
         .verify_bearer(&req.token)
         .await
         .map_err(backend)?;
-    let Some(principal) = principal else {
+    let Some(verified) = verified else {
         return Err(NOT_FOUND);
     };
-    // `verify_bearer` can only resolve Admin or Tagma by construction (the
-    // deputy guard). A `User` here is unreachable; surface it as a loud 500
-    // rather than a silent 404 so a regression is not mistaken for a miss.
-    let principal = WirePrincipal::try_from(principal).map_err(|rejected| {
-        backend(format!(
-            "unexpected {rejected:?} principal from verify_bearer"
-        ))
-    })?;
-    Ok(axum::Json(VerifyBearerResponse { principal }))
+    // The wire body carries the identity plus the credential that resolved
+    // it: an admin bearer has none, a tagma and a personal access token each
+    // name their record and its permission set.
+    Ok(axum::Json(VerifyBearerResponse::from(&verified)))
 }
 
 async fn tagma_profiles(

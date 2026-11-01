@@ -1293,3 +1293,124 @@ async fn zstd_policy_round_trips_through_self_identified_reads() {
     assert_eq!(response.headers()["content-range"], "bytes 1000-1099/65536");
     assert_eq!(bytes_of(response).await, content[1000..1100]);
 }
+
+/// The permission string is a second door on top of the ACL, never a
+/// replacement: a tagma whose credential is narrowed to reads still reads what
+/// the ACL allows and is refused at write, delete and send; emptied, the
+/// credential keeps authenticating and every content route turns it away. The
+/// session cookie carries no record, so it keeps its identity's reach.
+#[tokio::test]
+async fn a_narrowed_tagma_credential_is_refused_where_it_lacks_the_string() {
+    use kallipai_archeion_common::perm::{FILES_RECORD_READ, FILES_RECORD_WRITE};
+
+    let world = TestWorld::new().await;
+    let auth = bearer(&world.t1_token);
+    let (record_id, _) = put_ok(
+        &world,
+        auth.clone(),
+        &user1_shared(&world, "scoped.txt"),
+        b"scoped",
+    )
+    .await;
+
+    // The enrollment set: all three files strings, so every route answers.
+    assert_eq!(
+        get(&world, auth.clone(), &record_id).await.status(),
+        StatusCode::OK
+    );
+
+    // Reads only.
+    world.mock.set_perms(&world.t1_token, &[FILES_RECORD_READ]);
+    assert_eq!(
+        get(&world, auth.clone(), &record_id).await.status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        put(
+            &world,
+            auth.clone(),
+            &user1_shared(&world, "scoped-refused.txt"),
+            b"nope"
+        )
+        .await
+        .status(),
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        send(
+            &world,
+            auth.clone(),
+            &record_id,
+            serde_json::json!({ "to_user": world.user2.to_string() })
+        )
+        .await
+        .status(),
+        StatusCode::FORBIDDEN
+    );
+    let response = respond(
+        &world.router,
+        axum::http::Method::DELETE,
+        &format!("/{record_id}"),
+        Some(auth.clone()),
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+    // Refused calls wrote and removed nothing.
+    assert_eq!(
+        get(&world, cookie_for(&world, 1), &record_id)
+            .await
+            .status(),
+        StatusCode::OK
+    );
+
+    // Emptied: still a live credential, allowed nothing.
+    world.mock.set_perms(&world.t1_token, &[]);
+    assert_eq!(
+        get(&world, auth.clone(), &record_id).await.status(),
+        StatusCode::FORBIDDEN
+    );
+    let response = respond(
+        &world.router,
+        axum::http::Method::GET,
+        "/?space=shared",
+        Some(auth),
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+    // The session is not a record and keeps its reach.
+    assert_eq!(
+        get(&world, cookie_for(&world, 1), &record_id)
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    let response = respond(
+        &world.router,
+        axum::http::Method::GET,
+        "/?space=shared",
+        Some(cookie_for(&world, 1)),
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // A write-only credential is the mirror image: it stores but cannot read.
+    world.mock.set_perms(&world.t2_token, &[FILES_RECORD_WRITE]);
+    put_ok(
+        &world,
+        bearer(&world.t2_token),
+        &user1_shared(&world, "write-only.txt"),
+        b"written",
+    )
+    .await;
+    assert_eq!(
+        get(&world, bearer(&world.t2_token), &record_id)
+            .await
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+}

@@ -10,11 +10,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use crate::db::Db;
-use crate::db::entity::{emails, passkeys, tagma_tokens, tagmata, users};
+use crate::db::entity::{emails, passkeys, tagmata, users};
 use crate::db::migration::Migrator;
 use kallipai_archeion_common::bytes::Ed25519PublicKey;
 use kallipai_archeion_common::ids::{TagmaId, UserId};
-use kallipai_common::authtoken::{MintedToken, TokenHash};
+use kallipai_common::authtoken::TokenHash;
 use sea_orm::Statement;
 use sea_orm::{ActiveModelTrait, ActiveValue::Set, ConnectionTrait, Database, DatabaseBackend};
 use sea_orm_migration::MigratorTrait;
@@ -170,7 +170,7 @@ async fn sweep_dead_test_dbs(port: u16) {
 /// same-named database first (pid reuse). Dead databases disappear with the
 /// container (`docker rm -f kallipai-testcontainers-pg-16alpine`); no other cleanup
 /// exists by design.
-pub(crate) async fn setup_test_db() -> Db {
+pub(crate) async fn create_test_db() -> Db {
     let port = *shared_pg_port().await;
     let n = DB_COUNTER.fetch_add(1, Ordering::Relaxed);
     let db_name = format!("archeion_test_{}_{n}", std::process::id());
@@ -192,7 +192,13 @@ pub(crate) async fn setup_test_db() -> Db {
     .expect("create test database");
     drop(root);
     let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/{db_name}");
-    let db = Database::connect(&url).await.expect("connect to test db");
+    Database::connect(&url).await.expect("connect to test db")
+}
+
+/// [`create_test_db`] with the full migration set applied: the shape every
+/// handler test starts from.
+pub(crate) async fn setup_test_db() -> Db {
+    let db = create_test_db().await;
     Migrator::up(&db, None).await.expect("run migrations");
     db
 }
@@ -395,8 +401,6 @@ pub async fn seed_tagma_with_id(
     tagma_id: TagmaId,
     pinned_key: Ed25519PublicKey,
 ) -> (TagmaId, String) {
-    let token = MintedToken::generate(TAGMA).expect("getrandom failed");
-    let plaintext = token.secret().to_string();
     let now = OffsetDateTime::now_utc();
     tagmata::ActiveModel {
         id: Set(tagma_id.to_string()),
@@ -414,15 +418,24 @@ pub async fn seed_tagma_with_id(
     .insert(&state.db)
     .await
     .expect("insert tagma");
-    tagma_tokens::ActiveModel {
-        token_hash: Set(token.hash().as_bytes().to_vec()),
-        tagma_id: Set(tagma_id.to_string()),
-        issued_at: Set(now),
-    }
-    .insert(&state.db)
+    // The credential goes through the real mint path so the fixture carries the
+    // `create` event a live enrollment leaves behind.
+    let minted = crate::credentials::create(
+        &state.db,
+        TAGMA,
+        crate::credentials::NewCredential {
+            owner: crate::credentials::Owner::Tagma,
+            owner_id: tagma_id.as_ref(),
+            name: "enrollment",
+            perms: &kallipai_archeion_common::perm::tagma_defaults(),
+            created_by: owner.as_ref(),
+            actor: None,
+            expires_at: None,
+        },
+    )
     .await
     .expect("insert tagma token");
-    (tagma_id, plaintext)
+    (tagma_id, minted.plaintext)
 }
 
 // Note: data-plane fixtures (seed_conversation, seed_presence) lived here when

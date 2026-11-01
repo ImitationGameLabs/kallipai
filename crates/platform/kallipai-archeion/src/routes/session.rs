@@ -6,7 +6,7 @@
 //! session-token primitives (`build_set_cookie`, `read_session_cookie`, ...);
 //! this module is the HTTP route layer that consumes them.
 
-use crate::auth::{AuthPrincipal, require_user};
+use crate::auth::{AuthPrincipal, require_perm, require_session, require_user};
 use crate::db::entity::{emails, external_identities, passkeys, sessions, users};
 use crate::db::map_db_err;
 use crate::routes::oauth::ExternalIdentitySummary;
@@ -21,6 +21,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use kallipai_archeion_common::control_plane::{LOCAL_ADMIN_PROVIDER, LOCAL_ADMIN_SUBJECT};
+use kallipai_archeion_common::perm::ARCHEION_ACCOUNT_READ;
 use kallipai_common::authtoken::TokenHash;
 use kallipai_common::protocol::ApiError;
 use sea_orm::{ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter};
@@ -43,13 +44,13 @@ pub fn router() -> Router<SharedState> {
 
 async fn logout(
     State(state): State<SharedState>,
-    AuthPrincipal(principal): AuthPrincipal,
+    auth: AuthPrincipal,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
-    // Require a signed-in user (cookie) so an anonymous token cannot force a
-    // cookie clear. The actual session row deletion is best-effort keyed by the
-    // presented cookie hash.
-    require_user(&principal)?;
+    // Require the cookie origin so neither an anonymous caller nor a personal
+    // access token can drive a session clear. The session row deletion is keyed
+    // by the presented cookie hash.
+    require_session(&auth)?;
     let Some(cookie_value) = read_session_cookie(&headers) else {
         return Err(ApiError::unauthorized("no session"));
     };
@@ -70,9 +71,10 @@ async fn logout(
 
 async fn me(
     State(state): State<SharedState>,
-    AuthPrincipal(principal): AuthPrincipal,
+    auth: AuthPrincipal,
 ) -> Result<Json<MeResponse>, ApiError> {
-    let user_id = require_user(&principal)?;
+    require_perm(&auth, ARCHEION_ACCOUNT_READ)?;
+    let user_id = require_user(&auth.principal)?;
     let user = users::Entity::find_by_id(user_id.to_string())
         .one(&state.db)
         .await
@@ -202,7 +204,7 @@ mod tests {
             ..
         }) = me(
             State(state),
-            AuthPrincipal(Principal::User(user_id.clone())),
+            AuthPrincipal::unscoped(Principal::User(user_id.clone())),
         )
         .await
         .expect("me ok");
@@ -224,9 +226,12 @@ mod tests {
             emails,
             primary_email,
             ..
-        }) = me(State(state), AuthPrincipal(Principal::User(user_id)))
-            .await
-            .expect("me ok");
+        }) = me(
+            State(state),
+            AuthPrincipal::unscoped(Principal::User(user_id)),
+        )
+        .await
+        .expect("me ok");
         assert_eq!(emails.len(), 1);
         assert_eq!(emails[0].address, "alice@example.test");
         assert!(emails[0].is_primary);
@@ -261,16 +266,53 @@ mod tests {
             local_admin: plain, ..
         }) = me(
             State(state.clone()),
-            AuthPrincipal(Principal::User(plain_id)),
+            AuthPrincipal::unscoped(Principal::User(plain_id)),
         )
         .await
         .expect("me ok");
         assert!(!plain);
         let Json(MeResponse {
             local_admin: admin, ..
-        }) = me(State(state), AuthPrincipal(Principal::User(admin_id)))
-            .await
-            .expect("me ok");
+        }) = me(
+            State(state),
+            AuthPrincipal::unscoped(Principal::User(admin_id)),
+        )
+        .await
+        .expect("me ok");
         assert!(admin);
+    }
+
+    /// `/me` answers on the account-read string: a credential without it is a
+    /// 403, with it a 200, and a session (no record) needs no string at all.
+    #[tokio::test]
+    async fn me_requires_the_account_read_string() {
+        let state = make_state().await;
+        let user_id = seed_user(&state, "alice").await;
+
+        let scoped = |perms: &[&str]| {
+            AuthPrincipal::scoped(
+                Principal::User(user_id.clone()),
+                kallipai_archeion_common::control_plane::CredentialScope {
+                    token: kallipai_archeion_common::ids::TokenId::from("fixture".to_string()),
+                    perms: kallipai_archeion_common::perm::PermSet::from_known(
+                        perms.iter().copied(),
+                    )
+                    .expect("known strings"),
+                },
+            )
+        };
+
+        let err = me(State(state.clone()), scoped(&[]))
+            .await
+            .map(|_| ())
+            .expect_err("a credential that may do nothing");
+        assert_eq!(err.status, 403);
+
+        let _ = me(
+            State(state.clone()),
+            scoped(&[kallipai_archeion_common::perm::ARCHEION_ACCOUNT_READ]),
+        )
+        .await
+        .expect("the read string suffices");
     }
 }

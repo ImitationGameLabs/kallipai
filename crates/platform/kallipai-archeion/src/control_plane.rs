@@ -5,18 +5,19 @@
 
 use kallipai_archeion_common::bytes::Ed25519PublicKey;
 use kallipai_archeion_common::control_plane::{
-    ControlPlane, ControlPlaneError, EnrollmentLookup, LOCAL_ADMIN_PROVIDER, LOCAL_ADMIN_SUBJECT,
-    TagmaProfile, UserIdentity, VerifiedSession,
+    ControlPlane, ControlPlaneError, CredentialScope, EnrollmentLookup, LOCAL_ADMIN_PROVIDER,
+    LOCAL_ADMIN_SUBJECT, TagmaProfile, UserIdentity, VerifiedBearer, VerifiedSession,
 };
-use kallipai_archeion_common::ids::{TagmaId, UserId};
+use kallipai_archeion_common::ids::{TagmaId, TokenId, UserId};
 use kallipai_archeion_common::principal::Principal;
 use kallipai_common::authtoken::TokenHash;
 use sea_orm::sea_query::{Expr, LikeExpr, Query};
 use sea_orm::{ColumnTrait, EntityTrait, FromQueryResult, QueryFilter, QueryOrder, QuerySelect};
 use time::OffsetDateTime;
 
+use crate::credentials;
 use crate::db::Db;
-use crate::db::entity::{emails, external_identities, sessions, tagma_tokens, tagmata, users};
+use crate::db::entity::{access_tokens, emails, external_identities, sessions, tagmata, users};
 
 /// The registry, DB-backed. Cheap to construct (a cloned `Db` handle + the admin
 /// hash), so the archeion control-plane's own `AuthPrincipal` extractor and the
@@ -32,6 +33,32 @@ impl DbControlPlane {
         Self {
             db,
             admin_token_hash,
+        }
+    }
+}
+
+/// How stale `last_used_at` may get before another request writes it. The
+/// timestamp is for operators; a per-request write would be a per-request
+/// transaction on the hottest read path in the platform.
+const LAST_USED_REFRESH: time::Duration = time::Duration::seconds(60);
+
+impl DbControlPlane {
+    /// Stamp `last_used_at`, throttled to once per [`LAST_USED_REFRESH`]. A
+    /// failure is logged and swallowed: it is an operator convenience, never
+    /// an authorization input, so it must not fail a request.
+    async fn touch_last_used(&self, token_id: &str, now: OffsetDateTime) {
+        let cutoff = now - LAST_USED_REFRESH;
+        let stale = Expr::col(access_tokens::Column::LastUsedAt)
+            .is_null()
+            .or(Expr::col(access_tokens::Column::LastUsedAt).lt(cutoff));
+        let result = access_tokens::Entity::update_many()
+            .col_expr(access_tokens::Column::LastUsedAt, Expr::value(now))
+            .filter(access_tokens::Column::Id.eq(token_id))
+            .filter(stale)
+            .exec(&self.db)
+            .await;
+        if let Err(error) = result {
+            tracing::warn!(%error, token_id, "access-token last-used stamp failed");
         }
     }
 }
@@ -182,47 +209,104 @@ impl ControlPlane for DbControlPlane {
         }))
     }
 
-    async fn verify_bearer(&self, token: &str) -> Result<Option<Principal>, ControlPlaneError> {
+    async fn verify_bearer(
+        &self,
+        token: &str,
+    ) -> Result<Option<VerifiedBearer>, ControlPlaneError> {
         let hash = TokenHash::of(token);
         if self.admin_token_hash.ct_eq(&hash) {
-            return Ok(Some(Principal::Admin));
+            // The admin bearer is a bare secret, not a record: no id to name
+            // in a log line and no permission set to bound.
+            return Ok(Some(VerifiedBearer {
+                principal: Principal::Admin,
+                credential: None,
+            }));
         }
-        let row = tagma_tokens::Entity::find()
-            .filter(tagma_tokens::Column::TokenHash.eq(hash.as_bytes().to_vec()))
+        let row = access_tokens::Entity::find()
+            .filter(access_tokens::Column::TokenHash.eq(hash.as_bytes().to_vec()))
             .one(&self.db)
             .await
             .map_err(map_err)?;
         let Some(row) = row else {
             return Ok(None);
         };
-        // A revoked tagma never authenticates (the unified revoke flag cuts the
-        // tagma off on its next request).
-        let tagma = tagmata::Entity::find_by_id(row.tagma_id.clone())
-            .one(&self.db)
-            .await
-            .map_err(map_err)?;
-        let Some(tagma) = tagma else {
-            return Ok(None);
-        };
-        if tagma.revoked_at.is_some() {
+        let now = OffsetDateTime::now_utc();
+        // A revoked or expired record is no credential at all -- the caller
+        // answers 401 -- rather than a credential that entitles nothing.
+        if row.revoked_at.is_some() {
             return Ok(None);
         }
-        // A tagma owned by a disabled account never authenticates either. A
-        // missing owner is unreachable (FK ON DELETE RESTRICT); treat it as
-        // disabled so this path fails closed, matching `tagma_profiles`'s owner
-        // arm.
-        let owner_disabled = match users::Entity::find_by_id(tagma.owner_user_id.clone())
-            .one(&self.db)
-            .await
-            .map_err(map_err)?
-        {
-            Some(owner) => owner.disabled_at.is_some(),
-            None => true,
-        };
-        if owner_disabled {
+        if row.expires_at.is_some_and(|expires_at| expires_at <= now) {
             return Ok(None);
         }
-        Ok(Some(Principal::Tagma(TagmaId::from(row.tagma_id))))
+        let Some(perms) = credentials::perms_of(&row) else {
+            tracing::warn!(
+                token_id = %row.id,
+                "access token carries a permission string outside the vocabulary"
+            );
+            return Ok(None);
+        };
+        let principal = match row.owner_kind.as_str() {
+            "tagma" => {
+                // A revoked tagma never authenticates (the unified revoke flag
+                // cuts the tagma off on its next request), and neither does a
+                // tagma whose owning account is disabled.
+                let tagma = tagmata::Entity::find_by_id(row.owner_id.clone())
+                    .one(&self.db)
+                    .await
+                    .map_err(map_err)?;
+                let Some(tagma) = tagma else {
+                    return Ok(None);
+                };
+                if tagma.revoked_at.is_some() {
+                    return Ok(None);
+                }
+                // A missing owner is unreachable (FK ON DELETE RESTRICT); treat
+                // it as disabled so this path fails closed, matching
+                // `tagma_profiles`'s owner arm.
+                let owner_disabled = match users::Entity::find_by_id(tagma.owner_user_id)
+                    .one(&self.db)
+                    .await
+                    .map_err(map_err)?
+                {
+                    Some(owner) => owner.disabled_at.is_some(),
+                    None => true,
+                };
+                if owner_disabled {
+                    return Ok(None);
+                }
+                Principal::Tagma(TagmaId::from(tagma.id))
+            }
+            "user" => {
+                let owner = users::Entity::find_by_id(row.owner_id.clone())
+                    .one(&self.db)
+                    .await
+                    .map_err(map_err)?;
+                let Some(owner) = owner else {
+                    return Ok(None);
+                };
+                if owner.disabled_at.is_some() {
+                    return Ok(None);
+                }
+                Principal::User(UserId::from(owner.id))
+            }
+            other => {
+                tracing::warn!(
+                    token_id = %row.id,
+                    owner_kind = other,
+                    "access token has an unknown owner kind"
+                );
+                return Ok(None);
+            }
+        };
+        self.touch_last_used(&row.id, now).await;
+        Ok(Some(VerifiedBearer {
+            principal,
+            credential: Some(CredentialScope {
+                token: TokenId::from(row.id),
+                perms,
+            }),
+        }))
     }
 
     async fn tagma_profiles(
@@ -594,10 +678,20 @@ mod tests {
         let (tagma_id, token) = seed_tagma(&state, &user_id, Ed25519PublicKey(vec![0u8; 32])).await;
 
         let control = cp(&state);
-        assert!(matches!(
-            control.verify_bearer(&token).await.unwrap(),
-            Some(Principal::Tagma(id)) if id == tagma_id
-        ));
+        let verified = control
+            .verify_bearer(&token)
+            .await
+            .unwrap()
+            .expect("a live credential resolves");
+        assert!(matches!(verified.principal, Principal::Tagma(id) if id == tagma_id));
+        let credential = verified
+            .credential
+            .expect("a tagma bearer is a record, not a bare secret");
+        assert!(
+            credential
+                .perms
+                .contains(kallipai_archeion_common::perm::FILES_RECORD_READ)
+        );
 
         let row = tagmata::Entity::find_by_id(tagma_id.to_string())
             .one(&state.db)
@@ -802,5 +896,129 @@ mod tests {
         assert_eq!(hits.len(), 2);
         let hits = control.search_users("u-", u32::MAX).await.unwrap();
         assert_eq!(hits.len(), 3);
+    }
+
+    /// Seed a personal access token for `user_id`; returns its plaintext.
+    async fn seed_user_token(
+        state: &crate::state::SharedState,
+        user_id: &kallipai_archeion_common::ids::UserId,
+        expires_at: Option<OffsetDateTime>,
+        revoked_at: Option<OffsetDateTime>,
+    ) -> String {
+        let token = MintedToken::generate(crate::token::PAT).expect("getrandom failed");
+        let plaintext = token.secret().to_string();
+        let masked = kallipai_common::authtoken::mask_token(&plaintext, crate::token::PAT);
+        crate::db::entity::access_tokens::ActiveModel {
+            id: Set(uuid::Uuid::new_v4().to_string()),
+            owner_kind: Set("user".to_string()),
+            owner_id: Set(user_id.to_string()),
+            name: Set("laptop".to_string()),
+            token_hash: Set(token.hash().as_bytes().to_vec()),
+            masked: Set(Some(masked)),
+            perms: Set(serde_json::json!(
+                kallipai_archeion_common::perm::PAT_DEFAULTS
+            )),
+            created_at: Set(OffsetDateTime::now_utc()),
+            created_by: Set(user_id.to_string()),
+            expires_at: Set(expires_at),
+            last_used_at: Set(None),
+            revoked_at: Set(revoked_at),
+        }
+        .insert(&state.db)
+        .await
+        .expect("seed user token");
+        plaintext
+    }
+
+    /// A personal access token resolves as its owning user, carries its
+    /// stored permission set, and stamps its first use.
+    #[tokio::test]
+    async fn verify_bearer_resolves_a_user_token_as_its_owner() {
+        let state = make_state().await;
+        let user_id = seed_user(&state, "owner").await;
+        let token = seed_user_token(&state, &user_id, None, None).await;
+
+        let verified = cp(&state)
+            .verify_bearer(&token)
+            .await
+            .unwrap()
+            .expect("a live personal token resolves");
+        assert!(matches!(verified.principal, Principal::User(id) if id == user_id));
+        let credential = verified.credential.expect("a PAT is a record");
+        assert_eq!(
+            credential.perms,
+            kallipai_archeion_common::perm::pat_defaults()
+        );
+
+        let row = crate::db::entity::access_tokens::Entity::find()
+            .filter(crate::db::entity::access_tokens::Column::Id.eq(credential.token.to_string()))
+            .one(&state.db)
+            .await
+            .unwrap()
+            .expect("the record exists");
+        assert!(row.last_used_at.is_some(), "first use stamps last_used_at");
+    }
+
+    /// Expired, revoked, and owner-disabled all mean the same thing at this
+    /// boundary: no credential. The caller answers 401, never a principal
+    /// that may do nothing.
+    #[tokio::test]
+    async fn verify_bearer_rejects_expired_revoked_and_disabled() {
+        let state = make_state().await;
+        let now = OffsetDateTime::now_utc();
+        let control = cp(&state);
+
+        let owner = seed_user(&state, "owner").await;
+        let expired = seed_user_token(&state, &owner, Some(now - Duration::minutes(1)), None).await;
+        assert!(control.verify_bearer(&expired).await.unwrap().is_none());
+
+        let revoked = seed_user_token(&state, &owner, None, Some(now)).await;
+        assert!(control.verify_bearer(&revoked).await.unwrap().is_none());
+
+        let disabled = seed_user(&state, "disabled").await;
+        let token = seed_user_token(&state, &disabled, None, None).await;
+        let row = users::Entity::find_by_id(disabled.to_string())
+            .one(&state.db)
+            .await
+            .unwrap()
+            .unwrap();
+        let mut am: users::ActiveModel = row.into();
+        am.disabled_at = Set(Some(now));
+        am.update(&state.db).await.unwrap();
+        assert!(control.verify_bearer(&token).await.unwrap().is_none());
+    }
+
+    /// A stored permission string outside the vocabulary leaves the record
+    /// unusable: the registry will not guess what it meant.
+    #[tokio::test]
+    async fn verify_bearer_rejects_an_unknown_permission_string() {
+        let state = make_state().await;
+        let user_id = seed_user(&state, "owner").await;
+        let token = MintedToken::generate(crate::token::PAT).expect("getrandom failed");
+        crate::db::entity::access_tokens::ActiveModel {
+            id: Set(uuid::Uuid::new_v4().to_string()),
+            owner_kind: Set("user".to_string()),
+            owner_id: Set(user_id.to_string()),
+            name: Set("typo".to_string()),
+            token_hash: Set(token.hash().as_bytes().to_vec()),
+            masked: Set(None),
+            perms: Set(serde_json::json!(["files:everything"])),
+            created_at: Set(OffsetDateTime::now_utc()),
+            created_by: Set(user_id.to_string()),
+            expires_at: Set(None),
+            last_used_at: Set(None),
+            revoked_at: Set(None),
+        }
+        .insert(&state.db)
+        .await
+        .expect("seed record");
+
+        assert!(
+            cp(&state)
+                .verify_bearer(token.secret())
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 }

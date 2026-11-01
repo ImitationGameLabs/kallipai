@@ -22,8 +22,9 @@ use tracing::Instrument as _;
 use uuid::Uuid;
 
 use crate::acl::{self, Action};
-use crate::auth::AuthPrincipal;
+use crate::auth::{AuthPrincipal, require_perm};
 use crate::state::AppState;
+use kallipai_archeion_common::perm;
 use kallipai_archeion_common::principal::Principal;
 use kallipai_common::protocol::ApiError;
 
@@ -50,9 +51,11 @@ pub struct SendResponse {
 pub async fn send_file(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
-    AuthPrincipal(principal): AuthPrincipal,
+    auth: AuthPrincipal,
     axum::Json(request): axum::Json<SendRequest>,
 ) -> Result<Response, ApiError> {
+    require_perm(&auth, perm::FILES_DELIVERY_WRITE)?;
+    let principal = auth.principal;
     let target = match (request.to_user, request.to_tagma) {
         (Some(user), None) => Target::User(user),
         (None, Some(tagma)) => Target::Tagma(tagma),

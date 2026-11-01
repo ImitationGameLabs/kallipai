@@ -50,7 +50,9 @@ pub fn router() -> Router<SharedState> {
 /// `GET /admin` -- admin-gated probe. Returns 200 only for a valid
 /// `sk-admin-` bearer; any other credential is rejected by the extractor
 /// (`AuthPrincipal`) or by `require_admin`.
-async fn admin_root(AuthPrincipal(principal): AuthPrincipal) -> Result<&'static str, ApiError> {
+async fn admin_root(
+    AuthPrincipal { principal, .. }: AuthPrincipal,
+) -> Result<&'static str, ApiError> {
     require_admin(&principal)?;
     Ok("kallipai-archeion admin")
 }
@@ -60,7 +62,7 @@ async fn admin_root(AuthPrincipal(principal): AuthPrincipal) -> Result<&'static 
 /// hash; the old token stops authenticating on the next request.
 async fn rotate_admin_token(
     State(state): State<SharedState>,
-    AuthPrincipal(principal): AuthPrincipal,
+    AuthPrincipal { principal, .. }: AuthPrincipal,
 ) -> Result<Json<RotateAdminTokenResponse>, ApiError> {
     require_admin(&principal)?;
     if state.admin_token_pinned {
@@ -132,7 +134,7 @@ fn decode_cursor(s: &str) -> Result<(OffsetDateTime, String), ApiError> {
 
 async fn create_enrollment_code(
     State(state): State<SharedState>,
-    AuthPrincipal(principal): AuthPrincipal,
+    AuthPrincipal { principal, .. }: AuthPrincipal,
     Json(req): Json<CreateEnrollmentCodeRequest>,
 ) -> Result<Json<CreateEnrollmentCodeResponse>, ApiError> {
     require_admin(&principal)?;
@@ -162,7 +164,7 @@ async fn create_enrollment_code(
 
 async fn list_users(
     State(state): State<SharedState>,
-    AuthPrincipal(principal): AuthPrincipal,
+    AuthPrincipal { principal, .. }: AuthPrincipal,
     Query(query): Query<PageQuery>,
 ) -> Result<Json<Page<UserSummary>>, ApiError> {
     require_admin(&principal)?;
@@ -248,7 +250,7 @@ async fn primary_emails_by_account(
 
 async fn update_user(
     State(state): State<SharedState>,
-    AuthPrincipal(principal): AuthPrincipal,
+    AuthPrincipal { principal, .. }: AuthPrincipal,
     Path(id): Path<String>,
     Json(req): Json<UpdateUserRequest>,
 ) -> Result<Json<UserSummary>, ApiError> {
@@ -308,7 +310,7 @@ async fn update_user(
 
 async fn list_user_passkeys(
     State(state): State<SharedState>,
-    AuthPrincipal(principal): AuthPrincipal,
+    AuthPrincipal { principal, .. }: AuthPrincipal,
     Path(user_id): Path<String>,
 ) -> Result<Json<Vec<PasskeySummary>>, ApiError> {
     require_admin(&principal)?;
@@ -329,7 +331,7 @@ async fn list_user_passkeys(
 
 async fn revoke_passkey(
     State(state): State<SharedState>,
-    AuthPrincipal(principal): AuthPrincipal,
+    AuthPrincipal { principal, .. }: AuthPrincipal,
     Path(id): Path<Uuid>,
 ) -> Result<axum::http::StatusCode, ApiError> {
     require_admin(&principal)?;
@@ -382,7 +384,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let out = dir.path().join("admin-token.env");
         let state = make_state_with_admin(Some(out.clone()), false).await;
-        let admin = AuthPrincipal(Principal::Admin);
+        let admin = AuthPrincipal::unscoped(Principal::Admin);
         let resp = rotate_admin_token(State(state.clone()), admin)
             .await
             .expect("rotate")
@@ -409,16 +411,19 @@ mod tests {
     async fn rotate_requires_admin() {
         let state = make_state().await;
         let user_id = seed_user(&state, "u").await;
-        let err = rotate_admin_token(State(state), AuthPrincipal(Principal::User(user_id)))
-            .await
-            .expect_err("non-admin must be rejected");
+        let err = rotate_admin_token(
+            State(state),
+            AuthPrincipal::unscoped(Principal::User(user_id)),
+        )
+        .await
+        .expect_err("non-admin must be rejected");
         assert_eq!(err.status, 403);
     }
 
     #[tokio::test]
     async fn rotate_rejects_pinned_token() {
         let state = make_state_with_admin(None, true).await;
-        let err = rotate_admin_token(State(state), AuthPrincipal(Principal::Admin))
+        let err = rotate_admin_token(State(state), AuthPrincipal::unscoped(Principal::Admin))
             .await
             .expect_err("pinned token must be rejected");
         assert_eq!(err.status, 409);
@@ -433,9 +438,12 @@ mod tests {
             .read()
             .expect("admin token lock")
             .clone();
-        let err = rotate_admin_token(State(state.clone()), AuthPrincipal(Principal::Admin))
-            .await
-            .expect_err("unwritable output must fail");
+        let err = rotate_admin_token(
+            State(state.clone()),
+            AuthPrincipal::unscoped(Principal::Admin),
+        )
+        .await
+        .expect_err("unwritable output must fail");
         assert_eq!(err.status, 500);
         assert_eq!(
             *state.admin_token_hash.read().expect("admin token lock"),
@@ -447,13 +455,13 @@ mod tests {
         let state = make_state().await;
         // A non-admin principal (a regular user) is rejected with 403.
         let user_id = seed_user(&state, "u").await;
-        let err = admin_root(AuthPrincipal(Principal::User(user_id)))
+        let err = admin_root(AuthPrincipal::unscoped(Principal::User(user_id)))
             .await
             .expect_err("non-admin must be rejected");
         assert_eq!(err.status, 403);
         // The admin principal passes.
         assert_eq!(
-            admin_root(AuthPrincipal(Principal::Admin))
+            admin_root(AuthPrincipal::unscoped(Principal::Admin))
                 .await
                 .expect("admin passes"),
             "kallipai-archeion admin"
@@ -463,7 +471,7 @@ mod tests {
     #[tokio::test]
     async fn enrollment_code_rejects_unknown_user() {
         let state = make_state().await;
-        let admin = AuthPrincipal(Principal::Admin);
+        let admin = AuthPrincipal::unscoped(Principal::Admin);
         match create_enrollment_code(
             State(state),
             admin,
@@ -483,7 +491,7 @@ mod tests {
     async fn enrollment_code_for_known_user() {
         let state = make_state().await;
         let user_id = seed_user(&state, "owner").await;
-        let admin = AuthPrincipal(Principal::Admin);
+        let admin = AuthPrincipal::unscoped(Principal::Admin);
         let resp = create_enrollment_code(
             State(state),
             admin,
@@ -523,7 +531,7 @@ mod tests {
     #[tokio::test]
     async fn users_list_paginates() {
         let state = make_state().await;
-        let admin = AuthPrincipal(Principal::Admin);
+        let admin = AuthPrincipal::unscoped(Principal::Admin);
         let mut all = Vec::new();
         for i in 0..3 {
             all.push(seed_user(&state, &format!("u{i}")).await.to_string());
@@ -573,7 +581,7 @@ mod tests {
     #[tokio::test]
     async fn disable_then_enable_user_round_trips() {
         let state = make_state().await;
-        let admin = AuthPrincipal(Principal::Admin);
+        let admin = AuthPrincipal::unscoped(Principal::Admin);
         let user_id = seed_user(&state, "owner").await;
 
         // Disable -> disabled_at is set.
@@ -621,7 +629,7 @@ mod tests {
     #[tokio::test]
     async fn update_unknown_user_404() {
         let state = make_state().await;
-        let admin = AuthPrincipal(Principal::Admin);
+        let admin = AuthPrincipal::unscoped(Principal::Admin);
         match update_user(
             State(state),
             admin,
@@ -640,7 +648,7 @@ mod tests {
     #[tokio::test]
     async fn list_passkeys_for_user() {
         let state = make_state().await;
-        let admin = AuthPrincipal(Principal::Admin);
+        let admin = AuthPrincipal::unscoped(Principal::Admin);
         let user_id = seed_user(&state, "owner").await;
         let pk_id = seed_passkey(&state, user_id.as_ref()).await;
 
@@ -669,7 +677,7 @@ mod tests {
     #[tokio::test]
     async fn revoke_passkey_hard_deletes_and_404s_when_gone() {
         let state = make_state().await;
-        let admin = AuthPrincipal(Principal::Admin);
+        let admin = AuthPrincipal::unscoped(Principal::Admin);
         let user_id = seed_user(&state, "owner").await;
         let pk_id = seed_passkey(&state, user_id.as_ref()).await;
 
@@ -697,7 +705,7 @@ mod tests {
         // Unknown passkey -> 404.
         match revoke_passkey(
             State(make_state().await),
-            AuthPrincipal(Principal::Admin),
+            AuthPrincipal::unscoped(Principal::Admin),
             Path(Uuid::new_v4()),
         )
         .await

@@ -216,7 +216,7 @@ async fn add_passkey_begin_discoverable_writes_bare_registration_state() {
 
     let resp = add_passkey_begin(
         State(state.clone()),
-        AuthPrincipal(Principal::User(user_id.clone())),
+        AuthPrincipal::unscoped(Principal::User(user_id.clone())),
         headers,
         Query(AddPasskeyBeginParams {
             discoverable: Some(true),
@@ -277,7 +277,7 @@ async fn add_passkey_begin_cap_counts_both_add_kinds() {
 
     let err = add_passkey_begin(
         State(state),
-        AuthPrincipal(Principal::User(user_id)),
+        AuthPrincipal::unscoped(Principal::User(user_id)),
         headers,
         Query(AddPasskeyBeginParams {
             discoverable: Some(true),

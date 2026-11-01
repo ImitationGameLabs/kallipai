@@ -17,7 +17,8 @@
 use std::time::Duration;
 
 use kallipai_archeion_common::control_plane::{
-    ControlPlane, ControlPlaneError, EnrollmentLookup, TagmaProfile, UserIdentity, VerifiedSession,
+    ControlPlane, ControlPlaneError, EnrollmentLookup, TagmaProfile, UserIdentity, VerifiedBearer,
+    VerifiedSession,
 };
 use kallipai_archeion_common::ids::{TagmaId, UserId};
 use kallipai_archeion_common::internal_api::{
@@ -26,7 +27,6 @@ use kallipai_archeion_common::internal_api::{
     UserIdentityByUsernameRequest, UserIdentityResponse, VerifyBearerRequest, VerifyBearerResponse,
     VerifySessionRequest, VerifySessionResponse,
 };
-use kallipai_archeion_common::principal::Principal;
 use kallipai_common::telemetry;
 
 /// Per-call timeout for an `/internal/*` round-trip. These are tiny JSON
@@ -114,7 +114,10 @@ impl ControlPlane for HttpControlPlane {
         Ok(resp)
     }
 
-    async fn verify_bearer(&self, token: &str) -> Result<Option<Principal>, ControlPlaneError> {
+    async fn verify_bearer(
+        &self,
+        token: &str,
+    ) -> Result<Option<VerifiedBearer>, ControlPlaneError> {
         let resp: Option<VerifyBearerResponse> = self
             .post(
                 "/internal/verify-bearer",
@@ -123,9 +126,10 @@ impl ControlPlane for HttpControlPlane {
                 },
             )
             .await?;
-        // The wire enum is the bearer-reachable subset of Principal; the
-        // From impl (in internal_api) is the single mapping site.
-        Ok(resp.map(|r| Principal::from(r.principal)))
+        // The wire body is the resolved identity plus the credential that
+        // carried it; `From<VerifyBearerResponse>` (in internal_api) is the
+        // single mapping site.
+        Ok(resp.map(VerifiedBearer::from))
     }
 
     async fn tagma_profiles(
@@ -229,6 +233,7 @@ mod tests {
     use base64::Engine;
     use kallipai_archeion_common::control_plane::ControlPlane;
     use kallipai_archeion_common::ids::{TagmaId, UserId};
+    use kallipai_archeion_common::principal::Principal;
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -279,7 +284,12 @@ mod tests {
             .mount(&server)
             .await;
 
-        let principal = cp.verify_bearer("sk-tagma-y").await.unwrap().unwrap();
+        let principal = cp
+            .verify_bearer("sk-tagma-y")
+            .await
+            .unwrap()
+            .unwrap()
+            .principal;
         assert!(matches!(
             principal,
             Principal::Tagma(id) if id == TagmaId::from("t1".to_string())

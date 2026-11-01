@@ -1,10 +1,10 @@
 //! The files-service client behind `kallip file *`: a thin reqwest face
 //! over `PUT|GET /v1/files`, `GET /v1/files/{id}` and
 //! `POST /v1/files/{id}/send`. Credentials ride the spawn env
-//! (`KALLIPAI_POLIS_URL` origin, deriving the /v1/files base, plus
-//! `KALLIPAI_FILES_TOKEN` bearer) -- the enrollment-code channel shape, so
-//! the secret reaches the agent's environment without any CLI flag
-//! ever carrying it.
+//! (`KALLIPAI_POLIS_URL` origin, deriving the /v1/files base, plus a
+//! `KALLIPAI_FILES_TOKEN` bearer carrying a personal access token or a
+//! tagma credential), so the secret reaches the caller's environment
+//! without any CLI flag carrying it.
 
 use std::path::Path;
 
@@ -63,9 +63,9 @@ pub struct FilesClient {
 
 impl FilesClient {
     /// Read the configuration from the environment: `KALLIPAI_POLIS_URL`
-    /// names the platform edge origin (required -- a files token is
-    /// credentials, so there is no deployment to assume), and
-    /// `KALLIPAI_FILES_TOKEN` carries the bearer.
+    /// names the platform edge origin (required -- there is no deployment to
+    /// assume), and `KALLIPAI_FILES_TOKEN` carries a personal access token or a
+    /// tagma credential, whichever the caller was provisioned with.
     pub fn from_env() -> anyhow::Result<Self> {
         let origin =
             kallipai_common::polis::polis_origin(std::env::var("KALLIPAI_POLIS_URL").ok())?;

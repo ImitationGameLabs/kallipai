@@ -14,6 +14,13 @@ id_type! {
     /// Unique identifier for a user account.
     UserId
 }
+
+id_type! {
+    /// Unique identifier for one credential record (`access_tokens.id`). A
+    /// record outlives the secret it carries: a reset swaps the hash and
+    /// keeps this id, so audit rows point at one stable credential.
+    TokenId
+}
 id_type! {
     /// Unique identifier for a conversation.
     ConversationId

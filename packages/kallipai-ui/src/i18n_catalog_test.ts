@@ -651,6 +651,19 @@ const SYNONYMS: string[][] = [
   ["user_gateway_heading", "user_gateway_menu"],
   ["manage_agent_description", "user_gateway_set_description"],
   ["manage_profiles_providers", "user_gateway_providers"],
+  ["settings_tokens_perms", "tagma_credential_perms"],
+  [
+    "settings_tokens_created",
+    "tagma_credential_created",
+    "tagma_profile_created",
+  ],
+  [
+    "settings_tokens_last_used",
+    "tagma_credential_last_used",
+    "settings_last_used",
+  ],
+  ["settings_tokens_never_used", "tagma_credential_never_used"],
+  ["settings_tokens_copy", "tagma_credential_copy"],
 ];
 
 Deno.test("catalog: same-value keys are all deliberate synonyms", () => {

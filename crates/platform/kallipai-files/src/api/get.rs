@@ -14,8 +14,9 @@ use futures_util::Stream;
 use uuid::Uuid;
 
 use super::{load_record, parse_record_path};
-use crate::auth::AuthPrincipal;
+use crate::auth::{AuthPrincipal, require_perm};
 use crate::state::AppState;
+use kallipai_archeion_common::perm;
 use kallipai_blob_store::BlobId;
 use kallipai_common::protocol::ApiError;
 
@@ -28,8 +29,10 @@ pub async fn get_file(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
     headers: HeaderMap,
-    AuthPrincipal(principal): AuthPrincipal,
+    auth: AuthPrincipal,
 ) -> Result<Response, ApiError> {
+    require_perm(&auth, perm::FILES_RECORD_READ)?;
+    let principal = auth.principal;
     let record = load_record(&state, id).await?;
     let path = parse_record_path(&record.space_path)?;
     super::authorize(&state, &principal, &path, crate::acl::Action::Read).await?;
@@ -59,8 +62,10 @@ pub async fn get_file(
 pub async fn head_file(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
-    AuthPrincipal(principal): AuthPrincipal,
+    auth: AuthPrincipal,
 ) -> Result<Response, ApiError> {
+    require_perm(&auth, perm::FILES_RECORD_READ)?;
+    let principal = auth.principal;
     let record = load_record(&state, id).await?;
     let path = parse_record_path(&record.space_path)?;
     super::authorize(&state, &principal, &path, crate::acl::Action::Read).await?;

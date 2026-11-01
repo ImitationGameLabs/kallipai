@@ -14,8 +14,11 @@ import type {
   AddEmailRequest,
   AddPasskeyFinishRequest,
   AuthFinishResponse,
+  CredentialEventView,
+  CreateTokenRequest,
   EmailSummary,
   ExternalIdentitySummary,
+  IssuedToken,
   LoginBeginResponse,
   LoginFinishRequest,
   MeResponse,
@@ -35,8 +38,12 @@ import type {
   RegisterFinishRequest,
   RenamePasskeyRequest,
   RenameTagmaRequest,
+  TagmaCredentialUpdateRequest,
+  TagmaCredentialView,
   TagmaInfo,
   TagmaView,
+  TokenView,
+  UpdateTokenRequest,
   UsernameAvailabilityResponse,
   VerifyEmailRequest,
 } from "./types.ts";
@@ -396,6 +403,68 @@ export class ArcheionClient extends BaseClient {
    * is disabled) 404s. */
   getTagmaProfile(id: string): Promise<PublicTagmaProfile> {
     return this.json(`/tagmata/${encodeURIComponent(id)}/profile`, "GET");
+  }
+
+  // -- credentials (personal access tokens + the tagma credential) --------
+
+  /** `GET /me/tokens` -- the caller's personal tokens, oldest first,
+   *  revoked ones included (`revoked_at` set). The mask, never the
+   *  secret: the plaintext is readable only from the create/reset
+   *  response. */
+  listTokens(): Promise<TokenView[]> {
+    return this.json("/me/tokens", "GET");
+  }
+
+  /** `POST /me/tokens` -- mint a personal token. The response carries the
+   *  plaintext once; the archeion keeps only its hash. */
+  createToken(body: CreateTokenRequest): Promise<IssuedToken> {
+    return this.json("/me/tokens", "POST", body);
+  }
+
+  /** `PATCH /me/tokens/{id}` -- rename and/or rescope. Returns the updated
+   *  record; the next request with the token sees the new set. */
+  updateToken(id: string, body: UpdateTokenRequest): Promise<TokenView> {
+    return this.json(`/me/tokens/${encodeURIComponent(id)}`, "PATCH", body);
+  }
+
+  /** `DELETE /me/tokens/{id}` -- revoke. Idempotent, and the row stays in
+   *  the list with `revoked_at` set. Returns on 204. */
+  revokeToken(id: string): Promise<void> {
+    return this.json(
+      `/me/tokens/${encodeURIComponent(id)}`,
+      "DELETE",
+      undefined,
+    );
+  }
+
+  /** `GET /tagmata/{id}/credential` -- the tagma's credential plus its
+   *  history. Owner-session only. */
+  getTagmaCredential(id: string): Promise<TagmaCredentialView> {
+    return this.json(`/tagmata/${encodeURIComponent(id)}/credential`, "GET");
+  }
+
+  /** `PATCH /tagmata/{id}/credential` -- rename and/or rescope the tagma
+   *  credential. The change applies to the tagma's next request. */
+  updateTagmaCredential(
+    id: string,
+    body: TagmaCredentialUpdateRequest,
+  ): Promise<TagmaCredentialView> {
+    return this.json(
+      `/tagmata/${encodeURIComponent(id)}/credential`,
+      "PATCH",
+      body,
+    );
+  }
+
+  /** `POST /tagmata/{id}/credential/reset` -- replace the tagma's secret.
+   *  The old secret stops working on the tagma's next request; the new
+   *  plaintext is returned once, for the operator to install. */
+  resetTagmaCredential(id: string): Promise<IssuedToken> {
+    return this.json(
+      `/tagmata/${encodeURIComponent(id)}/credential/reset`,
+      "POST",
+      {},
+    );
   }
 }
 

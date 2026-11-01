@@ -18,6 +18,44 @@ internal: true
   stated otherwise; tagma endpoints (the authorization tables below)
   use the tagma's own unprefixed paths.
 
+## Credential Routes
+
+Two credential surfaces, both session-only: they take a browser session and
+refuse any bearer with `403`, whatever permission set it carries. A
+credential that could mint or widen another credential could promote
+itself.
+
+| Endpoint                             | Method | Purpose                                                          |
+| ------------------------------------ | ------ | ---------------------------------------------------------------- |
+| `/me/tokens`                         | GET    | the caller's personal tokens: mask, set, dates, revocation       |
+| `/me/tokens`                         | POST   | mint one; `{name, perms, expires_in_days?}`, plaintext once      |
+| `/me/tokens/{id}`                    | PATCH  | rename, rescope, or both                                         |
+| `/me/tokens/{id}`                    | DELETE | revoke; the row stays listed with `revoked_at`                   |
+| `/tagmata/{id}/credential`           | GET    | the tagma's record plus its audit rows                           |
+| `/tagmata/{id}/credential`           | PATCH  | rename or rescope the tagma's record                             |
+| `/tagmata/{id}/credential/reset`     | POST   | new secret; the old hash stops working at once                   |
+
+A personal token is created with a name, a permission set, and
+`expires_in_days` of 30, 90, or 365 (absent means 90). The response is
+`{token, plaintext}`, and that is the only time the plaintext exists:
+every later read returns `masked`, except a record the migration carried,
+which has no tail to show. A reset answers the same shape for the tagma's
+record. The audit history writes a row for every action that changes
+something: a create names the whole set as added, a rescope names what it
+added and withdrew, and a reset writes neither because only the hash moves.
+A rescope that changes nothing writes no row.
+
+An unknown permission string or an off-menu expiry is `400`; an empty set
+is accepted and narrows the credential to nothing rather than revoking it.
+Someone else's personal token or tagma answers `404`. Enrollment codes
+(`POST /tagmata`) belong to the same session-only surface. The write routes
+on this page are session-only too: called with the session cookie, they
+answer `403` unless the request carries `X-Requested-With: kallipai`.
+
+The matrix below classifies agent and operator tokens. A personal token
+reaches none of it: it is limited to the routes its set names, documented
+in [Authentication and authorization](auth.md).
+
 ## Authorization Matrix
 
 ### Agent Management

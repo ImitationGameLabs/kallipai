@@ -39,3 +39,8 @@ pub const EMAIL_VERIFY: TokenKind = TokenKind("sk-email-");
 /// row, the plaintext is returned to the SPA, and it is consumed at signup
 /// completion (`POST /auth/oauth/signup/complete`).
 pub const OAUTH_SIGNUP: TokenKind = TokenKind("sk-oauthsu-");
+
+/// Personal access token -- a user's own credential, hash-indexed in
+/// `access_tokens` (`owner_kind = 'user'`). The plaintext is returned once at
+/// creation; the record carries the permission set and the expiry.
+pub const PAT: TokenKind = TokenKind("sk-pat-");

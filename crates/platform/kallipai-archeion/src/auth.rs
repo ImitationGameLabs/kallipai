@@ -3,23 +3,32 @@
 //! but resolves to archeion principals (admin / user / tagma) rather than the
 //! tagma's operator/agent supervisor chain.
 //!
-//! # Origin / deputy guard
+//! # One extractor, two decisions
 //!
-//! A `User` principal is reached ONLY via the `kallipai_session` cookie; a
-//! `Tagma` principal is reached ONLY via an `sk-tagma-` bearer; the admin ONLY
-//! via the `sk-admin-` bearer. So the deputy threats a multi-origin design
-//! would face — a session cookie authenticating a tagma route, a tagma bearer
-//! reaching `/me` — are already impossible by construction: `require_tagma`
-//! never sees a `User` and `require_user` never sees a `Tagma`. An
-//! `Origin { Bearer, Cookie }` tag on each principal is therefore not yet
-//! needed; it becomes relevant only when personal access tokens introduce a
-//! second `User` origin that genuinely needs distinguishing, so adding a
-//! single-valued enum variant now would be premature.
+//! [`AuthPrincipal`] is the only extractor: it accepts a bearer or the session
+//! cookie and resolves to a [`Principal`] plus, when a stored record carried
+//! the call, that record's [`CredentialScope`].
+//!
+//! Two functions decide what such a principal may do. [`require_perm`] asks
+//! whether the call carries one permission string; the routes that act on the
+//! caller's own data gate themselves that way. [`require_session`] asks for the
+//! cookie origin itself and backs the routes that mint or destroy credentials,
+//! change the account's sign-in methods, or mint an enrollment code -- a token
+//! that could reach those would mint its own successor.
+//!
+//! # Deputy guard
+//!
+//! A `Tagma` principal still arrives only via an `sk-` bearer, and a `User`
+//! either via the cookie (`credential: None`) or via a personal access token
+//! (`credential: Some`). The record is what distinguishes the two user origins;
+//! it lives beside the principal rather than on it, so an identity stays the
+//! same thing across a token reset.
 
 use crate::control_plane::DbControlPlane;
 use crate::session::read_session_cookie;
 use axum::extract::FromRequestParts;
-use kallipai_archeion_common::control_plane::ControlPlane;
+use kallipai_archeion_common::control_plane::{ControlPlane, CredentialScope};
+use kallipai_archeion_common::ids::UserId;
 use kallipai_common::auth_header::extract_bearer_token;
 use kallipai_common::protocol::ApiError;
 
@@ -31,21 +40,57 @@ use crate::state::SharedState;
 // `super::require_*` references keep resolving.
 pub use kallipai_archeion_common::principal::{Principal, require_admin, require_user};
 
-/// axum extractor that resolves a request to a [`Principal`].
-///
-/// Layer 1 (Authentication): if an `Authorization: Bearer` header is present,
-/// hash it and match the admin hash (constant-time) first, then look up the
-/// tagma token in the durable store. Otherwise, if a `kallipai_session` cookie is
-/// present, look up the (non-expired) session row and resolve to the owning
-/// user. A request with neither is anonymous and rejected with 401.
-///
-/// The admin path is DB-free (constant-time compare); the tagma path is one
-/// indexed `tagma_tokens` lookup plus the owning tagma row (a revoked tagma or
-/// a disabled owner re-check); the cookie path is an indexed `sessions` lookup
-/// plus an owner-disabled re-check. A revoked tagma or a disabled owner takes
-/// effect immediately on every request.
+/// A resolved identity plus the credential that carried it.
 #[derive(Debug, Clone)]
-pub struct AuthPrincipal(pub Principal);
+pub struct AuthPrincipal {
+    pub principal: Principal,
+    /// `None` when no stored record carried the call: the session cookie and
+    /// the admin bearer are potencies of the identity itself, not grants a
+    /// record can narrow.
+    pub credential: Option<CredentialScope>,
+}
+
+impl AuthPrincipal {
+    /// A caller with no credential record behind it (the session cookie, the
+    /// admin bearer, a handler test).
+    pub fn unscoped(principal: Principal) -> Self {
+        Self {
+            principal,
+            credential: None,
+        }
+    }
+
+    /// A caller holding a record, bounded by that record's stored set.
+    pub fn scoped(principal: Principal, credential: CredentialScope) -> Self {
+        Self {
+            principal,
+            credential: Some(credential),
+        }
+    }
+}
+
+/// Does this call carry `perm`?
+///
+/// A caller with no record passes (a session cookie or the admin bearer holds
+/// the whole identity's rights). A credential passes only when its set names
+/// the string, so an emptied set authenticates and does nothing -- a state the
+/// owner can create on purpose, and not the same thing as a revoked identity.
+pub fn require_perm(auth: &AuthPrincipal, perm: &str) -> Result<(), ApiError> {
+    kallipai_archeion_common::perm::require(auth.credential.as_ref(), perm)
+}
+
+fn control_plane(state: &SharedState) -> DbControlPlane {
+    DbControlPlane::new(
+        state.db.clone(),
+        // Snapshot under the read lock: a token rotation swaps the value
+        // behind this lock, and the next request picks up the new hash.
+        state
+            .admin_token_hash
+            .read()
+            .expect("admin token lock")
+            .clone(),
+    )
+}
 
 impl FromRequestParts<SharedState> for AuthPrincipal {
     type Rejection = ApiError;
@@ -57,24 +102,18 @@ impl FromRequestParts<SharedState> for AuthPrincipal {
         // Credential verification is delegated to the shared DB-backed
         // `ControlPlane` impl (the same one the data-plane services consume),
         // so the registry and the services enforce identical auth semantics.
-        let control = DbControlPlane::new(
-            state.db.clone(),
-            // Snapshot under the read lock: a token rotation swaps the value
-            // behind this lock, and the next request picks up the new hash.
-            state
-                .admin_token_hash
-                .read()
-                .expect("admin token lock")
-                .clone(),
-        );
-        // Prefer an explicit bearer credential when present.
+        let control = control_plane(state);
+        // An explicit bearer credential wins when present.
         if let Ok(bearer) = extract_bearer_token(&parts.headers) {
-            let principal = control
+            let verified = control
                 .verify_bearer(bearer)
                 .await
                 .map_err(|e| ApiError::internal(format_args!("registry error: {e}")))?
                 .ok_or_else(|| ApiError::unauthorized("invalid token"))?;
-            return Ok(AuthPrincipal(principal));
+            return Ok(match verified.credential {
+                Some(credential) => Self::scoped(verified.principal, credential),
+                None => Self::unscoped(verified.principal),
+            });
         }
         // Otherwise fall back to the session cookie.
         if let Some(cookie_value) = read_session_cookie(&parts.headers) {
@@ -86,15 +125,24 @@ impl FromRequestParts<SharedState> for AuthPrincipal {
             // The archeion's own routes need only the user id; the verified
             // session's username/display_name are consumed by the data planes
             // over the /internal/verify-session HTTP surface, not here.
-            return Ok(AuthPrincipal(Principal::User(user.user_id)));
+            return Ok(Self::unscoped(Principal::User(user.user_id)));
         }
         Err(ApiError::unauthorized("authentication required"))
     }
 }
 
-// ---------------------------------------------------------------------------
-// Layer 2: Authorization helpers (`require_admin` / `require_user`) live in
-// `kallipai-archeion-common::principal` and are re-exported above. The disabled-user
-// / revoked-tagma auth semantics are tested at the `DbControlPlane` impl
-// (`crate::control_plane`).
-// ---------------------------------------------------------------------------
+/// The signed-in user, and only the user themselves.
+///
+/// Runs after authentication so a bearer is first recognized and then refused
+/// with a 403 that names the rule. A 401 here would say "this token is not a
+/// token", which is false, and would send a script hunting for a rotated
+/// secret instead of reading the message.
+pub fn require_session(auth: &AuthPrincipal) -> Result<&UserId, ApiError> {
+    match (&auth.principal, &auth.credential) {
+        (Principal::User(id), None) => Ok(id),
+        (Principal::User(_), Some(_)) => Err(ApiError::forbidden(
+            "a personal access token cannot change the account or its credentials",
+        )),
+        _ => Err(ApiError::forbidden("a signed-in user is required")),
+    }
+}

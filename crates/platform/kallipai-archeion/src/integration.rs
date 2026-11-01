@@ -21,6 +21,20 @@ use time::OffsetDateTime;
 
 const PEER: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
 
+/// Drive a request through the router and read its status and body (draining
+/// the body either way).
+async fn run_with_body(app: axum::Router, request: Request<Body>) -> (StatusCode, String) {
+    let resp = app.oneshot(request).await.expect("router responds");
+    let status = resp.status();
+    let bytes = resp
+        .into_body()
+        .collect()
+        .await
+        .expect("read body")
+        .to_bytes();
+    (status, String::from_utf8_lossy(&bytes).to_string())
+}
+
 /// Build a JSON request with the `MockConnectInfo` extension the rate-limit
 /// middleware reads (the `ConnectInfo` extractor falls back to it outside a
 /// real socket).
@@ -121,6 +135,14 @@ async fn csrf_guard_exempts_bearer() {
 
 /// Seed a live session for a fresh user and return the cookie value to send.
 async fn seed_session(state: &crate::state::SharedState) -> String {
+    seed_user_and_session(state).await.0
+}
+
+/// The same fixture, keeping the user id so a test can issue a credential for
+/// the very account the cookie belongs to.
+async fn seed_user_and_session(
+    state: &crate::state::SharedState,
+) -> (String, kallipai_archeion_common::ids::UserId) {
     use crate::db::entity::{sessions, users};
     use kallipai_common::authtoken::MintedToken;
     use sea_orm::ActiveValue::Set;
@@ -147,7 +169,136 @@ async fn seed_session(state: &crate::state::SharedState) -> String {
     .insert(&state.db)
     .await
     .expect("seed session");
-    session.secret().to_string()
+    (session.secret().to_string(), user_id)
+}
+
+/// Seed a personal access token holding every string in the vocabulary for
+/// `user`, and return its plaintext.
+async fn seed_full_pat(
+    state: &crate::state::SharedState,
+    user: &kallipai_archeion_common::ids::UserId,
+) -> String {
+    let perms = kallipai_archeion_common::perm::PermSet::from_known(
+        kallipai_archeion_common::perm::VOCABULARY.iter().copied(),
+    )
+    .expect("the vocabulary is known");
+    let minted = crate::credentials::create(
+        &state.db,
+        crate::token::PAT,
+        crate::credentials::NewCredential {
+            owner: crate::credentials::Owner::User,
+            owner_id: user.as_ref(),
+            name: "script",
+            perms: &perms,
+            created_by: user.as_ref(),
+            actor: Some(user.as_ref()),
+            expires_at: None,
+        },
+    )
+    .await
+    .expect("seed a personal token");
+    minted.plaintext
+}
+
+/// Every route that may only be driven by a session: minting or resetting
+/// credentials, the sign-in methods, and logout. A bearer with the whole
+/// vocabulary must not reach one of them.
+const SESSION_FACES: &[(Method, &str, &str)] = &[
+    (Method::GET, "/me/emails", ""),
+    (
+        Method::POST,
+        "/me/emails",
+        r#"{"address":"alice@example.com"}"#,
+    ),
+    (
+        Method::POST,
+        "/me/emails/00000000-0000-0000-0000-000000000000",
+        "{}",
+    ),
+    (
+        Method::DELETE,
+        "/me/emails/00000000-0000-0000-0000-000000000000",
+        "",
+    ),
+    (Method::GET, "/me/passkeys", ""),
+    (Method::POST, "/me/passkeys/register/begin", "{}"),
+    (
+        Method::PATCH,
+        "/me/passkeys/00000000-0000-0000-0000-000000000000",
+        r#"{"label":"x"}"#,
+    ),
+    (
+        Method::DELETE,
+        "/me/passkeys/00000000-0000-0000-0000-000000000000",
+        "",
+    ),
+    (Method::POST, "/me/oauth/google/begin", "{}"),
+    (
+        Method::DELETE,
+        "/me/external-identities/00000000-0000-0000-0000-000000000000",
+        "",
+    ),
+    (Method::POST, "/me/device-pairing", ""),
+    (Method::POST, "/auth/logout", ""),
+    (Method::GET, "/me/tokens", ""),
+    (
+        Method::POST,
+        "/me/tokens",
+        r#"{"name":"x","perms":["files:record:read"]}"#,
+    ),
+    (
+        Method::PATCH,
+        "/me/tokens/00000000-0000-0000-0000-000000000000",
+        r#"{"name":"y"}"#,
+    ),
+    (
+        Method::DELETE,
+        "/me/tokens/00000000-0000-0000-0000-000000000000",
+        "",
+    ),
+    (
+        Method::GET,
+        "/tagmata/00000000-0000-0000-0000-000000000000/credential",
+        "",
+    ),
+    (
+        Method::POST,
+        "/tagmata/00000000-0000-0000-0000-000000000000/credential/reset",
+        "",
+    ),
+    (Method::POST, "/tagmata", "{}"),
+];
+
+/// A personal access token holding every string is still the token origin, and
+/// these routes ask for the cookie origin: a full set buys nothing here.
+#[tokio::test]
+async fn a_full_personal_token_is_refused_on_every_session_face() {
+    let state = make_state_with(100, 100).await;
+    let (cookie, user_id) = seed_user_and_session(&state).await;
+    let secret = seed_full_pat(&state, &user_id).await;
+    let app = routes::router(state, None, false);
+
+    for (method, uri, body) in SESSION_FACES {
+        let mut request = req(method.clone(), uri, body);
+        request.headers_mut().append(
+            axum::http::header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {secret}")).expect("bearer header"),
+        );
+        let (status, text) = run_with_body(app.clone(), request).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{method} {uri}");
+        assert!(
+            text.contains("personal access token"),
+            "{method} {uri} refuses without naming the origin: {text}"
+        );
+    }
+
+    // The cookie is still the way in: the same listing answers 200.
+    let mut request = req(Method::GET, "/me/emails", "");
+    request.headers_mut().append(
+        axum::http::header::COOKIE,
+        HeaderValue::from_str(&format!("kallipai_session={cookie}")).expect("cookie header"),
+    );
+    assert_eq!(run(app, request).await, StatusCode::OK);
 }
 
 /// `POST /tagmata` (mint a pending tagma) is CSRF-gated: a cookie-bearing
@@ -460,4 +611,53 @@ async fn admin_probe_mounted_at_no_slash_path() {
         StatusCode::NOT_FOUND,
         "trailing-slash form is unregistered under axum 0.8 nest"
     );
+}
+
+/// A personal token holding the tagma-write string is still refused at
+/// `POST /tagmata`: minting an enrollment code mints a credential, and a
+/// credential may not do that. The refusal is a 403, which says the token was
+/// understood and the route is closed to it; a well-formed but unknown bearer
+/// on the same request is a 401, so the two answers stay distinguishable.
+#[tokio::test]
+async fn a_write_scoped_personal_token_cannot_mint_an_enrollment_code() {
+    use kallipai_archeion_common::perm::{ARCHEION_TAGMA_READ, ARCHEION_TAGMA_WRITE, PermSet};
+
+    use crate::credentials;
+    use crate::test_helpers::seed_user;
+    use crate::token::PAT;
+
+    let state = make_state_with(10, 10).await;
+    let user = seed_user(&state, "alice").await;
+    let perms = PermSet::from_known([ARCHEION_TAGMA_READ, ARCHEION_TAGMA_WRITE]).expect("known");
+    let minted = credentials::create(
+        &state.db,
+        PAT,
+        credentials::NewCredential {
+            owner: credentials::Owner::User,
+            owner_id: user.as_ref(),
+            name: "ci",
+            perms: &perms,
+            created_by: user.as_ref(),
+            actor: Some(user.as_ref()),
+            expires_at: None,
+        },
+    )
+    .await
+    .expect("seed a personal token");
+    let app = routes::router(state, None, false);
+
+    let authorize = |request: &mut Request<Body>, bearer: &str| {
+        request.headers_mut().append(
+            axum::http::header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {bearer}")).expect("bearer header"),
+        );
+    };
+
+    let mut request = req(Method::POST, "/tagmata", "{}");
+    authorize(&mut request, &minted.plaintext);
+    assert_eq!(run(app.clone(), request).await, StatusCode::FORBIDDEN);
+
+    let mut request = req(Method::POST, "/tagmata", "{}");
+    authorize(&mut request, "sk-pat-not-a-real-token");
+    assert_eq!(run(app, request).await, StatusCode::UNAUTHORIZED);
 }

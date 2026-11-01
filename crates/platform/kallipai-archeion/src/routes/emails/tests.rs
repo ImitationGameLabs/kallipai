@@ -43,7 +43,7 @@ async fn add_email_starts_unverified_non_primary() {
     let user = seed_user(&state, "alice").await;
     let Json(sum) = add_email(
         State(state.clone()),
-        AuthPrincipal(Principal::User(user.clone())),
+        AuthPrincipal::unscoped(Principal::User(user.clone())),
         Json(AddEmailRequest {
             address: "Alice@Example.Test".to_string(),
         }),
@@ -54,7 +54,7 @@ async fn add_email_starts_unverified_non_primary() {
     assert!(!sum.is_primary);
     assert!(sum.verified_at.is_none());
 
-    let Json(list) = list_emails(State(state), AuthPrincipal(Principal::User(user)))
+    let Json(list) = list_emails(State(state), AuthPrincipal::unscoped(Principal::User(user)))
         .await
         .expect("list ok");
     assert_eq!(list.len(), 1);
@@ -68,7 +68,7 @@ async fn add_email_rejects_address_owned_by_another_account() {
     let alice = seed_user(&state, "alice").await;
     let Json(_) = add_email(
         State(state.clone()),
-        AuthPrincipal(Principal::User(alice)),
+        AuthPrincipal::unscoped(Principal::User(alice)),
         Json(AddEmailRequest {
             address: "shared@Example.Test".to_string(),
         }),
@@ -81,7 +81,7 @@ async fn add_email_rejects_address_owned_by_another_account() {
     let bob = seed_user(&state, "bob").await;
     let err = add_email(
         State(state),
-        AuthPrincipal(Principal::User(bob)),
+        AuthPrincipal::unscoped(Principal::User(bob)),
         Json(AddEmailRequest {
             address: "shared@example.test".to_string(),
         }),
@@ -99,7 +99,7 @@ async fn verify_email_marks_verified_and_is_single_use() {
     let user = seed_user(&state, "alice").await;
     let Json(added) = add_email(
         State(state.clone()),
-        AuthPrincipal(Principal::User(user)),
+        AuthPrincipal::unscoped(Principal::User(user)),
         Json(AddEmailRequest {
             address: "alice@example.test".to_string(),
         }),
@@ -138,7 +138,7 @@ async fn make_primary_requires_verified() {
     let user = seed_user(&state, "alice").await;
     let Json(second) = add_email(
         State(state.clone()),
-        AuthPrincipal(Principal::User(user.clone())),
+        AuthPrincipal::unscoped(Principal::User(user.clone())),
         Json(AddEmailRequest {
             address: "two@example.test".to_string(),
         }),
@@ -149,7 +149,7 @@ async fn make_primary_requires_verified() {
     let id = Uuid::parse_str(&second.id).unwrap();
     let err = make_primary(
         State(state),
-        AuthPrincipal(Principal::User(user)),
+        AuthPrincipal::unscoped(Principal::User(user)),
         axum::extract::Path(id),
     )
     .await
@@ -163,10 +163,10 @@ async fn make_primary_requires_verified() {
 async fn make_primary_swaps_to_verified() {
     let state = make_state().await;
     let user = seed_user(&state, "alice").await;
-    let principal = AuthPrincipal(Principal::User(user));
+    let principal = AuthPrincipal::unscoped(Principal::User(user));
     let Json(first) = add_email(
         State(state.clone()),
-        AuthPrincipal(principal.0.clone()),
+        AuthPrincipal::unscoped(principal.principal.clone()),
         Json(AddEmailRequest {
             address: "one@example.test".to_string(),
         }),
@@ -175,7 +175,7 @@ async fn make_primary_swaps_to_verified() {
     .expect("add one");
     let Json(second) = add_email(
         State(state.clone()),
-        AuthPrincipal(principal.0.clone()),
+        AuthPrincipal::unscoped(principal.principal.clone()),
         Json(AddEmailRequest {
             address: "two@example.test".to_string(),
         }),
@@ -206,7 +206,7 @@ async fn make_primary_swaps_to_verified() {
     // Make the first primary, then swap to the second.
     let Json(now_primary) = make_primary(
         State(state.clone()),
-        AuthPrincipal(principal.0.clone()),
+        AuthPrincipal::unscoped(principal.principal.clone()),
         axum::extract::Path(Uuid::parse_str(&first.id).unwrap()),
     )
     .await
@@ -215,7 +215,7 @@ async fn make_primary_swaps_to_verified() {
 
     let Json(swapped) = make_primary(
         State(state.clone()),
-        AuthPrincipal(principal.0.clone()),
+        AuthPrincipal::unscoped(principal.principal.clone()),
         axum::extract::Path(Uuid::parse_str(&second.id).unwrap()),
     )
     .await
@@ -239,10 +239,10 @@ async fn make_primary_swaps_to_verified() {
 async fn remove_primary_promotes_verified_only() {
     let state = make_state().await;
     let user = seed_user(&state, "alice").await;
-    let principal = AuthPrincipal(Principal::User(user));
+    let principal = AuthPrincipal::unscoped(Principal::User(user));
     let Json(one) = add_email(
         State(state.clone()),
-        AuthPrincipal(principal.0.clone()),
+        AuthPrincipal::unscoped(principal.principal.clone()),
         Json(AddEmailRequest {
             address: "one@example.test".to_string(),
         }),
@@ -251,7 +251,7 @@ async fn remove_primary_promotes_verified_only() {
     .expect("add one");
     let Json(two) = add_email(
         State(state.clone()),
-        AuthPrincipal(principal.0.clone()),
+        AuthPrincipal::unscoped(principal.principal.clone()),
         Json(AddEmailRequest {
             address: "two@example.test".to_string(),
         }),
@@ -279,7 +279,7 @@ async fn remove_primary_promotes_verified_only() {
     .expect("verify two");
     let _ = make_primary(
         State(state.clone()),
-        AuthPrincipal(principal.0.clone()),
+        AuthPrincipal::unscoped(principal.principal.clone()),
         axum::extract::Path(Uuid::parse_str(&one.id).unwrap()),
     )
     .await
@@ -288,7 +288,7 @@ async fn remove_primary_promotes_verified_only() {
     // Remove the primary; `two` is verified -> promoted.
     let Json(remaining) = remove_email(
         State(state.clone()),
-        AuthPrincipal(principal.0.clone()),
+        AuthPrincipal::unscoped(principal.principal.clone()),
         axum::extract::Path(Uuid::parse_str(&one.id).unwrap()),
     )
     .await
@@ -315,7 +315,7 @@ async fn mutations_are_owner_scoped() {
     let alice = seed_user(&state, "alice").await;
     let Json(alice_email) = add_email(
         State(state.clone()),
-        AuthPrincipal(Principal::User(alice)),
+        AuthPrincipal::unscoped(Principal::User(alice)),
         Json(AddEmailRequest {
             address: "alice@example.test".to_string(),
         }),
@@ -327,7 +327,7 @@ async fn mutations_are_owner_scoped() {
 
     let err = make_primary(
         State(state.clone()),
-        AuthPrincipal(Principal::User(bob.clone())),
+        AuthPrincipal::unscoped(Principal::User(bob.clone())),
         axum::extract::Path(id),
     )
     .await
@@ -336,7 +336,7 @@ async fn mutations_are_owner_scoped() {
 
     let err = remove_email(
         State(state),
-        AuthPrincipal(Principal::User(bob)),
+        AuthPrincipal::unscoped(Principal::User(bob)),
         axum::extract::Path(id),
     )
     .await
@@ -356,7 +356,7 @@ async fn add_email_re_add_own_address_returns_generic_409() {
     });
     let Json(_) = add_email(
         State(state.clone()),
-        AuthPrincipal(Principal::User(alice.clone())),
+        AuthPrincipal::unscoped(Principal::User(alice.clone())),
         req,
     )
     .await
@@ -364,7 +364,7 @@ async fn add_email_re_add_own_address_returns_generic_409() {
 
     let err = add_email(
         State(state),
-        AuthPrincipal(Principal::User(alice)),
+        AuthPrincipal::unscoped(Principal::User(alice)),
         Json(AddEmailRequest {
             address: "mine@example.test".to_string(),
         }),
@@ -384,7 +384,7 @@ async fn verify_email_concurrent_double_consume_one_wins() {
     let user = seed_user(&state, "alice").await;
     let Json(added) = add_email(
         State(state.clone()),
-        AuthPrincipal(Principal::User(user)),
+        AuthPrincipal::unscoped(Principal::User(user)),
         Json(AddEmailRequest {
             address: "alice@example.test".to_string(),
         }),
@@ -437,7 +437,7 @@ async fn concurrent_make_primary_leaves_one_primary() {
     for addr in ["a@example.test", "b@example.test"] {
         let Json(added) = add_email(
             State(state.clone()),
-            AuthPrincipal(Principal::User(user.clone())),
+            AuthPrincipal::unscoped(Principal::User(user.clone())),
             Json(AddEmailRequest {
                 address: addr.to_string(),
             }),
@@ -462,7 +462,7 @@ async fn concurrent_make_primary_leaves_one_primary() {
         async {
             make_primary(
                 State(state.clone()),
-                AuthPrincipal(Principal::User(user.clone())),
+                AuthPrincipal::unscoped(Principal::User(user.clone())),
                 axum::extract::Path(id_a),
             )
             .await
@@ -470,7 +470,7 @@ async fn concurrent_make_primary_leaves_one_primary() {
         async {
             make_primary(
                 State(state.clone()),
-                AuthPrincipal(Principal::User(user.clone())),
+                AuthPrincipal::unscoped(Principal::User(user.clone())),
                 axum::extract::Path(id_b),
             )
             .await

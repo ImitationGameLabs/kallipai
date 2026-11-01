@@ -170,7 +170,7 @@ $ kallip file send <ID> (--to-tagma <TAGMA> | --to-user <USER>) [--json]
 $ kallip file ls --space self|shared [--prefix <PREFIX>] [--limit <N>] [--json]
 ```
 
-凭据走环境变量，不走标志：`KALLIPAI_POLIS_URL`（平台边缘 origin，CLI 从它推导 `<origin>/v1/files`；必填，未设置即报错（凭据绝不发往假定的部署））与 `KALLIPAI_FILES_TOKEN`（tagma 的长效 bearer）。在 CLI 运行处供给它们；agent shell 继承 spawn 时点 tagma 环境的实况，而启动清扫会最先移除 `KALLIPAI_FILES_TOKEN`，所以被供给的令牌绝不会到达 agent shell（服务端文件读取以 tagma 注册的登记凭据认证）。`--json` 把成功响应打成 JSON；`get` 缓冲内容（受服务最大 body 尺寸约束）写到 stdout（或 `--out`），内容从不被 JSON 包裹。
+凭据走环境变量，不走标志：`KALLIPAI_POLIS_URL`（平台边缘 origin，CLI 从它推导 `<origin>/v1/files`；必填，未设置即报错（凭据绝不发往假定的部署））与 `KALLIPAI_FILES_TOKEN`（个人令牌或 tagma 凭据）。在 CLI 运行处供给它们；agent shell 继承 spawn 时点 tagma 环境的实况，而启动清扫会最先移除 `KALLIPAI_FILES_TOKEN`，所以被供给的令牌绝不会到达 agent shell（服务端文件读取以 tagma 注册的登记凭据认证）。`--json` 把成功响应打成 JSON；`get` 缓冲内容（受服务最大 body 尺寸约束）写到 stdout（或 `--out`），内容从不被 JSON 包裹。
 
 ### `image`：把图片读入会话
 

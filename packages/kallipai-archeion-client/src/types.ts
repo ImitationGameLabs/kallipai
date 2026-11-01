@@ -265,6 +265,71 @@ export interface PublicTagmaProfile {
   readonly owner_display_name: string | null;
   readonly created_at: string;
 }
+// -- credentials (personal access tokens + the tagma credential) ----------
+// A credential record carries its permission set. `masked` is the display-safe
+// form; the plaintext appears exactly once, in `IssuedToken.plaintext`, and a
+// record the migration carried has no masked tail at all.
+
+/** One credential record as its owner sees it (a `GET /me/tokens` row, and
+ * the `token` half of `GET /tagmata/{id}/credential`). Revoked records stay
+ * in the list with `revoked_at` set: the owner can still read what was cut
+ * off and when. */
+export interface TokenView {
+  readonly id: string;
+  readonly name: string;
+  readonly masked: string | null;
+  readonly perms: readonly string[];
+  readonly created_at: string;
+  readonly expires_at: string | null;
+  readonly last_used_at: string | null;
+  readonly revoked_at: string | null;
+}
+
+/** One audit row of a credential's history. `kind` is `create`, `reset`, or
+ * `perms`; `added`/`removed` are the permission strings the event changed
+ * (empty for a reset, whose subject is the secret itself). */
+export interface CredentialEventView {
+  readonly at: string;
+  readonly kind: string;
+  readonly actor_user_id: string | null;
+  readonly added: readonly string[];
+  readonly removed: readonly string[];
+}
+
+/** A created or reset credential: the one time the plaintext is readable.
+ * `token` carries the record; `plaintext` is the secret to copy now. */
+export interface IssuedToken {
+  readonly token: TokenView;
+  readonly plaintext: string;
+}
+
+/** `GET /tagmata/{id}/credential` -- the tagma's credential plus its
+ * history, oldest first, for the owner's card. */
+export interface TagmaCredentialView {
+  readonly token: TokenView;
+  readonly events: readonly CredentialEventView[];
+}
+
+/** `POST /me/tokens` body. `expires_in_days` is one of 30/90/365; absent
+ * means 90. A personal token always expires: the no-expiry shape belongs to
+ * a tagma's credential. */
+export interface CreateTokenRequest {
+  readonly name: string;
+  readonly perms: readonly string[];
+  readonly expires_in_days?: number;
+}
+
+/** `PATCH /me/tokens/{id}` body: rename, rescope, or both. */
+export interface UpdateTokenRequest {
+  readonly name?: string;
+  readonly perms?: readonly string[];
+}
+
+/** `PATCH /tagmata/{id}/credential` body: rename, rescope, or both. */
+export interface TagmaCredentialUpdateRequest {
+  readonly name?: string;
+  readonly perms?: readonly string[];
+}
 
 // -- rooms ---------------------------------------------------------------
 // Moved out of this package with the data-plane split: the bilateral chat

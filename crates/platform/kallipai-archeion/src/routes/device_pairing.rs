@@ -21,7 +21,7 @@
 //! the challenge, and is the only input at finish — Device B cannot target
 //! another account.
 
-use crate::auth::{AuthPrincipal, require_user};
+use crate::auth::{AuthPrincipal, require_session};
 use crate::code;
 use crate::db::entity::{device_pairing_codes, passkeys, users, webauthn_challenges};
 use crate::db::{TxnError, flatten_txn, map_db_err};
@@ -122,10 +122,10 @@ struct AuthFinishResponse {
 
 async fn mint_pairing_code(
     State(state): State<SharedState>,
-    AuthPrincipal(principal): AuthPrincipal,
+    auth: AuthPrincipal,
     headers: HeaderMap,
 ) -> Result<Json<MintPairingCodeResponse>, ApiError> {
-    let user_id = require_user(&principal)?;
+    let user_id = require_session(&auth)?;
 
     // Resolve the calling session (its authed_at is the step-up marker).
     let cookie = read_session_cookie(&headers)

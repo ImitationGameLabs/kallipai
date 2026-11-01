@@ -11,12 +11,17 @@
 //!
 //! # Origin / deputy guard
 //!
-//! A `User` principal is reached ONLY via the `kallipai_session` cookie; a
-//! `Tagma` principal is reached ONLY via an `sk-tagma-` bearer; the admin ONLY
-//! via an `sk-admin-` bearer. So the deputy threats a multi-origin design would
-//! face — a session cookie authenticating a tagma route, a tagma bearer
-//! reaching `/me` — are already impossible by construction: `require_tagma`
-//! never sees a `User` and `require_user` never sees a `Tagma`.
+//! A `User` principal arrives via the `kallipai_session` cookie or via a
+//! personal access token (an `sk-pat-` bearer); a `Tagma` principal ONLY via
+//! an `sk-tagma-` bearer; the admin ONLY via an `sk-admin-` bearer. The
+//! credential beside the principal tells the two user origins apart, and
+//! [`require_user`] cannot: a token carrying the caller's own identity reaches
+//! every `/me` route a cookie does. The registry's `require_session` is the
+//! decision that separates them, and the routes that mint or destroy
+//! credentials, change the sign-in methods, or mint an enrollment code use it.
+//!
+//! The bearer/cookie split still holds where it matters: `require_tagma` never
+//! sees a `User`, and a cookie never resolves to a `Tagma`.
 
 use crate::ids::{ParticipantId, ParticipantKind, TagmaId, UserId};
 use kallipai_common::protocol::ApiError;
@@ -26,7 +31,8 @@ use kallipai_common::protocol::ApiError;
 #[derive(Debug, Clone)]
 pub enum Principal {
     Admin,
-    /// A signed-in user. Reached via the session cookie.
+    /// A signed-in user: via the session cookie, or via a personal access
+    /// token the user issued to a script.
     User(UserId),
     /// A tagma's long-lived tagma token. Always via bearer.
     Tagma(TagmaId),
@@ -63,7 +69,9 @@ pub fn require_admin(principal: &Principal) -> Result<(), ApiError> {
 }
 
 /// The authenticated user (for user-scoped endpoints). Reached via the session
-/// cookie.
+/// cookie or via a personal access token; this helper answers "is a user" and
+/// not "which origin said so" — the registry's `require_session` is the one
+/// that asks the second question.
 pub fn require_user(principal: &Principal) -> Result<&UserId, ApiError> {
     match principal {
         Principal::User(id) => Ok(id),

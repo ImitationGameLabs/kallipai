@@ -15,6 +15,7 @@ mod boot_secrets;
 mod clientip;
 mod code;
 mod control_plane;
+mod credentials;
 mod db;
 mod email;
 #[cfg(test)]

@@ -420,9 +420,12 @@ async fn take_admin_login_response(resp: axum::response::Response) -> (String, O
 #[tokio::test]
 async fn admin_login_first_login_creates_account_and_session() {
     let state = make_state().await;
-    let resp = admin_login(State(state.clone()), AuthPrincipal(Principal::Admin))
-        .await
-        .expect("first login");
+    let resp = admin_login(
+        State(state.clone()),
+        AuthPrincipal::unscoped(Principal::Admin),
+    )
+    .await
+    .expect("first login");
     assert_eq!(resp.status(), 200);
     let (user_id, cookie) = take_admin_login_response(resp).await;
     assert!(
@@ -455,15 +458,21 @@ async fn admin_login_first_login_creates_account_and_session() {
 async fn admin_login_second_login_same_user_new_session() {
     let state = make_state().await;
     let (first, _) = take_admin_login_response(
-        admin_login(State(state.clone()), AuthPrincipal(Principal::Admin))
-            .await
-            .expect("first login"),
+        admin_login(
+            State(state.clone()),
+            AuthPrincipal::unscoped(Principal::Admin),
+        )
+        .await
+        .expect("first login"),
     )
     .await;
     let (second, _) = take_admin_login_response(
-        admin_login(State(state.clone()), AuthPrincipal(Principal::Admin))
-            .await
-            .expect("second login"),
+        admin_login(
+            State(state.clone()),
+            AuthPrincipal::unscoped(Principal::Admin),
+        )
+        .await
+        .expect("second login"),
     )
     .await;
     assert_eq!(first, second);
@@ -482,7 +491,7 @@ async fn admin_login_rejects_non_admin_principal() {
     let state = make_state().await;
     let err = admin_login(
         State(state),
-        AuthPrincipal(Principal::User(
+        AuthPrincipal::unscoped(Principal::User(
             kallipai_archeion_common::ids::UserId::random(),
         )),
     )
@@ -498,7 +507,7 @@ async fn admin_login_rejects_non_admin_principal() {
 async fn admin_login_username_taken_fails_fast() {
     let state = make_state().await;
     seed_user(&state, "admin").await;
-    let err = admin_login(State(state), AuthPrincipal(Principal::Admin))
+    let err = admin_login(State(state), AuthPrincipal::unscoped(Principal::Admin))
         .await
         .expect_err("collision");
     assert_eq!(err.status, 409);
@@ -511,9 +520,12 @@ async fn admin_login_username_taken_fails_fast() {
 async fn admin_login_disabled_account_refused() {
     let state = make_state().await;
     let (user_id, _) = take_admin_login_response(
-        admin_login(State(state.clone()), AuthPrincipal(Principal::Admin))
-            .await
-            .expect("first login"),
+        admin_login(
+            State(state.clone()),
+            AuthPrincipal::unscoped(Principal::Admin),
+        )
+        .await
+        .expect("first login"),
     )
     .await;
     let mut am: users::ActiveModel = users::Entity::find()
@@ -526,7 +538,7 @@ async fn admin_login_disabled_account_refused() {
     am.disabled_at = Set(Some(OffsetDateTime::now_utc()));
     am.update(&state.db).await.expect("disable user");
 
-    let err = admin_login(State(state), AuthPrincipal(Principal::Admin))
+    let err = admin_login(State(state), AuthPrincipal::unscoped(Principal::Admin))
         .await
         .expect_err("disabled");
     assert_eq!(err.status, 401);
@@ -543,9 +555,12 @@ async fn admin_login_disabled_account_refused() {
 async fn admin_login_user_row_deletion_resets_the_account() {
     let state = make_state().await;
     let (user_id_1, _) = take_admin_login_response(
-        admin_login(State(state.clone()), AuthPrincipal(Principal::Admin))
-            .await
-            .expect("first login"),
+        admin_login(
+            State(state.clone()),
+            AuthPrincipal::unscoped(Principal::Admin),
+        )
+        .await
+        .expect("first login"),
     )
     .await;
     // Delete only the user row; the FK cascade removes the marker with it.
@@ -559,7 +574,7 @@ async fn admin_login_user_row_deletion_resets_the_account() {
     );
 
     let (user_id_2, _) = take_admin_login_response(
-        admin_login(State(state), AuthPrincipal(Principal::Admin))
+        admin_login(State(state), AuthPrincipal::unscoped(Principal::Admin))
             .await
             .expect("re-login after deletion"),
     )

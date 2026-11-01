@@ -59,7 +59,7 @@ pub fn admin_login_router() -> Router<SharedState> {
 /// logged here.
 pub(super) async fn admin_login(
     State(state): State<SharedState>,
-    AuthPrincipal(principal): AuthPrincipal,
+    AuthPrincipal { principal, .. }: AuthPrincipal,
 ) -> Result<Response, ApiError> {
     let Principal::Admin = principal else {
         return Err(ApiError::unauthorized("admin token required"));

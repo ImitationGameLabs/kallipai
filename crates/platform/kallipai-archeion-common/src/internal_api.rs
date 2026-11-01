@@ -14,7 +14,8 @@
 use crate::principal::Principal;
 use serde::{Deserialize, Serialize};
 
-use crate::ids::{TagmaId, UserId};
+use crate::ids::{TagmaId, TokenId, UserId};
+use crate::perm::PermSet;
 
 // --- verify-session ---
 
@@ -38,48 +39,98 @@ pub struct VerifyBearerRequest {
     pub token: String,
 }
 
-/// The on-wire principal for `verify_bearer`. A `User` never appears here:
-/// `verify_bearer` can only resolve an `Admin` (admin token) or a `Tagma`
-/// (tagma token). The session-cookie path resolves a user through
-/// `verify_session`, which carries a bare `UserId`, not a `Principal`.
+/// The on-wire principal for `verify_bearer`: an `Admin` (admin token), a
+/// `Tagma` (a tagma's credential), or a `User` (a personal access token).
+/// The cookie path is unaffected: `verify_session` carries a bare `UserId`
+/// and never a `Principal`, so the two ways of being a user stay distinct on
+/// the wire even though both resolve to `Principal::User`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum WirePrincipal {
     Admin,
     Tagma { tagma_id: TagmaId },
+    User { user_id: UserId },
 }
 
-/// Project a [`Principal`] onto the wire. The single centralization of the
-/// bearer-path mapping; `User` -- cookie-sourced by construction -- is handed
-/// back in the `Err` so the caller can fail loudly (500) instead of silently
-/// minting a wire form the contract forbids.
-impl TryFrom<Principal> for WirePrincipal {
-    type Error = Principal;
-
-    fn try_from(principal: Principal) -> Result<Self, Self::Error> {
+/// Project a [`Principal`] onto the wire. Every variant is reachable: the
+/// bearer path resolves an admin, a tagma credential, or a personal access
+/// token (which acts as its owning user).
+impl From<Principal> for WirePrincipal {
+    fn from(principal: Principal) -> Self {
         match principal {
-            Principal::Admin => Ok(WirePrincipal::Admin),
-            Principal::Tagma(tagma_id) => Ok(WirePrincipal::Tagma { tagma_id }),
-            Principal::User(_) => Err(principal),
+            Principal::Admin => WirePrincipal::Admin,
+            Principal::Tagma(tagma_id) => WirePrincipal::Tagma { tagma_id },
+            Principal::User(user_id) => WirePrincipal::User { user_id },
         }
     }
 }
 
-/// Lift a [`WirePrincipal`] back into a [`Principal`]. Total (no variant is
-/// rejected): the wire enum is exactly the bearer-reachable subset.
+/// The credential a bearer resolved through, as carried on the wire: its
+/// record id (so a data plane can name it in a log line) and the permission
+/// set stored on that record. Absent for the admin bearer, which has no
+/// record.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WireCredential {
+    pub token_id: TokenId,
+    pub perms: PermSet,
+}
+
+/// Lift a [`WirePrincipal`] back into a [`Principal`]. Total: the wire enum
+/// is exactly the set the bearer path can resolve.
 impl From<WirePrincipal> for Principal {
     fn from(wire: WirePrincipal) -> Self {
         match wire {
             WirePrincipal::Admin => Principal::Admin,
             WirePrincipal::Tagma { tagma_id } => Principal::Tagma(tagma_id),
+            WirePrincipal::User { user_id } => Principal::User(user_id),
         }
     }
 }
 
-/// `200` body: the resolved principal. (`404` = no body, maps to `None`.)
+/// `200` body: the resolved identity plus the credential that carried it.
+/// (`404` = no body, maps to `None`.)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VerifyBearerResponse {
     pub principal: WirePrincipal,
+    /// `None` means this path carried no record: the admin bearer, or a
+    /// registry that predates this field. Three things a reader must keep
+    /// apart: `None` (no record, so no narrowing), an empty set (a live
+    /// credential that authenticates and passes no permission gate, so its
+    /// calls are refused one route at a time with `403`), and a `404` (no
+    /// usable record: an unknown hash, an expired or revoked credential, a
+    /// retired tagma, a disabled owner, an unknown owner kind, or a set with
+    /// a string outside the vocabulary -- all read as no credential, never as
+    /// half of one).
+    pub credential: Option<WireCredential>,
+}
+
+impl From<&crate::control_plane::VerifiedBearer> for VerifyBearerResponse {
+    fn from(verified: &crate::control_plane::VerifiedBearer) -> Self {
+        Self {
+            principal: verified.principal.clone().into(),
+            credential: verified
+                .credential
+                .as_ref()
+                .map(|credential| WireCredential {
+                    token_id: credential.token.clone(),
+                    perms: credential.perms.clone(),
+                }),
+        }
+    }
+}
+
+impl From<VerifyBearerResponse> for crate::control_plane::VerifiedBearer {
+    fn from(response: VerifyBearerResponse) -> Self {
+        Self {
+            principal: response.principal.into(),
+            credential: response.credential.map(|credential| {
+                crate::control_plane::CredentialScope {
+                    token: credential.token_id,
+                    perms: credential.perms,
+                }
+            }),
+        }
+    }
 }
 
 // --- tagma-profiles (canonical tagma fact read) ---
@@ -302,19 +353,28 @@ mod tests {
     fn wire_principal_admin_tag_round_trips() {
         let admin = VerifyBearerResponse {
             principal: WirePrincipal::Admin,
+            credential: None,
         };
         let json = serde_json::to_string(&admin).unwrap();
-        assert_eq!(json, r#"{"principal":{"kind":"admin"}}"#);
+        assert_eq!(json, r#"{"principal":{"kind":"admin"},"credential":null}"#);
         let back: VerifyBearerResponse = serde_json::from_str(&json).unwrap();
         assert!(matches!(back.principal, WirePrincipal::Admin));
+        assert!(back.credential.is_none());
 
         let tagma = VerifyBearerResponse {
             principal: WirePrincipal::Tagma {
                 tagma_id: TagmaId::from("t1".to_string()),
             },
+            credential: Some(WireCredential {
+                token_id: TokenId::from("c1".to_string()),
+                perms: crate::perm::tagma_defaults(),
+            }),
         };
         let json = serde_json::to_string(&tagma).unwrap();
-        assert_eq!(json, r#"{"principal":{"kind":"tagma","tagma_id":"t1"}}"#);
+        assert_eq!(
+            json,
+            r#"{"principal":{"kind":"tagma","tagma_id":"t1"},"credential":{"token_id":"c1","perms":["files:delivery:write","files:record:read","files:record:write"]}}"#
+        );
         let back: VerifyBearerResponse = serde_json::from_str(&json).unwrap();
         match back.principal {
             WirePrincipal::Tagma { tagma_id } => {
@@ -322,29 +382,58 @@ mod tests {
             }
             other => panic!("unexpected {other:?}"),
         }
+        let credential = back.credential.expect("a tagma credential is a record");
+        assert_eq!(credential.token_id, TokenId::from("c1".to_string()));
+        assert_eq!(credential.perms, crate::perm::tagma_defaults());
     }
 
     #[test]
     fn principal_round_trips_through_the_wire_projection() {
-        // Admin/Tagma project onto the wire and lift back losslessly --
-        // the TryFrom/From pair is the only mapping site (debt-#4).
-        let wire = WirePrincipal::try_from(Principal::Admin).unwrap();
+        // Every variant projects onto the wire and lifts back losslessly:
+        // the From/From pair is the only mapping site.
+        let wire = WirePrincipal::from(Principal::Admin);
         assert!(matches!(Principal::from(wire), Principal::Admin));
 
         let tagma_id = TagmaId::from("t1".to_string());
-        let wire = WirePrincipal::try_from(Principal::Tagma(tagma_id.clone())).unwrap();
+        let wire = WirePrincipal::from(Principal::Tagma(tagma_id.clone()));
         assert!(matches!(Principal::from(wire), Principal::Tagma(id) if id == tagma_id));
+
+        // A personal access token rides the bearer path as its owning user.
+        let user_id = UserId::from("u1".to_string());
+        let wire = WirePrincipal::from(Principal::User(user_id.clone()));
+        assert_eq!(
+            serde_json::to_string(&wire).unwrap(),
+            r#"{"kind":"user","user_id":"u1"}"#
+        );
+        assert!(matches!(Principal::from(wire), Principal::User(id) if id == user_id));
     }
 
     #[test]
-    fn user_principal_is_rejected_on_the_wire() {
-        // THE invariant: a User is cookie-sourced and can never ride the
-        // bearer path. The projection hands the principal back (Err) so the
-        // caller 500s loudly -- a silent drop or a minted wire form would
-        // break the deputy guard.
-        let rejected = WirePrincipal::try_from(Principal::User(UserId::from("u1".to_string())))
-            .expect_err("User must not project onto the wire");
-        assert!(matches!(rejected, Principal::User(id) if id == UserId::from("u1".to_string())));
+    fn verified_bearer_round_trips_through_the_response() {
+        use crate::control_plane::{CredentialScope, VerifiedBearer};
+
+        let verified = VerifiedBearer {
+            principal: Principal::User(UserId::from("u1".to_string())),
+            credential: Some(CredentialScope {
+                token: TokenId::from("c1".to_string()),
+                perms: crate::perm::pat_defaults(),
+            }),
+        };
+        let response = VerifyBearerResponse::from(&verified);
+        let back: VerifiedBearer = response.into();
+        assert!(
+            matches!(back.principal, Principal::User(id) if id == UserId::from("u1".to_string()))
+        );
+        assert_eq!(back.credential, verified.credential);
+
+        // The admin bearer has no record behind it.
+        let admin = VerifiedBearer {
+            principal: Principal::Admin,
+            credential: None,
+        };
+        let back: VerifiedBearer = VerifyBearerResponse::from(&admin).into();
+        assert!(matches!(back.principal, Principal::Admin));
+        assert!(back.credential.is_none());
     }
 
     #[test]

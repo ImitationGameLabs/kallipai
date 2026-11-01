@@ -355,7 +355,7 @@ async fn mint_caps_active_codes_per_user() {
 
     let err = mint_pairing_code(
         State(state.clone()),
-        AuthPrincipal(Principal::User(user_id.clone())),
+        AuthPrincipal::unscoped(Principal::User(user_id.clone())),
         step_up_headers(&state, &user_id).await,
     )
     .await

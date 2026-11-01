@@ -18,8 +18,9 @@
     presenceDotClass,
     presenceLabel,
   } from "../../lib/tagmata.svelte.ts";
-  import { DoorOpen, Settings } from "@lucide/svelte";
+  import { DoorOpen, KeyRound, Settings } from "@lucide/svelte";
   import ManageTagmaRoomsDialog from "./ManageTagmaRoomsDialog.svelte";
+  import TagmaCredentialDialog from "./TagmaCredentialDialog.svelte";
   import { navigate } from "../../lib/shell/port.ts";
   import { tagmaDetailsSectionPath } from "../../lib/shell/routes.ts";
   import {
@@ -37,6 +38,7 @@
     tagma_actions_aria,
     tagma_menu_manage,
     tagma_menu_manage_rooms,
+    tagma_credential_title,
     manage_instances_running,
     manage_instances_stopped,
     manage_instances_start,
@@ -124,6 +126,9 @@
   }
   // Manage-rooms dialog (lazy: only opened on demand).
   let roomsOpen = $state(false);
+  // Access-credential dialog: the tagma's permission list and secret, opened
+  // lazily from the menu (same treatment as the rooms dialog).
+  let credentialOpen = $state(false);
 
   async function confirmRevoke() {
     if (revoking || !onRevoke || !tagma) return;
@@ -332,6 +337,7 @@
           } else if (value === "manage" && tagma) {
             navigate(tagmaDetailsSectionPath(tagma.tagmaId, "overview"));
           } else if (value === "rooms" && tagma) roomsOpen = true;
+          else if (value === "credential" && tagma) credentialOpen = true;
           else if (value === "rename" && tagma && onRename) startRename();
           else if (value === "revoke" && tagma && onRevoke)
             confirmingRevoke = true;
@@ -347,6 +353,12 @@
           <Menu.Item value="rooms" class={MENU_ITEM}>
             <DoorOpen class="size-4" />
             {tagma_menu_manage_rooms()}
+          </Menu.Item>
+        {/if}
+        {#if tagma}
+          <Menu.Item value="credential" class={MENU_ITEM}>
+            <KeyRound class="size-4" />
+            {tagma_credential_title()}
           </Menu.Item>
         {/if}
         {#if process?.port}
@@ -410,6 +422,17 @@
     tagmaLabel={tagma.label}
     onCancel={() => {
       roomsOpen = false;
+    }}
+  />
+{/if}
+
+{#if tagma}
+  <TagmaCredentialDialog
+    open={credentialOpen}
+    tagmaId={tagma.tagmaId}
+    tagmaLabel={tagma.label}
+    onClose={() => {
+      credentialOpen = false;
     }}
   />
 {/if}

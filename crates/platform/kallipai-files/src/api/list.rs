@@ -13,8 +13,9 @@ use time::format_description::well_known::Rfc3339;
 
 use super::tagma_facts;
 use crate::acl::{self, Action, SpacePath};
-use crate::auth::AuthPrincipal;
+use crate::auth::{AuthPrincipal, require_perm};
 use crate::state::AppState;
+use kallipai_archeion_common::perm;
 use kallipai_archeion_common::principal::Principal;
 use kallipai_common::protocol::ApiError;
 
@@ -78,9 +79,11 @@ pub fn clamp_limit(requested: Option<u64>) -> u64 {
 /// GET /?space=self|shared&prefix=&limit=
 pub async fn list_files(
     State(state): State<AppState>,
-    AuthPrincipal(principal): AuthPrincipal,
+    auth: AuthPrincipal,
     Query(query): Query<ListQuery>,
 ) -> Result<Json<Vec<FileEntryView>>, ApiError> {
+    require_perm(&auth, perm::FILES_RECORD_READ)?;
+    let principal = auth.principal;
     // Row 8 parity with the other content routes: the admin gets the same
     // shape of denial, not an empty listing that hides it.
     if matches!(principal, Principal::Admin) {

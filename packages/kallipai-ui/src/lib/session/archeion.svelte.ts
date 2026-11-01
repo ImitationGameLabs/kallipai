@@ -40,6 +40,10 @@ import {
   type ProviderInfo,
   registerWithPasskey,
   type TagmaView,
+  type IssuedToken,
+  type CreateTokenRequest,
+  type TokenView,
+  type UpdateTokenRequest,
 } from "@kallipai/kallipai-archeion-client";
 import type { PairingCodeView } from "../passkeys.svelte.ts";
 import { INSTANCES_TOKEN_KEY } from "../instances/client.ts";
@@ -290,6 +294,15 @@ class ArcheionSessionStore {
   // inline (success / reauth-required / duplicate / cancelled).
   lastAddPasskey: AddPasskeyResult | null = $state(null);
 
+  // The signed-in user's personal access tokens, oldest first, revoked rows
+  // included: the list is the audit surface, so a secret that was cut off
+  // stays readable with its `revoked_at`. Mirrors the passkeys discipline:
+  // a list failure lands in `tokensError`; create/update/revoke THROW so one
+  // failure does not blank the section.
+  tokens: TokenView[] = $state([]);
+  tokensError: string | null = $state(null);
+  tokensLoaded = $state(false);
+
   // The signed-in user's linked OAuth identities. Mirrors the passkeys
   // discipline: a refresh failure lands in `externalIdentitiesError` and never
   // blanks `user`; unlink THROWS so one failure does not blank the section.
@@ -515,6 +528,50 @@ class ArcheionSessionStore {
     const next = { ...this.mintedCode };
     delete next[id];
     this.mintedCode = next;
+  }
+
+  // -- personal access tokens (self-service credentials) ------------------
+
+  /** Fetch the signed-in user's personal tokens. */
+  async refreshTokens(): Promise<void> {
+    this.tokensError = null;
+    try {
+      this.tokens = await client().listTokens();
+      this.tokensLoaded = true;
+    } catch (e) {
+      // Leave the stale list + loaded flag so a refresh failure does not blank it.
+      console.error("[archeion] listTokens failed:", e);
+      this.tokensError = rooms_couldnt_reach();
+    }
+  }
+
+  /** Mint a personal token. The response's `plaintext` is the only chance to
+   *  copy it; the list keeps the mask. Prepends the row locally. */
+  async createToken(body: CreateTokenRequest): Promise<IssuedToken> {
+    const issued = await client().createToken(body);
+    this.tokens = [...this.tokens, issued.token];
+    this.tokensError = null;
+    return issued;
+  }
+
+  /** Rename and/or rescope a token. The new set applies to the token's next
+   *  request (nothing to restart, nothing to re-issue); patches the row
+   *  locally, THROWS on error. */
+  async updateToken(id: string, body: UpdateTokenRequest): Promise<void> {
+    const updated = await client().updateToken(id, body);
+    this.tokens = this.tokens.map((t) => (t.id === id ? updated : t));
+  }
+
+  /** Revoke a token. The row is kept with `revoked_at` set: revoking cuts the
+   *  secret off, it does not erase the record. Patches the row locally, then
+   *  refetches so the timestamp is the server's. */
+  async revokeToken(id: string): Promise<void> {
+    await client().revokeToken(id);
+    const now = new Date().toISOString();
+    this.tokens = this.tokens.map((t) =>
+      t.id === id ? { ...t, revoked_at: t.revoked_at ?? now } : t,
+    );
+    await this.refreshTokens();
   }
 
   // -- passkeys (self-service device management) ---------------------------
@@ -828,6 +885,9 @@ class ArcheionSessionStore {
     this.passkeysError = null;
     this.passkeysLoaded = false;
     this.lastAddPasskey = null;
+    this.tokens = [];
+    this.tokensError = null;
+    this.tokensLoaded = false;
     this.externalIdentities = [];
     this.externalIdentitiesError = null;
     this.externalIdentitiesLoaded = false;

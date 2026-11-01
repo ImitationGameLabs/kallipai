@@ -17,6 +17,7 @@ mod passkeys;
 mod public_profiles;
 mod session;
 mod tagmata;
+mod tokens;
 
 use axum::Router;
 use axum::extract::State;
@@ -94,6 +95,7 @@ pub fn router(
         .nest("/admin", admin::router())
         .merge(enroll)
         .merge(tagmata::protected_router())
+        .merge(tokens::router())
         .merge(public_profiles);
     // The local-platform admin-login mounts only when the boot flag is set
     // (production default: the route does not exist). It is an

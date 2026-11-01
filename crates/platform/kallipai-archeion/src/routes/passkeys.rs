@@ -16,7 +16,7 @@
 //! prevents self-lockout on the user path; admin (`routes/admin.rs`) reuses the
 //! same helper with `allow_last = true`.
 
-use crate::auth::{AuthPrincipal, require_user};
+use crate::auth::{AuthPrincipal, require_session};
 use crate::db::entity::{
     external_identities, passkey_revocations, passkeys, sessions, users, webauthn_challenges,
 };
@@ -290,9 +290,9 @@ pub(crate) async fn revoke_passkey_row(
 
 async fn list_my_passkeys(
     State(state): State<SharedState>,
-    AuthPrincipal(principal): AuthPrincipal,
+    auth: AuthPrincipal,
 ) -> Result<Json<Vec<PasskeySummary>>, ApiError> {
-    let user_id = require_user(&principal)?;
+    let user_id = require_session(&auth)?;
     let rows = list_user_passkey_rows(&state.db, user_id).await?;
     let items = rows.into_iter().map(row_to_summary).collect();
     Ok(Json(items))
@@ -304,12 +304,12 @@ async fn list_my_passkeys(
 
 async fn add_passkey_begin(
     State(state): State<SharedState>,
-    AuthPrincipal(principal): AuthPrincipal,
+    auth: AuthPrincipal,
     headers: HeaderMap,
     Query(params): Query<AddPasskeyBeginParams>,
 ) -> Result<Json<CeremonyBeginResponse<CreationChallengeResponse>>, ApiError> {
+    let user_id = require_session(&auth)?;
     let discoverable = params.discoverable.unwrap_or(false);
-    let user_id = require_user(&principal)?;
     let user = users::Entity::find_by_id(user_id.to_string())
         .one(&state.db)
         .await
@@ -323,9 +323,10 @@ async fn add_passkey_begin(
         return Err(ApiError::forbidden("account disabled"));
     }
 
-    // Resolve the calling session: its `authed_at` is the step-up marker. The
-    // extractor already proved the cookie is valid; we re-hash it to lock the
-    // exact session row inside the begin txn.
+    // Resolve the calling session: its `authed_at` is the step-up marker.
+    // `require_session` above is what proves the cookie carried this call, so
+    // the read below cannot miss; we re-hash it to lock the exact session row
+    // inside the begin txn.
     let cookie = read_session_cookie(&headers)
         .ok_or_else(|| ApiError::internal("session cookie missing on authenticated request"))?;
     let session_hash = TokenHash::of(&cookie).as_bytes().to_vec();
@@ -595,11 +596,11 @@ struct RenamePasskeyRequest {
 
 async fn rename_my_passkey(
     State(state): State<SharedState>,
-    AuthPrincipal(principal): AuthPrincipal,
+    auth: AuthPrincipal,
     Path(id): Path<Uuid>,
     Json(req): Json<RenamePasskeyRequest>,
 ) -> Result<Json<PasskeySummary>, ApiError> {
-    let user_id = require_user(&principal)?;
+    let user_id = require_session(&auth)?;
     let label = normalize_label(req.label)?;
     // Owner-scoped: only touch a row belonging to the caller.
     let row = passkeys::Entity::find()
@@ -617,10 +618,10 @@ async fn rename_my_passkey(
 
 async fn revoke_my_passkey(
     State(state): State<SharedState>,
-    AuthPrincipal(principal): AuthPrincipal,
+    auth: AuthPrincipal,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
-    let user_id = require_user(&principal)?;
+    let user_id = require_session(&auth)?;
     revoke_passkey_row(
         &state,
         user_id,

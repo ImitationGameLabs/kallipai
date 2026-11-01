@@ -16,10 +16,11 @@ use sea_orm::EntityTrait;
 use uuid::Uuid;
 
 use crate::acl::{self, Action, EnrollmentFacts, SpacePath};
-use crate::auth::AuthPrincipal;
+use crate::auth::{AuthPrincipal, require_perm};
 use crate::metadata::models::file_records;
 use crate::state::AppState;
 use kallipai_archeion_common::ids::TagmaId;
+use kallipai_archeion_common::perm;
 use kallipai_archeion_common::principal::Principal;
 use kallipai_common::protocol::ApiError;
 
@@ -135,8 +136,10 @@ pub(crate) async fn authorize(
 pub async fn delete_file(
     axum::extract::State(state): axum::extract::State<AppState>,
     Path(id): Path<Uuid>,
-    AuthPrincipal(principal): AuthPrincipal,
+    auth: AuthPrincipal,
 ) -> Result<StatusCode, ApiError> {
+    require_perm(&auth, perm::FILES_RECORD_WRITE)?;
+    let principal = auth.principal;
     let record = load_record(&state, id).await?;
     let path = parse_record_path(&record.space_path)?;
     let allowed = match &principal {

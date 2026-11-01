@@ -17,9 +17,10 @@ use std::sync::{Arc, Mutex};
 
 use kallipai_archeion_common::bytes::Ed25519PublicKey;
 use kallipai_archeion_common::control_plane::{
-    ControlPlane, ControlPlaneError, EnrollmentLookup, TagmaProfile, UserIdentity, VerifiedSession,
+    ControlPlane, ControlPlaneError, CredentialScope, EnrollmentLookup, TagmaProfile, UserIdentity,
+    VerifiedBearer, VerifiedSession,
 };
-use kallipai_archeion_common::ids::{TagmaId, UserId};
+use kallipai_archeion_common::ids::{TagmaId, TokenId, UserId};
 use kallipai_archeion_common::principal::Principal;
 
 use crate::state::{ConversationsState, SharedConvState};
@@ -33,6 +34,8 @@ pub struct MockControlPlane {
     tokens: Mutex<HashMap<String, TagmaId>>,
     /// session cookie value -> user.
     sessions: Mutex<HashMap<String, UserId>>,
+    /// personal access token -> the user it was issued to.
+    personal_tokens: Mutex<HashMap<String, UserId>>,
     replay_ts: Mutex<HashMap<TagmaId, i64>>,
     /// Known user accounts: user id -> display identity + disabled flag.
     /// The `tagma_profiles` resolver derives each tagma's `owner_disabled`
@@ -64,6 +67,7 @@ impl MockControlPlane {
             tagmas: Mutex::new(HashMap::new()),
             tokens: Mutex::new(HashMap::new()),
             sessions: Mutex::new(HashMap::new()),
+            personal_tokens: Mutex::new(HashMap::new()),
             replay_ts: Mutex::new(HashMap::new()),
             users: Mutex::new(HashMap::new()),
             fail_tagma_profiles: AtomicBool::new(false),
@@ -198,7 +202,21 @@ impl ControlPlane for MockControlPlane {
             }))
     }
 
-    async fn verify_bearer(&self, token: &str) -> Result<Option<Principal>, ControlPlaneError> {
+    async fn verify_bearer(
+        &self,
+        token: &str,
+    ) -> Result<Option<VerifiedBearer>, ControlPlaneError> {
+        // A personal access token resolves to its user plus the record's set,
+        // exactly as the registry answers; the extractor is what refuses it.
+        if let Some(user) = self.personal_tokens.lock().unwrap().get(token).cloned() {
+            return Ok(Some(VerifiedBearer {
+                principal: Principal::User(user),
+                credential: Some(CredentialScope {
+                    token: TokenId::from(format!("mock-pat-{token}")),
+                    perms: kallipai_archeion_common::perm::pat_defaults(),
+                }),
+            }));
+        }
         let Some(tagma) = self.tokens.lock().unwrap().get(token).cloned() else {
             return Ok(None);
         };
@@ -209,7 +227,13 @@ impl ControlPlane for MockControlPlane {
         if t.revoked {
             return Ok(None);
         }
-        Ok(Some(Principal::Tagma(tagma)))
+        Ok(Some(VerifiedBearer {
+            principal: Principal::Tagma(tagma),
+            credential: Some(CredentialScope {
+                token: TokenId::from(format!("mock-{token}")),
+                perms: kallipai_archeion_common::perm::tagma_defaults(),
+            }),
+        }))
     }
 
     async fn tagma_profiles(
@@ -309,6 +333,17 @@ impl ControlPlane for MockControlPlane {
         // The keryx never calls this (it is the files service's ACL read);
         // the mock carries no enrollment data.
         Ok(None)
+    }
+}
+
+impl MockControlPlane {
+    /// Seed a personal access token that resolves to `user` with the token
+    /// default set, matching what the registry answers for `sk-pat-`.
+    pub fn seed_personal_token(&self, token: &str, user: UserId) {
+        self.personal_tokens
+            .lock()
+            .unwrap()
+            .insert(token.to_string(), user);
     }
 }
 

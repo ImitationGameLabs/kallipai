@@ -39,7 +39,7 @@ const MAX_LIMIT: u64 = 1000;
 /// GET /admin/delivery-events?blob_id=&limit=
 pub async fn list_events(
     State(state): State<AppState>,
-    AuthPrincipal(principal): AuthPrincipal,
+    AuthPrincipal { principal, .. }: AuthPrincipal,
     Query(query): Query<EventsQuery>,
 ) -> Result<Json<Vec<DeliveryEventView>>, ApiError> {
     // Row 8: management face is admin-only. A non-admin gets the same

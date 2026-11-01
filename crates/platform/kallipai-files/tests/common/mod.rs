@@ -9,9 +9,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use kallipai_archeion_common::control_plane::{
-    ControlPlane, ControlPlaneError, EnrollmentLookup, TagmaProfile, UserIdentity, VerifiedSession,
+    ControlPlane, ControlPlaneError, CredentialScope, EnrollmentLookup, TagmaProfile, UserIdentity,
+    VerifiedBearer, VerifiedSession,
 };
-use kallipai_archeion_common::ids::{TagmaId, UserId};
+use kallipai_archeion_common::ids::{TagmaId, TokenId, UserId};
+use kallipai_archeion_common::perm::PermSet;
 use kallipai_archeion_common::principal::Principal;
 use kallipai_files::LocalBackend;
 use kallipai_files::gc::GcConfig;
@@ -169,6 +171,9 @@ pub struct MockControlPlaneInner {
     pub users: BTreeSet<String>,
     /// TagmaId -> (owning user, full enrolled set of that space).
     pub enrollments: HashMap<String, (String, BTreeSet<String>)>,
+    /// Token -> the permission set it was narrowed to, when a test set one.
+    /// Absent means the token still carries the enrollment set.
+    pub perms: HashMap<String, PermSet>,
 }
 
 #[derive(Clone, Default)]
@@ -190,6 +195,20 @@ impl MockControlPlane {
     }
     pub fn revoke_session(&self, cookie: &str) {
         self.0.lock().unwrap().sessions.remove(cookie);
+    }
+
+    /// Narrow a seeded tagma's credential to `perms` (the enrollment set is the
+    /// default). An empty slice is a live credential that may do nothing.
+    pub fn set_perms(&self, token: &str, perms: &[&str]) {
+        let mut inner = self.0.lock().unwrap();
+        assert!(
+            inner.tokens.contains_key(token),
+            "set_perms wants a seeded tagma token"
+        );
+        inner.perms.insert(
+            token.to_string(),
+            PermSet::from_known(perms.iter().map(|p| (*p).to_owned())).expect("known perm strings"),
+        );
     }
 
     /// Enroll one tagma into a space: mints its token and folds it into
@@ -233,14 +252,27 @@ impl ControlPlane for MockControlPlane {
             }))
     }
 
-    async fn verify_bearer(&self, token: &str) -> Result<Option<Principal>, ControlPlaneError> {
+    async fn verify_bearer(
+        &self,
+        token: &str,
+    ) -> Result<Option<VerifiedBearer>, ControlPlaneError> {
         let inner = self.0.lock().unwrap();
         if let Some(admin) = &inner.admin_token
             && token == admin
         {
-            return Ok(Some(Principal::Admin));
+            return Ok(Some(VerifiedBearer {
+                principal: Principal::Admin,
+                credential: None,
+            }));
         }
-        Ok(inner.tokens.get(token).map(|t| Principal::Tagma(t.clone())))
+        let narrowed = inner.perms.get(token).cloned();
+        Ok(inner.tokens.get(token).map(|t| VerifiedBearer {
+            principal: Principal::Tagma(t.clone()),
+            credential: Some(CredentialScope {
+                token: TokenId::from(format!("mock-{token}")),
+                perms: narrowed.unwrap_or_else(kallipai_archeion_common::perm::tagma_defaults),
+            }),
+        }))
     }
 
     async fn tagma_profiles(

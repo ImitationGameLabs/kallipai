@@ -31,5 +31,6 @@ pub mod control_plane;
 pub mod ids;
 pub mod internal_api;
 pub mod participant;
+pub mod perm;
 pub mod principal;
 pub mod proof;
