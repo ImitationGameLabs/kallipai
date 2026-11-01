@@ -173,11 +173,14 @@
             kallipai-keryx = builds.keryx;
             kallipai-files = builds.files;
             kallipai-tagma = builds.tagma;
+            kallipai-run = builds.run;
             kallipai-cron-daemon = builds.cron-daemon;
             kallipai-cron = builds.cron;
             kallipai-daemon = builds.daemon;
             kallipctl = builds.ctl;
             kallipai-daemon-spawn = builds.daemon-spawn;
+            # The binaries the NixOS module installs (see nix/packages/workspace.nix).
+            kallipai-host = builds.host;
             kallipai-instances = builds.instances;
             kallipai-model-gateway = builds.model-gateway;
             # Retention for the local telemetry stack's data directory (the

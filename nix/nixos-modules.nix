@@ -146,13 +146,14 @@ in
 
       package = lib.mkOption {
         type = lib.types.package;
-        default = hostPackages.workspace;
+        default = hostPackages.kallipai-host;
         description = ''
-          The kallipai daemon package, defaulting to this flake's full
-          workspace build. The unit pins KALLIPAI_BIN_DIR to this
-          package's bin directory, so the daemon, its spawn helper,
-          and the tagma it launches all come from one build; a
-          custom package moves the whole set together.
+          The kallipai daemon package, defaulting to this flake's host build:
+          the daemon, its spawn helper, the per-instance run helper,
+          kallipctl, and the tagma (with the agent-side kallip CLI). The unit
+          pins KALLIPAI_BIN_DIR to this package's bin directory, so the
+          daemon, its spawn helper, and the tagma it launches all come from
+          one build; a custom package moves the whole set together.
         '';
       };
 
@@ -196,10 +197,10 @@ in
           (<scheme>://api.<domain>, the scheme following
           services.kallipai.tls); an explicit value always
           wins. Set it explicitly on split deployments where the daemon
-          host cannot reach api.<domain>. With polis disabled nothing is
-          derived: null injects nothing, and a spawn carrying an
-          enrollment code but no origin then fails loudly at boot
-          (credentials are never sent to an assumed deployment). The
+          host cannot reach api.<domain>. With polis disabled, as on a
+          daemon-only host, nothing is derived: null injects nothing, and a
+          spawn carrying an enrollment code but no origin then fails loudly
+          at boot (credentials are never sent to an assumed deployment). The
           api.<domain> form beats a service port -- tagma clients append
           /v1/<service>, which only the edge routes.
         '';
@@ -786,13 +787,14 @@ in
       # in tagmaUsers, not in a competing declaration.
       nix.settings.allowed-users = lib.mkForce (lib.unique (cfg.tagmaUsers ++ [ "@${cfg.group}" ]));
 
-      # Enabling the daemon puts every platform command on PATH (the
-      # full workspace build), plus the aifed editor tool that agents
-      # shell out to and people use interactively. The services still
-      # run from their own packages -- PATH is for people and their
-      # agents, not for the systemd units.
+      # Enabling the daemon puts the host build on PATH (the daemon, its spawn
+      # helper, kallipctl, the tagma, the agent-side kallip CLI, and the
+      # kallipai-run runner), plus the aifed editor tool that agents shell out
+      # to and people use interactively. Polis binaries are not here: the
+      # polis block adds only archeion's admin CLI, and every service runs
+      # from its unit's explicit path -- PATH is for people and their agents.
       environment.systemPackages = [
-        hostPackages.workspace
+        hostPackages.kallipai-host
         config.services.kallipai.aifedPackage
       ];
 
@@ -867,6 +869,10 @@ in
       };
     })
     (lib.mkIf polisCfg.enable {
+      # The polis face's operator CLI. The host build carries the daemon side
+      # only, so archeion's admin tool ships with the services it administers.
+      environment.systemPackages = [ hostPackages.kallipai-admin ];
+
       # Dedicated users with the platform gate group as their primary.
       # Polis is a trust domain: the 0640 internal-token file and the
       # 0750 log directories are readable across the family by design

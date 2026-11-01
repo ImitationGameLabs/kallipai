@@ -12,36 +12,68 @@
   # here: a stub bundle only, seconds on a warm store.
   "${project}-nixos-module-eval" =
     let
+      # The binaries each stubbed package stands for. The module's package
+      # defaults resolve against these stubs, so the eval never builds a real
+      # crate -- but the PATH assertions below read bin/, so each stub must
+      # carry the entries these assertions read. kallipai-host is the linked
+      # host build the module installs; workspace is the full build.
+      hostBins = [
+        "kallipai-daemon"
+        "kallipai-daemon-spawn"
+        "kallipctl"
+        "kallipai-tagma"
+        "kallipai-run"
+        "kallip"
+      ];
+      polisBins = [
+        "kallipai-archeion"
+        "kallipai-lesche"
+        "kallipai-keryx"
+        "kallipai-files"
+        "kallipai-instances"
+        "kallipai-model-gateway"
+        "kallipai-admin"
+      ];
+      stubBins = {
+        kallipai-host = hostBins;
+        workspace = hostBins ++ polisBins;
+        kallipai-daemon = [ "kallipai-daemon" ];
+        kallipai-daemon-spawn = [ "kallipai-daemon-spawn" ];
+        kallipctl = [ "kallipctl" ];
+        kallipai-tagma = [
+          "kallipai-tagma"
+          "kallip"
+        ];
+        kallipai-run = [ "kallipai-run" ];
+        kallipai-archeion = [ "kallipai-archeion" ];
+        kallipai-lesche = [ "kallipai-lesche" ];
+        kallipai-keryx = [ "kallipai-keryx" ];
+        kallipai-files = [ "kallipai-files" ];
+        kallipai-instances = [ "kallipai-instances" ];
+        kallipai-model-gateway = [ "kallipai-model-gateway" ];
+        kallipai-admin = [ "kallipai-admin" ];
+      };
       stubPackages = {
-        ${pkgs.stdenv.hostPlatform.system} = builtins.listToAttrs (
-          map
-            (name: {
-              inherit name;
-              # The web stub ships a config.js shell and a page sentinel:
-              # the plain site root must pass both through; a baked root
-              # must overwrite the former and carry the latter.
-              value = pkgs.runCommand "${name}-stub" { } (
-                if name == "kallipai-web-dist" then
-                  ''
-                    mkdir $out
-                    echo bundle-shell > $out/config.js
-                    echo bundle-page > $out/index.html
-                  ''
-                else
-                  "mkdir $out"
-              );
-            })
-            [
-              "kallipai-daemon"
-              "kallipai-archeion"
-              "kallipai-lesche"
-              "kallipai-files"
-              "kallipai-instances"
-              "kallipai-model-gateway"
-              "kallipai-web-dist"
-              "workspace"
-            ]
-        );
+        ${pkgs.stdenv.hostPlatform.system} =
+          builtins.mapAttrs (
+            name: bins:
+            pkgs.runCommand "${name}-stub" { } ''
+              mkdir -p $out/bin
+              for binname in ${lib.concatStringsSep " " bins}; do
+                echo '${name}' > $out/bin/$binname
+              done
+            ''
+          ) stubBins
+          // {
+            # The web stub ships a config.js shell and a page sentinel: the
+            # plain site root must pass both through; a baked root must
+            # overwrite the former and carry the latter.
+            kallipai-web-dist = pkgs.runCommand "kallipai-web-dist-stub" { } ''
+              mkdir $out
+              echo bundle-shell > $out/config.js
+              echo bundle-page > $out/index.html
+            '';
+          };
       };
       kallipaiModule = import ../nixos-modules.nix {
         packages = stubPackages;
@@ -133,15 +165,38 @@
           builtins.head (builtins.head hits);
       boundPortsLine = lib.concatStringsSep " " (map moduleBinding portNames);
       boundForwardPortLine = moduleBinding "defaultForwardPort";
-      # The daemon block installs the whole workspace build on PATH.
-      workspaceOnPath =
-        builtins.elem stubPackages.${pkgs.stdenv.hostPlatform.system}.workspace
-          aligned.config.environment.systemPackages;
+      # The two PATH shapes, read off the evaluated hosts. A NixOS host fills
+      # environment.systemPackages with its default environment too, so the
+      # comparison filters to the packages this flake knows about: what stays
+      # must be exactly the host build (plus the admin CLI under polis), and a
+      # leaked service or a return of the full workspace build turns it red.
+      hostStub = stubPackages.${pkgs.stdenv.hostPlatform.system}.kallipai-host;
+      workspaceStub = stubPackages.${pkgs.stdenv.hostPlatform.system}.workspace;
+      adminStub = stubPackages.${pkgs.stdenv.hostPlatform.system}.kallipai-admin;
+      # Every stub package this flake offers, web bundle included: the module
+      # reaches this flake's packages only through packages.<system>
+      # (nixos-modules.nix binds hostPackages to it), so installing a package
+      # that stubBins does not carry fails evaluation outright instead of
+      # passing quietly. Per-binary stubs sit in the list as well (kallipctl,
+      # the daemon pair, the tagma, run, the polis services, admin), so a
+      # single binary package added to PATH turns the equality below red.
+      # Out of reach: a third-party package some other module takes from pkgs
+      # and installs; eval cannot stat a store path nobody built.
+      flakeStubs = builtins.attrValues stubPackages.${pkgs.stdenv.hostPlatform.system};
+      flakeEntries = packages: builtins.filter (p: builtins.elem p flakeStubs) packages;
+      daemonOnlyPath = webDaemonOnly.config.environment.systemPackages;
+      daemonOnlyPathIsHostOnly = flakeEntries daemonOnlyPath == [ hostStub ];
+      polisPathIsHostPlusAdmin =
+        flakeEntries aligned.config.environment.systemPackages == [
+          hostStub
+          adminStub
+        ];
+      aifedOnPath =
+        builtins.elem webDaemonOnly.config.services.kallipai.aifedPackage daemonOnlyPath
+        && builtins.elem aligned.config.services.kallipai.aifedPackage aligned.config.environment.systemPackages;
 
-      # The daemon block also installs the aifed tool on PATH, from
-      # the option's default (the aifed input's own build). Asserting
-      # the config's own value keeps the check self-contained.
-      aifedOnPath = builtins.elem aligned.config.services.kallipai.aifedPackage aligned.config.environment.systemPackages;
+      # The option default itself: the daemon unit runs this package.
+      daemonPackageIsHostStub = webDaemonOnly.config.services.kallipai.daemon.package == hostStub;
       # The daemon unit's text must carry the system path on PATH: the
       # daemon resolves its helpers by bare name, and a NixOS unit's
       # PATH is empty unless the unit lists `path` explicitly. Dropping
@@ -150,6 +205,11 @@
       daemonUnitFile =
         pkgs.writeText "kallipai-daemon.service-test"
           aligned.config.systemd.units."kallipai-daemon.service".text;
+      # The same unit text on the daemon-only host: it runs the host build,
+      # pins no relay origin, and delegates nothing to a polis service.
+      daemonOnlyUnitFile =
+        pkgs.writeText "kallipai-daemon.service-daemon-only-test"
+          webDaemonOnly.config.systemd.units."kallipai-daemon.service".text;
       # The derived service defaults must reach the process: these two
       # files carry the archeion unit env for the derived (tls on) and
       # the tls-off hosts, and the assertions below grep them.
@@ -396,8 +456,35 @@
       test "${boundForwardPortLine}" = "${pinnedForwardPort}"
       test "${toString (builtins.length (failedAssertions aligned))}" = "0"
       test "${toString (builtins.length aligned.config.warnings)}" = "0"
-      test "${toString workspaceOnPath}" = "1"
+
+      # PATH shape: a daemon-only host carries the host build and the aifed
+      # tool, nothing else; a polis host adds the admin CLI. Both leave the
+      # full workspace build off PATH, and the daemon unit runs the host one.
+      test "${toString daemonOnlyPathIsHostOnly}" = "1" || {
+        echo "daemon-only PATH carries: ${
+          lib.concatMapStringsSep " " toString (flakeEntries daemonOnlyPath)
+        }" >&2
+        exit 1
+      }
+      test "${toString polisPathIsHostPlusAdmin}" = "1"
       test "${toString aifedOnPath}" = "1"
+      test "${toString daemonPackageIsHostStub}" = "1"
+      grep -q 'KALLIPAI_BIN_DIR=${hostStub}/bin' "${daemonOnlyUnitFile}"
+      # `set -e` ignores a negated command's exit status, so absence needs its
+      # own arms: an `! grep` here would pass whatever the unit says.
+      absent() {
+        if grep -q "$1" "$2"; then
+          echo "unexpected '$1' in $2" >&2
+          exit 1
+        fi
+      }
+      absent KALLIPAI_POLIS_URL "${daemonOnlyUnitFile}"
+      absent kallipai-instances "${daemonOnlyUnitFile}"
+
+      # Discrimination: the workspace stub does carry a polis binary, so the
+      # PATH assertions above would be red on a module that installed it.
+      test -e '${workspaceStub}/bin/kallipai-archeion'
+      test ! -e '${hostStub}/bin/kallipai-archeion'
 
       # The daemon unit rides the system path on PATH: bare-name
       # helper resolution depends on it (see daemonUnitFile).
