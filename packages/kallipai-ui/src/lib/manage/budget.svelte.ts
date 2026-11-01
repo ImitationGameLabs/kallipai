@@ -110,10 +110,17 @@ class BudgetStore {
     this.samples = [];
   }
 
-  /** Adjust budget by delta. Optimistic. Returns the server response or throws. */
+  /**
+   * Adjust budget by delta. Optimistic. Returns the server response or throws.
+   *
+   * The async is load-bearing, not decoration: the zero-delta guard throws
+   * synchronously, and the quick-add buttons call this as
+   * .adjust(...).catch(() => {}). Without async that throw would escape the
+   * promise, and the .catch would never run.
+   */
   async adjust(delta: number): Promise<BudgetResponse> {
     if (delta === 0) throw new Error("delta must be non-zero");
-    return this.mutate(async () => {
+    return await this.mutate(async () => {
       const resp = await this.backend.updateBudget({ delta });
       return resp;
     }, delta);
@@ -121,14 +128,14 @@ class BudgetStore {
 
   /** Set remaining budget to an exact value. Optimistic. */
   async setRemaining(value: number): Promise<BudgetResponse> {
-    return this.mutate(async () => {
+    return await this.mutate(async () => {
       return await this.backend.updateBudget({ set_remaining: value });
     }, value - this.remaining);
   }
 
   /** Pause all agents by setting remaining to 0. */
   async pauseAll(): Promise<BudgetResponse> {
-    return this.mutate(async () => {
+    return await this.mutate(async () => {
       return await this.backend.updateBudget({ set_remaining: 0 });
     }, -this.remaining);
   }

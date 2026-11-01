@@ -209,7 +209,7 @@ export async function signInWithOAuth(
   const { authorize_url } = await client.oauthSignInBegin(provider, {
     return_path: opts.returnPath,
   });
-  window.location.href = authorize_url;
+  globalThis.location.href = authorize_url;
 }
 
 /** The outcome of an OAuth finish on the SPA callback page. The same `/finish`

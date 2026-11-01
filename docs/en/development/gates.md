@@ -70,6 +70,19 @@ Notes:
 - Markdown belongs to rumdl, not prettier (`.prettierignore` excludes
   `**/*.md`); rumdl does not align table columns, so a one-row edit never
   reflows the rest of a table.
+- `deno task lint` runs `scripts/lint-rule-guard.ts` before `deno lint`. The
+  guard writes a two-file probe into `packages/kallipai-ui/src/lib`, asserts
+  that `error[no-sloppy-imports]` fires on a `.js` specifier whose real file
+  is the `.ts` neighbour, and deletes the probe in a finally. The UI
+  package's resolution is the premise: a base or package setting that
+  answered specifiers differently would silence the rule and leave the gate
+  green, so the guard makes that failure the gate's own red. The probe lives
+  in a directory lint scans, so a leftover from a killed run is itself the
+  shape the rule rejects: a bare `deno lint`, or a guarded run started within
+  the next minute (the sweep skips younger leftovers), fails on it. A guarded
+  run past that window sweeps it first and stays green, so treat a killed run
+  as cleanup owed, not as a backstop. Do not exclude that directory in
+  `lint.exclude`.
 - A page keeps its title in the frontmatter `title` and opens the body with
   prose. rumdl's MD025 counts a level-one heading in the body as a second
   top-level heading and fails the gate; the other pages under `docs/en/` are

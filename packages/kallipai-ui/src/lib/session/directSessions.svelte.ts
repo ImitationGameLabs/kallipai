@@ -20,8 +20,8 @@ import type {
   DirectMessageRow,
   LescheSessionEntry,
 } from "@kallipai/kallipai-client";
-import { archeionSession } from "./archeion.svelte";
-import { channelsStore } from "./channels.svelte";
+import { archeionSession } from "./archeion.svelte.ts";
+import { channelsStore } from "./channels.svelte.ts";
 import { relayRootAgentId } from "./rootAgent.ts";
 import { chat_direct_fallback } from "../../paraglide/messages.js";
 

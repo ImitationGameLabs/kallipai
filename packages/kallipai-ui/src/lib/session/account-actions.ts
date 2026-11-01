@@ -4,10 +4,10 @@
 // (connection viewmodel, user-branch rendering) stays in the components so
 // this module holds no presentation concerns. (The mode-switch actions
 // left with the offline world, which moved to the kallipai-direct package.)
-import { archeionSession } from "./archeion.svelte";
-import { channelsStore } from "./channels.svelte";
-import { roomsStore } from "./rooms.svelte";
-import { roomConversationsStore } from "./roomConversations.svelte";
+import { archeionSession } from "./archeion.svelte.ts";
+import { channelsStore } from "./channels.svelte.ts";
+import { roomsStore } from "./rooms.svelte.ts";
+import { roomConversationsStore } from "./roomConversations.svelte.ts";
 import { chatDraftsStore } from "./drafts.ts";
 import { unreadStore } from "./unread.svelte.ts";
 

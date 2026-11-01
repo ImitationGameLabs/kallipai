@@ -702,7 +702,7 @@ class ArcheionSessionStore {
       returnPath ? { return_path: returnPath } : {},
     );
     stashOAuthCallback({ provider, action: "signin" });
-    window.location.href = authorize_url;
+    globalThis.location.href = authorize_url;
   }
 
   /** Start an OAuth LINK from settings (step-up gated server-side): navigate to
@@ -713,7 +713,7 @@ class ArcheionSessionStore {
   async linkProvider(provider: string): Promise<void> {
     const { authorize_url } = await client().oauthLinkBegin(provider, {});
     stashOAuthCallback({ provider, action: "link" });
-    window.location.href = authorize_url;
+    globalThis.location.href = authorize_url;
   }
 
   /** Unlink an OAuth identity (hard-delete). THROWS on the 409 last-method
@@ -785,7 +785,7 @@ class ArcheionSessionStore {
         message: oauth_context_lost(),
       };
     }
-    return this.completeOAuth(ctx.provider, { state, code });
+    return await this.completeOAuth(ctx.provider, { state, code });
   }
 
   // -- device pairing (cross-device enrollment) ----------------------------

@@ -194,7 +194,6 @@ pkgs.stdenvNoCC.mkDerivation {
     deno run -A --frozen ../../node_modules/@inlang/paraglide-js/bin/run.js compile \
       --project ../kallipai-ui/i18n/project.inlang \
       --strategy cookie preferredLanguage baseLocale \
-      --emit-ts-declarations \
       --output-structure message-modules \
       --outdir ../kallipai-ui/src/paraglide
     )

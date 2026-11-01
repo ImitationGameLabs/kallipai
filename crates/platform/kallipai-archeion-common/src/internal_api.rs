@@ -148,7 +148,8 @@ impl std::fmt::Display for RecordlessBearer {
 
 impl std::error::Error for RecordlessBearer {}
 
-/// Lift a [`VerifyBearerResponse`] into a [`VerifiedBearer`], refusing the one
+/// Lift a [`VerifyBearerResponse`] into
+/// [`VerifiedBearer`](crate::control_plane::VerifiedBearer), refusing the one
 /// shape a same-version registry cannot produce: a user or a tagma with no
 /// credential. The admin bearer stays accepted, since a bare secret is the one
 /// identity with no record behind it.

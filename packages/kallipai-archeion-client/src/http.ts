@@ -14,7 +14,6 @@ import type {
   AddEmailRequest,
   AddPasskeyFinishRequest,
   AuthFinishResponse,
-  CredentialEventView,
   CreateTokenRequest,
   EmailSummary,
   ExternalIdentitySummary,

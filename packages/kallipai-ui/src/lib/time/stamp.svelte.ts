@@ -19,7 +19,7 @@ export const timezoneLoad = $state<{ done: boolean; ok: boolean }>({
 // Single-flight: concurrent callers share one GET; the guard clears on
 // completion so a re-established session re-fetches (rebind = fresh read).
 let inflight: Promise<void> | null = null;
-export async function loadTimezoneSetting(
+export function loadTimezoneSetting(
   getTimezone: () => Promise<{ timezone: string | null }>,
 ): Promise<void> {
   if (inflight) return inflight;

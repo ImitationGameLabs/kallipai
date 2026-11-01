@@ -38,7 +38,6 @@ export default defineConfig({
       project: "../kallipai-ui/i18n/project.inlang",
       outdir: "../kallipai-ui/src/paraglide",
       strategy: ["cookie", "preferredLanguage", "baseLocale"],
-      emitTsDeclarations: true,
       outputStructure: "message-modules",
     }),
     sveltekit({

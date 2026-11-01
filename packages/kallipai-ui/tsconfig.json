@@ -3,7 +3,16 @@
   "compilerOptions": {
     // kallipai-common is Deno-first and imports with ".ts" extensions; this flag
     // (paired with noEmit from the base) lets svelte-check follow that source.
-    "allowImportingTsExtensions": true
+    "allowImportingTsExtensions": true,
+    // The generated paraglide message modules are JS carrying JSDoc types.
+    // allowJs is what makes that enough: with no .d.ts beside the .js,
+    // bundler resolution answers a ./messages.js specifier with the JS
+    // itself. With declarations beside the JS, resolution answers such a
+    // specifier with the .d.ts, and no-sloppy-imports reads the generated
+    // message and runtime modules as sloppy. No checkJs: the generated JS is
+    // the compiler's output, so its own type errors are not ours to report,
+    // while the JSDoc it carries still types importers.
+    "allowJs": true
   },
   "include": ["src/**/*.ts", "src/**/*.svelte", "src/**/*.js"],
   // Deno test files use `Deno` globals + jsr: imports that svelte-check (tsc)

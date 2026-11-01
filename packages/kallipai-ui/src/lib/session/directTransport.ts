@@ -11,7 +11,7 @@
 // `message_accepted` ack: the user's inbound POST resolves synchronously with
 // no `history_id`, so the store renders the optimistic user line as sent once
 // the POST resolves.
-import { KallipaiError, TransportError } from "@kallipai/kallipai-common";
+import { TransportError } from "@kallipai/kallipai-common";
 
 import type { TagmaClient } from "@kallipai/kallipai-client";
 import type {

@@ -15,12 +15,7 @@ libc = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
 clap_complete = { workspace = true, features = ["unstable-dynamic"] }
-tokio = { workspace = true, features = [
-  "rt",
-  "macros",
-  "time",
-  "signal",
-] }
+tokio = { workspace = true, features = ["rt", "macros", "time", "signal"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }

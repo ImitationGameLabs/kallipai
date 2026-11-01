@@ -192,9 +192,13 @@ class FakeChannel {
   }
 }
 
-/** The minimal Transport surface the constructor touches. The replies
- * drain never starts in these tests — frames arrive via feed(). */
-function fakeTransport(channel: FakeChannel): Transport {
+/** The Transport surface the constructor touches, plus the channel the
+ *  window pulls reach for, carried as a plain property where the real
+ *  transport holds it in a field behind an accessor. The replies drain
+ *  never starts in these tests — frames arrive via feed(). */
+function fakeTransport(channel: FakeChannel): Transport & {
+  relayChannel: FakeChannel;
+} {
   return {
     localSender: { kind: "user", id: USER.id, handle: USER.handle },
     async *replies() {},
@@ -204,8 +208,8 @@ function fakeTransport(channel: FakeChannel): Transport {
       return Promise.resolve();
     },
     close() {},
-  } as unknown as Transport & { relayChannel: FakeChannel };
-  void channel;
+    relayChannel: channel,
+  };
 }
 
 type RelayConv = InstanceType<typeof RelayConversation>;
@@ -225,10 +229,6 @@ function makeConv(channel: FakeChannel): RelayConv {
     "tagma-1",
     "Tagma",
   );
-  // pullPage reaches the fake channel through relayTransport.relayChannel;
-  // splice it onto the transport stand-in.
-  (transport as unknown as { relayChannel: FakeChannel }).relayChannel =
-    channel;
   channel["deliver"] = (f) => conv.feed(f.reply, f.sender);
   convById.set(conv.conversationId, conv);
   return conv;

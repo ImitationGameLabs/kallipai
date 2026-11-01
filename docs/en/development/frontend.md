@@ -55,7 +55,7 @@ assume it.
 | `deno task fmt:md <path>`   | rumdl `fmt` a single Markdown file                                     |
 | `deno task fmt:md:check`    | Every Markdown file, read-only (the `--check` half of `fmt:md`)        |
 | `deno task fmt:check`       | Prettier `--check .` + rumdl `fmt --check .` (CI-style, no writes)     |
-| `deno task lint`            | `deno lint`                                                            |
+| `deno task lint`            | the lint-rule guard, then `deno lint`                                  |
 
 #### Single Package (Run inside the Package Directory)
 
@@ -248,7 +248,7 @@ discoverable for every agent, instead of each one hand-rolling a
 - `deno task check`: types / svelte checks for the touched package(s).
 - `deno task fmt:file <paths>` (or `deno task fmt`): formatting.
 - `deno task build`: for packages with a build step (e.g. `kallipai-web`).
-- `deno task lint`: Deno lint.
+- `deno task lint`: the lint-rule guard, then Deno lint.
 - the 375/1280 dual-form walkthrough for page-facing changes: empty
   states, cap note, delete confirm, upload landing, breakpoint
   density, and entry-cell layout.

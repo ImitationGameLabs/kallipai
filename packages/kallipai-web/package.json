@@ -7,7 +7,7 @@
     "dev": "vite dev",
     "build": "vite build",
     "preview": "vite preview",
-    "prepare": "(svelte-kit sync || echo '') && paraglide-js compile --project ../kallipai-ui/i18n/project.inlang --strategy cookie preferredLanguage baseLocale --emit-ts-declarations --output-structure message-modules --outdir ../kallipai-ui/src/paraglide",
+    "prepare": "(svelte-kit sync || echo '') && paraglide-js compile --project ../kallipai-ui/i18n/project.inlang --strategy cookie preferredLanguage baseLocale --output-structure message-modules --outdir ../kallipai-ui/src/paraglide",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
     "clean": "rm -rf node_modules/.vite .svelte-kit",

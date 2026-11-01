@@ -9,7 +9,6 @@
 // group, so a stray system line between two messages doesn't split them.
 
 import { ROW_TIME, formatStampInZone } from "../time/stamp.ts";
-import { getLocale } from "../../paraglide/runtime.js";
 import {
   timeline_today,
   timeline_yesterday,
