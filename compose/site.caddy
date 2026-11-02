@@ -98,3 +98,23 @@
 		}
 		respond 404
 }
+
+# The model gateway's forwarding face, on a host of its own. The gateway routes
+# on the bare path (`/chat/completions`, `/messages`, `/health`); the `/v1` root
+# belongs to the client contract, so the edge strips it once here and the
+# published base ends in `/v1`. The fallback forwards the unprefixed form
+# unchanged, which is what a client pointed at the bare origin sends. The
+# management face is not here: it stays on the api host, under
+# /v1/model-gateway/*.
+(model-gw-routes) {
+	handle_path /v1/* {
+		reverse_proxy {$KALLIPAI_MODEL_GATEWAY_FORWARD_UPSTREAM} {
+			# A streaming completion holds one response open for minutes; the pin
+			# keeps any future buffer from sitting between the model and the client.
+			flush_interval -1
+		}
+	}
+	reverse_proxy {$KALLIPAI_MODEL_GATEWAY_FORWARD_UPSTREAM} {
+		flush_interval -1
+	}
+}

@@ -1,5 +1,6 @@
-# https, app and api served from the bundle in this image: production, and any
-# deployment that terminates TLS with a certificate pair the host renews.
+# https, app, api and the model gateway served from the bundle in this image:
+# production, and any deployment that terminates TLS with a certificate pair the
+# host renews.
 import site.caddy
 
 {$KALLIPAI_EDGE_SITE} {
@@ -10,4 +11,9 @@ import site.caddy
 {$KALLIPAI_API_BASE} {
 	tls {$KALLIPAI_TLS_CERT} {$KALLIPAI_TLS_KEY}
 	import kallipai-api-routes
+}
+
+{$KALLIPAI_MODEL_GW_SITE} {
+	tls {$KALLIPAI_TLS_CERT} {$KALLIPAI_TLS_KEY}
+	import model-gw-routes
 }

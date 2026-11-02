@@ -188,6 +188,9 @@ services:
       KALLIPAI_TLS_CERT: /certs/cert.pem
       KALLIPAI_TLS_KEY: /certs/key.pem
       KALLIPAI_API_BASE: "${KALLIPAI_API_BASE:-https://api.${KALLIPAI_DOMAIN:?}:${KALLIPAI_EDGE_PORT:-443}}"
+      # The gateway's forwarding face keeps a host of its own; the plain entry
+      # serves it over http on the same port as the other two hosts.
+      KALLIPAI_MODEL_GW_SITE: "${KALLIPAI_MODEL_GW_SITE:-model-gw.${KALLIPAI_DOMAIN:?}:${KALLIPAI_EDGE_PORT:-443}}"
       # The shared /v1 route table takes its upstreams from the environment;
       # dev publishes each service on loopback, so that is where they point.
       KALLIPAI_ARCHEION_UPSTREAM: 127.0.0.1:7100
@@ -196,6 +199,9 @@ services:
       KALLIPAI_FILES_UPSTREAM: 127.0.0.1:7400
       KALLIPAI_INSTANCES_UPSTREAM: 127.0.0.1:7300
       KALLIPAI_MODEL_GATEWAY_UPSTREAM: 127.0.0.1:7500
+      # Both ports publish on loopback for the tagma that runs on the host;
+      # the edge is the only way in from off the machine.
+      KALLIPAI_MODEL_GATEWAY_FORWARD_UPSTREAM: 127.0.0.1:7501
       # These repeat the loopback ports the services publish: compose cannot
       # read another service's ports, so the two lists exist twice with nothing
       # comparing them. The status check probes the published ports directly and

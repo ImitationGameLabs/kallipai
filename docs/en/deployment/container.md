@@ -119,8 +119,9 @@ them.
 The browser-facing keys are not yours to write. CORS origins, the session
 cookie domain, the WebAuthn relying party and the OAuth return base follow
 `KALLIPAI_DOMAIN` in `compose.prod.yaml`, the way the dev override derives
-them from the same value: the app is served at `app.<domain>` and the API at
-`api.<domain>`, so none of them can disagree with what the edge serves.
+them from the same value: the app is served at `app.<domain>`, the API at
+`api.<domain>`, and the model gateway's forwarding face at `model-gw.<domain>`,
+so none of them can disagree with what the edge serves.
 
 A change to a compose file or a Caddyfile is verified by starting the stack once
 here: nothing static checks either. Run these in order:
@@ -217,6 +218,14 @@ unset key the same way. The api host is served at `KALLIPAI_API_BASE` itself,
 scheme and port included, so the address the browser is given and the one the
 edge answers on are one value.
 
+The model gateway keeps a host of its own, `KALLIPAI_MODEL_GW_SITE`, for its
+forwarding face. The gateway's forwarding routes carry no `/v1` prefix, while a
+client base ends in `/v1`, so that host strips the prefix once
+(`handle_path /v1/*`) and forwards the bare path; a fallback `reverse_proxy` in
+the same block keeps the unprefixed form working. The base the gateway
+publishes is therefore `https://model-gw.<domain>/v1`. The management face is
+not on this host: it stays on the api host, under `/v1/model-gateway/*`.
+
 The image carries three entries and one body (`compose/site.caddy`):
 
 | Entry              | App host answers with            | TLS  |
@@ -225,10 +234,11 @@ The image carries three entries and one body (`compose/site.caddy`):
 | `Caddyfile.plain`  | the bundle in the image          | no   |
 | `Caddyfile.vite`   | `127.0.0.1:5173`, the vite server | yes  |
 
-Each entry declares its own two site blocks, the app host and the api host, and
-carries the body's snippets: that is the whole difference between them. The
-edge container picks one with its `command:`; the production override leaves the
-image's own default (`Caddyfile`), and the dev override names it through
+Each entry declares its own site blocks: the app host, the api host and the
+model gateway's forwarding host. They carry the body's snippets and differ only
+in the answers and the addresses they name: that is the whole difference between
+them. The edge container picks one with its `command:`; the production override
+leaves the image's own default (`Caddyfile`), and the dev override names it through
 `KALLIPAI_EDGE_ENTRY`. `Caddyfile.plain` exists as a separate entry because
 caddy refuses an `http://` address that also configures TLS ("server is HTTP,
 but attempts to configure TLS"), so an https-less stack has to reach the body
@@ -396,9 +406,10 @@ Brings up the platform's services (the archeion identity control plane, the
 lesche relay data plane, the keryx tagma-link relay, and the files service),
 plus one postgres store per stateful service (`postgres:17.5`), co-located on
 one host. **None of the services is published**: all sit behind your
-TLS-terminating edge proxy, which path-routes the single `api.<your-domain>`
-host by service; `reverse_proxy` sets `X-Forwarded-For` on its own, and you
-configure `KALLIPAI_ARCHEION_TRUSTED_PROXIES` to the proxy's CIDR. The edge
+TLS-terminating edge proxy, which path-routes the `api.<your-domain>` host by
+service and gives the model gateway's forwarding face a second host,
+`model-gw.<your-domain>`; `reverse_proxy` sets `X-Forwarded-For` on its own, and
+you configure `KALLIPAI_ARCHEION_TRUSTED_PROXIES` to the proxy's CIDR. The edge
 must not route `/v1/archeion/internal` or anything under it publicly (that
 is the archeion's `/internal` and `/internal/*` once the prefix is
 stripped): the relay, the tagma-link relay and the files service reach it
@@ -443,6 +454,30 @@ api.<your-domain> {
   respond 404
 }
 ```
+
+The forwarding face takes its own host. Its routes carry no `/v1` prefix, so
+the host strips the prefix once and forwards the rest; the fallback serves a
+client that points at the bare origin, and both flush immediately because a
+streaming completion holds one response open for minutes:
+
+```caddy
+model-gw.<your-domain> {
+  handle_path /v1/* {
+    reverse_proxy gateway:7501 {
+      flush_interval -1
+    }
+  }
+  reverse_proxy gateway:7501 {
+    flush_interval -1
+  }
+}
+```
+
+`KALLIPAI_MODEL_GATEWAY_PUBLIC_BASE_URL` is then
+`https://model-gw.<your-domain>/v1`. The `/v1/model-gateway/*` segment on the
+api host is the management face, which has no forwarding route. The stack's own
+edge writes that block from the `(model-gw-routes)` snippet in
+`compose/site.caddy`.
 
 ```sh
 scripts/compose-up.sh prod up -d

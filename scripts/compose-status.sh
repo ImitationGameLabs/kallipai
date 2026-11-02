@@ -58,10 +58,11 @@ if [ -z "$project" ]; then
 fi
 
 # Service -> the environment key carrying the address it listens on, the health
-# path, and what that path answers. The gateway listens on
-# two addresses; the probe names the management one, where /health sits beside
-# /metrics as the process probe (the data plane answers its own copy, but the
-# management port is the one published for exactly this).
+# path, and what that path answers. The gateway listens on two addresses; the
+# probe names the management one, where /health sits beside /metrics as the
+# process probe. The forwarding face answers its own copy of /health, but the
+# edge is the way in to it, and a probe that went through the edge would report
+# one caddy failure as every service down.
 services=(
   "archeion:KALLIPAI_ARCHEION_ADDR:/healthz:ok"
   "lesche:KALLIPAI_LESCHE_ADDR:/healthz:ok"

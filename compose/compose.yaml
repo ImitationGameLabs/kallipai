@@ -248,7 +248,7 @@ services:
     restart: unless-stopped
 
   caddy:
-    depends_on: ["archeion", "lesche", "keryx", "files"]
+    depends_on: ["archeion", "lesche", "keryx", "files", "gateway"]
     logging: *logging
     restart: unless-stopped
 

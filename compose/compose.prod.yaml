@@ -100,6 +100,9 @@ services:
       KALLIPAI_TLS_CERT: /certs/fullchain.pem
       KALLIPAI_TLS_KEY: /certs/privkey.pem
       KALLIPAI_API_BASE: https://api.${KALLIPAI_DOMAIN:?set KALLIPAI_DOMAIN}
+      # The wildcard above covers this host as well; the explicit block wins for
+      # it and routes to the forwarding face instead of the api route table.
+      KALLIPAI_MODEL_GW_SITE: "model-gw.${KALLIPAI_DOMAIN:?set KALLIPAI_DOMAIN}"
       # The shared /v1 route table takes its upstreams from the environment;
       # on the platform network the service names resolve.
       KALLIPAI_ARCHEION_UPSTREAM: archeion:7100
@@ -108,6 +111,7 @@ services:
       KALLIPAI_FILES_UPSTREAM: files:7400
       KALLIPAI_INSTANCES_UPSTREAM: instances:7300
       KALLIPAI_MODEL_GATEWAY_UPSTREAM: gateway:7500
+      KALLIPAI_MODEL_GATEWAY_FORWARD_UPSTREAM: gateway:7501
     # The Caddyfile, the route table and the site are in the image; the
     # certificates stay a mount because the host renews them.
     volumes:
