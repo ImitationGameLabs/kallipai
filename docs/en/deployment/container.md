@@ -684,6 +684,20 @@ scripts/build-and-load-images.sh            # all eleven
 scripts/build-and-load-images.sh tagma      # one image
 ```
 
+The last thing it prints is the tag the batch carries, shaped to be copied
+straight into a `.env` file:
+
+```text
+KALLIPAI_IMAGE_TAG=<tag>
+```
+
+The tag is the one the flake evaluation produced: a clean worktree gives the
+short commit hash, uncommitted changes give `dirty`. The script builds each
+image in its own evaluation, then compares the tags as they load, so the
+promise is one tag per batch. A `dirty` batch proves nothing about the tree:
+two builds of different dirty trees are both `dirty`, and the check cannot
+tell them apart.
+
 The eleven attributes are `kallipai-archeion-image`,
 `kallipai-lesche-image`, `kallipai-keryx-image`, `kallipai-files-image`,
 `kallipai-model-gateway-image`, `kallipai-instances-image`,

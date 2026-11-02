@@ -108,6 +108,11 @@ cd -- "$repo_root"
 
 total=${#selected[@]}
 index=0
+# Every image of one run carries one tag: each image is its own flake
+# evaluation, so a second tag inside the loop means the two were not built
+# from the same tree. The check compares tags, not trees: two dirty builds of
+# different trees are both named dirty, and nothing here can tell them apart.
+batch_tag=
 for name in "${selected[@]}"; do
   index=$((index + 1))
   attr="$(attr_for "$name")"
@@ -118,6 +123,12 @@ for name in "${selected[@]}"; do
   printf '[%d/%d] %s: loading %s\n' "$index" "$total" "$name" "$path"
   loaded=$(docker load -i "$path" | sed -n 's/^Loaded image: //p' | tail -n 1)
   [ -n "$loaded" ] || die "$name: docker load named no image"
+  tag=${loaded##*:}
+  if [ -z "$batch_tag" ]; then
+    batch_tag=$tag
+  elif [ "$tag" != "$batch_tag" ]; then
+    die "$name: loaded $tag, but this batch already loaded $batch_tag; one run builds one batch"
+  fi
   # The tarball names the image without a registry prefix. A stack that runs
   # behind one resolves <prefix><that name>, so the alias is added here instead
   # of leaving a hand-run `docker tag` between a load and a start.
@@ -125,4 +136,5 @@ for name in "${selected[@]}"; do
     docker tag "$loaded" "${KALLIPAI_IMAGE_PREFIX}${loaded}"
   fi
 done
-printf 'done: %d image(s) loaded; docker images | grep kallipai\n' "$total"
+echo "loaded $total image(s)"
+echo "KALLIPAI_IMAGE_TAG=$batch_tag"
