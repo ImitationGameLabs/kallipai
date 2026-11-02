@@ -61,6 +61,7 @@
               mkdir -p $out/bin
               for binname in ${lib.concatStringsSep " " bins}; do
                 echo '${name}' > $out/bin/$binname
+                chmod +x $out/bin/$binname
               done
             ''
           ) stubBins
@@ -359,6 +360,52 @@
           web.enable = true;
         };
       };
+      # The polisUrl knob's plaintext arm: the module swaps in a wrapped
+      # host build so kallipctl on PATH carries --allow-plaintext, while an
+      # https origin keeps the plain host build. The wrapper needs an
+      # executable source, hence the chmod on every stub binary.
+      plaintextHost = evalHost {
+        services.kallipai = {
+          daemon.enable = true;
+          daemon.polisUrl = "http://kallipai.lan:8080";
+        };
+      };
+      httpsHost = evalHost {
+        services.kallipai = {
+          daemon.enable = true;
+          daemon.polisUrl = "https://api.example.com";
+        };
+      };
+      # A plaintext origin on a loopback host is wrapped too: the module reads
+      # the scheme, because the CLI's plaintext branch never looks at the flag
+      # on loopback and an unused flag there does nothing.
+      loopbackPlainHost = evalHost {
+        services.kallipai = {
+          daemon.enable = true;
+          daemon.polisUrl = "http://127.0.0.1:7100";
+        };
+      };
+      # The joined build is not a stub, so it is picked out by derivation
+      # name from the default environment it is merged into. Exactly one:
+      # two would mean two bin/kallipctl on one PATH.
+      wrappedEntry =
+        host:
+        let
+          hits = builtins.filter (
+            p: (p.name or "") == "kallipai-host-plaintext"
+          ) host.config.environment.systemPackages;
+        in
+        if builtins.length hits == 1 then
+          builtins.head hits
+        else
+          throw "plaintext PATH: ${toString (builtins.length hits)} wrapped host builds, want exactly one";
+      plaintextPathEntry = wrappedEntry plaintextHost;
+      loopbackPlainPathEntry = wrappedEntry loopbackPlainHost;
+      plaintextDropsHostStub = !(builtins.elem hostStub plaintextHost.config.environment.systemPackages);
+      httpsPathIsHostStub = flakeEntries httpsHost.config.environment.systemPackages == [ hostStub ];
+      plaintextUnitFile =
+        pkgs.writeText "kallipai-daemon.service-plaintext-test"
+          plaintextHost.config.systemd.units."kallipai-daemon.service".text;
       # The polis scrape export: empty with polis or gateway off; one
       # job per enabled metrics-capable service (the gateway today)
       # with the port following the service's own option, a drifted
@@ -470,6 +517,35 @@
       test "${toString aifedOnPath}" = "1"
       test "${toString daemonPackageIsHostStub}" = "1"
       grep -q 'KALLIPAI_BIN_DIR=${hostStub}/bin' "${daemonOnlyUnitFile}"
+      # The plaintext arm, both ways: an https origin keeps the bare stub, a
+      # plaintext one replaces it (never alongside: one bin/kallipctl), the
+      # link carries all six binaries, and bin/kallipctl is a wrapper naming
+      # both the flag and the stub binary instead of the stub itself. The
+      # daemon unit keeps running the unwrapped build. A loopback plaintext
+      # origin is wrapped too, because the module reads the scheme alone.
+      test "${toString httpsPathIsHostStub}" = "1" || {
+        echo "https PATH carries: ${
+          lib.concatMapStringsSep " " toString (flakeEntries httpsHost.config.environment.systemPackages)
+        }" >&2
+        exit 1
+      }
+      test "${toString plaintextDropsHostStub}" = "1"
+      test -x ${plaintextPathEntry}/bin/kallipctl
+      for b in kallip kallipai-daemon kallipai-daemon-spawn kallipai-run kallipai-tagma kallipctl; do
+        test -e ${plaintextPathEntry}/bin/$b
+      done
+      grep -q -- '--allow-plaintext' ${plaintextPathEntry}/bin/kallipctl
+      grep -q '${hostStub}/bin/kallipctl' ${plaintextPathEntry}/bin/kallipctl
+      # A loopback plaintext host is wrapped as well: the scheme alone decides,
+      # and the flag is unused there because the CLI never reaches that branch.
+      test -x ${loopbackPlainPathEntry}/bin/kallipctl
+      grep -q -- '--allow-plaintext' ${loopbackPlainPathEntry}/bin/kallipctl
+      grep -q '${hostStub}/bin/kallipctl' ${loopbackPlainPathEntry}/bin/kallipctl
+      if cmp -s ${plaintextPathEntry}/bin/kallipctl ${hostStub}/bin/kallipctl; then
+        echo 'PATH kallipctl is still the unwrapped stub' >&2
+        exit 1
+      fi
+      grep -q 'KALLIPAI_BIN_DIR=${hostStub}/bin' "${plaintextUnitFile}"
       # `set -e` ignores a negated command's exit status, so absence needs its
       # own arms: an `! grep` here would pass whatever the unit says.
       absent() {

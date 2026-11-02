@@ -101,6 +101,7 @@ async fn run() -> Result<()> {
     // Set when this invocation minted an enrollment code, so a failed
     // spawn can still point at the pending tagma it left behind.
     let mut pending_mint: Option<archeion::MintedCode> = None;
+    let allow_plaintext = cli.allow_plaintext;
     let body = match cli.command {
         Command::Spawn {
             slug,
@@ -115,7 +116,7 @@ async fn run() -> Result<()> {
             // after an enrollment code would already be spent. Resolving here
             // checks the path the daemon will actually use and sends that one.
             let workspace = absolute_workspace(&workspace)?;
-            let (env, minted) = spawn_env::prepare(env, polis, token_file).await?;
+            let (env, minted) = spawn_env::prepare(env, polis, token_file, allow_plaintext).await?;
             if let Some(minted) = &minted {
                 eprintln!(
                     "pending tagma {} (code expires at {})",

@@ -67,6 +67,43 @@ let
   aifedDefault = (pkgs.extend aifedOverlay).aifed;
   inherit (import ./lib.nix) bakeRuntimeConfig;
 
+  # A plaintext origin, as this module reads one. The CLI's plaintext branch
+  # only fires on a host that is not loopback, and it reads the flag only
+  # there, so a flag on a loopback origin changes nothing: the scheme decides.
+  # polisUrl is null on hosts that serve no polis; those read as https, and so
+  # does anything the match cannot read, which fails closed: no wrapper.
+  isPlaintextOrigin =
+    url:
+    if url == null then
+      false
+    else
+      let
+        trimmed = lib.trim url;
+        parts = builtins.match "([A-Za-z][A-Za-z0-9+.-]*)://.*" trimmed;
+      in
+      parts != null && lib.toLower (builtins.head parts) == "http";
+
+  # The PATH build. Minting an enrollment code through a plaintext origin
+  # needs --allow-plaintext on kallipctl, and the one place a deployment can
+  # put it without the operator typing it is a wrapper: the flag is a global
+  # option, so it goes in front of the subcommand. The two branches are
+  # exclusive, so PATH never holds two bin/kallipctl. The daemon unit and its
+  # KALLIPAI_BIN_DIR keep pointing at daemon.package, untouched.
+  pathHostPackage =
+    if isPlaintextOrigin cfg.polisUrl then
+      pkgs.symlinkJoin {
+        name = "kallipai-host-plaintext";
+        paths = [ hostPackages.kallipai-host ];
+        nativeBuildInputs = [ pkgs.makeWrapper ];
+        postBuild = ''
+          rm $out/bin/kallipctl
+          makeWrapper ${hostPackages.kallipai-host}/bin/kallipctl $out/bin/kallipctl \
+            --add-flags --allow-plaintext
+        '';
+      }
+    else
+      hostPackages.kallipai-host;
+
   # Single source of truth for the polis port defaults: the option
   # defaults and the direct-connect warning both read this one
   # binding, so a default change happens here and nowhere else. The
@@ -203,6 +240,8 @@ in
           at boot (credentials are never sent to an assumed deployment). The
           api.<domain> form beats a service port -- tagma clients append
           /v1/<service>, which only the edge routes.
+          A plaintext origin makes the module wrap the PATH kallipctl so a
+          spawn can mint through it; https needs no such help.
         '';
       };
 
@@ -793,8 +832,10 @@ in
       # to and people use interactively. Polis binaries are not here: the
       # polis block adds only archeion's admin CLI, and every service runs
       # from its unit's explicit path -- PATH is for people and their agents.
+      # A plaintext polisUrl swaps in a wrapped copy, so kallipctl on PATH
+      # carries --allow-plaintext without anyone typing it.
       environment.systemPackages = [
-        hostPackages.kallipai-host
+        pathHostPackage
         config.services.kallipai.aifedPackage
       ];
 

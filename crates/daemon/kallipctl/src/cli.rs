@@ -23,6 +23,16 @@ pub(crate) struct Cli {
     /// build against a running daemon).
     #[arg(long, global = true)]
     pub(crate) bin: Option<String>,
+
+    /// Allow a plaintext http platform origin that is not loopback. Only
+    /// spawn reads it, where the access token and the enrollment code would
+    /// otherwise cross the network in the clear; elsewhere, and with no --polis,
+    /// it means nothing. It sits at top level because a wrapper can only put a
+    /// flag between the program name and the subcommand, and clap reads a global
+    /// option there. A NixOS deployment whose daemon.polisUrl is plaintext puts
+    /// it on PATH already, so there is nothing to type.
+    #[arg(long, global = true)]
+    pub(crate) allow_plaintext: bool,
     #[command(subcommand)]
     pub(crate) command: Command,
 }

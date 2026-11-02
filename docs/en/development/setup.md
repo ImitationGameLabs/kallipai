@@ -52,6 +52,11 @@ The plain entry serves the bundle the image carries, so this shape has no hot
 reload: the vite loop needs the https edge below. `scripts/compose-up.sh` skips
 the mkcert check for this entry alone; the other two need the pair.
 
+Spawning through this edge from a NixOS host needs nothing extra: when
+`services.kallipai.daemon.polisUrl` is plaintext the module puts a wrapped
+`kallipctl` on PATH carrying `--allow-plaintext`. Other installs pass the flag
+themselves, before the subcommand: `kallipctl --allow-plaintext spawn ...`.
+
 - Open `http://app.localhost:8080`: browsers resolve every `*.localhost` name
 to the loopback interface, so no hosts-file entry is needed. What answers is
 the bundle the image carries, so `deno task dev` has nothing to serve here.

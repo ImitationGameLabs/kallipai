@@ -33,9 +33,19 @@ chmod 600 ~/.config/kallipai/access-token
 `--polis` is the platform edge origin: the value the instance receives as
 `KALLIPAI_POLIS_URL`, and the base the mint appends `/v1/archeion` to. It is
 not a service's bare address. It must be an http or https URL with no query,
-no fragment, and no user name or password; plain http is accepted only for a
-loopback origin, because the access token and the code it mints would
-otherwise cross the network in the clear.
+no fragment, and no user name or password; plain http is accepted for a
+loopback origin (a loopback IP, `localhost`, or any name under `.localhost`),
+because the access token and the code it mints would otherwise cross the
+network in the clear. A plaintext origin off this host needs
+`--allow-plaintext`, a top-level option placed before the subcommand and
+read by spawn alone; a spawn without `--polis` ignores it. When the flag lets
+a plaintext origin through, spawn names the risk on stderr and proceeds.
+
+A plaintext edge on a trusted network needs the flag, before the subcommand:
+
+```bash
+kallipctl --allow-plaintext spawn dev /srv/kallipai/dev --polis http://kallipai.lan:7100
+```
 
 `--polis` writes `KALLIPAI_POLIS_URL` into the instance environment. Passing
 `-e KALLIPAI_POLIS_URL` or `-e KALLIPAI_TAGMA_RELAY_ENROLLMENT_CODE` next to
@@ -64,7 +74,7 @@ on the operator's machine. Each failure names its fix:
 | --polis must be an origin, without a query or fragment | pass scheme://host[:port] |
 | --polis must be an origin, without a path | pass scheme://host[:port] |
 | --polis must not carry a user name or password | drop the userinfo |
-| --polis URL is not loopback and not https | it would send the token in the clear |
+| --polis URL is not loopback and not https | the token would cross the network in the clear; pass --allow-plaintext to proceed anyway |
 
 ## Shell completions
 

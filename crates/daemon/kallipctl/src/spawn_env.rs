@@ -16,11 +16,15 @@ pub(crate) async fn prepare(
     env: Vec<String>,
     polis: Option<String>,
     token_file: Option<String>,
+    allow_plaintext: bool,
 ) -> Result<(Vec<String>, Option<archeion::MintedCode>)> {
     let Some(polis) = polis else {
         if token_file.is_some() {
             anyhow::bail!("--token-file only means something together with --polis");
         }
+        // The flag is ignored here: a plaintext polisUrl host puts it on PATH
+        // for every invocation, so an offline spawn has to keep working with it
+        // present but meaningless.
         return Ok((env, None));
     };
     // Both sources write the same two variables. Picking a winner silently
@@ -55,13 +59,21 @@ pub(crate) async fn prepare(
     }
     // The mint spends a long-lived access token and the instance keeps the
     // code it mints; over plain HTTP either one crosses the network in the
-    // clear, so only a loopback origin may be plaintext.
-    if origin.scheme() == "http" && !is_loopback(&origin) {
-        anyhow::bail!(
-            "--polis {origin} is not loopback and not https; the access token would cross the network in the clear"
+    // clear, so a non-loopback origin needs the operator's say-so.
+    let plaintext = origin.scheme() == "http" && !is_loopback(&origin);
+    // The string the instance receives is the trimmed one, so the messages
+    // below print that instead of the Url, which keeps a trailing slash.
+    let origin = origin.as_str().trim_end_matches('/').to_owned();
+    if plaintext {
+        if !allow_plaintext {
+            anyhow::bail!(
+                "--polis {origin} is not loopback and not https; the access token would cross the network in the clear; pass --allow-plaintext on a network you trust"
+            );
+        }
+        eprintln!(
+            "plaintext origin {origin}: the access token and the enrollment code cross the network in the clear"
         );
     }
-    let origin = origin.as_str().trim_end_matches('/').to_owned();
     let path = match token_file {
         Some(path) => PathBuf::from(path),
         None => default_token_path()?,
@@ -77,13 +89,19 @@ pub(crate) async fn prepare(
     Ok((env, Some(minted)))
 }
 
-/// Whether the origin names this host: a plaintext origin is acceptable only
-/// for traffic that never leaves the machine.
+/// Whether the origin names this host, and so whether the traffic stays on it.
+/// The addresses answer that themselves. For names the rule is the RFC 6761
+/// convention rather than the kernel's: `localhost` and every name under it are
+/// left to resolve to loopback, which is what resolvers do with them and not
+/// something this check can observe.
 fn is_loopback(origin: &url::Url) -> bool {
     match origin.host() {
         Some(url::Host::Ipv4(addr)) => addr.is_loopback(),
         Some(url::Host::Ipv6(addr)) => addr.is_loopback(),
-        Some(url::Host::Domain(name)) => name.eq_ignore_ascii_case("localhost"),
+        Some(url::Host::Domain(name)) => {
+            let name = name.strip_suffix('.').unwrap_or(name).to_ascii_lowercase();
+            name == "localhost" || name.ends_with(".localhost")
+        }
         None => false,
     }
 }
@@ -102,7 +120,7 @@ mod tests {
     #[tokio::test]
     async fn without_polis_the_env_passes_through() {
         let env = vec!["KALLIPAI_FOO=1".to_string()];
-        let (out, minted) = prepare(env.clone(), None, None)
+        let (out, minted) = prepare(env.clone(), None, None, false)
             .await
             .expect("pass-through");
         assert_eq!(out, env);
@@ -111,7 +129,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_token_file_without_polis_is_a_usage_error() {
-        let err = prepare(Vec::new(), None, Some("/tmp/token".to_string()))
+        let err = prepare(Vec::new(), None, Some("/tmp/token".to_string()), false)
             .await
             .expect_err("token without polis");
         assert!(
@@ -130,6 +148,7 @@ mod tests {
                 vec![pair.to_string()],
                 Some("https://a.test".to_string()),
                 None,
+                false,
             )
             .await
             .expect_err("two sources");
@@ -139,7 +158,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_polis_that_is_not_a_url_is_named_as_such() {
-        let err = prepare(Vec::new(), Some("a.test".to_string()), None)
+        let err = prepare(Vec::new(), Some("a.test".to_string()), None, false)
             .await
             .expect_err("not a URL");
         assert!(
@@ -150,9 +169,14 @@ mod tests {
 
     #[tokio::test]
     async fn a_polis_on_another_scheme_is_refused_before_the_token() {
-        let err = prepare(Vec::new(), Some("file:///tmp/polis".to_string()), None)
-            .await
-            .expect_err("not http");
+        let err = prepare(
+            Vec::new(),
+            Some("file:///tmp/polis".to_string()),
+            None,
+            false,
+        )
+        .await
+        .expect_err("not http");
         assert!(
             format!("{err:#}").contains("must be an http or https URL"),
             "{err:#}"
@@ -162,7 +186,7 @@ mod tests {
     #[tokio::test]
     async fn a_polis_with_a_query_or_fragment_is_refused() {
         for polis in ["https://api.test?x=1", "https://api.test#frag"] {
-            let err = prepare(Vec::new(), Some(polis.to_string()), None)
+            let err = prepare(Vec::new(), Some(polis.to_string()), None, false)
                 .await
                 .expect_err("not an origin");
             assert!(
@@ -178,6 +202,7 @@ mod tests {
             Vec::new(),
             Some("https://user:pw@api.test".to_string()),
             None,
+            false,
         )
         .await
         .expect_err("userinfo");
@@ -191,15 +216,20 @@ mod tests {
     async fn a_polis_with_a_path_is_refused() {
         // A path survives into KALLIPAI_POLIS_URL, and every consumer
         // appends `/v1/<service>` to it.
-        let err = prepare(Vec::new(), Some("https://api.test/polis".to_string()), None)
-            .await
-            .expect_err("a path is not an origin");
+        let err = prepare(
+            Vec::new(),
+            Some("https://api.test/polis".to_string()),
+            None,
+            false,
+        )
+        .await
+        .expect_err("a path is not an origin");
         assert!(format!("{err:#}").contains("without a path"), "{err:#}");
     }
 
     #[tokio::test]
     async fn a_plaintext_origin_off_this_host_is_refused() {
-        let err = prepare(Vec::new(), Some("http://api.test".to_string()), None)
+        let err = prepare(Vec::new(), Some("http://api.test".to_string()), None, false)
             .await
             .expect_err("plaintext");
         assert!(
@@ -216,11 +246,98 @@ mod tests {
             Vec::new(),
             Some("http://127.0.0.1:7100".to_string()),
             Some(missing),
+            false,
         )
         .await
         .expect_err("no token file");
         // The origin checks passed: the failure is the token file, not the
         // scheme.
         assert!(format!("{err:#}").contains("no access token at"), "{err:#}");
+    }
+
+    #[tokio::test]
+    async fn a_plaintext_name_under_localhost_is_loopback() {
+        // RFC 6761: every name under .localhost resolves to loopback.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let missing = dir.path().join("absent").to_string_lossy().into_owned();
+        let err = prepare(
+            Vec::new(),
+            Some("http://api.localhost:8080".to_string()),
+            Some(missing),
+            false,
+        )
+        .await
+        .expect_err("no token file");
+        assert!(format!("{err:#}").contains("no access token at"), "{err:#}");
+    }
+
+    #[tokio::test]
+    async fn a_localhost_name_with_a_trailing_dot_is_loopback() {
+        // One trailing dot still names the same host.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let missing = dir.path().join("absent").to_string_lossy().into_owned();
+        let err = prepare(
+            Vec::new(),
+            Some("http://localhost.:8080".to_string()),
+            Some(missing),
+            false,
+        )
+        .await
+        .expect_err("no token file");
+        assert!(format!("{err:#}").contains("no access token at"), "{err:#}");
+    }
+
+    #[tokio::test]
+    async fn the_plaintext_flag_lets_a_named_origin_through() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let missing = dir.path().join("absent").to_string_lossy().into_owned();
+        let err = prepare(
+            Vec::new(),
+            Some("http://kallipai.lan:8080".to_string()),
+            Some(missing),
+            true,
+        )
+        .await
+        .expect_err("no token file");
+        assert!(format!("{err:#}").contains("no access token at"), "{err:#}");
+    }
+
+    #[tokio::test]
+    async fn the_plaintext_flag_without_polis_changes_nothing() {
+        let env = vec!["KALLIPAI_FOO=1".to_string()];
+        let (out, minted) = prepare(env.clone(), None, None, true)
+            .await
+            .expect("ignored flag");
+        assert_eq!(out, env);
+        assert!(minted.is_none());
+    }
+
+    #[tokio::test]
+    async fn the_plaintext_flag_does_not_admit_another_scheme() {
+        let err = prepare(
+            Vec::new(),
+            Some("file:///tmp/polis".to_string()),
+            None,
+            true,
+        )
+        .await
+        .expect_err("not http");
+        assert!(
+            format!("{err:#}").contains("must be an http or https URL"),
+            "{err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_plaintext_flag_keeps_the_origin_shape_checks() {
+        let err = prepare(
+            Vec::new(),
+            Some("http://kallipai.lan:8080/path".to_string()),
+            None,
+            true,
+        )
+        .await
+        .expect_err("a path is not an origin");
+        assert!(format!("{err:#}").contains("without a path"), "{err:#}");
     }
 }

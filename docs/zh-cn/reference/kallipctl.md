@@ -29,8 +29,17 @@ chmod 600 ~/.config/kallipai/access-token
 
 `--polis` 是平台边缘源（edge origin）：实例把它读作 `KALLIPAI_POLIS_URL`，
 换取注册码时也从它拼出 `/v1/archeion`。它不是某个服务的裸地址。取值必须是
-http 或 https URL，不带查询串、片段、用户名和密码；明文 http 只接受回环
-地址，否则访问令牌和换取到的注册码都会以明文过网。
+http 或 https URL，不带查询串、片段、用户名和密码；明文 http 只对回环
+地址（回环 IP、`localhost`、`*.localhost` 之下的名字）免开关，因为访问令牌
+和换取到的注册码都会以明文过网；其它主机上的明文源要加 `--allow-plaintext`，
+它是顶层参数，写在子命令之前，只有 spawn 会读它；不带 `--polis` 时它不起作用。
+放行时会先在 stderr 上写明风险。
+
+可信内网里的明文边缘要在子命令前加开关：
+
+```bash
+kallipctl --allow-plaintext spawn dev /srv/kallipai/dev --polis http://kallipai.lan:7100
+```
 
 `--polis` 会把 `KALLIPAI_POLIS_URL` 写进实例环境。再叠加
 `-e KALLIPAI_POLIS_URL` 或 `-e KALLIPAI_TAGMA_RELAY_ENROLLMENT_CODE` 会被
@@ -58,7 +67,7 @@ http 或 https URL，不带查询串、片段、用户名和密码；明文 http
 | --polis must be an origin, without a query or fragment | 只写 scheme://host[:port] |
 | --polis must be an origin, without a path | 只写 scheme://host[:port] |
 | --polis must not carry a user name or password | 去掉地址里的用户名和密码 |
-| --polis URL is not loopback and not https | 否则令牌会以明文过网 |
+| --polis URL is not loopback and not https | 令牌会以明文过网；确认网络可信时加 --allow-plaintext |
 
 ## Shell 补全
 
