@@ -179,8 +179,9 @@ services:
     network_mode: host
     environment:
       KALLIPAI_DOMAIN: ${KALLIPAI_DOMAIN:?}
-      # Both addresses keep a default this file derives and take an override:
-      # the plain entry serves them over http, on whatever port it was given.
+      # All three edge addresses keep a default this file derives and take an
+      # override: the plain entry serves them over http, on whatever port it was
+      # given.
       KALLIPAI_EDGE_SITE: "${KALLIPAI_EDGE_SITE:-*.${KALLIPAI_DOMAIN:?}:${KALLIPAI_EDGE_PORT:-443}}"
       # The mkcert pair the mount holds; a name caddy cannot find fails at the
       # first handshake, not at load, so a wrong name surfaces only when a
@@ -188,8 +189,7 @@ services:
       KALLIPAI_TLS_CERT: /certs/cert.pem
       KALLIPAI_TLS_KEY: /certs/key.pem
       KALLIPAI_API_BASE: "${KALLIPAI_API_BASE:-https://api.${KALLIPAI_DOMAIN:?}:${KALLIPAI_EDGE_PORT:-443}}"
-      # The gateway's forwarding face keeps a host of its own; the plain entry
-      # serves it over http on the same port as the other two hosts.
+      # The gateway's forwarding face keeps a host of its own.
       KALLIPAI_MODEL_GW_SITE: "${KALLIPAI_MODEL_GW_SITE:-model-gw.${KALLIPAI_DOMAIN:?}:${KALLIPAI_EDGE_PORT:-443}}"
       # The shared /v1 route table takes its upstreams from the environment;
       # dev publishes each service on loopback, so that is where they point.

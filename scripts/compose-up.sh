@@ -206,14 +206,14 @@ fi
 # so an address that names another scheme sends caddy after a certificate of its
 # own -- its internal CA for localhost or a private name, ACME for a public one --
 # and that port then answers over TLS with a certificate no browser trusts, while
-# `up -d` still exits 0 and the mkcert pair above was never mounted. Both values
-# have to be http://: an address without a scheme is an https site to caddy
+# `up -d` still exits 0 and the mkcert pair above was never mounted. Every edge
+# address has to be http://: one without a scheme is an https site to caddy
 # whatever its port, with the same result. A missing value is refused too, since
 # compose would stop on it one step later. The origin compose derives is https on
 # 443, so a plain edge has to name it as well: CORS, the session cookie domain
 # and the WebAuthn relying party compare it verbatim.
 if [ "$mode" = dev ] && [ "$starts" = 1 ] && [ "$edge_entry" = "$plain_entry" ]; then
-  for name in KALLIPAI_EDGE_SITE KALLIPAI_API_BASE; do
+  for name in KALLIPAI_EDGE_SITE KALLIPAI_API_BASE KALLIPAI_MODEL_GW_SITE; do
     value=$(env_value "$name")
     case "$value" in
       "")
@@ -245,7 +245,7 @@ fi
 # then serves that port over TLS, so `https://app.localhost:8080` answers and
 # only the port is unusual.
 if [ "$mode" = dev ] && [ "$starts" = 1 ] && [ "$edge_entry" != "$plain_entry" ]; then
-  for name in KALLIPAI_EDGE_SITE KALLIPAI_API_BASE; do
+  for name in KALLIPAI_EDGE_SITE KALLIPAI_API_BASE KALLIPAI_MODEL_GW_SITE; do
     value=$(env_value "$name")
     case "$value" in
       http://*)

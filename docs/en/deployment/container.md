@@ -424,8 +424,8 @@ archeion's `/healthz`, `/me/*` and `/admin/*` carry no `/v1`). The `files`
 service also answers its bare root (`/v1/files`), which a
 `handle_path /v1/files/*` rule would miss, so it takes a named matcher
 on both forms and strips with `uri strip_prefix /v1/files`. The route
-table lives in `compose/site.caddy`, the body both entries import; the six
-upstream addresses come from the environment, `compose.dev.yaml` pointing them
+table lives in `compose/site.caddy`, the body all three entries import; the
+seven upstream addresses come from the environment, `compose.dev.yaml` pointing them
 at loopback and `compose.prod.yaml` at the service names.
 An unlisted `/v1/*` prefix is a real 404:
 

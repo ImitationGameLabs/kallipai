@@ -23,3 +23,4 @@ Tagma 的配置参考见 [Tagma](tagma/index.md)；其余组件（cron、files �
 | `KALLIPAI_EDGE_ENTRY` | `/etc/caddy/Caddyfile.vite` | dev 边缘容器跑哪份入口。`/etc/caddy/Caddyfile.plain` 用 http 提供镜像内的 bundle，且不挂证书；生产跑镜像自带的 `Caddyfile`。 |
 | `KALLIPAI_EDGE_SITE` | `*.<域名>:<端口>` | 替换边缘的站点地址。https 边缘下这里若写端口，必须等于 `KALLIPAI_EDGE_PORT`：API base 与 HMR client 端口都跟那个值。不带端口的地址按 443 应答，所以 `KALLIPAI_EDGE_PORT` 不是 443 时这里必须写出端口；两种不一致脚本都会拒绝。纯 http 入口的端口就写在这个地址里，不参与这项检查，且需要给一个 `http://` 地址。 |
 | `KALLIPAI_API_BASE`  | `https://api.<域名>:<端口>` | 浏览器拿到的 API 基址，同时也是边缘服务它的地址：同一个值，两者无法分叉。 |
+| `KALLIPAI_MODEL_GW_SITE` | `model-gw.<域名>:<端口>` | 模型网关转发面应答的主机名。边缘在这台主机上剥掉一次 `/v1` 前缀，所以网关发布的基址以 `/v1` 结尾；管理面仍在 api 主机上。纯 http 入口的 scheme 规则同样管这个地址。 |
