@@ -150,6 +150,14 @@ runs ACME. `KALLIPAI_TLS_DIR` holds `fullchain.pem` and `privkey.pem` and is
 mounted read-only at `/certs`, which is where `KALLIPAI_TLS_CERT` and
 `KALLIPAI_TLS_KEY` point.
 
+The pair has to cover three names, because the edge serves three hosts:
+`app.<domain>`, `api.<domain>` and `model-gw.<domain>`. A wildcard
+`*.<domain>` covers all three and is what `compose.prod.yaml` expects; a
+certificate listing names has to carry all three as SANs. A pair that names
+only the first two serves the first two hosts: a client reaching
+`model-gw.<domain>` gets a name mismatch, so reissue before that host goes
+live.
+
 Caddy loads the pair when it starts and holds it until it reloads, so a
 renewed certificate reaches the browser only after:
 
@@ -477,7 +485,15 @@ model-gw.<your-domain> {
 `https://model-gw.<your-domain>/v1`. The `/v1/model-gateway/*` segment on the
 api host is the management face, which has no forwarding route. The stack's own
 edge writes that block from the `(model-gw-routes)` snippet in
-`compose/site.caddy`.
+`compose/site.caddy`. `compose.prod.yaml` derives the base from
+`KALLIPAI_DOMAIN`, so it moves with the site. Set it through a compose-level
+variable (`compose/.env`, or exported before `scripts/compose-up.sh`) when the
+forwarding face answers on another host: the service environment file cannot
+set it, because a value in `service.environment` wins over `env_file`. A base
+assembled by hand as `{base}/{path}` must carry no trailing slash: the data
+plane matches exact paths, so `…/v1/` there becomes `//chat/completions` and
+answers 404. The in-house clients normalise the join themselves, so the slash
+only bites a script that concatenates the two parts.
 
 ```sh
 scripts/compose-up.sh prod up -d

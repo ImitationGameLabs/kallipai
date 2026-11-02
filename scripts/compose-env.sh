@@ -111,6 +111,9 @@ KALLIPAI_STACK_DIR=/var/lib/kallipai/stack
 TELEMETRY_BASE=/var/lib/kallipai/telemetry
 GF_SECURITY_ADMIN_PASSWORD=change-me
 KALLIPAI_DOMAIN=example.com
+# The gateway's published base follows KALLIPAI_DOMAIN; uncomment to point
+# the forwarding face at another host:
+# KALLIPAI_MODEL_GATEWAY_PUBLIC_BASE_URL=https://model-gw.example.com/v1
 KALLIPAI_ENV_FILE=$repo_root/compose/.env.prod
 KALLIPAI_INSTANCES_STATE_DIR=/run/user/<uid>/kallipai/daemon
 KALLIPAI_TLS_DIR=/etc/kallipai/tls

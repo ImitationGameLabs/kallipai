@@ -138,7 +138,7 @@ read none of them: they derive at runtime from the browser location
      `/etc/hosts`:
 
      ```text
-     192.168.1.7  app.kallipai.lan api.kallipai.lan
+     192.168.1.7  app.kallipai.lan api.kallipai.lan model-gw.kallipai.lan
      ```
 
      `/etc/hosts` does not support wildcard entries, so list each subdomain

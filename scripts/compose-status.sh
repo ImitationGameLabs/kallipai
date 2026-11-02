@@ -60,9 +60,12 @@ fi
 # Service -> the environment key carrying the address it listens on, the health
 # path, and what that path answers. The gateway listens on two addresses; the
 # probe names the management one, where /health sits beside /metrics as the
-# process probe. The forwarding face answers its own copy of /health, but the
-# edge is the way in to it, and a probe that went through the edge would report
-# one caddy failure as every service down.
+# process probe. The forwarding face answers its own copy of /health; the prod
+# override and the bundle only reach it through the edge, and the dev override
+# also publishes 7501 on the loopback for tagmata on this host. A probe through
+# the edge would report one caddy failure as every service down, and the process
+# exits when either listener cannot bind, so the management address speaks for
+# both faces.
 services=(
   "archeion:KALLIPAI_ARCHEION_ADDR:/healthz:ok"
   "lesche:KALLIPAI_LESCHE_ADDR:/healthz:ok"

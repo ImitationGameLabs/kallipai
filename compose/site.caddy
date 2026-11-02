@@ -59,8 +59,9 @@
 # The api host: /v1/<service>/* -> the stripped remainder, forwarded as-is.
 # Unlisted prefixes are a real 404 rather than an empty 200. The six upstreams
 # come from the environment because the stacks reach the same services
-# differently; an unset one fails the config load instead of surfacing as a 502
-# at request time.
+# differently. An unset one still loads: caddy builds the proxy with no upstream
+# and every request through it answers 503 (`no upstreams available`), while an
+# upstream that is set and unreachable answers 502; the stacks keep all six set.
 (kallipai-api-routes) {
 		@internal path /v1/archeion/internal /v1/archeion/internal/*
 		handle @internal {
@@ -106,6 +107,10 @@
 # unchanged, which is what a client pointed at the bare origin sends. The
 # management face is not here: it stays on the api host, under
 # /v1/model-gateway/*.
+# The fallback is not an open proxy: the data plane answers 404 itself for the
+# paths it does not list, `/admin` included, so nothing unknown reaches a
+# provider or the management face. The trade is that a route the data plane
+# adds appears on this host without an edge change.
 (model-gw-routes) {
 	handle_path /v1/* {
 		reverse_proxy {$KALLIPAI_MODEL_GATEWAY_FORWARD_UPSTREAM} {

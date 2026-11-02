@@ -41,6 +41,11 @@ services:
     env_file: ["${KALLIPAI_ENV_FILE:?}"]
     environment:
       KALLIPAI_MODEL_GATEWAY_CORS_ORIGINS: https://app.${KALLIPAI_DOMAIN:?}
+      # Derived from the same domain the sites are, so moving the stack to
+      # another domain moves the published base with it. A compose-level
+      # variable (compose/.env, or exported) overrides it; the service env
+      # file cannot, because this value wins over env_file.
+      KALLIPAI_MODEL_GATEWAY_PUBLIC_BASE_URL: ${KALLIPAI_MODEL_GATEWAY_PUBLIC_BASE_URL:-https://model-gw.${KALLIPAI_DOMAIN:?set KALLIPAI_DOMAIN}/v1}
 
   # The instance list is read from a daemon socket, so the socket directory is
   # a deployment input: point KALLIPAI_INSTANCES_STATE_DIR at the directory the
