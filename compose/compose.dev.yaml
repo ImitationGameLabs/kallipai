@@ -132,31 +132,19 @@ services:
       - ${KALLIPAI_TAGMATA_DIR:?}:/data
 
   otelcol:
-    image: ${KALLIPAI_IMAGE_PREFIX:-}kallipai-otelcol:${KALLIPAI_IMAGE_TAG:?}
+    image: otel/opentelemetry-collector-contrib:0.164.0@sha256:340c9ca6a36617084c6661bdc4f0fe92b7cda5a805d61673ec8db375fddc522b
     ports: ["127.0.0.1:4318:4318", "127.0.0.1:13133:13133"]
-    environment:
-      NIX_REMOTE: ""
-    volumes:
-      - /nix/store:/nix/store:ro
 
   tempo:
-    image: ${KALLIPAI_IMAGE_PREFIX:-}kallipai-tempo:${KALLIPAI_IMAGE_TAG:?}
+    image: grafana/tempo:2.9.5@sha256:785fd6c81d7f26ff0973208cd7093ac6030e13946c288612ff32f02416941d3a
     ports: ["127.0.0.1:3200:3200"]
-    environment:
-      NIX_REMOTE: ""
-    volumes:
-      - /nix/store:/nix/store:ro
 
   grafana:
-    image: ${KALLIPAI_IMAGE_PREFIX:-}kallipai-grafana:${KALLIPAI_IMAGE_TAG:?}
+    image: grafana/grafana:13.3.0@sha256:488984b716c0862639f91a698adbe2862677a5a07bad42da5f03f3030883b205
     ports: ["127.0.0.1:3001:3000"]
-    environment:
-      NIX_REMOTE: ""
-    volumes:
-      - /nix/store:/nix/store:ro
 
   prometheus:
-    image: prom/prometheus:v3.13.0
+    image: prom/prometheus:v3.13.0@sha256:c6b27ea434f8389bfe233fbc7be381cf50587c286e871bc842008f5a1b1908a7
     ports: ["127.0.0.1:9090:9090"]
 
   caddy:

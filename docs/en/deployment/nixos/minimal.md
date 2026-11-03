@@ -196,6 +196,10 @@ services.prometheus = {
 };
 ```
 
+Nothing in the NixOS form collects or stores traces or starts a dashboard; that
+stack exists only in the compose form, described in the [container
+guide](../container.md).
+
 ## Gateway Admin Face
 
 The model gateway's management face carries two credential families on

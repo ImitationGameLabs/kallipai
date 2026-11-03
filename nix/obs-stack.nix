@@ -1,23 +1,26 @@
-# The local observability stack for the dev compose: a collector, a trace
-# store and a UI. It is a pure function -- no `services.*` references -- so
-# both consumers evaluate it without a container runtime: nix/packages/stack.nix
-# renders the texts the compose services mount, and nix/checks/obs-stack.nix
-# asserts the ports and paths in them.
+# The config texts for the observability stack the compose files run: a
+# collector, a trace store and a UI. A pure function -- no services.*, no
+# pkgs -- so both consumers evaluate it without a container runtime:
+# nix/packages/stack.nix renders the texts the compose services mount, and
+# nix/checks/obs-stack.nix asserts the ports, paths and mounts they need.
 #
-# What it starts
-#   otelcol  otelcol-contrib: the OTLP receiver (http published to the host,
-#            grpc inside the compose network), forwarding traces to tempo and
-#            answering health probes.
-#   tempo    the trace store: query API published on loopback, OTLP received
-#            inside the network only; blocks retained for the age budget below.
-#   grafana  the UI, published on loopback, anonymous viewer, tempo
-#            pre-provisioned as the default datasource so a trace id pastes
-#            straight into Explore. Its host port is an image default, not a
-#            literal: a deployment that moves it moves it in one place.
+# What runs
+#   otelcol  otel/opentelemetry-collector-contrib: the OTLP receiver (http
+#            published to the host, grpc inside the compose network),
+#            forwarding traces to tempo and answering health probes.
+#   tempo    grafana/tempo: the trace store: query API published on loopback,
+#            OTLP received inside the network only; blocks retained for the
+#            age budget below.
+#   grafana  grafana/grafana: the UI, published on loopback, anonymous viewer,
+#            tempo pre-provisioned as the default datasource so a trace id
+#            pastes straight into Explore.
 #
-# Which port carries which role lives in the two tables below, not here:
-# `defaults` is the host side the user may move, `containerPorts` is what the
-# processes listen on and what every text and publish mapping is built from.
+# The images come from upstream registries, pinned by digest in the compose
+# files; this file describes no container, only the text each one reads.
+#
+# Which port carries which role lives in the containerPorts table below, not
+# in the texts: every text names a container port from there, and the compose
+# files carry the host side of the mapping.
 #
 # Where the data lands (outside the project, so `docker compose down -v`
 # cannot eat it)
@@ -42,9 +45,9 @@ let
   maxBytes = 5 * 1024 * 1024 * 1024;
   maxAgeHours = 72;
 
-  # Every container port the config texts and the publish mappings name. The
-  # host side is `defaults` below: the user may move that one, while these are
-  # what the processes listen on; the compose files repeat them on the host side.
+  # Every container port the config texts name. The host side lives in the
+  # compose files: a deployment that moves a published port does not have to
+  # touch a text, because none of them names a host port.
   # 4317 is spelled once because the collector's receive side and the address it
   # forwards to move together here; the two containers are otherwise independent,
   # so a second entry is the edit if they ever diverge.
@@ -77,18 +80,6 @@ in
 {
   inherit maxBytes maxAgeHours containerPorts;
 
-  # The four host ports this stack publishes, and their defaults. The compose
-  # files and the rendered texts read them from here, so the collector's address
-  # cannot drift between two renderings. Every one is loopback-only, and a host
-  # override moves the published side only: the container side is a value, not
-  # a literal, in every text and publish mapping below.
-  defaults = {
-    otlpHTTP = "4318";
-    otelHealth = "13133";
-    tempo = "3200";
-    grafana = "3001";
-  };
-
   # Pure: the caller reads the environment, this decides the path.
   telemetryRoot =
     {
@@ -102,21 +93,17 @@ in
     else
       throw "obs-stack: neither XDG_DATA_HOME nor HOME is set; cannot place the telemetry data";
 
-  # The compose service attrs plus the config texts they are built from. The
-  # texts are returned as strings as well so a check can assert on them
-  # without building the store paths.
-  # The container ports are a parameter so a caller can evaluate the stack on
-  # other ones; its default is the table above (see `defaultContainerPorts`).
+  # The config texts, plus the container port table they were built from, so a
+  # caller (and the check) can see which numbers went in. The texts are plain
+  # strings: a check asserts on them without building a store path, and the
+  # nix/packages/stack.nix writes them into the directory compose mounts.
+  # The container ports are a parameter so the check can rebuild the texts
+  # through that argument and prove they carry no literal number.
   mkStack =
     {
-      pkgs,
-      root,
-      ports,
       containerPorts ? defaultContainerPorts,
     }:
     let
-      inherit (pkgs) tempo grafana;
-      otelCol = pkgs.opentelemetry-collector-contrib;
 
       otelcolText = ''
         receivers:
@@ -210,74 +197,7 @@ in
     in
     {
       # The container port table this stack was built from: a caller that
-      # overrides it must name endpoints from here, not from the module default.
+      # overrides it must name endpoints from here, not from `defaultContainerPorts`.
       inherit texts containerPorts;
-
-      services = {
-        # Binaries come from the flake's nixpkgs closure (useHostStore plus
-        # image.contents), so nothing is pulled from a registry.
-        otelcol = {
-          service = {
-            useHostStore = true;
-            command = [
-              "${otelCol}/bin/otelcol-contrib"
-              "--config=/etc/otelcol/config.yaml"
-            ];
-            ports = [
-              "127.0.0.1:${toString ports.otlpHTTP}:${containerPorts.otlpHTTP}"
-              "127.0.0.1:${toString ports.otelHealth}:${containerPorts.otelHealth}"
-            ];
-            volumes = [
-              "${pkgs.writeText "otelcol.yaml" otelcolText}:/etc/otelcol/config.yaml:ro"
-            ];
-            depends_on = [ "tempo" ];
-          };
-          image.contents = [ otelCol ];
-        };
-
-        tempo = {
-          service = {
-            useHostStore = true;
-            command = [
-              "${tempo}/bin/tempo"
-              "-config.file=/etc/tempo/config.yaml"
-            ];
-            ports = [ "127.0.0.1:${toString ports.tempo}:${containerPorts.tempo}" ];
-            volumes = [
-              "${pkgs.writeText "tempo.yaml" tempoText}:/etc/tempo/config.yaml:ro"
-              "${root}/tempo:/var/tempo"
-            ];
-          };
-          image.contents = [ tempo ];
-        };
-
-        grafana = {
-          service = {
-            useHostStore = true;
-            command = [
-              "${grafana}/bin/grafana"
-              "server"
-              "--homepath=${grafana}/share/grafana"
-              "--config=/etc/grafana/grafana.ini"
-            ];
-            ports = [ "127.0.0.1:${toString ports.grafana}:${containerPorts.grafana}" ];
-            volumes = [
-              "${pkgs.writeText "grafana.ini" grafanaText}:/etc/grafana/grafana.ini:ro"
-              "${pkgs.writeText "tempo-datasource.yaml" datasourceText}:/etc/grafana/provisioning/datasources/tempo.yaml:ro"
-              "${root}/grafana:/var/lib/grafana"
-            ];
-            # The generated ini has no paths section, so where grafana writes is
-            # set here; the rest of its settings live in grafanaText above.
-            environment = {
-              GF_PATHS_DATA = "/var/lib/grafana";
-              GF_PATHS_LOGS = "/var/lib/grafana/logs";
-              GF_PATHS_PLUGINS = "/var/lib/grafana/plugins";
-              GF_PATHS_PROVISIONING = "/etc/grafana/provisioning";
-            };
-            depends_on = [ "tempo" ];
-          };
-          image.contents = [ grafana ];
-        };
-      };
     };
 }

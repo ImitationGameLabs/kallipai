@@ -21,8 +21,8 @@
 # prod runs them untouched; dev names the binary because one image holds all
 # six and its merged /bin is on PATH. Those six copy their own closure into
 # the image, which is what makes that /bin real; a store-less image would
-# leave the path dangling. The observability images need arguments, so they
-# name theirs too.
+# leave the path dangling. The observability images come from upstream, so their
+# entrypoints decide the arguments; only tempo has to be told its config file.
 
 x-logging: &logging
   driver: json-file
@@ -201,10 +201,10 @@ services:
     restart: unless-stopped
 
   otelcol:
-    command: ["otelcol-contrib", "--config=/etc/otelcol/config.yaml"]
+    # The upstream Cmd already names this path; the mount below matches it.
     depends_on: ["tempo"]
     volumes:
-      - ${KALLIPAI_STACK_DIR:?run scripts/compose-up.sh}/otelcol.yaml:/etc/otelcol/config.yaml:ro
+      - ${KALLIPAI_STACK_DIR:?run scripts/compose-up.sh}/otelcol.yaml:/etc/otelcol-contrib/config.yaml:ro
     logging: *logging
     restart: unless-stopped
 
@@ -213,15 +213,24 @@ services:
   # the two data mounts below sit under it, so moving it away from that path
   # means the pruner stops finding what the stack writes.
   tempo:
-    command: ["tempo", "-config.file=/etc/tempo/config.yaml"]
+    command: ["-config.file=/etc/tempo.yaml"]
+    # The data directory below belongs to root on the host and the image runs as
+    # uid 10001 with an entrypoint that drops no privilege, so root here is what
+    # keeps /var/tempo writable.
+    user: "0:0"
     volumes:
-      - ${KALLIPAI_STACK_DIR:?run scripts/compose-up.sh}/tempo.yaml:/etc/tempo/config.yaml:ro
+      - ${KALLIPAI_STACK_DIR:?run scripts/compose-up.sh}/tempo.yaml:/etc/tempo.yaml:ro
       - ${TELEMETRY_BASE:?set TELEMETRY_BASE}/tempo:/var/tempo
     logging: *logging
     restart: unless-stopped
 
   grafana:
-    command: ["grafana-server", "--config=/etc/grafana/grafana.ini"]
+    # The image itself sets GF_PATHS_CONFIG to /etc/grafana/grafana.ini, so the
+    # mount lands where the entrypoint reads it and no command is needed. Root
+    # for the same reason as tempo: the bind directory belongs to root, the
+    # image's default uid is 472, and /run.sh ends in an exec, not a privilege
+    # drop.
+    user: "0:0"
     depends_on: ["tempo"]
     environment:
       GF_PATHS_DATA: /var/lib/grafana

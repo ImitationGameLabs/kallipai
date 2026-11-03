@@ -1,8 +1,12 @@
-# Static proof for nix/obs-stack.nix: the stack expression is evaluated here
-# as a pure function, and every invariant the dev compose relies on is
-# asserted at eval time -- a broken shape fails the check rather than the next
-# `docker compose up`. What only a running stack can prove (the containers'
-# uid, the real tempo layout) is not asserted here.
+# Static proof for the observability stack the compose files run: the texts
+# nix/obs-stack.nix renders, and the wiring in compose/compose.yaml plus its two
+# overrides that has to match them. Every invariant is asserted at eval time, so
+# a config mounted where the image never reads it fails the check rather than
+# the next `docker compose up`. The compose files are read with their comment
+# lines dropped, and each wiring line must appear exactly once, so a mount
+# someone commented out cannot satisfy an assertion. What only a running
+# stack can prove (that the upstream entrypoint honours the path, tempo's
+# real layout) is not asserted here.
 {
   pkgs,
   lib,
@@ -10,18 +14,15 @@
 }:
 let
   stack = import ../obs-stack.nix { inherit lib; };
+  # The stack package the operator mounts, imported for its file names: the
+  # compose volume lines name these, so a rename here has to fail the check.
+  stackPackage = import ../packages/stack.nix { inherit lib pkgs; };
 
-  # A root the shape assertions can name literally; nothing is created.
-  root = "/home/operator/.local/share/kallipai/telemetry";
-  # The real defaults, not a copy of them: a second literal here would be the
-  # second place to forget, and every port assertion below would then be
-  # checking this file against itself. These are strings, the shape
-  # nix/packages/stack.nix passes for the same values.
-  ports = stack.defaults;
   # The container side, read from the same export the stack itself uses, so
   # these assertions move with the values instead of copying them.
   inherit (stack) containerPorts;
-  built = stack.mkStack { inherit pkgs root ports; };
+
+  built = stack.mkStack { };
   # The same stack on other container ports. The numbers are arbitrary; what
   # the assertions built on it check is that nothing keeps the old ones.
   movedPorts = {
@@ -31,21 +32,41 @@ let
     tempo = "13200";
     grafana = "13000";
   };
-  moved = stack.mkStack {
-    inherit pkgs root ports;
-    containerPorts = movedPorts;
-  };
-  inherit (built) services;
-  names = builtins.attrNames services;
-  get = name: attr: services.${name}.service.${attr};
-  allTrue = builtins.all (x: x);
+  moved = stack.mkStack { containerPorts = movedPorts; };
 
   expect = what: cond: if cond then null else throw "obs-stack: ${what}";
-  rootOf = config: path: "${config}/${path}";
-  inVolumes = name: entry: lib.elem entry (get name "volumes");
+  inText = name: needle: lib.hasInfix needle built.texts.${name};
 
-  contents = name: services.${name}.image.contents or [ ];
-  headOf = name: lib.head (get name "command");
+  # The compose wiring, read as text. The base file carries the mounts and the
+  # arguments; the two overrides carry the coordinates, and both must name the
+  # same pinned reference -- a floating tag in one of them is the drift this
+  # catches.
+  compose = stripComments (builtins.readFile ../../compose/compose.yaml);
+  composeDev = stripComments (builtins.readFile ../../compose/compose.dev.yaml);
+  composeProd = stripComments (builtins.readFile ../../compose/compose.prod.yaml);
+  linesOf = file: lib.splitString "\n" file;
+  # Comment lines are not wiring: an assertion must not be satisfiable by a
+  # line someone commented out, so the compose text is read without them.
+  stripComments =
+    file: lib.concatStringsSep "\n" (lib.filter (l: !(lib.hasPrefix "#" (lib.trim l))) (linesOf file));
+  occurrences = needle: file: builtins.length (lib.filter (l: lib.hasInfix needle l) (linesOf file));
+  # The two services that run as root, written the way compose writes them;
+  # an indented Nix string keeps the quote out of an escape chain.
+  rootLine = ''user: "0:0"'';
+  imageRef =
+    file: repo:
+    let
+      line = lib.findFirst (
+        l: lib.hasInfix "image: ${repo}" l
+      ) (throw "obs-stack: the override has no image line for ${repo}") (linesOf file);
+    in
+    lib.last (lib.splitString "image: " line);
+  repos = [
+    "otel/opentelemetry-collector-contrib:"
+    "grafana/tempo:"
+    "grafana/grafana:"
+    "prom/prometheus:"
+  ];
 
   # The two budgets and the unit parents are written in both languages. Reading
   # the Rust source here is what holds the copies together: a drift on one side
@@ -123,71 +144,33 @@ let
   tempoWrites = name: lib.hasInfix "/var/tempo/${name}" built.texts.tempo;
 
   assertions = [
-    (expect "the stack is exactly the collector, tempo and grafana" (
-      names == [
-        "grafana"
-        "otelcol"
-        "tempo"
-      ]
-    ))
-    (expect "every service runs a host-store binary, never a pulled image" (
-      allTrue (map (n: get n "useHostStore" && contents n != [ ]) names)
-    ))
-    (expect "every service's command starts its own image contents" (
-      allTrue (map (n: lib.any (item: lib.hasPrefix "${item}" (headOf n)) (contents n)) names)
-    ))
-    (expect "no service joins the host network" (
-      allTrue (map (n: (services.${n}.service.network_mode or null) == null) names)
-    ))
-    (expect "every published port is loopback-only" (
-      allTrue (lib.concatMap (n: map (p: lib.hasPrefix "127.0.0.1:" p) (get n "ports")) names)
-    ))
-    (expect "the collector publishes OTLP and health only, on the caller's host ports" (
-      get "otelcol" "ports" == [
-        "127.0.0.1:${ports.otlpHTTP}:${containerPorts.otlpHTTP}"
-        "127.0.0.1:${ports.otelHealth}:${containerPorts.otelHealth}"
-      ]
-    ))
-    (expect "tempo publishes the caller's host port onto its own container port" (
-      get "tempo" "ports" == [ "127.0.0.1:${ports.tempo}:${containerPorts.tempo}" ]
-    ))
-    (expect "grafana publishes the caller's host port onto its own container port" (
-      get "grafana" "ports" == [ "127.0.0.1:${ports.grafana}:${containerPorts.grafana}" ]
-    ))
-    (expect "tempo's ini listens on the container port its publish names" (
-      lib.hasInfix "http_listen_port: ${containerPorts.tempo}" built.texts.tempo
-    ))
-    (expect "grafana's ini listens on the container port its publish names" (
-      lib.hasInfix "http_port = ${containerPorts.grafana}" built.texts.grafana
-    ))
-    (expect "every default host port is a string, the shape compose passes" (
-      lib.all (name: builtins.isString stack.defaults.${name}) (builtins.attrNames stack.defaults)
-    ))
     (expect "every container port is a string, the shape compose passes" (
       lib.all (name: builtins.isString containerPorts.${name}) (builtins.attrNames containerPorts)
     ))
-    (expect "both stateful services bind their state under the telemetry root" (
-      inVolumes "tempo" (rootOf root "tempo:/var/tempo")
-      && inVolumes "grafana" (rootOf root "grafana:/var/lib/grafana")
+    (expect "tempo's ini listens on the container port the compose mapping names" (
+      inText "tempo" "http_listen_port: ${containerPorts.tempo}"
+    ))
+    (expect "grafana's ini listens on the container port the compose mapping names" (
+      inText "grafana" "http_port = ${containerPorts.grafana}"
     ))
     (expect "the collector forwards to tempo inside the compose network" (
-      lib.hasInfix "endpoint: tempo:${containerPorts.otlpGRPC}" built.texts.otelcol
+      inText "otelcol" "endpoint: tempo:${containerPorts.otlpGRPC}"
     ))
-    (expect "the collector accepts OTLP on the published port" (
-      lib.hasInfix "endpoint: 0.0.0.0:${containerPorts.otlpHTTP}" built.texts.otelcol
+    (expect "the collector accepts OTLP on the port the compose mapping publishes" (
+      inText "otelcol" "endpoint: 0.0.0.0:${containerPorts.otlpHTTP}"
     ))
     (expect "the collector accepts OTLP gRPC on the port it forwards to" (
-      lib.hasInfix "endpoint: 0.0.0.0:${containerPorts.otlpGRPC}" built.texts.otelcol
+      inText "otelcol" "endpoint: 0.0.0.0:${containerPorts.otlpGRPC}"
     ))
     (expect "the collector answers health probes on its container port" (
-      lib.hasInfix "endpoint: 0.0.0.0:${containerPorts.otelHealth}" built.texts.otelcol
+      inText "otelcol" "endpoint: 0.0.0.0:${containerPorts.otelHealth}"
     ))
     (expect "tempo accepts OTLP gRPC on the port the collector forwards to" (
-      lib.hasInfix "endpoint: 0.0.0.0:${containerPorts.otlpGRPC}" built.texts.tempo
+      inText "tempo" "endpoint: 0.0.0.0:${containerPorts.otlpGRPC}"
     ))
     # The table is a value, not a literal: on other container ports every text
-    # and publish mapping has to move, and no default value may stay behind.
-    # A same-value literal elsewhere would keep the assertions above green.
+    # has to move, and no default value may stay behind. A same-value literal
+    # elsewhere would keep the assertions above green.
     (expect "a moved container port moves every config text that names it" (
       lib.hasInfix "0.0.0.0:${movedPorts.otlpHTTP}" moved.texts.otelcol
       && lib.hasInfix "0.0.0.0:${movedPorts.otlpGRPC}" moved.texts.otelcol
@@ -197,14 +180,6 @@ let
       && lib.hasInfix "http_listen_port: ${movedPorts.tempo}" moved.texts.tempo
       && lib.hasInfix "http_port = ${movedPorts.grafana}" moved.texts.grafana
       && lib.hasInfix "url: http://tempo:${movedPorts.tempo}" moved.texts.datasource
-    ))
-    (expect "a moved container port moves every publish mapping" (
-      moved.services.otelcol.service.ports == [
-        "127.0.0.1:${ports.otlpHTTP}:${movedPorts.otlpHTTP}"
-        "127.0.0.1:${ports.otelHealth}:${movedPorts.otelHealth}"
-      ]
-      && moved.services.tempo.service.ports == [ "127.0.0.1:${ports.tempo}:${movedPorts.tempo}" ]
-      && moved.services.grafana.service.ports == [ "127.0.0.1:${ports.grafana}:${movedPorts.grafana}" ]
     ))
     (expect "a moved container port leaves no default value in the texts" (
       !(lib.hasInfix "0.0.0.0:${containerPorts.otlpHTTP}" moved.texts.otelcol)
@@ -219,6 +194,63 @@ let
       builtins.attrNames movedPorts == builtins.attrNames containerPorts
       && lib.all (name: movedPorts.${name} != containerPorts.${name}) (builtins.attrNames movedPorts)
     ))
+    # The wiring: each config is mounted exactly where the upstream image reads
+    # it, which is the one thing this change can silently get wrong. Each line
+    # below must appear exactly once, so a second stray mount cannot hide
+    # behind the first.
+    (expect "the collector reads its config where the upstream image expects it" (
+      occurrences "otelcol.yaml:/etc/otelcol-contrib/config.yaml:ro" compose == 1
+    ))
+    (expect "tempo is told to read the file that is mounted" (
+      occurrences "-config.file=/etc/tempo.yaml" compose == 1
+      && occurrences "tempo.yaml:/etc/tempo.yaml:ro" compose == 1
+    ))
+    (expect "grafana mounts the ini and the provisioning dir the image reads" (
+      occurrences "/etc/grafana/grafana.ini:ro" compose == 1
+      && occurrences "/etc/grafana/provisioning/datasources/tempo.yaml:ro" compose == 1
+    ))
+    (expect "prometheus reads its scrape config from the documented path" (
+      occurrences "prometheus.yaml:/etc/prometheus/prometheus.yml:ro" compose == 1
+    ))
+    # The other direction: the package decides the file names, compose names the
+    # sources. A rename on either side leaves a docker-created directory behind.
+    # The source name is read from the volume line itself: the prefix up to `}`
+    # is the stack directory expression, what follows is the file name and then
+    # the container path. A name can repeat inside the container path (the
+    # grafana datasource mounts tempo.yaml under /etc), so a substring cannot
+    # answer this.
+    (expect "compose mounts exactly the files the stack package writes" (
+      let
+        mounted = lib.filter (l: lib.hasInfix "KALLIPAI_STACK_DIR" l) (linesOf compose);
+        sourceOf = l: lib.head (lib.splitString ":" (lib.last (lib.splitString "}" l)));
+      in
+      builtins.length mounted == builtins.length stackPackage.textNames
+      && lib.all (
+        name: builtins.length (lib.filter (l: sourceOf l == "/${name}") mounted) == 1
+      ) stackPackage.textNames
+    ))
+    (expect "the two services writing into root-owned bind dirs run as root" (
+      builtins.length (lib.filter (l: lib.trim l == rootLine) (linesOf compose)) == 2
+    ))
+    (expect "the collector names no command, so the image's own Cmd applies" (
+      !(lib.hasInfix "\"otelcol-contrib\"" compose)
+    ))
+    (expect "both overrides pin the four upstream images by digest, to the same reference" (
+      lib.all (
+        repo:
+        imageRef composeDev repo == imageRef composeProd repo
+        && lib.hasInfix "@sha256:" (imageRef composeDev repo)
+      ) repos
+    ))
+    (expect "the dev override publishes every observability port on loopback only" (
+      lib.all (p: lib.hasInfix "127.0.0.1:${p}" composeDev) [
+        "4318:4318"
+        "13133:13133"
+        "3200:3200"
+        "3001:3000"
+        "9090:9090"
+      ]
+    ))
     (expect "the stack's byte budget is the pruner's MAX_BYTES" (
       builtins.isInt maxBytesRust && maxBytesRust == stack.maxBytes
     ))
@@ -226,21 +258,13 @@ let
       builtins.isInt maxAgeHoursRust && maxAgeHoursRust == stack.maxAgeHours
     ))
     (expect "tempo keeps blocks for the age the pruner enforces" (
-      lib.hasInfix "block_retention: ${toString maxAgeHoursRust}h" built.texts.tempo
+      inText "tempo" "block_retention: ${toString maxAgeHoursRust}h"
     ))
     (expect "the pruner walks exactly the directories tempo writes" (
       lib.all (name: prunerKnows name && tempoWrites name) unitNames
     ))
     (expect "grafana ships tempo as its default datasource" (
-      lib.hasInfix "http://tempo:${containerPorts.tempo}" built.texts.datasource
-      && lib.hasInfix "isDefault: true" built.texts.datasource
-    ))
-    (expect "grafana keeps its state under the bound data dir" (
-      lib.all (k: lib.hasPrefix "/var/lib/grafana" services.grafana.service.environment.${k}) [
-        "GF_PATHS_DATA"
-        "GF_PATHS_LOGS"
-        "GF_PATHS_PLUGINS"
-      ]
+      inText "datasource" "http://tempo:${containerPorts.tempo}" && inText "datasource" "isDefault: true"
     ))
     (expect "the root derivation prefers XDG_DATA_HOME" (
       stack.telemetryRoot {
@@ -256,9 +280,7 @@ let
     # tree while the stack writes elsewhere. The nix side is pinned above;
     # these read the Rust side back, anchored to the arm that carries each
     # suffix (`Some(path) =>` is the XDG arm's line; the HOME suffix sits inside
-    # the `None => (` arm, so that assertion reads the arm's block). A needle matched
-    # anywhere in the file would stay green on a quote in a doc comment after
-    # the value had moved.
+    # the `None => (` arm, so that assertion reads the arm's block).
     (expect "the pruner spells the XDG suffix the root derivation appends" (
       lib.hasInfix xdgSuffixRust (lineWith "        Some(path) => ")
     ))

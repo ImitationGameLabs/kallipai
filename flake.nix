@@ -253,9 +253,10 @@
                 ;
               inherit (builds) tagma;
             };
-            # The two remaining platform services and the observability trio,
-            # plus the store-less dev image the dev override points every
-            # application at: the same shapes as the four above.
+            # The two remaining platform services, plus the store-less dev image
+            # the dev override points every application at: the same shapes as
+            # the four above. Observability is not built here: those three come
+            # from upstream registries, pinned by digest in the compose files.
             kallipai-model-gateway-image = import ./nix/packages/docker-images/model-gateway.nix {
               inherit
                 pkgs
@@ -269,15 +270,6 @@
                 common
                 ;
               inherit (builds) instances;
-            };
-            kallipai-otelcol-image = import ./nix/packages/docker-images/otelcol.nix {
-              inherit pkgs common;
-            };
-            kallipai-tempo-image = import ./nix/packages/docker-images/tempo.nix {
-              inherit pkgs common;
-            };
-            kallipai-grafana-image = import ./nix/packages/docker-images/grafana.nix {
-              inherit pkgs common;
             };
             # The edge image carries the three Caddyfile entries, the shared site
             # and the SPA bundle; the certificate directory stays a mount. Built here

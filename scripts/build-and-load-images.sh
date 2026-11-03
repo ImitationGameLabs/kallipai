@@ -14,7 +14,7 @@
 #
 #   image       Build only the named images instead of all of them.
 #               names: archeion lesche keryx files model-gateway instances
-#                      otelcol tempo grafana caddy-web tagma
+#                      caddy-web tagma
 #   -h, --help  Show this help.
 #
 # Exit status: 0 when every selected image built and loaded. The run stops at
@@ -112,6 +112,8 @@ index=0
 # evaluation, so a second tag inside the loop means the two were not built
 # from the same tree. The check compares tags, not trees: two dirty builds of
 # different trees are both named dirty, and nothing here can tell them apart.
+# Beside that identity tag every image also gets :latest, which is what the
+# stack configuration defaults to.
 batch_tag=
 for name in "${selected[@]}"; do
   index=$((index + 1))
@@ -123,17 +125,25 @@ for name in "${selected[@]}"; do
   printf '[%d/%d] %s: loading %s\n' "$index" "$total" "$name" "$path"
   loaded=$(docker load -i "$path" | sed -n 's/^Loaded image: //p' | tail -n 1)
   [ -n "$loaded" ] || die "$name: docker load named no image"
+  id=$(docker image inspect --format '{{.Id}}' "$loaded")
   tag=${loaded##*:}
   if [ -z "$batch_tag" ]; then
     batch_tag=$tag
   elif [ "$tag" != "$batch_tag" ]; then
     die "$name: loaded $tag, but this batch already loaded $batch_tag; one run builds one batch"
   fi
+  # The stack configuration defaults to :latest, so every image answers to that
+  # tag as well. The identity tag stays on it: pasting a batch hash into
+  # KALLIPAI_IMAGE_TAG rolls the stack back to that build.
+  latest="${loaded%:*}:latest"
+  docker tag "$loaded" "$latest"
+  printf '[%d/%d] %s: %s and %s (%s)\n' "$index" "$total" "$name" "$loaded" "$latest" "$id"
   # The tarball names the image without a registry prefix. A stack that runs
   # behind one resolves <prefix><that name>, so the alias is added here instead
   # of leaving a hand-run `docker tag` between a load and a start.
   if [ -n "${KALLIPAI_IMAGE_PREFIX:-}" ]; then
     docker tag "$loaded" "${KALLIPAI_IMAGE_PREFIX}${loaded}"
+    docker tag "$loaded" "${KALLIPAI_IMAGE_PREFIX}${latest}"
   fi
 done
 echo "loaded $total image(s)"

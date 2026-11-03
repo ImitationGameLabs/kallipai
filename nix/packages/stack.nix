@@ -16,14 +16,9 @@ let
   obs = import ../obs-stack.nix { inherit lib; };
   shared = import ../platform-texts.nix { inherit lib; };
 
-  # Only the texts are wanted here. The host ports and the data root reach no
-  # text, so the defaults and a documentation root are enough; `defaults` is
-  # obs-stack's own port table, not a second copy of it.
-  stack = obs.mkStack {
-    inherit pkgs;
-    root = "/var/lib/kallipai/telemetry";
-    ports = obs.defaults;
-  };
+  # Only the texts are wanted here: they are plain strings, so no host ports
+  # and no data root are involved.
+  stack = obs.mkStack { };
 
   texts = {
     "otelcol.yaml" = pkgs.writeText "otelcol.yaml" stack.texts.otelcol;
@@ -34,7 +29,9 @@ let
     "prometheus.yaml" = pkgs.writeText "prometheus.yaml" shared.prometheus;
   };
 in
-pkgs.runCommand "kallipai-stack" { } (
+# The names travel with the output so the eval check can compare them with
+# the volume lines in compose, the contract that breaks silently.
+pkgs.runCommand "kallipai-stack" { passthru.textNames = builtins.attrNames texts; } (
   ''
     mkdir -p $out
   ''

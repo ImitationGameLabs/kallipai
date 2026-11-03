@@ -180,6 +180,9 @@ services.prometheus = {
 };
 ```
 
+NixOS 形态既不收集也不存储 trace，也不起看板；这套栈只存在于 compose
+形态，指南见 `docs/en/deployment/container.md`。
+
 ## 网关管理面
 
 模型网关的管理面在同一端口上承载两族凭据：代理键授权分发读与转发面，

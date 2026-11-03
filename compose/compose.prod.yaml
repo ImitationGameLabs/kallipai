@@ -78,19 +78,19 @@ services:
     env_file: ["${KALLIPAI_ENV_FILE:?}"]
 
   otelcol:
-    image: ${KALLIPAI_IMAGE_PREFIX:-}kallipai-otelcol:${KALLIPAI_IMAGE_TAG:?}
+    image: otel/opentelemetry-collector-contrib:0.164.0@sha256:340c9ca6a36617084c6661bdc4f0fe92b7cda5a805d61673ec8db375fddc522b
 
   tempo:
-    image: ${KALLIPAI_IMAGE_PREFIX:-}kallipai-tempo:${KALLIPAI_IMAGE_TAG:?}
+    image: grafana/tempo:2.9.5@sha256:785fd6c81d7f26ff0973208cd7093ac6030e13946c288612ff32f02416941d3a
 
   grafana:
-    image: ${KALLIPAI_IMAGE_PREFIX:-}kallipai-grafana:${KALLIPAI_IMAGE_TAG:?}
+    image: grafana/grafana:13.3.0@sha256:488984b716c0862639f91a698adbe2862677a5a07bad42da5f03f3030883b205
     environment:
       GF_SECURITY_ADMIN_PASSWORD: ${GF_SECURITY_ADMIN_PASSWORD:?set GF_SECURITY_ADMIN_PASSWORD}
       GF_AUTH_ANONYMOUS_ENABLED: "false"
 
   prometheus:
-    image: prom/prometheus:v3.13.0
+    image: prom/prometheus:v3.13.0@sha256:c6b27ea434f8389bfe233fbc7be381cf50587c286e871bc842008f5a1b1908a7
 
   caddy:
     image: ${KALLIPAI_IMAGE_PREFIX:-}kallipai-caddy-web:${KALLIPAI_IMAGE_TAG:?}

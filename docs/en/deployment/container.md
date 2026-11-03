@@ -57,13 +57,13 @@ read-only into the containers, so they run straight out of the workspace
 build (`packages.default`) and a rebuild needs no in-compose bake; postgres
 uses the official `postgres:17.5` image.
 
-Docker alone is enough for that side, with no registry in the picture:
-`scripts/compose-up.sh dev` builds the dev image and the observability trio
-(`otelcol`, `tempo`, `grafana`) on the machine that runs the stack, loads
-them, and takes `KALLIPAI_IMAGE_TAG` from what it loaded; `KALLIPAI_DEV_IMAGE`
-is the reference the compose files then name. Images loaded by hand under
-another tag are the mismatch the script reports rather than a stack that
-cannot find its image.
+Docker alone is enough for that side, with no registry for the KallipAI images:
+`scripts/compose-up.sh dev` builds the dev image on the machine that runs the
+stack, loads it, and takes `KALLIPAI_IMAGE_TAG` from what it loaded;
+`KALLIPAI_DEV_IMAGE` is the reference the compose files then name. Images
+loaded by hand under another tag are the mismatch the script reports rather
+than a stack that cannot find its image. The observability services come from
+upstream registries, pinned by digest, so dev pulls them once.
 
 The tagma is not in either compose file: it runs on the machine where its
 agents work, started by whatever that machine provides. Running it with
@@ -85,13 +85,13 @@ One-time host setup is covered in the
 The pair `compose.yaml` + `compose.prod.yaml` runs the whole platform on one
 host: the four stores, the six application services, the observability stack,
 and the edge that terminates TLS and routes each `/v1/<service>` prefix.
-Image sources, in order of preference. The ten KallipAI images are built
+Image sources, in order of preference. The seven KallipAI images are built
 here by `scripts/compose-up.sh`, which runs `nix build` per image and loads
 the result into the docker store, so the default path needs no registry at
-all. The five upstream images are pulled on the first start: four
-`postgres:17.5` and `prometheus:v3.13.0`. On a host with no route to a
-registry, `docker save` those five on a machine that has one and
-`docker load` them here before the first step.
+all. The eight upstream images are pulled on the first start: four
+`postgres:17.5` and the four observability services, each pinned by digest.
+On a host with no route to a registry, `docker save` those eight on a machine
+that has one and `docker load` them here before the first step.
 
 A host without nix cannot follow the steps as written: `scripts/compose-up.sh`
 builds the images before it starts anything, and only `down`, `stop`, `ps` and
@@ -263,11 +263,12 @@ scripts/build-and-load-images.sh caddy-web
 docker compose -f compose/compose.yaml -f compose/compose.prod.yaml up -d caddy
 ```
 
-The build loads the image under the flake revision (or `dirty`), and compose
-names it by `KALLIPAI_IMAGE_TAG`. Rolling back means pointing that tag at the
-previous build and running the same `up -d` again, which is why the previous
-image stays loaded (`docker image ls kallipai-caddy-web`). A store path
-printed by `nix build` is not the durable artifact here; the docker store is.
+The build loads the image under the flake revision (or `dirty`) and also
+under `:latest`, and compose names whatever `KALLIPAI_IMAGE_TAG` holds.
+Rolling back means setting that value to the previous batch's tag and running
+the same `up -d` again, which is why the previous image stays loaded
+(`docker image ls kallipai-caddy-web`). A store path printed by `nix build` is
+not the durable artifact here; the docker store is.
 
 Check: `curl -sS https://app.<domain>/config.js` shows the domain and the API
 base this deployment actually serves, so the browser does not fall back to
@@ -722,7 +723,7 @@ The id cannot change later without invalidating every bound passkey.
 
 Then create an agent via the tagma API with `workspace_root: /workspace`.
 
-#### All Eleven Images At Once
+#### All Eight Images At Once
 
 `scripts/build-and-load-images.sh` builds every image the compose stack
 runs, plus the tagma, and loads their tarballs into the local daemon in
@@ -731,7 +732,7 @@ no `result` symlink is created or overwritten, and it stops at the first
 failure:
 
 ```sh
-scripts/build-and-load-images.sh            # all eleven
+scripts/build-and-load-images.sh            # all eight
 scripts/build-and-load-images.sh tagma      # one image
 ```
 
@@ -749,12 +750,18 @@ promise is one tag per batch. A `dirty` batch proves nothing about the tree:
 two builds of different dirty trees are both `dirty`, and the check cannot
 tell them apart.
 
-The eleven attributes are `kallipai-archeion-image`,
-`kallipai-lesche-image`, `kallipai-keryx-image`, `kallipai-files-image`,
+Each image also gets `:latest`, so `KALLIPAI_IMAGE_TAG=latest` names the batch
+that was loaded last without copying the batch tag around. Pinning the batch
+tag in `.env` keeps a later build from moving a running stack; pasting an
+older batch tag rolls back to it.
+
+The eight attributes are `kallipai-archeion-image`, `kallipai-lesche-image`,
+`kallipai-keryx-image`, `kallipai-files-image`,
 `kallipai-model-gateway-image`, `kallipai-instances-image`,
-`kallipai-otelcol-image`, `kallipai-tempo-image`, `kallipai-grafana-image`,
 `kallipai-caddy-web-image` and `kallipai-tagma-image`. The selector is the
 middle word (`archeion`, `lesche`, `keryx`, `files`, `model-gateway`,
-`instances`, `otelcol`, `tempo`, `grafana`, `caddy-web`, `tagma`); `--help`
-prints the same list. The edge image is the one the production stack serves
-the browser from: it carries the site, so the two move together.
+`instances`, `caddy-web`, `tagma`); `--help` prints the same list. The
+observability services are not built here: the collector, tempo, Grafana and
+Prometheus come from upstream registries, pinned by digest in the two
+override files. The edge image is the one the production stack serves the
+browser from: it carries the site, so the two move together.

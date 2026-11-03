@@ -184,7 +184,7 @@ agents; the lesche message route returns 503).
 #### Archeion Side
 
 ```sh
-scripts/compose-up.sh dev   # fifteen containers: edge, eight services, four stores, two observability
+scripts/compose-up.sh dev   # fifteen containers: edge, six services, four stores, four observability
 ```
 
 The stack is the compose pair at the repo root:

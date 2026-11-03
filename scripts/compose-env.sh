@@ -130,15 +130,16 @@ EXAMPLES
 # is kallipai-<name>-image. `all` is what scripts/build-and-load-images.sh
 # builds, `dev` and `prod` are what scripts/compose-up.sh loads. One list, so a
 # service added to the stack cannot be missing from one script and loaded by
-# the other.
+# the other. The observability services are in no list: their images come from
+# upstream registries, pinned by digest in the compose overrides.
 images() {
   case "${1:-}" in
     all)
       printf '%s\n' archeion lesche keryx files model-gateway instances \
-        otelcol tempo grafana caddy-web tagma
+        caddy-web tagma
       ;;
-    prod) printf '%s\n' archeion lesche files keryx model-gateway instances otelcol tempo grafana caddy-web ;;
-    dev) printf '%s\n' otelcol tempo grafana caddy-web ;;
+    prod) printf '%s\n' archeion lesche files keryx model-gateway instances caddy-web ;;
+    dev) printf '%s\n' caddy-web ;;
     *)
       echo "compose-env: --images takes all, dev or prod" >&2
       return 2
