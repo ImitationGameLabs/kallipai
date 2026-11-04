@@ -77,11 +77,16 @@
     known.known.filter((p) => !TAGMA_PERM_IDS.includes(p)),
   );
   const reachable = $derived(TAGMA_PERM_IDS.filter((id) => perms.includes(id)));
-  const dirty = $derived(
-    data !== null &&
-      (perms.length !== data.token.perms.length ||
-        perms.some((p) => !data.token.perms.includes(p))),
-  );
+  const dirty = $derived.by(() => {
+    // The narrowing has to survive into the callback, so bind the record
+    // to a local first: a closure does not inherit the null check.
+    const record = data;
+    if (record === null) return false;
+    return (
+      perms.length !== record.token.perms.length ||
+      perms.some((p) => !record.token.perms.includes(p))
+    );
+  });
 
   function msgOf(e: unknown, fallback: () => string): string {
     if (e instanceof ArcheionApiError) return e.message;
