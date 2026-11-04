@@ -513,7 +513,7 @@ in
         enrollmentCodeTtlSecs = lib.mkOption {
           type = lib.types.nullOr lib.types.ints.unsigned;
           default = null;
-          description = "Single-use enrollment-code lifetime in seconds.";
+          description = "Single-use enrollment-code lifetime in seconds; unset keeps the binary default.";
         };
         signupEnabled = lib.mkOption {
           type = lib.types.nullOr lib.types.bool;

@@ -160,7 +160,7 @@ pub struct Args {
     #[arg(
         long,
         env = "KALLIPAI_ARCHEION_ENROLLMENT_CODE_TTL_SECS",
-        default_value = "600"
+        default_value = "1800"
     )]
     pub enrollment_code_ttl_secs: u64,
     /// Whether open signup is allowed (both passkey-only signup and OAuth
@@ -240,10 +240,9 @@ mod tests {
     /// values instead of silently falling back.
     #[test]
     fn sql_slow_threshold_defaults_and_is_typed() {
-        // SAFETY: single-threaded test setup, and nothing else in
-        // this crate reads this var, so no concurrent access.
-        unsafe { std::env::remove_var("KALLIPAI_ARCHEION_SQL_SLOW_MS") };
-        let args = Args::parse_from(["kallipai-archeion", "--database-url", "postgres://x"]);
+        let args = temp_env::with_vars_unset(["KALLIPAI_ARCHEION_SQL_SLOW_MS"], || {
+            Args::parse_from(["kallipai-archeion", "--database-url", "postgres://x"])
+        });
         assert_eq!(args.sql_slow_ms, 100);
 
         let err = Args::try_parse_from([
@@ -256,5 +255,31 @@ mod tests {
         .err()
         .expect("a non-numeric threshold must be refused");
         assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
+    }
+
+    /// The enrollment-code lifetime defaults to thirty minutes; an explicit flag
+    /// and the environment variable both override it.
+    #[test]
+    fn enrollment_code_ttl_defaults_to_thirty_minutes() {
+        let args =
+            temp_env::with_vars_unset(["KALLIPAI_ARCHEION_ENROLLMENT_CODE_TTL_SECS"], || {
+                Args::parse_from(["kallipai-archeion", "--database-url", "postgres://x"])
+            });
+        assert_eq!(args.enrollment_code_ttl_secs, 1800);
+
+        let args = Args::parse_from([
+            "kallipai-archeion",
+            "--database-url",
+            "postgres://x",
+            "--enrollment-code-ttl-secs",
+            "60",
+        ]);
+        assert_eq!(args.enrollment_code_ttl_secs, 60);
+
+        let args = temp_env::with_vars(
+            [("KALLIPAI_ARCHEION_ENROLLMENT_CODE_TTL_SECS", Some("60"))],
+            || Args::parse_from(["kallipai-archeion", "--database-url", "postgres://x"]),
+        );
+        assert_eq!(args.enrollment_code_ttl_secs, 60);
     }
 }

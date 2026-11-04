@@ -58,7 +58,9 @@ it. The admin token passes the string check and then stops at the user
 check, and the `403` names which: `code: "perm_missing"` for a token
 without the string, `code: "user_required"` for a principal that is not a
 user. The response is `{code, id, created_at, expires_at}`; the code is
-single-use, and an expired one keeps holding its slot until it is revoked.
+single-use, expires 30 minutes after it is minted unless the deployment sets
+`KALLIPAI_ARCHEION_ENROLLMENT_CODE_TTL_SECS`, and an expired one keeps holding
+its slot until it is revoked.
 
 The matrix below classifies agent and operator tokens. A personal token
 reaches none of it: it is limited to the routes its set names, documented

@@ -40,6 +40,7 @@ reqwest = { workspace = true, features = ["form"] }
 testcontainers = { workspace = true, features = ["reusable-containers"] }
 testcontainers-modules = { workspace = true }
 tempfile = { workspace = true }
+temp-env = { workspace = true }
 tower = { workspace = true }
 ed25519-dalek = { workspace = true }
 http-body-util = { workspace = true }
