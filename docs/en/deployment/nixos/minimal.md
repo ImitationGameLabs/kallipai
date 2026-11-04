@@ -183,21 +183,53 @@ model-gw host: reach it on the host itself at
 Prometheus text of the forwarding observability counters, with no
 credential: a probe that must survive credential outages.
 
-The NixOS module exports the scrape job for that face as a read-only
-list: `config.services.kallipai.polis.scrapeConfigs`. The exported job
-scrapes every 30 seconds. The module never starts a recorder; wire the
-list into the host's Prometheus on its own options (append more jobs
-with `++`, retention follows `services.prometheus.retentionTime`):
+The NixOS module starts the host's observability stack itself:
+Prometheus, Grafana, the node exporter and a tempo trace store, all bound
+to loopback, plus the OTLP/HTTP receiver the platform services export to.
+`services.kallipai.observability.enable` defaults to the polis switch, so
+a platform host gets the stack and a daemon-only host does not; set it to
+`false` on a polis host that runs its own recorder.
+
+The ports are options and everything that names them follows:
+`services.kallipai.observability.ports` carries `prometheus` (9090),
+`grafana` (3000), `tempo` (3200), `otlp` (4318), `otlp-grpc` (4317) and
+`node-exporter` (9100). Retention is 30 days of metrics
+(`retention.metrics`) and 72 hours of traces (`retention.traces`), the
+same budgets the compose stack prunes to. The stores live under
+`/var/lib/prometheus2`, `/var/lib/grafana` and
+`/var/lib/kallipai/telemetry/tempo`.
+
+The module wires three jobs into the recorder: the platform's own faces, the
+node exporter, and tempo's `/metrics`, so none of them needs further wiring,
+and Grafana provisions Prometheus and Tempo as datasources. The
+read-only list (`config.services.kallipai.polis.scrapeConfigs`) is still
+there for a host that keeps its own Prometheus. Switch the stack off in
+that case: with it on, the module appends the same list itself and
+Prometheus refuses to start on two jobs of one name.
 
 ```nix
+services.kallipai.observability.enable = false;
 services.prometheus = {
   enable = true;
   scrapeConfigs = config.services.kallipai.polis.scrapeConfigs;
 };
 ```
 
-Nothing in the NixOS form collects or stores traces or starts a dashboard; that
-stack exists only in the compose form, described in the [container
+The UI opens anonymously as a Viewer; the admin password is generated
+with mode 0600 at `/var/lib/grafana/admin-password` on first start and
+never enters the store. Reset it from the host with `grafana cli
+admin reset-admin-password`. The tracing endpoint reaches
+every platform service and every instance the daemon spawns, and each
+instance whose environment carries the generic
+`OTEL_EXPORTER_OTLP_ENDPOINT` reports `service.instance.id=<slug>`, so
+several instances of
+one build stay apart in the UI. The endpoint reaches an instance through its
+own environment at start. `nixos-rebuild switch` restarts the platform units,
+the daemon included, but an instance is not a systemd unit: an adopted
+instance runs across the switch with the environment it started with, and
+reports only after it restarts itself. An existing polis host gains these
+units on upgrade; the switch above turns them off. The compose form runs the
+same stores in containers, described in the [container
 guide](../container.md).
 
 ## Gateway Admin Face

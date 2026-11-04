@@ -20,6 +20,26 @@ polis 服务之间用一枚共享密钥相互认证，由控制面供给到其�
 
 声明的用户随模块供给家目录与 linger：`/home/<user>` 存放实例的 XDG config、data 与 state 树，logind 在开机时预建 `/run/user/<uid>`，即被拉起实例的 `XDG_RUNTIME_DIR`，无需逐实例设置。服务所有的持久状态（polis 服务的存储与内部令牌）留在 `/var/lib/kallipai`，与逐用户家目录分开：即内部令牌一节描述的同一套生命周期划分。
 
+## 查看观测栈
+
+平台主机默认运行观测栈：Grafana 在 `127.0.0.1:3000`，Prometheus 在
+`127.0.0.1:9090`，tempo 在 `127.0.0.1:3200`，OTLP 接收端在
+`127.0.0.1:4318`（HTTP）与 `127.0.0.1:4317`（gRPC）。它们全部只绑回环，
+另一台机器上的浏览器经由隧道访问：
+
+    ssh -N -L 3000:127.0.0.1:3000 -L 9090:127.0.0.1:9090 admin@host
+
+Grafana 以匿名 Viewer 打开，Prometheus 与 tempo 两个数据源已预置，trace id
+可直接粘进 Explore。管理员登录名是 `admin`，密码在
+`/var/lib/grafana/admin-password`；在主机上用
+`grafana cli admin reset-admin-password` 重置。
+
+四个单元是 `prometheus`、`grafana`、`prometheus-node-exporter` 与
+`kallipai-tempo`，`systemctl status` 可列出它们，
+`journalctl -u kallipai-tempo` 显示 trace 存储如何读它的配置。把
+`services.kallipai.observability.enable` 设为 `false` 会停掉这四个单元，
+被观测的服务不受影响。
+
 ## 首次启动排障
 
 内部令牌文件缺失在 archeion 首次启动时不算错误；它会生成一枚。lesche、keryx、files、instances 与 model-gateway unit 依赖 archeion 并在启动时读取该文件；短宽限窗内文件未出现，unit 就拒绝启动，`journalctl -u kallipai-instances` 会显示它等待的路径。空令牌文件会让所有读取方显式失败；删掉文件重新供给，不要手工编辑。

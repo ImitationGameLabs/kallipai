@@ -151,8 +151,10 @@ pub(super) fn fill_relay_defaults(env: &[String], polis: Option<&str>) -> Vec<St
 /// default (None: left as-is), and every duplicate is dropped.
 /// Ordering must stay irrelevant downstream -- the spawn helper passes
 /// duplicate pairs straight to execve, and the daemon's env validation
-/// rejects empty values -- so collapsing here is the one place that
-/// keeps both properties airtight.
+/// rejects empty values -- so this function collapses the keys it fills,
+/// and `fill_tracing_env` collapses the keys the daemon owns. One place
+/// per policy: an explicit value wins here, the daemon's own value wins
+/// there.
 fn fill_one(env: &mut Vec<String>, prefix: &str, default: Option<&str>) {
     let explicit = env
         .iter()
@@ -178,6 +180,134 @@ fn fill_one(env: &mut Vec<String>, prefix: &str, default: Option<&str>) {
         Some(slot) => *slot = format!("{prefix}{default}"),
         None => env.push(format!("{prefix}{default}")),
     }
+}
+
+// --- tracing handoff ------------------------------------------------------
+
+/// The OTLP endpoint the daemon exports to, when its own environment names
+/// one. The three names mirror `kallipai_common::telemetry`, where the tagma
+/// reads them; the daemon does not depend on that crate (it would pull the
+/// exporter stack into the CLI), so a test reads the defining file and fails
+/// when either side drifts.
+pub(super) const ENDPOINT_VAR: &str = "OTEL_EXPORTER_OTLP_ENDPOINT";
+/// The sampler override, forwarded verbatim.
+pub(super) const SAMPLER_VAR: &str = "OTEL_TRACES_SAMPLER";
+/// The argument the ratio samplers read.
+pub(super) const SAMPLER_ARG_VAR: &str = "OTEL_TRACES_SAMPLER_ARG";
+/// The SDK's environment detector folds these attributes into the resource.
+const RESOURCE_ATTRIBUTES_VAR: &str = "OTEL_RESOURCE_ATTRIBUTES";
+
+/// The values one launch may forward, read once from the daemon's own
+/// environment (the NixOS module sets them on the daemon unit).
+#[derive(Debug, Clone, Default)]
+pub(super) struct TracingSource {
+    endpoint: Option<String>,
+    sampler: Option<String>,
+    sampler_arg: Option<String>,
+}
+
+impl TracingSource {
+    pub(super) fn from_daemon_env() -> Self {
+        Self {
+            endpoint: daemon_env_value(ENDPOINT_VAR),
+            sampler: daemon_env_value(SAMPLER_VAR),
+            sampler_arg: daemon_env_value(SAMPLER_ARG_VAR),
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn new(
+        endpoint: Option<&str>,
+        sampler: Option<&str>,
+        sampler_arg: Option<&str>,
+    ) -> Self {
+        Self {
+            endpoint: endpoint.map(str::to_owned),
+            sampler: sampler.map(str::to_owned),
+            sampler_arg: sampler_arg.map(str::to_owned),
+        }
+    }
+}
+
+/// Hand the trace configuration to one instance.
+///
+/// `env` is the composed vector this launch will exec with, the harvested
+/// login environment and the request pairs already merged, and the call sits
+/// before the exec boundary: the endpoint test below has to see what the
+/// instance will actually receive. A request cannot name these keys (the
+/// allowlist admits `KALLIPAI_*`, `RUST_LOG` and `PATH` only), though the
+/// composed login environment can carry an endpoint of its own. Pairs already
+/// in `env` under a key the daemon sets are replaced rather than duplicated:
+/// `execve` leaves the winner of a duplicate pair to the libc.
+///
+/// `service.instance.id` is added whenever the environment this launch
+/// hands over carries the generic `OTEL_EXPORTER_OTLP_ENDPOINT`, whichever
+/// channel supplied it (the per-signal endpoint keys are not consulted): several
+/// instances of one build reporting to one collector are exactly the case
+/// where the slug has to tell their traces apart, and a login shell that
+/// exports the endpoint produces that case too. An instance with no
+/// endpoint gets no attribute, because nothing would read it. An
+/// attributes value already present is kept and appended to, so an
+/// operator's `deployment.environment` survives.
+pub(super) fn fill_tracing_env(env: &[String], tracing: &TracingSource, slug: &str) -> Vec<String> {
+    let endpoint_prefix = format!("{ENDPOINT_VAR}=");
+    let carries_endpoint = |pairs: &[String]| {
+        pairs.iter().any(|pair| {
+            pair.strip_prefix(&endpoint_prefix)
+                .is_some_and(|value| !value.is_empty())
+        })
+    };
+    if tracing.endpoint.is_none()
+        && tracing.sampler.is_none()
+        && tracing.sampler_arg.is_none()
+        && !carries_endpoint(env)
+    {
+        return env.to_vec();
+    }
+    // Only the keys this launch carries are replaced: a value the daemon does
+    // not set stays whatever the caller passed.
+    let owned: Vec<&str> = [
+        tracing.endpoint.as_ref().map(|_| ENDPOINT_VAR),
+        tracing.sampler.as_ref().map(|_| SAMPLER_VAR),
+        tracing.sampler_arg.as_ref().map(|_| SAMPLER_ARG_VAR),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    let mut out: Vec<String> = env
+        .iter()
+        .filter(|pair| {
+            !owned.iter().any(|key| {
+                pair.strip_prefix(key)
+                    .is_some_and(|rest| rest.starts_with('='))
+            })
+        })
+        .cloned()
+        .collect();
+    if let Some(endpoint) = &tracing.endpoint {
+        out.push(format!("{ENDPOINT_VAR}={endpoint}"));
+    }
+    if let Some(sampler) = &tracing.sampler {
+        out.push(format!("{SAMPLER_VAR}={sampler}"));
+    }
+    if let Some(sampler_arg) = &tracing.sampler_arg {
+        out.push(format!("{SAMPLER_ARG_VAR}={sampler_arg}"));
+    }
+    if carries_endpoint(&out) {
+        let attributes = format!("service.instance.id={slug}");
+        let prefix = format!("{RESOURCE_ATTRIBUTES_VAR}=");
+        let merged = match env
+            .iter()
+            .find_map(|pair| pair.strip_prefix(&prefix))
+            .filter(|value| !value.is_empty())
+        {
+            Some(existing) => format!("{existing},{attributes}"),
+            None => attributes,
+        };
+        out.retain(|pair| !pair.starts_with(&prefix));
+        out.push(format!("{prefix}{merged}"));
+    }
+    out
 }
 
 /// Request env pairs: KEY=VALUE shape, KALLIPAI_* (plus RUST_LOG and PATH —

@@ -167,21 +167,44 @@ curl http://model-gw.kallipai.lan/health
 `http://api.kallipai.lan/v1/model-gateway/metrics`。它是转发可观测性
 计数器的 Prometheus 文本，无需凭据：探针必须在凭据故障时仍可抓取。
 
-NixOS 模块把这个指标面的抓取任务导出为只读列表：
-`config.services.kallipai.polis.scrapeConfigs`。导出的任务每 30 秒抓
-取一次。模块自身不启动记录器；在主机的 Prometheus 自身选项上接入
-该列表（用 `++` 追加更多任务，保留期跟随
-`services.prometheus.retentionTime`）：
+NixOS 模块自行启动主机的可观测性栈：Prometheus、Grafana、node
+exporter 与 tempo trace 存储，全部只绑回环，外加平台服务导出的
+OTLP/HTTP 接收端。`services.kallipai.observability.enable` 默认跟随
+polis 开关，因此平台主机获得这套栈、仅 daemon 的主机不获得；在自行运行
+记录器的 polis 主机上设为 `false`。
+
+端口是选项，引用端口的地方全部跟随：`services.kallipai.observability.ports`
+包含 `prometheus`（9090）、`grafana`（3000）、`tempo`（3200）、
+`otlp`（4318）、`otlp-grpc`（4317）与 `node-exporter`（9100）。保留期
+为指标 30 天（`retention.metrics`）、trace 72 小时（`retention.traces`），
+与 compose 形态的清理预算相同。存储在 `/var/lib/prometheus2`、
+`/var/lib/grafana` 与 `/var/lib/kallipai/telemetry/tempo`。
+
+模块向记录器接入三个任务：平台自身的指标面、node exporter，以及 tempo
+自己的 `/metrics`，都无需额外接线；Grafana 预置 Prometheus 与 Tempo 两个
+数据源。只读列表
+（`config.services.kallipai.polis.scrapeConfigs`）保留给自建 Prometheus
+的主机；那种主机要把栈关掉，否则模块自己会追加同一份列表，Prometheus 因同名
+任务拒绝启动：
 
 ```nix
+services.kallipai.observability.enable = false;
 services.prometheus = {
   enable = true;
   scrapeConfigs = config.services.kallipai.polis.scrapeConfigs;
 };
 ```
 
-NixOS 形态既不收集也不存储 trace，也不起看板；这套栈只存在于 compose
-形态，指南见 `docs/en/deployment/container.md`。
+看板以 Viewer 身份匿名开放；管理员密码首次启动时以 0600 生成在
+`/var/lib/grafana/admin-password`，从不进入 store。在主机上用
+`grafana cli admin reset-admin-password` 重置。追踪端点送达每个平台服务
+以及 daemon 启动的每个实例；环境里带通用键 `OTEL_EXPORTER_OTLP_ENDPOINT`
+的实例上报 `service.instance.id=<slug>`，同一构建的多个实例在看板里互不
+混淆。端点只在实例启动时写进它自己的环境。
+`nixos-rebuild switch` 会重启平台单元（含 daemon），但实例不是 systemd 单元：
+被接管的实例跨过 switch 用启动时的环境继续跑，各自重启后才开始上报。既有的
+polis 主机升级后即获得这些单元；上面的开关可关闭它们。compose 形态在容器里运行同一套存储，指南见
+`docs/en/deployment/container.md`。
 
 ## 网关管理面
 

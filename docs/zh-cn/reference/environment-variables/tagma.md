@@ -79,3 +79,16 @@ deadline 截断的配置，因此只记一条说明性日志而不告警；其�
 | `KALLIPAI_TOKEN_BUDGET`        | 否    | _（无上限）_                    | tagma 级 Token 消耗上限的启动值（见 `docs/en/reference/tagma-api.md` 的 Token Budget 一节）。接受不带后缀的 Token 数或 `K`/`M`/`G` 后缀（如 `500000`、`5M`、`2G`）。`0` 以暂停态启动 tagma：所有 agent 阻塞，直到经 `POST /budget` 设定有限预算。未设则无上限启动；空值或非法值以解析错误启动失败，而非悄悄无上限启动。运行时预算经 `GET`/`POST /budget` 读取与更改，不经本变量。                                                                                                                                                                           |
 | `KALLIPAI_OPERATOR_TOKEN`      | 否    | _（随机 `sk-operator-…`）_     | 预设 tagma operator 令牌。启动优先级：本环境变量最先（逐字采用，不落盘），其次既有的 `<data dir>/credentials/operator-token.env`，否则生成随机 256 位 `sk-operator-…` 令牌并以 0600 权限写入该文件——启动过程不会打印它（只有显式的 `operator-token reset` 会打印新铸的令牌）。用 `kallipctl operator-token show <slug>` 取回；用 `operator-token set`/`reset` 轮换。tagma 只保留其哈希。不可为空。启动读取后该变量即从进程环境中移除，agent shell 不会再继承它。                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | `KALLIPAI_LLM_API_USER_AGENT`  | 否    | `kallipai/<tagma-version>` | 出站 LLM chat completion 请求携带的 User-Agent 头。逐字覆盖（保留首尾空白）；非法头字符（如换行）快速失败（活跃 set 在启动时，故障转移在首次失败时惰性触发）。                                                                                                                                                                                                                                                                                                                                              |
+
+## 追踪
+
+设置了 `OTEL_EXPORTER_OTLP_ENDPOINT` 时，tagma 导出 OpenTelemetry trace。
+这些变量按 OpenTelemetry 规范语义读取；`OTEL_RESOURCE_ATTRIBUTES` 由 SDK
+的环境探测器并入资源。
+
+| 变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | _（未设置）_ | 收集器的 OTLP/HTTP 基地址；未设置则不导出。值末尾不是 `/v1/traces` 时自动追加。 |
+| `OTEL_TRACES_SAMPLER` | 父级基准、全采样 | 采样器名：`always_on`、`always_off`、`traceidratio` 或 `parentbased_traceidratio`。 |
+| `OTEL_TRACES_SAMPLER_ARG` | _（未设置）_ | 比率采样器读取的参数，例如 `0.1`。 |
+| `OTEL_RESOURCE_ATTRIBUTES` | _（未设置）_ | 逗号分隔的资源属性。daemon 启动的实例，只要环境里有通用键 `OTEL_EXPORTER_OTLP_ENDPOINT`，就在此收到 `service.instance.id=<slug>`；见[本地 daemon](daemon.md)。 |

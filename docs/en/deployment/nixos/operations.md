@@ -49,6 +49,27 @@ stores and the internal token) stays under `/var/lib/kallipai`,
 separate from the per-user homes: the same lifetime split the
 internal-token section describes.
 
+## Seeing the Observability Stack
+
+A polis host runs the stack by default: Grafana on `127.0.0.1:3000`,
+Prometheus on `127.0.0.1:9090`, tempo on `127.0.0.1:3200`, and the OTLP
+receivers on `127.0.0.1:4318` (HTTP) and `127.0.0.1:4317` (gRPC). Every one
+of them binds loopback, so a browser on another machine reaches them through
+a tunnel:
+
+    ssh -N -L 3000:127.0.0.1:3000 -L 9090:127.0.0.1:9090 admin@host
+
+Grafana opens as an anonymous Viewer with the Prometheus and tempo
+datasources provisioned, so a trace id pastes straight into Explore. The
+admin login is `admin` with the password in `/var/lib/grafana/admin-password`;
+reset it with `grafana cli admin reset-admin-password` from the host.
+
+The four units are `prometheus`, `grafana`, `prometheus-node-exporter` and
+`kallipai-tempo`. `systemctl status` names them, and
+`journalctl -u kallipai-tempo` shows what the trace store made of its config.
+Setting `services.kallipai.observability.enable = false` stops all four and
+leaves the services they watched untouched.
+
 ## Troubleshooting the First Boot
 
 A missing internal-token file is not an error on the archeion's first

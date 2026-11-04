@@ -462,8 +462,30 @@
       };
       collideMsg = (builtins.head (failedAssertions collide)).message;
       collideFwdMsg = (builtins.head (failedAssertions collideFwd)).message;
-      # Pins that the documented example evaluates; wiring in stays the host's call.
+      # The documented recipe, evaluated: a host that keeps its own recorder
+      # switches the stack off and wires the export into it.
       scrapeWired = evalHost [
+        {
+          services.kallipai.polis.enable = true;
+        }
+        (
+          {
+            config,
+            ...
+          }:
+          {
+            services.kallipai.observability.enable = false;
+            services.prometheus = {
+              enable = true;
+              scrapeConfigs = config.services.kallipai.polis.scrapeConfigs;
+            };
+          }
+        )
+      ];
+      # The same recipe with the switch left on: the module appends the same
+      # list and the job name appears twice, which Prometheus refuses to start
+      # on. This arm is why the example carries the off line.
+      scrapeDuplicated = evalHost [
         {
           services.kallipai.polis.enable = true;
         }
@@ -480,7 +502,64 @@
           }
         )
       ];
+      jobNamesOf = cfg: map (job: job.job_name) cfg.config.services.prometheus.scrapeConfigs;
+      hasDuplicateJobNames =
+        cfg: builtins.length (jobNamesOf cfg) != builtins.length (lib.unique (jobNamesOf cfg));
       wiredTarget = lib.elemAt (lib.elemAt (lib.elemAt scrapeWired.config.services.prometheus.scrapeConfigs 0).static_configs 0).targets 0;
+      # The observability stack's other arms: polis on with the switch
+      # explicitly off (how an operator says no to the default), and a host
+      # that moved every observability port, so each consumer of a number is
+      # pinned against the option rather than against a literal.
+      obsForcedOff = evalHost {
+        services.kallipai = {
+          daemon.enable = true;
+          polis.enable = true;
+          observability.enable = false;
+        };
+      };
+      obsDrifted = evalHost {
+        services.kallipai = {
+          daemon.enable = true;
+          polis.enable = true;
+          observability.ports = {
+            prometheus = 9095;
+            grafana = 3005;
+            tempo = 3205;
+            otlp = 4340;
+          };
+        };
+      };
+      # A host that keeps its own recorder: the module's ports stay defaults,
+      # so everything pointing at the recorder has to follow these instead.
+      obsRemapped = evalHost {
+        services = {
+          prometheus.port = 9091;
+          prometheus.exporters.node.port = 9101;
+        };
+        services.kallipai = {
+          daemon.enable = true;
+          polis.enable = true;
+        };
+      };
+      obsPortsOf = cfg: cfg.config.services.kallipai.observability.ports;
+      # The list comes from the module's read-only option, so the assertions
+      # below walk whatever it names: a seventh service is covered the moment
+      # it is added there. The daemon is separate: it does not export, it
+      # forwards the endpoint to the instances it spawns.
+      tracingUnitNames = cfg: cfg.config.services.kallipai.observability.tracingUnits;
+      otelLineOf =
+        cfg:
+        lib.concatStringsSep " " (
+          map (n: cfg.config.systemd.services.${n}.environment.OTEL_EXPORTER_OTLP_ENDPOINT) (
+            tracingUnitNames cfg ++ [ "kallipai-daemon" ]
+          )
+        );
+      scrapeJobAt = cfg: i: lib.elemAt cfg.config.services.prometheus.scrapeConfigs i;
+      scrapeTargetAt =
+        cfg: i:
+        lib.elemAt (lib.elemAt (lib.elemAt cfg.config.services.prometheus.scrapeConfigs i).static_configs 0).targets 0;
+      datasourceAt =
+        cfg: i: lib.elemAt cfg.config.services.grafana.provision.datasources.settings.datasources i;
 
       # The baking helper, called directly (no module), writes exactly
       # the payload it is given.
@@ -757,13 +836,73 @@
       # The polis scrape export: no polis or gateway leaves the
       # list empty; a polis host gets one loopback job per
       # metrics-capable service with the port following the service's
-      # own option; a drifted management port reaches the target; the
-      # module keeps services.prometheus off, and the documented
-      # wiring carries the job through verbatim. Stays assertion- and
-      # warning-free beside the polis family.
+      # own option; a drifted management port reaches the target, and the
+      # documented standalone wiring carries the job through verbatim.
+      # The module's own recorder follows the observability switch (see the
+      # arm pinned below), never enabled beside the polis family alone.
       test "${toString (builtins.length scrapeOff.config.services.kallipai.polis.scrapeConfigs)}" = "0"
       test "${toString (builtins.length scrapeGwOff.config.services.kallipai.polis.scrapeConfigs)}" = "0"
-      test "${lib.boolToString webDerived.config.services.prometheus.enable}" = "false"
+      # The observability switch, pinned by value on both arms. The promise
+      # this module makes is "polis off, stack off; the switch on, stack on":
+      # the assertions below read the numbers off the options, so a drift in
+      # either the module or an option default lands here.
+      test "${lib.boolToString aligned.config.services.prometheus.enable}" = "true"
+      test "${aligned.config.services.prometheus.listenAddress}" = "127.0.0.1"
+      test "${toString aligned.config.services.prometheus.port}" = "${toString (obsPortsOf aligned).prometheus}"
+      test "${aligned.config.services.prometheus.retentionTime}" = "${aligned.config.services.kallipai.observability.retention.metrics}"
+      test "${lib.boolToString aligned.config.services.prometheus.exporters.node.enable}" = "true"
+      test "${aligned.config.services.prometheus.exporters.node.listenAddress}" = "127.0.0.1"
+      test "${toString aligned.config.services.prometheus.exporters.node.port}" = "${toString (obsPortsOf aligned).node-exporter}"
+      # Three jobs: the platform's own face (from the module's scrape export)
+      # first, then the node exporter and the trace store's own /metrics.
+      test "${toString (builtins.length aligned.config.services.prometheus.scrapeConfigs)}" = "3"
+      test "${(scrapeJobAt aligned 0).job_name}" = "${scrapeJob.job_name}"
+      test "${(scrapeJobAt aligned 1).job_name}" = "kallipai-node"
+      test "${scrapeTargetAt aligned 1}" = "127.0.0.1:${toString (obsPortsOf aligned).node-exporter}"
+      test "${(scrapeJobAt aligned 2).job_name}" = "tempo"
+      test "${scrapeTargetAt aligned 2}" = "127.0.0.1:${toString (obsPortsOf aligned).tempo}"
+      test "${lib.boolToString aligned.config.services.grafana.enable}" = "true"
+      test "${aligned.config.services.grafana.settings.server.http_addr}" = "127.0.0.1"
+      test "${toString aligned.config.services.grafana.settings.server.http_port}" = "${toString (obsPortsOf aligned).grafana}"
+      test "${
+        lib.boolToString aligned.config.services.grafana.settings."auth.anonymous".enabled
+      }" = "true"
+      test "${toString (builtins.length aligned.config.services.grafana.provision.datasources.settings.datasources)}" = "2"
+      test "${(datasourceAt aligned 0).url}" = "http://127.0.0.1:${toString (obsPortsOf aligned).prometheus}"
+      test "${(datasourceAt aligned 1).url}" = "http://127.0.0.1:${toString (obsPortsOf aligned).tempo}"
+      test "${(datasourceAt aligned 0).uid}" = "kallipai-prometheus"
+      test "${(datasourceAt aligned 1).uid}" = "kallipai-tempo"
+      # The trace store: its own user, and a config file the unit names -- the
+      # build-time check runs tempo --config.verify against that file.
+      test "${lib.boolToString (builtins.hasAttr "kallipai-tempo" aligned.config.systemd.services)}" = "true"
+      test "${aligned.config.systemd.services.kallipai-tempo.serviceConfig.User}" = "kallipai-tempo"
+      test "${lib.boolToString (builtins.hasAttr "kallipai-tempo" aligned.config.users.users)}" = "true"
+      test "${lib.boolToString (lib.hasInfix "-config.file=" aligned.config.systemd.services.kallipai-tempo.serviceConfig.ExecStart)}" = "true"
+      # Every tracing unit and the daemon carry the same loopback endpoint.
+      test "${otelLineOf aligned}" = "http://127.0.0.1:4318 http://127.0.0.1:4318 http://127.0.0.1:4318 http://127.0.0.1:4318 http://127.0.0.1:4318 http://127.0.0.1:4318 http://127.0.0.1:4318"
+      test "${lib.concatStringsSep "," (tracingUnitNames aligned)}" = "kallipai-archeion,kallipai-lesche,kallipai-keryx,kallipai-files,kallipai-instances,kallipai-model-gateway"
+      # Port drift reaches every consumer of a number, not just the unit that
+      # listens on it.
+      test "${otelLineOf obsDrifted}" = "http://127.0.0.1:4340 http://127.0.0.1:4340 http://127.0.0.1:4340 http://127.0.0.1:4340 http://127.0.0.1:4340 http://127.0.0.1:4340 http://127.0.0.1:4340"
+      test "${toString obsDrifted.config.services.prometheus.port}" = "9095"
+      test "${toString obsDrifted.config.services.grafana.settings.server.http_port}" = "3005"
+      test "${(datasourceAt obsDrifted 0).url}" = "http://127.0.0.1:9095"
+      test "${(datasourceAt obsDrifted 1).url}" = "http://127.0.0.1:3205"
+      # The host's own recorder: the datasource and the scrape job read the
+      # effective listener, so neither points at a port nothing listens on.
+      test "${(datasourceAt obsRemapped 0).url}" = "http://127.0.0.1:9091"
+      test "${scrapeTargetAt obsRemapped 1}" = "127.0.0.1:9101"
+      # The off arms: a daemon-only host keeps the stack off (the default
+      # follows polis), an explicit false on a polis host wins over that
+      # default, and neither leaves an endpoint in a unit environment.
+      test "${lib.boolToString scrapeOff.config.services.prometheus.enable}" = "false"
+      test "${lib.boolToString scrapeOff.config.services.grafana.enable}" = "false"
+      test "${lib.boolToString (builtins.hasAttr "kallipai-tempo" scrapeOff.config.systemd.services)}" = "false"
+      test "${lib.boolToString obsForcedOff.config.services.prometheus.enable}" = "false"
+      test "${lib.boolToString obsForcedOff.config.services.grafana.enable}" = "false"
+      test "${lib.boolToString (builtins.hasAttr "kallipai-tempo" obsForcedOff.config.systemd.services)}" = "false"
+      test "${lib.boolToString (builtins.hasAttr "OTEL_EXPORTER_OTLP_ENDPOINT" obsForcedOff.config.systemd.services.kallipai-archeion.environment)}" = "false"
+      test "${lib.boolToString (builtins.hasAttr "OTEL_EXPORTER_OTLP_ENDPOINT" obsForcedOff.config.systemd.services.kallipai-daemon.environment)}" = "false"
       test "${toString (builtins.length aligned.config.services.kallipai.polis.scrapeConfigs)}" = "1"
       # The job name is a dashboard-side label (Grafana panels select on
       # it), so it is pinned by value beside the unit-existence check.
@@ -775,6 +914,10 @@
       test "${wiredTarget}" = "127.0.0.1:${toString scrapeWired.config.services.kallipai.polis.ports.model-gateway}"
       test "${toString (builtins.length (failedAssertions scrapeWired))}" = "0"
       test "${toString (builtins.length scrapeWired.config.warnings)}" = "0"
+      test "${lib.boolToString (hasDuplicateJobNames scrapeWired)}" = "false"
+      test "${toString (builtins.length (jobNamesOf scrapeWired))}" = "1"
+      test "${lib.boolToString (hasDuplicateJobNames scrapeDuplicated)}" = "true"
+      test "${toString (builtins.length (jobNamesOf scrapeDuplicated))}" = "4"
       printf %s ok > "$out"
     '';
 }

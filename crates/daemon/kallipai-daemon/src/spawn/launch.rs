@@ -3,8 +3,8 @@
 
 use super::authorize::authorized;
 use super::env::{
-    compose_launch_env, daemon_env_value, ensure_addr_parses, fill_relay_defaults,
-    validate_user_env,
+    TracingSource, compose_launch_env, daemon_env_value, ensure_addr_parses, fill_relay_defaults,
+    fill_tracing_env, validate_user_env,
 };
 use super::error::{OverlapInput, SpawnError};
 use super::harvest::harvest_base_env;
@@ -333,6 +333,10 @@ pub(crate) fn launch(
         state_home.as_deref(),
         target_user,
     );
+    // The trace configuration the daemon was given rides to the instance:
+    // the NixOS module sets the endpoint on the daemon unit, and a request
+    // cannot name these keys (the allowlist refuses OTEL_*).
+    let env = fill_tracing_env(&env, &TracingSource::from_daemon_env(), slug);
     // Guard every channel at the composed boundary: request pairs were
     // validated, but a harvested base value slips past that check.
     ensure_addr_parses(&env)?;

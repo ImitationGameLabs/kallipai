@@ -14,5 +14,18 @@ order: 60
 | `KALLIPAI_HARVEST_BASH`                    | 否           | `/bin/bash`                                 | 登录环境采集所用的 bash（两种启动形态；落下式启动时以目标用户运行）。这是管理常量：没有 `/bin/bash` 的部署（NixOS）把它指向受管 bash；请求或用户环境供给的任何值都动不了它。                                                                                                                                                                                                                                                                                                                                                                    |
 | `KALLIPAI_DAEMON_SOCKET_GROUP`             | 否           | _（无）_                                       | 控制 socket 访问组：设置后，daemon 在绑定时把 socket 交给该组（经组数据库解析）并把模式放宽到 0660，组成员即可驱动 daemon。                                                                                                                                                                                                                                                                                                                                                                                         |
 
-落下式启动（root daemon 为声明用户启动实例）时，daemon 依据 passwd 条目构造实例的标准身份环境：`HOME`、`USER`、`LOGNAME`、`SHELL`、`XDG_CONFIG_HOME`、`XDG_DATA_HOME`、`XDG_STATE_HOME`、`XDG_CACHE_HOME`，以及运行时目录存在时的 `XDG_RUNTIME_DIR`。这些键由 daemon 所有：采集到的登录环境与请求对都无法覆盖它们，实例也不会继承 daemon 自身环境的任何其他内容。
+落下式启动（root daemon 为声明用户启动实例）时，daemon 依据 passwd 条目构造实例的标准身份环境：`HOME`、`USER`、`LOGNAME`、`SHELL`、`XDG_CONFIG_HOME`、`XDG_DATA_HOME`、`XDG_STATE_HOME`、`XDG_CACHE_HOME`，以及运行时目录存在时的 `XDG_RUNTIME_DIR`。这些键由 daemon 所有：采集到的登录环境与请求对都无法覆盖它们，实例也不会继承 daemon 自身环境的其他内容（下方所述的追踪配置除外）。
 登录环境采集本身也会播种 `XDG_RUNTIME_DIR`（用户运行时目录存在时），使从它推导的系统会话脚本与真实登录同形求值。
+
+追踪配置是 daemon 唯一转交的一族变量。daemon 自身环境带有
+`OTEL_EXPORTER_OTLP_ENDPOINT` 时，它启动的每个实例都收到同一端点，并在设置
+时一并收到 `OTEL_TRACES_SAMPLER` 与 `OTEL_TRACES_SAMPLER_ARG`。实例标识看的
+是通用键 `OTEL_EXPORTER_OTLP_ENDPOINT`、不是它的来源：实例自己的环境里带这个
+键（daemon 给的，或登录 shell 导出的），就得到
+`OTEL_RESOURCE_ATTRIBUTES=service.instance.id=<slug>`，使同一构建的多个实例在
+收集器里互不混淆；没有这个键的实例不加该属性。同名键以
+daemon 的值为准，请求无法指名这些键：允许清单只收 `KALLIPAI_*`、`RUST_LOG`
+与 `PATH`。其他渠道设置的 `OTEL_RESOURCE_ATTRIBUTES` 按合并处理：原有属性保
+留，`service.instance.id` 追加在后。主机上实例多时，把 `OTEL_TRACES_SAMPLER`
+设为 `parentbased_traceidratio`、`OTEL_TRACES_SAMPLER_ARG` 设为一个小数：每
+个实例各带一套批处理导出器，全量采样只是白烧 CPU。

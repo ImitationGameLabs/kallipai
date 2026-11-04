@@ -93,3 +93,17 @@ These variables control the tagma server.
 | `KALLIPAI_TOKEN_BUDGET`        | no       | _(unlimited)_              | Startup value for the tagma-wide token spend cap (see the Token Budget section in `docs/en/reference/tagma-api.md`). Accepts plain token counts or `K`/`M`/`G` suffixes (e.g. `500000`, `5M`, `2G`). `0` boots the tagma paused: all agents block until a finite budget is set via `POST /budget`. Unset boots with no cap; an empty or invalid value fails the boot with a parse error rather than silently starting uncapped. The runtime budget is read and changed via `GET`/`POST /budget`, not this variable. |
 | `KALLIPAI_OPERATOR_TOKEN`      | no       | _(random `sk-operator-…`)_ | Pre-set the tagma operator token. Priority at boot: this env pin first (taken verbatim, never persisted), then an existing `<data dir>/credentials/operator-token.env` from a previous run, otherwise a random 256-bit `sk-operator-…` token is generated and written to that file with mode 0600 — the boot path never prints it (only an explicit `operator-token reset` prints a freshly minted value). Retrieve it with `kallipctl operator-token show <slug>`; rotate with `operator-token set`/`reset`. The tagma retains only a hash of it. Must not be empty. After boot captures the pin it is removed from the process environment, so agent shells never inherit it.                                                                                                                                                                                                                                                                  |
 | `KALLIPAI_LLM_API_USER_AGENT`  | no       | `kallipai/<tagma-version>` | User-Agent header sent on outbound LLM chat completion requests. Override verbatim (leading/trailing whitespace preserved); illegal header chars (e.g. newlines) fail fast (at startup for the active set, lazily on first failover).                                                                                                                                                                                                                                                                               |
+
+## Tracing
+
+The tagma exports OpenTelemetry traces when `OTEL_EXPORTER_OTLP_ENDPOINT`
+is set. The standard variables are read as the OpenTelemetry specification
+defines them; `OTEL_RESOURCE_ATTRIBUTES` is folded into the resource by the
+SDK's environment detector.
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | _(unset)_ | OTLP/HTTP base URL of the collector; unset exports nothing. `/v1/traces` is appended when the value does not already end there. |
+| `OTEL_TRACES_SAMPLER` | parent-based, always on | Sampler name: `always_on`, `always_off`, `traceidratio`, or `parentbased_traceidratio`. |
+| `OTEL_TRACES_SAMPLER_ARG` | _(unset)_ | The argument the ratio samplers read, for example `0.1`. |
+| `OTEL_RESOURCE_ATTRIBUTES` | _(unset)_ | Comma-separated resource attributes. An instance the daemon starts receives `service.instance.id=<slug>` here whenever its environment carries the generic `OTEL_EXPORTER_OTLP_ENDPOINT`; see [Local daemon](daemon.md). |

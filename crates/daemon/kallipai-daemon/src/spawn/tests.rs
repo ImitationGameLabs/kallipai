@@ -1266,6 +1266,200 @@ fn unconfigured_daemon_origin_fills_nothing() {
     );
 }
 
+// --- fill_tracing_env -----------------------------------------------
+// The daemon's own trace values are a parameter here, so the branches
+// test without process-global env mutation.
+
+/// The endpoint the daemon carries reaches the instance, and the slug
+/// rides along as the instance id exactly when the endpoint does.
+#[test]
+fn tracing_endpoint_carries_the_instance_id() {
+    let env = vec!["PATH=/bin".to_string()];
+    let out = fill_tracing_env(
+        &env,
+        &TracingSource::new(
+            Some("http://127.0.0.1:4318"),
+            Some("parentbased_traceidratio"),
+            Some("0.1"),
+        ),
+        "instance-1",
+    );
+    assert!(has(
+        &out,
+        "OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318"
+    ));
+    assert!(has(&out, "OTEL_TRACES_SAMPLER=parentbased_traceidratio"));
+    assert!(has(&out, "OTEL_TRACES_SAMPLER_ARG=0.1"));
+    assert!(has(
+        &out,
+        "OTEL_RESOURCE_ATTRIBUTES=service.instance.id=instance-1"
+    ));
+    assert!(has(&out, "PATH=/bin"));
+    assert_eq!(out.len(), 5);
+}
+
+/// A daemon with nothing configured hands nothing over: the instance
+/// keeps the env it was given, down to the order.
+#[test]
+fn tracing_unset_leaves_the_env_alone() {
+    let env = vec![
+        "OTEL_TRACES_SAMPLER=always_on".to_string(),
+        "PATH=/bin".to_string(),
+    ];
+    let out = fill_tracing_env(&env, &TracingSource::default(), "instance-1");
+    assert_eq!(out, env);
+}
+/// The login environment can supply the endpoint on its own: the instance
+/// still gets its id, and the caller's attributes survive beside it.
+#[test]
+fn tracing_endpoint_from_the_login_environment_carries_the_instance_id() {
+    let env = vec![
+        "OTEL_EXPORTER_OTLP_ENDPOINT=http://collector:4318".to_string(),
+        "OTEL_RESOURCE_ATTRIBUTES=deployment.environment=prod".to_string(),
+    ];
+    let out = fill_tracing_env(&env, &TracingSource::new(None, None, None), "instance-2");
+    assert_eq!(out.len(), 2);
+    assert!(has(
+        &out,
+        "OTEL_EXPORTER_OTLP_ENDPOINT=http://collector:4318"
+    ));
+    assert!(has(
+        &out,
+        "OTEL_RESOURCE_ATTRIBUTES=deployment.environment=prod,service.instance.id=instance-2"
+    ));
+}
+
+/// A key that only shares the prefix is not the endpoint: the attribute
+/// follows the exact name, so a suffixed variant carries no instance id.
+#[test]
+fn tracing_instance_id_follows_the_exact_endpoint_key() {
+    let env = vec!["OTEL_EXPORTER_OTLP_ENDPOINT_SECONDARY=http://other:4318".to_string()];
+    let out = fill_tracing_env(&env, &TracingSource::new(None, None, None), "instance-1");
+    assert_eq!(out, env);
+}
+
+/// A daemon endpoint replaces the one the login environment exported: one
+/// pair survives carrying the daemon's value, and the caller's attributes
+/// are still extended in place.
+#[test]
+fn tracing_daemon_endpoint_replaces_the_exported_one() {
+    let env = vec![
+        "OTEL_EXPORTER_OTLP_ENDPOINT=http://login:4318".to_string(),
+        "OTEL_RESOURCE_ATTRIBUTES=a=1".to_string(),
+    ];
+    let out = fill_tracing_env(
+        &env,
+        &TracingSource::new(Some("http://daemon:4318"), None, None),
+        "instance-1",
+    );
+    assert_eq!(out.len(), 2);
+    assert!(has(&out, "OTEL_EXPORTER_OTLP_ENDPOINT=http://daemon:4318"));
+    assert!(!has(&out, "OTEL_EXPORTER_OTLP_ENDPOINT=http://login:4318"));
+    assert!(has(
+        &out,
+        "OTEL_RESOURCE_ATTRIBUTES=a=1,service.instance.id=instance-1"
+    ));
+}
+
+/// A sampler without an endpoint travels alone: the instance id is
+/// only there to tell collectors apart, and there is no collector.
+#[test]
+fn tracing_sampler_without_endpoint_carries_no_instance_id() {
+    let out = fill_tracing_env(
+        &[],
+        &TracingSource::new(None, Some("always_on"), None),
+        "instance-1",
+    );
+    assert_eq!(out, vec!["OTEL_TRACES_SAMPLER=always_on".to_string()]);
+}
+
+/// A pair the daemon sets is replaced, not duplicated, and a pair it
+/// does not set survives.
+#[test]
+fn tracing_replaces_only_the_keys_it_carries() {
+    let env = vec![
+        "OTEL_EXPORTER_OTLP_ENDPOINT=http://stale:4318".to_string(),
+        "OTEL_TRACES_SAMPLER_ARG=0.5".to_string(),
+    ];
+    let out = fill_tracing_env(
+        &env,
+        &TracingSource::new(Some("http://127.0.0.1:4318"), None, None),
+        "instance-1",
+    );
+    assert_eq!(
+        out.iter()
+            .filter(|e| e.starts_with("OTEL_EXPORTER_OTLP_ENDPOINT="))
+            .count(),
+        1
+    );
+    assert!(has(
+        &out,
+        "OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318"
+    ));
+    assert!(has(&out, "OTEL_TRACES_SAMPLER_ARG=0.5"));
+}
+
+/// An attributes value the caller already set is kept, and the
+/// instance id is appended to it once.
+#[test]
+fn tracing_attributes_merge_with_the_callers() {
+    let env = vec!["OTEL_RESOURCE_ATTRIBUTES=deployment.environment=prod".to_string()];
+    let out = fill_tracing_env(
+        &env,
+        &TracingSource::new(Some("http://127.0.0.1:4318"), None, None),
+        "instance-1",
+    );
+    assert!(has(
+        &out,
+        "OTEL_RESOURCE_ATTRIBUTES=deployment.environment=prod,service.instance.id=instance-1"
+    ));
+    assert_eq!(
+        out.iter()
+            .filter(|e| e.starts_with("OTEL_RESOURCE_ATTRIBUTES="))
+            .count(),
+        1
+    );
+}
+
+/// The key names here mirror the tagma's reader. The check reads the
+/// defining file rather than depending on `kallipai-common`: a dev
+/// dependency would drag the telemetry stack into the daemon's test build,
+/// and pinning the value on the wire is what both sides must agree on.
+/// Renaming the constant there is a deliberate edit that touches this list.
+#[test]
+fn tracing_keys_match_the_tagma_reader() {
+    let source = include_str!("../../../../kallipai-common/src/telemetry.rs");
+    for (constant, value) in [
+        ("ENDPOINT_VAR", ENDPOINT_VAR),
+        ("SAMPLER_VAR", SAMPLER_VAR),
+        ("SAMPLER_ARG_VAR", SAMPLER_ARG_VAR),
+    ] {
+        let declaration = format!("pub const {constant}: &str = \"{value}\";");
+        assert!(
+            source.contains(&declaration),
+            "the tagma reader does not declare {declaration}"
+        );
+    }
+}
+
+/// The trace keys stay daemon-owned: a request naming one is refused
+/// with the same allowlist error as any other foreign key.
+#[test]
+fn tracing_keys_are_refused_from_requests() {
+    for pair in [
+        "OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318",
+        "OTEL_TRACES_SAMPLER=always_on",
+        "OTEL_TRACES_SAMPLER_ARG=1",
+        "OTEL_RESOURCE_ATTRIBUTES=service.instance.id=mine",
+    ] {
+        let error = validate_user_env(&[pair.to_string()]).unwrap_err();
+        assert!(
+            error.to_string().contains("is not allowlisted"),
+            "{pair}: {error}"
+        );
+    }
+}
+
 #[test]
 fn parse_drops_an_oversized_value() {
     // A profile echoing megabytes of KEY=VALUE-shaped text after the

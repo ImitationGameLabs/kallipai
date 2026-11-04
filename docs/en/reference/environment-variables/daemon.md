@@ -22,7 +22,26 @@ from the passwd entry: `HOME`, `USER`, `LOGNAME`, `SHELL`,
 and `XDG_RUNTIME_DIR` when the runtime directory exists. These keys are
 daemon-owned: neither the harvested login environment nor request pairs
 can override them, and the instance inherits nothing else from the
-daemon's own environment.
+daemon's own environment, apart from the trace configuration below.
 The login-environment harvest is also seeded with `XDG_RUNTIME_DIR`
 (the user's runtime directory, when it exists), so session scripts
 that derive from it evaluate as they would in a real login.
+
+The trace configuration is the one family the daemon hands over. When its
+own environment carries `OTEL_EXPORTER_OTLP_ENDPOINT`, every instance it
+spawns receives that endpoint, together with `OTEL_TRACES_SAMPLER` and
+`OTEL_TRACES_SAMPLER_ARG` when they are set. The instance id follows the
+generic key, not its source: an instance whose own environment carries
+`OTEL_EXPORTER_OTLP_ENDPOINT` — the daemon's, or one a login shell exported —
+receives
+`OTEL_RESOURCE_ATTRIBUTES=service.instance.id=<slug>`, so several instances
+of one build stay apart in the collector; an instance with no endpoint
+receives no attribute. The daemon's value
+replaces a same-named pair from any other channel, and a request cannot
+name these keys: the allowlist admits `KALLIPAI_*`, `RUST_LOG` and
+`PATH`. An `OTEL_RESOURCE_ATTRIBUTES` set by any other channel merges:
+its attributes stay and `service.instance.id` is appended. With many
+instances on one host, set `OTEL_TRACES_SAMPLER` to
+`parentbased_traceidratio` and `OTEL_TRACES_SAMPLER_ARG` to a fraction:
+each instance carries its own batch exporter, so sampling everything
+spends CPU on traces nobody reads.

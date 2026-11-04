@@ -1,8 +1,10 @@
-# The config texts for the observability stack the compose files run: a
-# collector, a trace store and a UI. A pure function -- no services.*, no
-# pkgs -- so both consumers evaluate it without a container runtime:
-# nix/packages/stack.nix renders the texts the compose services mount, and
-# nix/checks/obs-stack.nix asserts the ports, paths and mounts they need.
+# The config texts for the observability stack: one set the compose
+# containers read, one the NixOS module writes for the host's own tempo.
+# A pure function -- no services.*, no pkgs -- so every consumer
+# evaluates it without a container runtime: nix/packages/stack.nix
+# renders the compose texts, nix/checks/obs-stack.nix asserts their
+# ports and mounts, nix/checks/obs-nixos.nix verifies the host text,
+# and nix/nixos-modules.nix feeds it to the tempo unit.
 #
 # What runs
 #   otelcol  otel/opentelemetry-collector-contrib: the OTLP receiver (http
@@ -43,6 +45,9 @@
 { lib }:
 let
   maxBytes = 5 * 1024 * 1024 * 1024;
+  # The metrics budget the compose recorder is started with: the module's
+  # option default reads this, and the check compares the compose flag to it.
+  metricsRetention = "30d";
   maxAgeHours = 72;
 
   # Every container port the config texts name. The host side lives in the
@@ -78,7 +83,12 @@ let
       path;
 in
 {
-  inherit maxBytes maxAgeHours containerPorts;
+  inherit
+    maxBytes
+    maxAgeHours
+    metricsRetention
+    containerPorts
+    ;
 
   # Pure: the caller reads the environment, this decides the path.
   telemetryRoot =
@@ -200,4 +210,56 @@ in
       # overrides it must name endpoints from here, not from `defaultContainerPorts`.
       inherit texts containerPorts;
     };
+  # The trace store's config for a host that runs its own stack (the NixOS
+  # module), beside the container text above. The two are separate on
+  # purpose: the container image pins tempo 2.9.x, whose retention knob is
+  # compactor.compaction.block_retention, while nixpkgs ships tempo 3.x,
+  # where the same budget lives under backend_scheduler.work.prune_age.
+  # One text handed to the other major fails configuration validation
+  # outright. Merge them if the compose image and the nixpkgs package land
+  # on one major.
+  hostTempoText =
+    {
+      listenAddress,
+      httpPort,
+      otlpHttpPort,
+      otlpGrpcPort,
+      storageRoot,
+      retentionHours,
+    }:
+    ''
+      server:
+        http_listen_address: ${listenAddress}
+        http_listen_port: ${toString httpPort}
+        grpc_listen_address: ${listenAddress}
+      distributor:
+        receivers:
+          otlp:
+            protocols:
+              grpc:
+                endpoint: ${listenAddress}:${toString otlpGrpcPort}
+              http:
+                endpoint: ${listenAddress}:${toString otlpHttpPort}
+      storage:
+        trace:
+          backend: local
+          local:
+            path: ${guardedPath "storageRoot" storageRoot}/blocks
+          wal:
+            path: ${guardedPath "storageRoot" storageRoot}/wal
+      backend_scheduler:
+        work:
+          prune_age: ${toString retentionHours}h
+      usage_report:
+        reporting_enabled: false
+      # The live store keeps its own WAL and a shutdown marker: both default
+      # under /var/tempo, which the unit's account does not own. Keeping them
+      # under the same root as the blocks puts every written file inside the
+      # state directory systemd hands the unit.
+      live_store:
+        shutdown_marker_dir: ${guardedPath "storageRoot" storageRoot}/live-store/shutdown-marker
+        wal:
+          path: ${guardedPath "storageRoot" storageRoot}/live-store/traces
+    '';
+
 }

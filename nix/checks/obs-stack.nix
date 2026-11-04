@@ -168,6 +168,11 @@ let
     (expect "tempo accepts OTLP gRPC on the port the collector forwards to" (
       inText "tempo" "endpoint: 0.0.0.0:${containerPorts.otlpGRPC}"
     ))
+    # The metrics window is one number in two places: this reads it from
+    # the export both forms share, so a change on one side alone fails.
+    (expect "the compose recorder is started with the module's retention window" (
+      lib.hasInfix "--storage.tsdb.retention.time=${stack.metricsRetention}" compose
+    ))
     # The table is a value, not a literal: on other container ports every text
     # has to move, and no default value may stay behind. A same-value literal
     # elsewhere would keep the assertions above green.

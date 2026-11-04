@@ -124,6 +124,13 @@ so a tight race is not separable this way.
 | `OTEL_TRACES_SAMPLER_ARG` | the ratio for the two `traceidratio` families; an unparseable or out-of-range value keeps the default |
 | `RUST_LOG` | one filter for both the events and the export layer: a span below it is never created, so it never reaches the trace. Default `info`; the store spans need `trace` |
 
+An instance the daemon starts receives the daemon's `OTEL_EXPORTER_OTLP_ENDPOINT`
+and sampler values, plus `service.instance.id=<slug>` whenever its environment
+carries the generic `OTEL_EXPORTER_OTLP_ENDPOINT`, from the daemon or from a
+login shell; the per-signal endpoint keys are not read here. See [Local
+daemon](../reference/environment-variables/daemon.md). A request cannot name
+these keys.
+
 The default sampler follows the parent, so a trace is sampled or dropped as a
 whole across a hop rather than half-recorded. Batching bounds the cost: up to
 2048 spans queued, exported in batches of 512, a batch leaving every 5 seconds

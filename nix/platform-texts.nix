@@ -7,9 +7,10 @@
 # without building anything.
 { lib }:
 {
-  # The scraper config for the compose prometheus: the same 30s single job the
-  # NixOS metrics switch pins, pointed at the gateway's management face by
-  # service name.
+  # The scraper config for the compose prometheus: one 30s job on the
+  # gateway's management face, addressed by service name. The compose stack
+  # runs no node exporter and no trace store, so this is the whole list there;
+  # the NixOS form adds the node exporter and tempo's /metrics beside it.
   prometheus = ''
     global:
       scrape_interval: 30s

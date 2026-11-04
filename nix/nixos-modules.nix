@@ -143,6 +143,58 @@ let
   # The polis listeners' localhost ports, configured per service under
   # services.kallipai.polis.ports and shared by the env and the edge
   polisPorts = polisCfg.ports;
+  # The host-local observability stack: the switch, its ports and its
+  # budgets. Every wiring below reads these bindings, so a default change
+  # happens here and nowhere else.
+  obsCfg = config.services.kallipai.observability;
+  obsStack = import ./obs-stack.nix { inherit lib; };
+  otelEndpoint = "http://127.0.0.1:${toString obsCfg.ports.otlp}";
+  # mkDefault so a host that points these at its own collector wins.
+  otelEnv = {
+    OTEL_EXPORTER_OTLP_ENDPOINT = lib.mkDefault otelEndpoint;
+  };
+  # The node exporter's target, appended beside the polis jobs.
+  nodeScrapeJob = {
+    job_name = "kallipai-node";
+    scrape_interval = "30s";
+    static_configs = [
+      {
+        targets = [
+          "${config.services.prometheus.exporters.node.listenAddress}:${toString config.services.prometheus.exporters.node.port}"
+        ];
+      }
+    ];
+  };
+  # Tempo's own /metrics on its HTTP address: `up{job="tempo"}` turns a
+  # stopped trace store into a down target instead of merely no traces.
+  tempoScrapeJob = {
+    job_name = "tempo";
+    scrape_interval = "30s";
+    static_configs = [
+      {
+        targets = [ "127.0.0.1:${toString obsCfg.ports.tempo}" ];
+      }
+    ];
+  };
+  grafanaAdminPassword = obsCfg.grafana.adminPasswordFile;
+  # One literal: the relative name systemd takes first, the absolute path
+  # the config text names derived from it.
+  tempoStateDir = "kallipai/telemetry/tempo";
+  tempoStorageRoot = "/var/lib/${tempoStateDir}";
+  # The Grafana secret key signs session cookies and encrypts stored
+  # secrets; it lives beside the admin password so one option moves both
+  # files.
+  grafanaSecretKey = "${builtins.dirOf obsCfg.grafana.adminPasswordFile}/secret-key";
+  tempoConfig = pkgs.writeText "kallipai-tempo.yaml" (
+    obsStack.hostTempoText {
+      listenAddress = "127.0.0.1";
+      httpPort = obsCfg.ports.tempo;
+      otlpHttpPort = obsCfg.ports.otlp;
+      otlpGrpcPort = obsCfg.ports.otlp-grpc;
+      storageRoot = tempoStorageRoot;
+      retentionHours = obsCfg.retention.traces;
+    }
+  );
   # The platform's web-facing knobs and the origins derived from them.
   # Only forced under the domain-is-set guard in the derivation arm
   # (Nix laziness), so a null domain never reaches the interpolation.
@@ -624,8 +676,9 @@ in
 
       # The read-only scrape jobs for every enabled polis service
       # that serves a /metrics text face (the model gateway
-      # today): wire them into the host's recorder on its own
-      # options; the module itself never enables a recorder.
+      # today). With services.kallipai.observability.enable the
+      # module appends them to the Prometheus it configures; the
+      # list stays readable for a host that scrapes on its own.
       scrapeConfigs = lib.mkOption {
         type = lib.types.listOf lib.types.attrs;
         readOnly = true;
@@ -633,14 +686,21 @@ in
           Upstream Prometheus scrape jobs for the enabled polis
           services that serve a /metrics text face (the model gateway
           today), one job per service with the port following the
-          service's own option. The module generates the list and never
-          touches the recorder itself; wire it in on the recorder's own
-          options:
+          service's own option. With
+          services.kallipai.observability.enable the module appends the
+          list to the Prometheus it configures; a host that runs its own
+          recorder switches that off and wires the list on the recorder's
+          own options:
 
+            services.kallipai.observability.enable = false;
             services.prometheus = {
               enable = true;
               scrapeConfigs = config.services.kallipai.polis.scrapeConfigs;
             };
+
+          The switch has to be off there: with the stack on, the module
+          appends the same list itself and Prometheus refuses to start on
+          two jobs of one name.
 
           Append with ++ to scrape more; retention follows
           services.prometheus.retentionTime.
@@ -741,6 +801,136 @@ in
       };
     };
 
+    observability = {
+      enable = lib.mkOption {
+        type = lib.types.bool;
+        default = polisCfg.enable;
+        defaultText = lib.literalMD "the value of `services.kallipai.polis.enable`";
+        description = ''
+          Run a host-local observability stack: Prometheus, the node
+          exporter, Grafana, and Tempo, all bound to loopback, plus the
+          OTLP endpoint the platform's tracing services export to.
+
+          The default follows `services.kallipai.polis.enable`: a host that
+          runs the platform is the host worth observing, while a bare web
+          origin or a daemon-only host should not grow four resident
+          processes uninvited. Set it explicitly on those hosts.
+
+          Every wiring is `mkDefault`/`mkAfter`, so a host that already runs
+          its own Prometheus or Grafana keeps its settings and only gains
+          the platform's scrape job and the two datasources.
+
+          The logs under /var/log/kallipai stay readable through the
+          `kallipai-polis` group; this stack reads metrics and traces, never
+          the log files.
+        '';
+      };
+
+      ports = {
+        prometheus = lib.mkOption {
+          type = lib.types.port;
+          default = 9090;
+          description = "The Prometheus listener port, on 127.0.0.1 only.";
+        };
+        grafana = lib.mkOption {
+          type = lib.types.port;
+          default = 3000;
+          description = "The Grafana listener port, on 127.0.0.1 only.";
+        };
+        tempo = lib.mkOption {
+          type = lib.types.port;
+          default = 3200;
+          description = "The Tempo HTTP listener port, on 127.0.0.1 only.";
+        };
+        otlp = lib.mkOption {
+          type = lib.types.port;
+          default = 4318;
+          description = ''
+            The OTLP/HTTP receive port the tracing services export to, on
+            127.0.0.1 only.
+          '';
+        };
+        otlp-grpc = lib.mkOption {
+          type = lib.types.port;
+          default = 4317;
+          description = ''
+            The OTLP/gRPC receive port, on 127.0.0.1 only. The platform's
+            services export over HTTP; this one stays for tools that speak
+            gRPC.
+          '';
+        };
+        node-exporter = lib.mkOption {
+          type = lib.types.port;
+          default = 9100;
+          description = "The node exporter's listener port, on 127.0.0.1 only.";
+        };
+      };
+
+      # The services that read the OTLP endpoint for themselves; the daemon
+      # does not, it hands the same endpoint to every instance it spawns.
+      # Exported so the checks assert over this list rather than a second
+      # copy: a seventh service named here is checked the moment it lands.
+      tracingUnits = lib.mkOption {
+        type = lib.types.listOf lib.types.str;
+        default = [
+          "kallipai-archeion"
+          "kallipai-lesche"
+          "kallipai-keryx"
+          "kallipai-files"
+          "kallipai-instances"
+          "kallipai-model-gateway"
+        ];
+        readOnly = true;
+        description = ''
+          The platform units that install the tracing layer themselves. The
+          module sets it; the checks read it.
+        '';
+      };
+
+      retention = {
+        metrics = lib.mkOption {
+          type = lib.types.str;
+          default = obsStack.metricsRetention;
+          defaultText = lib.literalMD "`metricsRetention` from nix/obs-stack.nix";
+          description = ''
+            Prometheus retention window, as `services.prometheus.retentionTime`
+            spells it. The compose recorder is started with the same window,
+            read from the one binding both forms share.
+          '';
+        };
+        traces = lib.mkOption {
+          type = lib.types.ints.positive;
+          default = obsStack.maxAgeHours;
+          defaultText = lib.literalMD "`maxAgeHours` from nix/obs-stack.nix";
+          description = ''
+            Trace retention in hours. The default is the same 72-hour budget
+            the compose stack prunes to, read from the one binding both forms
+            share.
+          '';
+        };
+      };
+
+      grafana = {
+        anonymousViewer = lib.mkOption {
+          type = lib.types.bool;
+          default = true;
+          description = ''
+            Provision anonymous Viewers, so dashboards open without a login
+            on a loopback-only UI. The compose stack does the same.
+          '';
+        };
+        adminPasswordFile = lib.mkOption {
+          type = lib.types.str;
+          default = "/var/lib/grafana/admin-password";
+          description = ''
+            File holding the Grafana admin password, read through the file
+            provider and generated 0600 on first start when absent. The
+            password never enters the store; reset it with
+            `grafana cli admin reset-admin-password`.
+          '';
+        };
+      };
+    };
   };
   config = lib.mkMerge [
     {
@@ -1283,9 +1473,9 @@ in
     })
     # The polis scrape jobs: one per enabled metrics-capable
     # service, the port following each service's own option (the
-    # model gateway today). A read-only export for the host's
-    # recorder wiring; the module never touches
-    # services.prometheus.
+    # model gateway today). Exported read-only here; the
+    # observability block appends the list to the Prometheus it
+    # configures.
     { services.kallipai.polis.scrapeConfigs = scrapeJobs; }
 
     (lib.mkIf webCfg.enable {
@@ -1369,5 +1559,150 @@ in
     {
       services.kallipai.polis.archeion.cookieSecure = lib.mkIf (!platformTls) (lib.mkDefault false);
     }
+    # Host-local observability: a metrics recorder, a trace store, a UI and
+    # their exporter, all on loopback, plus the OTLP endpoint the tracing
+    # services export to. Every wiring here is mkDefault/mkAfter: a host that
+    # already runs its own Prometheus or Grafana keeps its settings and only
+    # gains the platform's scrape job and the two datasources.
+    (lib.mkIf obsCfg.enable {
+      services = {
+        prometheus = {
+          enable = lib.mkDefault true;
+          listenAddress = lib.mkDefault "127.0.0.1";
+          port = lib.mkDefault obsCfg.ports.prometheus;
+          retentionTime = lib.mkDefault obsCfg.retention.metrics;
+          scrapeConfigs = lib.mkAfter (
+            scrapeJobs
+            ++ lib.optional config.services.prometheus.exporters.node.enable nodeScrapeJob
+            ++ [ tempoScrapeJob ]
+          );
+
+          # Host metrics beside the platform's own face: without them the UI
+          # shows one business curve and nothing about the machine it runs on.
+          exporters.node = {
+            enable = lib.mkDefault true;
+            listenAddress = lib.mkDefault "127.0.0.1";
+            port = lib.mkDefault obsCfg.ports.node-exporter;
+          };
+        };
+
+        grafana = {
+          enable = lib.mkDefault true;
+          settings = {
+            server = {
+              http_addr = lib.mkDefault "127.0.0.1";
+              http_port = lib.mkDefault obsCfg.ports.grafana;
+            };
+            analytics = {
+              reporting_enabled = lib.mkDefault false;
+              check_for_updates = lib.mkDefault false;
+            };
+            security.admin_password = lib.mkDefault "$__file{${grafanaAdminPassword}}";
+            security.secret_key = lib.mkDefault "$__file{${grafanaSecretKey}}";
+          }
+          // lib.optionalAttrs obsCfg.grafana.anonymousViewer {
+            "auth.anonymous" = {
+              enabled = true;
+              org_role = "Viewer";
+            };
+          };
+
+          # The datasources the UI opens with: the metrics store and the trace
+          # store, both loopback. The compose stack provisions Tempo alone
+          # because that UI only ever had Tempo mounted; the host runs both
+          # stores, so both are named here. The URL reads the effective
+          # listener, not the option defaults: a host that moved its Prometheus
+          # keeps the recorder where it put it.
+          provision = {
+            enable = lib.mkDefault true;
+            # Only the scalars are defaults. The list is appended, so a host
+            # that provisions its own datasources keeps them and gains these.
+            datasources.settings = {
+              apiVersion = lib.mkDefault 1;
+              datasources = lib.mkAfter (
+                lib.optionals config.services.prometheus.enable [
+                  {
+                    name = "Prometheus";
+                    uid = "kallipai-prometheus";
+                    type = "prometheus";
+                    access = "proxy";
+                    url = "http://${config.services.prometheus.listenAddress}:${toString config.services.prometheus.port}";
+                    # Two datasources marked default is a warning rather than
+                    # an error, and Grafana resolves the pair on its own; the
+                    # bare host needs a landing view, so the metrics store
+                    # carries the mark.
+                    isDefault = true;
+                  }
+                ]
+                ++ [
+                  {
+                    name = "Tempo";
+                    uid = "kallipai-tempo";
+                    type = "tempo";
+                    access = "proxy";
+                    url = "http://127.0.0.1:${toString obsCfg.ports.tempo}";
+                  }
+                ]
+              );
+            };
+          };
+        };
+      };
+
+      # The trace store's own account. It owns nothing but the telemetry
+      # subtree systemd creates for it.
+      users.groups.kallipai-tempo = { };
+      users.users.kallipai-tempo = {
+        isSystemUser = true;
+        group = "kallipai-tempo";
+      };
+
+      systemd.services = lib.mkMerge [
+        {
+          # The admin password never enters the store: the file provider reads
+          # a 0600 file the unit generates on first start, and an operator
+          # resets it through the grafana cli. The compose stack keeps its own
+          # 0600 env file for the same reason.
+          grafana.preStart = lib.mkAfter ''
+            for f in ${grafanaAdminPassword} ${grafanaSecretKey}; do
+              if [ ! -e "$f" ]; then
+                (umask 077; ${pkgs.openssl}/bin/openssl rand -base64 24 > "$f")
+              fi
+            done
+          '';
+
+          # The trace store. nixpkgs ships tempo without a NixOS module, so
+          # the unit is ours: loopback only, blocks under the host telemetry
+          # tree, pruned on the same budget the compose stack uses.
+          kallipai-tempo = {
+            description = "kallipai tempo trace store";
+            wantedBy = [ "multi-user.target" ];
+            after = [ "network.target" ];
+            serviceConfig = {
+              ExecStart = "${pkgs.tempo}/bin/tempo -config.file=${tempoConfig}";
+              User = "kallipai-tempo";
+              Group = "kallipai-tempo";
+              StateDirectory = tempoStateDir;
+              StateDirectoryMode = "0700";
+              Restart = "on-failure";
+              RestartSec = "5s";
+            };
+          };
+        }
+
+        # The endpoint the tracing services export to: the polis units install
+        # the layer themselves, the daemon hands the same endpoint to every
+        # instance it spawns (see the spawn environment in
+        # crates/daemon/kallipai-daemon).
+        (lib.mkIf cfg.enable {
+          kallipai-daemon.environment = otelEnv;
+        })
+        (lib.mkIf polisCfg.enable (
+          lib.genAttrs obsCfg.tracingUnits (_: {
+            environment = otelEnv;
+          })
+        ))
+      ];
+    })
   ];
 }

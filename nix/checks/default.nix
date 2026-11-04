@@ -124,4 +124,27 @@ in
         project
         ;
     })."${project}-obs-stack-eval";
+
+  # The host side of the same stack: the module's tempo text, verified by
+  # the tempo binary the unit runs.
+  "${project}-obs-nixos" =
+    (import ./obs-nixos.nix {
+      inherit
+        pkgs
+        lib
+        aifed
+        project
+        ;
+    })."${project}-obs-nixos";
+
+  # The same stack on a booted host: unit health, the recorder's own
+  # target, the UI's datasources, and a span in and back out.
+  "${project}-nixos-observability-vm" = import ./nixos-observability-vm.nix {
+    inherit
+      pkgs
+      lib
+      aifed
+      project
+      ;
+  };
 }
