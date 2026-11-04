@@ -1,4 +1,4 @@
-//! The `kallip turns` family: rendering over the turn-history read routes.
+//! The `kallip history` family: rendering over the turn-history read routes.
 //!
 //! Every fact printed here comes from the tagma's read face. The log stays the
 //! single source of truth, and this module never opens a history file: a
@@ -14,19 +14,22 @@ use std::io::Write;
 use anyhow::{Context, Result, anyhow, bail};
 use kallipai_client::TagmaClient;
 use kallipai_common::protocol::{
-    CallBody, CallBodyQuery, CallRow, MessageRow, SPILL_RECLAIMED, TURN_SCHEMA_VERSION, TurnDetail,
-    TurnProfile, TurnRow, TurnUsageView, TurnsPage, TurnsQuery,
+    CallBody, CallBodyQuery, CallPart, CallRow, MessageBody, MessageBodyQuery, MessageRow,
+    SPILL_RECLAIMED, TURN_SCHEMA_VERSION, TextPart, TurnDetail, TurnProfile, TurnRow,
+    TurnUsageView, TurnsPage, TurnsQuery,
 };
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::args::turns::{TurnsCommand, TurnsExportArgs, TurnsListArgs, TurnsShowArgs};
+use crate::args::history::{
+    HistoryCommand, PartArg, TurnsExportArgs, TurnsListArgs, TurnsShowArgs,
+};
 
-/// The columns a bare `turns list` prints: the triage facts of a round.
+/// The columns a bare `history list` prints: the triage facts of a round.
 const DEFAULT_FIELDS: &[&str] = &["turn_id", "at", "profile", "usage", "elapsed_ms", "calls"];
 
-/// Run one `turns` command against the tagma's read routes.
-pub async fn run_turns(client: &TagmaClient, cmd: &TurnsCommand) -> Result<()> {
+/// Run one `history` command against the tagma's read routes.
+pub async fn run_history(client: &TagmaClient, cmd: &HistoryCommand) -> Result<()> {
     let mut out = std::io::stdout().lock();
     let mut err = std::io::stderr().lock();
     run(client, cmd, &mut out, &mut err).await
@@ -37,14 +40,14 @@ pub async fn run_turns(client: &TagmaClient, cmd: &TurnsCommand) -> Result<()> {
 /// alone.
 async fn run(
     client: &TagmaClient,
-    cmd: &TurnsCommand,
+    cmd: &HistoryCommand,
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> Result<()> {
     match cmd {
-        TurnsCommand::List(args) => list(client, args, out).await,
-        TurnsCommand::Show(args) => show(client, args, out, err).await,
-        TurnsCommand::Export(args) => export(client, args, out, err).await,
+        HistoryCommand::List(args) => list(client, args, out).await,
+        HistoryCommand::Show(args) => show(client, args, out, err).await,
+        HistoryCommand::Export(args) => export(client, args, out, err).await,
     }
 }
 
@@ -187,7 +190,7 @@ fn render_list(page: &TurnsPage, fields: &[String], tools: bool) -> String {
         if tools {
             for call in &page.rows[index].calls {
                 text.push_str("  ");
-                text.push_str(&call_line(call));
+                text.push_str(&call_line(call, false));
                 text.push('\n');
             }
         }
@@ -281,20 +284,33 @@ async fn show(
     if (args.offset.is_some() || args.limit.is_some()) && !args.body {
         bail!("--offset and --limit address a text range; they only apply with --body");
     }
-    let body_index = if args.body {
-        Some(
-            args.call
-                .ok_or_else(|| anyhow!("--body reads one call's text: name it with --call N"))?,
-        )
-    } else {
-        None
+    if args.part.is_some() && !args.body {
+        bail!("--part picks which text --body reads; it only applies with --body");
+    }
+    if args.call.is_some() && args.message.is_some() {
+        bail!("--call and --message name one text each; pass one of them");
+    }
+    // A body read names exactly one text, and each face holds its own kinds:
+    // both facts are settled here, where the message can name the flags, and
+    // not by the tagma after a round trip.
+    let call_read = match (args.body, args.call) {
+        (true, Some(index)) => Some((index, call_part(args.part)?)),
+        _ => None,
     };
+    let message_read = match (args.body, args.message) {
+        (true, Some(index)) => Some((index, text_part(args.part)?)),
+        _ => None,
+    };
+    if args.body && call_read.is_none() && message_read.is_none() {
+        bail!("--body reads one text: name it with --call N or --message N");
+    }
     let agent = client.resolve_agent_ref(&args.agent).await?;
-    let range = CallBodyQuery {
-        offset: args.offset,
-        limit: args.limit,
-    };
-    if let Some(index) = body_index {
+    if let Some((index, part)) = call_read {
+        let range = CallBodyQuery {
+            part: Some(part),
+            offset: args.offset,
+            limit: args.limit,
+        };
         if args.json {
             let document = client
                 .call_body_document(&agent, args.turn, index, &range)
@@ -304,35 +320,110 @@ async fn show(
         }
         let body = client.call_body(&agent, args.turn, index, &range).await?;
         check_schema(body.schema_version)?;
-        write_body_notices(&body, err)?;
+        write_body_notices(
+            &call_subject(&body),
+            body.offset,
+            body.text.len(),
+            body.total_bytes,
+            body.next_offset,
+            body.reclaimed,
+            err,
+        )?;
+        out.write_all(body.text.as_bytes())?;
+        out.flush()?;
+        return Ok(());
+    }
+    if let Some((index, part)) = message_read {
+        let range = MessageBodyQuery {
+            part: Some(part),
+            offset: args.offset,
+            limit: args.limit,
+        };
+        if args.json {
+            let document = client
+                .message_body_document(&agent, args.turn, index, &range)
+                .await?;
+            writeln!(out, "{document}")?;
+            return Ok(());
+        }
+        let body = client
+            .message_body(&agent, args.turn, index, &range)
+            .await?;
+        check_schema(body.schema_version)?;
+        write_body_notices(
+            &message_subject(&body),
+            body.offset,
+            body.text.len(),
+            body.total_bytes,
+            body.next_offset,
+            body.reclaimed,
+            err,
+        )?;
         out.write_all(body.text.as_bytes())?;
         out.flush()?;
         return Ok(());
     }
     if args.json {
         let text = client.turn_document(&agent, args.turn).await?;
-        match args.call {
-            Some(index) => {
+        match (args.call, args.message) {
+            (Some(index), None) => {
                 let document: Value =
                     serde_json::from_str(&text).context("read the turn the tagma sent")?;
                 let call = find_call_in_document(&document, args.turn, index)?;
                 writeln!(out, "{}", serde_json::to_string_pretty(call)?)?;
             }
-            None => writeln!(out, "{text}")?,
+            (None, Some(index)) => {
+                let document: Value =
+                    serde_json::from_str(&text).context("read the turn the tagma sent")?;
+                let message = find_message_in_document(&document, args.turn, index)?;
+                writeln!(out, "{}", serde_json::to_string_pretty(message)?)?;
+            }
+            _ => writeln!(out, "{text}")?,
         }
         return Ok(());
     }
     let detail = client.turn(&agent, args.turn).await?;
     check_schema(detail.schema_version)?;
     let agent_text = agent.to_string();
-    match args.call {
-        Some(index) => {
+    match (args.call, args.message) {
+        (Some(index), None) => {
             let call = find_call(&detail, index)?;
             write!(out, "{}", render_call(call, &agent_text, args.turn))?;
         }
-        None => write!(out, "{}", render_turn(&detail))?,
+        (None, Some(index)) => {
+            let message = find_message(&detail, index)?;
+            writeln!(out, "{}", message_line(message))?;
+        }
+        _ => write!(out, "{}", render_turn(&detail))?,
     }
     Ok(())
+}
+
+/// The call text a `--call --body` read walks: the result record unless the
+/// operator named another one of the call's kinds.
+fn call_part(part: Option<PartArg>) -> Result<CallPart> {
+    match part {
+        None | Some(PartArg::Result) => Ok(CallPart::Result),
+        Some(PartArg::Args) => Ok(CallPart::Args),
+        Some(PartArg::Error) => Ok(CallPart::Error),
+        Some(other) => bail!(
+            "--part {} reads a message's text; a call's text is result, args or error",
+            other.as_str()
+        ),
+    }
+}
+
+/// The message text a `--message --body` read walks: the message itself
+/// unless the operator named its reasoning.
+fn text_part(part: Option<PartArg>) -> Result<TextPart> {
+    match part {
+        None | Some(PartArg::Text) => Ok(TextPart::Text),
+        Some(PartArg::Reasoning) => Ok(TextPart::Reasoning),
+        Some(other) => bail!(
+            "--part {} reads a call's text; a message's text is text or reasoning",
+            other.as_str()
+        ),
+    }
 }
 
 /// The error a wrong `--call` earns, built from the indices the turn carried.
@@ -393,27 +484,99 @@ fn find_call(detail: &TurnDetail, index: u32) -> Result<&CallRow> {
         })
 }
 
+/// The error a wrong `--message` earns, built from the positions the turn
+/// carried.
+fn no_such_message(turn: u64, index: u32, carried: usize) -> anyhow::Error {
+    let list = if carried == 0 {
+        "none".to_string()
+    } else {
+        (0..carried)
+            .map(|at| at.to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    anyhow!("turn {turn} carried no message {index}; its messages: {list}")
+}
+
+/// The message a `--message N` names, or the error listing the positions the
+/// turn did carry.
+fn find_message(detail: &TurnDetail, index: u32) -> Result<&MessageRow> {
+    detail
+        .turn
+        .messages
+        .get(index as usize)
+        .ok_or_else(|| no_such_message(detail.turn.turn_id, index, detail.turn.messages.len()))
+}
+
+/// The message a `--message N` names in the document the tagma sent: the
+/// `--json` twin of [`find_message`], by position in the same list.
+fn find_message_in_document(document: &Value, turn: u64, index: u32) -> Result<&Value> {
+    let view = document
+        .get("schema_version")
+        .and_then(Value::as_u64)
+        .map_or_else(|| "unknown".to_string(), |found| found.to_string());
+    let messages = document
+        .pointer("/turn/messages")
+        .and_then(Value::as_array)
+        .with_context(|| {
+            format!("the messages of turn {turn} do not read as a list (view {view})")
+        })?;
+    messages
+        .get(index as usize)
+        .ok_or_else(|| no_such_message(turn, index, messages.len()))
+}
+
 /// Where a text range sits and what came of it, on stderr: the payload on
 /// stdout stays exactly the range the tagma returned.
-fn write_body_notices(body: &CallBody, err: &mut dyn Write) -> Result<()> {
-    let end = body.offset + body.text.len() as u64;
+fn write_body_notices(
+    subject: &str,
+    offset: u64,
+    text_len: usize,
+    total_bytes: u64,
+    next_offset: Option<u64>,
+    reclaimed: u32,
+    err: &mut dyn Write,
+) -> Result<()> {
+    let end = offset + text_len as u64;
     writeln!(
         err,
-        "call {} ({}) covers bytes {}..{end} of {}",
-        body.call_index, body.name, body.offset, body.total_bytes
+        "{subject} covers bytes {offset}..{end} of {total_bytes}"
     )?;
-    match body.next_offset {
+    match next_offset {
         Some(next) => writeln!(err, "the range stops early; ask for offset {next} to go on")?,
         None => writeln!(err, "the range reaches the end of the text")?,
     }
-    if body.reclaimed > 0 {
-        writeln!(err, "{} spill path(s) {SPILL_RECLAIMED}", body.reclaimed)?;
+    if reclaimed > 0 {
+        writeln!(err, "{reclaimed} spill path(s) {SPILL_RECLAIMED}")?;
     }
     Ok(())
 }
 
-/// One call as a line: what a list scans for, the index first.
-fn call_line(call: &CallRow) -> String {
+/// The text a notice speaks for: which call, and which of its kinds.
+fn call_subject(body: &CallBody) -> String {
+    format!(
+        "call {} ({}) {}",
+        body.call_index,
+        body.name,
+        body.part.as_str()
+    )
+}
+
+/// The text a notice speaks for: which message, by role, and which part.
+fn message_subject(body: &MessageBody) -> String {
+    format!(
+        "message {} ({}) {}",
+        body.message_index,
+        body.role,
+        body.part.as_str()
+    )
+}
+
+/// One call as a line: what a list scans for, the index first. `error_text`
+/// decides whether the record's error is printed beside the outcome: a call's
+/// own view prints it under its `error:` label instead, and a page row stops at
+/// the outcome because that row carries no control to read on from.
+fn call_line(call: &CallRow, error_text: bool) -> String {
     let mut line = format!("[{}] {}", call.call_index, call.name);
     if call.pending_approval == Some(true) {
         line.push_str(" awaiting approval");
@@ -429,20 +592,34 @@ fn call_line(call: &CallRow) -> String {
     if call.truncated {
         line.push_str(" truncated");
     }
-    if let Some(error) = &call.first_error_line {
+    if error_text && let Some(error) = &call.first_error_line {
         line.push_str(": ");
         line.push_str(error);
+        if error_continues(call) {
+            line.push_str(" …");
+        }
     }
     line
 }
 
+/// Whether the record's error holds more than the line a view draws: the rest
+/// of the first line (the byte cap cut it), or later lines the line keeps out.
+/// One rule for the `…` on a call line and the `…` under `error:`, because the
+/// two say the same thing about the same record.
+fn error_continues(call: &CallRow) -> bool {
+    call.error_more || call.error_lines.unwrap_or(1) > 1
+}
+
 fn render_call(call: &CallRow, agent: &str, turn: u64) -> String {
-    let mut text = format!("{}\n", call_line(call));
-    text.push_str(&format!("args:   {}\n", fold(&call.args)));
+    let mut text = format!("{}\n", call_line(call, false));
+    text.push_str(&labeled("args", &call.args, call.args_more));
     text.push_str(&stream_line("stdout", call.stdout_bytes, call.stdout_lines));
     text.push_str(&stream_line("stderr", call.stderr_bytes, call.stderr_lines));
+    if let Some(error) = &call.first_error_line {
+        text.push_str(&labeled("error", error, error_continues(call)));
+    }
     text.push_str(&format!(
-        "text:   kallip turns show {agent} {turn} --call {} --body\n",
+        "text:   kallip history show {agent} {turn} --call {} --body\n",
         call.call_index
     ));
     text
@@ -460,10 +637,16 @@ fn stream_line(label: &str, bytes: Option<u64>, lines: Option<u64>) -> String {
     }
 }
 
-/// Text folded onto one line, so a record that carries newlines cannot break
-/// the layout around it.
-fn fold(value: &str) -> String {
-    value.lines().collect::<Vec<_>>().join(" ")
+/// A text under its own label, printed as the record holds it: because the
+/// label sits on a line of its own, a newline inside the text cannot break the
+/// layout around it. A `…` line stands for a prefix whose rest is a body read.
+fn labeled(label: &str, text: &str, more: bool) -> String {
+    let mut out = format!("{label}:\n{text}");
+    if more {
+        out.push_str("\n…");
+    }
+    out.push('\n');
+    out
 }
 
 fn render_turn(detail: &TurnDetail) -> String {
@@ -506,25 +689,25 @@ fn render_turn(detail: &TurnDetail) -> String {
     text.push_str(&format!("  calls    {}\n", row.calls.len()));
     for call in &row.calls {
         text.push_str("    ");
-        text.push_str(&call_line(call));
+        text.push_str(&call_line(call, true));
         text.push('\n');
     }
     text
 }
 
-/// One message of a turn: its shape, and the shortened text the detail face
-/// carries, folded onto one line.
+/// One message of a turn: its shape, and the text the detail face carries,
+/// printed as the record holds it.
 fn message_line(message: &MessageRow) -> String {
     let mut line = format!("{} {} chars", message.role, message.chars);
     if message.has_reasoning {
         line.push_str(" reasoning");
     }
-    if message.truncated {
-        line.push_str(" truncated");
-    }
     if let Some(text) = &message.text {
-        line.push_str(": ");
-        line.push_str(&fold(text));
+        line.push_str(":\n");
+        line.push_str(text);
+        if message.text_more {
+            line.push_str("\n…");
+        }
     }
     line
 }
@@ -705,7 +888,8 @@ struct ExportCounts {
 mod tests {
     use super::*;
     use kallipai_common::protocol::{
-        CALL_BODY_MAX_BYTES, TURN_SCHEMA_VERSION, TURNS_PAGE_LIMIT_MAX,
+        CALL_BODY_MAX_BYTES, CallPart, PAGE_TEXT_INLINE_CHARS, TURN_SCHEMA_VERSION,
+        TURNS_PAGE_LIMIT_MAX,
     };
     use wiremock::matchers::{method, path, query_param, query_param_is_missing};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -718,6 +902,7 @@ mod tests {
             call_id: format!("call-{index}"),
             name: name.to_string(),
             args: "{}".to_string(),
+            args_more: false,
             ok: true,
             pending_approval: None,
             stdout_bytes: Some(12),
@@ -728,6 +913,9 @@ mod tests {
             timed_out: Some(false),
             truncated: false,
             first_error_line: None,
+            error_more: false,
+            error_bytes: None,
+            error_lines: None,
         }
     }
 
@@ -736,10 +924,10 @@ mod tests {
             role: role.to_string(),
             chars: 5,
             has_reasoning: false,
-            truncated: false,
             text: Some("hello".to_string()),
+            text_more: false,
             reasoning: None,
-            reasoning_truncated: false,
+            reasoning_more: false,
         }
     }
 
@@ -789,8 +977,8 @@ mod tests {
         TagmaClient::builder(&server.uri()).build().unwrap()
     }
 
-    fn turns_path() -> String {
-        format!("/agents/{AGENT}/turns")
+    fn history_path() -> String {
+        format!("/agents/{AGENT}/history")
     }
 
     fn list_args() -> TurnsListArgs {
@@ -810,9 +998,11 @@ mod tests {
             agent: AGENT.to_string(),
             turn,
             call: None,
+            message: None,
             body: false,
             offset: None,
             limit: None,
+            part: None,
             json: false,
         }
     }
@@ -889,7 +1079,7 @@ mod tests {
         let server = MockServer::start().await;
         let fixture = page(vec![row(9)], None);
         Mock::given(method("GET"))
-            .and(path(turns_path()))
+            .and(path(history_path()))
             .and(query_param("before", "a b%c+d"))
             .respond_with(serve(&fixture))
             .mount(&server)
@@ -911,7 +1101,7 @@ mod tests {
         let server = MockServer::start().await;
         let sent = r#"{"schema_version":1,"rows":[{"turn_id":3,"future_field":7}],"bad_lines":0,"next_cursor":null,"page_truncated":false}"#;
         Mock::given(method("GET"))
-            .and(path(turns_path()))
+            .and(path(history_path()))
             .respond_with(ResponseTemplate::new(200).set_body_string(sent))
             .mount(&server)
             .await;
@@ -934,13 +1124,13 @@ mod tests {
         let first = page(vec![row(2), row(1)], Some("cursor-2"));
         let second = page(vec![row(0)], None);
         Mock::given(method("GET"))
-            .and(path(turns_path()))
+            .and(path(history_path()))
             .and(query_param_is_missing("before"))
             .respond_with(serve(&first))
             .mount(&server)
             .await;
         Mock::given(method("GET"))
-            .and(path(turns_path()))
+            .and(path(history_path()))
             .and(query_param("before", "cursor-2"))
             .respond_with(serve(&second))
             .mount(&server)
@@ -971,13 +1161,13 @@ mod tests {
         let first = page(vec![row(2)], Some("cursor-2"));
         let second = page(vec![row(1)], Some("cursor-3"));
         Mock::given(method("GET"))
-            .and(path(turns_path()))
+            .and(path(history_path()))
             .and(query_param_is_missing("before"))
             .respond_with(serve(&first))
             .mount(&server)
             .await;
         Mock::given(method("GET"))
-            .and(path(turns_path()))
+            .and(path(history_path()))
             .and(query_param("before", "cursor-2"))
             .respond_with(serve(&second))
             .mount(&server)
@@ -1004,7 +1194,7 @@ mod tests {
             turn: fixture_row,
         };
         Mock::given(method("GET"))
-            .and(path(format!("/agents/{AGENT}/turns/142")))
+            .and(path(format!("/agents/{AGENT}/history/142")))
             .respond_with(serve(&detail))
             .mount(&server)
             .await;
@@ -1031,7 +1221,7 @@ mod tests {
             turn: fixture_row,
         };
         Mock::given(method("GET"))
-            .and(path(format!("/agents/{AGENT}/turns/142")))
+            .and(path(format!("/agents/{AGENT}/history/142")))
             .respond_with(serve(&detail))
             .mount(&server)
             .await;
@@ -1060,7 +1250,7 @@ mod tests {
             turn: fixture_row,
         };
         Mock::given(method("GET"))
-            .and(path(format!("/agents/{AGENT}/turns/142")))
+            .and(path(format!("/agents/{AGENT}/history/142")))
             .respond_with(serve(&detail))
             .mount(&server)
             .await;
@@ -1089,7 +1279,7 @@ mod tests {
             "turn": { "turn_id": 142, "calls": "not a list" },
         });
         Mock::given(method("GET"))
-            .and(path(format!("/agents/{AGENT}/turns/142")))
+            .and(path(format!("/agents/{AGENT}/history/142")))
             .respond_with(serve(&sent))
             .mount(&server)
             .await;
@@ -1122,6 +1312,7 @@ mod tests {
             call_index: 1,
             call_id: "call-1".to_string(),
             name: "bash".to_string(),
+            part: CallPart::Result,
             offset: 0,
             total_bytes: 9,
             text: "abcde".to_string(),
@@ -1130,7 +1321,7 @@ mod tests {
             reclaimed: 1,
         };
         Mock::given(method("GET"))
-            .and(path(format!("/agents/{AGENT}/turns/142/calls/1/body")))
+            .and(path(format!("/agents/{AGENT}/history/142/calls/1/body")))
             .respond_with(serve(&body))
             .mount(&server)
             .await;
@@ -1156,6 +1347,7 @@ mod tests {
             call_index: 1,
             call_id: "call-1".to_string(),
             name: "bash".to_string(),
+            part: CallPart::Result,
             offset: 0,
             total_bytes: 5,
             text: "abcde".to_string(),
@@ -1164,7 +1356,7 @@ mod tests {
             reclaimed: 0,
         };
         Mock::given(method("GET"))
-            .and(path(format!("/agents/{AGENT}/turns/142/calls/1/body")))
+            .and(path(format!("/agents/{AGENT}/history/142/calls/1/body")))
             .respond_with(serve(&body))
             .mount(&server)
             .await;
@@ -1233,7 +1425,7 @@ mod tests {
             turn: fixture_row,
         };
         Mock::given(method("GET"))
-            .and(path(format!("/agents/{AGENT}/turns/142")))
+            .and(path(format!("/agents/{AGENT}/history/142")))
             .respond_with(serve(&detail))
             .mount(&server)
             .await;
@@ -1309,7 +1501,7 @@ mod tests {
     fn the_help_prose_quotes_the_live_bounds() {
         use clap::Subcommand as _;
         let command =
-            TurnsCommand::augment_subcommands(clap::Command::new("kallip turns")).term_width(0);
+            HistoryCommand::augment_subcommands(clap::Command::new("kallip history")).term_width(0);
         let list = command.find_subcommand("list").expect("list subcommand");
         let fields = help_text(list, "fields");
         assert!(fields.contains(&DEFAULT_FIELDS.join(",")), "{fields}");
@@ -1355,7 +1547,7 @@ mod tests {
     fn a_call_awaiting_approval_says_so() {
         let mut deferred = call(0, "bash");
         deferred.pending_approval = Some(true);
-        let line = call_line(&deferred);
+        let line = call_line(&deferred, false);
         assert!(line.contains("awaiting approval"), "{line}");
         assert!(!line.contains(" ok"), "{line}");
         let mut fixture_row = row(142);
@@ -1372,13 +1564,63 @@ mod tests {
     /// a distinction rather than the only word a call row can carry.
     #[test]
     fn a_finished_call_reads_as_ok_or_failed() {
-        let line = call_line(&call(0, "bash"));
+        let line = call_line(&call(0, "bash"), false);
         assert!(line.contains(" ok"), "{line}");
         assert!(!line.contains("awaiting approval"), "{line}");
         let mut broke = call(1, "bash");
         broke.ok = false;
-        let line = call_line(&broke);
+        let line = call_line(&broke, false);
         assert!(line.contains(" failed"), "{line}");
+    }
+
+    /// A call's own view prints its error under its own label, and the line
+    /// above states the outcome: one view never prints the same text twice.
+    #[test]
+    fn a_call_view_prints_its_error_once() {
+        let mut broke = call(0, "bash");
+        broke.ok = false;
+        broke.first_error_line = Some("boom".to_string());
+        broke.error_more = true;
+        let text = render_call(&broke, "a", 1);
+        let first = text.lines().next().expect("a call line");
+        assert!(first.contains(" failed"), "{first}");
+        assert!(!first.contains("boom"), "{first}");
+        assert_eq!(text.matches("boom").count(), 1, "{text}");
+        assert!(text.contains("error:"), "{text}");
+        assert!(text.contains("…"), "{text}");
+    }
+
+    /// A page's rows carry no control to read on from, so a row stops at the
+    /// outcome: a first error line the page cut shorter would otherwise read
+    /// as the whole of what the command wrote.
+    #[test]
+    fn a_page_call_line_states_the_outcome_only() {
+        let mut broke = call(0, "bash");
+        broke.exit_code = None;
+        broke.ok = false;
+        broke.first_error_line = Some("e".repeat(PAGE_TEXT_INLINE_CHARS));
+        broke.error_lines = Some(3);
+        let line = call_line(&broke, false);
+        assert_eq!(line, "[0] bash failed");
+        // The detail face holds the bit that says the rest is a read away.
+        let detail = call_line(&broke, true);
+        assert!(detail.starts_with("[0] bash failed: eee"), "{detail}");
+        assert!(detail.ends_with(" …"), "{detail}");
+    }
+
+    /// The marker under `error:` follows the rule the call line uses: a first
+    /// line that fits the cap with more lines behind it still says the rest is
+    /// a read away, because the block draws that line and not the traceback.
+    #[test]
+    fn a_call_view_marks_the_lines_behind_the_first() {
+        let mut broke = call(0, "bash");
+        broke.ok = false;
+        broke.first_error_line = Some("stderr:".to_string());
+        broke.error_lines = Some(12);
+        let text = render_call(&broke, "a", 1);
+        // The call line carries no error text, so the one marker in this view
+        // is the one the error block puts under its label.
+        assert_eq!(text.matches("…").count(), 1, "{text}");
     }
 
     /// The usage column names the cache and reasoning counters when the record
@@ -1411,7 +1653,7 @@ mod tests {
             turn: detail_row,
         };
         Mock::given(method("GET"))
-            .and(path(format!("/agents/{AGENT}/turns/142")))
+            .and(path(format!("/agents/{AGENT}/history/142")))
             .respond_with(serve(&detail))
             .mount(&server)
             .await;
@@ -1421,6 +1663,7 @@ mod tests {
             call_index: 0,
             call_id: "call-0".to_string(),
             name: "bash".to_string(),
+            part: CallPart::Result,
             offset: 0,
             total_bytes: 5,
             text: "later".to_string(),
@@ -1429,7 +1672,7 @@ mod tests {
             reclaimed: 0,
         };
         Mock::given(method("GET"))
-            .and(path(format!("/agents/{AGENT}/turns/142/calls/0/body")))
+            .and(path(format!("/agents/{AGENT}/history/142/calls/0/body")))
             .respond_with(serve(&body))
             .mount(&server)
             .await;
@@ -1461,7 +1704,7 @@ mod tests {
         let mut fixture = page(vec![row(1)], None);
         fixture.schema_version = TURN_SCHEMA_VERSION + 1;
         Mock::given(method("GET"))
-            .and(path(turns_path()))
+            .and(path(history_path()))
             .respond_with(serve(&fixture))
             .mount(&server)
             .await;
@@ -1490,7 +1733,7 @@ mod tests {
         let mut fixture = page(vec![row(1)], None);
         fixture.schema_version = TURN_SCHEMA_VERSION + 1;
         Mock::given(method("GET"))
-            .and(path(turns_path()))
+            .and(path(history_path()))
             .respond_with(serve(&fixture))
             .mount(&server)
             .await;
@@ -1536,10 +1779,10 @@ mod tests {
         assert!(message.contains("--body"), "{message}");
     }
 
-    /// A text read names the call it reads: refused before the wire, with the
-    /// flag the operator has to add.
+    /// A text read names what it reads: refused before the wire, with both
+    /// flags an operator can use.
     #[tokio::test]
-    async fn body_without_a_call_names_the_flag() {
+    async fn body_without_a_target_names_both_flags() {
         let server = MockServer::start().await;
         let client = client(&server);
         let mut args = show_args(142);
@@ -1551,6 +1794,7 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(message.contains("--call"), "{message}");
+        assert!(message.contains("--message"), "{message}");
     }
 
     /// A cursor copied from a page is bytes, not a sentence: an empty one is
@@ -1576,7 +1820,7 @@ mod tests {
         let server = MockServer::start().await;
         let fixture = page(vec![row(1)], None);
         Mock::given(method("GET"))
-            .and(path(turns_path()))
+            .and(path(history_path()))
             .respond_with(serve(&fixture))
             .mount(&server)
             .await;
@@ -1644,7 +1888,7 @@ mod tests {
         let server = MockServer::start().await;
         let fixture = page(vec![row(1)], None);
         Mock::given(method("GET"))
-            .and(path(turns_path()))
+            .and(path(history_path()))
             .and(query_param("day", "2026-10-24"))
             .and(query_param("limit", "20"))
             .respond_with(serve(&fixture))
@@ -1670,6 +1914,7 @@ mod tests {
             call_index: 1,
             call_id: "call-1".to_string(),
             name: "bash".to_string(),
+            part: CallPart::Result,
             offset: 16,
             total_bytes: 96,
             text: "later".to_string(),
@@ -1678,7 +1923,7 @@ mod tests {
             reclaimed: 0,
         };
         Mock::given(method("GET"))
-            .and(path(format!("/agents/{AGENT}/turns/142/calls/1/body")))
+            .and(path(format!("/agents/{AGENT}/history/142/calls/1/body")))
             .and(query_param("offset", "16"))
             .and(query_param("limit", "16"))
             .respond_with(serve(&body))
@@ -1720,6 +1965,7 @@ mod tests {
             call_index: 1,
             call_id: "call-1".to_string(),
             name: "bash".to_string(),
+            part: CallPart::Result,
             offset: 0,
             total_bytes: 5,
             text: "later".to_string(),
@@ -1728,7 +1974,7 @@ mod tests {
             reclaimed: 0,
         };
         Mock::given(method("GET"))
-            .and(path(format!("/agents/{AGENT}/turns/142/calls/1/body")))
+            .and(path(format!("/agents/{AGENT}/history/142/calls/1/body")))
             .respond_with(serve(&body))
             .mount(&server)
             .await;
@@ -1754,14 +2000,14 @@ mod tests {
         let first = page(vec![row(2)], Some("cursor-2"));
         let second = page(vec![row(1)], Some("cursor-3"));
         Mock::given(method("GET"))
-            .and(path(turns_path()))
+            .and(path(history_path()))
             .and(query_param("limit", "20"))
             .and(query_param_is_missing("before"))
             .respond_with(serve(&first))
             .mount(&server)
             .await;
         Mock::given(method("GET"))
-            .and(path(turns_path()))
+            .and(path(history_path()))
             .and(query_param("limit", "20"))
             .and(query_param("before", "cursor-2"))
             .respond_with(serve(&second))
@@ -1796,19 +2042,19 @@ mod tests {
         let second = page((41..=50u64).rev().map(stamped).collect(), Some("cursor-3"));
         let trailing = page(Vec::new(), None);
         Mock::given(method("GET"))
-            .and(path(turns_path()))
+            .and(path(history_path()))
             .and(query_param_is_missing("before"))
             .respond_with(serve(&first))
             .mount(&server)
             .await;
         Mock::given(method("GET"))
-            .and(path(turns_path()))
+            .and(path(history_path()))
             .and(query_param("before", "cursor-2"))
             .respond_with(serve(&second))
             .mount(&server)
             .await;
         Mock::given(method("GET"))
-            .and(path(turns_path()))
+            .and(path(history_path()))
             .and(query_param("before", "cursor-3"))
             .respond_with(serve(&trailing))
             .mount(&server)
@@ -1841,13 +2087,13 @@ mod tests {
         let mut second = page(vec![stamped(1)], None);
         second.schema_version = TURN_SCHEMA_VERSION + 1;
         Mock::given(method("GET"))
-            .and(path(turns_path()))
+            .and(path(history_path()))
             .and(query_param_is_missing("before"))
             .respond_with(serve(&first))
             .mount(&server)
             .await;
         Mock::given(method("GET"))
-            .and(path(turns_path()))
+            .and(path(history_path()))
             .and(query_param("before", "cursor-2"))
             .respond_with(serve(&second))
             .mount(&server)
@@ -1881,7 +2127,7 @@ mod tests {
         sent_page["rows"][0]["future_field"] = serde_json::json!(7);
         let sent = serde_json::to_string(&sent_page).expect("page serializes");
         Mock::given(method("GET"))
-            .and(path(turns_path()))
+            .and(path(history_path()))
             .respond_with(ResponseTemplate::new(200).set_body_string(sent))
             .mount(&server)
             .await;
@@ -1903,7 +2149,7 @@ mod tests {
         let server = MockServer::start().await;
         let fixture = page(Vec::new(), None);
         Mock::given(method("GET"))
-            .and(path(turns_path()))
+            .and(path(history_path()))
             .respond_with(serve(&fixture))
             .mount(&server)
             .await;
@@ -1926,7 +2172,7 @@ mod tests {
         let server = MockServer::start().await;
         let stuck = page(vec![row(1)], Some("same"));
         Mock::given(method("GET"))
-            .and(path(turns_path()))
+            .and(path(history_path()))
             .respond_with(serve(&stuck))
             .mount(&server)
             .await;
@@ -1959,7 +2205,7 @@ mod tests {
         let server = MockServer::start().await;
         let fixture = page(vec![row(1)], None);
         Mock::given(method("GET"))
-            .and(path(turns_path()))
+            .and(path(history_path()))
             .respond_with(serve(&fixture))
             .mount(&server)
             .await;
@@ -1978,5 +2224,330 @@ mod tests {
         let notice = String::from_utf8(err).expect("utf-8 notice");
         assert!(notice.contains("wrote 1 page(s) / 1 row(s)"), "{notice}");
         assert!(notice.contains("(stopped by end)"), "{notice}");
+    }
+
+    /// `--part` picks a text inside a body read, so on its own it names
+    /// nothing.
+    #[tokio::test]
+    async fn part_without_a_body_names_the_flag() {
+        let server = MockServer::start().await;
+        let client = client(&server);
+        let mut args = show_args(142);
+        args.part = Some(PartArg::Args);
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let message = show(&client, &args, &mut out, &mut err)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(message.contains("--part"), "{message}");
+        assert!(message.contains("--body"), "{message}");
+        assert!(out.is_empty(), "nothing is printed on a refusal");
+    }
+
+    /// One text per read: a call and a message cannot both be named.
+    #[tokio::test]
+    async fn a_call_and_a_message_cannot_share_a_read() {
+        let server = MockServer::start().await;
+        let client = client(&server);
+        let mut args = show_args(142);
+        args.call = Some(1);
+        args.message = Some(0);
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let message = show(&client, &args, &mut out, &mut err)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(message.contains("--call"), "{message}");
+        assert!(message.contains("--message"), "{message}");
+    }
+
+    /// Each face holds its own kinds: a call has no `text` part and a message
+    /// has no `result`, so the mismatch is refused here and names the kinds
+    /// that face does hold.
+    #[tokio::test]
+    async fn a_part_from_the_other_face_is_refused() {
+        let server = MockServer::start().await;
+        let client = client(&server);
+        let mut args = show_args(142);
+        args.call = Some(1);
+        args.body = true;
+        args.part = Some(PartArg::Text);
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let message = show(&client, &args, &mut out, &mut err)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(message.contains("result, args or error"), "{message}");
+
+        let mut args = show_args(142);
+        args.message = Some(0);
+        args.body = true;
+        args.part = Some(PartArg::Result);
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let message = show(&client, &args, &mut out, &mut err)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(message.contains("text or reasoning"), "{message}");
+    }
+
+    /// A message's reasoning is a text of its own, read on its own route, and
+    /// the notice says which text a reader just received.
+    #[tokio::test]
+    async fn a_message_part_is_read_and_noticed() {
+        let server = MockServer::start().await;
+        let body = MessageBody {
+            schema_version: TURN_SCHEMA_VERSION,
+            turn_id: 142,
+            message_index: 0,
+            role: "assistant".to_string(),
+            part: TextPart::Reasoning,
+            offset: 0,
+            total_bytes: 5,
+            text: "think".to_string(),
+            truncated: false,
+            next_offset: None,
+            reclaimed: 0,
+        };
+        Mock::given(method("GET"))
+            .and(path(format!("/agents/{AGENT}/history/142/messages/0/body")))
+            .and(query_param("part", "reasoning"))
+            .respond_with(serve(&body))
+            .mount(&server)
+            .await;
+        let client = client(&server);
+        let mut args = show_args(142);
+        args.message = Some(0);
+        args.body = true;
+        args.part = Some(PartArg::Reasoning);
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        show(&client, &args, &mut out, &mut err).await.unwrap();
+        assert_eq!(out, b"think".to_vec());
+        let notices = String::from_utf8(err).expect("utf-8 notices");
+        assert!(
+            notices.contains("message 0 (assistant) reasoning covers bytes 0..5 of 5"),
+            "{notices}"
+        );
+    }
+
+    /// `--json` on a message's text hands the range's document over, exactly
+    /// as a call's does.
+    #[tokio::test]
+    async fn json_message_body_is_the_tagma_document_verbatim() {
+        let server = MockServer::start().await;
+        let body = MessageBody {
+            schema_version: TURN_SCHEMA_VERSION,
+            turn_id: 142,
+            message_index: 0,
+            role: "user".to_string(),
+            part: TextPart::Text,
+            offset: 0,
+            total_bytes: 5,
+            text: "hello".to_string(),
+            truncated: false,
+            next_offset: None,
+            reclaimed: 0,
+        };
+        Mock::given(method("GET"))
+            .and(path(format!("/agents/{AGENT}/history/142/messages/0/body")))
+            .respond_with(serve(&body))
+            .mount(&server)
+            .await;
+        let client = client(&server);
+        let mut args = show_args(142);
+        args.message = Some(0);
+        args.body = true;
+        args.json = true;
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        show(&client, &args, &mut out, &mut err).await.unwrap();
+        assert_eq!(
+            String::from_utf8(out).expect("utf-8 document"),
+            format!(
+                "{}\n",
+                serde_json::to_string(&body).expect("body serializes")
+            )
+        );
+        assert!(err.is_empty(), "a json read writes no notices");
+    }
+
+    /// A message index narrows the turn to that message's line, the way a
+    /// call index narrows it to one call.
+    #[tokio::test]
+    async fn show_narrows_to_one_message() {
+        let server = MockServer::start().await;
+        let mut fixture_row = row(142);
+        let mut second = message("assistant");
+        second.text = Some("the answer".to_string());
+        fixture_row.messages = vec![message("user"), second];
+        let detail = TurnDetail {
+            schema_version: TURN_SCHEMA_VERSION,
+            turn: fixture_row,
+        };
+        Mock::given(method("GET"))
+            .and(path(format!("/agents/{AGENT}/history/142")))
+            .respond_with(serve(&detail))
+            .mount(&server)
+            .await;
+        let client = client(&server);
+        let mut args = show_args(142);
+        args.message = Some(1);
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        show(&client, &args, &mut out, &mut err).await.unwrap();
+        let text = String::from_utf8(out).expect("utf-8 message");
+        assert!(text.contains("assistant"), "{text}");
+        assert!(text.contains("the answer"), "{text}");
+        assert!(!text.contains("hello"), "{text}");
+    }
+
+    /// A wrong message index names the positions the turn carried, so the
+    /// reader does not have to ask for the whole turn again.
+    #[tokio::test]
+    async fn show_rejects_an_absent_message() {
+        let server = MockServer::start().await;
+        let mut fixture_row = row(142);
+        fixture_row.messages = vec![message("user"), message("assistant")];
+        let detail = TurnDetail {
+            schema_version: TURN_SCHEMA_VERSION,
+            turn: fixture_row,
+        };
+        Mock::given(method("GET"))
+            .and(path(format!("/agents/{AGENT}/history/142")))
+            .respond_with(serve(&detail))
+            .mount(&server)
+            .await;
+        let client = client(&server);
+        let mut args = show_args(142);
+        args.message = Some(9);
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let message = show(&client, &args, &mut out, &mut err)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(message.contains("carried no message 9"), "{message}");
+        assert!(message.contains("its messages: 0, 1"), "{message}");
+    }
+
+    /// With `--json`, a message index narrows the JSON to that message's
+    /// object rather than printing the whole turn.
+    #[tokio::test]
+    async fn json_message_narrows_to_one_message() {
+        let server = MockServer::start().await;
+        let mut fixture_row = row(142);
+        let mut second = message("assistant");
+        second.text = Some("the answer".to_string());
+        fixture_row.messages = vec![message("user"), second];
+        let wanted = fixture_row.messages[1].clone();
+        let detail = TurnDetail {
+            schema_version: TURN_SCHEMA_VERSION,
+            turn: fixture_row,
+        };
+        Mock::given(method("GET"))
+            .and(path(format!("/agents/{AGENT}/history/142")))
+            .respond_with(serve(&detail))
+            .mount(&server)
+            .await;
+        let client = client(&server);
+        let mut args = show_args(142);
+        args.message = Some(1);
+        args.json = true;
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        show(&client, &args, &mut out, &mut err).await.unwrap();
+        let printed: Value = serde_json::from_slice(&out).expect("json message");
+        assert_eq!(printed, serde_json::to_value(&wanted).unwrap());
+    }
+
+    /// The `--json` face names the same miss, built from the document it
+    /// walked: a pointer that missed would report a real message as absent.
+    #[tokio::test]
+    async fn show_json_rejects_an_absent_message() {
+        let server = MockServer::start().await;
+        let mut fixture_row = row(142);
+        fixture_row.messages = vec![message("user"), message("assistant")];
+        let detail = TurnDetail {
+            schema_version: TURN_SCHEMA_VERSION,
+            turn: fixture_row,
+        };
+        Mock::given(method("GET"))
+            .and(path(format!("/agents/{AGENT}/history/142")))
+            .respond_with(serve(&detail))
+            .mount(&server)
+            .await;
+        let client = client(&server);
+        let mut args = show_args(142);
+        args.message = Some(9);
+        args.json = true;
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let message = show(&client, &args, &mut out, &mut err)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(message.contains("carried no message 9"), "{message}");
+        assert!(out.is_empty(), "the document is not written on a miss");
+    }
+
+    /// A prefix prints as the record holds it, and says once that it continues:
+    /// one marker for the rest, because the rest is a body read away.
+    #[tokio::test]
+    async fn a_prefix_prints_as_the_record_holds_it() {
+        let server = MockServer::start().await;
+        let mut fixture_row = row(142);
+        let mut shortened = message("assistant");
+        shortened.text = Some("head".to_string());
+        shortened.text_more = true;
+        fixture_row.messages = vec![shortened];
+        let mut failed = call(0, "bash");
+        failed.ok = false;
+        failed.first_error_line = Some("boom".to_string());
+        failed.error_more = true;
+        failed.args = "{\"a\":1".to_string();
+        failed.args_more = true;
+        fixture_row.calls = vec![failed];
+        let detail = TurnDetail {
+            schema_version: TURN_SCHEMA_VERSION,
+            turn: fixture_row,
+        };
+        Mock::given(method("GET"))
+            .and(path(format!("/agents/{AGENT}/history/142")))
+            .respond_with(serve(&detail))
+            .mount(&server)
+            .await;
+        let client = client(&server);
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        show(&client, &show_args(142), &mut out, &mut err)
+            .await
+            .unwrap();
+        let text = String::from_utf8(out).expect("utf-8 turn");
+        assert!(text.contains("chars:\nhead\n…"), "{text}");
+        assert!(text.contains(": boom …"), "{text}");
+        assert_eq!(text.matches("boom").count(), 1, "{text}");
+
+        let mut args = show_args(142);
+        args.call = Some(0);
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        show(&client, &args, &mut out, &mut err).await.unwrap();
+        let text = String::from_utf8(out).expect("utf-8 call");
+        assert!(text.contains("args:\n{\"a\":1\n…"), "{text}");
+        assert!(text.contains("error:\nboom\n…"), "{text}");
+        assert_eq!(text.matches("boom").count(), 1, "{text}");
+    }
+
+    /// A label puts the text on its own lines, so a newline inside it cannot
+    /// break the layout, and a continuing text gets one marker line.
+    #[test]
+    fn a_labeled_text_keeps_its_lines() {
+        assert_eq!(labeled("args", "abc\ndef", false), "args:\nabc\ndef\n");
+        assert_eq!(labeled("args", "abc", true), "args:\nabc\n…\n");
     }
 }

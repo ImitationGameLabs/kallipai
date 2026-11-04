@@ -48,8 +48,9 @@ pub use team::{
     TeamStatusResponse,
 };
 pub use turns::{
-    CALL_BODY_LIMIT_DEFAULT, CALL_BODY_MAX_BYTES, CallBody, CallBodyQuery, CallRow, MessageRow,
-    SPILL_RECLAIMED, TEXT_CUT_CHARS, TURN_SCHEMA_VERSION, TURNS_PAGE_LIMIT_DEFAULT,
-    TURNS_PAGE_LIMIT_MAX, TURNS_PAGE_MAX_BYTES, TurnDetail, TurnProfile, TurnRow, TurnUsageView,
-    TurnsPage, TurnsQuery,
+    CALL_BODY_LIMIT_DEFAULT, CALL_BODY_MAX_BYTES, CallBody, CallBodyQuery, CallPart, CallRow,
+    DETAIL_TEXT_INLINE_BYTES, MessageBody, MessageBodyQuery, MessageRow, PAGE_TEXT_INLINE_CHARS,
+    SPILL_RECLAIMED, TURN_SCHEMA_VERSION, TURNS_PAGE_LIMIT_DEFAULT, TURNS_PAGE_LIMIT_MAX,
+    TURNS_PAGE_MAX_BYTES, TextPart, TurnDetail, TurnProfile, TurnRow, TurnUsageView, TurnsPage,
+    TurnsQuery,
 };

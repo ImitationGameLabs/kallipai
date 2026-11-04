@@ -12,10 +12,11 @@ use std::path::{Path, PathBuf};
 
 use just_llm_client::types::generation::{ContentPart, Message, ToolCall};
 use kallipai_common::protocol::{
-    CALL_BODY_LIMIT_DEFAULT, CALL_BODY_MAX_BYTES, CallBody, CallBodyQuery, CallRow, MessageRow,
-    SPILL_RECLAIMED, TEXT_CUT_CHARS, TURN_SCHEMA_VERSION, TURNS_PAGE_LIMIT_DEFAULT,
-    TURNS_PAGE_LIMIT_MAX, TURNS_PAGE_MAX_BYTES, TurnDetail, TurnProfile, TurnRow, TurnUsageView,
-    TurnsPage, TurnsQuery,
+    CALL_BODY_LIMIT_DEFAULT, CALL_BODY_MAX_BYTES, CallBody, CallBodyQuery, CallPart, CallRow,
+    DETAIL_TEXT_INLINE_BYTES, MessageBody, MessageBodyQuery, MessageRow, PAGE_TEXT_INLINE_CHARS,
+    SPILL_RECLAIMED, TURN_SCHEMA_VERSION, TURNS_PAGE_LIMIT_DEFAULT, TURNS_PAGE_LIMIT_MAX,
+    TURNS_PAGE_MAX_BYTES, TextPart, TurnDetail, TurnProfile, TurnRow, TurnUsageView, TurnsPage,
+    TurnsQuery,
 };
 use kallipai_common::toolresult::ToolResultEnvelope;
 use serde_json::Value;
@@ -46,7 +47,7 @@ const SPILL_MARKER: &str = "/kallipai/";
 
 /// Why a read failed.
 ///
-/// The first two are the caller's input, the last two are what the log does
+/// The first two are the caller's input, the rest are what the log does
 /// not have — the split callers map to status codes.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum ViewError {
@@ -62,6 +63,13 @@ pub enum ViewError {
     /// The turn carries fewer tool calls than the index asked for.
     #[error("turn {0} has no call {1}")]
     NoSuchCall(u64, u32),
+    /// The turn has fewer messages than the index asked for.
+    #[error("turn {0} has no message {1}")]
+    NoSuchMessage(u64, u32),
+    /// The record kept no text for the part asked for: a message with no
+    /// reasoning text, a call with no error.
+    #[error("no {part} text at {at}")]
+    NoSuchPart { at: String, part: &'static str },
 }
 
 /// One page of turns, newest first.
@@ -92,7 +100,7 @@ pub fn read_turns_page(agent_dir: &Path, query: &TurnsQuery) -> Result<TurnsPage
         .map(|record| PageRow {
             at: record.datetime,
             turn_id: record.turn_id.unwrap_or_default(),
-            row: project_record(record, false),
+            row: project_record(record, Face::Page),
         })
         .collect();
     let mut sizes: Vec<usize> = rows
@@ -135,7 +143,7 @@ pub fn read_turn(agent_dir: &Path, turn_id: u64) -> Result<TurnDetail, ViewError
     let record = find_turn(agent_dir, turn_id).ok_or(ViewError::NoSuchTurn(turn_id))?;
     Ok(TurnDetail {
         schema_version: TURN_SCHEMA_VERSION,
-        turn: project_record(&record, true),
+        turn: project_record(&record, Face::Detail),
     })
 }
 
@@ -155,24 +163,15 @@ pub fn read_call_body(
     let (call, stored) = calls
         .get(call_index as usize)
         .ok_or(ViewError::NoSuchCall(turn_id, call_index))?;
-    let (text, reclaimed) = scrub_spills(stored.unwrap_or_default());
+    let part = query.part.unwrap_or_default();
+    let (text, reclaimed) = call_part_text(call, *stored, part, turn_id, call_index)?;
 
     let total_bytes = text.len() as u64;
     let limit = query
         .limit
         .unwrap_or(CALL_BODY_LIMIT_DEFAULT)
         .clamp(1, CALL_BODY_MAX_BYTES);
-    let mut start = query.offset.unwrap_or(0).min(total_bytes) as usize;
-    while start < text.len() && !text.is_char_boundary(start) {
-        start += 1;
-    }
-    let mut end = (start + limit).min(text.len());
-    // A window narrower than one character still returns that character:
-    // the end moves to the next boundary, at most three bytes past
-    // `limit`, so `next_offset` always advances.
-    while end < text.len() && !text.is_char_boundary(end) {
-        end += 1;
-    }
+    let (start, end) = byte_window(&text, query.offset, limit);
     let truncated = end < text.len();
     Ok(CallBody {
         schema_version: TURN_SCHEMA_VERSION,
@@ -180,6 +179,7 @@ pub fn read_call_body(
         call_index,
         call_id: call.id.clone(),
         name: call.name.clone(),
+        part,
         offset: start as u64,
         total_bytes,
         text: text.get(start..end).unwrap_or_default().to_owned(),
@@ -187,6 +187,98 @@ pub fn read_call_body(
         next_offset: truncated.then_some(end as u64),
         reclaimed,
     })
+}
+
+/// The text one part of a call names, cleaned: a spill path is reclaimed
+/// before anything measures or slices it.
+fn call_part_text(
+    call: &ToolCall,
+    stored: Option<&str>,
+    part: CallPart,
+    turn_id: u64,
+    call_index: u32,
+) -> Result<(String, u32), ViewError> {
+    match part {
+        CallPart::Result => Ok(scrub_spills(stored.unwrap_or_default())),
+        CallPart::Args => Ok(scrub_spills(&call.arguments)),
+        CallPart::Error => {
+            let error = stored
+                .and_then(|text| serde_json::from_str::<ToolResultEnvelope>(text).ok())
+                .and_then(|envelope| envelope.error)
+                .ok_or_else(|| ViewError::NoSuchPart {
+                    at: format!("turn {turn_id} call {call_index}"),
+                    part: part.as_str(),
+                })?;
+            Ok(scrub_spills(&error))
+        }
+    }
+}
+
+/// A byte range of one message's text.
+///
+/// The text is the message as the log holds it, cleaned: a spill path inside
+/// it reads as reclaimed, and nothing here opens the path.
+pub fn read_message_body(
+    agent_dir: &Path,
+    turn_id: u64,
+    message_index: u32,
+    query: &MessageBodyQuery,
+) -> Result<MessageBody, ViewError> {
+    let record = find_turn(agent_dir, turn_id).ok_or(ViewError::NoSuchTurn(turn_id))?;
+    let message = record
+        .messages
+        .get(message_index as usize)
+        .ok_or(ViewError::NoSuchMessage(turn_id, message_index))?;
+    let part = query.part.unwrap_or_default();
+    let raw = match part {
+        TextPart::Text => message_text(message),
+        TextPart::Reasoning => reasoning_text(message)
+            .filter(|held| !held.trim().is_empty())
+            .map(str::to_owned)
+            .ok_or_else(|| ViewError::NoSuchPart {
+                at: format!("turn {turn_id} message {message_index}"),
+                part: part.as_str(),
+            })?,
+    };
+    let (text, reclaimed) = scrub_spills(&raw);
+
+    let total_bytes = text.len() as u64;
+    let limit = query
+        .limit
+        .unwrap_or(CALL_BODY_LIMIT_DEFAULT)
+        .clamp(1, CALL_BODY_MAX_BYTES);
+    let (start, end) = byte_window(&text, query.offset, limit);
+    let truncated = end < text.len();
+    Ok(MessageBody {
+        schema_version: TURN_SCHEMA_VERSION,
+        turn_id,
+        message_index,
+        role: message.role().to_owned(),
+        part,
+        offset: start as u64,
+        total_bytes,
+        text: text.get(start..end).unwrap_or_default().to_owned(),
+        truncated,
+        next_offset: truncated.then_some(end as u64),
+        reclaimed,
+    })
+}
+
+/// The byte window a range read asks for, widened outward to character
+/// boundaries. An offset landing inside a character moves forward to the
+/// next boundary, so no range starts mid-character; an end landing inside
+/// one moves forward too, keeping that character whole. Widening overruns
+/// `limit` by at most three bytes, so `next_offset` always advances.
+fn byte_window(text: &str, offset: Option<u64>, limit: usize) -> (usize, usize) {
+    let mut start = offset.unwrap_or(0).min(text.len() as u64) as usize;
+    while start < text.len() && !text.is_char_boundary(start) {
+        start += 1;
+    }
+    let mut end = (start + limit).min(text.len());
+    while end < text.len() && !text.is_char_boundary(end) {
+        end += 1;
+    }
+    (start, end)
 }
 
 /// What one pass over the log produced.
@@ -407,7 +499,7 @@ fn find_turn(agent_dir: &Path, turn_id: u64) -> Option<HistoryRecord> {
 /// The model-round facts are read off the attempt block and nothing else: a
 /// record without one shows no model round at all, which is the honest
 /// reading of a log that never recorded the round.
-fn project_record(record: &HistoryRecord, with_text: bool) -> TurnRow {
+fn project_record(record: &HistoryRecord, face: Face) -> TurnRow {
     let attempt = record.attempt.as_ref();
     TurnRow {
         turn_id: record.turn_id.unwrap_or_default(),
@@ -429,8 +521,8 @@ fn project_record(record: &HistoryRecord, with_text: bool) -> TurnRow {
                 reasoning: usage.reasoning.into(),
             }),
         elapsed_ms: attempt.map(|attempt| attempt.elapsed_ms),
-        calls: project_calls(&record.messages),
-        messages: project_messages(&record.messages, with_text),
+        calls: project_calls(&record.messages, face),
+        messages: project_messages(&record.messages, face),
     }
 }
 
@@ -454,11 +546,11 @@ fn calls_with_results(messages: &[Message]) -> Vec<(&ToolCall, Option<&str>)> {
     calls
 }
 
-fn project_calls(messages: &[Message]) -> Vec<CallRow> {
+fn project_calls(messages: &[Message], face: Face) -> Vec<CallRow> {
     calls_with_results(messages)
         .into_iter()
         .enumerate()
-        .map(|(index, (call, result))| project_call(index as u32, call, result))
+        .map(|(index, (call, result))| project_call(index as u32, call, result, face))
         .collect()
 }
 
@@ -468,12 +560,16 @@ fn project_calls(messages: &[Message]) -> Vec<CallRow> {
 /// A call with no result row, or one whose text is not an envelope (a tool
 /// answering in another shape), reads as not ok: this face never reports a
 /// success it cannot see in the log.
-fn project_call(call_index: u32, call: &ToolCall, result: Option<&str>) -> CallRow {
+fn project_call(call_index: u32, call: &ToolCall, result: Option<&str>, face: Face) -> CallRow {
+    let cap = face.cap();
+    let cleaned = scrub_spills(&call.arguments).0;
+    let (args, args_more) = inline_text(&cleaned, cap);
     let mut row = CallRow {
         call_index,
         call_id: call.id.clone(),
         name: call.name.clone(),
-        args: shorten(&scrub_spills(&call.arguments).0),
+        args,
+        args_more: args_more && face.carries_bits(),
         ok: false,
         pending_approval: None,
         stdout_bytes: None,
@@ -484,6 +580,9 @@ fn project_call(call_index: u32, call: &ToolCall, result: Option<&str>) -> CallR
         timed_out: None,
         truncated: false,
         first_error_line: None,
+        error_more: false,
+        error_bytes: None,
+        error_lines: None,
     };
     let Some(envelope) =
         result.and_then(|text| serde_json::from_str::<ToolResultEnvelope>(text).ok())
@@ -492,11 +591,17 @@ fn project_call(call_index: u32, call: &ToolCall, result: Option<&str>) -> CallR
     };
     row.ok = envelope.ok;
     row.pending_approval = envelope.pending_approval;
-    row.first_error_line = envelope
-        .error
-        .as_deref()
-        .and_then(|error| error.lines().next())
-        .map(|line| shorten(&scrub_spills(line).0));
+    if let Some(error) = envelope.error.as_deref() {
+        // The counters measure the record's own error text, spill paths
+        // included: the same rule the stream sizes follow.
+        row.error_bytes = Some(error.len() as u64);
+        row.error_lines = Some(count_lines(error));
+        if let Some(first) = error.lines().next() {
+            let (line, more) = inline_text(&scrub_spills(first).0, cap);
+            row.first_error_line = Some(line);
+            row.error_more = more && face.carries_bits();
+        }
+    }
     if let Some(result) = envelope.result.as_ref() {
         // bash_exec's merged stream fills the stdout column: it is the one
         // stream the model saw.
@@ -536,28 +641,42 @@ fn count_lines(text: &str) -> u64 {
     text.lines().count() as u64
 }
 
-fn project_messages(messages: &[Message], with_text: bool) -> Vec<MessageRow> {
+fn project_messages(messages: &[Message], face: Face) -> Vec<MessageRow> {
     messages
         .iter()
         .map(|message| {
-            let raw = message_text(message);
-            let chars = raw.chars().count();
+            // Characters as the reader sees them: the cleaned text, so a
+            // reclaimed spill path does not count as its own length.
+            let cleaned = scrub_spills(&message_text(message)).0;
+            let chars = cleaned.chars().count();
             // Both text fields read through one rule, so they cannot drift:
             // a page carries neither, the detail face carries both.
             // A reasoning text with nothing to show is no text: a record
             // that kept an empty or all-blank string would otherwise open
             // a fold with nothing in it.
             let reasoning_raw = reasoning_text(message).filter(|held| !held.trim().is_empty());
-            let (reasoning, reasoning_truncated) = text_face(reasoning_raw, with_text);
-            let (text, truncated) = text_face(Some(&raw), with_text);
+            let (text, text_more) = match face {
+                Face::Detail => {
+                    let (head, more) = inline_text(&cleaned, face.cap());
+                    (Some(head), more)
+                }
+                Face::Page => (None, false),
+            };
+            let (reasoning, reasoning_more) = match (face, reasoning_raw) {
+                (Face::Detail, Some(raw)) => {
+                    let (head, more) = inline_text(&scrub_spills(raw).0, face.cap());
+                    (Some(head), more)
+                }
+                _ => (None, false),
+            };
             MessageRow {
                 role: message.role().to_owned(),
                 chars,
                 has_reasoning: message.reasoning().is_some(),
-                truncated,
                 text,
+                text_more,
                 reasoning,
-                reasoning_truncated,
+                reasoning_more,
             }
         })
         .collect()
@@ -589,33 +708,64 @@ fn reasoning_text(message: &Message) -> Option<&str> {
         .and_then(|reasoning| reasoning.text.as_deref())
 }
 
-/// The text face of a field: cleaned, then shortened to its ends; a page
-/// carries neither.
-fn text_face(raw: Option<&str>, with_text: bool) -> (Option<String>, bool) {
-    match raw {
-        Some(raw) if with_text => {
-            let (cut, truncated) = cut_text(&scrub_spills(raw).0);
-            (Some(cut), truncated)
+/// Which face is being built decides what a text costs and whether a bit goes
+/// with it: a detail row carries bytes, a list row carries a short prefix.
+#[derive(Clone, Copy)]
+enum Face {
+    Page,
+    Detail,
+}
+
+/// How much of a text a face keeps, and in what unit.
+#[derive(Clone, Copy)]
+enum InlineCap {
+    /// The detail face: a byte budget, so a prefix's length is the offset a
+    /// body read continues from.
+    Bytes(usize),
+    /// A list row: a character budget, a summary rather than a reading surface.
+    Chars(usize),
+}
+
+impl Face {
+    fn cap(self) -> InlineCap {
+        match self {
+            Face::Page => InlineCap::Chars(PAGE_TEXT_INLINE_CHARS),
+            Face::Detail => InlineCap::Bytes(DETAIL_TEXT_INLINE_BYTES),
         }
-        _ => (None, false),
+    }
+
+    /// Whether this face carries the prefix bits: a page has no reader and no
+    /// read control, so a bit there would have no consumer.
+    fn carries_bits(self) -> bool {
+        matches!(self, Face::Detail)
     }
 }
 
-/// Shorten a text to [`TEXT_CUT_CHARS`] characters, keeping both ends: the
-/// identifying facts of an argument blob or a tool result sit at the edges.
-fn cut_text(text: &str) -> (String, bool) {
-    let total = text.chars().count();
-    if total <= TEXT_CUT_CHARS {
-        return (text.to_owned(), false);
+/// One text as a face carries it: the whole text, or a prefix and a bit saying
+/// the rest is a body read.
+///
+/// The cut lands on a character boundary in either unit. A prefix's byte
+/// length is the offset a body read continues from, so a cut inside a
+/// character would address half of one.
+fn inline_text(text: &str, cap: InlineCap) -> (String, bool) {
+    match cap {
+        InlineCap::Chars(limit) => {
+            if text.chars().count() <= limit {
+                return (text.to_owned(), false);
+            }
+            (text.chars().take(limit).collect(), true)
+        }
+        InlineCap::Bytes(limit) => {
+            if text.len() <= limit {
+                return (text.to_owned(), false);
+            }
+            let mut cut = limit;
+            while !text.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            (text[..cut].to_owned(), true)
+        }
     }
-    let half = TEXT_CUT_CHARS / 2;
-    let head: String = text.chars().take(half).collect();
-    let tail: String = text.chars().skip(total - half).collect();
-    (format!("{head} … {tail}"), true)
-}
-
-fn shorten(text: &str) -> String {
-    cut_text(text).0
 }
 
 /// Replace every path into the spill tree with [`SPILL_RECLAIMED`],

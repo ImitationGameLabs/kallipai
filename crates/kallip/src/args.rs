@@ -72,13 +72,14 @@ pub enum Commands {
     /// Read an agent's turn history: the paged log, one turn, and one call's
     /// text, computed by the tagma from the log on demand.
     #[command(subcommand)]
-    Turns(TurnsCommand),
+    History(HistoryCommand),
 }
 
 pub(crate) mod agent;
 pub(crate) mod approval;
 pub(crate) mod budget;
 pub(crate) mod file;
+pub(crate) mod history;
 pub(crate) mod image;
 pub(crate) mod inbox;
 pub(crate) mod lesche;
@@ -88,12 +89,12 @@ pub(crate) mod skill;
 pub(crate) mod subagent;
 pub(crate) mod task;
 pub(crate) mod team;
-pub(crate) mod turns;
 use self::{
     agent::{AgentCommand, AgentDirCommand},
     approval::ApprovalCommand,
     budget::BudgetCommand,
     file::FileCommand,
+    history::HistoryCommand,
     image::ImageCommand,
     inbox::InboxCommand,
     lesche::LescheCommand,
@@ -103,5 +104,4 @@ use self::{
     subagent::SubagentCommand,
     task::TaskCommand,
     team::TeamCommand,
-    turns::TurnsCommand,
 };

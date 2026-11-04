@@ -5,8 +5,9 @@ use axum::body::Body;
 use axum::extract::{Path, Query, State};
 use axum::http::{Request, StatusCode, header};
 use axum::response::IntoResponse;
-use just_llm_client::types::generation::Message;
+use just_llm_client::types::generation::{Message, ToolCall};
 use kallipai_adk::history::{HistoryRecord, RecordKind};
+use kallipai_common::protocol::CALL_BODY_MAX_BYTES;
 use tempfile::TempDir;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
@@ -266,7 +267,7 @@ async fn a_foreign_bearer_is_401() {
     let state = make_state();
     let (id, _dir) = agent_with_turns(&state).await;
     let request = Request::builder()
-        .uri(format!("/agents/{id}/turns"))
+        .uri(format!("/agents/{id}/history"))
         .header(header::AUTHORIZATION, "Bearer not-a-token")
         .body(Body::empty())
         .unwrap();
@@ -276,4 +277,177 @@ async fn a_foreign_bearer_is_401() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+/// A message body reads the text the detail face shortened, and an index the
+/// turn does not have is 404 rather than an empty range.
+#[tokio::test]
+async fn a_message_body_reads_the_whole_text_and_refuses_a_missing_index() {
+    let state = make_state();
+    let (id, _dir) = agent_with_turns(&state).await;
+    let auth = AuthIdentity::test_new(Identity::Agent {
+        id: AgentId::random(),
+    });
+
+    let body = get_message_body(
+        State(state.clone()),
+        auth.clone(),
+        Path((id.clone(), 1, 0)),
+        Query(MessageBodyQuery::default()),
+    )
+    .await
+    .expect("the first message reads");
+    assert_eq!(body.0.turn_id, 1);
+    assert_eq!(body.0.role, "user");
+    assert_eq!(body.0.text, "first");
+    assert_eq!(body.0.part, kallipai_common::protocol::TextPart::Text);
+
+    let missing = get_message_body(
+        State(state),
+        auth,
+        Path((id, 1, 9)),
+        Query(MessageBodyQuery::default()),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(missing.status, 404);
+}
+
+/// A live agent whose one call answered with a stream past the body cap.
+async fn agent_with_a_long_call(state: &SharedState) -> (AgentId, TempDir) {
+    let id = AgentId::random();
+    let dir = TempDir::new().unwrap();
+    let output = "x".repeat(CALL_BODY_MAX_BYTES + 4_096);
+    let envelope = serde_json::json!({
+        "ok": true,
+        "tool_name": "bash_exec",
+        "result": {"output": output, "exit_code": 0, "timed_out": false, "truncated": false},
+    });
+    let call = ToolCall {
+        id: "c1".to_owned(),
+        name: "bash_exec".to_owned(),
+        arguments: "{}".to_owned(),
+    };
+    write_turns(
+        dir.path(),
+        vec![turn(
+            1,
+            0,
+            vec![
+                Message::assistant_tool_calls(None, vec![call], None),
+                Message::tool(serde_json::to_string(&envelope).unwrap(), "c1"),
+            ],
+        )],
+    );
+    let mut entry = make_entry(None, format!("agent-{id}"));
+    entry.identity.agent_dir = Some(dir.path().to_path_buf());
+    state
+        .registry
+        .write()
+        .await
+        .register(id.clone(), RegistryEntry::Live(entry));
+    (id, dir)
+}
+
+/// The two body reads take their own part type, so a value from the other
+/// family is refused before any log is read: `args` is a call's part, and a
+/// message body answering it would have to guess.
+#[tokio::test]
+async fn a_part_from_the_other_family_is_400() {
+    let state = make_state();
+    let (id, _dir) = agent_with_turns(&state).await;
+
+    for uri in [
+        format!("/agents/{id}/history/1/messages/0/body?part=args"),
+        format!("/agents/{id}/history/1/calls/0/body?part=reasoning"),
+    ] {
+        let request = Request::builder()
+            .uri(&uri)
+            .header(header::AUTHORIZATION, "Bearer op-token")
+            .body(Body::empty())
+            .unwrap();
+        let response = crate::routes::router()
+            .with_state(state.clone())
+            .oneshot(request)
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "{uri} names a part the other reader owns"
+        );
+    }
+}
+
+/// `limit` is the caller's wish, clamped into the bounds the face promises:
+/// asking for nothing still returns a byte, and asking for everything stops
+/// at the cap with a next offset to continue from.
+#[tokio::test]
+async fn a_body_limit_is_clamped_into_the_bounds() {
+    let state = make_state();
+    let (id, _dir) = agent_with_a_long_call(&state).await;
+    let auth = AuthIdentity::test_new(Identity::Operator);
+
+    let least = get_call_body(
+        State(state.clone()),
+        auth.clone(),
+        Path((id.clone(), 1, 0)),
+        Query(CallBodyQuery {
+            limit: Some(0),
+            ..CallBodyQuery::default()
+        }),
+    )
+    .await
+    .expect("a zero limit is clamped, not refused");
+    assert_eq!(least.0.text.chars().count(), 1, "one byte is the floor");
+    assert!(least.0.truncated);
+    assert_eq!(least.0.next_offset, Some(1));
+
+    let most = get_call_body(
+        State(state),
+        auth,
+        Path((id, 1, 0)),
+        Query(CallBodyQuery {
+            limit: Some(usize::MAX),
+            ..CallBodyQuery::default()
+        }),
+    )
+    .await
+    .expect("a huge limit is clamped, not refused");
+    assert_eq!(
+        most.0.text.len(),
+        CALL_BODY_MAX_BYTES,
+        "the cap bounds one response"
+    );
+    assert_eq!(most.0.next_offset, Some(CALL_BODY_MAX_BYTES as u64));
+}
+
+/// A part the record does not hold is 404, and the reason names the part, so
+/// a reader can tell "no reasoning text" from "no message".
+#[tokio::test]
+async fn a_missing_part_is_404_and_names_the_part() {
+    let state = make_state();
+    let (id, _dir) = agent_with_turns(&state).await;
+    let auth = AuthIdentity::test_new(Identity::Operator);
+
+    let error = get_message_body(
+        State(state),
+        auth,
+        Path((id, 1, 0)),
+        Query(MessageBodyQuery {
+            part: Some(kallipai_common::protocol::TextPart::Reasoning),
+            ..MessageBodyQuery::default()
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.status, 404);
+    let rendered = axum::body::to_bytes(error.into_response().into_body(), 1 << 16)
+        .await
+        .unwrap();
+    let text = reason(&rendered).expect("a 404 carries a reason the caller can read");
+    assert!(
+        text.contains("reasoning"),
+        "the refusal names the part: {text}"
+    );
 }

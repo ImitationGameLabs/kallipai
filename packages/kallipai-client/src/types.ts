@@ -915,9 +915,15 @@ export interface CallRow {
   readonly call_index: number;
   readonly call_id: string;
   readonly name: string;
-  /** The arguments as the model sent them, shortened to 400 characters;
-   * the face carries no flag for that cut. */
+  /** The arguments as the model sent them, as a prefix: at most 16384 bytes
+   * on a turn detail, at most 400 characters on a page. A page carries no
+   * `args_more`. */
   readonly args: string;
+  /** A prefix of `args`; the rest reads from the byte range that starts where
+   * this prefix ends, at an offset equal to the prefix's byte length (never
+   * either cap). Detail-only: absent on a page and absent when `args` is
+   * whole. */
+  readonly args_more?: boolean;
   /** False when the call never produced a readable result. */
   readonly ok: boolean;
   /** Present when the tool asked for approval; the call may then have no
@@ -937,35 +943,45 @@ export interface CallRow {
   readonly timed_out?: boolean;
   /** Whether the tool's own output was cut before it was returned. */
   readonly truncated: boolean;
-  /** The first line of the error, shortened -- the fact a list is scanned
-   * for. */
+  /** The first line of the error -- the fact a list is scanned for -- as a
+   * prefix: at most 16384 bytes on a turn detail, at most 400 characters on a
+   * page. */
   readonly first_error_line?: string;
+  /** A prefix of the first error line; same rule as `args_more`. */
+  readonly error_more?: boolean;
+  /** Bytes of the whole error in the record, spill paths included: what a
+   * reader needs to tell a one-line failure from a wall of traceback. */
+  readonly error_bytes?: number;
+  /** Lines in the error, counted as `str::lines` counts them. */
+  readonly error_lines?: number;
 }
 
 /** One message of a turn. A page carries shape only (`chars`, flags); a turn
- * detail carries the shortened text too, and with it the shortened reasoning
+ * detail carries the text too, up to its byte cap, and with it the reasoning
  * text. */
 export interface MessageRow {
   readonly role: string;
-  /** Characters in the message text as the record holds it: counted before
-   * any spill path is reclaimed and before any shortening. */
+  /** Characters in the message text as a reader sees it: counted after
+   * spill paths are reclaimed. */
   readonly chars: number;
   /** Whether the message carried reasoning content. */
   readonly has_reasoning: boolean;
-  /** Whether `text` was shortened to 400 characters. */
-  readonly truncated: boolean;
-  /** The shortened, cleaned text; absent on a page. */
+  /** The cleaned text, as a prefix: all of it unless it is longer than 16384
+   * bytes. Absent on a page. */
   readonly text?: string;
-  /** The shortened, cleaned reasoning text; absent on a page and absent
+  /** A prefix of `text`; the rest reads from the byte range that starts where
+   * this prefix ends, at an offset equal to the prefix's byte length (never
+   * either cap). Absent on a page and absent when `text` is whole. */
+  readonly text_more?: boolean;
+  /** The cleaned reasoning text, as a prefix; absent on a page and absent
    * when the record kept a reasoning flag with nothing to show: no text,
    * or a text that is blank throughout. Detail-only. */
   readonly reasoning?: string;
-  /** Whether `reasoning` was shortened. Absent unless true, so a page
-   * carries not a byte more. */
-  readonly reasoning_truncated?: boolean;
+  /** A prefix of `reasoning`; same rule as `text_more`. */
+  readonly reasoning_more?: boolean;
 }
 
-/** One turn, text included (`GET /agents/{id}/turns/{turn}`). */
+/** One turn, text included (`GET /agents/{id}/history/{turn}`). */
 export interface TurnDetail {
   readonly schema_version: number;
   readonly turn: TurnRow;
@@ -980,6 +996,8 @@ export interface CallBody {
   readonly call_index: number;
   readonly call_id: string;
   readonly name: string;
+  /** Which text this range walks: the result record unless asked otherwise. */
+  readonly part: CallPart;
   /** Byte offset this range starts at, in the cleaned text. */
   readonly offset: number;
   /** Length of the whole cleaned text in bytes. */
@@ -995,7 +1013,51 @@ export interface CallBody {
   readonly reclaimed: number;
 }
 
-/** Query of `GET /agents/{id}/turns`. `before` is an opaque cursor taken
+/** Which text of a message a body read addresses (kallipai-common
+ * `TextPart`). */
+export type TextPart = "text" | "reasoning";
+
+/** Which text of a call a body read addresses (kallipai-common
+ * `CallPart`). */
+export type CallPart = "result" | "args" | "error";
+
+/** A byte range of one message's text (`GET
+ * /agents/{id}/history/{turn}/messages/{index}/body`). The same shape as
+ * `CallBody` because a reader pages through both the same way. `role` is
+ * what a reader checks when it re-asks: an index that no longer names the
+ * message it named before is a different message. */
+export interface MessageBody {
+  readonly schema_version: number;
+  readonly turn_id: number;
+  readonly message_index: number;
+  readonly role: string;
+  /** Which text this range walks. */
+  readonly part: TextPart;
+  /** Byte offset this range starts at, in the cleaned text. */
+  readonly offset: number;
+  /** Length of the whole cleaned text in bytes. */
+  readonly total_bytes: number;
+  /** The range asked for, widened to the next character boundary when a
+   * character straddles the limit. */
+  readonly text: string;
+  /** True when this range stops before the end of the cleaned text. */
+  readonly truncated: boolean;
+  /** Offset to ask for next; absent at the end. */
+  readonly next_offset?: number;
+  /** Spill paths replaced in the whole cleaned text, not in this range. */
+  readonly reclaimed: number;
+}
+
+/** One range of a body read: which text to walk, and where in it. `offset`
+ * and `limit` page through the cleaned text, capped per request by the
+ * server; `part` names the text, and its values differ between a call body
+ * (`CallPart`) and a message body (`TextPart`). */
+export interface BodyRange<P extends string = string> {
+  readonly part?: P;
+  readonly offset?: number;
+  readonly limit?: number;
+}
+/** Query of `GET /agents/{id}/history`. `before` is an opaque cursor taken
  * from a previous page's `next_cursor`; `day` pins one UTC day file. */
 export interface TurnQuery {
   readonly day?: string;

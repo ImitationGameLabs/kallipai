@@ -27,6 +27,7 @@
   import { keryxBaseUrlOrFail } from "../lib/session/archeion.svelte.ts";
   import { managementBackend } from "../lib/manage/client.ts";
   import { conversationStorageKey } from "../lib/session/drafts.ts";
+  import { lgQuery } from "../lib/shell/breakpoint.ts";
   import { channelsStore } from "../lib/session/channels.svelte";
   import { tagmaForConversation } from "../lib/session/convOf.ts";
   import { createUnresolvedGuard } from "../lib/session/unresolvedGuard.svelte.ts";
@@ -341,15 +342,15 @@
     }
   }
   let sideWanted = $state(readStoredSide());
-  const lgQuery = matchMedia("(min-width: 64rem)");
+  const lgMql = matchMedia(lgQuery);
   // Seed from the query's current state: a "change" event only fires on
   // transitions, never for the state at subscribe time.
-  let lgMatches = $state(lgQuery.matches);
+  let lgMatches = $state(lgMql.matches);
   $effect(() => {
     const onChange = (event: MediaQueryListEvent) =>
       (lgMatches = event.matches);
-    lgQuery.addEventListener("change", onChange);
-    return () => lgQuery.removeEventListener("change", onChange);
+    lgMql.addEventListener("change", onChange);
+    return () => lgMql.removeEventListener("change", onChange);
   });
   const sideLayout = $derived(sideWanted && lgMatches);
 

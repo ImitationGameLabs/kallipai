@@ -219,9 +219,9 @@ mod tests {
             "kallip inbox done",
             "kallip inbox clear",
             // turns
-            "kallip turns list",
-            "kallip turns show",
-            "kallip turns export",
+            "kallip history list",
+            "kallip history show",
+            "kallip history export",
         ];
         for leaf in leaves {
             assert!(
@@ -285,9 +285,10 @@ mod tests {
     fn render_carries_the_turns_examples() {
         let out = render();
         for example in [
-            "kallip turns list my-agent",
-            "kallip turns show my-agent 142 --call 1 --body",
-            "kallip turns export my-agent --out turns.json",
+            "kallip history list my-agent",
+            "kallip history show my-agent 142 --call 1 --body",
+            "kallip history show my-agent 142 --message 0 --body --part reasoning",
+            "kallip history export my-agent --out history.json",
         ] {
             assert!(out.contains(example), "reference is missing {example}");
         }

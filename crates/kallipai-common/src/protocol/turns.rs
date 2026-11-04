@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 
 /// Version of the read face. Bumped when a field changes meaning or goes
 /// away, so an older client stops instead of misreading a page.
-pub const TURN_SCHEMA_VERSION: u32 = 1;
+pub const TURN_SCHEMA_VERSION: u32 = 3;
 
 /// Rows per page when the request carries no `limit`.
 pub const TURNS_PAGE_LIMIT_DEFAULT: u32 = 50;
@@ -31,21 +31,34 @@ pub const TURNS_PAGE_LIMIT_MAX: u32 = 200;
 /// a byte bound on its own.
 pub const TURNS_PAGE_MAX_BYTES: usize = 128 * 1024;
 
-/// Characters in a shortened text field: half from the head, half from the
-/// tail, the middle elided. Tool arguments and message text can both be
-/// enormous, and the identifying facts sit at the ends.
-pub const TEXT_CUT_CHARS: usize = 400;
+/// Characters a list row keeps of an argument or a first error line: a strict
+/// prefix, because the detail face reads on from a prefix and a tail has no
+/// offset to continue from. A list row is a summary, so the number lives here
+/// and nowhere on the page.
+pub const PAGE_TEXT_INLINE_CHARS: usize = 400;
 
-/// Bytes per call-body range read when the request carries no `limit`.
+/// Bytes of a text the detail face carries whole. Equal to
+/// [`CALL_BODY_LIMIT_DEFAULT`] by an assertion in the test below rather than by
+/// aliasing: one answers how much a detail response holds, the other how much a
+/// body read hands back, and a change to one should have to face the other.
+pub const DETAIL_TEXT_INLINE_BYTES: usize = 16 * 1024;
+
+/// Bytes per body range read when the request carries no `limit`: a call's
+/// text and a message's text read through this one bound.
 pub const CALL_BODY_LIMIT_DEFAULT: usize = 16 * 1024;
 
-/// Bytes per call-body range read, clamped to this.
+/// Bytes per body range read, clamped to this.
 pub const CALL_BODY_MAX_BYTES: usize = 64 * 1024;
 
 /// Stands in for a spill path: a tool stream parked in a temporary file. The
 /// file is temporary and may already be gone, so the read face reports the
 /// reclaim — it never hands out a path to follow.
 pub const SPILL_RECLAIMED: &str = "[temporary stream reclaimed]";
+/// Keeps a `false` prefix bit off the wire: a page carries no bit at all, and a
+/// detail row says "more" only by carrying one.
+fn is_false(flag: &bool) -> bool {
+    !*flag
+}
 
 /// Query for one page of turns.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -66,6 +79,69 @@ pub struct TurnsQuery {
 /// Query for one range of a call's text.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CallBodyQuery {
+    /// Which text to read; absent reads the call's result record.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub part: Option<CallPart>,
+    /// Byte offset into the cleaned text.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub offset: Option<u64>,
+    /// Bytes wanted, clamped to 1..=[`CALL_BODY_MAX_BYTES`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+}
+
+/// Which text of a message a body read addresses.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TextPart {
+    /// The message's own text.
+    #[default]
+    Text,
+    /// The reasoning text stored beside it.
+    Reasoning,
+}
+
+impl TextPart {
+    /// The name this part goes by on the wire and in messages.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TextPart::Text => "text",
+            TextPart::Reasoning => "reasoning",
+        }
+    }
+}
+
+/// Which text of a call a body read addresses.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CallPart {
+    /// The tool-result record the log kept for the call.
+    #[default]
+    Result,
+    /// The arguments the model sent.
+    Args,
+    /// The record's `error` field: the text a call row's first line is
+    /// taken from.
+    Error,
+}
+
+impl CallPart {
+    /// The name this part goes by on the wire and in messages.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CallPart::Result => "result",
+            CallPart::Args => "args",
+            CallPart::Error => "error",
+        }
+    }
+}
+
+/// Query for one range of a message's text.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MessageBodyQuery {
+    /// Which text to read; absent reads the message's own.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub part: Option<TextPart>,
     /// Byte offset into the cleaned text.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub offset: Option<u64>,
@@ -149,9 +225,16 @@ pub struct CallRow {
     pub call_index: u32,
     pub call_id: String,
     pub name: String,
-    /// The arguments as the model sent them, shortened to
-    /// [`TEXT_CUT_CHARS`].
+    /// The arguments as the model sent them, as a prefix: at most
+    /// [`DETAIL_TEXT_INLINE_BYTES`] bytes on the detail face, at most
+    /// [`PAGE_TEXT_INLINE_CHARS`] characters on a page. A page carries no bit.
     pub args: String,
+    /// A prefix of this text; the rest reads from the byte range that starts
+    /// where this prefix ends, at an offset equal to the prefix's byte length
+    /// (never either cap). Detail face only: absent on a page, and absent when
+    /// the text is whole.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub args_more: bool,
     /// False when the call never produced a readable result.
     pub ok: bool,
     /// Present when the tool asked for approval; the call may then have no
@@ -179,40 +262,54 @@ pub struct CallRow {
     pub timed_out: Option<bool>,
     /// Whether the tool's own output was cut before it was returned.
     pub truncated: bool,
-    /// The first line of the error, shortened — the fact a list is scanned
-    /// for.
+    /// The first line of the error — the fact a list is scanned for — as a
+    /// prefix: [`DETAIL_TEXT_INLINE_BYTES`] bytes on the detail face,
+    /// [`PAGE_TEXT_INLINE_CHARS`] characters on a page.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub first_error_line: Option<String>,
+    /// A prefix of the first error line; same rule as [`Self::args_more`].
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub error_more: bool,
+    /// Bytes of the whole error in the record, spill paths included: what a
+    /// reader needs to tell a one-line failure from a wall of traceback.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_bytes: Option<u64>,
+    /// Lines in the error, counted as `str::lines` counts them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_lines: Option<u64>,
 }
 
 /// One message of a turn.
 ///
 /// A page carries shape only (`chars`, flags) because a page of full text
-/// would be unbounded; a turn detail carries the shortened text too, and
-/// with it the shortened reasoning text.
+/// would be unbounded; a turn detail carries the text too, up to its byte
+/// cap, and with it the reasoning text.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MessageRow {
     pub role: String,
-    /// Characters in the message text as the record holds it: counted before
-    /// any spill path is reclaimed and before any shortening.
+    /// Characters in the message text as a reader sees it: counted after
+    /// spill paths are reclaimed, and before any shortening.
     pub chars: usize,
     /// Whether the message carried reasoning content.
     pub has_reasoning: bool,
-    /// Whether `text` was shortened to [`TEXT_CUT_CHARS`].
-    pub truncated: bool,
-    /// The shortened, cleaned text; absent on a page.
+    /// The cleaned text, as a prefix: all of it unless it is longer than
+    /// [`DETAIL_TEXT_INLINE_BYTES`] bytes. Absent on a page.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
-    /// The shortened, cleaned reasoning text; absent on a page and absent
+    /// A prefix of the text; the rest reads from the byte range that starts
+    /// where this prefix ends, at an offset equal to the prefix's byte length
+    /// (never either cap). Absent on a page and absent when the text is whole.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub text_more: bool,
+    /// The cleaned reasoning text, as a prefix; absent on a page and absent
     /// when the record kept a reasoning flag with nothing to show: no text,
     /// or a text that is blank throughout. Detail-only: a page leaves it
     /// out so each row keeps its shape.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<String>,
-    /// Whether `reasoning` was shortened to [`TEXT_CUT_CHARS`]. Absent
-    /// unless it is true, so a page carries not a byte more than before.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub reasoning_truncated: bool,
+    /// A prefix of the reasoning text; same rule as [`Self::text_more`].
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub reasoning_more: bool,
 }
 
 /// One turn, text included.
@@ -238,6 +335,8 @@ pub struct CallBody {
     pub call_index: u32,
     pub call_id: String,
     pub name: String,
+    /// Which text this range walks.
+    pub part: CallPart,
     /// Byte offset this range starts at, in the cleaned text.
     pub offset: u64,
     /// Length of the whole cleaned text in bytes.
@@ -254,4 +353,49 @@ pub struct CallBody {
     /// Spill paths replaced in the whole cleaned text, not in this range:
     /// non-zero says the text pointed at a temporary file somewhere in it.
     pub reclaimed: u32,
+}
+
+/// A byte range of one message's text, as this face renders it.
+///
+/// The same shape as [`CallBody`], because a reader pages through both
+/// the same way. `role` is what a reader checks when it re-asks: it catches
+/// an index that moved to a message of another role, and says nothing
+/// about a move between two messages of the same role -- those differ by
+/// their text, not by this field.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MessageBody {
+    pub schema_version: u32,
+    pub turn_id: u64,
+    pub message_index: u32,
+    pub role: String,
+    /// Which text this range walks.
+    pub part: TextPart,
+    /// Byte offset this range starts at, in the cleaned text.
+    pub offset: u64,
+    /// Length of the whole cleaned text in bytes.
+    pub total_bytes: u64,
+    /// The range asked for, widened to the next character boundary when a
+    /// character straddles the limit: at most three bytes over. An offset at
+    /// or past the end of the text returns an empty range.
+    pub text: String,
+    /// True when this range stops before the end of the cleaned text.
+    pub truncated: bool,
+    /// Offset to ask for next; absent at the end.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_offset: Option<u64>,
+    /// Spill paths replaced in the whole cleaned text, not in this range:
+    /// non-zero says the text pointed at a temporary file somewhere in it.
+    pub reclaimed: u32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CALL_BODY_LIMIT_DEFAULT, DETAIL_TEXT_INLINE_BYTES};
+
+    /// The detail face carries a text whole exactly as far as one body read
+    /// hands it back, so a reader never meets a gap between the two.
+    #[test]
+    fn the_detail_cap_is_one_body_read() {
+        assert_eq!(DETAIL_TEXT_INLINE_BYTES, CALL_BODY_LIMIT_DEFAULT);
+    }
 }

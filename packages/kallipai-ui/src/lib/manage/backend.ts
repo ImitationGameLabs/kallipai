@@ -17,12 +17,15 @@ import {
 import { KallipaiError, parseErrorEnvelope } from "@kallipai/kallipai-common";
 import type {
   AgentStatusResponse,
+  BodyRange,
   BudgetResponse,
   BudgetUpdateRequest,
+  CallPart,
   CallBody,
   DeleteSetResponse,
   ListAgentsManagementResponse,
   ListAgentsQuery,
+  MessageBody,
   ProfileApplyResponse,
   ProfileConfig,
   ProfileConfigPutRequest,
@@ -37,6 +40,7 @@ import type {
   TaskListPage,
   TaskListQuery,
   TaskNoteRequest,
+  TextPart,
   TurnDetail,
   TurnQuery,
   TurnsPage,
@@ -44,6 +48,16 @@ import type {
   UpdateDutyRequest,
   WorkSchedule,
 } from "@kallipai/kallipai-client";
+
+/** The query string a body read sends; empty when nothing was asked. */
+function bodyQuery(query?: BodyRange): string {
+  const params = new URLSearchParams();
+  if (query?.part) params.set("part", query.part);
+  if (query?.offset !== undefined) params.set("offset", String(query.offset));
+  if (query?.limit !== undefined) params.set("limit", String(query.limit));
+  const qs = params.toString();
+  return qs ? `?${qs}` : "";
+}
 
 /** A live projection-dirty subscription, when the transport has
  * one (OnlineBackend over the keryx state SSE). `subscribe` starts the
@@ -97,14 +111,20 @@ export interface ManagementBackend {
   exportAllTasks(): Promise<TaskExport[]>;
   getTimezone(): Promise<{ timezone: string | null }>;
   putTimezone(timezone: string | null): Promise<{ timezone: string | null }>;
-  turns(id: string, query?: TurnQuery): Promise<TurnsPage>;
+  history(id: string, query?: TurnQuery): Promise<TurnsPage>;
   turn(id: string, turnId: number): Promise<TurnDetail>;
   callBody(
     id: string,
     turnId: number,
     callIndex: number,
-    offset?: number,
+    query?: BodyRange<CallPart>,
   ): Promise<CallBody>;
+  messageBody(
+    id: string,
+    turnId: number,
+    messageIndex: number,
+    query?: BodyRange<TextPart>,
+  ): Promise<MessageBody>;
 }
 
 // --- OfflineBackend (wraps TagmaClient) ---
@@ -217,14 +237,28 @@ export class OfflineBackend implements ManagementBackend {
   putTimezone(timezone: string | null) {
     return this.client.putTimezone(timezone);
   }
-  turns(id: string, query?: TurnQuery) {
-    return this.client.turns(id, query);
+  history(id: string, query?: TurnQuery) {
+    return this.client.history(id, query);
   }
   turn(id: string, turnId: number) {
     return this.client.turn(id, turnId);
   }
-  callBody(id: string, turnId: number, callIndex: number, offset?: number) {
-    return this.client.callBody(id, turnId, callIndex, offset);
+  callBody(
+    id: string,
+    turnId: number,
+    callIndex: number,
+    query?: BodyRange<CallPart>,
+  ) {
+    return this.client.callBody(id, turnId, callIndex, query);
+  }
+
+  messageBody(
+    id: string,
+    turnId: number,
+    messageIndex: number,
+    query?: BodyRange<TextPart>,
+  ) {
+    return this.client.messageBody(id, turnId, messageIndex, query);
   }
 }
 
@@ -422,7 +456,7 @@ export class OnlineBackend implements ManagementBackend {
     if (result.status >= 400) throw parseError(result.status, result.body);
   }
 
-  /** The turn family is text: its three reads carry session content, so the
+  /** The turn family is text: its reads carry session content, so the
    * plaintext manage frame enumerates none of them and they ride the E2E
    * envelope instead. The channel's shared deadline covers a page read. */
   private async envelopeGet<T>(path: string): Promise<T> {
@@ -434,27 +468,42 @@ export class OnlineBackend implements ManagementBackend {
     return result.body as T;
   }
 
-  turns(id: string, query?: TurnQuery) {
+  history(id: string, query?: TurnQuery) {
     const params = new URLSearchParams();
     if (query?.day) params.set("day", query.day);
     if (query?.before) params.set("before", query.before);
     if (query?.limit !== undefined) params.set("limit", String(query.limit));
     const qs = params.toString();
     return this.envelopeGet<TurnsPage>(
-      `/agents/${encodeURIComponent(id)}/turns${qs ? `?${qs}` : ""}`,
+      `/agents/${encodeURIComponent(id)}/history${qs ? `?${qs}` : ""}`,
     );
   }
 
   turn(id: string, turnId: number) {
     return this.envelopeGet<TurnDetail>(
-      `/agents/${encodeURIComponent(id)}/turns/${turnId}`,
+      `/agents/${encodeURIComponent(id)}/history/${turnId}`,
     );
   }
 
-  callBody(id: string, turnId: number, callIndex: number, offset?: number) {
-    const qs = offset === undefined ? "" : `?offset=${offset}`;
+  callBody(
+    id: string,
+    turnId: number,
+    callIndex: number,
+    query?: BodyRange<CallPart>,
+  ) {
     return this.envelopeGet<CallBody>(
-      `/agents/${encodeURIComponent(id)}/turns/${turnId}/calls/${callIndex}/body${qs}`,
+      `/agents/${encodeURIComponent(id)}/history/${turnId}/calls/${callIndex}/body${bodyQuery(query)}`,
+    );
+  }
+
+  messageBody(
+    id: string,
+    turnId: number,
+    messageIndex: number,
+    query?: BodyRange<TextPart>,
+  ) {
+    return this.envelopeGet<MessageBody>(
+      `/agents/${encodeURIComponent(id)}/history/${turnId}/messages/${messageIndex}/body${bodyQuery(query)}`,
     );
   }
 

@@ -331,6 +331,36 @@ Deno.test("catalog: values are non-empty in both locales", () => {
   }
 });
 
+// Words in the tool area: the two roles, the call count, the two halves of a
+// call, its stream names, and the controls a reader presses there. The
+// operator ruled that the tool area reads English throughout, so these carry
+// the same text in both locales and a change to one side alone is a mistake,
+// not a translation. Sentences that explain a record stay in the reader's
+// language.
+const SHARED_TERMS: Record<string, string> = {
+  manage_turns_shape_user: "User",
+  manage_turns_shape_assistant: "Assistant",
+  manage_turns_calls_label: "Tool calls",
+  manage_turns_args_label: "Args",
+  manage_turns_result_label: "Result",
+  manage_turns_stdout_label: "stdout",
+  manage_turns_stderr_label: "stderr",
+  manage_turns_structured: "Structured",
+  manage_turns_raw: "Raw",
+  manage_turns_view_switch: "View",
+  manage_turns_show_original: "Read text",
+};
+
+Deno.test(
+  "catalog: the shared tool words read the same in both locales",
+  () => {
+    for (const [key, word] of Object.entries(SHARED_TERMS)) {
+      assertEquals(en[key], word, `${key} must read as the term`);
+      assertEquals(zh[key], word, `${key} must read the same in zh`);
+    }
+  },
+);
+
 // Prefix vocabulary is closed: a key's prefix names its domain (cross-surface
 // copy like auth_/signal_) or its page (nav_/settings_). The bare manage_
 // prefix is reserved for manage-section layout state shared across pages.

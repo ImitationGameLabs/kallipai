@@ -4,6 +4,7 @@
   import type { ComposerModel } from "../lib/composer.svelte";
   import { composerKeyIntent } from "../lib/composerKeys.ts";
   import { MENTION_LIST_ID } from "../lib/mentions.ts";
+  import { desktopQuery } from "../lib/shell/breakpoint.ts";
   import {
     composer_placeholder,
     composer_message_aria,
@@ -124,7 +125,7 @@
   // and 240px cap. Mirrors the AppShell mdQuery listener pattern; the
   // measure effect below re-runs on the flip (post-flush), so the rows
   // attribute and the cap are both current when the height is recomputed.
-  const mdQuery = matchMedia("(min-width: 48rem)");
+  const mdQuery = matchMedia(desktopQuery);
   let desktop = $state(mdQuery.matches);
   $effect(() => {
     const onChange = (event: MediaQueryListEvent) => {

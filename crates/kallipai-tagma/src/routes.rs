@@ -144,14 +144,21 @@ pub fn router() -> Router<SharedState> {
             axum::routing::put(agent::update_activity),
         )
         .route("/agents/{id}/duty", axum::routing::put(agent::update_duty))
-        .route("/agents/{id}/turns", axum::routing::get(turns::list_turns))
         .route(
-            "/agents/{id}/turns/{turn_id}",
+            "/agents/{id}/history",
+            axum::routing::get(turns::list_turns),
+        )
+        .route(
+            "/agents/{id}/history/{turn_id}",
             axum::routing::get(turns::get_turn),
         )
         .route(
-            "/agents/{id}/turns/{turn_id}/calls/{call_index}/body",
+            "/agents/{id}/history/{turn_id}/calls/{call_index}/body",
             axum::routing::get(turns::get_call_body),
+        )
+        .route(
+            "/agents/{id}/history/{turn_id}/messages/{message_index}/body",
+            axum::routing::get(turns::get_message_body),
         )
         .route(
             "/agents/{id}/inbox",

@@ -7,15 +7,18 @@ import {
 import type { AgentId, FileAttachment } from "@kallipai/kallipai-common";
 import type {
   AgentStatusResponse,
+  BodyRange,
   BudgetResponse,
   BudgetUpdateRequest,
   CallBody,
+  CallPart,
   DeleteSetResponse,
   DirectMessageRow,
   ExternalHistoryResponse,
   LescheSessionEntry,
   ListAgentsManagementResponse,
   ListAgentsQuery,
+  MessageBody,
   MessageResponse,
   ProfileApplyResponse,
   ProfileConfig,
@@ -31,6 +34,7 @@ import type {
   TaskListPage,
   TaskListQuery,
   TaskNoteRequest,
+  TextPart,
   TurnDetail,
   TurnQuery,
   TurnsPage,
@@ -43,6 +47,16 @@ import type {
 export interface TagmaClientOptions {
   readonly baseUrl: string;
   readonly authToken?: string;
+}
+
+/** The query string a body read sends; empty when nothing was asked. */
+function bodyQuery(query?: BodyRange): string {
+  const params = new URLSearchParams();
+  if (query?.part) params.set("part", query.part);
+  if (query?.offset !== undefined) params.set("offset", String(query.offset));
+  if (query?.limit !== undefined) params.set("limit", String(query.limit));
+  const qs = params.toString();
+  return qs ? `?${qs}` : "";
 }
 
 /**
@@ -468,40 +482,56 @@ export class TagmaClient {
 
   // --- management: turn history ---
 
-  /** GET /agents/{id}/turns -- one page of an agent's turn log, newest
+  /** GET /agents/{id}/history -- one page of an agent's turn log, newest
    * first. `before` is the previous page's `next_cursor` (older); absent
    * when the log is exhausted. */
-  turns(id: string, query?: TurnQuery): Promise<TurnsPage> {
+  history(id: string, query?: TurnQuery): Promise<TurnsPage> {
     const params = new URLSearchParams();
     if (query?.day) params.set("day", query.day);
     if (query?.before) params.set("before", query.before);
     if (query?.limit !== undefined) params.set("limit", String(query.limit));
     const qs = params.toString();
     return this.json<TurnsPage>(
-      `/agents/${encodeURIComponent(id)}/turns${qs ? `?${qs}` : ""}`,
+      `/agents/${encodeURIComponent(id)}/history${qs ? `?${qs}` : ""}`,
     );
   }
 
-  /** GET /agents/{id}/turns/{turn} -- one turn, its messages carrying the
+  /** GET /agents/{id}/history/{turn} -- one turn, its messages carrying the
    * shortened text and reasoning text a page leaves out. */
   turn(id: string, turnId: number): Promise<TurnDetail> {
     return this.json<TurnDetail>(
-      `/agents/${encodeURIComponent(id)}/turns/${turnId}`,
+      `/agents/${encodeURIComponent(id)}/history/${turnId}`,
     );
   }
 
-  /** GET /agents/{id}/turns/{turn}/calls/{index}/body -- one byte range of
-   * a call's stored text. Omit `offset` for the first range; follow
+  /** GET /agents/{id}/history/{turn}/calls/{index}/body -- one byte range of
+   * a call's stored text. `part` picks the result record (the default), the
+   * arguments or the error; omit `offset` for the first range and follow
    * `next_offset` for the next one. */
   callBody(
     id: string,
     turnId: number,
     callIndex: number,
-    offset?: number,
+    query?: BodyRange<CallPart>,
   ): Promise<CallBody> {
-    const qs = offset === undefined ? "" : `?offset=${offset}`;
+    const qs = bodyQuery(query);
     return this.json<CallBody>(
-      `/agents/${encodeURIComponent(id)}/turns/${turnId}/calls/${callIndex}/body${qs}`,
+      `/agents/${encodeURIComponent(id)}/history/${turnId}/calls/${callIndex}/body${qs}`,
+    );
+  }
+
+  /** GET /agents/{id}/history/{turn}/messages/{index}/body -- one byte
+   * range of one message's own text, or of the reasoning text stored beside
+   * it. Same paging as a call body. */
+  messageBody(
+    id: string,
+    turnId: number,
+    messageIndex: number,
+    query?: BodyRange<TextPart>,
+  ): Promise<MessageBody> {
+    const qs = bodyQuery(query);
+    return this.json<MessageBody>(
+      `/agents/${encodeURIComponent(id)}/history/${turnId}/messages/${messageIndex}/body${qs}`,
     );
   }
 }

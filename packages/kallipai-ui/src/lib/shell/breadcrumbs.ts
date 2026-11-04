@@ -18,6 +18,7 @@ import { roomsStore } from "../session/rooms.svelte.ts";
 import { RelayConversation } from "../session/conversation.svelte.ts";
 import { directSessionsStore } from "../session/directSessions.svelte.ts";
 import {
+  tagmaAgentPath,
   tagmaDetailsPath,
   tagmaDetailsSectionPath,
   type TagmaDetailsSection,
@@ -26,6 +27,7 @@ import {
   account_menu,
   chat_title_local,
   manage_gateway_menu,
+  manage_turns_heading,
   nav_budget,
   nav_breadcrumb_agents,
   nav_breadcrumb_tagma,
@@ -129,6 +131,22 @@ export const trailTable: TrailEntry[] = [
       // and the page header carries the role -- the same fallback branch the
       // page itself used before the trail moved here.
       { label: agentId.slice(0, 8), current: true },
+    ],
+  ),
+
+  // A turn history hangs off the agent page: the trail keeps the agent
+  // step (linked back to the detail page) and ends on the history page.
+  entry(
+    "/tagma/:id/details/agents/:agentId/history",
+    ({ id, agentId }: With<"id" | "agentId">) => [
+      { label: nav_home(), href: "/" },
+      { label: nav_breadcrumb_tagma(), href: tagmaDetailsPath(id) },
+      {
+        label: nav_breadcrumb_agents(),
+        href: tagmaDetailsSectionPath(id, "agents"),
+      },
+      { label: agentId.slice(0, 8), href: tagmaAgentPath(id, agentId) },
+      { label: manage_turns_heading(), current: true },
     ],
   ),
   entry("/rooms", () => [

@@ -52,14 +52,21 @@ fn manage_router() -> Router<SharedState> {
         .route("/agents/{id}/status", get(context::agent_status))
         .route("/agents/{id}/interrupt", post(agent::interrupt_agent))
         .route("/agents/{id}/duty", put(agent::update_duty))
-        .route("/agents/{id}/turns", get(crate::routes::turns::list_turns))
         .route(
-            "/agents/{id}/turns/{turn_id}",
+            "/agents/{id}/history",
+            get(crate::routes::turns::list_turns),
+        )
+        .route(
+            "/agents/{id}/history/{turn_id}",
             get(crate::routes::turns::get_turn),
         )
         .route(
-            "/agents/{id}/turns/{turn_id}/calls/{call_index}/body",
+            "/agents/{id}/history/{turn_id}/calls/{call_index}/body",
             get(crate::routes::turns::get_call_body),
+        )
+        .route(
+            "/agents/{id}/history/{turn_id}/messages/{message_index}/body",
+            get(crate::routes::turns::get_message_body),
         )
         .route("/agents/{id}/metadata", put(agent::update_metadata))
         .route("/agents/{id}/profile-set", put(agent::update_profile_set))
@@ -504,7 +511,7 @@ mod tests {
         let page = manage_send(
             &state,
             "GET",
-            &format!("/agents/{id}/turns"),
+            &format!("/agents/{id}/history"),
             Some("peer-1"),
             None,
         )
@@ -519,7 +526,7 @@ mod tests {
         let detail = manage_send(
             &state,
             "GET",
-            &format!("/agents/{id}/turns/4"),
+            &format!("/agents/{id}/history/4"),
             Some("peer-1"),
             None,
         )
@@ -529,7 +536,7 @@ mod tests {
         let body = manage_send(
             &state,
             "GET",
-            &format!("/agents/{id}/turns/4/calls/0/body"),
+            &format!("/agents/{id}/history/4/calls/0/body"),
             Some("peer-1"),
             None,
         )
@@ -599,7 +606,7 @@ mod tests {
         let page = manage_send(
             &state,
             "GET",
-            &format!("/agents/{id}/turns"),
+            &format!("/agents/{id}/history"),
             Some("peer-1"),
             None,
         )

@@ -326,9 +326,10 @@ mod manage_rest_tests {
             ("GET", "/completely/unknown"),
             // The turn history carries conversation text, so its reads
             // take the E2E envelope like every other content read.
-            ("GET", "/agents/x/turns"),
-            ("GET", "/agents/x/turns/7"),
-            ("GET", "/agents/x/turns/7/calls/0/body"),
+            ("GET", "/agents/x/history"),
+            ("GET", "/agents/x/history/7"),
+            ("GET", "/agents/x/history/7/calls/0/body"),
+            ("GET", "/agents/x/history/7/messages/0/body"),
             // The single-segment filter is the removal arm's safety
             // basis: a read on that path, a multi-segment tail, an empty
             // id and a lower-case method all stay off. A trailing slash

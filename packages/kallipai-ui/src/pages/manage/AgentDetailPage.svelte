@@ -16,6 +16,7 @@
   import type { ManagementBackend } from "../../lib/manage/backend.ts";
   import { navigate } from "../../lib/shell/port.ts";
   import { startVisibleInterval } from "../../lib/visibleInterval.ts";
+  import { agentHistoryPath } from "../../lib/shell/routes.ts";
   import ConfirmDialog from "../../components/ConfirmDialog.svelte";
   import AgentIdentityDialog from "../../components/manage/AgentIdentityDialog.svelte";
   import CopyButton from "../../components/CopyButton.svelte";
@@ -24,7 +25,6 @@
   import AgentStatusCard from "../../components/manage/AgentStatusCard.svelte";
   import AgentUsageCard from "../../components/manage/AgentUsageCard.svelte";
   import RetryListCard from "../../components/manage/RetryListCard.svelte";
-  import TurnHistoryCard from "../../components/manage/TurnHistoryCard.svelte";
 
   import {
     common_edit,
@@ -48,6 +48,9 @@
     manage_agent_interrupt,
     manage_agent_remove_agent,
     manage_agent_remove_agent_desc_short,
+    manage_turns_heading,
+    manage_turns_open,
+    manage_turns_open_hint,
   } from "../../paraglide/messages.js";
   let {
     id,
@@ -342,7 +345,18 @@
       {#if status.recent_retries.length > 0}
         <RetryListCard {status} />
       {/if}
-      <TurnHistoryCard {id} {backend} />
+      <section class="card preset-tonal-surface p-5 space-y-2">
+        <div class="flex flex-wrap items-center justify-between gap-2">
+          <h2 class="text-sm font-medium uppercase opacity-60 tracking-wide">
+            {manage_turns_heading()}
+          </h2>
+          <a
+            class="btn btn-sm preset-outlined-surface-500 hover:preset-filled-surface-500"
+            href={agentHistoryPath(basePath, id)}>{manage_turns_open()}</a
+          >
+        </div>
+        <p class="text-sm opacity-70">{manage_turns_open_hint()}</p>
+      </section>
     {/if}
 
     {#if agent}

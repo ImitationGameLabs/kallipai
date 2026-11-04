@@ -12,7 +12,8 @@ use axum::extract::{Path, Query, State};
 use kallipai_adk::history::view::{self, ViewError};
 use kallipai_common::agentid::AgentId;
 use kallipai_common::protocol::{
-    ApiError, CallBody, CallBodyQuery, TurnDetail, TurnsPage, TurnsQuery,
+    ApiError, CallBody, CallBodyQuery, MessageBody, MessageBodyQuery, TurnDetail, TurnsPage,
+    TurnsQuery,
 };
 
 use crate::state::SharedState;
@@ -55,10 +56,16 @@ fn map_view_error(error: ViewError) -> ApiError {
         ViewError::NoSuchCall(turn_id, call_index) => {
             ApiError::not_found(format!("no call {call_index} in turn {turn_id}"))
         }
+        ViewError::NoSuchMessage(turn_id, message_index) => {
+            ApiError::not_found(format!("no message {message_index} in turn {turn_id}"))
+        }
+        ViewError::NoSuchPart { at, part } => {
+            ApiError::not_found(format!("no {part} text at {at}"))
+        }
     }
 }
 
-/// `GET /agents/{id}/turns` — one page of the agent's turn log, newest first.
+/// `GET /agents/{id}/history` — one page of the agent's turn log, newest first.
 ///
 /// `day` pins the walk to one UTC day file, `before` continues from a previous
 /// page's `next_cursor`, and `limit` is clamped into the page bounds. Rows
@@ -77,12 +84,13 @@ pub async fn list_turns(
     ))
 }
 
-/// `GET /agents/{id}/turns/{turn_id}` — one turn, its message text included.
+/// `GET /agents/{id}/history/{turn_id}` — one turn, its message text included.
 ///
 /// Every message carries its own text, shortened head-and-tail; a tool
 /// message carries the result record the log stored for that call, cut the
 /// same way, and a stream that was spilled reads as reclaimed rather than as
-/// a path to follow. The full text is the call-body read below.
+/// a path to follow. The full text is the body reads below: one call's
+/// result, or one message's own text.
 pub async fn get_turn(
     State(state): State<SharedState>,
     _auth: crate::auth::AuthIdentity,
@@ -95,7 +103,7 @@ pub async fn get_turn(
     ))
 }
 
-/// `GET /agents/{id}/turns/{turn_id}/calls/{call_index}/body` — a byte range
+/// `GET /agents/{id}/history/{turn_id}/calls/{call_index}/body` — a byte range
 /// of one call's text.
 ///
 /// `offset` and `limit` walk the text the log holds for that call's result,
@@ -110,6 +118,25 @@ pub async fn get_call_body(
     require_history(&dir)?;
     Ok(Json(
         view::read_call_body(&dir, turn_id, call_index, &query).map_err(map_view_error)?,
+    ))
+}
+
+/// `GET /agents/{id}/history/{turn_id}/messages/{message_index}/body` — a
+/// byte range of one message's text.
+///
+/// `part` picks the message's own text or the reasoning text stored beside
+/// it; `offset` and `limit` walk the cleaned text, capped per request, and
+/// `next_offset` continues where a capped range stopped.
+pub async fn get_message_body(
+    State(state): State<SharedState>,
+    _auth: crate::auth::AuthIdentity,
+    Path((id, turn_id, message_index)): Path<(AgentId, u64, u32)>,
+    Query(query): Query<MessageBodyQuery>,
+) -> Result<Json<MessageBody>, ApiError> {
+    let dir = history_dir(&state, &id).await?;
+    require_history(&dir)?;
+    Ok(Json(
+        view::read_message_body(&dir, turn_id, message_index, &query).map_err(map_view_error)?,
     ))
 }
 

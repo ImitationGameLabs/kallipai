@@ -31,6 +31,7 @@ const MIGRATED_PAGES = [
   "./account/AccountHubPage.svelte",
   "./UserProfilePage.svelte",
   "./manage/OnlineAgentDetailPage.svelte",
+  "./manage/OnlineAgentHistoryPage.svelte",
 ].map((p) => new URL(p, import.meta.url));
 
 function source(url: URL): string {
@@ -51,8 +52,8 @@ Deno.test(
       "the chat path must not appear in the table (one target per label)",
     );
     assert(
-      src.split("entry(").length - 1 === 17,
-      "the table must cover the twelve migrated routes + the direct-session page + the files page + the three gateway pages",
+      src.split("entry(").length - 1 === 18,
+      "the table must cover the twelve migrated routes + the direct-session page + the files page + the three gateway pages + the agent turn history",
     );
   },
 );

@@ -53,6 +53,15 @@ Deno.test("the agent detail stays a drill to its agents section", () => {
   );
 });
 
+// The turn history hangs off the agent page: one more drill step, same
+// trail-derived back target.
+Deno.test("the agent turn history drills back to the agent detail", () => {
+  assertEquals(
+    mobileBack("/tagma/t-1/details/agents/a-9/history")?.href,
+    "/tagma/t-1/details/agents/a-9",
+  );
+});
+
 Deno.test("the tagma hub keeps its registry drill", () => {
   assertEquals(mobileBack("/tagma/t-1")?.href, "/tagmata");
 });

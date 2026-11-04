@@ -53,6 +53,7 @@
   } from "../paraglide/messages.js";
   import TagmaAgentRows from "./TagmaAgentRows.svelte";
   import UpstreamFacts from "./UpstreamFacts.svelte";
+  import { lgQuery } from "../lib/shell/breakpoint.ts";
   import AgentPills from "./AgentPills.svelte";
   import type { StatusCardRow } from "../lib/session/statusCard.svelte.ts";
   import type { FactView } from "@kallipai/kallipai-client";
@@ -83,13 +84,13 @@
   // status line owns the area), so the wrapping pill row is the one
   // form the top bar has.
 
-  const lgQuery = matchMedia("(min-width: 64rem)");
-  let lgMatches = $state(lgQuery.matches);
+  const lgMql = matchMedia(lgQuery);
+  let lgMatches = $state(lgMql.matches);
   $effect(() => {
     const onChange = (event: MediaQueryListEvent) =>
       (lgMatches = event.matches);
-    lgQuery.addEventListener("change", onChange);
-    return () => lgQuery.removeEventListener("change", onChange);
+    lgMql.addEventListener("change", onChange);
+    return () => lgMql.removeEventListener("change", onChange);
   });
 
   // The transient side panel behind the overflow chip: the same agent

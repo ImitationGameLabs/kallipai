@@ -1,7 +1,8 @@
 //! Turn-history client methods for [`TagmaClient`].
 //!
 //! Mirrors the read routes served by `kallipai-tagma` under
-//! `/agents/{id}/turns`: one page of the log, one turn, and one call's text.
+//! `/agents/{id}/history`: one page of the log, one turn, and a range of any
+//! text it holds, a call's or a message's.
 //! Every answer is computed by the tagma from the log it already keeps; the
 //! client never reads a history file itself, because a reader that parses the
 //! store turns the store's format into a contract.
@@ -9,7 +10,9 @@
 use super::TagmaClient;
 use anyhow::{Context, Result};
 use kallipai_common::agentid::AgentId;
-use kallipai_common::protocol::{CallBody, CallBodyQuery, TurnDetail, TurnsPage, TurnsQuery};
+use kallipai_common::protocol::{
+    CallBody, CallBodyQuery, MessageBody, MessageBodyQuery, TurnDetail, TurnsPage, TurnsQuery,
+};
 
 impl TagmaClient {
     /// One page of an agent's turns, newest first.
@@ -38,6 +41,20 @@ impl TagmaClient {
         serde_json::from_str(&document).context("parse call body")
     }
 
+    /// A byte range of one message's text, as the log holds it.
+    pub async fn message_body(
+        &self,
+        agent: &AgentId,
+        turn_id: u64,
+        message_index: u32,
+        query: &MessageBodyQuery,
+    ) -> Result<MessageBody> {
+        let document = self
+            .message_body_document(agent, turn_id, message_index, query)
+            .await?;
+        serde_json::from_str(&document).context("parse message body")
+    }
+
     /// The page as the tagma sent it, bytes and all. A reader that has to
     /// audit a newer view keeps the fields this build does not know, which a
     /// round trip through the typed view would drop.
@@ -46,7 +63,7 @@ impl TagmaClient {
             .with_auth(
                 self.inner
                     .http
-                    .get(self.url(&format!("/agents/{agent}/turns")))
+                    .get(self.url(&format!("/agents/{agent}/history")))
                     .query(query),
             )
             .send()
@@ -62,7 +79,7 @@ impl TagmaClient {
             .with_auth(
                 self.inner
                     .http
-                    .get(self.url(&format!("/agents/{agent}/turns/{turn_id}"))),
+                    .get(self.url(&format!("/agents/{agent}/history/{turn_id}"))),
             )
             .send()
             .await
@@ -84,7 +101,7 @@ impl TagmaClient {
                 self.inner
                     .http
                     .get(self.url(&format!(
-                        "/agents/{agent}/turns/{turn_id}/calls/{call_index}/body"
+                        "/agents/{agent}/history/{turn_id}/calls/{call_index}/body"
                     )))
                     .query(query),
             )
@@ -93,5 +110,29 @@ impl TagmaClient {
             .context("read call body")?;
         let response = self.ensure_success(response).await?;
         response.text().await.context("read call body document")
+    }
+
+    /// One message's text range as the tagma sent it.
+    pub async fn message_body_document(
+        &self,
+        agent: &AgentId,
+        turn_id: u64,
+        message_index: u32,
+        query: &MessageBodyQuery,
+    ) -> Result<String> {
+        let response = self
+            .with_auth(
+                self.inner
+                    .http
+                    .get(self.url(&format!(
+                        "/agents/{agent}/history/{turn_id}/messages/{message_index}/body"
+                    )))
+                    .query(query),
+            )
+            .send()
+            .await
+            .context("read message body")?;
+        let response = self.ensure_success(response).await?;
+        response.text().await.context("read message body document")
     }
 }

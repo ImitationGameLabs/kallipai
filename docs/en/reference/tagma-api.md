@@ -78,9 +78,10 @@ single operator comparison additionally uses a constant-time compare.
 | `GET`    | `/agents/{id}/exec-policy`                            | Read the `bash_exec` per-command overrides                                                                      | any                          |
 | `PUT`    | `/agents/{id}/exec-policy`                            | Update the `bash_exec` overrides (strictly monotonic)                                                           | operator / superior          |
 | `GET`    | `/agents/{id}/verify`                                 | Confirm a bearer matches this agent (`204`/`401`)                                                               | any (self-consistent)        |
-| `GET`    | `/agents/{id}/turns`                                  | One page of the agent's turn log (rows carry no message text)                                                    | any                          |
-| `GET`    | `/agents/{id}/turns/{turn_id}`                        | One turn, message text included                                                                                 | any                          |
-| `GET`    | `/agents/{id}/turns/{turn_id}/calls/{call_index}/body` | A byte range of one call's stored result text                                                                   | any                          |
+| `GET`    | `/agents/{id}/history`                                  | One page of the agent's turn log (rows carry no message text)                                                    | any                          |
+| `GET`    | `/agents/{id}/history/{turn_id}`                        | One turn, message text included                                                                                 | any                          |
+| `GET`    | `/agents/{id}/history/{turn_id}/calls/{call_index}/body` | A byte range of one call's stored result text                                                                   | any                          |
+| `GET`    | `/agents/{id}/history/{turn_id}/messages/{message_index}/body` | A byte range of one message's text                                                                        | any                          |
 | `PUT`    | `/profiles/default`                                   | Transfer the default-set marker                                                                                 | operator                     |
 | `DELETE` | `/profiles/sets/{name}`                               | Remove a set (`?force=true` interrupts)                                                                         | operator                     |
 | `GET`    | `/profiles`                                           | Read the profile config (masked)                                                                                | operator                     |
@@ -773,22 +774,22 @@ demand, so none of it can drift from what was recorded.
 
 > A relay client (the web app talking to the tagma through lesche) reads
 > these routes over the E2E envelope channel rather than the plaintext
-> manage frame: a page row, a call body and a detail read carry session
+> manage frame: a page row, a detail read and the call and message body
 > text, so the frame allowlist fails them closed with `404 not on the manage
 > frame surface`.
 > Clients reaching the tagma directly (the CLI, a client on the tagma's own
 > host, the Rust client) are unaffected: they speak plain HTTP.
 
 Every text this face takes from the log — tool arguments and error lines on a
-page, message text on a detail read, call bodies — has its spill paths
-reclaimed; the log keeps the text it wrote, and only the body route reports
-how many were replaced.
+page, message text on a detail read, call and message bodies — has its
+spill paths reclaimed; the log keeps the text it wrote, and only the body
+routes report how many were replaced.
 
 Auth: any authenticated identity may read any agent's turns, faulted agents
 included (a dead agent's directory outlives its process). An unknown agent, an
 agent with no directory, and an agent with no history log are all `404`.
 
-#### `GET /agents/{id}/turns`: One Page of Turns
+#### `GET /agents/{id}/history`: One Page of Turns
 
 Query: `day` (`YYYY-MM-DD`, pins the walk to that UTC day file and is
 not checked for existence), `before` (a `next_cursor` from a previous
@@ -885,7 +886,7 @@ face.
         }
       ],
       "messages": [
-        {"role": "user", "chars": 120, "has_reasoning": false, "truncated": false}
+        {"role": "user", "chars": 120, "has_reasoning": false}
       ]
     }
   ],
@@ -904,44 +905,74 @@ reports `ok: false` and no result facts.
 
 `calls[].stdout_bytes`, `stdout_lines` and the stderr pair measure the
 stream as the record holds it — spill paths included, nothing shortened —
-and a last line with no line end still counts as one. `messages[].chars` is
-the record's own length in the same way, before reclaim and before any cut.
+and a last line with no line end still counts as one. `messages[].chars`
+counts the text a reader sees: spill paths reclaimed, nothing cut.
 
-#### `GET /agents/{id}/turns/{turn_id}`: One Turn
+#### `GET /agents/{id}/history/{turn_id}`: One Turn
 
-The same row with `messages[].text` filled in: each message's own text,
-shortened to about 400 characters (200 from the head, a separator, 200 from
-the tail, with `truncated` marking the cut). A tool message carries the
-result record the log stored for that call, cut the same way; the full text
-is the call-body read below.
+The same row with `messages[].text` filled in: each message's own text, whole
+unless it is longer than 16 KiB, in which case `text` holds a prefix and
+`text_more: true` says the rest is a body read. A call row's arguments follow
+the same byte rule on this face; a page instead carries the first 400
+characters of them, a summary with no bit and no tail. `chars` counts the text
+as the log holds it on either face: spill paths reclaimed, nothing cut.
 
-On a message that carried reasoning, `messages[].reasoning` carries its text
-shortened by the same rule, `messages[].reasoning_truncated` marking the cut.
-A record that kept the flag but no text, or a text that is blank
-throughout, has `has_reasoning: true` and no `reasoning` key at all; a
-page leaves `reasoning` out, so its rows keep the shape shown above.
+A tool message carries the result record the log stored for that call, by the
+same rule; the full text is the body reads below.
+
+On a message that carried reasoning, `messages[].reasoning` carries the
+reasoning text by the same byte rule, and `reasoning_more` marks a prefix. A
+record that kept the flag but no text, or a text blank throughout, has
+`has_reasoning: true` and no `reasoning` key at all; a page leaves `reasoning`
+out, so its rows keep the shape shown above.
+
+A call row's `first_error_line` is the first line of the error by the same
+rule, with `error_more` its prefix bit; `error_bytes` and `error_lines`
+measure the whole error, which is what tells a one-line failure from a wall of
+traceback. A row that reported no error carries no `first_error_line` key.
+A first line that fits the cap while more lines follow carries no `error_more`:
+`error_lines` is what says the error ran on, and a reader continues from the
+byte this line ends at.
 
 ```json
 {
   "role": "assistant",
-  "chars": 9000,
+  "chars": 10,
   "has_reasoning": true,
-  "truncated": true,
-  "text": "head of the text … tail of the text",
-  "reasoning": "head of the reasoning … tail of the reasoning",
-  "reasoning_truncated": true
+  "text": "all of it.",
+  "reasoning": "head of a reasoning text past 16 KiB",
+  "reasoning_more": true
 }
 ```
 
-#### `GET /agents/{id}/turns/{turn_id}/calls/{call_index}/body`: One Call's Text
+```json
+{
+  "call_index": 0,
+  "name": "bash_exec",
+  "args": "head of an arguments text past 16 KiB",
+  "args_more": true,
+  "ok": false,
+  "truncated": false,
+  "first_error_line": "error: could not compile `kallip` due to 12 previous errors",
+  "error_bytes": 40960,
+  "error_lines": 812
+}
+```
 
-Query: `offset` (byte offset into the cleaned text) and `limit` (default
-16 KiB, clamped to 1..=64 KiB). The text is the record the log kept for that
-call — the tool-result JSON the tool answered with, `result.stdout` and its
-siblings included — never the bare stream, and never a file it points at.
-Spill paths are reclaimed before the range is taken, so `offset` addresses
-the text this route returns.
-`total_bytes`, `truncated`, and `next_offset` continue a long result in
+#### `GET /agents/{id}/history/{turn_id}/calls/{call_index}/body`: One Call's Text
+
+Query: `part` (`result`, the default, `args` for the arguments the model
+sent, or `error` for the record's error field), `offset` (byte offset into the
+cleaned text) and `limit` (default 16 KiB, clamped to 1..=64 KiB). The
+result text is the record the log kept for that call — the tool-result JSON
+the tool answered with, `result.stdout` and its siblings included — never
+the bare stream, and never a file it points at. Spill paths are reclaimed
+before the range is taken, so `offset` addresses the text this route returns.
+
+The response names the `part` it walked, beside the `turn_id`,
+`call_index`, `call_id` and `name` the row carries.
+
+`total_bytes`, `truncated`, and `next_offset` continue a long text in
 bounded reads; `reclaimed` counts the spill paths replaced in the whole
 cleaned text, not in this range.
 
@@ -954,6 +985,14 @@ Reclaiming works on whole path tokens: any token wrapping a
 reclaimed too. A stream the shell had to spill therefore reads as its clipped
 banner with the path replaced by `[temporary stream reclaimed]`: the file is
 temporary, and this face never sends a reader after it.
+
+#### `GET /agents/{id}/history/{turn_id}/messages/{message_index}/body`: One Message's Text
+
+Query: `part` (`text`, the default, or `reasoning`), `offset` and `limit`
+with the bounds the call body uses. The response is the same range shape a
+call body returns, with `message_index` and `role` in place of the call's
+identity: a reader that re-asks checks the role, because an index that no
+longer names the message it named before addresses a different message.
 
 ### Context & Policy
 

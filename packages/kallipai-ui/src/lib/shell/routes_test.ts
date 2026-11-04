@@ -1,5 +1,6 @@
 import { assert, assertEquals } from "@std/assert";
 import {
+  agentHistoryPath,
   adminGatewayCollectionPath,
   adminGatewayPath,
   filesPath,
@@ -32,6 +33,75 @@ Deno.test("tagmaDetailsSectionPath builds the details sections", () => {
 Deno.test("tagmaAgentPath builds the agent detail page route", () => {
   assertEquals(tagmaAgentPath("abc", "a1"), "/tagma/abc/details/agents/a1");
 });
+
+Deno.test(
+  "agentHistoryPath hangs the turn history off either base path",
+  () => {
+    assertEquals(
+      agentHistoryPath("/tagma/abc/details", "a1"),
+      "/tagma/abc/details/agents/a1/history",
+    );
+    assertEquals(
+      agentHistoryPath("/local/manage", "a1"),
+      "/local/manage/agents/a1/history",
+    );
+  },
+);
+
+/** The shells that serve the manage page, and where each one's route tree
+ * keeps the turn history. The path builder names the last segment; a rename
+ * there is only real when every host's tree carries the same one, which is
+ * what a page that 404s while every type still checks looks like. */
+const HISTORY_ROUTES = [
+  {
+    path: agentHistoryPath("/tagma/abc/details", "a1"),
+    pages: [
+      new URL(
+        "../../../../kallipai-web/src/routes/tagma/[id]/details/agents/[agentId]/history/+page.svelte",
+        import.meta.url,
+      ),
+      new URL(
+        "../../../../kallipai-app/src/routes/tagma/[id]/details/agents/[agentId]/history/+page.svelte",
+        import.meta.url,
+      ),
+    ],
+  },
+  {
+    path: agentHistoryPath("/local/manage", "a1"),
+    pages: [
+      new URL(
+        "../../../../kallipai-direct/src/routes/local/manage/agents/[id]/history/+page.svelte",
+        import.meta.url,
+      ),
+    ],
+  },
+];
+
+Deno.test(
+  "every shell serves the turn history page the builder names",
+  // Scoped read grant, same rationale as the details pages below: the two
+  // sides are written apart and can disagree while both still pass their
+  // own test, so read the trees and compare them with the built path.
+  { permissions: { read: HISTORY_ROUTES.flatMap(({ pages }) => [...pages]) } },
+  () => {
+    for (const { path, pages } of HISTORY_ROUTES) {
+      const segment = path.split("/").pop();
+      assert(segment, `${path} must name a page`);
+      for (const page of pages) {
+        const dir = new URL(".", page).pathname;
+        assert(
+          dir.endsWith(`/${segment}/`),
+          `${dir} must be the route the builder names (${segment})`,
+        );
+        const src = new TextDecoder().decode(Deno.readFileSync(page));
+        assert(
+          src.includes("AgentHistoryPage"),
+          `${page.pathname} must render the turn history page`,
+        );
+      }
+    }
+  },
+);
 
 const DETAILS_PAGES = [
   "overview",

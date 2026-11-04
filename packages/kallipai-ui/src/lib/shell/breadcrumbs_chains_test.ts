@@ -19,8 +19,11 @@ const { matchTrail, trailTable } = await import("./breadcrumbs.ts");
 const {
   manage_gateway_menu,
   nav_admin,
+  nav_breadcrumb_agents,
+  nav_breadcrumb_tagma,
   user_gateway_menu,
   nav_chats,
+  manage_turns_heading,
   nav_files,
   nav_home,
   nav_rooms,
@@ -123,5 +126,18 @@ Deno.test("the user gateway page keeps its home-first chain", () => {
   assertEquals(matchTrail("/gateway"), [
     { label: nav_home(), href: "/" },
     { label: user_gateway_menu(), current: true },
+  ]);
+});
+
+Deno.test("the agent turn history extends the agent chain", () => {
+  assertEquals(matchTrail("/tagma/t-1/details/agents/a-9/history"), [
+    { label: nav_home(), href: "/" },
+    { label: nav_breadcrumb_tagma(), href: "/tagma/t-1/details" },
+    {
+      label: nav_breadcrumb_agents(),
+      href: "/tagma/t-1/details/agents",
+    },
+    { label: "a-9", href: "/tagma/t-1/details/agents/a-9" },
+    { label: manage_turns_heading(), current: true },
   ]);
 });

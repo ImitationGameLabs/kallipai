@@ -38,6 +38,12 @@ export function tagmaAgentPath(tagmaId: string, agentId: string): string {
   return `${tagmaDetailsSectionPath(tagmaId, "agents")}/${agentId}`;
 }
 
+/** An agent's turn history beneath a manage base path: `/tagma/<uuid>/details`
+ * online, `/local/manage` offline, one shape for both host trees. */
+export function agentHistoryPath(basePath: string, agentId: string): string {
+  return `${basePath}/agents/${agentId}/history`;
+}
+
 /** The global files page: `/files` (the user-scope file manager). */
 export function filesPath(): string {
   return "/files";

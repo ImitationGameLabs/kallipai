@@ -546,7 +546,7 @@ fn a_spill_path_never_reaches_the_view() {
 #[test]
 fn the_page_stops_at_its_byte_cap() {
     let dir = agent_dir();
-    let long = "x".repeat(TEXT_CUT_CHARS);
+    let long = "x".repeat(PAGE_TEXT_INLINE_CHARS);
     for index in 0..4u64 {
         let calls: Vec<ToolCall> = (0..100)
             .map(|call| ToolCall {
@@ -639,6 +639,7 @@ fn a_call_body_ranges_over_the_stored_text() {
         5,
         0,
         &CallBodyQuery {
+            part: None,
             offset: Some(10),
             limit: Some(7),
         },
@@ -654,6 +655,7 @@ fn a_call_body_ranges_over_the_stored_text() {
         5,
         0,
         &CallBodyQuery {
+            part: None,
             offset: Some(whole.total_bytes),
             limit: Some(4),
         },
@@ -942,6 +944,7 @@ fn a_range_read_advances_past_characters_wider_than_its_limit() {
             8,
             0,
             &CallBodyQuery {
+                part: None,
                 offset: Some(at),
                 limit: Some(1),
             },
@@ -1002,8 +1005,9 @@ fn a_cut_character_does_not_hide_the_rest_of_the_day() {
     );
 }
 
-/// Counters measure the text the record holds, not the text this face shows:
-/// a spilled stream still reports what the tool produced.
+/// The stream counters measure the text the record holds, not the text this
+/// face shows: a spilled stream still reports what the tool produced. `chars`
+/// runs the other way -- it counts the text a reader sees.
 #[test]
 fn the_stream_counters_measure_the_record_not_the_rendering() {
     let dir = agent_dir();
@@ -1040,10 +1044,16 @@ fn the_stream_counters_measure_the_record_not_the_rendering() {
         .iter()
         .find(|message| message.role == "tool")
         .expect("the result row is a message");
+    let cleaned = tool.text.as_deref().expect("the detail carries the text");
     assert_eq!(
         tool.chars,
+        cleaned.chars().count(),
+        "chars counts the text a reader sees"
+    );
+    assert_ne!(
+        tool.chars,
         stored.chars().count(),
-        "chars counts the record's text, not the reclaimed one"
+        "the spill path it replaced was longer"
     );
     assert!(
         tool.text
@@ -1247,18 +1257,17 @@ fn a_page_stopped_by_its_row_limit_or_by_the_log_end_is_not_truncated() {
     assert!(whole_log.next_cursor.is_none(), "nothing follows");
 }
 
-/// The reasoning text is a detail-face fact: a page reports the flag, one
-/// turn hands back the shortened text, and a record holding only the
-/// redacted marker reports the flag with no text at all.
+/// The reasoning text is a detail-face fact: a page reports the flag and no
+/// text, and one turn hands the text back whole while it fits the byte cap.
 #[test]
-fn the_detail_face_carries_the_shortened_reasoning_text() {
+fn the_detail_face_carries_the_reasoning_text_whole() {
     let dir = agent_dir();
-    let long = "r".repeat(TEXT_CUT_CHARS + 20);
+    let long = "r".repeat(PAGE_TEXT_INLINE_CHARS + 20);
     let held = Message::assistant_tool_calls(
         Some("done".to_owned()),
         Vec::new(),
         Some(Reasoning {
-            text: Some(long),
+            text: Some(long.clone()),
             ..Reasoning::default()
         }),
     );
@@ -1283,24 +1292,25 @@ fn the_detail_face_carries_the_shortened_reasoning_text() {
 
     let detail = read_turn(dir.path(), 1).unwrap();
     let rows = &detail.turn.messages;
-    let text = rows[0].reasoning.as_deref().unwrap();
-    assert!(rows[0].reasoning_truncated, "the long text was shortened");
-    assert!(text.contains(" … "), "both ends survive: {text}");
-    assert_eq!(text.chars().count(), TEXT_CUT_CHARS + 3);
+    assert_eq!(
+        rows[0].reasoning.as_deref(),
+        Some(long.as_str()),
+        "the detail face carries the text as it stands"
+    );
+    assert!(!rows[0].reasoning_more, "the whole text fits the byte cap");
     assert!(rows[1].has_reasoning, "the marker alone is still reasoning");
     assert!(rows[1].reasoning.is_none(), "no text was stored");
-    assert!(!rows[1].reasoning_truncated, "nothing was shortened");
+    assert!(!rows[1].reasoning_more, "there is nothing to continue");
 
     let listed = read_turns_page(dir.path(), &query(Some("2026-10-01"), None, Some(10))).unwrap();
     assert_eq!(ids(&listed), vec![1]);
     for row in &listed.rows[0].messages {
         assert!(row.has_reasoning, "the flag survives the page");
         assert!(row.reasoning.is_none(), "a page carries the flag alone");
-        assert!(!row.reasoning_truncated, "a page reports no shortening");
         let encoded = serde_json::to_string(row).unwrap();
         assert!(
-            !encoded.contains("reasoning_truncated"),
-            "the flag leaves no trace on a page: {encoded}"
+            !encoded.contains("reasoning_more"),
+            "a page states no continuation it cannot serve: {encoded}"
         );
         assert!(
             !encoded.contains("\"reasoning\":"),
@@ -1364,7 +1374,7 @@ fn an_empty_reasoning_text_reads_as_no_text() {
     for row in &rows[..2] {
         assert!(row.has_reasoning, "the record kept a reasoning block");
         assert!(row.reasoning.is_none(), "a blank text is no text");
-        assert!(!row.reasoning_truncated, "nothing was shortened");
+        assert!(!row.reasoning_more, "there is nothing more to read");
     }
     assert_eq!(
         rows[2].reasoning.as_deref(),
@@ -1376,4 +1386,407 @@ fn an_empty_reasoning_text_reads_as_no_text() {
         Some("first\n\nsecond"),
         "a blank line inside a text is still a text"
     );
+}
+
+/// A detail row carries the text up to the byte cap and marks the rest; the
+/// body read starting where the row stops reaches exactly the remainder, so
+/// the row's length is the offset a reader continues from.
+#[test]
+fn a_message_row_marks_the_rest_and_the_body_read_continues_from_it() {
+    let dir = agent_dir();
+    let long = "m".repeat(DETAIL_TEXT_INLINE_BYTES + 20);
+    append(
+        dir.path(),
+        "2026-10-01",
+        &[record(
+            "2026-10-01T10:00:00Z",
+            1,
+            vec![Message::user(long.clone())],
+            None,
+        )],
+    );
+
+    let detail = read_turn(dir.path(), 1).unwrap();
+    let row = &detail.turn.messages[0];
+    let head = row.text.as_deref().unwrap();
+    assert_eq!(
+        head.len(),
+        DETAIL_TEXT_INLINE_BYTES,
+        "the row stops at the cap"
+    );
+    assert!(row.text_more, "the row states that the rest is a read");
+    assert_eq!(long.as_bytes()[head.len()], b'm', "the cut is an offset");
+
+    let rest = read_message_body(
+        dir.path(),
+        1,
+        0,
+        &MessageBodyQuery {
+            offset: Some(head.len() as u64),
+            ..MessageBodyQuery::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(rest.total_bytes, long.len() as u64);
+    assert_eq!(
+        format!("{head}{}", rest.text),
+        long,
+        "the prefix and the rest read back as one text"
+    );
+
+    let whole = read_message_body(
+        dir.path(),
+        1,
+        0,
+        &MessageBodyQuery {
+            limit: Some(CALL_BODY_MAX_BYTES),
+            ..MessageBodyQuery::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(whole.role, "user");
+    assert_eq!(whole.part, TextPart::Text);
+    assert_eq!(whole.text, long, "the range read reaches the whole text");
+}
+
+/// A cut never lands inside a character: a four-byte character straddling the
+/// byte cap moves the cut back to its start, so the row's length is a boundary
+/// a body read can start at.
+#[test]
+fn a_prefix_cut_lands_on_a_character_boundary() {
+    let dir = agent_dir();
+    let text = format!("{}😀tail", "a".repeat(DETAIL_TEXT_INLINE_BYTES - 2));
+    append(
+        dir.path(),
+        "2026-10-01",
+        &[record(
+            "2026-10-01T10:00:00Z",
+            2,
+            vec![Message::user(text.clone())],
+            None,
+        )],
+    );
+
+    let detail = read_turn(dir.path(), 2).unwrap();
+    let head = detail.turn.messages[0].text.clone().unwrap();
+    assert_eq!(
+        head.len(),
+        DETAIL_TEXT_INLINE_BYTES - 2,
+        "the cut steps back to the start of the character it would split"
+    );
+    assert!(detail.turn.messages[0].text_more, "the rest is a read");
+    assert!(
+        text.is_char_boundary(head.len()),
+        "the offset is a boundary"
+    );
+
+    let rest = read_message_body(
+        dir.path(),
+        2,
+        0,
+        &MessageBodyQuery {
+            offset: Some(head.len() as u64),
+            ..MessageBodyQuery::default()
+        },
+    )
+    .unwrap();
+    assert!(
+        rest.text.starts_with('😀'),
+        "the rest starts at the whole character: {:?}",
+        rest.text
+    );
+    assert_eq!(format!("{head}{}", rest.text), text);
+}
+
+/// The reasoning part reads on its own, and a message that kept no reasoning
+/// text is an error rather than an empty range.
+#[test]
+fn a_message_body_read_reaches_the_reasoning_text() {
+    let dir = agent_dir();
+    let held = Message::assistant_tool_calls(
+        Some("done".to_owned()),
+        Vec::new(),
+        Some(Reasoning {
+            text: Some("because".to_owned()),
+            ..Reasoning::default()
+        }),
+    );
+    append(
+        dir.path(),
+        "2026-10-01",
+        &[record(
+            "2026-10-01T10:00:00Z",
+            1,
+            vec![held, Message::user("plain")],
+            None,
+        )],
+    );
+
+    let reasoning = MessageBodyQuery {
+        part: Some(TextPart::Reasoning),
+        ..MessageBodyQuery::default()
+    };
+    let body = read_message_body(dir.path(), 1, 0, &reasoning).unwrap();
+    assert_eq!(body.part, TextPart::Reasoning);
+    assert_eq!(body.text, "because");
+
+    let missing = read_message_body(dir.path(), 1, 1, &reasoning).unwrap_err();
+    assert_eq!(
+        missing,
+        ViewError::NoSuchPart {
+            at: "turn 1 message 1".to_owned(),
+            part: "reasoning",
+        }
+    );
+}
+
+/// An index past the record is an error, and it says which index was asked
+/// for so a reader can re-read the turn and try again.
+#[test]
+fn a_message_index_past_the_record_is_an_error() {
+    let dir = agent_dir();
+    append(
+        dir.path(),
+        "2026-10-01",
+        &[record(
+            "2026-10-01T10:00:00Z",
+            1,
+            vec![Message::user("one")],
+            None,
+        )],
+    );
+
+    let missing = read_message_body(dir.path(), 1, 9, &MessageBodyQuery::default()).unwrap_err();
+    assert_eq!(missing, ViewError::NoSuchMessage(1, 9));
+}
+
+/// A call body read reaches the arguments and the error text a row holds,
+/// not only the result record.
+#[test]
+fn a_call_body_read_reaches_the_arguments_and_the_error() {
+    let dir = agent_dir();
+    let arguments = "a".repeat(PAGE_TEXT_INLINE_CHARS + 5);
+    let error = "first\nsecond".to_owned();
+    let envelope = ToolResultEnvelope {
+        ok: false,
+        tool_name: "bash_exec".to_owned(),
+        result: None,
+        error: Some(error.clone()),
+        pending_approval: None,
+        rest: serde_json::Map::new(),
+    };
+    let stored = serde_json::to_string(&envelope).unwrap();
+    let calls = vec![ToolCall {
+        id: "c1".to_owned(),
+        name: "bash_exec".to_owned(),
+        arguments: arguments.clone(),
+    }];
+    append(
+        dir.path(),
+        "2026-10-01",
+        &[record(
+            "2026-10-01T10:00:00Z",
+            7,
+            vec![
+                Message::assistant_tool_calls(None, calls, None),
+                Message::tool(stored, "c1"),
+            ],
+            None,
+        )],
+    );
+
+    let row = &read_turn(dir.path(), 7).unwrap().turn.calls[0];
+    assert_eq!(
+        row.args, arguments,
+        "the detail row carries the arguments as they stand"
+    );
+    assert!(!row.args_more, "the whole blob fits the byte cap");
+    assert_eq!(row.first_error_line.as_deref(), Some("first"));
+    assert!(!row.error_more, "the first line is the whole first line");
+    assert_eq!(
+        row.error_bytes,
+        Some(error.len() as u64),
+        "the error, counted"
+    );
+    assert_eq!(row.error_lines, Some(2), "both lines are counted");
+
+    let args = read_call_body(
+        dir.path(),
+        7,
+        0,
+        &CallBodyQuery {
+            part: Some(CallPart::Args),
+            ..CallBodyQuery::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(args.part, CallPart::Args);
+    assert_eq!(
+        args.text, arguments,
+        "the read reaches the whole argument blob"
+    );
+
+    let error = read_call_body(
+        dir.path(),
+        7,
+        0,
+        &CallBodyQuery {
+            part: Some(CallPart::Error),
+            ..CallBodyQuery::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(error.text, "first\nsecond", "the error field, whole");
+}
+
+/// A page holds a strict prefix of an argument blob and of an error line, and
+/// states no continuation: the list has no reader and no read control, so a
+/// bit there would have no consumer. The detail face carries both whole.
+#[test]
+fn a_page_holds_a_prefix_and_states_no_continuation() {
+    let dir = agent_dir();
+    let first = "a".repeat(PAGE_TEXT_INLINE_CHARS + 40);
+    let envelope = ToolResultEnvelope {
+        ok: false,
+        tool_name: "bash_exec".to_owned(),
+        result: None,
+        error: Some(format!("{first}\nb\nccc")),
+        pending_approval: None,
+        rest: serde_json::Map::new(),
+    };
+    let calls = vec![ToolCall {
+        id: "c1".to_owned(),
+        name: "bash_exec".to_owned(),
+        arguments: "a".repeat(PAGE_TEXT_INLINE_CHARS + 40),
+    }];
+    append(
+        dir.path(),
+        "2026-10-01",
+        &[record(
+            "2026-10-01T10:00:00Z",
+            11,
+            vec![
+                Message::assistant_tool_calls(None, calls, None),
+                Message::tool(serde_json::to_string(&envelope).unwrap(), "c1"),
+            ],
+            None,
+        )],
+    );
+
+    let detail = read_turn(dir.path(), 11).unwrap();
+    let kept = &detail.turn.calls[0];
+    assert_eq!(
+        kept.args.chars().count(),
+        PAGE_TEXT_INLINE_CHARS + 40,
+        "the detail face carries the arguments whole"
+    );
+    assert!(!kept.args_more, "nothing is held back");
+    assert_eq!(
+        kept.first_error_line.as_deref(),
+        Some(first.as_str()),
+        "the detail face carries the first line whole"
+    );
+    assert!(!kept.error_more, "the first line is whole");
+    assert_eq!(kept.error_lines, Some(3), "the later lines are counted");
+
+    let page = read_turns_page(dir.path(), &query(Some("2026-10-01"), None, Some(10))).unwrap();
+    let row = &page.rows[0].calls[0];
+    assert_eq!(
+        row.args.chars().count(),
+        PAGE_TEXT_INLINE_CHARS,
+        "a page holds a prefix of the arguments"
+    );
+    assert!(!row.args_more, "a page states no continuation");
+    assert_eq!(
+        row.first_error_line
+            .as_deref()
+            .map(|line| line.chars().count()),
+        Some(PAGE_TEXT_INLINE_CHARS),
+        "a page holds a prefix of the first error line"
+    );
+    assert!(!row.error_more, "a page states no continuation");
+    assert_eq!(row.error_bytes, Some(first.len() as u64 + 2 + 4));
+    assert_eq!(row.error_lines, Some(3));
+    let encoded = serde_json::to_string(row).unwrap();
+    assert!(
+        !encoded.contains("args_more"),
+        "no bit on the wire: {encoded}"
+    );
+    assert!(
+        !encoded.contains("error_more"),
+        "no bit on the wire: {encoded}"
+    );
+}
+
+/// `chars` counts the text a reader can see: a reclaimed spill path is
+/// measured as its stand-in, not as the path it hides.
+#[test]
+fn chars_counts_the_cleaned_text() {
+    let dir = agent_dir();
+    let raw = format!("look at {SPILL_PATH} now");
+    append(
+        dir.path(),
+        "2026-10-01",
+        &[record(
+            "2026-10-01T10:00:00Z",
+            12,
+            vec![Message::user(raw.clone())],
+            None,
+        )],
+    );
+
+    let row = &read_turn(dir.path(), 12).unwrap().turn.messages[0];
+    let cleaned = format!("look at {SPILL_RECLAIMED} now");
+    assert_eq!(row.chars, cleaned.chars().count());
+    assert_ne!(
+        row.chars,
+        raw.chars().count(),
+        "the path is longer than the text that replaced it"
+    );
+}
+
+/// A continuation bit only reaches the wire when the text continues: the key
+/// is absent rather than false, and so is a text that is not there at all.
+#[test]
+fn continuation_bits_stay_off_the_wire_when_nothing_continues() {
+    let dir = agent_dir();
+    let envelope = ToolResultEnvelope {
+        ok: true,
+        tool_name: "read_file".to_owned(),
+        result: Some(serde_json::json!({"lines": 3})),
+        error: None,
+        pending_approval: None,
+        rest: serde_json::Map::new(),
+    };
+    let calls = vec![ToolCall {
+        id: "c1".to_owned(),
+        name: "read_file".to_owned(),
+        arguments: "{\"path\":\"/tmp/x\"}".to_owned(),
+    }];
+    append(
+        dir.path(),
+        "2026-10-01",
+        &[record(
+            "2026-10-01T10:00:00Z",
+            13,
+            vec![
+                Message::assistant_tool_calls(None, calls, None),
+                Message::tool(serde_json::to_string(&envelope).unwrap(), "c1"),
+            ],
+            None,
+        )],
+    );
+
+    let detail = serde_json::to_value(read_turn(dir.path(), 13).unwrap()).unwrap();
+    let call = &detail["turn"]["calls"][0];
+    for key in ["args_more", "first_error_line", "error_more"] {
+        assert!(call.get(key).is_none(), "{key} must not be sent as a false");
+    }
+    let message = &detail["turn"]["messages"][0];
+    for key in ["text_more", "reasoning_more"] {
+        assert!(
+            message.get(key).is_none(),
+            "{key} must not be sent as a false"
+        );
+    }
 }

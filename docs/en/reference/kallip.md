@@ -454,45 +454,58 @@ structural problems, and writes the lock on applied and aborted
 outcomes. `lock-rebuild` rebuilds the lock archive from reality,
 listing every recovered parked agent.
 
-### `turns`: Read an Agent's Turn History
+### `history`: Read an Agent's Turn History
 
 ```bash
-kallip turns list <AGENT> [--day <YYYY-MM-DD>] [--before <CURSOR>] [--limit <N>]
+kallip history list <AGENT> [--day <YYYY-MM-DD>] [--before <CURSOR>] [--limit <N>]
     [--fields <NAMES>] [--tools] [--json]
-kallip turns show <AGENT> <TURN> [--call <N> [--body [--offset <N>] [--limit <N>]]]
-    [--json]
-kallip turns export <AGENT> [--day <YYYY-MM-DD>] [--limit <N>] [--pages <N>] [--out <FILE>]
+kallip history show <AGENT> <TURN> [--call <N>|--message <N>]
+    [--body [--part <PART>] [--offset <N>] [--limit <N>]] [--json]
+kallip history export <AGENT> [--day <YYYY-MM-DD>] [--limit <N>] [--pages <N>] [--out <FILE>]
 ```
 
 The tagma computes every answer from the log it already keeps, so the CLI
 never opens a history file: `list` returns one page of turns newest first,
-`show` returns one turn with its messages and call rows, and `--call N --body`
-returns a byte range of one call's text.
+`show` returns one turn with its messages and call rows, and a body read
+returns a byte range of one text, a call's or a message's. A call holds three
+texts (`result`, `args`, `error`) and a message holds two (`text`,
+`reasoning`); `--part` picks one, and a read naming a kind the other face holds
+is refused before the request.
 
 | Subcommand     | Purpose |
 | ---            | --- |
-| `turns list`   | One page of turns, newest first; `--fields` picks the columns, `--tools` expands each turn's calls under its row, outcome and all, `--json` prints the page as the tagma returned it |
-| `turns show`   | One turn: its messages and call rows; `--call N` narrows to one call, `--call N --body` fetches that call's text, and `--json` prints the tagma's document for the turn, the call, or the text range |
-| `turns export` | Walks up to `--pages` pages (20 by default) and writes one JSON document: a manifest plus the pages as returned |
+| `history list`   | One page of turns, newest first; `--fields` picks the columns, `--tools` expands each turn's calls under its row, outcome and all, `--json` prints the page as the tagma returned it |
+| `history show`   | One turn: its messages and call rows; `--call N` narrows to one call and `--message N` to one message, either with `--body` fetches a range of that text (`--part` picks which), and `--json` prints the tagma's document for the turn, that call or message, or the text range |
+| `history export` | Walks up to `--pages` pages (20 by default) and writes one JSON document: a manifest plus the pages as returned |
 
 A cursor is opaque: copy `next_cursor` into `--before` byte for byte, since
-the ordering key belongs to the tagma. `turns export` stays bounded, and its
+the ordering key belongs to the tagma. `history export` stays bounded, and its
 manifest says which bound stopped the walk (`stopped_by`: `end` when the log
 ran out, `pages` when the page bound did) and where a stopped walk resumes
 (`next_cursor` and `limit`). Tool output never rides a page: `--call N --body`
-reads a range of the text, and every range notice goes to stderr so the bytes
-can be piped straight on.
+and `--message N --body` read a range of one text, and every range notice goes
+to stderr so the bytes can be piped straight on.
 
 The table and text faces refuse a page whose `schema_version` this build does
 not read, so a field that changed meaning cannot print as a dash; `--json` hands
 the tagma's document over byte for byte, unknown fields and version included,
-and `turns export` keeps each page body the same way. A walk that meets a
+and `history export` keeps each page body the same way. A walk that meets a
 second `schema_version` stops instead: one document never mixes two views.
-The `profile` column shows provider and model only; `turns show` prints the
+A text reaches the text faces as the record holds it, and every label sits on a
+line of its own, so a newline inside the text cannot break the layout around
+it. `history show --call N` prints `args:` over the arguments, then `error:`
+over the record's error, and the call line above states only how the call
+ended: one error prints once in one view. A turn view carries the error's first
+line on the call line and ends it with `…` when the rest is a read away; a list
+row states the outcome alone, because that row carries no control to read on
+from. A text longer than the detail face carries ends with a `…` line, and
+the range read is how the rest comes back.
+
+The `profile` column shows provider and model only; `history show` prints the
 profile set, profile id, and effort as well. The `usage` column prints
 `prompt→completion`, then `cache:<read>/<write>` when either side is non-zero
 (a zero side stays in the pair) and `reason:<tokens>` when it is not zero;
-`turns show` prints all five counters on one line, each under its name, a zero
+`history show` prints all five counters on one line, each under its name, a zero
 included.
 
 ### Usage Patterns
