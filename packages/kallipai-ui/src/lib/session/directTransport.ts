@@ -83,13 +83,20 @@ function toSummary(p: DirectStatusPayload): TagmaStatusSummary {
 /** Backoff between SSE reconnect attempts (the transport-level retry loop):
  * four attempts span ~15s of silent retrying before the failure is surfaced
  * as final — the user sees the in-chat reconnecting spinner, never an error.
- * Any live frame resets the budget. */
+ * Any body bytes reset the budget. */
 const STREAM_RETRY_DELAYS_MS = [1000, 2000, 4000, 8000] as const;
 
-/** No raw frame (including the tagma's 15s keepalive comments) for this long
- * means the connection is half-open: tear it down and reconnect. 3x the
- * keepalive interval absorbs jitter. */
-const STREAM_WATCHDOG_MS = 45_000;
+/** The tagma's SSE keepalive cadence: the handler wraps every stream in
+ * `Sse::keep_alive(KeepAlive::default())`, which writes a `:` comment every
+ * 15s (crates/kallipai-tagma/src/sse.rs:227). Liveness is those bytes, not
+ * parsed events. */
+const SSE_KEEPALIVE_HINT_MS = 15_000;
+
+/** No body bytes (the keepalive comments above are bytes on the wire even
+ * though they carry no event) for this long means the connection is half-open:
+ * tear it down and reconnect. Three keepalive intervals absorb jitter, so the
+ * interval can never drop below twice the keepalive cadence. */
+const STREAM_WATCHDOG_MS = 3 * SSE_KEEPALIVE_HINT_MS;
 
 /** Stream lifecycle states surfaced to the owning conversation: the retry
  * loop is taking over ("reconnecting") and a fresh connection is live
@@ -235,9 +242,13 @@ export class DirectTransport implements Transport {
       try {
         // The first liveness tick (connection open) both feeds the watchdog
         // and reports "resumed" — the conversation then backfills whatever
-        // the reconnect gap dropped via its cursor-based catch-up.
+        // the reconnect gap dropped via its cursor-based catch-up. Every body
+        // chunk feeds it from then on, keepalive comments included.
         let live = false;
-        const onFrame = () => {
+        // Liveness is byte arrival, so a stream whose event source stalls
+        // but whose keepalives still flow stays connected: this watchdog
+        // catches a dead socket, not a stuck producer.
+        const onLiveness = () => {
           this.feedWatchdog();
           if (!live) {
             live = true;
@@ -246,7 +257,7 @@ export class DirectTransport implements Transport {
           }
         };
         this.armWatchdog();
-        for await (const f of this.frames(this.streamCtl.signal, onFrame)) {
+        for await (const f of this.frames(this.streamCtl.signal, onLiveness)) {
           switch (f.kind) {
             case "authored":
               this.replyQueue.push({
@@ -276,7 +287,7 @@ export class DirectTransport implements Transport {
         this.restartKind = null;
         if (kind === "watchdog") {
           console.error(
-            "[sse] no frames for " +
+            "[sse] no bytes for " +
               this.watchdogMs +
               "ms (half-open?), reconnecting",
           );
@@ -334,9 +345,11 @@ export class DirectTransport implements Transport {
     });
   }
 
-  /** No raw frame (incl. keepalive comments) for watchdogMs: the connection
+  /** No body bytes (keepalive comments count) for watchdogMs: the connection
    * is half-open. Abort the attempt; the retry loop reconnects immediately
-   * without spending the budget. */
+   * without spending the budget. The timer only re-arms from a pull of the
+   * stream, which is synchronous in the mux loop today (as is `AsyncQueue`'s
+   * push), so a slow consumer cannot starve it. */
   private armWatchdog(): void {
     this.disarmWatchdog();
     this.watchdog = setTimeout(() => {
@@ -388,12 +401,12 @@ export class DirectTransport implements Transport {
    *  connection). */
   async *frames(
     signal = this.controller.signal,
-    onFrame?: () => void,
+    onLiveness?: () => void,
   ): AsyncGenerator<DirectFrame> {
     for await (const f of this.client.externalEventStream(
       this.agentId,
       signal,
-      onFrame,
+      onLiveness,
     )) {
       try {
         switch (f.event) {

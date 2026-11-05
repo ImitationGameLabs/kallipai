@@ -5,7 +5,8 @@
 // string.
 //
 // Handles chunk-split data lines, multi-event chunks, multi-line `data:` values
-// (joined with "\n"), and ":comment"/keepalive lines (which produce no event).
+// (joined with "\n"), and ":comment"/keepalive lines (which produce no event,
+// though they still count as bytes arriving for the optional `onRead` hook).
 
 export interface RawSseEvent {
   /** The joined `data:` payload (multiple data lines concatenated with "\n"). */
@@ -19,10 +20,16 @@ export interface RawSseEvent {
 /**
  * Yield parsed SSE events from a fetch Response body until the stream ends.
  * Throws if the response has no body.
+ *
+ * `onRead` fires after every non-empty body read, before the chunk is parsed,
+ * so a caller can run a liveness watchdog on bytes arriving rather than on
+ * parsed events: keepalive comment blocks yield no event, but the server
+ * writing them does prove the stream is alive.
  */
 export async function* parseSseStream(
   response: Response,
   signal?: AbortSignal,
+  onRead?: () => void,
 ): AsyncGenerator<RawSseEvent> {
   if (!response.body) {
     throw new Error("SSE response has no body");
@@ -38,6 +45,7 @@ export async function* parseSseStream(
     while (true) {
       const { value, done } = await reader.read();
       if (done) break;
+      if (value.byteLength > 0) onRead?.();
       buffer += decoder.decode(value, { stream: true });
 
       let boundary = matchBlankLine(buffer);

@@ -151,11 +151,13 @@ export class TagmaClient {
   async *externalEventStream(
     id: AgentId,
     signal?: AbortSignal,
-    /** Fired when the connection opens and on EVERY raw frame, including
-     * keepalive comment frames (they carry no event name and are skipped
-     * below). Lets a caller run a liveness watchdog on top of the stream.
-     * Optional; omitted by callers that do not need it. */
-    onFrame?: () => void,
+    /** Fired when the connection opens and after every non-empty chunk of
+     * the body arrives -- including keepalive comment blocks, which carry
+     * no event name and are skipped below. Liveness is bytes on the wire,
+     * not parsed events, so a watchdog over this cannot starve on a quiet
+     * but healthy stream. Optional; omitted by callers that do not need
+     * it. */
+    onLiveness?: () => void,
   ): AsyncGenerator<{ readonly event: string; readonly data: string }> {
     const resp = await this.request(`/agents/${id}/external/events`, {
       method: "GET",
@@ -167,9 +169,8 @@ export class TagmaClient {
         `expected text/event-stream, got ${contentType}`,
       );
     }
-    onFrame?.(); // connection open: initial liveness for the watchdog
-    for await (const raw of parseSseStream(resp, signal)) {
-      onFrame?.();
+    onLiveness?.(); // connection open: initial liveness for the watchdog
+    for await (const raw of parseSseStream(resp, signal, onLiveness)) {
       // Keepalive / comment frames carry no `event:` name; skip them. Every
       // real frame on this stream is discriminated by its event name.
       if (!raw.event) continue;

@@ -4,7 +4,7 @@
 // server now auto-wakes parked agents on delivery.)
 
 import { assertEquals } from "@std/assert";
-import type { TagmaClient } from "@kallipai/kallipai-client";
+import { TagmaClient } from "@kallipai/kallipai-client";
 import { DirectTransport } from "./directTransport.ts";
 import { LOCAL_OPERATOR_SENDER } from "../transcript.ts";
 
@@ -19,7 +19,7 @@ type RawFrame = { readonly event: string; readonly data: string };
 * reports liveness when the connection opens). */
 type AttemptFactory = (
   signal: AbortSignal | undefined,
-  onFrame: () => void,
+  onLiveness: () => void,
 ) => AsyncIterable<RawFrame>;
 
 function streamClient(script: (Error | AttemptFactory)[]): {
@@ -31,13 +31,13 @@ function streamClient(script: (Error | AttemptFactory)[]): {
     async *externalEventStream(
       _id: string,
       signal?: AbortSignal,
-      onFrame?: () => void,
+      onLiveness?: () => void,
     ) {
       state.connects++;
       const next = script.shift();
       if (!next) throw new Error("script exhausted");
       if (next instanceof Error) throw next;
-      yield* next(signal, onFrame!);
+      yield* next(signal, onLiveness!);
     },
   } as unknown as TagmaClient;
   return { client, state };
@@ -61,8 +61,8 @@ function statusFrame(n: number): RawFrame {
 * live SSE) until aborted. Ending the generator would end the stream
 * cleanly, which now triggers a reconnect. */
 const liveStream = (...fs: RawFrame[]): AttemptFactory =>
-  async function* (signal, onFrame) {
-    onFrame(); // connection open
+  async function* (signal, onLiveness) {
+    onLiveness(); // connection open
     for (const f of fs) yield f;
     await new Promise<never>((_, reject) => {
       const onAbort = () => reject(new Error("aborted"));
@@ -71,25 +71,17 @@ const liveStream = (...fs: RawFrame[]): AttemptFactory =>
     });
   };
 
-/** A healthy keepalive-fed connection: yields the frame every few ms (so
-
-* the watchdog stays fed) until aborted. */
-const ticking = (f: RawFrame): AttemptFactory =>
-  async function* (sig, onFrame) {
-    onFrame(); // connection open
-    for (;;) {
-      onFrame(); // every raw frame feeds the watchdog
-      yield f;
-      const aborted = await new Promise<boolean>((resolve) => {
-        const t = setTimeout(() => resolve(false), 5);
-        const onAbort = () => {
-          clearTimeout(t);
-          resolve(true);
-        };
-        if (sig?.aborted) onAbort();
-        else sig?.addEventListener("abort", onAbort, { once: true });
-      });
-      if (aborted) return;
+/** A healthy keepalive-fed connection, modelled at the byte layer: liveness
+ * ticks land every few ms (the tagma's `:` comments), independent of any raw
+ * frame. With `f` it also yields one frame; without it the stream is quiet
+ * but alive. */
+const ticking = (f?: RawFrame): AttemptFactory =>
+  async function* (signal, onLiveness) {
+    const timer = setInterval(() => onLiveness(), 10);
+    try {
+      yield* liveStream(...(f ? [f] : []))(signal, onLiveness);
+    } finally {
+      clearInterval(timer);
     }
   };
 
@@ -98,8 +90,8 @@ const ticking = (f: RawFrame): AttemptFactory =>
 * socket): never yields — next() parks until the abort rejects. Hand-rolled
 * as an async iterable because a yield-less async generator trips
 * require-yield by design. */
-const silent: AttemptFactory = (signal, onFrame) => {
-  onFrame(); // connection open
+const silent: AttemptFactory = (signal, onLiveness) => {
+  onLiveness(); // connection open
   return {
     [Symbol.asyncIterator]: () => ({
       next: (): Promise<IteratorResult<RawFrame>> =>
@@ -113,15 +105,15 @@ const silent: AttemptFactory = (signal, onFrame) => {
 };
 
 const tick = (ms: number) => new Promise((r) => setTimeout(r, ms));
-/** A connection that delivers ONE status frame and then goes completely
- * silent — no raw frames and no keepalive comments. Strictly quieter
- * than production (where SSE comments feed the watchdog; that path is
- * outside unit-test timescale). What the leg proves: the status queue
- * tolerates frame silence without reconnecting or closing. */
+/** A connection that delivers ONE status frame and then goes silent at the
+ * byte layer — no raw frames and no keepalive comments, so nothing feeds the
+ * watchdog. Strictly quieter than production, and kept inside the shipped
+ * watchdog interval: what the leg proves is that the status queue tolerates
+ * that silence without reconnecting or closing. */
 const oneStatusThenSilence =
   (f: RawFrame): AttemptFactory =>
-  (signal, onFrame) => {
-    onFrame(); // connection open
+  (signal, onLiveness) => {
+    onLiveness(); // connection open
     let yielded = false;
     return {
       [Symbol.asyncIterator]: () => ({
@@ -284,6 +276,89 @@ Deno.test(
     t.close();
     await drain;
     assertEquals(seen, [1]);
-    assertEquals(state.connects, 1, "frame silence holds the stream");
+    assertEquals(state.connects, 1, "byte silence holds the stream");
   },
 );
+
+Deno.test(
+  "keepalive ticks alone hold a quiet stream open past the watchdog",
+  async () => {
+    const { client, state } = streamClient([ticking()]);
+    const states: string[] = [];
+    const t = new DirectTransport(
+      client,
+      "root",
+      LOCAL_OPERATOR_SENDER,
+      [10_000],
+      120, // watchdogMs: twelve keepalive ticks fit inside it
+    );
+    t.onState = (s) => states.push(s);
+    const drain = (async () => {
+      for await (const _ of t.status()) {
+        /* wait */
+      }
+    })();
+    await tick(500); // four watchdog periods
+    t.close();
+    await drain;
+    assertEquals(state.connects, 1, "keepalives are liveness, not silence");
+    assertEquals(states, ["resumed"]);
+  },
+);
+
+/** A 200 SSE response whose body carries nothing but keepalive comments. */
+function keepaliveResponse(ms: number): Response {
+  const encoder = new TextEncoder();
+  let timer: ReturnType<typeof setInterval> | undefined;
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      timer = setInterval(() => {
+        try {
+          controller.enqueue(encoder.encode(":\n\n"));
+        } catch {
+          // closed by cancel(); the timer is cleared there
+        }
+      }, ms);
+    },
+    cancel() {
+      if (timer !== undefined) clearInterval(timer);
+    },
+  });
+  return new Response(body, {
+    status: 200,
+    headers: { "content-type": "text/event-stream" },
+  });
+}
+
+Deno.test("a body of keepalive comments alone never reconnects", async () => {
+  const original = globalThis.fetch;
+  globalThis.fetch = (() =>
+    Promise.resolve(keepaliveResponse(20))) as typeof fetch;
+  try {
+    const client = new TagmaClient({ baseUrl: "http://tagma.test" });
+    const states: string[] = [];
+    const t = new DirectTransport(
+      client,
+      "root",
+      LOCAL_OPERATOR_SENDER,
+      [10_000],
+      200, // watchdogMs: ten keepalive comments fit inside it
+    );
+    t.onState = (s) => states.push(s);
+    const drain = (async () => {
+      for await (const _ of t.status()) {
+        /* wait */
+      }
+    })();
+    await tick(700); // three and a half watchdog periods
+    t.close();
+    await drain;
+    assertEquals(
+      states,
+      ["resumed"],
+      "keepalive bytes are liveness: no reconnecting inside three periods",
+    );
+  } finally {
+    globalThis.fetch = original;
+  }
+});

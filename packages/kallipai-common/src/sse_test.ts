@@ -44,3 +44,35 @@ Deno.test("yields a trailing event without a final blank line", async () => {
   const data = await collect(["data: tail"]);
   assertEquals(data, ["tail"]);
 });
+
+Deno.test("keepalive-only chunks report reads but yield no event", async () => {
+  let reads = 0;
+  const data: string[] = [];
+  for await (const ev of parseSseStream(
+    sseResponse([":\n\n", ":\n\n"]),
+    undefined,
+    () => {
+      reads++;
+    },
+  )) {
+    data.push(ev.data);
+  }
+  assertEquals(data, []);
+  assertEquals(reads, 2);
+});
+
+Deno.test("a data chunk reports exactly one read", async () => {
+  let reads = 0;
+  const data: string[] = [];
+  for await (const ev of parseSseStream(
+    sseResponse(['data: {"a":1}\n\n']),
+    undefined,
+    () => {
+      reads++;
+    },
+  )) {
+    data.push(ev.data);
+  }
+  assertEquals(data, ['{"a":1}']);
+  assertEquals(reads, 1);
+});
