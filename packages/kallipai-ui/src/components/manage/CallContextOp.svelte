@@ -11,8 +11,8 @@
   } from "../../lib/manage/toolViews.ts";
   import { contextOpFacts } from "../../lib/manage/toolViews.ts";
   import {
-    manage_turns_pin_done,
-    manage_turns_unpin_done,
+    manage_history_pin_done,
+    manage_history_unpin_done,
   } from "../../paraglide/messages.js";
   import CallNarration from "./CallNarration.svelte";
 
@@ -27,8 +27,8 @@
 
   const line = $derived(
     facts.verb === "pinned"
-      ? manage_turns_pin_done({ label: facts.label, count: `${facts.total}` })
-      : manage_turns_unpin_done({
+      ? manage_history_pin_done({ label: facts.label, count: `${facts.total}` })
+      : manage_history_unpin_done({
           label: facts.label,
           count: `${facts.total}`,
         }),

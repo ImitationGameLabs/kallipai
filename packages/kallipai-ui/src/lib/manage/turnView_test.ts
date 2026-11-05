@@ -44,7 +44,7 @@ import {
   stillCurrent,
   startRead,
   wholeText,
-  TURN_SCHEMA_VERSION,
+  HISTORY_SCHEMA_VERSION,
   toneDot,
   untouchedResults,
   turnShape,
@@ -78,7 +78,7 @@ function turn(id: number): TurnRow {
 
 function page(over: Partial<TurnsPage> = {}): TurnsPage {
   return {
-    schema_version: TURN_SCHEMA_VERSION,
+    schema_version: HISTORY_SCHEMA_VERSION,
     rows: [],
     bad_lines: 0,
     page_truncated: false,
@@ -88,7 +88,7 @@ function page(over: Partial<TurnsPage> = {}): TurnsPage {
 
 function body(over: Partial<CallBody> = {}): CallBody {
   return {
-    schema_version: TURN_SCHEMA_VERSION,
+    schema_version: HISTORY_SCHEMA_VERSION,
     turn_id: 1,
     call_index: 0,
     call_id: "call-a",
@@ -142,12 +142,12 @@ Deno.test("pageNotices stops at another face, and names it", () => {
   assertEquals(
     pageNotices(
       page({
-        schema_version: TURN_SCHEMA_VERSION + 1,
+        schema_version: HISTORY_SCHEMA_VERSION + 1,
         bad_lines: 3,
         page_truncated: true,
       }),
     ),
-    [{ kind: "face", face: TURN_SCHEMA_VERSION + 1 }],
+    [{ kind: "face", face: HISTORY_SCHEMA_VERSION + 1 }],
   );
 });
 
@@ -616,11 +616,11 @@ Deno.test("bodyView measures the range it received, in bytes", () => {
 });
 
 Deno.test("faceSupported reads one version, the one the CLI reads", () => {
-  assertEquals(faceSupported(TURN_SCHEMA_VERSION), true);
+  assertEquals(faceSupported(HISTORY_SCHEMA_VERSION), true);
   // An older face is refused too: the CLI refuses anything but its own
   // version, and two readers of one face must not disagree about it.
-  assertEquals(faceSupported(TURN_SCHEMA_VERSION - 1), false);
-  assertEquals(faceSupported(TURN_SCHEMA_VERSION + 1), false);
+  assertEquals(faceSupported(HISTORY_SCHEMA_VERSION - 1), false);
+  assertEquals(faceSupported(HISTORY_SCHEMA_VERSION + 1), false);
 });
 
 Deno.test("stillCurrent drops a read whose agent or era moved on", () => {
@@ -776,9 +776,9 @@ Deno.test("finishRead writes each outcome over the ranges already read", () => {
   const base = { ...startRead(null, 1), text: "kept", total: 4 };
   const unsupported = finishRead(base, {
     kind: "unsupported",
-    face: TURN_SCHEMA_VERSION - 1,
+    face: HISTORY_SCHEMA_VERSION - 1,
   });
-  assertEquals(unsupported.unsupported, TURN_SCHEMA_VERSION - 1);
+  assertEquals(unsupported.unsupported, HISTORY_SCHEMA_VERSION - 1);
   assertEquals(unsupported.error, null);
   assertEquals(unsupported.loading, false);
   assertEquals(unsupported.text, "kept");

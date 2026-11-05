@@ -7,7 +7,7 @@
 // purpose: `deno test` reads it without a rune shim.
 //
 // The shapes come from the tagma read face (kallipai-common
-// `protocol::turns`). Two rules hold throughout:
+// `protocol::history`). Two rules hold throughout:
 //
 // - A server fact is never re-worded: the page translates keys, it does not
 //   re-derive counts, ranges or flags the face already states.
@@ -41,15 +41,15 @@ import type {
 } from "@kallipai/kallipai-client";
 
 /** The read-face version this build reads: hand-copied from `kallipai-common`
- * `TURN_SCHEMA_VERSION`, so a change there needs the same change here. It has
+ * `HISTORY_SCHEMA_VERSION`, so a change there needs the same change here. It has
  * to stay equal, because a page whose version differs from the record's would
  * read fields by the wrong meanings, so a face at another version is not
  * rendered; the CLI makes the same stop, and this number never labels a view. */
-export const TURN_SCHEMA_VERSION = 3;
+export const HISTORY_SCHEMA_VERSION = 3;
 
 /** Whether this build can read a face at `version`. */
 export function faceSupported(version: number): boolean {
-  return version === TURN_SCHEMA_VERSION;
+  return version === HISTORY_SCHEMA_VERSION;
 }
 
 /** Rows asked for on the first page: the server's own default, hand-copied

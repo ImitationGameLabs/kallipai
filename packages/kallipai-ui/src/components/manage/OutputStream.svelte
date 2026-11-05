@@ -17,8 +17,8 @@
     type TerminalOutput,
   } from "../../lib/manage/jsonView.ts";
   import {
-    manage_turns_stderr_label,
-    manage_turns_stdout_label,
+    manage_history_stderr_label,
+    manage_history_stdout_label,
   } from "../../paraglide/messages.js";
   import BlockText from "./BlockText.svelte";
 
@@ -43,13 +43,13 @@
     <p
       class="inline-block rounded-sm ring-1 ring-surface-200-800 bg-surface-50-950 px-1.5 py-0.5 text-xs font-semibold tracking-wide text-surface-700-300 uppercase"
     >
-      {manage_turns_stdout_label()}
+      {manage_history_stdout_label()}
     </p>
     <BlockText text={split.out} />
     <p
       class="mt-2 inline-block rounded-sm ring-1 ring-error-300-700 bg-error-50-950 px-1.5 py-0.5 text-xs font-bold tracking-wide text-error-600-400 uppercase"
     >
-      {manage_turns_stderr_label()}
+      {manage_history_stderr_label()}
     </p>
     <BlockText text={split.err} />
   </div>

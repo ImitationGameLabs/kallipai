@@ -22,25 +22,25 @@
     ranTools,
   } from "../../lib/manage/turnView.ts";
   import {
-    manage_turns_calls_label,
-    manage_turns_empty,
-    manage_turns_effort_value,
-    manage_turns_elapsed_label,
-    manage_turns_elapsed_value,
-    manage_turns_load_failed,
-    manage_turns_refresh,
-    manage_turns_loading,
-    manage_turns_messages_label,
-    manage_turns_profile_id,
-    manage_turns_reasoning_flag,
-    manage_turns_reasoning_hide,
-    manage_turns_reasoning_show,
-    manage_turns_reasoning_unavailable,
-    manage_turns_schema_face,
-    manage_turns_turn_empty,
-    manage_turns_turn_id,
-    manage_turns_usage_label,
-    manage_turns_usage_line,
+    manage_history_calls_label,
+    manage_history_empty,
+    manage_history_effort_value,
+    manage_history_elapsed_label,
+    manage_history_elapsed_value,
+    manage_history_load_failed,
+    manage_history_refresh,
+    manage_history_loading,
+    manage_history_messages_label,
+    manage_history_profile_id,
+    manage_history_reasoning_flag,
+    manage_history_reasoning_hide,
+    manage_history_reasoning_show,
+    manage_history_reasoning_unavailable,
+    manage_history_schema_face,
+    manage_history_turn_empty,
+    manage_history_turn_id,
+    manage_history_usage_label,
+    manage_history_usage_line,
   } from "../../paraglide/messages.js";
 
   let {
@@ -109,29 +109,29 @@
 
 <div class="space-y-3">
   {#if loading && detail === null}
-    <p class="text-xs opacity-70">{manage_turns_loading()}</p>
+    <p class="text-xs opacity-70">{manage_history_loading()}</p>
   {:else if fire === "failed"}
     <div class="flex flex-wrap items-center gap-x-2 text-xs">
-      <p class="text-error-500">{error ?? manage_turns_load_failed()}</p>
+      <p class="text-error-500">{error ?? manage_history_load_failed()}</p>
       <button
         type="button"
         class="opacity-60 transition hover:opacity-100"
-        onclick={onRetry}>{manage_turns_refresh()}</button
+        onclick={onRetry}>{manage_history_refresh()}</button
       >
     </div>
   {:else if face !== null}
     <p class="text-xs text-surface-700-300">
-      {manage_turns_schema_face()}
+      {manage_history_schema_face()}
     </p>
   {:else if empty}
-    <p class="text-xs opacity-70">{manage_turns_empty()}</p>
+    <p class="text-xs opacity-70">{manage_history_empty()}</p>
   {:else if detail}
     {@const turn = detail.turn}
     {@const shown = visibleMessages(turn)}
     <div class="space-y-1 rounded border border-surface-200-800 p-3">
       <div class="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
         <span class="font-mono font-medium"
-          >{manage_turns_turn_id({ id: turn.turn_id })}</span
+          >{manage_history_turn_id({ id: turn.turn_id })}</span
         >
         <CopyButton getText={() => String(turn.turn_id)} />
         {#if turn.profile}
@@ -139,11 +139,11 @@
             >{turn.profile.provider} · {turn.profile.model}</span
           >
           <span class="font-mono opacity-60"
-            >{manage_turns_profile_id({ id: turn.profile.profile_id })}</span
+            >{manage_history_profile_id({ id: turn.profile.profile_id })}</span
           >
           {#if turn.profile.effort}
             <span class="opacity-60"
-              >{manage_turns_effort_value({
+              >{manage_history_effort_value({
                 effort: turn.profile.effort,
               })}</span
             >
@@ -151,15 +151,15 @@
         {/if}
         {#if turn.elapsed_ms !== undefined}
           <span class="opacity-60"
-            >{manage_turns_elapsed_label()}:
-            {manage_turns_elapsed_value({ ms: turn.elapsed_ms })}</span
+            >{manage_history_elapsed_label()}:
+            {manage_history_elapsed_value({ ms: turn.elapsed_ms })}</span
           >
         {/if}
       </div>
       {#if turn.usage}
         <p class="text-xs opacity-60">
-          {manage_turns_usage_label()}:
-          {manage_turns_usage_line({
+          {manage_history_usage_label()}:
+          {manage_history_usage_line({
             prompt: turn.usage.prompt,
             completion: turn.usage.completion,
             cacheRead: turn.usage.cache_read,
@@ -171,13 +171,13 @@
     </div>
 
     {#if turn.messages.length === 0 && !ranTools(turn)}
-      <p class="text-xs opacity-70">{manage_turns_turn_empty()}</p>
+      <p class="text-xs opacity-70">{manage_history_turn_empty()}</p>
     {/if}
 
     {#if shown.length > 0}
       <div class="space-y-2">
         <p class="text-xs font-semibold text-surface-800-200">
-          {manage_turns_messages_label()}
+          {manage_history_messages_label()}
         </p>
         {#each shown as slot (slot.index)}
           {@const view = messageView(slot.message)}
@@ -197,11 +197,11 @@
                   onclick={() => toggleReasoning(turn.turn_id, slot.index)}
                 >
                   {open
-                    ? manage_turns_reasoning_hide()
-                    : manage_turns_reasoning_show()}
+                    ? manage_history_reasoning_hide()
+                    : manage_history_reasoning_show()}
                 </button>
               {:else if thought.state === "unavailable"}
-                <span>{manage_turns_reasoning_flag()}</span>
+                <span>{manage_history_reasoning_flag()}</span>
               {/if}
             </div>
             {#if carries || showsThought}
@@ -265,7 +265,7 @@
               </div>
             {:else if thought.state === "unavailable"}
               <p class="text-xs opacity-60">
-                {manage_turns_reasoning_unavailable()}
+                {manage_history_reasoning_unavailable()}
               </p>
             {/if}
           </div>
@@ -276,7 +276,7 @@
     {#if ranTools(turn)}
       <div class="space-y-2">
         <p class="text-xs font-semibold text-surface-800-200">
-          {manage_turns_calls_label()}
+          {manage_history_calls_label()}
         </p>
         {#each turn.calls as call (call.call_index)}
           <TurnCall

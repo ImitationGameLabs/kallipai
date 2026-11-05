@@ -218,7 +218,7 @@ mod tests {
             "kallip inbox summary",
             "kallip inbox done",
             "kallip inbox clear",
-            // turns
+            // history
             "kallip history list",
             "kallip history show",
             "kallip history export",
@@ -279,10 +279,10 @@ mod tests {
         assert!(!rendered.contains("```"), "{rendered}");
     }
 
-    /// The turns family carries its examples into the reference, so the two
+    /// The history family carries its examples into the reference, so the two
     /// surfaces read the same.
     #[test]
-    fn render_carries_the_turns_examples() {
+    fn render_carries_the_history_examples() {
         let out = render();
         for example in [
             "kallip history list my-agent",

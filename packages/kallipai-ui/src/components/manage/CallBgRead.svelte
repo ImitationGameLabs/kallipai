@@ -14,12 +14,12 @@
     formatBytes,
   } from "../../lib/manage/toolViews.ts";
   import {
-    manage_turns_bg_exited,
-    manage_turns_bg_killed,
-    manage_turns_bg_running,
-    manage_turns_bg_stalled,
-    manage_turns_bg_state_unknown,
-    manage_turns_bg_tail,
+    manage_history_bg_exited,
+    manage_history_bg_killed,
+    manage_history_bg_running,
+    manage_history_bg_stalled,
+    manage_history_bg_state_unknown,
+    manage_history_bg_tail,
   } from "../../paraglide/messages.js";
   import BlockText from "./BlockText.svelte";
   import CallNarration from "./CallNarration.svelte";
@@ -35,16 +35,16 @@
   const line = $derived.by(() => {
     switch (facts.state) {
       case "running":
-        return manage_turns_bg_running({ bytes: formatBytes(facts.bytes) });
+        return manage_history_bg_running({ bytes: formatBytes(facts.bytes) });
       case "exited":
-        return manage_turns_bg_exited({
+        return manage_history_bg_exited({
           code: `${facts.exit}`,
           bytes: formatBytes(facts.bytes),
         });
       case "killed":
-        return manage_turns_bg_killed({ bytes: formatBytes(facts.bytes) });
+        return manage_history_bg_killed({ bytes: formatBytes(facts.bytes) });
       case "other":
-        return manage_turns_bg_state_unknown({
+        return manage_history_bg_state_unknown({
           state: facts.stateWord,
           bytes: formatBytes(facts.bytes),
         });
@@ -59,10 +59,14 @@
 <div class="space-y-1">
   <CallNarration {tone} text={line} />
   {#if facts.stalled}
-    <p class="pl-3.5 text-xs text-error-900-100">{manage_turns_bg_stalled()}</p>
+    <p class="pl-3.5 text-xs text-error-900-100">
+      {manage_history_bg_stalled()}
+    </p>
   {/if}
   {#if facts.folded}
-    <p class="pl-3.5 text-xs text-surface-800-200">{manage_turns_bg_tail()}</p>
+    <p class="pl-3.5 text-xs text-surface-800-200">
+      {manage_history_bg_tail()}
+    </p>
   {/if}
   {#if facts.tail !== ""}
     <BlockText text={facts.tail} {failed} />

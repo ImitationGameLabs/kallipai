@@ -846,7 +846,7 @@ export interface TaskListQuery {
 
 // --- turn history: the paged read face over an agent's turn log ---
 //
-// Mirrors kallipai-common `protocol::turns` on the response side, field for
+// Mirrors kallipai-common `protocol::history` on the response side, field for
 // field (serde snake_case); the request side lives on the two client methods,
 // so `CallBodyQuery`'s `limit` has no counterpart here. An agent's append-only
 // turn log stays the single source of truth: these shapes are a projection

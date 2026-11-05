@@ -23,7 +23,7 @@ const {
   nav_breadcrumb_tagma,
   user_gateway_menu,
   nav_chats,
-  manage_turns_heading,
+  manage_history_heading,
   nav_files,
   nav_home,
   nav_rooms,
@@ -138,6 +138,6 @@ Deno.test("the agent turn history extends the agent chain", () => {
       href: "/tagma/t-1/details/agents",
     },
     { label: "a-9", href: "/tagma/t-1/details/agents/a-9" },
-    { label: manage_turns_heading(), current: true },
+    { label: manage_history_heading(), current: true },
   ]);
 });

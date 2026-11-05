@@ -48,9 +48,9 @@
     manage_agent_interrupt,
     manage_agent_remove_agent,
     manage_agent_remove_agent_desc_short,
-    manage_turns_heading,
-    manage_turns_open,
-    manage_turns_open_hint,
+    manage_history_heading,
+    manage_history_open,
+    manage_history_open_hint,
   } from "../../paraglide/messages.js";
   let {
     id,
@@ -348,14 +348,14 @@
       <section class="card preset-tonal-surface p-5 space-y-2">
         <div class="flex flex-wrap items-center justify-between gap-2">
           <h2 class="text-sm font-medium uppercase opacity-60 tracking-wide">
-            {manage_turns_heading()}
+            {manage_history_heading()}
           </h2>
           <a
             class="btn btn-sm preset-outlined-surface-500 hover:preset-filled-surface-500"
-            href={agentHistoryPath(basePath, id)}>{manage_turns_open()}</a
+            href={agentHistoryPath(basePath, id)}>{manage_history_open()}</a
           >
         </div>
-        <p class="text-sm opacity-70">{manage_turns_open_hint()}</p>
+        <p class="text-sm opacity-70">{manage_history_open_hint()}</p>
       </section>
     {/if}
 

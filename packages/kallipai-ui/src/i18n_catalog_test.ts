@@ -36,7 +36,7 @@ const FILES = [
   "manage_gateway",
   "manage_schedules",
   "manage_tasks",
-  "manage_turns",
+  "manage_history",
   "manage_instances",
   "user_gateway",
   "panorama",
@@ -238,12 +238,12 @@ const loaders: Record<string, Loader> = {
     import("../i18n/project.inlang/messages/zh/manage_tasks.json", {
       with: { type: "json" },
     }).then((m) => m.default as Record<string, string>),
-  "en|manage_turns": () =>
-    import("../i18n/project.inlang/messages/en/manage_turns.json", {
+  "en|manage_history": () =>
+    import("../i18n/project.inlang/messages/en/manage_history.json", {
       with: { type: "json" },
     }).then((m) => m.default as Record<string, string>),
-  "zh|manage_turns": () =>
-    import("../i18n/project.inlang/messages/zh/manage_turns.json", {
+  "zh|manage_history": () =>
+    import("../i18n/project.inlang/messages/zh/manage_history.json", {
       with: { type: "json" },
     }).then((m) => m.default as Record<string, string>),
   "zh|manage_instances": () =>
@@ -338,17 +338,17 @@ Deno.test("catalog: values are non-empty in both locales", () => {
 // not a translation. Sentences that explain a record stay in the reader's
 // language.
 const SHARED_TERMS: Record<string, string> = {
-  manage_turns_shape_user: "User",
-  manage_turns_shape_assistant: "Assistant",
-  manage_turns_calls_label: "Tool calls",
-  manage_turns_args_label: "Args",
-  manage_turns_result_label: "Result",
-  manage_turns_stdout_label: "stdout",
-  manage_turns_stderr_label: "stderr",
-  manage_turns_structured: "Structured",
-  manage_turns_raw: "Raw",
-  manage_turns_view_switch: "View",
-  manage_turns_show_original: "Read text",
+  manage_history_shape_user: "User",
+  manage_history_shape_assistant: "Assistant",
+  manage_history_calls_label: "Tool calls",
+  manage_history_args_label: "Args",
+  manage_history_result_label: "Result",
+  manage_history_stdout_label: "stdout",
+  manage_history_stderr_label: "stderr",
+  manage_history_structured: "Structured",
+  manage_history_raw: "Raw",
+  manage_history_view_switch: "View",
+  manage_history_show_original: "Read text",
 };
 
 Deno.test(
@@ -402,7 +402,7 @@ const PREFIXES = new Set([
   "manage_schedules",
   "manage_instances",
   "manage_tasks",
-  "manage_turns",
+  "manage_history",
   "manage_gateway",
   "user_gateway",
   "panorama",
@@ -473,7 +473,7 @@ const PREFIX_FILES: Record<string, string> = {
   manage_schedules: "manage_schedules",
   manage_instances: "manage_instances",
   manage_tasks: "manage_tasks",
-  manage_turns: "manage_turns",
+  manage_history: "manage_history",
   manage_gateway: "manage_gateway",
   user_gateway: "user_gateway",
   panorama: "panorama",

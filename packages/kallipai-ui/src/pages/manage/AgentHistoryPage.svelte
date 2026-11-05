@@ -48,11 +48,11 @@
   import { BlockTexts } from "../../lib/manage/blockTexts.svelte.ts";
   import {
     manage_agent_back,
-    manage_turns_back,
-    manage_turns_body_break,
-    manage_turns_body_wrong_message,
-    manage_turns_load_failed,
-    manage_turns_page_title,
+    manage_history_back,
+    manage_history_body_break,
+    manage_history_body_wrong_message,
+    manage_history_load_failed,
+    manage_history_page_title,
   } from "../../paraglide/messages.js";
 
   let {
@@ -262,7 +262,7 @@
       const message = displayError(
         "turn-history",
         e,
-        manage_turns_load_failed(),
+        manage_history_load_failed(),
       );
       const fire = errorState("list", errorStatus(e));
       // A failed refresh keeps the rows already read: only a first read has
@@ -301,7 +301,7 @@
       page = next;
     } catch (e) {
       if (!stillCurrent(asked, { agent: id, epoch: readEpoch })) return;
-      moreError = displayError("turn-history", e, manage_turns_load_failed());
+      moreError = displayError("turn-history", e, manage_history_load_failed());
     } finally {
       if (stillCurrent(asked, { agent: id, epoch: readEpoch })) {
         loadingMore = false;
@@ -393,7 +393,11 @@
         return;
       }
       detailFire = errorState("detail", errorStatus(e));
-      detailError = displayError("turn-history", e, manage_turns_load_failed());
+      detailError = displayError(
+        "turn-history",
+        e,
+        manage_history_load_failed(),
+      );
     } finally {
       if (
         detailToken === token &&
@@ -484,11 +488,11 @@
     if (expectRole !== undefined && read.role !== expectRole) {
       // The text came back for another message than the one on screen: the
       // index moved under the reader, so the text would be mislabelled.
-      return { kind: "failed", error: manage_turns_body_wrong_message() };
+      return { kind: "failed", error: manage_history_body_wrong_message() };
     }
     const text = appendRange(append ? previous : null, read);
     if (text === null) {
-      return { kind: "failed", error: manage_turns_body_break() };
+      return { kind: "failed", error: manage_history_body_break() };
     }
     return { kind: "text", text };
   }
@@ -513,14 +517,15 @@
     } catch (e) {
       texts.settle(key, token, {
         kind: "failed",
-        error: displayError("turn-history", e, manage_turns_load_failed()),
+        error: displayError("turn-history", e, manage_history_load_failed()),
       });
     }
   }
 </script>
 
 <svelte:head
-  ><title>{manage_turns_page_title({ agent: role || id })}</title></svelte:head
+  ><title>{manage_history_page_title({ agent: role || id })}</title
+  ></svelte:head
 >
 
 <div
@@ -587,7 +592,7 @@
             bind:this={backToList}
             onclick={() => void backToRow(selectedId)}
           >
-            {manage_turns_back()}
+            {manage_history_back()}
           </button>
         {/if}
         <TurnDetail

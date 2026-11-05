@@ -11,10 +11,10 @@
   import { formatTokens } from "../../lib/manage/compute.ts";
   import { getLocale } from "../../paraglide/runtime.js";
   import {
-    manage_turns_evict_cap_zero,
-    manage_turns_evict_degraded,
-    manage_turns_evict_kept,
-    manage_turns_evict_line,
+    manage_history_evict_cap_zero,
+    manage_history_evict_degraded,
+    manage_history_evict_kept,
+    manage_history_evict_line,
   } from "../../paraglide/messages.js";
   import CallNarration from "./CallNarration.svelte";
 
@@ -27,7 +27,7 @@
   const tone = $derived(evictTone(facts));
 
   const line = $derived(
-    manage_turns_evict_line({
+    manage_history_evict_line({
       evicted: formatTokens(facts.evicted, getLocale()),
       total: formatTokens(facts.total, getLocale()),
       freed: formatTokens(facts.freed, getLocale()),
@@ -45,7 +45,7 @@
       maxTurns: formatTokens(kept.maxTurns, getLocale()),
       maxTokens: formatTokens(kept.maxTokens, getLocale()),
     };
-    return manage_turns_evict_kept(caps);
+    return manage_history_evict_kept(caps);
   });
 </script>
 
@@ -56,12 +56,12 @@
   {/if}
   {#if facts.capZero}
     <p class="pl-3.5 text-xs text-surface-800-200">
-      {manage_turns_evict_cap_zero()}
+      {manage_history_evict_cap_zero()}
     </p>
   {/if}
   {#if facts.degraded !== null}
     <p class="pl-3.5 text-xs text-surface-800-200">
-      {manage_turns_evict_degraded({ reason: facts.degraded })}
+      {manage_history_evict_degraded({ reason: facts.degraded })}
     </p>
   {/if}
 </div>

@@ -27,7 +27,7 @@ import {
   account_menu,
   chat_title_local,
   manage_gateway_menu,
-  manage_turns_heading,
+  manage_history_heading,
   nav_budget,
   nav_breadcrumb_agents,
   nav_breadcrumb_tagma,
@@ -146,7 +146,7 @@ export const trailTable: TrailEntry[] = [
         href: tagmaDetailsSectionPath(id, "agents"),
       },
       { label: agentId.slice(0, 8), href: tagmaAgentPath(id, agentId) },
-      { label: manage_turns_heading(), current: true },
+      { label: manage_history_heading(), current: true },
     ],
   ),
   entry("/rooms", () => [

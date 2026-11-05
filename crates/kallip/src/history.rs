@@ -14,8 +14,8 @@ use std::io::Write;
 use anyhow::{Context, Result, anyhow, bail};
 use kallipai_client::TagmaClient;
 use kallipai_common::protocol::{
-    CallBody, CallBodyQuery, CallPart, CallRow, MessageBody, MessageBodyQuery, MessageRow,
-    SPILL_RECLAIMED, TURN_SCHEMA_VERSION, TextPart, TurnDetail, TurnProfile, TurnRow,
+    CallBody, CallBodyQuery, CallPart, CallRow, HISTORY_SCHEMA_VERSION, MessageBody,
+    MessageBodyQuery, MessageRow, SPILL_RECLAIMED, TextPart, TurnDetail, TurnProfile, TurnRow,
     TurnUsageView, TurnsPage, TurnsQuery,
 };
 use serde::Serialize;
@@ -100,9 +100,9 @@ fn refuse_blank(flag: &str, value: Option<&str>, what: &str) -> Result<()> {
 /// the tagma's document over byte for byte (`--json`, `export`) pass the
 /// version through instead of judging it.
 fn check_schema(version: u32) -> Result<()> {
-    if version != TURN_SCHEMA_VERSION {
+    if version != HISTORY_SCHEMA_VERSION {
         bail!(
-            "the tagma answered with turns view v{version}, and this build reads v{TURN_SCHEMA_VERSION}; run the kallip built for that view, or bring the tagma and this CLI onto the same one"
+            "the tagma answered with history view v{version}, and this build reads v{HISTORY_SCHEMA_VERSION}; run the kallip built for that view, or bring the tagma and this CLI onto the same one"
         );
     }
     Ok(())
@@ -888,7 +888,7 @@ struct ExportCounts {
 mod tests {
     use super::*;
     use kallipai_common::protocol::{
-        CALL_BODY_MAX_BYTES, CallPart, PAGE_TEXT_INLINE_CHARS, TURN_SCHEMA_VERSION,
+        CALL_BODY_MAX_BYTES, CallPart, HISTORY_SCHEMA_VERSION, PAGE_TEXT_INLINE_CHARS,
         TURNS_PAGE_LIMIT_MAX,
     };
     use wiremock::matchers::{method, path, query_param, query_param_is_missing};
@@ -965,7 +965,7 @@ mod tests {
 
     fn page(rows: Vec<TurnRow>, next: Option<&str>) -> TurnsPage {
         TurnsPage {
-            schema_version: TURN_SCHEMA_VERSION,
+            schema_version: HISTORY_SCHEMA_VERSION,
             rows,
             bad_lines: 0,
             next_cursor: next.map(|cursor| cursor.to_string()),
@@ -1147,7 +1147,7 @@ mod tests {
         assert_eq!(document["manifest"]["counts"]["rows"], 3);
         assert_eq!(
             document["manifest"]["view"]["schema_version"],
-            TURN_SCHEMA_VERSION
+            HISTORY_SCHEMA_VERSION
         );
         assert_eq!(document["manifest"]["tagma"], server.uri());
         assert_eq!(document["pages"].as_array().unwrap().len(), 2);
@@ -1190,7 +1190,7 @@ mod tests {
         let mut fixture_row = row(142);
         fixture_row.calls = vec![call(0, "bash"), call(1, "read_file")];
         let detail = TurnDetail {
-            schema_version: TURN_SCHEMA_VERSION,
+            schema_version: HISTORY_SCHEMA_VERSION,
             turn: fixture_row,
         };
         Mock::given(method("GET"))
@@ -1217,7 +1217,7 @@ mod tests {
         let mut fixture_row = row(142);
         fixture_row.calls = vec![call(0, "bash"), call(1, "read_file")];
         let detail = TurnDetail {
-            schema_version: TURN_SCHEMA_VERSION,
+            schema_version: HISTORY_SCHEMA_VERSION,
             turn: fixture_row,
         };
         Mock::given(method("GET"))
@@ -1246,7 +1246,7 @@ mod tests {
         let mut fixture_row = row(142);
         fixture_row.calls = vec![call(0, "bash"), call(1, "read_file")];
         let detail = TurnDetail {
-            schema_version: TURN_SCHEMA_VERSION,
+            schema_version: HISTORY_SCHEMA_VERSION,
             turn: fixture_row,
         };
         Mock::given(method("GET"))
@@ -1275,7 +1275,7 @@ mod tests {
     async fn show_json_reports_a_call_list_it_cannot_read() {
         let server = MockServer::start().await;
         let sent = serde_json::json!({
-            "schema_version": TURN_SCHEMA_VERSION,
+            "schema_version": HISTORY_SCHEMA_VERSION,
             "turn": { "turn_id": 142, "calls": "not a list" },
         });
         Mock::given(method("GET"))
@@ -1295,7 +1295,7 @@ mod tests {
             .to_string();
         assert!(message.contains("do not read as a list"), "{message}");
         assert!(
-            message.contains(&format!("view {TURN_SCHEMA_VERSION}")),
+            message.contains(&format!("view {HISTORY_SCHEMA_VERSION}")),
             "{message}"
         );
         assert!(!message.contains("its calls: none"), "{message}");
@@ -1307,7 +1307,7 @@ mod tests {
     async fn body_text_is_stdout() {
         let server = MockServer::start().await;
         let body = CallBody {
-            schema_version: TURN_SCHEMA_VERSION,
+            schema_version: HISTORY_SCHEMA_VERSION,
             turn_id: 142,
             call_index: 1,
             call_id: "call-1".to_string(),
@@ -1342,7 +1342,7 @@ mod tests {
     async fn json_body_is_the_tagma_document_verbatim() {
         let server = MockServer::start().await;
         let body = CallBody {
-            schema_version: TURN_SCHEMA_VERSION,
+            schema_version: HISTORY_SCHEMA_VERSION,
             turn_id: 142,
             call_index: 1,
             call_id: "call-1".to_string(),
@@ -1403,7 +1403,7 @@ mod tests {
         fixture_row.messages = vec![message("user"), message("assistant")];
         fixture_row.calls = vec![call(0, "bash"), call(1, "read_file")];
         let detail = TurnDetail {
-            schema_version: TURN_SCHEMA_VERSION,
+            schema_version: HISTORY_SCHEMA_VERSION,
             turn: fixture_row,
         };
         let text = render_turn(&detail);
@@ -1421,7 +1421,7 @@ mod tests {
         fixture_row.calls = vec![call(0, "bash"), call(1, "read_file")];
         let wanted = fixture_row.calls[1].clone();
         let detail = TurnDetail {
-            schema_version: TURN_SCHEMA_VERSION,
+            schema_version: HISTORY_SCHEMA_VERSION,
             turn: fixture_row,
         };
         Mock::given(method("GET"))
@@ -1553,7 +1553,7 @@ mod tests {
         let mut fixture_row = row(142);
         fixture_row.calls = vec![deferred];
         let detail = TurnDetail {
-            schema_version: TURN_SCHEMA_VERSION,
+            schema_version: HISTORY_SCHEMA_VERSION,
             turn: fixture_row,
         };
         let text = render_turn(&detail);
@@ -1649,7 +1649,7 @@ mod tests {
         let mut detail_row = row(142);
         detail_row.calls = vec![call(0, "bash")];
         let detail = TurnDetail {
-            schema_version: TURN_SCHEMA_VERSION + 1,
+            schema_version: HISTORY_SCHEMA_VERSION + 1,
             turn: detail_row,
         };
         Mock::given(method("GET"))
@@ -1658,7 +1658,7 @@ mod tests {
             .mount(&server)
             .await;
         let body = CallBody {
-            schema_version: TURN_SCHEMA_VERSION + 1,
+            schema_version: HISTORY_SCHEMA_VERSION + 1,
             turn_id: 142,
             call_index: 0,
             call_id: "call-0".to_string(),
@@ -1679,7 +1679,7 @@ mod tests {
         let client = client(&server);
         let mut out = Vec::new();
         let mut err = Vec::new();
-        let newer = format!("v{}", TURN_SCHEMA_VERSION + 1);
+        let newer = format!("v{}", HISTORY_SCHEMA_VERSION + 1);
         let message = show(&client, &show_args(142), &mut out, &mut err)
             .await
             .unwrap_err()
@@ -1702,7 +1702,7 @@ mod tests {
     async fn a_newer_view_is_refused_by_the_table() {
         let server = MockServer::start().await;
         let mut fixture = page(vec![row(1)], None);
-        fixture.schema_version = TURN_SCHEMA_VERSION + 1;
+        fixture.schema_version = HISTORY_SCHEMA_VERSION + 1;
         Mock::given(method("GET"))
             .and(path(history_path()))
             .respond_with(serve(&fixture))
@@ -1715,11 +1715,11 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(
-            message.contains(&format!("v{}", TURN_SCHEMA_VERSION + 1)),
+            message.contains(&format!("v{}", HISTORY_SCHEMA_VERSION + 1)),
             "{message}"
         );
         assert!(
-            message.contains(&format!("v{TURN_SCHEMA_VERSION}")),
+            message.contains(&format!("v{HISTORY_SCHEMA_VERSION}")),
             "{message}"
         );
         assert!(out.is_empty(), "a refused page prints nothing");
@@ -1731,7 +1731,7 @@ mod tests {
     async fn a_newer_view_still_passes_through_as_json() {
         let server = MockServer::start().await;
         let mut fixture = page(vec![row(1)], None);
-        fixture.schema_version = TURN_SCHEMA_VERSION + 1;
+        fixture.schema_version = HISTORY_SCHEMA_VERSION + 1;
         Mock::given(method("GET"))
             .and(path(history_path()))
             .respond_with(serve(&fixture))
@@ -1909,7 +1909,7 @@ mod tests {
     async fn a_body_read_carries_its_range() {
         let server = MockServer::start().await;
         let body = CallBody {
-            schema_version: TURN_SCHEMA_VERSION,
+            schema_version: HISTORY_SCHEMA_VERSION,
             turn_id: 142,
             call_index: 1,
             call_id: "call-1".to_string(),
@@ -1960,7 +1960,7 @@ mod tests {
     async fn a_body_read_notices_before_the_text() {
         let server = MockServer::start().await;
         let body = CallBody {
-            schema_version: TURN_SCHEMA_VERSION,
+            schema_version: HISTORY_SCHEMA_VERSION,
             turn_id: 142,
             call_index: 1,
             call_id: "call-1".to_string(),
@@ -2085,7 +2085,7 @@ mod tests {
         let server = MockServer::start().await;
         let first = page(vec![stamped(2)], Some("cursor-2"));
         let mut second = page(vec![stamped(1)], None);
-        second.schema_version = TURN_SCHEMA_VERSION + 1;
+        second.schema_version = HISTORY_SCHEMA_VERSION + 1;
         Mock::given(method("GET"))
             .and(path(history_path()))
             .and(query_param_is_missing("before"))
@@ -2106,11 +2106,11 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(
-            message.contains(&format!("v{}", TURN_SCHEMA_VERSION + 1)),
+            message.contains(&format!("v{}", HISTORY_SCHEMA_VERSION + 1)),
             "{message}"
         );
         assert!(
-            message.contains(&format!("v{TURN_SCHEMA_VERSION}")),
+            message.contains(&format!("v{HISTORY_SCHEMA_VERSION}")),
             "{message}"
         );
         assert!(out.is_empty(), "a refused walk prints no document");
@@ -2301,7 +2301,7 @@ mod tests {
     async fn a_message_part_is_read_and_noticed() {
         let server = MockServer::start().await;
         let body = MessageBody {
-            schema_version: TURN_SCHEMA_VERSION,
+            schema_version: HISTORY_SCHEMA_VERSION,
             turn_id: 142,
             message_index: 0,
             role: "assistant".to_string(),
@@ -2341,7 +2341,7 @@ mod tests {
     async fn json_message_body_is_the_tagma_document_verbatim() {
         let server = MockServer::start().await;
         let body = MessageBody {
-            schema_version: TURN_SCHEMA_VERSION,
+            schema_version: HISTORY_SCHEMA_VERSION,
             turn_id: 142,
             message_index: 0,
             role: "user".to_string(),
@@ -2386,7 +2386,7 @@ mod tests {
         second.text = Some("the answer".to_string());
         fixture_row.messages = vec![message("user"), second];
         let detail = TurnDetail {
-            schema_version: TURN_SCHEMA_VERSION,
+            schema_version: HISTORY_SCHEMA_VERSION,
             turn: fixture_row,
         };
         Mock::given(method("GET"))
@@ -2414,7 +2414,7 @@ mod tests {
         let mut fixture_row = row(142);
         fixture_row.messages = vec![message("user"), message("assistant")];
         let detail = TurnDetail {
-            schema_version: TURN_SCHEMA_VERSION,
+            schema_version: HISTORY_SCHEMA_VERSION,
             turn: fixture_row,
         };
         Mock::given(method("GET"))
@@ -2446,7 +2446,7 @@ mod tests {
         fixture_row.messages = vec![message("user"), second];
         let wanted = fixture_row.messages[1].clone();
         let detail = TurnDetail {
-            schema_version: TURN_SCHEMA_VERSION,
+            schema_version: HISTORY_SCHEMA_VERSION,
             turn: fixture_row,
         };
         Mock::given(method("GET"))
@@ -2473,7 +2473,7 @@ mod tests {
         let mut fixture_row = row(142);
         fixture_row.messages = vec![message("user"), message("assistant")];
         let detail = TurnDetail {
-            schema_version: TURN_SCHEMA_VERSION,
+            schema_version: HISTORY_SCHEMA_VERSION,
             turn: fixture_row,
         };
         Mock::given(method("GET"))
@@ -2513,7 +2513,7 @@ mod tests {
         failed.args_more = true;
         fixture_row.calls = vec![failed];
         let detail = TurnDetail {
-            schema_version: TURN_SCHEMA_VERSION,
+            schema_version: HISTORY_SCHEMA_VERSION,
             turn: fixture_row,
         };
         Mock::given(method("GET"))

@@ -8,12 +8,12 @@
   } from "../../lib/manage/toolViews.ts";
   import { breakFacts } from "../../lib/manage/toolViews.ts";
   import {
-    manage_turns_break_message,
-    manage_turns_break_not_paused,
-    manage_turns_break_timer,
-    manage_turns_break_timer_seconds,
-    manage_turns_break_unrecorded,
-    manage_turns_break_wait,
+    manage_history_break_message,
+    manage_history_break_not_paused,
+    manage_history_break_timer,
+    manage_history_break_timer_seconds,
+    manage_history_break_unrecorded,
+    manage_history_break_wait,
   } from "../../paraglide/messages.js";
   import CallNarration from "./CallNarration.svelte";
 
@@ -25,17 +25,17 @@
   const line = $derived.by(() => {
     switch (facts.state) {
       case "not-paused":
-        return manage_turns_break_not_paused();
+        return manage_history_break_not_paused();
       case "paused-message":
-        return manage_turns_break_message();
+        return manage_history_break_message();
       case "paused-unrecorded":
-        return manage_turns_break_unrecorded();
+        return manage_history_break_unrecorded();
       case "paused-timer": {
         const timer = facts.timer;
-        if (timer === null) return manage_turns_break_wait();
+        if (timer === null) return manage_history_break_wait();
         return timer.unit === "seconds"
-          ? manage_turns_break_timer_seconds({ seconds: `${timer.value}` })
-          : manage_turns_break_timer({ minutes: `${timer.value}` });
+          ? manage_history_break_timer_seconds({ seconds: `${timer.value}` })
+          : manage_history_break_timer({ minutes: `${timer.value}` });
       }
     }
   });

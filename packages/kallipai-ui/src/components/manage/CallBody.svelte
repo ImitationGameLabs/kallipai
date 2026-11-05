@@ -43,28 +43,28 @@
   } from "../../lib/manage/turnView.ts";
   import { summarize } from "../../lib/manage/toolSummary.ts";
   import {
-    manage_turns_args_label,
-    manage_turns_body_empty,
-    manage_turns_body_loading,
-    manage_turns_body_more,
-    manage_turns_body_range,
-    manage_turns_body_reclaimed,
-    manage_turns_error_unstated,
-    manage_turns_failed_line,
-    manage_turns_pending_line,
-    manage_turns_pending_hint,
-    manage_turns_pending_no_id,
-    manage_turns_refresh,
-    manage_turns_schema_face,
-    manage_turns_result_label,
-    manage_turns_show_original,
-    manage_turns_streams_pending,
-    manage_turns_streams_unknown,
-    manage_turns_text_as_kept,
-    manage_turns_text_too_large,
-    manage_turns_text_unsafe_number,
-    manage_turns_view_switch,
-    manage_turns_fallback_shown,
+    manage_history_args_label,
+    manage_history_body_empty,
+    manage_history_body_loading,
+    manage_history_body_more,
+    manage_history_body_range,
+    manage_history_body_reclaimed,
+    manage_history_error_unstated,
+    manage_history_failed_line,
+    manage_history_pending_line,
+    manage_history_pending_hint,
+    manage_history_pending_no_id,
+    manage_history_refresh,
+    manage_history_schema_face,
+    manage_history_result_label,
+    manage_history_show_original,
+    manage_history_streams_pending,
+    manage_history_streams_unknown,
+    manage_history_text_as_kept,
+    manage_history_text_too_large,
+    manage_history_text_unsafe_number,
+    manage_history_view_switch,
+    manage_history_fallback_shown,
   } from "../../paraglide/messages.js";
 
   let {
@@ -207,7 +207,7 @@
     <span
       id={titleId(call.call_index, "args")}
       class="text-xs font-semibold text-surface-800-200"
-      >{manage_turns_args_label()}</span
+      >{manage_history_args_label()}</span
     >
     {#if !args.more}
       <CopyButton getText={() => call.args} />
@@ -217,7 +217,7 @@
     {/if}
     {#if hasArgsStructured}
       <span class="sr-only" id={switchId(call.call_index, "args")}
-        >{manage_turns_view_switch()}</span
+        >{manage_history_view_switch()}</span
       >
       <ViewSwitch
         labelledby={switchName(call.call_index, "args")}
@@ -257,14 +257,14 @@
   <span
     id={titleId(call.call_index, "result")}
     class="text-xs font-semibold text-surface-800-200"
-    >{manage_turns_result_label()}</span
+    >{manage_history_result_label()}</span
   >
   {#if text !== "" && atEnd}
     <CopyButton getText={() => body?.text ?? ""} />
   {/if}
   {#if hasStructured}
     <span class="sr-only" id={switchId(call.call_index, "result")}
-      >{manage_turns_view_switch()}</span
+      >{manage_history_view_switch()}</span
     >
     <ViewSwitch
       labelledby={switchName(call.call_index, "result")}
@@ -280,30 +280,30 @@
     class="text-xs text-surface-800-200 transition hover:opacity-70"
     onclick={() => onRead("result", 0)}
   >
-    {manage_turns_show_original()}
+    {manage_history_show_original()}
   </button>
 {:else}
   {#if body.loading}
-    <p class="text-xs opacity-60">{manage_turns_body_loading()}</p>
+    <p class="text-xs opacity-60">{manage_history_body_loading()}</p>
   {:else if body.error}
     <div class="flex flex-wrap items-center gap-2 text-xs">
       <p class="text-error-900-100">{body.error}</p>
       <button
         type="button"
         class="btn btn-sm preset-outlined-surface-500 text-xs hover:preset-filled-surface-500"
-        onclick={() => onRead("result", 0)}>{manage_turns_refresh()}</button
+        onclick={() => onRead("result", 0)}>{manage_history_refresh()}</button
       >
     </div>
   {:else if body.unsupported !== null}
     <p class="text-xs text-surface-700-300">
-      {manage_turns_schema_face()}
+      {manage_history_schema_face()}
     </p>
   {:else if body.empty}
-    <p class="text-xs opacity-60">{manage_turns_body_empty()}</p>
+    <p class="text-xs opacity-60">{manage_history_body_empty()}</p>
   {:else}
     {#if body.more !== null}
       <p class="text-xs opacity-60">
-        {manage_turns_body_range({
+        {manage_history_body_range({
           from: body.from.toLocaleString(),
           to: body.to.toLocaleString(),
           total: body.total.toLocaleString(),
@@ -312,7 +312,7 @@
     {/if}
     {#if body.reclaimed > 0}
       <p class="text-xs opacity-60">
-        {manage_turns_body_reclaimed({ count: body.reclaimed })}
+        {manage_history_body_reclaimed({ count: body.reclaimed })}
       </p>
     {/if}
 
@@ -322,12 +322,12 @@
           tone="info"
           mono={pick.pending.id !== null}
           text={pick.pending.id === null
-            ? manage_turns_pending_no_id()
-            : manage_turns_pending_line({ id: pick.pending.id })}
+            ? manage_history_pending_no_id()
+            : manage_history_pending_line({ id: pick.pending.id })}
         />
         {#if pick.pending.id !== null}
           <p class="pl-3.5 text-xs text-surface-800-200">
-            {manage_turns_pending_hint()}
+            {manage_history_pending_hint()}
           </p>
         {/if}
       {:else if pick.kind === "dedicated"}
@@ -341,14 +341,14 @@
       {:else if pick.kind === "failed"}
         <CallNarration
           tone="error"
-          text={manage_turns_failed_line({
-            reason: pick.error ?? manage_turns_error_unstated(),
+          text={manage_history_failed_line({
+            reason: pick.error ?? manage_history_error_unstated(),
           })}
         />
       {:else}
         {#if pick.registered}
           <p class="text-xs text-surface-700-300">
-            {manage_turns_fallback_shown()}
+            {manage_history_fallback_shown()}
           </p>
         {/if}
         {#if shape === "terminal"}
@@ -364,13 +364,13 @@
             {:else if atEnd}
               <p class="text-xs opacity-60">
                 {envelope.ok
-                  ? manage_turns_streams_unknown()
-                  : manage_turns_text_as_kept()}
+                  ? manage_history_streams_unknown()
+                  : manage_history_text_as_kept()}
               </p>
               <BlockText {text} />
             {:else}
               <p class="text-xs opacity-60">
-                {manage_turns_streams_pending()}
+                {manage_history_streams_pending()}
               </p>
             {/if}
           </div>
@@ -388,8 +388,8 @@
           {#if envelope.reason === "unsafe-number" || envelope.reason === "too-large"}
             <p class="text-xs opacity-60">
               {envelope.reason === "unsafe-number"
-                ? manage_turns_text_unsafe_number()
-                : manage_turns_text_too_large()}
+                ? manage_history_text_unsafe_number()
+                : manage_history_text_too_large()}
             </p>
           {/if}
           <BlockText {text} />
@@ -407,13 +407,13 @@
         class="btn btn-sm preset-outlined-surface-500 text-xs hover:preset-filled-surface-500"
         onclick={() => onMore("result", body?.more ?? 0)}
       >
-        {manage_turns_body_more()}
+        {manage_history_body_more()}
       </button>
     {:else if !body.atEnd}
       <button
         type="button"
         class="btn btn-sm preset-outlined-surface-500 text-xs hover:preset-filled-surface-500"
-        onclick={() => onRead("result", 0)}>{manage_turns_refresh()}</button
+        onclick={() => onRead("result", 0)}>{manage_history_refresh()}</button
       >
     {/if}
   {/if}

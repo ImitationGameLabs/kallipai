@@ -54,19 +54,19 @@ fn manage_router() -> Router<SharedState> {
         .route("/agents/{id}/duty", put(agent::update_duty))
         .route(
             "/agents/{id}/history",
-            get(crate::routes::turns::list_turns),
+            get(crate::routes::history::list_turns),
         )
         .route(
             "/agents/{id}/history/{turn_id}",
-            get(crate::routes::turns::get_turn),
+            get(crate::routes::history::get_turn),
         )
         .route(
             "/agents/{id}/history/{turn_id}/calls/{call_index}/body",
-            get(crate::routes::turns::get_call_body),
+            get(crate::routes::history::get_call_body),
         )
         .route(
             "/agents/{id}/history/{turn_id}/messages/{message_index}/body",
-            get(crate::routes::turns::get_message_body),
+            get(crate::routes::history::get_message_body),
         )
         .route("/agents/{id}/metadata", put(agent::update_metadata))
         .route("/agents/{id}/profile-set", put(agent::update_profile_set))

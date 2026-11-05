@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 
 /// Version of the read face. Bumped when a field changes meaning or goes
 /// away, so an older client stops instead of misreading a page.
-pub const TURN_SCHEMA_VERSION: u32 = 3;
+pub const HISTORY_SCHEMA_VERSION: u32 = 3;
 
 /// Rows per page when the request carries no `limit`.
 pub const TURNS_PAGE_LIMIT_DEFAULT: u32 = 50;

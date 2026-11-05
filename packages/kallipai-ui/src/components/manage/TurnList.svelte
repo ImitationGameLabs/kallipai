@@ -13,21 +13,21 @@
     turnShape,
   } from "../../lib/manage/turnView.ts";
   import {
-    manage_turns_bad_lines_one,
-    manage_turns_bad_lines_other,
-    manage_turns_call_failed_count,
-    manage_turns_calls_label,
-    manage_turns_elapsed_value,
-    manage_turns_empty,
-    manage_turns_load_failed,
-    manage_turns_load_more,
-    manage_turns_loading,
-    manage_turns_no_log,
-    manage_turns_page_cut,
-    manage_turns_refresh,
-    manage_turns_schema_face,
-    manage_turns_shape_assistant,
-    manage_turns_shape_user,
+    manage_history_bad_lines_one,
+    manage_history_bad_lines_other,
+    manage_history_call_failed_count,
+    manage_history_calls_label,
+    manage_history_elapsed_value,
+    manage_history_empty,
+    manage_history_load_failed,
+    manage_history_load_more,
+    manage_history_loading,
+    manage_history_no_log,
+    manage_history_page_cut,
+    manage_history_refresh,
+    manage_history_schema_face,
+    manage_history_shape_assistant,
+    manage_history_shape_user,
   } from "../../paraglide/messages.js";
 
   let {
@@ -68,12 +68,12 @@
     switch (notice.kind) {
       case "bad-lines":
         return notice.count === 1
-          ? manage_turns_bad_lines_one({ count: notice.count })
-          : manage_turns_bad_lines_other({ count: notice.count });
+          ? manage_history_bad_lines_one({ count: notice.count })
+          : manage_history_bad_lines_other({ count: notice.count });
       case "page-cut":
-        return manage_turns_page_cut();
+        return manage_history_page_cut();
       case "face":
-        return manage_turns_schema_face();
+        return manage_history_schema_face();
       default: {
         // A new notice kind without a line here is a compile error, not a
         // blank row.
@@ -112,29 +112,31 @@
     <p class="text-xs text-error-500">{refreshError}</p>
   {/if}
   {#if loading && rows.length === 0}
-    <p class="text-xs opacity-70">{manage_turns_loading()}</p>
+    <p class="text-xs opacity-70">{manage_history_loading()}</p>
   {:else if fire === "no-log"}
-    <p class="text-xs opacity-70">{manage_turns_no_log()}</p>
+    <p class="text-xs opacity-70">{manage_history_no_log()}</p>
   {:else if fire === "failed"}
-    <p class="text-xs text-error-500">{error ?? manage_turns_load_failed()}</p>
+    <p class="text-xs text-error-500">
+      {error ?? manage_history_load_failed()}
+    </p>
     <button
       type="button"
       class="text-xs opacity-60 transition hover:opacity-100"
       disabled={loading}
-      onclick={onRetry}>{manage_turns_refresh()}</button
+      onclick={onRetry}>{manage_history_refresh()}</button
     >
   {:else if face !== null || rows.length === 0}
     {#each notes as notice}
       <p class="text-xs opacity-60">{noticeText(notice)}</p>
     {/each}
     {#if face === null}
-      <p class="text-xs opacity-70">{manage_turns_empty()}</p>
+      <p class="text-xs opacity-70">{manage_history_empty()}</p>
     {/if}
     <button
       type="button"
       class="text-xs opacity-60 transition hover:opacity-100"
       disabled={loading}
-      onclick={onRefresh}>{manage_turns_refresh()}</button
+      onclick={onRefresh}>{manage_history_refresh()}</button
     >
   {:else}
     {#each notes as notice}
@@ -173,15 +175,16 @@
               class="flex flex-wrap items-center gap-x-2 text-xs text-surface-800-200"
             >
               {#if row.elapsed_ms !== undefined}
-                <span>{manage_turns_elapsed_value({ ms: row.elapsed_ms })}</span
+                <span
+                  >{manage_history_elapsed_value({ ms: row.elapsed_ms })}</span
                 >
               {/if}
               {#if shape === "tools"}
-                <span>{manage_turns_calls_label()}: {row.calls.length}</span>
+                <span>{manage_history_calls_label()}: {row.calls.length}</span>
               {:else if shape === "user"}
-                <span>{manage_turns_shape_user()}</span>
+                <span>{manage_history_shape_user()}</span>
               {:else if shape === "assistant"}
-                <span>{manage_turns_shape_assistant()}</span>
+                <span>{manage_history_shape_assistant()}</span>
               {/if}
               {#if failedCount(row) > 0}
                 <span
@@ -191,7 +194,7 @@
                     class="size-1.5 rounded-full bg-error-500"
                     aria-hidden="true"
                   ></span>
-                  {manage_turns_call_failed_count({
+                  {manage_history_call_failed_count({
                     count: failedCount(row),
                   })}
                 </span>
@@ -209,7 +212,7 @@
         type="button"
         class="text-xs opacity-60 transition hover:opacity-100"
         disabled={loading || loadingMore}
-        onclick={onMore}>{manage_turns_load_more()}</button
+        onclick={onMore}>{manage_history_load_more()}</button
       >
     {/if}
   {/if}

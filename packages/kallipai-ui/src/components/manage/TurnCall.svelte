@@ -13,19 +13,19 @@
     callStatus,
   } from "../../lib/manage/turnView.ts";
   import {
-    manage_turns_call_cut,
-    manage_turns_call_exit,
-    manage_turns_call_failed,
-    manage_turns_call_ok,
-    manage_turns_call_pending,
-    manage_turns_call_timed_out,
-    manage_turns_stderr_label,
-    manage_turns_stdout_label,
-    manage_turns_stream_byte_one,
-    manage_turns_stream_byte_other,
-    manage_turns_stream_line_one,
-    manage_turns_stream_line_other,
-    manage_turns_stream_shape,
+    manage_history_call_cut,
+    manage_history_call_exit,
+    manage_history_call_failed,
+    manage_history_call_ok,
+    manage_history_call_pending,
+    manage_history_call_timed_out,
+    manage_history_stderr_label,
+    manage_history_stdout_label,
+    manage_history_stream_byte_one,
+    manage_history_stream_byte_other,
+    manage_history_stream_line_one,
+    manage_history_stream_line_other,
+    manage_history_stream_shape,
   } from "../../paraglide/messages.js";
 
   let {
@@ -53,10 +53,10 @@
   const errorBody = $derived(bodies[bodyKey(turnId, call.call_index, "error")]);
   const statusText = $derived(
     status === "ok"
-      ? manage_turns_call_ok()
+      ? manage_history_call_ok()
       : status === "pending"
-        ? manage_turns_call_pending()
-        : manage_turns_call_failed(),
+        ? manage_history_call_pending()
+        : manage_history_call_failed(),
   );
   const exitClass = $derived(
     facts.exit === 0 ? "text-success-950-50" : "text-error-900-100",
@@ -70,16 +70,16 @@
   ): string {
     const bytes = size.bytes.toLocaleString();
     const lines = size.lines.toLocaleString();
-    return manage_turns_stream_shape({
+    return manage_history_stream_shape({
       label,
       bytes:
         size.bytes === 1
-          ? manage_turns_stream_byte_one({ bytes })
-          : manage_turns_stream_byte_other({ bytes }),
+          ? manage_history_stream_byte_one({ bytes })
+          : manage_history_stream_byte_other({ bytes }),
       lines:
         size.lines === 1
-          ? manage_turns_stream_line_one({ lines })
-          : manage_turns_stream_line_other({ lines }),
+          ? manage_history_stream_line_one({ lines })
+          : manage_history_stream_line_other({ lines }),
     });
   }
 </script>
@@ -97,14 +97,14 @@
     >
     {#if facts.exit !== null}
       <span class="font-mono {exitClass}"
-        >{manage_turns_call_exit({ code: facts.exit })}</span
+        >{manage_history_call_exit({ code: facts.exit })}</span
       >
     {/if}
     {#if facts.timedOut}
-      <span class="text-warning-950-50">{manage_turns_call_timed_out()}</span>
+      <span class="text-warning-950-50">{manage_history_call_timed_out()}</span>
     {/if}
     {#if facts.cut}
-      <span class="opacity-60">{manage_turns_call_cut()}</span>
+      <span class="opacity-60">{manage_history_call_cut()}</span>
     {/if}
   </div>
   {#if facts.firstError}
@@ -133,11 +133,11 @@
   {#if facts.stdout || facts.stderr}
     <p class="text-xs text-surface-800-200">
       {#if facts.stdout}{streamLine(
-          manage_turns_stdout_label(),
+          manage_history_stdout_label(),
           facts.stdout,
         )}{/if}
       {#if facts.stderr}· {streamLine(
-          manage_turns_stderr_label(),
+          manage_history_stderr_label(),
           facts.stderr,
         )}{/if}
     </p>

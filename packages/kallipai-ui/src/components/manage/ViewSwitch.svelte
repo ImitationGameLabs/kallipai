@@ -11,8 +11,8 @@
   import { SegmentedControl } from "@skeletonlabs/skeleton-svelte";
 
   import {
-    manage_turns_raw,
-    manage_turns_structured,
+    manage_history_raw,
+    manage_history_structured,
   } from "../../paraglide/messages.js";
 
   let {
@@ -44,7 +44,7 @@
       <SegmentedControl.ItemHiddenInput />
       <SegmentedControl.ItemText
         class="text-surface-950-50! data-[state=checked]:text-primary-950-50!"
-        >{manage_turns_structured()}</SegmentedControl.ItemText
+        >{manage_history_structured()}</SegmentedControl.ItemText
       >
     </SegmentedControl.Item>
     <SegmentedControl.Item
@@ -54,7 +54,7 @@
       <SegmentedControl.ItemHiddenInput />
       <SegmentedControl.ItemText
         class="text-surface-950-50! data-[state=checked]:text-primary-950-50!"
-        >{manage_turns_raw()}</SegmentedControl.ItemText
+        >{manage_history_raw()}</SegmentedControl.ItemText
       >
     </SegmentedControl.Item>
   </SegmentedControl.Control>

@@ -10,14 +10,14 @@
     wholeText,
   } from "../../lib/manage/turnView.ts";
   import {
-    manage_turns_body_empty,
-    manage_turns_body_loading,
-    manage_turns_body_more,
-    manage_turns_body_range,
-    manage_turns_body_reclaimed,
-    manage_turns_body_stopped,
-    manage_turns_refresh,
-    manage_turns_schema_face,
+    manage_history_body_empty,
+    manage_history_body_loading,
+    manage_history_body_more,
+    manage_history_body_range,
+    manage_history_body_reclaimed,
+    manage_history_body_stopped,
+    manage_history_refresh,
+    manage_history_schema_face,
   } from "../../paraglide/messages.js";
 
   let {
@@ -62,28 +62,28 @@
 {#if more && body !== undefined}
   {#if body.loading}
     {#if text !== null}<BlockText {text} {failed} {kind} />{/if}
-    <p class="text-xs opacity-60">{manage_turns_body_loading()}</p>
+    <p class="text-xs opacity-60">{manage_history_body_loading()}</p>
   {:else if body.error !== null}
     {#if text !== null}<BlockText {text} {failed} {kind} />{/if}
     <p class="text-xs text-error-900-100">{body.error}</p>
     <button
       type="button"
       class="btn btn-sm preset-outlined-surface-500 text-xs hover:preset-filled-surface-500"
-      onclick={readRest}>{manage_turns_refresh()}</button
+      onclick={readRest}>{manage_history_refresh()}</button
     >
   {:else if body.unsupported !== null}
     {#if text !== null}<BlockText {text} {failed} {kind} />{/if}
     <p class="text-xs text-surface-700-300">
-      {manage_turns_schema_face()}
+      {manage_history_schema_face()}
     </p>
   {:else if body.empty}
     {#if text !== null}<BlockText {text} {failed} {kind} />{/if}
-    <p class="text-xs opacity-60">{manage_turns_body_empty()}</p>
+    <p class="text-xs opacity-60">{manage_history_body_empty()}</p>
   {:else}
     <BlockText text={wholeText(text, body)} {failed} {kind} />
     {#if body.more !== null}
       <p class="text-xs text-surface-700-300">
-        {manage_turns_body_range({
+        {manage_history_body_range({
           from: body.from.toLocaleString(),
           to: body.to.toLocaleString(),
           total: body.total.toLocaleString(),
@@ -92,21 +92,21 @@
     {/if}
     {#if body.reclaimed > 0}
       <p class="text-xs opacity-60">
-        {manage_turns_body_reclaimed({ count: body.reclaimed })}
+        {manage_history_body_reclaimed({ count: body.reclaimed })}
       </p>
     {/if}
     {#if body.more !== null}
       <button
         type="button"
         class="btn btn-sm preset-outlined-surface-500 text-xs hover:preset-filled-surface-500"
-        onclick={readMore}>{manage_turns_body_more()}</button
+        onclick={readMore}>{manage_history_body_more()}</button
       >
     {:else if !body.atEnd}
-      <p class="text-xs opacity-60">{manage_turns_body_stopped()}</p>
+      <p class="text-xs opacity-60">{manage_history_body_stopped()}</p>
       <button
         type="button"
         class="btn btn-sm preset-outlined-surface-500 text-xs hover:preset-filled-surface-500"
-        onclick={readRest}>{manage_turns_refresh()}</button
+        onclick={readRest}>{manage_history_refresh()}</button
       >
     {/if}
   {/if}
@@ -118,7 +118,7 @@
     <button
       type="button"
       class="btn btn-sm preset-outlined-surface-500 text-xs hover:preset-filled-surface-500"
-      onclick={readRest}>{manage_turns_body_more()}</button
+      onclick={readRest}>{manage_history_body_more()}</button
     >
   {/if}
 {/if}

@@ -73,14 +73,14 @@ Deno.test(
     );
     const stored = source(STORED);
     assert(
-      stored.includes("manage_turns_body_range({"),
+      stored.includes("manage_history_body_range({"),
       "the block names the range its rest will come in",
     );
     for (const label of [
-      "manage_turns_body_range({",
-      "manage_turns_body_more()",
-      "manage_turns_body_empty()",
-      "manage_turns_body_reclaimed({",
+      "manage_history_body_range({",
+      "manage_history_body_more()",
+      "manage_history_body_empty()",
+      "manage_history_body_reclaimed({",
     ]) {
       assert(call.includes(label), `a call block must render ${label}`);
     }
@@ -152,16 +152,16 @@ Deno.test(
     const list = source(LIST);
     assert(
       list.includes('fire === "no-log"') &&
-        list.includes("manage_turns_no_log()"),
+        list.includes("manage_history_no_log()"),
       "a list 404 must render the no-log line",
     );
     assert(
-      list.includes("manage_turns_empty()"),
+      list.includes("manage_history_empty()"),
       "an empty page must render the empty line",
     );
     assert(
       list.includes('fire === "failed"') &&
-        list.includes("manage_turns_load_failed()"),
+        list.includes("manage_history_load_failed()"),
       "a failed read must render the failure line",
     );
     const page = source(PAGE);
@@ -186,12 +186,12 @@ Deno.test(
   () => {
     const src = source(DETAIL);
     assert(
-      src.includes("manage_turns_reasoning_show()") &&
-        src.includes("manage_turns_reasoning_hide()"),
+      src.includes("manage_history_reasoning_show()") &&
+        src.includes("manage_history_reasoning_hide()"),
       "the reasoning fold needs both labels",
     );
     assert(
-      src.includes("manage_turns_reasoning_unavailable()"),
+      src.includes("manage_history_reasoning_unavailable()"),
       "a flag without text must say so instead of folding nothing",
     );
     const open = src.indexOf(
@@ -226,7 +226,7 @@ Deno.test(
       "the paging control must follow the decision layer's verdict",
     );
     assert(
-      source(LIST).includes("manage_turns_load_more()"),
+      source(LIST).includes("manage_history_load_more()"),
       "the paging control must render its label",
     );
   },
@@ -477,8 +477,8 @@ Deno.test(
       "the call header must delegate the body to its one component",
     );
     assert(
-      src.includes("manage_turns_text_unsafe_number()") &&
-        src.includes("manage_turns_text_too_large()"),
+      src.includes("manage_history_text_unsafe_number()") &&
+        src.includes("manage_history_text_too_large()"),
       "a text that cannot be laid out must say so instead of showing nothing",
     );
     assert(
@@ -623,14 +623,14 @@ Deno.test(
       "the base box neither caps its height nor scrolls",
     );
     assert(
-      !block.includes("manage_turns_show_all") &&
-        !block.includes("manage_turns_show_less") &&
+      !block.includes("manage_history_show_all") &&
+        !block.includes("manage_history_show_less") &&
         !block.includes("atEnd"),
       "a line count is no answer to whether the text is all here: no fold",
     );
     for (const url of [BODY, STREAM]) {
       assert(
-        !source(url).includes("manage_turns_show_all"),
+        !source(url).includes("manage_history_show_all"),
         "no other component offers a fold either",
       );
     }
@@ -665,9 +665,9 @@ Deno.test(
     );
     assert(
       pendingArm.includes('tone="info"') &&
-        pendingArm.includes("manage_turns_pending_no_id()") &&
+        pendingArm.includes("manage_history_pending_no_id()") &&
         pendingArm.includes(
-          "manage_turns_pending_line({ id: pick.pending.id })",
+          "manage_history_pending_line({ id: pick.pending.id })",
         ),
       "a deferred call waits, and says which approval it waits on",
     );
@@ -676,7 +676,7 @@ Deno.test(
       "the id the sentence prints is the one to copy, so it sets in mono",
     );
     assert(
-      pendingArm.includes("{manage_turns_pending_hint()}"),
+      pendingArm.includes("{manage_history_pending_hint()}"),
       "the waiting call says what turns the wait into a run",
     );
     assert(
@@ -688,14 +688,14 @@ Deno.test(
       "the hint that speaks of an id waits for a record that carries one",
     );
     assertEquals(
-      count(bodyTemplate, "manage_turns_fallback_shown"),
+      count(bodyTemplate, "manage_history_fallback_shown"),
       1,
       "one line says a registered tool fell back",
     );
     const fallback = between(
       body,
       'pick.kind === "failed"',
-      "manage_turns_fallback_shown",
+      "manage_history_fallback_shown",
     );
     assert(
       fallback.includes("{:else}") &&
@@ -706,8 +706,8 @@ Deno.test(
     // arm can be reached. Reachability is parseEnvelope's unit test.
     const failure = between(body, 'pick.kind === "failed"', "{:else}");
     assert(
-      failure.includes("manage_turns_failed_line(") &&
-        failure.includes("pick.error ?? manage_turns_error_unstated()"),
+      failure.includes("manage_history_failed_line(") &&
+        failure.includes("pick.error ?? manage_history_error_unstated()"),
       "the failure arm states its failure and falls back to this wording",
     );
     for (const literal of ['"command"', '"exit_code"']) {
@@ -845,7 +845,7 @@ Deno.test(
       "{:else if body.unsupported !== null}",
     );
     assert(
-      arm.includes("manage_turns_refresh"),
+      arm.includes("manage_history_refresh"),
       "a failed read offers the same read again, in the words the page uses",
     );
     assert(
@@ -896,18 +896,18 @@ Deno.test(
     // never renders, so this test goes red.
     assert(
       count(bg, "{#if facts.stalled}") === 1 &&
-        bg.includes("manage_turns_bg_stalled()") &&
+        bg.includes("manage_history_bg_stalled()") &&
         bg.includes("text-error-900-100"),
       "a stalled task says so, in the one alarm this page has",
     );
     assert(
       bg.includes("{#if facts.folded}") &&
-        bg.includes("manage_turns_bg_tail()"),
+        bg.includes("manage_history_bg_tail()"),
       "a folded tail says the start is not in this read",
     );
     assert(
       evict.includes("{#if keptLine !== null}") &&
-        count(evict, "manage_turns_evict_kept(caps)") === 1,
+        count(evict, "manage_history_evict_kept(caps)") === 1,
       "the keep window is drawn when the record states one",
     );
     assert(
@@ -971,11 +971,11 @@ Deno.test(
     // short of the end".
     const moreArm = between(src, "{#if body.more !== null}", OPN);
     assert(
-      moreArm.includes("manage_turns_body_more()") &&
+      moreArm.includes("manage_history_body_more()") &&
         moreArm.includes("onclick={readMore}"),
       "a face that names the next range offers exactly that range",
     );
-    const stopped = src.indexOf("manage_turns_body_stopped(");
+    const stopped = src.indexOf("manage_history_body_stopped(");
     const stoppedOpener = src.slice(
       src.lastIndexOf("{:else", stopped),
       stopped,
@@ -985,18 +985,20 @@ Deno.test(
       "the apology is for a range that stopped short, never for the end",
     );
     assert(
-      !src.includes("manage_turns_body_end"),
+      !src.includes("manage_history_body_end"),
       "the end of the text is not announced twice",
     );
-    const stoppedArm = between(src, "manage_turns_body_stopped(", "{/if}");
+    const stoppedArm = between(src, "manage_history_body_stopped(", "{/if}");
     assert(
       stoppedArm.includes("onclick={readRest}") &&
-        stoppedArm.includes("manage_turns_refresh()"),
+        stoppedArm.includes("manage_history_refresh()"),
       "a range that stops short of the end offers the read again",
     );
     assert(
       src.includes("{#if body.reclaimed > 0}") &&
-        src.includes("manage_turns_body_reclaimed({ count: body.reclaimed })"),
+        src.includes(
+          "manage_history_body_reclaimed({ count: body.reclaimed })",
+        ),
       "reclaimed stream paths are named where the text sits",
     );
   },
@@ -1015,7 +1017,7 @@ Deno.test(
       "}",
     );
     assert(
-      guard.includes("manage_turns_body_wrong_message()"),
+      guard.includes("manage_history_body_wrong_message()"),
       "a range from another message is refused, and says why",
     );
     const detail = source(DETAIL);
@@ -1034,7 +1036,7 @@ Deno.test(
   { permissions: { read: [DETAIL, STORED, BODY] } },
   () => {
     assert(
-      !source(DETAIL).includes("manage_turns_message_chars"),
+      !source(DETAIL).includes("manage_history_message_chars"),
       "a message states its role, not how many characters it kept",
     );
     for (const url of [STORED, BODY]) {
@@ -1071,7 +1073,7 @@ Deno.test(
     );
     assert(
       retry.includes("{body.error}") &&
-        retry.includes("manage_turns_refresh()") &&
+        retry.includes("manage_history_refresh()") &&
         retry.includes("preset-outlined-surface-500"),
       "the error is drawn with a button the reader can see, not a grey word",
     );
@@ -1148,9 +1150,9 @@ Deno.test(
   { permissions: { read: [BODY] } },
   () => {
     const src = source(BODY);
-    const row = between(src, "{manage_turns_args_label()}", "</div>");
+    const row = between(src, "{manage_history_args_label()}", "</div>");
     assertEquals(
-      count(row, "manage_turns_args_"),
+      count(row, "manage_history_args_"),
       1,
       "the title row names the half, once",
     );
@@ -1159,8 +1161,8 @@ Deno.test(
       "the title row keeps the copy control beside the half it names",
     );
     assert(
-      !src.includes("manage_turns_args_cut_note") &&
-        !src.includes("manage_turns_args_stored_cut"),
+      !src.includes("manage_history_args_cut_note") &&
+        !src.includes("manage_history_args_stored_cut"),
       "the prefix is carried by the read control and the range, nowhere else",
     );
     const cut = between(src, "{:else if args.more}", "{:else}");
@@ -1181,17 +1183,17 @@ Deno.test(
       "each count picks its own singular",
     );
     for (const key of [
-      "manage_turns_stream_line_one",
-      "manage_turns_stream_line_other",
-      "manage_turns_stream_byte_one",
-      "manage_turns_stream_byte_other",
+      "manage_history_stream_line_one",
+      "manage_history_stream_line_other",
+      "manage_history_stream_byte_one",
+      "manage_history_stream_byte_other",
     ]) {
       assert(call.includes(key), `a stream's size names ${key}`);
     }
     const list = source(LIST);
     assert(
       list.includes("notice.count === 1") &&
-        list.includes("manage_turns_bad_lines_one"),
+        list.includes("manage_history_bad_lines_one"),
       "one unread line is reported as one line",
     );
   },
@@ -1258,7 +1260,7 @@ Deno.test(
       `{:else if shape === "user"}`,
     );
     assert(
-      tools.includes("manage_turns_calls_label()") &&
+      tools.includes("manage_history_calls_label()") &&
         tools.includes("row.calls.length"),
       "the call count sits inside the tool branch, not on every row",
     );
@@ -1268,13 +1270,13 @@ Deno.test(
       `{:else if shape === "assistant"}`,
     );
     assert(
-      user.includes("manage_turns_shape_user()") &&
+      user.includes("manage_history_shape_user()") &&
         !user.includes("calls.length"),
       "a user turn names itself and carries no call count",
     );
     const reply = between(src, `{:else if shape === "assistant"}`, "{/if}");
     assert(
-      reply.includes("manage_turns_shape_assistant()"),
+      reply.includes("manage_history_shape_assistant()"),
       "a reply names itself",
     );
   },
@@ -1345,7 +1347,7 @@ Deno.test(
     const block = between(
       src,
       "{#if carries || showsThought}",
-      "{manage_turns_reasoning_unavailable()}",
+      "{manage_history_reasoning_unavailable()}",
     );
     assert(
       block.includes("{#if showsThought}") &&
@@ -1358,8 +1360,8 @@ Deno.test(
       "</div>",
     );
     assert(
-      roleLine.includes("manage_turns_reasoning_show()") &&
-        roleLine.includes("manage_turns_reasoning_hide()"),
+      roleLine.includes("manage_history_reasoning_show()") &&
+        roleLine.includes("manage_history_reasoning_hide()"),
       "the reasoning control sits on the role line",
     );
     assert(
@@ -1376,14 +1378,14 @@ Deno.test(
     const terminal = source(TERMINAL_VIEW);
     const call = source(CALL);
     assert(
-      terminal.includes("manage_turns_terminal_ran") &&
-        !terminal.includes("manage_turns_terminal_succeeded") &&
-        !terminal.includes("manage_turns_terminal_failed"),
+      terminal.includes("manage_history_terminal_ran") &&
+        !terminal.includes("manage_history_terminal_succeeded") &&
+        !terminal.includes("manage_history_terminal_failed"),
       "the terminal line says where the command ran, not how it ended",
     );
     assert(
-      call.includes("manage_turns_call_exit") &&
-        call.includes("manage_turns_call_failed()"),
+      call.includes("manage_history_call_exit") &&
+        call.includes("manage_history_call_failed()"),
       "the card says the outcome and the exit code the line leaves out",
     );
   },
@@ -1395,13 +1397,13 @@ Deno.test(
   () => {
     const body = source(BODY);
     assert(
-      body.indexOf("{manage_turns_args_label()}") <
-        body.indexOf("{manage_turns_result_label()}"),
+      body.indexOf("{manage_history_args_label()}") <
+        body.indexOf("{manage_history_result_label()}"),
       "the arguments half is titled before the result half",
     );
     const result = between(
       body,
-      "{manage_turns_result_label()}",
+      "{manage_history_result_label()}",
       "{#if body === undefined}",
     );
     assert(

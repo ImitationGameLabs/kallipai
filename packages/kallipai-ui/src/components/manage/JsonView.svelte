@@ -18,10 +18,10 @@
     type JsonNode,
   } from "../../lib/manage/jsonView.ts";
   import {
-    manage_turns_container_fields,
-    manage_turns_container_items,
-    manage_turns_show_all,
-    manage_turns_show_less,
+    manage_history_container_fields,
+    manage_history_container_items,
+    manage_history_show_all,
+    manage_history_show_less,
   } from "../../paraglide/messages.js";
 
   let {
@@ -59,8 +59,8 @@
   const preview = $derived(open ? "" : previewOf(node));
   const countText = $derived(
     node.kind === "array"
-      ? manage_turns_container_items({ count: size })
-      : manage_turns_container_fields({ count: size }),
+      ? manage_history_container_items({ count: size })
+      : manage_history_container_fields({ count: size }),
   );
   const unfoldedHere = $derived(unfolded[path] === true);
   const foldable = $derived(node.kind === "string" && foldsAt(node.value));
@@ -142,7 +142,9 @@
           onclick={() => onUnfold(path, !unfoldedHere)}
           aria-expanded={unfoldedHere}
         >
-          {unfoldedHere ? manage_turns_show_less() : manage_turns_show_all()}
+          {unfoldedHere
+            ? manage_history_show_less()
+            : manage_history_show_all()}
         </button>
       {/if}
     {:else if node.kind === "number"}

@@ -6,6 +6,7 @@ pub(crate) mod approval;
 #[cfg(not(test))]
 mod approval;
 pub(crate) mod context;
+pub(crate) mod history;
 mod inbox;
 pub(crate) mod ingest;
 pub(crate) mod lesche;
@@ -15,7 +16,6 @@ pub(crate) mod profiles;
 pub(crate) mod settings;
 pub(crate) mod task;
 pub(crate) mod team;
-pub(crate) mod turns;
 
 use axum::Router;
 use kallipai_common::protocol::{ListApprovalsQuery, MessageRequest};
@@ -146,19 +146,19 @@ pub fn router() -> Router<SharedState> {
         .route("/agents/{id}/duty", axum::routing::put(agent::update_duty))
         .route(
             "/agents/{id}/history",
-            axum::routing::get(turns::list_turns),
+            axum::routing::get(history::list_turns),
         )
         .route(
             "/agents/{id}/history/{turn_id}",
-            axum::routing::get(turns::get_turn),
+            axum::routing::get(history::get_turn),
         )
         .route(
             "/agents/{id}/history/{turn_id}/calls/{call_index}/body",
-            axum::routing::get(turns::get_call_body),
+            axum::routing::get(history::get_call_body),
         )
         .route(
             "/agents/{id}/history/{turn_id}/messages/{message_index}/body",
-            axum::routing::get(turns::get_message_body),
+            axum::routing::get(history::get_message_body),
         )
         .route(
             "/agents/{id}/inbox",

@@ -5,12 +5,12 @@ pub mod approval;
 pub mod budget;
 pub mod error;
 pub mod external;
+pub mod history;
 pub mod inbox;
 pub mod skill;
 pub mod sse;
 pub mod task;
 pub mod team;
-pub mod turns;
 
 // Re-export all public types for convenience.
 // Downstream `use kallipai_common::protocol::*` continues to work unchanged.
@@ -31,6 +31,13 @@ pub use approval::{
 pub use budget::{TokenBudgetResponse, TokenBudgetUpdateRequest};
 pub use error::ApiError;
 pub use external::{AuthoredEvent, SignalEvent};
+pub use history::{
+    CALL_BODY_LIMIT_DEFAULT, CALL_BODY_MAX_BYTES, CallBody, CallBodyQuery, CallPart, CallRow,
+    DETAIL_TEXT_INLINE_BYTES, HISTORY_SCHEMA_VERSION, MessageBody, MessageBodyQuery, MessageRow,
+    PAGE_TEXT_INLINE_CHARS, SPILL_RECLAIMED, TURNS_PAGE_LIMIT_DEFAULT, TURNS_PAGE_LIMIT_MAX,
+    TURNS_PAGE_MAX_BYTES, TextPart, TurnDetail, TurnProfile, TurnRow, TurnUsageView, TurnsPage,
+    TurnsQuery,
+};
 pub use inbox::{InboxEntry, InboxListQuery, InboxSummary};
 pub use skill::{SkillMeta, parse_frontmatter, parse_frontmatter_description};
 pub use sse::{FailoverChainExhaustion, QuotaBlockedInfo, SseEvent, TransientRetryInfo};
@@ -46,11 +53,4 @@ pub use team::{
     TeamConvergeResponse, TeamInactiveAgent, TeamInactiveAgentsListing, TeamLockEntry, TeamPlanRow,
     TeamRejection, TeamRejectionKind, TeamRoleStatus, TeamRowOutcome, TeamStatusQuery,
     TeamStatusResponse,
-};
-pub use turns::{
-    CALL_BODY_LIMIT_DEFAULT, CALL_BODY_MAX_BYTES, CallBody, CallBodyQuery, CallPart, CallRow,
-    DETAIL_TEXT_INLINE_BYTES, MessageBody, MessageBodyQuery, MessageRow, PAGE_TEXT_INLINE_CHARS,
-    SPILL_RECLAIMED, TURN_SCHEMA_VERSION, TURNS_PAGE_LIMIT_DEFAULT, TURNS_PAGE_LIMIT_MAX,
-    TURNS_PAGE_MAX_BYTES, TextPart, TurnDetail, TurnProfile, TurnRow, TurnUsageView, TurnsPage,
-    TurnsQuery,
 };

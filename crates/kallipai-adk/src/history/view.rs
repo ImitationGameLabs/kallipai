@@ -13,8 +13,8 @@ use std::path::{Path, PathBuf};
 use just_llm_client::types::generation::{ContentPart, Message, ToolCall};
 use kallipai_common::protocol::{
     CALL_BODY_LIMIT_DEFAULT, CALL_BODY_MAX_BYTES, CallBody, CallBodyQuery, CallPart, CallRow,
-    DETAIL_TEXT_INLINE_BYTES, MessageBody, MessageBodyQuery, MessageRow, PAGE_TEXT_INLINE_CHARS,
-    SPILL_RECLAIMED, TURN_SCHEMA_VERSION, TURNS_PAGE_LIMIT_DEFAULT, TURNS_PAGE_LIMIT_MAX,
+    DETAIL_TEXT_INLINE_BYTES, HISTORY_SCHEMA_VERSION, MessageBody, MessageBodyQuery, MessageRow,
+    PAGE_TEXT_INLINE_CHARS, SPILL_RECLAIMED, TURNS_PAGE_LIMIT_DEFAULT, TURNS_PAGE_LIMIT_MAX,
     TURNS_PAGE_MAX_BYTES, TextPart, TurnDetail, TurnProfile, TurnRow, TurnUsageView, TurnsPage,
     TurnsQuery,
 };
@@ -123,7 +123,7 @@ pub fn read_turns_page(agent_dir: &Path, query: &TurnsQuery) -> Result<TurnsPage
         _ => None,
     };
     Ok(TurnsPage {
-        schema_version: TURN_SCHEMA_VERSION,
+        schema_version: HISTORY_SCHEMA_VERSION,
         rows: rows.into_iter().map(|row| row.row).collect(),
         bad_lines: collected.bad_lines,
         next_cursor,
@@ -142,7 +142,7 @@ struct PageRow {
 pub fn read_turn(agent_dir: &Path, turn_id: u64) -> Result<TurnDetail, ViewError> {
     let record = find_turn(agent_dir, turn_id).ok_or(ViewError::NoSuchTurn(turn_id))?;
     Ok(TurnDetail {
-        schema_version: TURN_SCHEMA_VERSION,
+        schema_version: HISTORY_SCHEMA_VERSION,
         turn: project_record(&record, Face::Detail),
     })
 }
@@ -174,7 +174,7 @@ pub fn read_call_body(
     let (start, end) = byte_window(&text, query.offset, limit);
     let truncated = end < text.len();
     Ok(CallBody {
-        schema_version: TURN_SCHEMA_VERSION,
+        schema_version: HISTORY_SCHEMA_VERSION,
         turn_id,
         call_index,
         call_id: call.id.clone(),
@@ -250,7 +250,7 @@ pub fn read_message_body(
     let (start, end) = byte_window(&text, query.offset, limit);
     let truncated = end < text.len();
     Ok(MessageBody {
-        schema_version: TURN_SCHEMA_VERSION,
+        schema_version: HISTORY_SCHEMA_VERSION,
         turn_id,
         message_index,
         role: message.role().to_owned(),
