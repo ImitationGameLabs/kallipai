@@ -30,6 +30,7 @@ import {
   checkedMentions,
   checkedQuote,
   decodeRoomMessage,
+  dropFailedRoomLine,
   encodeRoomSendMessage,
   mentionsField,
   quoteField,
@@ -328,6 +329,22 @@ class RoomConversationsStore {
       mentions: line.mentions,
       quote: line.quote,
     });
+  }
+
+  /** Discard a failed own line for good (the bubble's delete action). Unlike
+   * the bilateral path there is no durable pending row to remove and no
+   * partition that could re-read it: a room send posts straight through and a
+   * failure only marks the optimistic line, so dropping the line is the whole
+   * of it. Only a failed line is discardable -- a pending one is still on its
+   * way, and a line with a server seq is history. Returns whether it left, so
+   * the caller can place focus before the row disappears. */
+  discard(roomId: string, seq: number): boolean {
+    const conv = this.convs.get(roomId);
+    if (!conv) return false;
+    const lines = dropFailedRoomLine(conv.lines, seq);
+    if (!lines) return false;
+    conv.lines = lines;
+    return true;
   }
 
   /** Render a live inbound room envelope (delivered by the realtime SSE

@@ -39,6 +39,13 @@ interface Reveal {
    *  say what it is. False means the jump did not happen -- the row is not
    *  registered, or nothing can name it: nothing moves and nothing is said. */
   jump(id: number): boolean;
+  /** Move the focus onto a registered row and bring it into view, nearest
+   *  edge first, with no sentence and no flash: the landing after a discard,
+   *  where the row is where the reader continues rather than something being
+   *  pointed at. False means the row is not registered, or the move did not
+   *  take -- focus() on an element that cannot hold focus is a silent no-op,
+   *  so the answer is what the document says, not what the call returned. */
+  land(id: number): boolean;
   /** Clear the flash timer, the mark and the announcement. Call from the
    *  owner's teardown, and from the cleanup of the effect that owns the
    *  scope: a timer outliving the transcript would touch torn-down state.
@@ -123,6 +130,39 @@ export function createReveal(options: {
     return true;
   }
 
+  /** Mark the row the landing arrived on, until focus leaves it. The marker
+   *  goes on the bubble when the row has one: an outline around the row would
+   *  span the whole transcript column, most of it empty. "Leaves it" includes
+   *  a move into one of the row's own buttons (Tab from the row onto Copy, or
+   *  onto the retry and delete actions): the ring says where the landing put
+   *  the reader, so it goes as soon as the reader walks on. */
+  function markLanded(el: HTMLElement): void {
+    const target = el.querySelector<HTMLElement>("[data-landing-target]") ?? el;
+    target.dataset.landing = "";
+    el.addEventListener(
+      "blur",
+      () => {
+        delete target.dataset.landing;
+      },
+      { once: true },
+    );
+  }
+
+  function land(id: number): boolean {
+    const el = rowEls.get(id);
+    if (!el) return false;
+    // The row is already on screen in the usual case, so the smallest move is
+    // the one that keeps the reader where they were reading.
+    el.scrollIntoView({ block: "nearest" });
+    el.focus({ preventScroll: true });
+    // focus() on a row that cannot hold focus is a silent no-op, and the blur
+    // that would drop the mark then never comes: mark only what took, so a
+    // landing that fails leaves no ring behind.
+    if (el.ownerDocument.activeElement !== el) return false;
+    markLanded(el);
+    return true;
+  }
+
   function destroy(): void {
     clearTimeout(timer);
     highlightId = null;
@@ -148,6 +188,7 @@ export function createReveal(options: {
     },
     trackRow,
     jump,
+    land,
     destroy,
   };
 }

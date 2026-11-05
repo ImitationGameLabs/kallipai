@@ -10,6 +10,7 @@ import {
   applyTagmaReply,
   cacheLineOf,
   type ConversationLine,
+  dropFailedLine,
   type ConversationTranscript,
   EMPTY_TRANSCRIPT,
   historyEntryLine,
@@ -165,6 +166,147 @@ Deno.test("retryLine re-arms a failed line and is idempotent", () => {
   assertEquals(armed.lines[0]!.status, "sending");
   assertEquals(armed.lines[0]!.error, undefined);
   assertEquals(retryLine(armed, -1), armed);
+});
+
+// Discarding a failed line: the delete action's reducer. The line goes; the
+// banner goes only when that line raised it. Two writers raise the same banner
+// without a line behind them (a wire error reply, a turn signal), so ownership
+// is recorded, never inferred from the text.
+Deno.test(
+  "dropFailedLine removes a failed line and the banner it raised",
+  () => {
+    const failed = sendFailed(
+      withUserLine(EMPTY_TRANSCRIPT, "hello", -1, userS),
+      -1,
+      "post failed",
+    );
+    const dropped = dropFailedLine(failed, -1);
+    assertEquals(dropped.lines, []);
+    assertEquals(dropped.status, "idle");
+    assertEquals(dropped.error, undefined);
+    assertEquals(dropped.errorLine, undefined);
+  },
+);
+
+Deno.test("dropFailedLine hands the banner to a surviving failed line", () => {
+  let t = sendFailed(
+    withUserLine(EMPTY_TRANSCRIPT, "one", -1, userS),
+    -1,
+    "one failed",
+  );
+  t = sendFailed(withUserLine(t, "two", -2, userS), -2, "two failed");
+  // Drop the line that raised the banner, not the newer one: only that path
+  // has a banner to hand over.
+  const dropped = dropFailedLine(t, -2);
+  assertEquals(
+    dropped.lines.map((l) => l.historyId),
+    [-1],
+  );
+  assertEquals(dropped.status, "error");
+  assertEquals(dropped.error, "one failed");
+  assertEquals(dropped.errorLine, -1);
+
+  // The mark moved with the banner: dropping the survivor too clears it.
+  const after = dropFailedLine(dropped, -1);
+  assertEquals(after.status, "idle");
+  assertEquals(after.error, undefined);
+});
+
+Deno.test("dropFailedLine leaves a banner a signal raised", () => {
+  const failed = sendFailed(
+    withUserLine(EMPTY_TRANSCRIPT, "hello", -1, userS),
+    -1,
+    "post failed",
+  );
+  const signalled: ConversationTranscript = {
+    ...failed,
+    status: "error",
+    error: "token budget spent",
+    errorLine: undefined,
+  };
+  const dropped = dropFailedLine(signalled, -1);
+  assertEquals(dropped.lines, []);
+  assertEquals(dropped.status, "error");
+  assertEquals(dropped.error, "token budget spent");
+});
+
+Deno.test("dropFailedLine leaves a banner behind a coded rejection", () => {
+  const t = sendFailed(
+    withUserLine(EMPTY_TRANSCRIPT, "hello", -1, userS),
+    -1,
+    "operator verbatim",
+    "profile_set_unusable",
+  );
+  assertEquals(t.error, undefined);
+  const dropped = dropFailedLine(t, -1);
+  assertEquals(dropped.lines, []);
+  assertEquals(dropped.status, "busy");
+  assertEquals(dropped.error, undefined);
+});
+
+// The banner carries its owner. Every writer that is not a line failure must
+// leave the mark empty, or a later delete of an unrelated line takes a banner
+// down with it -- the defect this field exists to prevent, caught here rather
+// than in a rendered page.
+Deno.test("only a line failure owns the banner", () => {
+  const failed = sendFailed(
+    withUserLine(EMPTY_TRANSCRIPT, "hello", -1, userS),
+    -1,
+    "post failed",
+  );
+  assertEquals(failed.errorLine, -1);
+
+  // Keyed by type: a new signal variant lands here as a compile error, not as
+  // a silently unguarded writer.
+  const writers: Record<SignalEvent["type"], SignalEvent> = {
+    idle: { type: "idle" },
+    busy: { type: "busy" },
+    error: { type: "error", message: "link down" },
+    interrupted: { type: "interrupted" },
+    cancelled: { type: "cancelled" },
+    token_budget_exceeded: {
+      type: "token_budget_exceeded",
+      consumed: 9000,
+      budget: 8000,
+    },
+    max_rounds_exceeded: { type: "max_rounds_exceeded" },
+    failover_chain_exhausted: {
+      type: "failover_chain_exhausted",
+      reason: "noFailoverConfigured",
+      detail: "no backups",
+    },
+  };
+  for (const signal of Object.values(writers)) {
+    assertEquals(
+      applySignal(failed, signal, 2).errorLine,
+      undefined,
+      signal.type,
+    );
+  }
+  const wire = applyTagmaReply(
+    failed,
+    { kind: "error", req_id: 0, status: 500, message: "wire said no" },
+    undefined,
+    3,
+  );
+  assertEquals(wire.errorLine, undefined);
+  assertEquals(withUserLine(failed, "next", -4, userS).errorLine, undefined);
+
+  // A signal that puts its own banner up survives the line going away.
+  const signalled = applySignal(
+    failed,
+    { type: "token_budget_exceeded", consumed: 9000, budget: 8000 },
+    2,
+  );
+  const after = dropFailedLine(signalled, -1);
+  assertEquals(after.error, signalled.error);
+  assertEquals(after.status, "error");
+});
+
+Deno.test("dropFailedLine is a no-op for a sending or unknown line", () => {
+  const sending = withUserLine(EMPTY_TRANSCRIPT, "hello", -1, userS);
+  assert(dropFailedLine(sending, -1) === sending);
+  assert(dropFailedLine(EMPTY_TRANSCRIPT, -1) === EMPTY_TRANSCRIPT);
 });
 
 // The pending stamp allocator: negative, strictly decreasing across calls,

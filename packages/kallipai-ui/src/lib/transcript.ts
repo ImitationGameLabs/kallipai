@@ -120,6 +120,12 @@ export interface ConversationTranscript {
   /** Set when status === "error" (or a non-fatal notice); the chat view shows
    * it inline. */
   readonly error?: string;
+  /** Which line raised the banner: the `historyId` of the failed send whose
+   *  copy `error` carries. When set, `status` is necessarily "error" and
+   *  `error` is that line's copy. A banner with no line behind it (a wire
+   *  error reply, a turn signal) leaves this unset, and a line may only take
+   *  down the banner it owns. */
+  readonly errorLine?: number;
 }
 
 export const EMPTY_TRANSCRIPT: ConversationTranscript = {
@@ -190,6 +196,7 @@ export function applyTagmaReply(
         ...line(state, lineId, "system", reply.message, undefined),
         status: "error",
         error: reply.message,
+        errorLine: undefined,
       };
     case "user_message":
       // Replay-only echo of a user-authored message.
@@ -352,33 +359,61 @@ export function applySignal(
   switch (signal.type) {
     case "busy":
       // A new turn clears any stale error from the previous one.
-      return { ...state, status: "busy", error: undefined };
+      return {
+        ...state,
+        status: "busy",
+        error: undefined,
+        errorLine: undefined,
+      };
     case "idle":
       // The agent yielded control. Content-less: just transition to idle.
-      return { ...state, status: "idle", error: undefined };
+      return {
+        ...state,
+        status: "idle",
+        error: undefined,
+        errorLine: undefined,
+      };
     case "error":
-      return { ...withLine, status: "error", error: signal.message };
+      return {
+        ...withLine,
+        status: "error",
+        error: signal.message,
+        errorLine: undefined,
+      };
     case "interrupted":
-      return { ...withLine, status: "idle", error: undefined };
+      return {
+        ...withLine,
+        status: "idle",
+        error: undefined,
+        errorLine: undefined,
+      };
     case "cancelled":
-      return { ...withLine, status: "idle", error: undefined };
+      return {
+        ...withLine,
+        status: "idle",
+        error: undefined,
+        errorLine: undefined,
+      };
     case "token_budget_exceeded":
       return {
         ...withLine,
         status: "error",
         error: signal_token_budget_error(),
+        errorLine: undefined,
       };
     case "max_rounds_exceeded":
       return {
         ...withLine,
         status: "error",
         error: signal_max_rounds_error(),
+        errorLine: undefined,
       };
     case "failover_chain_exhausted":
       return {
         ...withLine,
         status: "error",
         error: signal_failover_error(),
+        errorLine: undefined,
       };
     default: {
       // Leave the transcript exactly as it stands: a signal from a newer
@@ -429,6 +464,7 @@ export function withUserLine(
     // A fresh user line starts a new turn: clear any stale red error
     // a previous local send failure left (mirrors the busy-signal clear).
     error: undefined,
+    errorLine: undefined,
   };
 }
 
@@ -460,7 +496,9 @@ export function sendFailed(
     // whole transcript into the error state. A coded server rejection (the
     // localized short form lives in the line bubble) skips the banner: the
     // failure renders once, on the line.
-    ...(message && !code ? { status: "error" as const, error: message } : {}),
+    ...(message && !code
+      ? { status: "error" as const, error: message, errorLine: localId }
+      : {}),
   };
 }
 
@@ -478,6 +516,45 @@ export function retryLine(
         ? { ...l, status: "sending" as const, error: undefined }
         : l,
     ),
+  };
+}
+
+/** Drop a failed user line: the delete action's reducer. Only a failed line is
+ *  droppable -- a sending one is under way, and a sent one is history. The
+ *  transcript-wide red banner is raised by a wire error reply and by turn
+ *  signals as well, which is why `sendFailed` records the line it spoke for:
+ *  only that line takes the banner down, a surviving failed line with copy
+ *  takes it over, and a banner no line owns is left alone. A dead drain's
+ *  error lives on the store, not here, so it is out of reach of this reducer. */
+export function dropFailedLine(
+  state: ConversationTranscript,
+  localId: number,
+): ConversationTranscript {
+  const target = state.lines.find((l) => l.historyId === localId);
+  if (!target || target.status !== "failed") return state;
+  const lines = state.lines.filter((l) => l.historyId !== localId);
+  if (state.errorLine !== localId) return { ...state, lines };
+  const survivor = lines.find(
+    (l) =>
+      l.status === "failed" &&
+      l.errorCode === undefined &&
+      typeof l.error === "string",
+  );
+  if (survivor) {
+    return {
+      ...state,
+      lines,
+      status: "error",
+      error: survivor.error,
+      errorLine: survivor.historyId,
+    };
+  }
+  return {
+    ...state,
+    lines,
+    ...(state.status === "error" ? { status: "idle" as const } : {}),
+    error: undefined,
+    errorLine: undefined,
   };
 }
 

@@ -3,6 +3,7 @@ import {
   appendRoomLine,
   checkedMentions,
   decodeRoomMessage,
+  dropFailedRoomLine,
   encodeRoomSendMessage,
   MENTIONS_MAX,
   mentionChipsOf,
@@ -1009,4 +1010,57 @@ Deno.test("a room row's anchor is its own name, not a shared one", () => {
     roomRowAnchorId(7) !== roomRowAnchorId(8),
     "two rows never share an anchor",
   );
+});
+
+// The room transcript's delete action. A room send has no durable row behind
+// it, so the reducer is the whole of the discard; what it refuses is the part
+// that keeps a retry or a delivered line out of the user's hands.
+
+function failedLine(seq: number, extra: Partial<RoomLine> = {}): RoomLine {
+  return {
+    seq,
+    senderId: "alice",
+    senderKind: "human",
+    senderHandle: "Alice",
+    text: "hi",
+    createdAt: "t1",
+    mine: true,
+    failed: true,
+    ...extra,
+  };
+}
+
+Deno.test("dropFailedRoomLine removes a failed own line", () => {
+  const a = failedLine(-1);
+  const b = failedLine(-2);
+  assertEquals(dropFailedRoomLine([a, b], -1), [b]);
+});
+
+Deno.test("dropFailedRoomLine leaves a line still on its way", () => {
+  // Pending, not failed: the user is waiting for it, not taking it back.
+  const pending = failedLine(-1, { failed: undefined });
+  assertEquals(dropFailedRoomLine([pending], -1), null);
+});
+
+Deno.test("dropFailedRoomLine leaves a delivered line", () => {
+  // A server seq means the room already holds it; deleting here would only
+  // hide it until the next history fetch draws it again.
+  const sent = failedLine(4, { failed: undefined });
+  assertEquals(dropFailedRoomLine([sent], 4), null);
+});
+
+Deno.test(
+  "dropFailedRoomLine leaves a delivered line wearing a failure",
+  () => {
+    // The guard is the server seq, not the flag: a line the room numbered is
+    // history the next fetch draws back, whatever a mistimed failure left on it.
+    const sent = failedLine(4, { failed: true });
+    assertEquals(dropFailedRoomLine([sent], 4), null);
+  },
+);
+
+Deno.test("dropFailedRoomLine leaves a line that is not mine", () => {
+  const theirs = failedLine(-1, { mine: false });
+  assertEquals(dropFailedRoomLine([theirs], -1), null);
+  assertEquals(dropFailedRoomLine([failedLine(-1)], -9), null);
 });

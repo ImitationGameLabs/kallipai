@@ -467,6 +467,7 @@ export async function deletePending(
   localSeq: number,
 ): Promise<void> {
   try {
+    pendingDeleteObserver?.(tagmaId, localSeq);
     await run("readwrite", (s) => s.delete([tagmaId, localSeq]), PENDING_STORE);
   } catch {
     // best-effort
@@ -491,6 +492,23 @@ export function setPendingRowsForTests(
 ): void {
   pendingRowsOverride = provide;
 }
+
+/** Test seam: when set, every delete is reported to this observer on its way to
+ *  IndexedDB, which `deno test` cannot reach. The delete itself stays
+ *  best-effort by design (a missing store must not break a discard), so the
+ *  observer is the only way a test can see that the row was dropped. Production
+ *  never sets it. */
+let pendingDeleteObserver:
+  | ((tagmaId: string, localSeq: number) => void)
+  | null = null;
+
+/** Install (or clear with null) the pending-delete test seam. */
+export function setPendingDeletesForTests(
+  observe: ((tagmaId: string, localSeq: number) => void) | null,
+): void {
+  pendingDeleteObserver = observe;
+}
+
 /** Every unsent line for a tagma, oldest-first. Empty on any failure. */
 export async function readPendingByTagma(
   tagmaId: string,

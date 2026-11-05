@@ -24,3 +24,21 @@ export const MENU_ITEM =
   "flex items-center gap-2 px-3 py-2 rounded-base text-sm cursor-pointer hover:preset-filled-surface-500";
 export const MENU_ITEM_DANGER =
   "flex items-center gap-2 px-3 py-2 rounded-base text-sm text-error-500 dark:text-error-400 cursor-pointer hover:preset-filled-error-500";
+
+// The ring a transcript bubble wears while a discard's landing put the focus
+// on its row. A quote jump marks its row a moment, through `revealMark`, and
+// is a separate face. :focus-visible
+// answers false for a click and for a script focus alike (measured), so the
+// marker is a one-shot `data-landing` attribute that `reveal.land` sets once
+// the focus took and drops on blur: a click on a row leaves it unmarked, a
+// landing that never took leaves none, and a hand-off a sighted reader made
+// with the keyboard is visible. It sits on the bubble rather than the row,
+// which spans the whole transcript column. The floor is the 3:1 of non-text
+// indication; the mark aims to clear 4:1. Light: primary-800, 5.53:1 on the
+// white page, 4.12:1 on the own-message fill and 4.59:1 on the agent one;
+// one step darker clears more (primary-900 reaches 7.63 / 5.69 / 6.34) but
+// reads as a hard edge over the pale bubble, louder than the message. Dark:
+// primary-200, 7.72:1 on the page and 4.83:1 on the own-message fill; the
+// primary-500 it replaced sat 0.18 above the 3:1 floor, too thin for a mark.
+export const ROW_LANDED =
+  "rounded-base data-[landing]:outline-2 data-[landing]:outline-offset-2 data-[landing]:outline-primary-800 dark:data-[landing]:outline-primary-200";

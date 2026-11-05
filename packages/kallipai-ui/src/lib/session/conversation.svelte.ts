@@ -29,6 +29,7 @@ import {
   applySignal,
   applyTagmaReply,
   cacheLineOf,
+  dropFailedLine,
   EMPTY_TRANSCRIPT,
   historyEntryLine,
   isInFlightError,
@@ -185,6 +186,10 @@ export abstract class ConversationBase {
     }[]
   >([]);
 
+  /** Discarded local ids. Rule: any read that redraws lines from the store
+   *  consults this first -- a row can be in a snapshot taken before the delete
+   *  landed, and a discard must not be undone by a reconnect. */
+  readonly discarded = new Set<number>();
   /** Watchdog for the in-flight POST: if neither the ack nor an error
    *  reply consumes `pendingInFlight` within the window, the pump would
    *  stall forever (a lost reply rides no transport failure). The timer
@@ -323,6 +328,27 @@ export abstract class ConversationBase {
     void this.pumpPending();
   }
 
+  /** Discard one failed line for good (the bubble's delete action). The text,
+   *  the attachment and the quote go with the line, and the durable pending row
+   *  goes too, so a reload cannot draw it again: an online failure's row is
+   *  `failed`, an offline line's row is `queued`, and both are removed here (the
+   *  offline one is a send that will never happen). Only a failed line is
+   *  discardable -- a sending one is under way, and a sent one is history.
+   *
+   *  Returns whether the line left. The write is synchronous, so the caller
+   *  (the bubble's confirm) can tell a real discard from a refused one before
+   *  the row re-renders, and place focus accordingly. */
+  discard(localSeq: number): boolean {
+    const line = this.transcript.lines.find((l) => l.historyId === localSeq);
+    if (!line || line.status !== "failed") return false;
+    if (this.pendingInFlight?.localId === localSeq) return false;
+    this.transcript = dropFailedLine(this.transcript, localSeq);
+    this.pending = this.pending.filter((p) => p.localId !== localSeq);
+    this.discarded.add(localSeq);
+    void deletePending(this.pendingKey, localSeq);
+    return true;
+  }
+
   /** Drain every persisted pending row after (re)connect. The partition:
    *  queued rows (never accepted) are auto-sent -- at-least-once by design,
    *  a row the server accepted but whose ack never landed re-sends a
@@ -338,6 +364,12 @@ export abstract class ConversationBase {
       return; // IndexedDB unavailable (private mode): nothing to flush
     }
     for (const row of rows) {
+      if (this.discarded.has(row.localSeq)) {
+        // Discarded after this read began: the line is gone from the transcript
+        // and must not come back. Re-issuing the delete heals a miss.
+        void deletePending(this.pendingKey, row.localSeq);
+        continue;
+      }
       const failed = isFailedPending(row);
       // Render (or re-render) in stored order, whatever the branch: the
       // bubble sequence must follow the rows' original timing.

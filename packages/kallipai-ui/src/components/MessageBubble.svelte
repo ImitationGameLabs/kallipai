@@ -22,6 +22,7 @@
   import MentionChips from "./MentionChips.svelte";
   import type { Snippet } from "svelte";
   import type { TogglePin } from "../lib/transcript.svelte.ts";
+  import { ROW_LANDED } from "../lib/classes.ts";
   import type { QuoteView } from "../lib/quote.ts";
   import type { MentionChip } from "../lib/room-message.ts";
   import type { FileAttachment } from "@kallipai/kallipai-lesche-client";
@@ -122,7 +123,8 @@
 
 <div
   bind:this={box}
-  class="max-w-full min-w-0 rounded-base px-3 py-2 text-sm {mine
+  data-landing-target
+  class="max-w-full min-w-0 rounded-base px-3 py-2 text-sm {ROW_LANDED} {mine
     ? 'preset-filled-primary-100-900'
     : 'preset-tonal-surface'} {!markdown
     ? 'whitespace-pre-wrap break-words'

@@ -37,6 +37,7 @@ export {
   readPendingByTagma,
   readTail,
   readTailBefore,
+  setPendingDeletesForTests,
   setPendingRowsForTests,
 } from "./cache.ts";
 

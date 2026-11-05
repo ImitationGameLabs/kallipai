@@ -535,6 +535,7 @@
             onRetry={conv instanceof OfflineConversation
               ? undefined
               : (id) => conv?.retrySend(id)}
+            onDeleteFailed={(id) => conv?.discard(id) ?? false}
             {loadOlder}
             hasMoreOlder={windowStates.hasMoreOlder}
             loadingOlder={windowStates.loadingOlder}

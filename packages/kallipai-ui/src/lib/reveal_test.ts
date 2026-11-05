@@ -14,6 +14,7 @@ declare global {
 (globalThis as Record<string, unknown>)["$state"] = (v: unknown) => v;
 
 const { createReveal, revealMark } = await import("./reveal.svelte.ts");
+const { neighbourRow } = await import("./row_focus.ts");
 
 type Options = {
   flashMs?: number;
@@ -279,4 +280,159 @@ Deno.test("one jump serves both row tables", () => {
   assertEquals(room.jump(7), true);
   assertEquals(bilateral.announcement, "history row 7");
   assertEquals(room.announcement, "room row 7", "each reads its own table");
+});
+
+/** A stand-in row that answers focus the way a document does: `focus()` moves
+ *  the owner document's activeElement onto it, unless the row cannot hold
+ *  focus. `querySelector` stands in for the bubble a row may contain. */
+function landingRow(options: { takes?: boolean; bubble?: boolean } = {}) {
+  const takes = options.takes ?? true;
+  const doc = { activeElement: null as unknown };
+  const listeners: { type: string; run: () => void }[] = [];
+  const seen = {
+    scrolls: [] as ScrollIntoViewOptions[],
+    focuses: [] as FocusOptions[],
+  };
+  const bubble = {
+    dataset: {} as Record<string, string>,
+  };
+  const el = {
+    dataset: {} as Record<string, string>,
+    ownerDocument: doc,
+    scrollIntoView(opts?: ScrollIntoViewOptions) {
+      seen.scrolls.push(opts ?? {});
+    },
+    focus(opts?: FocusOptions) {
+      seen.focuses.push(opts ?? {});
+      if (takes) doc.activeElement = el;
+    },
+    addEventListener(type: string, run: () => void) {
+      listeners.push({ type, run });
+    },
+    querySelector() {
+      return options.bubble === true ? bubble : null;
+    },
+  };
+  return { el, doc, seen, listeners, bubble };
+}
+
+Deno.test(
+  "a landing brings the row in by the nearest edge and focuses it",
+  () => {
+    const reveal = controller();
+    const landed = landingRow();
+    reveal.trackRow(landed.el as unknown as HTMLElement, 3);
+
+    assertEquals(reveal.land(3), true, "focus took, so the landing reports it");
+    assertEquals(
+      landed.seen.scrolls,
+      [{ block: "nearest" }],
+      "the row is already on screen in the usual case, so the smallest move wins",
+    );
+    assertEquals(
+      landed.seen.focuses,
+      [{ preventScroll: true }],
+      "the focus move never drags the scroll back off the row",
+    );
+    assertEquals(landed.doc.activeElement, landed.el);
+    assertEquals(reveal.announcement, undefined, "a landing says nothing");
+    assertEquals(reveal.highlightId, null, "and marks nothing for a moment");
+  },
+);
+
+Deno.test("a landing on a row that cannot take focus reports false", () => {
+  const reveal = controller();
+  const landed = landingRow({ takes: false });
+  reveal.trackRow(landed.el as unknown as HTMLElement, 5);
+
+  assertEquals(
+    reveal.land(5),
+    false,
+    "focus() on a row that cannot hold it is a silent no-op",
+  );
+});
+
+Deno.test("a landing that does not take leaves no ring behind", () => {
+  // The mark is dropped by a blur, and a focus that never took never blurs:
+  // marking first would leave a ring on a bubble no one is standing on.
+  const reveal = controller();
+  const landed = landingRow({ takes: false, bubble: true });
+  reveal.trackRow(landed.el as unknown as HTMLElement, 6);
+
+  assertEquals(reveal.land(6), false);
+  assertEquals(
+    landed.bubble.dataset.landing,
+    undefined,
+    "a failed landing must not mark the bubble",
+  );
+});
+
+Deno.test(
+  "a landing on a row this transcript never registered reports false",
+  () => {
+    const reveal = controller();
+    assertEquals(reveal.land(11), false);
+  },
+);
+
+Deno.test(
+  "a landing marks the bubble and drops the mark when focus leaves",
+  () => {
+    const reveal = controller();
+    const landed = landingRow({ bubble: true });
+    reveal.trackRow(landed.el as unknown as HTMLElement, 9);
+
+    reveal.land(9);
+    assertEquals(
+      landed.bubble.dataset.landing,
+      "",
+      "the bubble wears the ring",
+    );
+    assertEquals(
+      landed.el.dataset.landing,
+      undefined,
+      "and the full-width row does not",
+    );
+
+    const blur = landed.listeners.find((l) => l.type === "blur");
+    assert(blur !== undefined, "the mark must be dropped on a blur");
+    blur.run();
+    assertEquals(landed.bubble.dataset.landing, undefined, "the ring is gone");
+  },
+);
+
+Deno.test("a row with no bubble wears the mark itself", () => {
+  const reveal = controller();
+  const landed = landingRow();
+  reveal.trackRow(landed.el as unknown as HTMLElement, 13);
+
+  reveal.land(13);
+  assertEquals(landed.el.dataset.landing, "", "a system line has only itself");
+});
+
+Deno.test("the row after the discarded one is the one focus lands on", () => {
+  // The two halves together, in the shape the views drive them: the order that
+  // remains plus the place the row held pick the row, and the landing moves
+  // focus onto it. The discarded row is the LAST one, which a lookup by id in
+  // what remains would answer with the first row of the transcript.
+  const reveal = controller();
+  const ids = [-1, -2, -3];
+  const rows = ids.map(() => landingRow());
+  const registered = rows.map((r, i) =>
+    reveal.trackRow(r.el as unknown as HTMLElement, ids[i]!),
+  );
+
+  // The store answers by dropping the line, then the caller reads the order.
+  const idsAfter = [-1, -2];
+  const landOn = neighbourRow(idsAfter, 2);
+
+  assertEquals(landOn, -2, "the row above the one that left");
+  assertEquals(reveal.land(landOn!), true);
+  assertEquals(rows[1]!.doc.activeElement, rows[1]!.el, "focus is on it");
+  assertEquals(
+    rows[1]!.seen.scrolls,
+    [{ block: "nearest" }],
+    "and the transcript moved by nothing it did not have to",
+  );
+  registered.forEach((r) => r.destroy());
 });

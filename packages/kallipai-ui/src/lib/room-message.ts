@@ -518,6 +518,24 @@ export function roomLinePending(line: Pick<RoomLine, "mine" | "seq">): boolean {
   return line.mine && line.seq < 0;
 }
 
+/** Drop one failed own line: the delete action's reducer for a room
+ *  transcript. NULL when the line is not there, not the reader's own, or not
+ *  failed -- a pending line is on its way and a line with a server seq is
+ *  history, so neither is the user's to take back. The caller leaves the
+ *  transcript untouched on NULL, which is also how it tells the bubble that
+ *  the discard was refused and the row is still there to keep focus. Pure:
+ *  unit-tested in room-message_test.ts. */
+export function dropFailedRoomLine(
+  lines: readonly RoomLine[],
+  seq: number,
+): RoomLine[] | null {
+  const line = lines.find((l) => l.seq === seq);
+  // A server seq means the room holds this line: it is history the next
+  // history fetch draws back, not an optimistic line the reader can take back.
+  if (!line || line.seq > 0 || !line.mine || line.failed !== true) return null;
+  return lines.filter((l) => l.seq !== seq);
+}
+
 /** The anchor id a room row stamps on itself, and the id a quote block points
  *  at. Keyed by the room seq -- the transcript's own numbering -- and
  *  namespaced so it cannot collide with the bilateral transcript's ids. Pure:

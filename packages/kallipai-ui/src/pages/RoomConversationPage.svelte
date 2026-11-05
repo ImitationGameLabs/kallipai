@@ -16,6 +16,8 @@
   import { Settings, Users, X } from "@lucide/svelte";
   import Composer from "../components/Composer.svelte";
   import MessageBubble from "../components/MessageBubble.svelte";
+  import DeleteFailedButton from "../components/DeleteFailedButton.svelte";
+  import { neighbourRow } from "../lib/row_focus.ts";
   import PageHeader from "../components/PageHeader.svelte";
   import ScrollToBottomButton from "../components/ScrollToBottomButton.svelte";
   import {
@@ -79,6 +81,7 @@
     room_close_members_aria,
     room_unavailable,
     nav_rooms,
+    chat_transcript_aria,
   } from "../paraglide/messages.js";
 
   let { roomId }: { roomId: string } = $props();
@@ -161,6 +164,31 @@
 
   // Stick to the tail as lines arrive; stop once the user scrolls up to read.
   const scroll = createAutoScroll();
+
+  /** The composer instance, for the case where no row is left to land on:
+   *  an emptied transcript after the last line is discarded. */
+  let composerRef: { focusInput(): boolean } | null = $state(null);
+
+  /** Run the discard, then put focus where the reader continues: the row above
+   *  the one that left, else the row that took its place, else the composer,
+   *  else the transcript itself. `index` is the place the row held when it was
+   *  rendered; the order is read after the store answered, which is the only
+   *  order whose rows are all still there. */
+  function discardRow(removed: number, index: number): boolean {
+    if (!roomConversationsStore.discard(roomId, removed)) return false;
+    landFocus(neighbourRow(conv?.lines.map((l) => l.seq) ?? [], index));
+    return true;
+  }
+
+  /** Focus the row `id`, or the next thing that can speak for the transcript:
+   *  the composer, then the viewport itself. A disabled composer cannot take
+   *  focus, and focus must not fall through to the document. */
+  function landFocus(id: number | null): void {
+    if (id !== null && reveal.land(id)) return;
+    if (composerRef?.focusInput() !== true) {
+      scroll.viewport?.focus({ preventScroll: true });
+    }
+  }
   // Session-key reset must be declared BEFORE the stick effect: effects in
   // the same flush run in declaration order, so a param change resets the
   // controllers before stick() observes the new room's lines. A pending
@@ -428,9 +456,18 @@
            anchoring (stick/observe), and an anchor adjustment racing the
            flex reflow could ship a scroll event with a large
            distance-from-bottom, detaching follow on a mere keystroke. -->
+      <!-- The scroll box is the last place a discard's landing can put the
+           focus, when the room empties while the composer cannot take it, so
+           it is a focus target of its own, outside the tab order, with a name
+           of its own: a click on the blank space below the last line focuses
+           it, which is the price of the fallback having somewhere audible to
+           land. -->
       <div
         class="flex-1 min-h-0 overflow-auto [overflow-anchor:none]"
         bind:this={scroll.viewport}
+        tabindex="-1"
+        role="group"
+        aria-label={chat_transcript_aria()}
         onscroll={scroll.onScroll}
       >
         <div class="mx-auto w-full max-w-[80rem] p-4 flex flex-col gap-3">
@@ -439,7 +476,7 @@
               {room_empty()}
             </p>
           {/if}
-          {#each conv.lines as line (line.seq)}
+          {#each conv.lines as line, i (line.seq)}
             <!-- Still-sending = own optimistic line (see roomLinePending); an
             inbound frame carries no seq yet but is delivered. -->
             {@const pending = roomLinePending(line)}
@@ -526,6 +563,7 @@
                       .catch(() => {});
                   }}>{common_retry()}</button
                 >
+                <DeleteFailedButton onConfirm={() => discardRow(line.seq, i)} />
               {/if}
             </div>
           {/each}
@@ -593,6 +631,7 @@
       {/if}
     </div>
     <Composer
+      bind:this={composerRef}
       {composer}
       {disabled}
       pendingCount={0}

@@ -86,6 +86,18 @@
 
   let area: HTMLTextAreaElement | undefined = $state();
 
+  /** Put the caret back in the field. A hosting view calls this after a line
+   *  leaves the transcript, where the next thing the user can do is type again:
+   *  better than focus landing on the document body. False when the field
+   *  cannot take focus (disabled while closed or reconnecting), so the caller
+   *  keeps looking instead of leaving focus on the body. */
+  export function focusInput(): boolean {
+    const field = area;
+    if (!field || field.disabled) return false;
+    field.focus();
+    return field.ownerDocument.activeElement === field;
+  }
+
   // Auto-grow: recompute on every draft change (and breakpoint flip, below)
   // so programmatic writes (e.g. an empty-state prompt chip), rows flips and
   // padding changes all re-measure, not just user key strokes.

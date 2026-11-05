@@ -6,6 +6,7 @@
   // no-channel empty state) stays in the page, which composes this as siblings
   // inside its own flex column.
   import Composer from "./Composer.svelte";
+  import DeleteFailedButton from "./DeleteFailedButton.svelte";
   import MessageBubble from "./MessageBubble.svelte";
   import MessageRow from "./MessageRow.svelte";
   import QuoteButton from "./QuoteButton.svelte";
@@ -21,7 +22,10 @@
   import { authorName, jumpAnnouncement } from "../lib/rowSpeech.ts";
   import { formatStamp, timezoneSetting } from "../lib/time/stamp.svelte.ts";
   import { ROW_TIME } from "../lib/time/stamp.ts";
+  import { ROW_LANDED } from "../lib/classes.ts";
+  import { neighbourRow } from "../lib/row_focus.ts";
   import {
+    chat_transcript_aria,
     chat_send_to_start,
     chat_retry_send_aria,
     chat_error_profile_set_unusable,
@@ -50,6 +54,7 @@
     disabled,
     pendingCount,
     onRetry,
+    onDeleteFailed,
     notice,
     loadOlder,
     hasMoreOlder,
@@ -75,6 +80,10 @@
     /** Optional retry affordance for failed lines: present = failed
      *  lines render an inline retry button wired to the page's retry handler. */
     onRetry?: (localId: number) => void;
+    /** Optional discard for failed lines: present = a failed line's action row
+     *  carries the delete button, which asks once and then drops the line for
+     *  good. Absent on read-only consumers, where a failed line has no actions. */
+    onDeleteFailed?: (localId: number) => boolean;
     /** Optional lazy-window pager: when present, a sentinel above the first
      *  line fires it as it enters the viewport (scroll-up paging). All three
      *  props default off so non-windowed callers (online relay pages) keep
@@ -254,6 +263,36 @@
   // onScroll contract stays untouched; a full prepend pushes the sentinel
   // back out of view, which naturally stops the arm loop.
   let sentinel: HTMLDivElement | undefined = $state();
+
+  /** The composer instance, for the one case where no row is left to land on:
+   *  an empty transcript after the last line is discarded. */
+  let composerRef: { focusInput(): boolean } | null = $state(null);
+
+  /** Run the discard, then put focus where the reader continues: the row above
+   *  the one that left, else the row that took its place, else the composer,
+   *  else the transcript itself. `index` is the place the row held when it was
+   *  rendered; the order is read after the store answered, which is the only
+   *  order whose rows are all still there. */
+  function discardRow(removed: number, index: number): boolean {
+    if (onDeleteFailed?.(removed) !== true) return false;
+    landFocus(
+      neighbourRow(
+        lines.map((l) => l.historyId),
+        index,
+      ),
+    );
+    return true;
+  }
+
+  /** Focus the row `id`, or the next thing that can speak for the transcript:
+   *  the composer, then the viewport itself. A disabled composer cannot take
+   *  focus, and focus must not fall through to the document. */
+  function landFocus(id: number | null): void {
+    if (id !== null && reveal.land(id)) return;
+    if (composerRef?.focusInput() !== true) {
+      scroll.viewport?.focus({ preventScroll: true });
+    }
+  }
   $effect(() => {
     const root = loadOlder ? scroll.viewport : undefined;
     if (!loadOlder || !sentinel) return;
@@ -299,10 +338,22 @@
   <!-- UA scroll anchoring is retired here: the controller owns the
        anchoring (stick/observe), and an anchor adjustment racing the
        flex reflow could ship a scroll event with a large
-       distance-from-bottom, detaching follow on a mere keystroke. -->
+       distance-from-bottom, detaching follow on a mere keystroke.
+
+       The scroll box is also the last place a discard's landing can put the
+       focus, when the transcript empties while the composer cannot take it.
+       That makes it a focus target of its own, outside the tab order, and a
+       click on the blank space below the last line now focuses it where
+       nothing used to happen: the price of the fallback having somewhere
+       audible to land. It carries its own name for that reason; the log
+       stays on the block inside, because a log is the region that announces
+       arrivals, while this one is only where focus lands. -->
   <div
     class="flex-1 min-h-0 overflow-auto [overflow-anchor:none]"
     bind:this={scroll.viewport}
+    tabindex="-1"
+    role="group"
+    aria-label={chat_transcript_aria()}
     onscroll={scroll.onScroll}
   >
     <div
@@ -358,7 +409,9 @@
         {/if}
         {#if line.role === "system"}
           <p
-            class="text-xs opacity-60 text-center whitespace-pre-wrap break-words"
+            use:reveal.trackRow={line.historyId}
+            tabindex="-1"
+            class="self-center text-xs opacity-60 text-center whitespace-pre-wrap break-words {ROW_LANDED}"
           >
             {line.text}
           </p>
@@ -384,34 +437,42 @@
             <MessageRow mine={line.role === "user"}>
               {#if line.role === "user" && line.status === "failed"}
                 <!-- Failed lines are transient: a bare bubble carries the
-                   outline and the text; retry only where the page wires a
-                   handler; no copy, raw toggle or quote rides here. -->
-                <div class="flex flex-row items-center gap-1.5 self-end">
-                  {#if onRetry}
-                    <button
-                      type="button"
-                      class="shrink-0 size-7 rounded-full preset-outlined-error-500 hover:preset-filled-error-500 flex items-center justify-center cursor-pointer"
-                      aria-label={chat_retry_send_aria()}
-                      onclick={() => onRetry(line.historyId)}
-                    >
-                      <RotateCcw class="size-3.5" aria-hidden="true" />
-                    </button>
+                   outline and the text; retry and delete appear only where the
+                   page wires a handler, retry beside the bubble and delete
+                   under it; no copy, raw toggle or quote rides here. -->
+                <div class="flex flex-col items-end gap-1 self-end">
+                  <div class="flex flex-row items-center gap-1.5">
+                    {#if onRetry}
+                      <button
+                        type="button"
+                        class="shrink-0 size-7 rounded-full preset-outlined-error-500 hover:preset-filled-error-500 flex items-center justify-center cursor-pointer"
+                        aria-label={chat_retry_send_aria()}
+                        onclick={() => onRetry(line.historyId)}
+                      >
+                        <RotateCcw class="size-3.5" aria-hidden="true" />
+                      </button>
+                    {/if}
+                    <MessageBubble
+                      text={line.text}
+                      mine
+                      bare
+                      failed
+                      failureCopy={line.errorCode === "profile_set_unusable"
+                        ? chat_error_profile_set_unusable()
+                        : line.error}
+                      attachment={line.attachment}
+                      {downloadAttachment}
+                      quote={quoted}
+                      quoteDescribedBy={quotedLabelId}
+                      onQuoteClick={quoteJump}
+                      onQuoteRetry={quoteRetry}
+                    />
+                  </div>
+                  {#if onDeleteFailed}
+                    <DeleteFailedButton
+                      onConfirm={() => discardRow(line.historyId, i)}
+                    />
                   {/if}
-                  <MessageBubble
-                    text={line.text}
-                    mine
-                    bare
-                    failed
-                    failureCopy={line.errorCode === "profile_set_unusable"
-                      ? chat_error_profile_set_unusable()
-                      : line.error}
-                    attachment={line.attachment}
-                    {downloadAttachment}
-                    quote={quoted}
-                    quoteDescribedBy={quotedLabelId}
-                    onQuoteClick={quoteJump}
-                    onQuoteRetry={quoteRetry}
-                  />
                 </div>
               {:else}
                 <MessageBubble
@@ -463,6 +524,7 @@
 </div>
 {#if composer}
   <Composer
+    bind:this={composerRef}
     {composer}
     {disabled}
     {pendingCount}
