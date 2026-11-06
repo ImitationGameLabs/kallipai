@@ -413,19 +413,21 @@ impl ExternalProjector {
     /// the operator). The only unstamped path is a genuine append failure.
     ///
     /// `attachment` rides the row as a file reference; `quote` is the row id
-    /// this message answers, which only the 1:1 relay path sets.
+    /// this message answers, which only the 1:1 relay path sets. Returns the
+    /// row id, so the send's own response can name it; `None` on the unstamped
+    /// path.
     pub(crate) async fn record_inbound(
         &self,
         partition: Option<Participant>,
         text: String,
         attachment: Option<FileAttachment>,
         quote: Option<i64>,
-    ) {
+    ) -> Option<i64> {
         *self.inner.partition.lock().await = partition.clone();
         let sender = partition.clone().unwrap_or_else(operator_sender);
         let Some(db) = self.inner.history.clone() else {
             self.publish_unstamped_inbound(sender, text, attachment, quote);
-            return;
+            return None;
         };
         let (user_id, username) = peer_fields(&partition);
         match chat_history::append(
@@ -452,10 +454,12 @@ impl ExternalProjector {
                 if let Some(seq) = self.publish(AuthoredFrame { sender, reply }) {
                     debug!(site = "record_inbound", seq, "authored frame published");
                 }
+                Some(id)
             }
             Err(e) => {
                 error!("inbound history append failed: {e:#}");
                 self.publish_unstamped_inbound(sender, text, attachment, quote);
+                None
             }
         }
     }

@@ -69,14 +69,6 @@ export interface Transport {
    *  The conversation drains this into its `statusSnapshot`, so the chat header
    *  has one uniform source regardless of transport. */
   status(): AsyncGenerator<TagmaStatusSummary>;
-  /** Send a user message. `options.attachment`, when given, rides the wire
-   *  message (the relay op / the direct POST body) and comes back on the
-   *  `message_accepted` ack and history replay. Resolves when the wire accept
-   *  lands (direct: 200; relay: 202), to the request's `req_id` when the
-   *  transport has one (relay channel; direct has none, resolves void) -- the
-   *  conversation correlates the eventual `error` reply on it. The tagma's
-   *  reply (ack/error/authored) flows via {@link replies}. */
-  send(text: string, options?: SendOptions): Promise<number | void>;
   /** Tear down the underlying stream(s) synchronously. */
   close(): void;
 }

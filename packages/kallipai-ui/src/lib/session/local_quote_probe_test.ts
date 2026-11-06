@@ -17,6 +17,7 @@ declare global {
 const { assertEquals } = await import("@std/assert");
 const { LocalConversation } = await import("./conversation.svelte.ts");
 import { DirectTransport } from "./directTransport.ts";
+import { DirectMessageSender } from "./messageSender.svelte.ts";
 import { LOCAL_OPERATOR_SENDER } from "../transcript.ts";
 
 type PageRequest = {
@@ -75,6 +76,7 @@ function conversation(script: (opts: PageRequest) => unknown) {
     { get: () => undefined } as never,
     transport,
     "conv-local",
+    new DirectMessageSender(client as never, "root"),
   );
   conv.maxRendered = 20;
   return { conv, seen };

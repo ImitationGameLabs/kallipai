@@ -33,12 +33,18 @@ function recording(): { conv: RelayConv; sends: SendOptions[] } {
     async *replies() {},
     async *signals() {},
     async *status() {},
-    send(_text: string, options?: SendOptions) {
-      sends.push(options ?? {});
-      return Promise.resolve(1);
-    },
     close() {},
   } as unknown as Transport;
+  // The write path's carrier: the transport no longer sends, so the harness
+  // records what the sender was handed instead.
+  const sender = {
+    available: true,
+    send(_text: string, options?: SendOptions) {
+      sends.push(options ?? {});
+      return Promise.resolve({ historyId: null });
+    },
+    close() {},
+  } as unknown as import("./session/messageSender.svelte.ts").MessageSender;
   // The store (second argument) is never reached: the paths here stop at the
   // transport seam, and the pending store swallows the missing IndexedDB.
   const conv = new RelayConversation(
@@ -47,7 +53,13 @@ function recording(): { conv: RelayConv; sends: SendOptions[] } {
     transport,
     "tagma-1",
     "T",
+    sender,
   );
+  // The store marks a relay channel open before it inserts the conv
+  // (channels.svelte.ts:383), and the write axis reads that status: these
+  // cases exercise send on an open channel, which is the only channel a
+  // reader can reach a composer on.
+  conv.status = "open";
   return { conv, sends };
 }
 

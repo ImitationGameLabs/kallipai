@@ -10,7 +10,8 @@ import { assert } from "@std/assert";
 //
 //   attachOfflineView / attachLocalOfflineView hydrate from readTail;
 //   OfflineConversation pins status "offline" (composer gates engage);
-//   the composer's canSubmit admits "offline";
+//   the composer's canSubmit and disabled gates read canWrite, which the
+//   offline view keeps true without a carrier (queued-to-store sends);
 //   single-line retry is suppressed for the offline view (no transport);
 //   the cached-time stamp skips unconfirmed lines;
 //   the tagma chat page renders the offline view through ChannelChatPage.
@@ -62,13 +63,27 @@ Deno.test("OfflineConversation pins status offline in its constructor", () => {
   );
 });
 
-Deno.test("the composer's canSubmit admits the offline status", () => {
+Deno.test("the composer gates on the write axis, not the stream", () => {
   const src = source(CHANNEL_PAGE);
   const at = src.indexOf("canSubmit");
   assert(at !== -1, "canSubmit must be wired");
   assert(
-    src.slice(at, at + 300).includes('"offline"'),
-    "offline must be a submittable status (queued-to-store sends)",
+    src.slice(at, at + 200).includes("canWrite"),
+    "canSubmit must read the write axis (a rebuild stays writable)",
+  );
+  const disabledAt = src.indexOf("const disabled = $derived(");
+  assert(disabledAt !== -1, "the composer's disabled gate must exist");
+  const gate = src.slice(disabledAt, disabledAt + 120);
+  assert(gate.includes("canWrite"), "the composer reads canWrite");
+  assert(!gate.includes('"open"'), "stream status is not a write gate");
+  const convSrc = source(CONVERSATION);
+  // Scoped to the offline class: the relay leaf overrides canWrite too, so a
+  // whole-file substring went green even with this override deleted.
+  const offlineAt = convSrc.indexOf("export class OfflineConversation");
+  assert(offlineAt !== -1, "the offline view class must exist");
+  assert(
+    convSrc.slice(offlineAt).includes("override get canWrite"),
+    "the offline view must override canWrite (no carrier, still writable)",
   );
 });
 

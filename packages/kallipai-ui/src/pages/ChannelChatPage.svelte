@@ -311,9 +311,9 @@
     // Busy is not a gate: send renders the optimistic line at once and POSTs as
     // soon as the previous POST's user_message frame lands (single-in-flight
     // pump, shared by both transports).
-    canSubmit: () =>
-      (conv?.status === "open" || conv?.status === "offline") &&
-      allReady(attachments), // open = live sends; offline = queued-to-store
+    canSubmit: () => (conv?.canWrite ?? false) && allReady(attachments),
+    // (open = live; offline = queued to the store; a rebuilding stream still
+    // writes, so health is not asked here -- see canWrite.)
     // An attachment-only submit (empty draft) is allowed once every
     // upload is ready; with no attachments the non-empty rule holds.
     allowEmpty: () => attachments.length > 0 && allReady(attachments),
@@ -423,11 +423,9 @@
     return () => document.removeEventListener("visibilitychange", onVisible);
   });
 
-  // Offline views send by design (lines land in the pending store for a
-  // later auto-flush), so they are not a disabled state.
-  const disabled = $derived(
-    !conv || (conv.status !== "open" && conv.status !== "offline"),
-  );
+  // The write axis decides, not the stream's health: a rebuild keeps the
+  // composer live, and the offline view writes to its pending store by design.
+  const disabled = $derived(!conv || !conv.canWrite);
   const pendingCount = $derived(conv?.pending.length ?? 0);
 </script>
 
@@ -507,8 +505,8 @@
           {#if conv.status === "reconnecting"}
             <!-- Silent SSE retry in progress (transport-level reconnect): the
              failure itself stays in the console. The overlay ignores pointer
-             events so the transcript stays scrollable; the composer is
-             disabled via status !== "open". No backdrop by design: the
+             events so the transcript stays scrollable; the composer keeps writing
+             (canWrite does not read the stream). No backdrop by design: the
              transcript stays fully readable while the reconnect runs. -->
             <div
               class="absolute inset-0 z-10 grid place-items-center pointer-events-none"

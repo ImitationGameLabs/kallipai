@@ -3,6 +3,7 @@ import type { AgentId } from "@kallipai/kallipai-common";
 import type { OfflineModeConfig } from "../config/config.ts";
 import { LOCAL_OPERATOR_SENDER } from "../transcript.ts";
 import { DirectTransport } from "./directTransport.ts";
+import { DirectMessageSender } from "./messageSender.svelte.ts";
 import { loadTimezoneSetting } from "../time/stamp.svelte.ts";
 
 /** The result of connecting to the tagma directly: the transport bound to the
@@ -14,6 +15,10 @@ import { loadTimezoneSetting } from "../time/stamp.svelte.ts";
 export interface DirectConnection {
   readonly transport: DirectTransport;
   readonly conversationId: string | null;
+  /** The write path's carrier: it outlives every stream the conversation swaps in. */
+  readonly sender: DirectMessageSender;
+  /** Builds a fresh stream over the same client and agent, for reattach. */
+  readonly restartStream: () => DirectTransport;
 }
 
 /**
@@ -40,6 +45,9 @@ export async function connectDirect(
 
   return {
     transport: new DirectTransport(client, agentId, LOCAL_OPERATOR_SENDER),
+    sender: new DirectMessageSender(client, agentId),
+    restartStream: () =>
+      new DirectTransport(client, agentId, LOCAL_OPERATOR_SENDER),
     conversationId: root.conversation_id ?? null,
   };
 }

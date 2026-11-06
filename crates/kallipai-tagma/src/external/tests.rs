@@ -118,7 +118,7 @@ async fn record_inbound_persists_and_publishes() {
     );
     let mut rx = state.bus.subscribe::<AuthoredFrame>().unwrap();
     let user = user_sender();
-    projector
+    let returned = projector
         .record_inbound(Some(user.clone()), "hi".into(), None, None)
         .await;
 
@@ -134,6 +134,7 @@ async fn record_inbound_persists_and_publishes() {
         }
         other => panic!("expected UserMessage, got {other:?}"),
     };
+    assert_eq!(returned, Some(id), "the caller gets the row it wrote");
     let rows = chat_history::read_last_n(&db, Some(user.id.as_ref()), 10)
         .await
         .unwrap();

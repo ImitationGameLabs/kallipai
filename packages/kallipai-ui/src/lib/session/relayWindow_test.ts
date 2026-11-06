@@ -204,9 +204,6 @@ function fakeTransport(channel: FakeChannel): Transport & {
     async *replies() {},
     async *signals() {},
     async *status() {},
-    send() {
-      return Promise.resolve();
-    },
     close() {},
     relayChannel: channel,
   };
@@ -1140,3 +1137,41 @@ Deno.test(
     assertEquals(channel.calls.length, 1, "one probe page, one answer");
   },
 );
+
+Deno.test("a closed conversation issues no history work", async () => {
+  const channel = new FakeChannel([{ rows: [eventRow(40)] }]);
+  const conv = makeConv(channel);
+  windowAt60(conv);
+  // Control: an open conversation on a live channel pages, so the zero
+  // counts below cannot pass on a pull that never worked in the first place.
+  await conv.loadOlder(10);
+  assertEquals(channel.calls.length, 1, "an open conversation pages");
+
+  conv.close();
+  conv.hasMoreOlder = true;
+  const before = channel.calls.length;
+  await conv.loadOlder(10);
+  assertEquals(
+    channel.calls.length,
+    before,
+    "a closed conversation pages nothing",
+  );
+  await conv.catchUp(WINDOW_PAGE);
+  assertEquals(
+    channel.calls.length,
+    before,
+    "a closed window catches up on nothing",
+  );
+  // Closing tears down the carrier, not the read: the probe answers from
+  // the guard rather than from a request, and reads as retryable (not as
+  // proof the row is gone).
+  const probe = await (
+    conv as unknown as {
+      probePage(id: number): Promise<HistoryEntry[] | null>;
+    }
+  ).probePage(30);
+  assertEquals(probe, null);
+  assertEquals(await conv.peekRow(30), "error");
+  assertEquals(channel.calls.length, before);
+  assertEquals(conv.hasMoreOlder, true);
+});

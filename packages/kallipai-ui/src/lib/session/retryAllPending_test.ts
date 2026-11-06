@@ -23,6 +23,7 @@ declare global {
 (globalThis as Record<string, unknown>)["$state"] = (v: unknown) => v;
 
 type Transport = import("./transport.ts").Transport;
+type MessageSender = import("./messageSender.svelte.ts").MessageSender;
 const assertMod = await import("@std/assert");
 const { assertEquals } = assertMod;
 const assertNotIncludesId = (pending: { localId: number }[], id: number) => {
@@ -47,6 +48,12 @@ const fakeTransport: Transport = {
   close() {},
 } as unknown as Transport;
 
+const fakeSender: MessageSender = {
+  available: true,
+  send: () => Promise.resolve({ historyId: null }),
+  close() {},
+};
+
 function makeConv(tagmaId: string) {
   // Second parameter is the lesche client (null): the retry paths under
   // test never reach the wire.
@@ -56,6 +63,7 @@ function makeConv(tagmaId: string) {
     fakeTransport,
     tagmaId,
     "T",
+    fakeSender,
   );
 }
 

@@ -25,7 +25,8 @@ import {
   archeionSession,
   keryxClientOrFail,
 } from "./archeion.svelte.ts";
-import type { DirectTransport } from "./directTransport.ts";
+import type { DirectConnection } from "./connect.ts";
+import { RelayMessageSender } from "./messageSender.svelte.ts";
 import { RelayTransport } from "./relayTransport.ts";
 import type { SendOptions } from "./transport.ts";
 import {
@@ -239,17 +240,25 @@ export class ChannelsStore {
     return c?.kind === "local" ? (c as LocalConversation) : undefined;
   }
 
-  /** True iff the local conversation is connected (offline transport bound). */
+  /** Whether a local conversation is bound at all: the offline setup question
+   *  (a stream rebuilding does not unbind it). The channel lamp reads
+   *  `localConnected` instead -- that one does go dark during a rebuild. */
+  get localAttached(): boolean {
+    return this.local !== undefined;
+  }
+
+  /** The channel lamp: the local conversation holds its destination now.
+   *  False during a stream rebuild, so it is not the offline setup answer. */
   get localConnected(): boolean {
     return this.local?.connected ?? false;
   }
 
   // --- offline (local) ---
 
-  /** Bind the offline DirectTransport as the "local" conversation. Replaces
+  /** Bind the offline connection as the "local" conversation. Replaces
    *  sessionStore.attach(): tears down any prior local conversation first,
    *  hydrates from the shared IndexedDB cache, then starts the drain. The store
-   *  entry stays keyed `"local"` (so the gate/links/`localConnected` are
+   *  entry stays keyed "local" (so `localAttached` and the links are
    *  untouched), but its cache lives under the tagma's conversation id (shared
    *  with the online path). `conversationId` is null for a never-enrolled tagma
    *  -- rows still persist to the operator (`NULL`) partition, but there is no
@@ -259,19 +268,19 @@ export class ChannelsStore {
    *  (a live frame racing ahead of the hydrate would double-render). Re-checks
    *  that the creds are still stored after the hydrate, so a forget during
    *  the await closes the stray transport instead of attaching it. */
-  async attachLocal(
-    transport: DirectTransport,
-    conversationId: string | null,
-  ): Promise<void> {
+  async attachLocal(connection: DirectConnection): Promise<void> {
     this.detachLocal();
     this.localError = null;
+    const { transport, conversationId, sender, restartStream } = connection;
     const cacheConversationId = conversationId ?? "local";
     rememberConversationOf("local", cacheConversationId);
-    const conv = new LocalConversation(this, transport, cacheConversationId);
-    // Wire the transport's stream-retry lifecycle into the conversation:
-    // reconnecting flips its status (spinner + composer gate), resumed
-    // re-opens it and backfills the gap via catch-up.
-    transport.onState = (s) => conv.onTransportState(s);
+    const conv = new LocalConversation(
+      this,
+      transport,
+      cacheConversationId,
+      sender,
+      restartStream,
+    );
     this.conversations.set("local", conv);
     try {
       const cached = await readTail(cacheConversationId, WINDOW_PAGE);
@@ -339,6 +348,7 @@ export class ChannelsStore {
       transport,
       tagma.tagma_id,
       tagma.label,
+      new RelayMessageSender(channel),
     );
     // Hydrate a tail window from the per-device cache before marking open,
     // so a refresh restores the conversation instantly and catchUp pulls
@@ -618,13 +628,15 @@ export class ChannelsStore {
    *  relay path -- local transports drop it. */
   send(conversationId: string, text: string, options?: SendOptions): void {
     const conv = this.conversations.get(conversationId);
-    // Same gate the chat page's canSubmit uses: open sends live,
-    // offline queues to the store. Judging transport here instead made
-    // the offline view's designed send path (failed line + retry +
-    // pending store) unreachable -- the message just vanished.
-    if (!conv || (conv.status !== "open" && conv.status !== "offline")) {
-      return;
-    }
+    // The write axis decides, not the stream's health -- for the direct and
+    // offline views, whose carrier outlives the stream: a line typed while the
+    // stream rebuilds still renders and queues (the pump posts it once the
+    // carrier returns). A relay channel's write path is the channel itself, so
+    // its canWrite follows the channel status instead (see RelayConversation).
+    // Either way this only asks whether there is a conversation to write into.
+    // A closed or carrier-less one says so through conv.send (conv.error),
+    // never by swallowing the text.
+    if (!conv) return;
     void conv.send(text, options);
   }
 

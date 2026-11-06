@@ -14,12 +14,7 @@ import type { RelayChannel } from "@kallipai/kallipai-keryx-client";
 import type { TagmaStatusSummary } from "../tagmata.svelte.ts";
 import type { ConversationSender } from "../transcript.ts";
 import { toSender } from "../transcript.ts";
-import {
-  AsyncQueue,
-  type IncomingFrame,
-  type SendOptions,
-  type Transport,
-} from "./transport.ts";
+import { AsyncQueue, type IncomingFrame, type Transport } from "./transport.ts";
 
 export class RelayTransport implements Transport {
   private readonly signalQueue = new AsyncQueue<SignalEvent>();
@@ -61,12 +56,6 @@ export class RelayTransport implements Transport {
    *  signal dispatch (keyed by tagma id). */
   enqueueSignal(event: SignalEvent): void {
     this.signalQueue.push(event);
-  }
-
-  send(text: string, options?: SendOptions): Promise<number> {
-    // The channel keeps its positional shape: only this adapter calls it, and
-    // its signature predates this seam, so it stays as it is.
-    return this.channel.send(text, options?.attachment, options?.quote);
   }
 
   /** The underlying E2EE pipe. Exposed for the two non-stream ops the store

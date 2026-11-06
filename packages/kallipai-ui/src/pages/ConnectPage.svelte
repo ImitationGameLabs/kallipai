@@ -85,9 +85,9 @@
       authToken,
     };
     try {
-      const { transport, conversationId } = await connectDirect(config);
+      const connection = await connectDirect(config);
       await configStore.setOffline(config);
-      await channelsStore.attachLocal(transport, conversationId);
+      await channelsStore.attachLocal(connection);
     } catch (e) {
       // Full error (with cause chain) to the console; the inline FormError
       // shows only the classified, path-free message.

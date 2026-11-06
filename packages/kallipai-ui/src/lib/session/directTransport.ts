@@ -15,19 +15,13 @@ import { TransportError } from "@kallipai/kallipai-common";
 
 import type { TagmaClient } from "@kallipai/kallipai-client";
 import type {
-  HistoryEntry,
   Participant,
   SignalEvent,
   TagmaReply,
 } from "@kallipai/kallipai-lesche-client";
 import type { TagmaStatusSummary } from "../tagmata.svelte.ts";
 import type { ConversationSender } from "../transcript.ts";
-import {
-  AsyncQueue,
-  type IncomingFrame,
-  type SendOptions,
-  type Transport,
-} from "./transport.ts";
+import { AsyncQueue, type IncomingFrame, type Transport } from "./transport.ts";
 
 /** The aggregate runtime snapshot on the direct stream (the snake_case wire
  * shape, mirroring the relay's `tagma_status` LescheEvent). Ephemeral operator
@@ -177,38 +171,6 @@ export class DirectTransport implements Transport {
       if (done) return;
       yield value;
     }
-  }
-
-  /** The direct POST body carries the quoted row id with the text and the
-   *  attachment: the offline path records it on the inbound row and hands
-   *  it back on the history read, exactly as the relay envelope does. */
-  async send(text: string, options?: SendOptions): Promise<void> {
-    await this.client.postMessage(
-      this.agentId,
-      text,
-      options?.attachment,
-      options?.quote,
-    );
-  }
-
-  /** Pull a cursor-driven history batch DIRECTLY (no queue interleave).
-   *
-   *  The lazy-window store merges pulled rows via mergeHistoryLines,
-   *  deliberately NOT through the reply queue: a queued batch racing the
-   *  live drain would let a live frame advance `maxRendered` first and
-   *  the gap rows would then be dropped as "replayed" (id <= cursor).
-   *  Rows arrive oldest-first with the server's `more` flag verbatim. */
-  async pullHistory(opts: {
-    after?: number | null;
-    before?: number | null;
-    limit?: number;
-  }): Promise<{ rows: HistoryEntry[]; more: boolean; undecodable: number }> {
-    const resp = await this.client.externalHistory(this.agentId, opts);
-    return {
-      rows: resp.rows as HistoryEntry[],
-      more: resp.more,
-      undecodable: resp.undecodable ?? 0,
-    };
   }
 
   close(): void {

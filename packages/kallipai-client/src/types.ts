@@ -90,6 +90,9 @@ export interface WireAgentSummary {
 export interface MessageResponse {
   readonly queue_depth: number;
   readonly warning?: string;
+  /** The history row the message landed as, when the tagma recorded one.
+   *  Absent from older tagmas and from the degraded path that records later. */
+  readonly history_id?: number | null;
 }
 
 /** `GET /agents/{id}/external/history` -- a cursor-driven history window for

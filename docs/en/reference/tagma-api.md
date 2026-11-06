@@ -346,8 +346,8 @@ outcome can arrive with no such event.
 
 Sends a message to the agent's input queue. The tagma accepts the message
 immediately and processes it asynchronously. Returns `queue_depth`,
-`delivery_mode`, and `warning` so callers can gauge when the message becomes
-visible.
+`delivery_mode`, `warning` and `history_id` so callers can gauge when the
+message becomes visible and settle their own copy of it.
 
 Auth: any authenticated identity. Inter-agent communication is peer-to-peer;
 no supervisor relationship is required. See [Authentication and authorization](auth.md).
@@ -369,13 +369,18 @@ no supervisor relationship is required. See [Authentication and authorization](a
 {
   "queue_depth": 0,
   "warning": "string | null — present when a gate held the delivery or a kick carries it; absent when there is nothing to name (in-round visibility, and the buffer while a dead task restarts)",
-  "delivery_mode": "in_round | kicked | deferred | buffered — how the message becomes visible to the receiver (omitted where none of the four applies)"
+  "delivery_mode": "in_round | kicked | deferred | buffered — how the message becomes visible to the receiver (omitted where none of the four applies)",
+  "history_id": "integer — the history row the message landed as (omitted on the degraded path that records on the next boot)"
 }
 ```
 
 - `queue_depth` is reserved: every response reports `0`, and the tagma does not
   count what sits ahead in the prompt queue. Read `delivery_mode` and `warning`
   for where the delivery stands.
+- `history_id` is the row the message landed as: a sender settles its own
+  copy from the response instead of waiting for the echoed frame. It is
+  absent when the store was unavailable; the message still reaches the
+  agent, and the row is written on the next boot.
 - There is no manual wake route. A parked target wakes when a delivery lands
   in its inbox: the message is buffered and a kick `[system]` turn (park
   reason + elapsed) is enqueued, so the agent decides in its kick round and

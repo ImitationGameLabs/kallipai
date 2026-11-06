@@ -631,6 +631,11 @@ pub struct MessageResponse {
     /// delivery-mode semantics do not cover.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delivery_mode: Option<DeliveryMode>,
+    /// The history row this message landed as, so a sender can settle its own
+    /// line without waiting for the echoed frame. Absent when the delivery
+    /// path has no row yet (the degraded path that records on the next boot).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history_id: Option<i64>,
 }
 
 /// Where a delivered message's visibility comes from, reported on the
@@ -807,6 +812,7 @@ mod tests {
         assert_eq!(old.delivery_mode, None);
         let resp = MessageResponse {
             queue_depth: 0,
+            history_id: None,
             warning: None,
             delivery_mode: Some(DeliveryMode::InRound),
         };
@@ -816,6 +822,7 @@ mod tests {
         );
         let resp = MessageResponse {
             queue_depth: 0,
+            history_id: None,
             warning: None,
             delivery_mode: None,
         };

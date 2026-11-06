@@ -14,7 +14,7 @@ function decide(
     loaded: true,
     user: undefined,
     authError: null,
-    connected: false,
+    localAttached: false,
     appKind: "app",
     search: "",
     ...over,
@@ -47,33 +47,33 @@ Deno.test("config not loaded -> skeleton on every route (incl. /login)", () => {
 
 // --- offline public ---
 
-Deno.test("offline + /connect + connected (app) -> redirect /local", () => {
+Deno.test("offline + /connect + attached (app) -> redirect /local", () => {
   assertEquals(
     decide({
       mode: "offline",
       pathname: "/connect",
-      connected: true,
+      localAttached: true,
       appKind: "app",
     }),
     { kind: "redirect", url: "/local" },
   );
 });
 
-Deno.test("offline + /connect + disconnected -> render the form", () => {
+Deno.test("offline + /connect + unattached -> render the form", () => {
   assertEquals(
-    decide({ mode: "offline", pathname: "/connect", connected: false }),
+    decide({ mode: "offline", pathname: "/connect", localAttached: false }),
     { kind: "render" },
   );
 });
 
 Deno.test(
-  "offline + /login + connected (app) -> redirect /local (one hop)",
+  "offline + /login + attached (app) -> redirect /local (one hop)",
   () => {
     assertEquals(
       decide({
         mode: "offline",
         pathname: "/login",
-        connected: true,
+        localAttached: true,
         appKind: "app",
       }),
       { kind: "redirect", url: "/local" },
@@ -81,36 +81,33 @@ Deno.test(
   },
 );
 
-Deno.test("offline + /login + disconnected -> redirect /connect", () => {
+Deno.test("offline + /login + unattached -> redirect /connect", () => {
   assertEquals(
-    decide({ mode: "offline", pathname: "/login", connected: false }),
+    decide({ mode: "offline", pathname: "/login", localAttached: false }),
     { kind: "redirect", url: "/connect" },
   );
 });
 
-Deno.test(
-  "offline + /connect + connected (web) -> redirect /local/chat",
-  () => {
-    assertEquals(
-      decide({
-        mode: "offline",
-        pathname: "/connect",
-        connected: true,
-        appKind: "web",
-      }),
-      { kind: "redirect", url: "/local/chat" },
-    );
-  },
-);
+Deno.test("offline + /connect + attached (web) -> redirect /local/chat", () => {
+  assertEquals(
+    decide({
+      mode: "offline",
+      pathname: "/connect",
+      localAttached: true,
+      appKind: "web",
+    }),
+    { kind: "redirect", url: "/local/chat" },
+  );
+});
 
 Deno.test(
-  "offline + /login + connected (web) -> redirect /local/chat (one hop)",
+  "offline + /login + attached (web) -> redirect /local/chat (one hop)",
   () => {
     assertEquals(
       decide({
         mode: "offline",
         pathname: "/login",
-        connected: true,
+        localAttached: true,
         appKind: "web",
       }),
       { kind: "redirect", url: "/local/chat" },

@@ -821,6 +821,88 @@ async fn a_one_to_one_quote_renders_its_author_summary_and_read_back_command() {
     );
 }
 
+/// The delivery response names the row it wrote, so a sender settles its own
+/// line from the POST alone; the published frame and the store carry the same
+/// id. No store means no row, and the field stays absent instead of inventing
+/// one.
+#[tokio::test]
+async fn the_delivery_response_names_the_row_it_wrote() {
+    let state = make_state();
+    install_inbox_store(&state).await;
+    let (db, mut frames, _dir) = install_projector(&state).await;
+    let (id, mut rx) = live_agent(&state).await;
+
+    let resp = crate::delivery::deliver_message(
+        &state,
+        crate::auth::Identity::Operator,
+        None,
+        &id,
+        crate::delivery::OutgoingMessage {
+            text: "hello",
+            attachment: None,
+            quote: None,
+        },
+        false,
+    )
+    .await
+    .expect("delivery succeeds");
+    let _ = rx.try_recv();
+    let row = resp
+        .history_id
+        .expect("the response names the row it appended");
+
+    // The frame the live view draws and the row the store holds agree with
+    // the response: one id, named in three places.
+    let frame = frames.recv().await.expect("the inbound frame");
+    match frame.reply {
+        kallipai_lesche_common::message::TagmaReply::UserMessage { history_id, .. } => {
+            assert_eq!(history_id, row, "the frame and the response agree");
+        }
+        other => panic!("expected UserMessage, got {other:?}"),
+    }
+    let rows = chat_history::read_last_n(&db, None, 10).await.unwrap();
+    assert_eq!(rows[0].id, row);
+    assert_eq!(rows[0].direction, "inbound");
+}
+
+/// The degraded write path: a tagma with no projector has no row to name, so
+/// the response leaves the id out instead of inventing one. The message still
+/// lands, and the client settles its line on the echoed frame.
+#[tokio::test]
+async fn a_delivery_without_a_store_names_no_row() {
+    let state = make_state();
+    install_inbox_store(&state).await;
+    let (id, mut rx) = live_agent(&state).await;
+
+    let resp = crate::delivery::deliver_message(
+        &state,
+        crate::auth::Identity::Operator,
+        None,
+        &id,
+        crate::delivery::OutgoingMessage {
+            text: "hello",
+            attachment: None,
+            quote: None,
+        },
+        false,
+    )
+    .await
+    .expect("delivery succeeds");
+
+    assert!(
+        resp.history_id.is_none(),
+        "no store, no row: the field stays absent"
+    );
+    let _ = rx.try_recv();
+
+    // Absent on the wire too: a zero would read as a row id.
+    let json = serde_json::to_value(&resp).expect("the response serializes");
+    assert!(
+        json.get("history_id").is_none(),
+        "the absent id is left out of the payload: {json}"
+    );
+}
+
 /// A row the conversation does not hold is said out loud, with the command
 /// still there: the position is a fact about the message, and the read-back is
 /// how the reader learns the rest. The message itself is delivered unchanged.

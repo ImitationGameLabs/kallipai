@@ -1,9 +1,10 @@
-// Behavior test for the store send gate's offline leg: the gate judges
-// status ("open" | "offline"), not transport presence, so the offline
-// view's designed send path -- optimistic line, durable pending row,
-// sendFailed -- is reachable from the store. A gate that judged
-// transport presence instead would drop such a send silently: the
-// offline view has no transport at all.
+// Behavior test for the store send gate: the gate asks the conversation's
+// write axis (canWrite), never its status, so the offline view's designed
+// send path -- optimistic line, durable pending row, sendFailed -- is
+// reachable from the store, and a stream that is rebuilding or still
+// handshaking does not close the door on a typed line. Only a conversation
+// with no way out refuses, and it leaves the refusal in conv.error rather
+// than dropping the text.
 //
 // Seams follow the channels_refresh_test pattern: the modules under test are
 // rune-bearing but `deno test` runs them uncompiled, so a passthrough $state
@@ -59,20 +60,19 @@ Deno.test(
   },
 );
 
-Deno.test(
-  "the store gate still refuses a conversation that is neither open nor offline",
-  () => {
-    const store = storeWith(offlineConv());
-    const conv = (
-      store as unknown as { conversations: Map<string, OfflineConversation> }
-    ).conversations.get("conv-off")!;
-    conv.status = "opening";
+Deno.test("the store gate asks the write axis, not the status", () => {
+  const store = storeWith(offlineConv());
+  const conv = (
+    store as unknown as { conversations: Map<string, OfflineConversation> }
+  ).conversations.get("conv-off")!;
+  conv.status = "opening";
 
-    store.send("conv-off", "too early");
-    assertEquals(
-      conv.transcript.lines.length,
-      0,
-      "a mid-handshake conversation takes no sends",
-    );
-  },
-);
+  store.send("conv-off", "too early");
+  assertEquals(
+    conv.transcript.lines.length,
+    1,
+    "a mid-handshake conversation takes the line",
+  );
+  store.send("no-such-conversation", "hello");
+  assertEquals(conv.transcript.lines.length, 1, "an unknown id adds nothing");
+});

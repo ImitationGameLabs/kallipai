@@ -7,8 +7,16 @@
 import { assertEquals } from "@std/assert";
 import type { FileAttachment } from "@kallipai/kallipai-lesche-client";
 import { TagmaClient } from "@kallipai/kallipai-client";
-import { DirectTransport } from "./directTransport.ts";
-import { LOCAL_OPERATOR_SENDER } from "../transcript.ts";
+import { DirectMessageSender } from "./messageSender.svelte.ts";
+
+// The sender keeps a $state flag (its liveness) and `deno test` runs the
+// module uncompiled: the passthrough shim the other session tests use.
+declare global {
+  function $state<T>(initial: T): T;
+  function $state<T>(): T | undefined;
+}
+
+(globalThis as Record<string, unknown>)["$state"] = (v: unknown) => v;
 
 /** Swap fetch for a recorder that answers every POST with a 202 receipt. */
 function recordBodies(): { bodies: string[]; restore: () => void } {
@@ -32,15 +40,14 @@ async function bodyOf(options?: {
 }): Promise<string> {
   const { bodies, restore } = recordBodies();
   try {
-    const transport = new DirectTransport(
+    const sender = new DirectMessageSender(
       new TagmaClient({ baseUrl: "http://tagma.test", authToken: "t" }),
       "root",
-      LOCAL_OPERATOR_SENDER,
     );
     try {
-      await transport.send("x", options);
+      await sender.send("x", options);
     } finally {
-      transport.close();
+      sender.close();
     }
     assertEquals(bodies.length, 1, "one POST per send");
     return bodies[0]!;

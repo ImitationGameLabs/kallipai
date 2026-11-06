@@ -67,6 +67,12 @@ import {
   readTailBefore,
 } from "@kallipai/kallipai-keryx-client";
 import type { SendOptions, Transport } from "./transport.ts";
+import type {
+  HistoryPage,
+  MessageSender,
+  PullOpts,
+} from "./messageSender.svelte.ts";
+import { RelayMessageSender } from "./messageSender.svelte.ts";
 import { DirectTransport, type TransportState } from "./directTransport.ts";
 import { DataPlaneApiError } from "@kallipai/kallipai-lesche-client";
 import { KallipaiError } from "@kallipai/kallipai-common";
@@ -83,6 +89,12 @@ import { notify } from "./notify.ts";
  * watchdog presumes the reply lost. Aligned with the SSE connect timeout
  * and the per-attempt fetch cap (30s each). */
 const SEND_WATCHDOG_MS = 30_000;
+
+/** Restart backoff for a dead read path (direct only): first wait, and the cap
+ *  the doubling stops at. The stream's own retry ladder covers short gaps; this
+ *  covers the case where that ladder gave up. */
+const RESTART_MIN_MS = 15_000;
+const RESTART_MAX_MS = 60_000;
 
 /** Tunnels already told that the roster names no root agent. An install in
  *  that state can never land a cursor write, so the badge only grows and the
@@ -161,18 +173,36 @@ export abstract class ConversationBase {
 
   abstract readonly kind: "local" | "relay" | "offline-view";
 
-  /** The underlying transport, or null once the drain has ended. `$state` so
-   *  `connected` (and the store's `localConnected`) re-fire when run() nulls it
-   *  on a clean/error drain end -- not just on attach/detach. */
+  /** The underlying transport, or null once the drain ended for good. `$state`
+   *  so consumers re-fire when run() nulls it on a terminal drain end -- not
+   *  just on attach/detach. A stream death under a restart does not null it. */
   protected transport = $state<Transport | null>(null);
+  /** The write path's carrier: the POST, its settlement and the history pull.
+   *  Deliberately not the read-path transport -- a dying stream must not take
+   *  the queue with it (see messageSender.svelte.ts). Null only when the
+   *  conversation is closed. Reactive, like the sender's own liveness flag:
+   *  the write axis changes exactly when a carrier is mounted or its sender
+   *  closes, and both fields are `$state` so a reader tracks either flip. */
+  protected sender: MessageSender | null = $state(null);
+  /** Set once close() has run: the restart wait and run() both stop here, and
+   *  the offline view's canWrite reads it (it has no sender to close). */
+  protected closed = $state(false);
+  /** Rebuild the read-path transport after its drain ended. Null = the drain's
+   *  end is terminal (the relay, or a conversation held by a test). */
+  protected restartStream: (() => Transport) | null = null;
+  private restartDelayMs = RESTART_MIN_MS;
+  /** Resolves the in-flight restart wait early (reattach). */
+  private restartWake: (() => void) | null = null;
 
   /** The IndexedDB cache key (the tagma's conversation id). The offline
    *  `"local"` entry and the online derived-id entry for the same tagma share
    *  this so a mode switch rehydrates from the same rows. Falls back to the
    *  store key when the tagma is not enrolled (no durable history). */
   readonly cacheConversationId: string;
-  /** The largest confirmed history_id rendered (the dedup cursor). Any inbound
-   *  frame with id <= this is dropped -- unifies catch-up batch and live. */
+  /** The pull anchor: the highest confirmed history_id rendered. `catchUp`
+   *  reads from it, as do the read-cursor report and peekRow's upper bound.
+   *  Not a dedup threshold -- see `minRendered` and applyReplyCore's identity
+   *  check for that. */
   maxRendered = $state(0);
   /** Rendered optimistic user lines awaiting their POST. Each entry's line is
    *  already in `transcript` (status "sending"); the single-in-flight send pump
@@ -217,7 +247,10 @@ export abstract class ConversationBase {
   /** The oldest durable id in the loaded window (the scroll-up cursor).
    *  `0` = nothing loaded. Together with `maxRendered` it brackets what
    *  the transcript currently holds; rows outside the bracket are fetched
-   *  on demand (catch-up above, scroll-paging below), never up front. */
+   *  on demand (catch-up above, scroll-paging below), never up front.
+   *  Second duty, dedup: a content frame below this floor was rendered and
+   *  then let go, so it is a replay; anything at or above the floor is still
+   *  eligible to land. */
   minRendered = $state(0);
   /** True while a scroll-up page is in flight (single-flight guard + the
    *  top sentinel's busy state). */
@@ -235,25 +268,57 @@ export abstract class ConversationBase {
     /** The UI sender for optimistic user lines (online: the archeion session;
      *  offline: the tagma-configured local identity). */
     protected readonly localSender: ConversationSender,
+    /** The write path's carrier; null = no sender (the conversation is closed). */
+    sender: MessageSender | null = null,
   ) {
     this.transport = transport;
+    this.sender = sender;
     this.cacheConversationId = cacheConversationId;
   }
 
   get connected(): boolean {
-    return this.transport !== null;
+    // True while the conversation holds its destination: writable, a stream
+    // holder, and a stream that is not reconnecting. Both layers report the
+    // same fact on `status`: the transport's own SSE retry says
+    // "reconnecting" through onTransportState, and a drain end under a
+    // restart says it in run(). A stream death is not a disconnect, so the
+    // status -- not the transport's presence -- is what flips this false.
+    // The relay panel's channel window is the same predicate: its drain end is
+    // terminal, so it nulls the transport rather than going "reconnecting".
+    // Built on canWrite so the two cannot drift: this is the lamp, that is the
+    // write axis.
+    return (
+      this.canWrite && this.transport !== null && this.status !== "reconnecting"
+    );
+  }
+  /** The write axis: whether a line can go out at all. Three inputs: the
+   *  conversation is open for writing, a carrier is mounted, and that carrier
+   *  has not closed. All three inputs are runes (`sender` and `closed` here,
+   *  the sender's flag in its own class), so a page deriving from this
+   *  re-evaluates on mount, on close, and on a sender closing under it. A
+   *  stream rebuilding leaves all three true; `connected` adds stream health. */
+  get canWrite(): boolean {
+    return !this.closed && this.sender !== null && this.sender.available;
   }
 
   /** Tear down the underlying transport. The run() drain then ends; its stale
    *  guard stops it from mutating the (likely-removed) conversation. */
   close(): void {
     this.transport?.close();
+    this.sender?.close();
+    this.closed = true;
+    this.restartWake?.();
   }
   /** Send a user message online: renders the optimistic line, queues it,
    *  and hands off to the shared single-in-flight send pump (the in-flight
    *  POST's `user_message` frame promotes the line via `applyReplyCore`). */
   send(text: string, options?: SendOptions): void {
-    if (!this.transport) return;
+    if (!this.canWrite) {
+      this.error = new Error(
+        this.closed ? "conversation closed" : "no live sender",
+      );
+      return;
+    }
     const trimmed = text.trim();
     if (trimmed === "" && options?.attachment === undefined) return;
     const localId = this.renderPendingLine(trimmed, options);
@@ -459,6 +524,19 @@ export abstract class ConversationBase {
       this.onReply(reply);
       return;
     }
+    // A frame this window already renders is a replay, whatever else is in
+    // flight: its row is on screen, so it never claims a queued line (two
+    // identical texts would otherwise hand the echo to the wrong one).
+    const realId = contentId(reply);
+    const replayed =
+      realId > 0 && this.transcript.lines.some((l) => l.historyId === realId);
+    if (replayed) {
+      // A replay only reports that this row is already here; it says nothing
+      // about the rows below it, so it moves no cursor (a settled line can
+      // leave a hole under it, and advancing would pull straight past it).
+      this.onReply(reply);
+      return;
+    }
     if (
       reply.kind === "user_message" &&
       this.pendingInFlight !== null &&
@@ -518,9 +596,11 @@ export abstract class ConversationBase {
       this.onReply(reply);
       return;
     }
-    // Dedup: a frame at or below the cursor is a replay of something rendered.
-    const realId = contentId(reply);
-    if (realId > 0 && realId <= this.maxRendered) {
+    // Dedup: a frame below the window's floor was rendered and then let go.
+    // Anything between that floor and the newest row is a row this
+    // conversation never landed (a settled line can leave such a hole), and
+    // it lands now.
+    if (this.minRendered > 0 && realId > 0 && realId < this.minRendered) {
       this.onReply(reply);
       return;
     }
@@ -551,25 +631,39 @@ export abstract class ConversationBase {
    *  (retryable), with the failure copy inline. */
   protected async pumpPending(): Promise<void> {
     if (this.pendingInFlight !== null) return;
+    const sender = this.sender;
+    // A missing or closed sender leaves the line queued: the pump is the queue's
+    // writer, not its owner, so nothing is dropped here.
+    if (sender === null || !sender.available) return;
     const next = this.pending.shift();
     if (next === undefined) return;
     this.pendingInFlight = { localId: next.localId, text: next.text };
     try {
-      const reqId = await this.transport!.send(next.text, {
+      const result = await sender.send(next.text, {
         attachment: next.attachment,
         quote: next.quote,
       });
-      // The POST was accepted: arm the reply watchdog. From here the only
-      // way the line resolves is the ack or an error reply arriving on the
-      // wire -- if neither lands (reply lost), the watchdog releases the
-      // pump and fails the line for an explicit retry.
-      this.armWatchdog(next.localId);
+      // A response-borne id settles the line here, with no help from the read
+      // path. Only a response without one falls back to the wire ack (relay
+      // frame) or the echo plus watchdog (direct degraded write).
+      if (
+        result.historyId !== null &&
+        result.historyId > 0 &&
+        this.pendingInFlight?.localId === next.localId
+      ) {
+        this.settleAccepted(next.localId, result.historyId);
+        this.pendingInFlight = null;
+        void this.pumpPending();
+      }
+      if (result.historyId === null || result.historyId <= 0) {
+        this.armWatchdog(next.localId);
+      }
       // The channel stamps this send's req_id on accept; the reply-side
       // error correlation (applyReplyCore) closes the line on it.
-      if (this.pendingInFlight) {
+      if (this.pendingInFlight?.localId === next.localId) {
         this.pendingInFlight = {
           ...this.pendingInFlight,
-          reqId: reqId ?? undefined,
+          reqId: result.reqId,
         };
       }
     } catch (e) {
@@ -593,6 +687,40 @@ export abstract class ConversationBase {
       this.clearWatchdog();
       void this.pumpPending();
     }
+  }
+
+  /** Promote a posted line to its confirmed row. The response's id is the
+   *  authority: the line renumbers, caches and clears its pending copy here,
+   *  with no read path involved. The cursor does not move: the response and
+   *  the stream are separate channels, and a lower row may still be on the way.
+   *  The echo that follows drops as a replay by its id. The row keeps the
+   *  client's created_at until a pull supplies the server's. */
+  private settleAccepted(localId: number, ackId: number): void {
+    if (ackId <= 0) return;
+    // The line is this client's own, so its sender is already the local one.
+    const wireSender = this.localSender;
+    this.transcript = replaceLineId(
+      this.transcript,
+      localId,
+      ackId,
+      undefined,
+      wireSender,
+    );
+    const confirmed = this.transcript.lines.find((l) => l.historyId === ackId);
+    if (confirmed) {
+      // Plain `wireSender`, never the $state proxy (structured clone rejects it).
+      void cachePut({
+        conversationId: this.cacheConversationId,
+        historyId: ackId,
+        role: "user",
+        text: confirmed.text,
+        sender: wireSender,
+        createdAt: confirmed.createdAt,
+        attachment: confirmed.attachment,
+        quote: confirmed.quote,
+      });
+    }
+    void deletePending(this.pendingKey, localId);
   }
 
   /** Arm the reply watchdog for one in-flight send. 30s, matching the SSE
@@ -771,11 +899,10 @@ export abstract class ConversationBase {
     this.statusSnapshot = snapshot;
   }
 
-  /** Drain all three transport streams concurrently. Sets status to
-   *  error/offline when the transport ends, guarded against a stale drain. */
-  async run(): Promise<void> {
-    const t = this.transport;
-    if (!t) return;
+  /** Drain all three transport streams concurrently for one transport lifetime.
+   *  Sets status to error/offline when the streams end; the caller decides whether
+   *  that end is terminal (relay) or a rebuild (direct). */
+  private async drainOnce(t: Transport): Promise<void> {
     let failure: unknown = null;
     const drainReplies = async () => {
       try {
@@ -825,9 +952,77 @@ export abstract class ConversationBase {
     } else if (this.status === "opening" || this.status === "open") {
       this.status = "offline";
     }
-    this.onDrainDead();
-    this.transport = null;
   }
+
+  /**
+   * Drain the read path, rebuilding it under the same sender when it dies.
+   *
+   *  The direct stream is replaceable (a fresh transport over the same client and
+   *  agent), so a dead stream is stream maintenance, not the end of the session:
+   *  the wait is bounded by a backoff the conversation owns, and reattach() cuts
+   *  it short. The relay has no replacement, so its drain end stays terminal and
+   *  the conversation drops to offline/error exactly as before.
+   */
+  async run(): Promise<void> {
+    for (;;) {
+      const t = this.transport;
+      if (t === null) return;
+      await this.drainOnce(t);
+      if (!this.isLive() || this.closed) return;
+      if (this.restartStream === null) {
+        this.onDrainDead();
+        this.transport = null;
+        return;
+      }
+      this.status = "reconnecting";
+      const rebuilt = await this.waitForRestart();
+      if (rebuilt === null) return;
+      this.transport = rebuilt;
+      this.onStreamAttached();
+    }
+  }
+
+  /** Wait out the restart backoff, cut short by {@link reattach}. Returns the
+   *  rebuilt transport, or null when the conversation stopped being live. */
+  private async waitForRestart(): Promise<Transport | null> {
+    const delay = this.restartDelayMs;
+    this.restartDelayMs = Math.min(delay * 2, RESTART_MAX_MS);
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(() => {
+        this.restartWake = null;
+        resolve();
+      }, delay);
+      this.restartWake = () => {
+        clearTimeout(timer);
+        this.restartWake = null;
+        resolve();
+      };
+    });
+    if (!this.isLive() || this.closed) return null;
+    return this.restartStream?.() ?? null;
+  }
+
+  /** Rebuild the read path now instead of on the timer: a foreground return or
+   *  the banner's action. A no-op while the wait is not running.
+   *
+   *  NOT wired in production: DirectTransport owns the visibilitychange
+   *  listener (it rebinds and unbinds it across retry attempts), and folding
+   *  that owner into the conversation belongs to the axis work of the next
+   *  grain. Only tests reach it today.
+   */
+  reattach(): void {
+    this.restartWake?.();
+  }
+
+  /** Reset the restart backoff: a live stream means the next interruption
+   *  starts at the first wait again. */
+  protected resetRestartBackoff(): void {
+    this.restartDelayMs = RESTART_MIN_MS;
+  }
+
+  /** Hook: a transport now drives the read path (the first attach and every
+   *  rebuild). Subclasses wire their stream lifecycle here. */
+  protected onStreamAttached(): void {}
 
   /** Hook for relay-only cleanup when the drain dies (abandon pending sends). */
   protected onDrainDead(): void {}
@@ -912,6 +1107,14 @@ export class RelayConversation extends ConversationBase {
     return this.tagmaId;
   }
 
+  /** The relay's write path is the channel itself: there is no separate
+   *  carrier that outlives it, so writability follows the channel's status
+   *  (and matches the room page's gate) instead of the direct path's
+   *  carrier-outlives-the-stream rule. */
+  override get canWrite(): boolean {
+    return !this.closed && this.status === "open";
+  }
+
   readonly tagmaId: string;
   readonly label: string | null;
 
@@ -977,6 +1180,8 @@ export class RelayConversation extends ConversationBase {
     transport: Transport,
     tagmaId: string,
     label: string | null,
+    /** The write path's carrier (the relay channel's op). */
+    sender: MessageSender | null = null,
   ) {
     // Relay store key == the derived conversation id == the cache key.
     super(
@@ -985,9 +1190,14 @@ export class RelayConversation extends ConversationBase {
       transport,
       conversationId,
       transport.localSender,
+      sender,
     );
     this.tagmaId = tagmaId;
     this.label = label;
+    // The relay channel is the sender's carrier; a caller may pass its own.
+    if (this.sender === null) {
+      this.sender = new RelayMessageSender(this.relayTransport.relayChannel);
+    }
   }
 
   /** The E2EE transport (for the store's history pull, envelope delivery,
@@ -1084,12 +1294,13 @@ export class RelayConversation extends ConversationBase {
   }
 
   /** Reroute replay rows into the in-flight before-page. The core's dedup
-   * is one-directional (id <= maxRendered is dropped), so a scroll-up
-   * page's rows would vanish; worse, a user_message whose text matches the
-   * in-flight send would be mis-consumed as its echo, promoting the
-   * optimistic line to a duplicate old id. Genuine echoes never take this
-   * branch: a relay echo is stamped above the cursor, a direct-path echo
-   * carries history_id 0, and acks/markers carry no content. */
+   * floors on minRendered (rows below it were rendered and let go), so a
+   * scroll-up page's older rows would vanish; worse, a user_message whose
+   * text matches the in-flight send would be mis-consumed as its echo,
+   * promoting the optimistic line to a duplicate old id. Genuine echoes
+   * never take this branch: a relay echo is stamped above the cursor, a
+   * direct-path echo carries history_id 0, and acks/markers carry no
+   * content. */
   protected override applyReplyCore(
     reply: TagmaReply,
     sender: Participant | undefined,
@@ -1298,8 +1509,9 @@ export class RelayConversation extends ConversationBase {
   private async pullPage(opts: PageRequest): Promise<PageResult> {
     // A dead transport has no channel to page through: fold as a timed-out
     // empty page so the caller keeps hasMoreOlder instead of reading the
-    // miss as a terminal end of history.
-    if (!this.connected) {
+    // miss as a terminal end of history. A closed conversation pages nothing
+    // either: the request would only ever pay its timeout.
+    if (this.transport === null || this.closed) {
       return { rows: [], count: 0, more: true, timedOut: true, undecodable: 0 };
     }
     const pull: RelayPull = { rows: [], settle: null };
@@ -1404,7 +1616,8 @@ export class RelayConversation extends ConversationBase {
     // A live catch-up window owns the drain's content frames: a probe now
     // would divide them between two buffers, so the block stays retryable
     // until the catch-up ends.
-    if (!this.connected || this.windowPull !== null) return null;
+    if (this.transport === null || this.closed || this.windowPull !== null)
+      return null;
     try {
       const { rows, count, timedOut, undecodable } = await this.pullPage({
         before: id + 1,
@@ -1449,6 +1662,10 @@ export class LocalConversation extends ConversationBase {
     store: ConversationStoreLike,
     transport: Transport,
     cacheConversationId: string,
+    /** The write path's carrier; the reattach path keeps it while swapping streams. */
+    sender: MessageSender | null = null,
+    /** Rebuilds the read-path transport after its drain ended. */
+    restartStream: (() => Transport) | null = null,
   ) {
     // attachLocal resolves the transport before binding; there is no opening
     // window. The conversation is open for the moment the drain runs; it flips
@@ -1459,18 +1676,33 @@ export class LocalConversation extends ConversationBase {
       transport,
       cacheConversationId,
       transport.localSender,
+      sender,
     );
     this.status = "open";
+    this.restartStream = restartStream;
+    this.onStreamAttached();
   }
 
-  /** The direct transport when still attached (null once the drain died). */
-  private get direct(): DirectTransport | null {
-    return this.transport instanceof DirectTransport ? this.transport : null;
+  /** The direct history pull, taken from the sender: a dead stream cannot take
+   *  the backfill with it. Null when this conversation has no puller. */
+  private get pull(): ((opts: PullOpts) => Promise<HistoryPage>) | null {
+    const sender = this.sender;
+    const pull = sender?.pullHistory;
+    return pull === undefined ? null : pull.bind(sender);
+  }
+
+  /** Wire the stream's retry lifecycle for whichever transport drives the read
+   *  path right now -- the first attach and every rebuild. */
+  protected override onStreamAttached(): void {
+    const t = this.transport;
+    if (t instanceof DirectTransport)
+      t.onState = (s) => this.onTransportState(s);
   }
 
   /** Stream lifecycle from the direct transport's retry loop (wired by
-   * attachLocal): "reconnecting" flips the status — the chat page shows its
-   * in-chat spinner and the composer disables via status !== "open";
+   *  onStreamAttached): "reconnecting" flips the status -- the chat page shows
+   *  an in-chat spinner and the channel lamp goes dark, while the composer
+   *  keeps writing (canWrite does not read the stream);
    * "resumed" restores "open" and backfills whatever frames the reconnect
    * gap dropped (cursor-based catch-up is idempotent and live-safe). */
   onTransportState(s: TransportState): void {
@@ -1479,6 +1711,7 @@ export class LocalConversation extends ConversationBase {
       this.status = "reconnecting";
     } else {
       this.status = "open";
+      this.resetRestartBackoff();
       // Back online: flush the durable unsent lines once (M2: retrySend is
       // idempotent, so racing retries collapse).
       void this.retryAllPending();
@@ -1494,11 +1727,11 @@ export class LocalConversation extends ConversationBase {
    *  the SSE drain runs concurrently and the UI is interactive meanwhile. */
   async catchUp(k = WINDOW_PAGE): Promise<void> {
     try {
-      const t = this.direct;
-      if (!t) return;
+      const pull = this.pull;
+      if (pull === null) return;
       if (this.maxRendered > 0) {
         for (;;) {
-          const { rows, more } = await t.pullHistory({
+          const { rows, more } = await pull({
             after: this.maxRendered,
             limit: k,
           });
@@ -1512,7 +1745,7 @@ export class LocalConversation extends ConversationBase {
           if (this.maxRendered <= before || !more) break;
         }
       } else {
-        const { rows, undecodable } = await t.pullHistory({ limit: k });
+        const { rows, undecodable } = await pull({ limit: k });
         this.applyPulledRows(rows);
         // A recent batch short of k RAW rows (decoded plus dropped) IS the
         // whole server history (recent-N carries no `more`); disarm the
@@ -1537,9 +1770,9 @@ export class LocalConversation extends ConversationBase {
       this.mergeWindowLines(cached.map(cachedLineToLine));
     }
     if (cached.length >= k) return;
-    const t = this.direct;
-    if (!t) return;
-    const { rows, more } = await t.pullHistory({ before: head, limit: k });
+    const pull = this.pull;
+    if (pull === null) return;
+    const { rows, more } = await pull({ before: head, limit: k });
     const added = this.applyPulledRows(rows);
     // Same distinction as the relay leaf: !more reads the database, while
     // added === 0 reads this window -- all-dropped rows cannot move the cursor.
@@ -1550,11 +1783,11 @@ export class LocalConversation extends ConversationBase {
    *  transport, read and not merged -- the window keeps its floor, so a
    *  mid-history segment cannot leave a hole. */
   protected async probePage(id: number): Promise<HistoryEntry[] | null> {
-    const t = this.direct;
+    const pull = this.pull;
     // No probe while the stream is down or reconnecting.
-    if (!t || this.status !== "open") return null;
+    if (pull === null || this.status !== "open") return null;
     try {
-      const { rows, undecodable } = await t.pullHistory({
+      const { rows, undecodable } = await pull({
         before: id + 1,
         limit: 1,
       });
@@ -1592,6 +1825,11 @@ export class OfflineConversation extends ConversationBase {
   get pendingKey(): string {
     return this.tagmaId;
   }
+  /** Writable without a carrier: the offline view's line is a durable pending
+   *  row that a later real channel flushes. Only a closed view stops it. */
+  override get canWrite(): boolean {
+    return !this.closed;
+  }
 
   /** The offline view pages its cache for scroll-up but holds no history
    *  source, so it cannot answer a probe. */
@@ -1599,11 +1837,16 @@ export class OfflineConversation extends ConversationBase {
     return Promise.resolve(null);
   }
 
-  /** The base send early-returns without a transport; the offline view
-   *  sends by design -- the line renders (failed, retryable) and lands in
-   *  the pending store for the reconnect auto-flush. No pump: there is
-   *  nothing to pump into until a real channel opens. */
+  /** The base send holds a sender for the conversation's life and fails the
+   *  line with `error` once it is closed; the offline view has no sender at
+   *  all, so it keeps its own send -- the line renders failed (retryable) and
+   *  persists to the pending store for the reconnect auto-flush. No pump:
+   *  there is nothing to pump into until a real channel opens. */
   override send(text: string, options?: SendOptions): void {
+    if (!this.canWrite) {
+      this.error = new Error("conversation closed");
+      return;
+    }
     const trimmed = text.trim();
     if (trimmed === "" && options?.attachment === undefined) return;
     const localId = this.renderPendingLine(trimmed, options);

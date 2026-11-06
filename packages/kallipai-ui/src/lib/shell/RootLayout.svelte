@@ -210,9 +210,7 @@
         // touches archeionSession.
         if (cfg?.offline) {
           connectDirect(cfg.offline)
-            .then(({ transport, conversationId }) =>
-              channelsStore.attachLocal(transport, conversationId),
-            )
+            .then((connection) => channelsStore.attachLocal(connection))
             .catch((e) => {
               channelsStore.localError = e;
               // Cold-start offline: hydrate the degraded view from the cache
@@ -323,7 +321,7 @@
       mode,
       user: archeionSession.user,
       authError: archeionSession.authError,
-      connected: channelsStore.localConnected,
+      localAttached: channelsStore.localAttached,
       pathname,
       search,
       appKind,

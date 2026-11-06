@@ -87,6 +87,7 @@ fn busy_peer_response(
             Ok(()) => (
                 MessageResponse {
                     queue_depth: 0,
+                    history_id: None,
                     warning: None,
                     delivery_mode: Some(DeliveryMode::InRound),
                 },
@@ -95,6 +96,7 @@ fn busy_peer_response(
             Err(_) => (
                 MessageResponse {
                     queue_depth: 0,
+                    history_id: None,
                     warning: Some("prompt queue full; visibility at run boundary".to_string()),
                     delivery_mode: Some(DeliveryMode::Deferred),
                 },
@@ -104,6 +106,7 @@ fn busy_peer_response(
         DeliveryNotice::Peer { defer: true } => (
             MessageResponse {
                 queue_depth: 0,
+                history_id: None,
                 warning: Some("deferred by sender".to_string()),
                 delivery_mode: Some(DeliveryMode::Deferred),
             },
@@ -112,6 +115,7 @@ fn busy_peer_response(
         DeliveryNotice::Surface => (
             MessageResponse {
                 queue_depth: 0,
+                history_id: None,
                 warning: None,
                 delivery_mode: None,
             },
@@ -297,7 +301,7 @@ pub async fn deliver_message(
     };
     let envelope = format_incoming(&header_sender, relation, quote.as_ref(), message.text);
 
-    let response = enqueue_prompt(
+    let mut response = enqueue_prompt(
         state,
         id,
         envelope,
@@ -320,7 +324,7 @@ pub async fn deliver_message(
         && matches!(relation, SenderRelation::Operator)
         && let Some(projector) = state.external.get()
     {
-        projector
+        response.history_id = projector
             .record_inbound(
                 sender.clone(),
                 message.text.to_string(),
@@ -475,6 +479,7 @@ pub(crate) async fn enqueue_prompt(
     if state.duty.is_off_duty(id) {
         return Ok(MessageResponse {
             queue_depth: 0,
+            history_id: None,
             warning: Some("agent is off-duty; message buffered to inbox".to_string()),
             delivery_mode: Some(DeliveryMode::Buffered),
         });
@@ -526,6 +531,7 @@ pub(crate) async fn enqueue_prompt(
         if matches!(notice, DeliveryNotice::Peer { defer: true }) {
             return Ok(MessageResponse {
                 queue_depth: 0,
+                history_id: None,
                 warning: Some("deferred by sender; agent parked".to_string()),
                 delivery_mode: Some(DeliveryMode::Deferred),
             });
@@ -552,6 +558,7 @@ pub(crate) async fn enqueue_prompt(
         };
         return Ok(MessageResponse {
             queue_depth: 0,
+            history_id: None,
             warning: Some(warning),
             delivery_mode: Some(delivery_mode),
         });
@@ -843,6 +850,7 @@ pub(crate) async fn enqueue_prompt(
     // pulls it from the inbox on its first wake — buffered visibility.
     Ok(MessageResponse {
         queue_depth: 0,
+        history_id: None,
         warning: None,
         delivery_mode: Some(DeliveryMode::Buffered),
     })
