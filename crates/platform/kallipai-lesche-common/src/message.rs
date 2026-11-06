@@ -395,6 +395,14 @@ pub enum TagmaReply {
         /// no durable row and on payloads serialized before the field existed.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         created_at: Option<String>,
+        /// The row's position inside this conversation, when the frame has a
+        /// durable row: dense per partition, never reused, so a reader holding
+        /// the last position it rendered can resume from it and can tell a
+        /// contiguous successor from a hole. `history_id` identifies the row;
+        /// this says where the row sits. Absent on frames with no durable row
+        /// and on payloads serialized before the field existed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        seq: Option<i64>,
     },
     /// Replay-only echo of a user-authored message (an inbound `chat_history`
     /// row), produced by `handle_history` so the app can reconstruct the user
@@ -417,6 +425,12 @@ pub enum TagmaReply {
         /// un-quoted), mirroring the attachment contract.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         quote: Option<i64>,
+        /// The row's position inside this conversation (dense per partition,
+        /// never reused), the same field `Event` carries and for the same
+        /// reason: it is what a reader's cursor advances over. Absent on rows
+        /// persisted before the field existed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        seq: Option<i64>,
     },
     /// The sole completion signal for a `TagmaControl::History` batch. The
     /// relay emits the batch's rows (each as `Event` or `UserMessage`) and then
@@ -487,6 +501,18 @@ impl TagmaReply {
             TagmaReply::Event { created_at, .. }
             | TagmaReply::MessageAccepted { created_at, .. }
             | TagmaReply::UserMessage { created_at, .. } => *created_at = Some(formatted),
+            _ => {}
+        }
+    }
+    /// Stamp the row's position inside its conversation onto this reply.
+    /// Covers the two replayable variants. `MessageAccepted` is left out on
+    /// purpose: its ack is live-only, and the app's own line is inbound, which
+    /// no unread count is derived from.
+    pub fn set_seq(&mut self, seq: i64) {
+        match self {
+            TagmaReply::Event { seq: field, .. } | TagmaReply::UserMessage { seq: field, .. } => {
+                *field = Some(seq)
+            }
             _ => {}
         }
     }
@@ -993,6 +1019,7 @@ mod tests {
                 },
                 history_id: 0,
                 created_at: None,
+                seq: None,
             })
             .unwrap(),
             serde_json::to_string(&TagmaReply::Event {
@@ -1001,12 +1028,14 @@ mod tests {
                 },
                 history_id: 42,
                 created_at: None,
+                seq: None,
             })
             .unwrap(),
             serde_json::to_string(&TagmaReply::UserMessage {
                 history_id: 11,
                 text: "hi".into(),
                 created_at: None,
+                seq: None,
                 attachment: None,
                 quote: None,
             })
@@ -1057,6 +1086,7 @@ mod tests {
             },
             history_id: 42,
             created_at: None,
+            seq: None,
         })
         .unwrap();
         assert!(
@@ -1069,6 +1099,7 @@ mod tests {
             history_id: 11,
             text: "hi".into(),
             created_at: None,
+            seq: None,
             attachment: None,
             quote: None,
         })
@@ -1107,6 +1138,7 @@ mod tests {
             },
             history_id: 0,
             created_at: None,
+            seq: None,
         };
         ev.set_history_id(99);
         assert!(matches!(ev, TagmaReply::Event { history_id: 99, .. }));
@@ -1128,6 +1160,42 @@ mod tests {
         interrupted.set_history_id(99);
         assert!(matches!(interrupted, TagmaReply::Interrupted { req_id: 1 }));
     }
+    #[test]
+    fn set_seq_covers_the_replayable_variants() {
+        let mut ev = TagmaReply::Event {
+            event: AuthoredEvent::AssistantContent {
+                content: "hi".into(),
+            },
+            history_id: 0,
+            created_at: None,
+            seq: None,
+        };
+        ev.set_seq(7);
+        assert!(matches!(ev, TagmaReply::Event { seq: Some(7), .. }));
+
+        let mut um = TagmaReply::UserMessage {
+            history_id: 11,
+            text: "hi".into(),
+            created_at: None,
+            attachment: None,
+            quote: None,
+            seq: None,
+        };
+        um.set_seq(7);
+        assert!(matches!(um, TagmaReply::UserMessage { seq: Some(7), .. }));
+
+        let mut ack = TagmaReply::MessageAccepted {
+            req_id: 1,
+            queue_depth: 0,
+            warning: None,
+            history_id: 0,
+            created_at: None,
+            attachment: None,
+            quote: None,
+        };
+        ack.set_seq(7);
+        assert!(matches!(ack, TagmaReply::MessageAccepted { .. }));
+    }
 
     #[test]
     fn set_created_at_formats_and_covers_durable_variants() {
@@ -1140,6 +1208,7 @@ mod tests {
             },
             history_id: 0,
             created_at: None,
+            seq: None,
         };
         ev.set_created_at(1_785_069_296);
         assert!(
@@ -1166,6 +1235,7 @@ mod tests {
             history_id: 11,
             text: "hi".into(),
             created_at: None,
+            seq: None,
             attachment: None,
             quote: None,
         };

@@ -786,7 +786,7 @@ async fn a_one_to_one_quote_renders_its_author_summary_and_read_back_command() {
     install_inbox_store(&state).await;
     let (db, _frames, _dir) = install_projector(&state).await;
     let (id, mut rx) = live_agent(&state).await;
-    let (quoted, _) =
+    let (quoted, _, _) =
         chat_history::append(&db, None, None, "inbound", "the quoted text", None, None)
             .await
             .expect("append the quoted row");
@@ -994,7 +994,7 @@ async fn a_quote_cannot_reach_a_row_of_another_partition() {
     install_inbox_store(&state).await;
     let (db, _frames, _dir) = install_projector(&state).await;
     let (id, mut rx) = live_agent(&state).await;
-    let (elsewhere, _) = chat_history::append(
+    let (elsewhere, _, _) = chat_history::append(
         &db,
         Some("peer-1"),
         Some("alice"),
@@ -1040,7 +1040,7 @@ async fn a_quoted_row_of_this_agents_own_reads_as_you() {
     install_inbox_store(&state).await;
     let (db, _frames, _dir) = install_projector(&state).await;
     let (id, mut rx) = live_agent(&state).await;
-    let (mine, _) = chat_history::append(&db, None, None, "outbound", "my own line", None, None)
+    let (mine, _, _) = chat_history::append(&db, None, None, "outbound", "my own line", None, None)
         .await
         .expect("append the row this agent wrote");
 
@@ -1096,7 +1096,7 @@ async fn a_reader_that_cannot_read_the_log_gets_no_reference() {
     state
         .duty
         .set(child.clone(), crate::duty::DutyStatus::OnDuty);
-    let (quoted, _) =
+    let (quoted, _, _) =
         chat_history::append(&db, None, None, "inbound", "the quoted text", None, None)
             .await
             .expect("append the quoted row");

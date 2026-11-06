@@ -150,6 +150,11 @@ pub(crate) struct HistoryPage {
     pub(crate) entries: Vec<HistoryEntry>,
     pub(crate) more: bool,
     pub(crate) undecodable: u32,
+    /// Where the same request continues (see `read_history`): the page's
+    /// own edge in the direction it was read, the caller's cursor echoed
+    /// back for an empty page, and `None` for an empty recent snapshot, which
+    /// has no position to name yet.
+    pub(crate) next: Option<i64>,
 }
 
 /// Why a history read could not answer. The direct route keeps caller errors
@@ -170,7 +175,44 @@ pub(crate) enum HistoryReadError {
     #[error("history store read failed: {0}")]
     Store(#[source] anyhow::Error),
 }
+/// Which numbering a history cursor is written in. The two are not
+/// interchangeable across paths, and the difference is visible on the wire, so
+/// the kind travels in the type instead of being assumed again at each call
+/// site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HistoryCursor {
+    /// A position in the partition's own numbering (`chat_history.seq`): dense,
+    /// never reused, so a reader can hold one across reconnects and ask for
+    /// `position + 1` with an answer either way. The direct path's cursor.
+    Position(i64),
+    /// A row id: unique across partitions, so it names a row but says nothing
+    /// about how far into its own conversation that row sits. The relay's pull
+    /// keeps it because its client holds the ids it rendered.
+    Row(i64),
+}
 
+impl HistoryCursor {
+    /// The number itself, for logs and error text.
+    pub(crate) fn value(self) -> i64 {
+        match self {
+            HistoryCursor::Position(v) | HistoryCursor::Row(v) => v,
+        }
+    }
+}
+
+/// The outcome of a read-cursor write, in the terms its caller acts on: taken,
+/// refused as outside the conversation's numbering, or not answerable at all.
+#[derive(Debug)]
+pub(crate) enum CursorWrite {
+    /// The partition's watermark covers the requested position (or already
+    /// covered more, since the write never moves backwards).
+    Accepted,
+    /// The position is outside this conversation's numbering; nothing was
+    /// written.
+    OutOfRange { cursor: i64, last: i64 },
+    /// No store, or the write failed.
+    Unavailable,
+}
 impl ExternalProjector {
     /// Construct the handle and spawn the event pump that subscribes to the
     /// root agent's broadcast. `history` is always `Some` in production (the Db
@@ -301,19 +343,29 @@ impl ExternalProjector {
         }
     }
 
-    /// Advance a partition's read cursor (monotonic and capped at the
-    /// partition's newest row in the store) and publish the resulting
-    /// snapshot, so every device of this user — not just the one that was read
-    /// on — sees the badge drop. `None` when there is no store.
-    pub(crate) async fn put_cursor(&self, user_id: Option<&str>, cursor: i64) -> Option<()> {
-        let db = self.inner.history.clone()?;
-        if let Err(e) = chat_history::put_cursor(&db, user_id, cursor).await {
-            error!("read cursor write failed: {e:#}");
-            return None;
+    /// Advance a partition's read cursor and publish the resulting snapshot, so
+    /// every device of this user — not just the one that was read on — sees the
+    /// badge drop. The write is monotonic and refused when the position lies
+    /// outside the conversation's numbering, so the answer keeps a caller bug
+    /// apart from a store that cannot take the write.
+    pub(crate) async fn put_cursor(&self, user_id: Option<&str>, cursor: i64) -> CursorWrite {
+        let Some(db) = self.inner.history.clone() else {
+            return CursorWrite::Unavailable;
+        };
+        match chat_history::put_cursor(&db, user_id, cursor).await {
+            Ok(_) => {
+                let (cursor, unread) = self.unread_snapshot(user_id).await;
+                self.publish_unread(user_id, cursor, unread);
+                CursorWrite::Accepted
+            }
+            Err(chat_history::CursorWriteError::OutOfRange { cursor, last }) => {
+                CursorWrite::OutOfRange { cursor, last }
+            }
+            Err(e) => {
+                error!("read cursor write failed: {e}");
+                CursorWrite::Unavailable
+            }
         }
-        let (cursor, unread) = self.unread_snapshot(user_id).await;
-        self.publish_unread(user_id, cursor, unread);
-        Some(())
     }
 
     /// The wire shape of one partition's snapshot: the peer key, the watermark
@@ -391,6 +443,7 @@ impl ExternalProjector {
             },
             history_id: 0,
             created_at: None,
+            seq: None,
         };
         self.stamp(&text, &mut reply).await;
         if let Some(seq) = self.publish(AuthoredFrame { sender, reply }) {
@@ -441,16 +494,18 @@ impl ExternalProjector {
         )
         .await
         {
-            Ok((id, created_at)) => {
+            Ok((id, created_at, seq)) => {
                 let mut reply = TagmaReply::UserMessage {
                     history_id: id,
                     text,
                     created_at: None,
                     attachment: attachment.clone(),
                     quote,
+                    seq: None,
                 };
                 reply.set_history_id(id);
                 reply.set_created_at(created_at);
+                reply.set_seq(seq);
                 if let Some(seq) = self.publish(AuthoredFrame { sender, reply }) {
                     debug!(site = "record_inbound", seq, "authored frame published");
                 }
@@ -481,6 +536,7 @@ impl ExternalProjector {
                 created_at: None,
                 attachment,
                 quote,
+                seq: None,
             },
         }) {
             debug!(site = "record_inbound", seq, "authored frame published");
@@ -547,44 +603,60 @@ impl ExternalProjector {
     }
 
     /// Read a history window for one peer partition as decoded entries (each a
-    /// sender and reply) with a `more` flag and the count of rows that did
-    /// not decode. Used by the direct
-    /// `/external/history` endpoint and the relay history replay (the single
-    /// read path). `user_id = None` reads the operator (direct) partition;
-    /// `Some(id)` reads that peer's relay partition. `more` is true only for
-    /// paginated (`after`/`before`) queries that returned a full page; the
-    /// recent-N snapshot is always `more=false`. The wire sender is
-    /// reconstructed per row: outbound becomes the agent, inbound becomes the
-    /// peer (or the operator for `NULL`).
+    /// sender and reply) with `more`, `next`, and the count of rows that did not
+    /// decode. Used by the direct `/external/history` endpoint and the relay
+    /// history replay (the single read path). `user_id = None` reads the
+    /// operator (direct) partition; `Some(id)` reads that peer's relay
+    /// partition. The wire sender is reconstructed per row: outbound becomes the
+    /// agent, inbound becomes the peer (or the operator for `NULL`).
     ///
-    /// The contract: **an `Ok` empty window in which nothing was dropped
-    /// (`undecodable == 0`) means the conversation really holds nothing
-    /// there.** Nothing else produces one in production. A store that cannot
-    /// be read is `Err`; a window the decoder could not read whole reports
-    /// the dropped rows in `undecodable`, and the page is then a hole, not a
-    /// complete window; a query naming two cursors, or a window of zero rows,
-    /// is refused rather than answered with an empty page. The one remaining
-    /// `Ok` empty window comes from a projector assembled without a store,
-    /// which only test wiring builds.
+    /// The cursor's numbering is the caller's ([`HistoryCursor`]): the direct
+    /// path asks in positions, the relay in row ids. Inside one partition the
+    /// two orders agree, so the same window shape serves both.
+    ///
+    /// `next` is where the same request continues: the page's newest position
+    /// for a catch-up or recent page, its oldest for a scroll-up page, and the
+    /// cursor the caller sent when the page came back empty, so a caller that
+    /// feeds `next` back in makes progress instead of restarting. On a
+    /// position-addressed window `more` answers "does another page exist that
+    /// way" by asking the store rather than by checking whether the page filled:
+    /// a short page with rows behind it says true, and a page that filled to
+    /// `limit` with nothing behind it says false. That distinction is what lets a
+    /// resuming reader stop.
+    ///
+    /// Both edges are taken from the raw window before decoding, because a row
+    /// that fails to decode still occupies a position: a page made only of such
+    /// rows must still name where to continue, or a caller would either re-read
+    /// the same block forever or skip whatever sits behind it.
+    ///
+    /// The contract: an `Ok` empty window in which nothing was dropped
+    /// (`undecodable == 0`) means the conversation really holds nothing there.
+    /// Nothing else produces one in production. A store that cannot be read is
+    /// `Err`; a window the decoder could not read whole reports the dropped rows
+    /// in `undecodable`, and the page is then a hole, not a complete window; a
+    /// query naming two cursors, or a window of zero rows, is refused rather
+    /// than answered with an empty page. The one remaining `Ok` empty window
+    /// comes from a projector assembled without a store, which only test wiring
+    /// builds.
     pub(crate) async fn read_history(
         &self,
         user_id: Option<&str>,
-        after: Option<i64>,
-        before: Option<i64>,
+        after: Option<HistoryCursor>,
+        before: Option<HistoryCursor>,
         limit: u32,
     ) -> Result<HistoryPage, HistoryReadError> {
         // A query naming two cursors asks for two windows at once. Refused
-        // before the store check, so a projector without a store cannot
-        // answer it with an empty page either.
+        // before the store check, so a projector without a store cannot answer
+        // it with an empty page either.
         if let (Some(a), Some(b)) = (after, before) {
             error!(
-                after = a,
-                before = b,
+                after = a.value(),
+                before = b.value(),
                 "history read refused: two cursors name two windows"
             );
             return Err(HistoryReadError::BothCursors {
-                after: a,
-                before: b,
+                after: a.value(),
+                before: b.value(),
             });
         }
         // A window of zero rows has no answer either: the empty page it would
@@ -596,23 +668,12 @@ impl ExternalProjector {
         let Some(db) = self.inner.history.clone() else {
             return Ok(HistoryPage::default());
         };
-        let rows = if let Some(a) = after {
-            chat_history::read_after(&db, user_id, a, limit).await
-        } else if let Some(b) = before {
-            chat_history::read_before(&db, user_id, b, limit).await
-        } else {
-            chat_history::read_last_n(&db, user_id, limit as u64).await
-        };
-        let rows = match rows {
-            Ok(r) => r,
+        let (rows, more, next) = match self.read_window(&db, user_id, after, before, limit).await {
+            Ok(window) => window,
             Err(e) => {
                 error!("history read failed: {e:#}");
                 return Err(HistoryReadError::Store(e));
             }
-        };
-        let more = match (after, before) {
-            (None, None) => false,
-            _ => rows.len() as u32 == limit && limit > 0,
         };
         let agent = self.agent_sender();
         let mut undecodable = 0u32;
@@ -637,7 +698,55 @@ impl ExternalProjector {
             entries,
             more,
             undecodable,
+            next,
         })
+    }
+
+    /// Read one window in the numbering the caller's cursor lives in and answer
+    /// `(rows, more, next)`: rows oldest-first, whether another page exists that
+    /// way, and where the same request continues.
+    ///
+    /// A row-addressed window answers `next = None`: its caller already holds the
+    /// ids of the rows it rendered, and it keeps the marker rule it has always
+    /// had (`more` means the window filled to `limit`), so the relay's pull is
+    /// unchanged by anything here.
+    async fn read_window(
+        &self,
+        db: &chat_history::Db,
+        user_id: Option<&str>,
+        after: Option<HistoryCursor>,
+        before: Option<HistoryCursor>,
+        limit: u32,
+    ) -> anyhow::Result<(Vec<chat_history::HistoryRow>, bool, Option<i64>)> {
+        match (after, before) {
+            (Some(HistoryCursor::Position(a)), _) => {
+                let rows = chat_history::read_after_seq(db, user_id, a, limit).await?;
+                let newest = rows.last().map(|r| r.seq);
+                let more = chat_history::has_after_seq(db, user_id, newest.unwrap_or(a)).await?;
+                Ok((rows, more, Some(newest.unwrap_or(a))))
+            }
+            (Some(HistoryCursor::Row(a)), _) => {
+                let rows = chat_history::read_after(db, user_id, a, limit).await?;
+                let more = rows.len() as u32 == limit;
+                Ok((rows, more, None))
+            }
+            (None, Some(HistoryCursor::Position(b))) => {
+                let rows = chat_history::read_before_seq(db, user_id, b, limit).await?;
+                let oldest = rows.first().map(|r| r.seq);
+                let more = chat_history::has_before_seq(db, user_id, oldest.unwrap_or(b)).await?;
+                Ok((rows, more, Some(oldest.unwrap_or(b))))
+            }
+            (None, Some(HistoryCursor::Row(b))) => {
+                let rows = chat_history::read_before(db, user_id, b, limit).await?;
+                let more = rows.len() as u32 == limit;
+                Ok((rows, more, None))
+            }
+            (None, None) => {
+                let rows = chat_history::read_last_n(db, user_id, limit as u64).await?;
+                let next = rows.last().map(|r| r.seq);
+                Ok((rows, false, next))
+            }
+        }
     }
 
     /// Append an outbound row once, stamp its row id + `created_at` onto
@@ -663,7 +772,8 @@ impl ExternalProjector {
         )
         .await
         {
-            Ok((id, created_at, cursor, unread)) => {
+            Ok((id, created_at, seq, cursor, unread)) => {
+                reply.set_seq(seq);
                 reply.set_history_id(id);
                 reply.set_created_at(created_at);
                 self.publish_unread(user_id.as_deref(), cursor, unread);
@@ -712,6 +822,7 @@ impl ExternalProjector {
                                 event,
                                 history_id: 0,
                                 created_at: None,
+                                seq: None,
                             };
                             self.stamp(&text, &mut reply).await;
                             if let Some(seq) = self.publish(AuthoredFrame { sender, reply }) {

@@ -37,12 +37,12 @@ pub enum DirectFrame {
     Signal(SignalEvent),
     /// An aggregate runtime snapshot. Ephemeral.
     Status(TagmaStatusPayload),
-    /// The authored source missed frames on this connection: the boundary was
-    /// crossed between two delivered events, and the payload names the last
-    /// durable row this connection delivered (`None` when it delivered none —
-    /// a connection that has seen no row cannot name a resume point). The
-    /// reader catches up over `/external/history`; nothing rides this frame.
-    Gap { authored_after: Option<i64> },
+    /// The authored source missed frames on this connection: the bus dropped
+    /// items the reader never saw. Nothing rides this frame — a reader that
+    /// keeps the position of the last frame it rendered already knows where
+    /// to resume, and a value carried here could only disagree with it. The
+    /// reader asks `/external/history` for what comes after that position.
+    Missed,
     /// The tagma is shutting down: this is the last event on the stream.
     /// The reader leaves on it instead of waiting for the body to end, so a
     /// close the server intends is never mistaken for a dropped connection.
@@ -58,29 +58,6 @@ pub(crate) struct DirectAuthoredPayload {
     pub reply: TagmaReply,
 }
 
-/// The JSON payload serialized for a `gap` direct-SSE event: the last
-/// `chat_history.id` this connection delivered, omitted when there is none
-/// (the client then falls back to its own rendered window).
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub(crate) struct DirectGapPayload {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub after: Option<i64>,
-}
-
-/// The `chat_history.id` a reply names, if it names a durable row. `0`
-/// means "no row recorded" and is not a resume point; replies that carry
-/// no id at all (acks, errors) say nothing about the cursor.
-fn authored_history_id(reply: &TagmaReply) -> Option<i64> {
-    match reply {
-        TagmaReply::Event { history_id, .. } | TagmaReply::UserMessage { history_id, .. } => {
-            match *history_id {
-                0 => None,
-                id => Some(id),
-            }
-        }
-        _ => None,
-    }
-}
 /// A shutdown-aware SSE stream over one agent's broadcast channel, with
 /// subscribe/unsubscribe transition logging.
 ///
@@ -189,10 +166,11 @@ fn event_stream(
 }
 
 /// Merge the direct SSE's three bus topics (authored, signal, status) into
-/// one [`DirectFrame`] stream. A loss on the authored topic becomes a single
-/// `gap` frame naming the last durable row this connection delivered; a
-/// loss on either of the other two is dropped, because neither can name a
-/// resume point and no frame would say more than the loss itself.
+/// one [`DirectFrame`] stream. A loss on the authored topic becomes one
+/// `missed` frame — the reader resumes from the last position it rendered,
+/// so nothing rides the frame; a loss on either of the other two is dropped,
+/// because neither carries a conversation position and no frame would say
+/// more than the loss itself.
 ///
 /// Cross-topic ordering (settled at this
 /// assembly point): intra-topic FIFO holds per source; across sources the
@@ -209,24 +187,16 @@ pub(crate) fn merge_direct_frames(
     signals: TopicReceiver<SignalFrame>,
     status: TopicReceiver<StatusSnapshot>,
 ) -> impl Stream<Item = DirectFrame> + Send {
-    // The authored source is the one that can name a resume point: track the
-    // last durable row it delivered and, when the bus reports a loss, say so
-    // once with that id. `0` is "no row recorded" and never becomes the
-    // cursor (a degraded frame cannot be resumed from).
-    let mut last_authored_id: Option<i64> = None;
-    let authored = authored.into_stream().map(move |item| match item {
-        TopicItem::Data(frame) => {
-            if let Some(id) = authored_history_id(&frame.reply) {
-                last_authored_id = Some(id);
-            }
-            DirectFrame::Authored {
-                sender: frame.sender,
-                reply: frame.reply,
-            }
-        }
-        TopicItem::Missed => DirectFrame::Gap {
-            authored_after: last_authored_id,
+    // A loss on the authored topic becomes one `missed` frame. The reader
+    // resumes from the last position it rendered, so the frame carries no
+    // value of its own: anything named here would be state the reader
+    // already holds, with a second chance to disagree with it.
+    let authored = authored.into_stream().map(|item| match item {
+        TopicItem::Data(frame) => DirectFrame::Authored {
+            sender: frame.sender,
+            reply: frame.reply,
         },
+        TopicItem::Missed => DirectFrame::Missed,
     });
     let signals = signals.into_stream().filter_map(|item| match item {
         TopicItem::Data(frame) => Some(DirectFrame::Signal(frame.0)),
@@ -239,7 +209,7 @@ pub(crate) fn merge_direct_frames(
     // Three erased sources, interleaved as they yield (no cross-source
     // ordering promise). A loss lands in the topic's lagged counter
     // (`into_stream` keeps the counting leg at the bus core); the authored
-    // source expresses it as one `gap` frame, the other two drop it.
+    // source expresses it as one `missed` frame, the other two drop it.
     let sources: Vec<std::pin::Pin<Box<dyn Stream<Item = DirectFrame> + Send>>> =
         vec![Box::pin(authored), Box::pin(signals), Box::pin(status)];
     futures_util::stream::select_all(sources)
@@ -247,7 +217,7 @@ pub(crate) fn merge_direct_frames(
 
 /// A shutdown-aware SSE stream over the direct serving channel. Each
 /// [`DirectFrame`] becomes one SSE `Event` whose `event:` name is the frame's
-/// channel discriminator (`authored` / `signal` / `status` / `gap` /
+/// channel discriminator (`authored` / `signal` / `status` / `missed` /
 /// `closing`) and whose `data:` is the inner value's JSON.
 ///
 /// The shutdown contract is [`sse_stream`]'s plus one frame: when the token
@@ -368,12 +338,7 @@ fn serialize_direct_frame(frame: &DirectFrame) -> serde_json::Result<Event> {
             })?,
         ),
         DirectFrame::Signal(event) => ("signal", serde_json::to_string(event)?),
-        DirectFrame::Gap { authored_after } => (
-            "gap",
-            serde_json::to_string(&DirectGapPayload {
-                after: *authored_after,
-            })?,
-        ),
+        DirectFrame::Missed => ("missed", "{}".to_string()),
         DirectFrame::Closing => ("closing", "{}".to_string()),
         DirectFrame::Status(payload) => ("status", serde_json::to_string(payload)?),
     };
@@ -509,6 +474,7 @@ mod tests {
                 created_at: None,
                 attachment: None,
                 quote: None,
+                seq: None,
             },
         })
         .unwrap();
@@ -543,7 +509,7 @@ mod tests {
                     panic!("unexpected frame")
                 }
                 DirectFrame::Status(_) => status_n += 1,
-                DirectFrame::Gap { .. } => {
+                DirectFrame::Missed => {
                     panic!("no loss expected: one published frame per source")
                 }
                 DirectFrame::Closing => {
@@ -583,14 +549,15 @@ mod tests {
                 },
                 history_id,
                 created_at: None,
+                seq: None,
             },
         }
     }
 
     /// A reader that was keeping up, then stopped: the loss is reported once,
-    /// and it names the last durable row the reader actually received.
+    /// as a `missed` frame carrying nothing.
     #[tokio::test]
-    async fn gap_emitted_once_per_lag() {
+    async fn a_lag_reports_one_missed_frame() {
         let bus = direct_bus();
         let mut frames = merge_direct_frames(
             bus.subscribe::<AuthoredFrame>().unwrap(),
@@ -607,55 +574,63 @@ mod tests {
             bus.publish(authored_frame(id)).unwrap();
         }
 
-        match frames.next().await {
-            Some(DirectFrame::Gap { authored_after }) => assert_eq!(
-                authored_after,
-                Some(7),
-                "the cursor is the last delivered durable row"
-            ),
-            other => panic!("expected one gap frame, got {other:?}"),
-        }
-        // One report per loss: what follows is the surviving tail, no gap.
-        assert!(matches!(
-            frames.next().await,
-            Some(DirectFrame::Authored { .. })
-        ));
-    }
-
-    /// A connection that delivered only degraded frames (`history_id == 0`)
-    /// has no resume point to name: the gap is still reported, without an
-    /// `after`, so the reader falls back to its own window instead of
-    /// replaying from the oldest row.
-    #[tokio::test]
-    async fn gap_without_anchor_when_nothing_was_delivered() {
-        let bus = direct_bus();
-        let mut frames = merge_direct_frames(
-            bus.subscribe::<AuthoredFrame>().unwrap(),
-            bus.subscribe::<SignalFrame>().unwrap(),
-            bus.subscribe::<StatusSnapshot>().unwrap(),
+        assert!(
+            matches!(frames.next().await, Some(DirectFrame::Missed)),
+            "a lag is reported once, and the report carries no value"
         );
-        bus.publish(authored_frame(0)).unwrap();
+        // One report per loss: what follows is the surviving tail.
         assert!(matches!(
             frames.next().await,
             Some(DirectFrame::Authored { .. })
         ));
-
-        for _ in 0..10 {
-            bus.publish(authored_frame(0)).unwrap();
-        }
-
-        match frames.next().await {
-            Some(DirectFrame::Gap { authored_after }) => assert_eq!(
-                authored_after, None,
-                "a degraded frame is not a resume point"
-            ),
-            other => panic!("expected one gap frame, got {other:?}"),
-        }
     }
 
-    /// A loss on the signal topic is dropped, not turned into a gap: only
-    /// authored frames can name a resume point, so a gap from this source
-    /// would tell the reader nothing it could act on.
+    /// The position a reader resumes from rides the reply as `seq`: present
+    /// when the frame has a durable row, omitted when it has none, so an
+    /// older reader (which ignores unknown fields) sees the old shape.
+    #[test]
+    fn an_authored_frame_carries_its_position() {
+        let stamped: serde_json::Value = serde_json::from_str(
+            &serde_json::to_string(&DirectAuthoredPayload {
+                sender: authored_frame(7).sender,
+                reply: TagmaReply::Event {
+                    event: kallipai_common::protocol::AuthoredEvent::AssistantContent {
+                        content: "row 7".into(),
+                    },
+                    history_id: 11,
+                    created_at: None,
+                    seq: Some(7),
+                },
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(stamped["reply"]["seq"], serde_json::json!(7));
+
+        let unstamped: serde_json::Value = serde_json::from_str(
+            &serde_json::to_string(&DirectAuthoredPayload {
+                sender: authored_frame(0).sender,
+                reply: TagmaReply::Event {
+                    event: kallipai_common::protocol::AuthoredEvent::AssistantContent {
+                        content: "row 0".into(),
+                    },
+                    history_id: 0,
+                    created_at: None,
+                    seq: None,
+                },
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            unstamped["reply"].get("seq").is_none(),
+            "a frame with no durable row names no position, got {unstamped}"
+        );
+    }
+
+    /// A loss on the signal topic is dropped, not reported: a signal
+    /// carries no conversation position, so the frame would tell the reader
+    /// nothing it could act on.
     #[tokio::test]
     async fn signal_loss_is_dropped_not_reported() {
         let bus = direct_bus();
@@ -671,13 +646,13 @@ mod tests {
         // frame is the surviving tail, never a gap.
         match frames.next().await {
             Some(DirectFrame::Signal(_)) => {}
-            other => panic!("a signal loss is not a gap, got {other:?}"),
+            other => panic!("a signal loss is not reported, got {other:?}"),
         }
     }
 
     /// The negative: a reader that keeps up is never told about a gap.
     #[tokio::test]
-    async fn no_gap_without_loss() {
+    async fn no_missed_without_loss() {
         let bus = direct_bus();
         let mut frames = merge_direct_frames(
             bus.subscribe::<AuthoredFrame>().unwrap(),
@@ -693,11 +668,10 @@ mod tests {
         }
     }
 
-    /// The wire shape, asserted on the bytes the handler writes rather than
-    /// on the Rust value: `event: gap` with the cursor in `data`, and an
-    /// empty payload when this connection has no resume point.
+    /// The wire shape, asserted on the bytes the handler writes: `event:
+    /// missed` with an empty payload.
     #[tokio::test]
-    async fn gap_reaches_the_wire() {
+    async fn missed_reaches_the_wire() {
         use axum::response::IntoResponse;
 
         async fn body_of(frame: DirectFrame) -> String {
@@ -709,27 +683,15 @@ mod tests {
             let body = sse.into_response().into_body();
             let bytes = axum::body::to_bytes(body, 64 * 1024)
                 .await
-                .expect("the body is one gap event");
+                .expect("the body is one missed event");
             String::from_utf8(bytes.to_vec()).expect("SSE is UTF-8")
         }
 
-        let with_anchor = body_of(DirectFrame::Gap {
-            authored_after: Some(7),
-        })
-        .await;
-        assert!(with_anchor.contains("event: gap"), "got {with_anchor:?}");
+        let body = body_of(DirectFrame::Missed).await;
+        assert!(body.contains("event: missed"), "got {body:?}");
         assert!(
-            with_anchor.contains("data: {\"after\":7}"),
-            "got {with_anchor:?}"
-        );
-
-        let without_anchor = body_of(DirectFrame::Gap {
-            authored_after: None,
-        })
-        .await;
-        assert!(
-            without_anchor.contains("data: {}"),
-            "an unknown cursor is omitted, got {without_anchor:?}"
+            body.contains("data: {}"),
+            "the reader already knows where it was, got {body:?}"
         );
     }
 

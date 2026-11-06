@@ -64,6 +64,7 @@ async fn tagma_topics_roundtrip_preserve_payloads() {
             },
             history_id: 7,
             created_at: None,
+            seq: None,
         },
     })
     .unwrap();

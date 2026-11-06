@@ -28,6 +28,12 @@ use sea_orm::entity::prelude::*;
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = true)]
     pub id: i64,
+    /// The row's position inside its own partition: dense, monotonic, and
+    /// minted from `chat_seq` in the same transaction as the insert. `id`
+    /// identifies the row (quotes, lookups, dedupe); `seq` says where it
+    /// sits, which is what a reader needs to tell a successor from a hole.
+    #[sea_orm(column_type = "Integer")]
+    pub seq: i64,
     /// The peer's `ParticipantId` (relay), or `NULL` (direct = the operator).
     #[sea_orm(column_type = "Text", nullable)]
     pub user_id: Option<String>,

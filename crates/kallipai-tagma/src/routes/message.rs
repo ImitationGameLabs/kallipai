@@ -6,7 +6,7 @@ use kallipai_common::protocol::{ApiError, MessageResponse};
 use serde::{Deserialize, Serialize};
 
 use super::MessageRequest;
-use crate::external::HistoryReadError;
+use crate::external::{HistoryCursor, HistoryReadError};
 use crate::sse::sse_stream;
 use crate::state::SharedState;
 use kallipai_common::agentid::AgentId;
@@ -151,15 +151,17 @@ pub async fn external_events(
     ))
 }
 
-/// Query params for [`external_history`]: `after` (incremental catch-up, rows
-/// with id > after), `before` (scroll-up, id < before), or neither (the most
-/// recent `limit`). Mirrors the relay `TagmaControl::History` modes.
+/// Query params for [`external_history`]: `after_seq` (incremental catch-up,
+/// rows at a position greater than it), `before_seq` (scroll-up, positions
+/// below it), or neither (the most recent `limit`). Both are positions in the
+/// conversation's own numbering (`chat_history.seq`), never row ids. Mirrors
+/// the relay `TagmaControl::History` modes.
 #[derive(Debug, Default, Deserialize)]
 pub struct ExternalHistoryQuery {
     #[serde(default)]
-    pub after: Option<i64>,
+    pub after_seq: Option<i64>,
     #[serde(default)]
-    pub before: Option<i64>,
+    pub before_seq: Option<i64>,
     #[serde(default)]
     pub limit: Option<u32>,
 }
@@ -178,11 +180,11 @@ async fn external_projector<'a>(
 }
 
 /// `GET /agents/{id}/external/history` -- the pull-based history window for the
-/// direct (offline) path, cursor-driven by the frontend's high-water mark.
+/// direct (offline) path, paged by the last position the client rendered.
 /// Root-only and projector-owned; returns the decoded entries (sender + reply),
-/// a `more` flag, and the count of rows the decoder could not read. A request
-/// naming two cursors, or a window of zero rows, is refused with 400; a store
-/// that cannot answer is refused with 503. The direct SSE stays live-only;
+/// `more`, `next` (where the same request continues), and the count of rows the
+/// decoder could not read. A request naming two cursors, or a window of zero
+/// rows, is refused with 400; a store that cannot answer is refused with 503.
 /// history is always a frontend-initiated pull, symmetric with the relay's
 /// `TagmaControl::History`. The badge count does not ride this reply: it
 /// reaches the client on the unread frames the tagma pushes, so a history pull
@@ -197,6 +199,12 @@ pub struct ExternalHistoryResponse {
     /// field always goes out; the compatibility lives in the client, where
     /// `undecodable` is optional and the direct transport fills in zero.
     pub undecodable: u32,
+    /// Where the same request continues: the page's newest position for a
+    /// catch-up or recent page, its oldest for a scroll-up page, the cursor the
+    /// caller sent when the page came back empty, and `null` for an empty recent
+    /// snapshot. Always present on the wire, so a client reads one field instead
+    /// of inferring a position from the rows it got.
+    pub next: Option<i64>,
 }
 
 pub async fn external_history(
@@ -213,7 +221,12 @@ pub async fn external_history(
     let limit = query.limit.unwrap_or(DEFAULT_LIMIT).min(MAX_LIMIT);
     // The direct endpoint serves the operator partition (`user_id IS NULL`).
     let page = match projector
-        .read_history(None, query.after, query.before, limit)
+        .read_history(
+            None,
+            query.after_seq.map(HistoryCursor::Position),
+            query.before_seq.map(HistoryCursor::Position),
+            limit,
+        )
         .await
     {
         Ok(page) => page,
@@ -221,7 +234,7 @@ pub async fn external_history(
         // keeps the "an empty page means an empty history" reading intact.
         Err(HistoryReadError::BothCursors { .. }) => {
             return Err(ApiError::bad_request(
-                "history takes at most one cursor (after or before)",
+                "history takes at most one cursor (after_seq or before_seq)",
             ));
         }
         // A window of zero rows cannot be answered either: it would come back
@@ -238,6 +251,7 @@ pub async fn external_history(
         rows: page.entries,
         more: page.more,
         undecodable: page.undecodable,
+        next: page.next,
     })
     .into_response())
 }
@@ -278,8 +292,8 @@ pub async fn external_history_row(
 #[derive(Clone, Debug)]
 pub struct ReadPeer(pub String);
 
-/// Body for [`external_read_cursor`]: the highest `chat_history.id` the user has
-/// read in that partition.
+/// Body for [`external_read_cursor`]: the highest position (`chat_history.seq`)
+/// the user has read in that partition.
 #[derive(Debug, Deserialize)]
 pub struct ReadCursorBody {
     pub cursor: i64,
@@ -292,8 +306,12 @@ pub struct ReadCursorBody {
 /// this route.
 ///
 /// Answers `204 No Content`, like the lesche read-cursor contract: the write is
-/// monotonic and capped inside the store, and the resulting count reaches every
-/// device of this user as an unread frame, so there is nothing to read back.
+/// monotonic and the resulting count reaches every device of this user as an
+/// unread frame, so there is nothing to read back. A position outside the
+/// conversation's numbering (below zero, or beyond its newest position) is
+/// refused with `400`: the store is the only place positions are minted, so
+/// such a value cannot be a reading of this conversation, and pinning it at
+/// the top would mark the whole conversation read.
 pub async fn external_read_cursor(
     State(state): State<SharedState>,
     _auth: crate::auth::AuthIdentity,
@@ -309,11 +327,15 @@ pub async fn external_read_cursor(
     // Envelope-authenticated: the manage router supplies the peer it
     // authenticated, so the write is always scoped to a conversation.
     let user_id = Some(peer.0.0.as_str());
-    projector
-        .put_cursor(user_id, body.cursor)
-        .await
-        .ok_or_else(|| ApiError::unavailable("chat history store not initialized"))?;
-    Ok(StatusCode::NO_CONTENT)
+    match projector.put_cursor(user_id, body.cursor).await {
+        crate::external::CursorWrite::Accepted => Ok(StatusCode::NO_CONTENT),
+        crate::external::CursorWrite::OutOfRange { cursor, last } => Err(ApiError::bad_request(
+            format!("read cursor {cursor} is outside this conversation's positions (0..={last})"),
+        )),
+        crate::external::CursorWrite::Unavailable => {
+            Err(ApiError::unavailable("chat history store not initialized"))
+        }
+    }
 }
 
 /// Reject any agent but the root: the direct (`/external/*`) surface belongs to

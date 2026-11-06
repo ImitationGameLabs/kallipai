@@ -410,7 +410,12 @@ impl RelayHandle {
             return;
         };
         let page = match projector
-            .read_history(Some(peer.id.as_ref()), after, before, limit)
+            .read_history(
+                Some(peer.id.as_ref()),
+                after.map(crate::external::HistoryCursor::Row),
+                before.map(crate::external::HistoryCursor::Row),
+                limit,
+            )
             .await
         {
             Ok(page) => page,

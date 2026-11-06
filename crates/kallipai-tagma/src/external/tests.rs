@@ -526,7 +526,12 @@ async fn read_history_refuses_two_cursors_without_a_store() {
         MessageLimits::default(),
     );
     let err = projector
-        .read_history(None, Some(10), Some(20), 50)
+        .read_history(
+            None,
+            Some(HistoryCursor::Position(10)),
+            Some(HistoryCursor::Position(20)),
+            50,
+        )
         .await
         .expect_err("two cursors name two windows");
     assert!(
@@ -720,4 +725,130 @@ async fn pump_exits_when_world_gone() {
         .await
         .expect("the pump did not exit when the world went away")
         .expect("the pump task panicked");
+}
+
+/// A position page answers where the same request continues, and `more` is an
+/// existence question rather than a fullness one: a page that filled to `limit`
+/// with nothing behind it says false, and a short page with rows behind it says
+/// true.
+#[tokio::test]
+async fn a_position_page_names_its_successor_and_stops_at_the_end() {
+    let state = make_state();
+    let dir = TempDir::new().unwrap();
+    let db = chat_history::open(
+        &dir.path().join("h.sqlite"),
+        std::time::Duration::from_millis(100),
+    )
+    .await
+    .unwrap();
+    let conv = ConversationId::for_tagma(&tagma_id());
+    let projector = ExternalProjector::new(
+        Arc::downgrade(&state),
+        Some(db.clone()),
+        Some(conv.clone()),
+        Some(tagma_id()),
+        Some("Tagma".into()),
+        MessageLimits::default(),
+    );
+    for text in ["one", "two", "three"] {
+        chat_history::append(&db, None, None, "inbound", text, None, None)
+            .await
+            .unwrap();
+    }
+
+    // The recent snapshot: each row names its own position, and the newest
+    // position is where a reader resumes from.
+    let page = projector.read_history(None, None, None, 10).await.unwrap();
+    let seqs: Vec<i64> = page
+        .entries
+        .iter()
+        .map(|e| match &e.reply {
+            TagmaReply::UserMessage { seq, .. } => seq.expect("a stored row names its position"),
+            other => panic!("expected UserMessage, got {other:?}"),
+        })
+        .collect();
+    assert_eq!(seqs, vec![1, 2, 3]);
+    assert_eq!(page.next, Some(3));
+    assert!(!page.more);
+
+    // A catch-up page that filled to the limit with nothing behind it: more is
+    // false, which is what lets a resuming reader stop instead of asking again.
+    let page = projector
+        .read_history(None, Some(HistoryCursor::Position(0)), None, 3)
+        .await
+        .unwrap();
+    assert_eq!(page.entries.len(), 3);
+    assert_eq!(page.next, Some(3));
+    assert!(!page.more, "three of three rows, nothing behind them");
+
+    // A short page with a row behind it: more is true, so the reader asks again
+    // from `next` rather than assuming it is caught up.
+    let page = projector
+        .read_history(None, Some(HistoryCursor::Position(0)), None, 2)
+        .await
+        .unwrap();
+    assert_eq!(page.entries.len(), 2);
+    assert_eq!(page.next, Some(2));
+    assert!(page.more);
+
+    // An empty catch-up page echoes the cursor back, so a reader that loops on
+    // `next` cannot fall back to the start of the conversation.
+    let page = projector
+        .read_history(None, Some(HistoryCursor::Position(3)), None, 10)
+        .await
+        .unwrap();
+    assert!(page.entries.is_empty());
+    assert_eq!(page.next, Some(3));
+    assert!(!page.more);
+
+    // Scroll-up walks backwards: the continuation is the page's oldest row.
+    let page = projector
+        .read_history(None, None, Some(HistoryCursor::Position(3)), 2)
+        .await
+        .unwrap();
+    assert_eq!(page.entries.len(), 2);
+    assert_eq!(page.next, Some(1));
+    assert!(!page.more, "nothing older than the first row");
+}
+
+/// A row the decoder cannot read still occupies a position: the page reports it
+/// in `undecodable` and `next` moves past it, so a reader neither re-reads the
+/// same block forever nor skips whatever sits behind the block.
+#[tokio::test]
+async fn a_page_of_undecodable_rows_still_says_where_to_go() {
+    let state = make_state();
+    let dir = TempDir::new().unwrap();
+    let db = chat_history::open(
+        &dir.path().join("h.sqlite"),
+        std::time::Duration::from_millis(100),
+    )
+    .await
+    .unwrap();
+    let conv = ConversationId::for_tagma(&tagma_id());
+    let projector = ExternalProjector::new(
+        Arc::downgrade(&state),
+        Some(db.clone()),
+        Some(conv.clone()),
+        Some(tagma_id()),
+        Some("Tagma".into()),
+        MessageLimits::default(),
+    );
+    for direction in ["inbound", "sideways", "inbound"] {
+        chat_history::append(&db, None, None, direction, "text", None, None)
+            .await
+            .unwrap();
+    }
+
+    let page = projector
+        .read_history(None, Some(HistoryCursor::Position(1)), None, 10)
+        .await
+        .unwrap();
+    assert_eq!(page.entries.len(), 1, "the readable row behind the hole");
+    assert_eq!(page.undecodable, 1);
+    assert_eq!(
+        page.next,
+        Some(3),
+        "the undecodable row still advances the cursor"
+    );
+    assert!(!page.more);
 }

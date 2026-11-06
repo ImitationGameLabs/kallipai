@@ -632,10 +632,10 @@ mod tests {
     }
 
     /// The positive seam the shape pin cannot reach: a cursor write through
-    /// the real router lands in the partition the envelope's peer names. The
-    /// store caps the value at that partition's own newest row id, so an id a
-    /// sibling partition minted (one global sequence) cannot pin the badge at
-    /// zero, and no other partition moves.
+    /// the real router lands in the partition the envelope's peer names. A
+    /// position past that partition's last minted row is refused with 400 and
+    /// writes nothing -- pinning it at the top would mark the whole
+    /// conversation read. No other partition moves.
     /// The write also re-announces the partition's snapshot on the bus -- the
     /// badge drop on this user's other devices rides that frame.
     #[tokio::test]
@@ -651,9 +651,8 @@ mod tests {
             .unwrap();
         let (db, _frames, _dir) = install_projector(&state).await;
         let mut unread_rx = state.bus.subscribe::<UnreadFrame>().unwrap();
-        let mut alice = Vec::new();
         for text in ["a1", "a2"] {
-            let (id, _) = chat_history::append(
+            chat_history::append(
                 &db,
                 Some("alice"),
                 Some("alice"),
@@ -664,28 +663,49 @@ mod tests {
             )
             .await
             .unwrap();
-            alice.push(id);
         }
-        let (bob, _) =
-            chat_history::append(&db, Some("bob"), Some("bob"), "outbound", "b1", None, None)
-                .await
-                .unwrap();
-        assert!(bob > *alice.last().unwrap(), "one global id sequence");
+        chat_history::append(&db, Some("bob"), Some("bob"), "outbound", "b1", None, None)
+            .await
+            .unwrap();
+        let alice_tail = chat_history::read_last_n(&db, Some("alice"), 1)
+            .await
+            .unwrap()[0]
+            .seq;
+        assert_eq!(alice_tail, 2, "alice's two rows are numbered from one");
+
+        let refused = manage_send(
+            &state,
+            "PUT",
+            &format!("/agents/{root}/external/read-cursor"),
+            Some("alice"),
+            Some(serde_json::json!({ "cursor": alice_tail + 1000 })),
+        )
+        .await;
+        assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            chat_history::read_cursor(&db, Some("alice")).await.unwrap(),
+            None,
+            "a position this store never minted writes nothing"
+        );
+        assert!(
+            unread_rx.try_recv().is_err(),
+            "a refused write announces nothing"
+        );
 
         let response = manage_send(
             &state,
             "PUT",
             &format!("/agents/{root}/external/read-cursor"),
             Some("alice"),
-            Some(serde_json::json!({ "cursor": bob })),
+            Some(serde_json::json!({ "cursor": alice_tail })),
         )
         .await;
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
 
         assert_eq!(
             chat_history::read_cursor(&db, Some("alice")).await.unwrap(),
-            Some(*alice.last().unwrap()),
-            "capped at alice's own newest row, not the id bob minted"
+            Some(alice_tail),
+            "alice's own newest position lands"
         );
         assert_eq!(
             chat_history::read_cursor(&db, Some("bob")).await.unwrap(),
@@ -702,10 +722,10 @@ mod tests {
             .try_recv()
             .expect("the write announces a snapshot");
         assert_eq!(frame.0.peer, "alice");
-        assert_eq!(frame.0.cursor, *alice.last().unwrap());
+        assert_eq!(frame.0.cursor, alice_tail);
         assert_eq!(
             frame.0.unread, 0,
-            "the capped cursor reads the partition clean"
+            "the accepted cursor reads the partition clean"
         );
     }
 

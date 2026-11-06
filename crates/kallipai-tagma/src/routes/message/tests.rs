@@ -791,8 +791,8 @@ async fn direct_history(state: &crate::state::SharedState, root: &AgentId) -> Ve
         AuthIdentity::test_new(Identity::Operator),
         Path(root.clone()),
         Query(ExternalHistoryQuery {
-            after: None,
-            before: None,
+            after_seq: None,
+            before_seq: None,
             limit: Some(50),
         }),
     )
@@ -843,8 +843,8 @@ async fn external_history_refuses_both_cursors_at_once() {
         AuthIdentity::test_new(Identity::Operator),
         Path(root),
         Query(ExternalHistoryQuery {
-            after: Some(1),
-            before: Some(9),
+            after_seq: Some(1),
+            before_seq: Some(9),
             limit: Some(50),
         }),
     )
@@ -883,8 +883,8 @@ async fn external_history_reports_an_unreadable_store() {
         AuthIdentity::test_new(Identity::Operator),
         Path(root),
         Query(ExternalHistoryQuery {
-            after: None,
-            before: None,
+            after_seq: None,
+            before_seq: None,
             limit: Some(50),
         }),
     )
@@ -920,8 +920,8 @@ async fn external_history_counts_a_row_it_cannot_decode() {
         AuthIdentity::test_new(Identity::Operator),
         Path(root),
         Query(ExternalHistoryQuery {
-            after: None,
-            before: None,
+            after_seq: None,
+            before_seq: None,
             limit: Some(50),
         }),
     )
@@ -958,8 +958,8 @@ async fn external_history_refuses_a_zero_limit() {
         AuthIdentity::test_new(Identity::Operator),
         Path(root),
         Query(ExternalHistoryQuery {
-            after: None,
-            before: None,
+            after_seq: None,
+            before_seq: None,
             limit: Some(0),
         }),
     )
@@ -987,7 +987,7 @@ async fn a_quote_read_answers_the_one_row_it_names() {
         .await
         .register_root(root.clone(), RegistryEntry::Live(entry))
         .unwrap();
-    let (first, _) = crate::relay::chat_history::append(
+    let (first, _, _) = crate::relay::chat_history::append(
         &db,
         None,
         None,
@@ -1040,7 +1040,7 @@ async fn a_quote_read_reaches_the_row_of_a_relay_partition() {
         .await
         .register_root(root.clone(), RegistryEntry::Live(entry))
         .unwrap();
-    let (row, _) = crate::relay::chat_history::append(
+    let (row, _, _) = crate::relay::chat_history::append(
         &db,
         Some("peer-1"),
         Some("alice"),
@@ -1120,4 +1120,126 @@ async fn a_quote_read_refuses_a_row_id_below_one() {
     .await
     .expect_err("no row sits below the first one");
     assert_eq!(err.status, 400, "unusable row id: {}", err.message);
+}
+
+/// The order the frontend uses is subscribe then pull. A row that lands while
+/// the pull is in flight rides both the page and the live stream, and both
+/// carriers name the same position, so a reader that dedups by position shows
+/// it once. Without a shared position the row would either double or vanish.
+#[tokio::test]
+async fn a_row_committed_during_an_inflight_pull_arrives_exactly_once() {
+    let state = make_state();
+    install_inbox_store(&state).await;
+    let (_db, _frames, _dir) = install_projector(&state).await;
+    let root = AgentId::random();
+    let (entry, _rx) = make_entry_with_rx(None, "root".into());
+    {
+        let mut reg = state.registry.write().await;
+        reg.register_root(root.clone(), RegistryEntry::Live(entry))
+            .unwrap();
+    }
+
+    let send = |text: &str| {
+        let state = state.clone();
+        let root = root.clone();
+        let text = text.to_owned();
+        async move {
+            send_message(
+                State(state),
+                AuthIdentity::test_new(Identity::Operator),
+                Path(root),
+                Json(MessageRequest {
+                    text,
+                    attachment: None,
+                    defer: false,
+                    quote: None,
+                }),
+            )
+            .await
+            .expect("an operator send is accepted")
+        }
+    };
+
+    let (status, _) = send("first").await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+
+    // Subscribe before pulling: anything committed from here on is on the
+    // stream, whether or not the page that follows carries it too.
+    let resp = external_events(
+        State(state.clone()),
+        AuthIdentity::test_new(Identity::Operator),
+        Path(root.clone()),
+    )
+    .await
+    .expect("root opens the direct stream");
+    let mut stream = axum::response::IntoResponse::into_response(resp)
+        .into_body()
+        .into_data_stream();
+
+    let (status, _) = send("second").await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+
+    // The catch-up pull carries the row that landed before it ran.
+    let response = external_history(
+        State(state.clone()),
+        AuthIdentity::test_new(Identity::Operator),
+        Path(root.clone()),
+        Query(ExternalHistoryQuery {
+            after_seq: Some(1),
+            before_seq: None,
+            limit: Some(50),
+        }),
+    )
+    .await
+    .expect("the catch-up read succeeds");
+    let body = json_body(response).await;
+    assert_eq!(body["next"], 2, "the page ends at the row it carried");
+    assert_eq!(body["more"], false);
+    let page: Vec<HistoryEntry> =
+        serde_json::from_value(body["rows"].clone()).expect("the page rows decode");
+    assert_eq!(page.len(), 1);
+    let page_seq = match &page[0].reply {
+        TagmaReply::UserMessage { seq, text, .. } => {
+            assert_eq!(text, "second");
+            seq.expect("a stored row names its position")
+        }
+        other => panic!("expected UserMessage, got {other:?}"),
+    };
+    assert_eq!(page_seq, 2);
+
+    // The live carrier for the very same row: one frame, same position.
+    let mut frame = read_sse_frame(&mut stream).await;
+    while !frame.starts_with("event: authored") {
+        assert!(
+            frame.starts_with("event: status"),
+            "unexpected frame before the authored one: {frame:?}"
+        );
+        frame = read_sse_frame(&mut stream).await;
+    }
+    let data = frame
+        .lines()
+        .find_map(|l| l.strip_prefix("data: "))
+        .expect("the authored frame carries a data line");
+    let payload: serde_json::Value = serde_json::from_str(data).expect("the frame data is json");
+    let frame_seq = payload["reply"]["seq"]
+        .as_i64()
+        .expect("the frame names its position");
+
+    // One position, two carriers, one line on screen.
+    assert_eq!(frame_seq, page_seq);
+    let mut seen: Vec<i64> = page
+        .iter()
+        .filter_map(|e| match &e.reply {
+            TagmaReply::UserMessage { seq, .. } => *seq,
+            _ => None,
+        })
+        .collect();
+    seen.push(frame_seq);
+    seen.sort_unstable();
+    seen.dedup();
+    assert_eq!(
+        seen,
+        vec![page_seq],
+        "one row, two carriers, a single line after dedup by position"
+    );
 }

@@ -35,6 +35,10 @@ pub(crate) struct HistoryRow {
     pub(crate) attachment: Option<String>,
     /// The quoted row id from the row's `quote` column (`None` = no quote).
     pub(crate) quote: Option<i64>,
+    /// The row's position in its own partition (`chat_history.seq`). `id`
+    /// identifies the row; this says where it sits, and it is what a cursor
+    /// advances over.
+    pub(crate) seq: i64,
 }
 
 /// Decode one stored [`HistoryRow`] into a [`HistoryEntry`] (`sender` + the
@@ -51,6 +55,7 @@ pub(crate) fn decode_row(row: HistoryRow, sender: Participant) -> Option<History
                 event: AuthoredEvent::AssistantContent { content: row.text },
                 history_id: row.id,
                 created_at: None,
+                seq: Some(row.seq),
             };
             r.set_created_at(row.created_at);
             r
@@ -75,6 +80,7 @@ pub(crate) fn decode_row(row: HistoryRow, sender: Participant) -> Option<History
                 created_at: None,
                 attachment,
                 quote: row.quote,
+                seq: Some(row.seq),
             };
             r.set_created_at(row.created_at);
             r

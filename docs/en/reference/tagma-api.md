@@ -68,7 +68,8 @@ single operator comparison additionally uses a constant-time compare.
 | `GET`    | `/agents/{id}/lesche/sessions/{session}/messages`     | Read a direct session's history by session id (root)                                                            | self (root) / operator       |
 | `GET`    | `/agents/{id}/events`                                 | Internal event stream (SSE, rich vocab)                                                                         | any                          |
 | `GET`    | `/agents/{id}/external/events`                        | External chat-room stream (SSE, frontend)                                                                       | any                          |
-| `GET`    | `/agents/{id}/external/history`                       | History window (cursor-driven, JSON)                                                                            | self (root) / operator       |
+| `GET`    | `/agents/{id}/external/history`                       | History window paged by position (JSON)                                                                          | self (root) / operator       |
+| `PUT`    | `/agents/{id}/external/read-cursor`                   | Mark how far the user has read the conversation                                                                 | self (root) / operator       |
 | `GET`    | `/agents/{id}/external/history/{row}`                 | One stored row by id, rendered as text (the `--quote` read-back)                                                | self (root) / operator       |
 | `GET`    | `/agents/{id}/status`                                 | Get context usage and retry history                                                                             | any                          |
 | `GET`    | `/agents/{id}/permissions`                            | Get permission profile and classify preset                                                                      | any                          |
@@ -732,10 +733,10 @@ JSON `type` field); each frame's `data:` is the JSON payload:
 
 | `event:` name | `data:` payload      | Meaning                                                                               |
 | ------------- | ---------------      | -----------------------------------------------------------                           |
-| `authored`    | `TagmaReply`         | An authored message (ack / op error / replayed user row / `assistant_content`).       |
+| `authored`    | `TagmaReply`         | An authored message (ack / op error / replayed user row / `assistant_content`). A replayed row carries its own position as `seq`. |
 | `signal`      | `SignalEvent`        | A runtime signal (busy/idle/interrupted/cancelled/terminals/error).                   |
 | `status`      | `TagmaStatusPayload` | An aggregate runtime snapshot (root state, subagent counts, token budget). Ephemeral. |
-| `gap`         | `{"after"?: number}` | The authored source missed frames on this connection; `after` is the last durable `chat_history.id` it delivered (absent when none). |
+| `missed`      | `{}`                 | The authored source lost frames on this connection; one marker stands for the hole. The reader catches up over `/external/history` from its own last position. |
 | `closing`     | `{}`                 | The tagma is shutting down; always the last event on the stream.                      |
 
 The `TagmaReply` shape mirrors the relay's envelope payload (`kind`-tagged,
@@ -751,14 +752,13 @@ envelope; the direct (offline) path serves it plaintext with no relay and no
 E2EE. Status snapshots are pushed on a fixed cadence; the transcript is driven
 by signals (busy/idle), not by these snapshots.
 
-The `gap` marker stands in for frames the subscriber missed. When a reader
-falls further behind than the bus ring, the authored source reports the
-boundary once rather than skipping silently, naming the last durable row it
-delivered (`after` is omitted when this connection had delivered none). The
-reader catches up over `/external/history` from that cursor, or from its own
-rendered head when the marker names none; nothing rides the frame itself.
-Signals and status carry no resume point, so a loss on those sources goes
-unreported.
+The `missed` marker stands in for frames the subscriber lost. When a reader
+falls further behind than the bus ring, the authored source reports the hole
+once instead of skipping silently, and the marker carries no payload: a reader
+that has rendered nothing asks for the recent snapshot, one that has rendered
+rows asks for the page after its own last position. The catch-up runs over
+`/external/history` by that position. Signals and status carry no resume point,
+so a loss on those sources goes unreported.
 
 `closing` is the tagma's own notice that it is shutting down: at most one per
 stream, always the last event, and the body ends on the next poll (keepalive
@@ -776,6 +776,40 @@ legitimate ends and does not.
 
 Auth: any authenticated identity. See [Authentication and authorization](auth.md). Status: `200 OK` (`404`
 on a non-root id, `503` if direct serving is not initialized).
+
+#### `GET /agents/{id}/external/history`: Catch-Up Page
+
+The pull face of the same conversation, and how a reader recovers what the
+stream no longer holds. Root-only. Query params: `after_seq` (rows newer than
+that position, oldest-first), `before_seq` (rows older than it, also rendered
+oldest-first), and `limit` (capped at 50). At most one cursor is accepted and a
+zero `limit` is refused, both with `400`; `503` answers when no store can.
+
+The response is `{ "rows", "more", "undecodable", "next" }`. Each row is a
+`HistoryEntry`, and a replayed row carries the position it was stored under as
+`seq`. `next` names where the same request continues: the newest position of a
+catch-up page, the oldest of a scroll-up page, and the cursor the caller sent
+when the page came back empty. A reader resumes from `next` instead of inferring
+a position from the rows it happens to hold. `more` says whether a row exists
+beyond the page in the direction asked; it is an existence probe, not a
+fullness test, so a page that fills `limit` with nothing behind it answers
+`false`. A request with no cursor reads the newest page and answers
+`more: false`.
+
+Positions are local to one conversation and assigned in store order from 1.
+They are not row ids: an id is global across partitions, a position is local to
+one. `undecodable` counts rows the window held that the decoder could not read;
+the position still advances past them, so the next read continues beyond the
+hole instead of landing on it again.
+
+##### `PUT /agents/{id}/external/read-cursor`: Mark How Far the User Read
+
+Body `{ "cursor": number }`: the highest position read in this conversation.
+The write is monotonic, answers `204`, and the resulting count reaches every
+device of this user as an unread frame. The value is a position, not a row id:
+a client that writes a row id sends a number this conversation never minted,
+and the request is refused with `400` rather than pinned at the newest
+position, which would mark the whole conversation read.
 
 #### `POST /agents/{id}/lesche/messages`: Deliver an Agent-Authored Message
 
@@ -1520,8 +1554,8 @@ These are the **internal** event stream's variants (`GET /agents/{id}/events`),
 consumed by `kallip` and `kallipai-run`. The
 [external chat-room stream](#external-chat-room-api) is a separate surface
 that does not use this vocabulary: it discriminates frames by the SSE
-`event:` field (`authored` / `signal` / `status` / `gap` / `closing`),
-reports lost frames as `gap` and the tagma's own shutdown as `closing`,
+`event:` field (`authored` / `signal` / `status` / `missed` / `closing`),
+reports lost frames as `missed` and the tagma's own shutdown as `closing`,
 and carries only complete authored messages + runtime signals.
 
 The internal event stream delivers JSON objects via Server-Sent Events. Each SSE
