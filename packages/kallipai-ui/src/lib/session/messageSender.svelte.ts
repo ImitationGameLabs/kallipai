@@ -24,18 +24,26 @@ export interface SendResult {
   readonly historyId: number | null;
 }
 
-/** One cursor-driven history page. `undecodable` counts rows the window held
+/** One position-cursor history page. `undecodable` counts rows the window held
  *  that the decoder could not read: non-zero means this page is a hole rather
- *  than a complete window. */
+ *  than a complete window. `next` is where the same request continues: the
+ *  page's edge in the direction it was read. It says where the page stopped,
+ *  not where the reader has rendered up to. */
 export interface HistoryPage {
   readonly rows: HistoryEntry[];
   readonly more: boolean;
   readonly undecodable: number;
+  readonly next: number | null;
 }
 
+/** One history pull: `afterSeq` continues from the newest position the caller
+ *  rendered, `beforeSeq` reads the page above a scroll-up anchor, `row` asks
+ *  for one row by id, and none of them reads the newest rows. */
 export interface PullOpts {
-  readonly after?: number | null;
-  readonly before?: number | null;
+  readonly afterSeq?: number | null;
+  readonly beforeSeq?: number | null;
+  /** One row by id: the probe behind a quoted reference. */
+  readonly row?: number | null;
   readonly limit?: number;
 }
 
@@ -92,6 +100,7 @@ export class DirectMessageSender implements MessageSender {
       rows: resp.rows as HistoryEntry[],
       more: resp.more,
       undecodable: resp.undecodable ?? 0,
+      next: resp.next ?? null,
     };
   }
 

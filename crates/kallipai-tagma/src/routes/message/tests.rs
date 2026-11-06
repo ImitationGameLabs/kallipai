@@ -794,6 +794,7 @@ async fn direct_history(state: &crate::state::SharedState, root: &AgentId) -> Ve
             after_seq: None,
             before_seq: None,
             limit: Some(50),
+            row: None,
         }),
     )
     .await
@@ -846,6 +847,7 @@ async fn external_history_refuses_both_cursors_at_once() {
             after_seq: Some(1),
             before_seq: Some(9),
             limit: Some(50),
+            row: None,
         }),
     )
     .await
@@ -886,6 +888,7 @@ async fn external_history_reports_an_unreadable_store() {
             after_seq: None,
             before_seq: None,
             limit: Some(50),
+            row: None,
         }),
     )
     .await
@@ -923,6 +926,7 @@ async fn external_history_counts_a_row_it_cannot_decode() {
             after_seq: None,
             before_seq: None,
             limit: Some(50),
+            row: None,
         }),
     )
     .await
@@ -961,6 +965,7 @@ async fn external_history_refuses_a_zero_limit() {
             after_seq: None,
             before_seq: None,
             limit: Some(0),
+            row: None,
         }),
     )
     .await
@@ -1188,6 +1193,7 @@ async fn a_row_committed_during_an_inflight_pull_arrives_exactly_once() {
             after_seq: Some(1),
             before_seq: None,
             limit: Some(50),
+            row: None,
         }),
     )
     .await
@@ -1242,4 +1248,270 @@ async fn a_row_committed_during_an_inflight_pull_arrives_exactly_once() {
         vec![page_seq],
         "one row, two carriers, a single line after dedup by position"
     );
+}
+// -- the row probe: one id, answered in the window's own page shape ----------
+
+/// `row=<id>` asks the window route for that one row: one entry, `more`
+/// false, and `next` naming the row's own position, so a caller can carry it
+/// into a window read afterwards.
+#[tokio::test]
+async fn a_row_probe_answers_the_row_and_its_position() {
+    let state = make_state();
+    install_inbox_store(&state).await;
+    let (db, _frames, _dir) = install_projector(&state).await;
+    let root = AgentId::random();
+    let (entry, _rx) = make_entry_with_rx(None, "root".into());
+    state
+        .registry
+        .write()
+        .await
+        .register_root(root.clone(), RegistryEntry::Live(entry))
+        .unwrap();
+    let (quoted, _, quoted_seq) = crate::relay::chat_history::append(
+        &db,
+        None,
+        None,
+        "inbound",
+        "the quoted row",
+        None,
+        None,
+    )
+    .await
+    .expect("seed the quoted row");
+    crate::relay::chat_history::append(&db, None, None, "outbound", "a later row", None, None)
+        .await
+        .expect("seed a later row");
+
+    let response = external_history(
+        State(state.clone()),
+        AuthIdentity::test_new(Identity::Operator),
+        Path(root),
+        Query(ExternalHistoryQuery {
+            after_seq: None,
+            before_seq: None,
+            limit: None,
+            row: Some(quoted),
+        }),
+    )
+    .await
+    .expect("the row is in this conversation");
+    let body = json_body(response).await;
+    assert_eq!(
+        body["rows"].as_array().map(Vec::len),
+        Some(1),
+        "one id names one row"
+    );
+    assert_eq!(body["more"], false, "one id has no next page");
+    assert_eq!(
+        body["next"], quoted_seq,
+        "the row's own position rides the answer"
+    );
+    assert_eq!(body["undecodable"], 0);
+}
+
+/// An id this conversation does not hold is an absence, not an error: the page
+/// comes back empty with nothing undecodable, which is what a quote probe reads
+/// as "that row is gone".
+#[tokio::test]
+async fn a_row_probe_of_a_missing_row_is_an_empty_page() {
+    let state = make_state();
+    install_inbox_store(&state).await;
+    let (db, _frames, _dir) = install_projector(&state).await;
+    let root = AgentId::random();
+    let (entry, _rx) = make_entry_with_rx(None, "root".into());
+    state
+        .registry
+        .write()
+        .await
+        .register_root(root.clone(), RegistryEntry::Live(entry))
+        .unwrap();
+    let (first, _, _) =
+        crate::relay::chat_history::append(&db, None, None, "inbound", "the only row", None, None)
+            .await
+            .expect("seed one row");
+
+    let response = external_history(
+        State(state.clone()),
+        AuthIdentity::test_new(Identity::Operator),
+        Path(root),
+        Query(ExternalHistoryQuery {
+            after_seq: None,
+            before_seq: None,
+            limit: None,
+            row: Some(first + 1000),
+        }),
+    )
+    .await
+    .expect("an absent row is still an answer");
+    let body = json_body(response).await;
+    assert_eq!(
+        body["rows"].as_array().map(Vec::len),
+        Some(0),
+        "nothing to render"
+    );
+    assert_eq!(body["undecodable"], 0, "absent is not a hole");
+    assert_eq!(
+        body["next"],
+        serde_json::Value::Null,
+        "no position to carry"
+    );
+}
+
+/// A row probe is a whole request: it shares no query with a position cursor,
+/// and a non-positive id names no row.
+#[tokio::test]
+async fn a_row_probe_refuses_a_position_cursor_and_a_non_positive_row() {
+    let state = make_state();
+    install_inbox_store(&state).await;
+    let (_db, _frames, _dir) = install_projector(&state).await;
+    let root = AgentId::random();
+    let (entry, _rx) = make_entry_with_rx(None, "root".into());
+    state
+        .registry
+        .write()
+        .await
+        .register_root(root.clone(), RegistryEntry::Live(entry))
+        .unwrap();
+
+    let err = external_history(
+        State(state.clone()),
+        AuthIdentity::test_new(Identity::Operator),
+        Path(root.clone()),
+        Query(ExternalHistoryQuery {
+            after_seq: Some(1),
+            before_seq: None,
+            limit: None,
+            row: Some(2),
+        }),
+    )
+    .await
+    .expect_err("a row id and a position name two different requests");
+    assert_eq!(err.status, 400, "unusable query: {}", err.message);
+    let err = external_history(
+        State(state.clone()),
+        AuthIdentity::test_new(Identity::Operator),
+        Path(root.clone()),
+        Query(ExternalHistoryQuery {
+            after_seq: None,
+            before_seq: Some(5),
+            limit: None,
+            row: Some(2),
+        }),
+    )
+    .await
+    .expect_err("a row id and a scroll-up cursor name two different requests");
+    assert_eq!(err.status, 400, "unusable query: {}", err.message);
+
+    let err = external_history(
+        State(state.clone()),
+        AuthIdentity::test_new(Identity::Operator),
+        Path(root),
+        Query(ExternalHistoryQuery {
+            after_seq: None,
+            before_seq: None,
+            limit: None,
+            row: Some(0),
+        }),
+    )
+    .await
+    .expect_err("there is no row 0");
+    assert_eq!(err.status, 400, "unusable query: {}", err.message);
+}
+
+/// A row that is there but cannot be decoded is a hole, not an absence: it is
+/// counted, and its position still rides the answer so the caller knows which
+/// block it could not read.
+#[tokio::test]
+async fn a_row_probe_counts_a_row_it_cannot_decode() {
+    let state = make_state();
+    install_inbox_store(&state).await;
+    let (db, _frames, _dir) = install_projector(&state).await;
+    let root = AgentId::random();
+    let (entry, _rx) = make_entry_with_rx(None, "root".into());
+    state
+        .registry
+        .write()
+        .await
+        .register_root(root.clone(), RegistryEntry::Live(entry))
+        .unwrap();
+    let (bad, _, bad_seq) =
+        crate::relay::chat_history::append(&db, None, None, "sideways", "corrupt", None, None)
+            .await
+            .expect("seed a row the decoder cannot read");
+
+    let response = external_history(
+        State(state.clone()),
+        AuthIdentity::test_new(Identity::Operator),
+        Path(root),
+        Query(ExternalHistoryQuery {
+            after_seq: None,
+            before_seq: None,
+            limit: None,
+            row: Some(bad),
+        }),
+    )
+    .await
+    .expect("a readable store answers");
+    let body = json_body(response).await;
+    assert_eq!(
+        body["rows"].as_array().map(Vec::len),
+        Some(0),
+        "nothing to render"
+    );
+    assert_eq!(body["undecodable"], 1, "the row is there and unreadable");
+    assert_eq!(body["next"], bad_seq, "the position still names the block");
+}
+
+/// The probe answers for this conversation's own partition: an id minted in a
+/// relay partition names a row of another conversation, so the probe answers an
+/// absence instead of borrowing the other peer's text.
+#[tokio::test]
+async fn a_row_probe_answers_only_its_own_partition() {
+    let state = make_state();
+    install_inbox_store(&state).await;
+    let (db, _frames, _dir) = install_projector(&state).await;
+    let root = AgentId::random();
+    let (entry, _rx) = make_entry_with_rx(None, "root".into());
+    state
+        .registry
+        .write()
+        .await
+        .register_root(root.clone(), RegistryEntry::Live(entry))
+        .unwrap();
+    let (peer_row, _, _) = crate::relay::chat_history::append(
+        &db,
+        Some("peer-1"),
+        Some("alice"),
+        "inbound",
+        "spoken in another partition",
+        None,
+        None,
+    )
+    .await
+    .expect("seed a row in the peer partition");
+
+    let response = external_history(
+        State(state.clone()),
+        AuthIdentity::test_new(Identity::Operator),
+        Path(root),
+        Query(ExternalHistoryQuery {
+            after_seq: None,
+            before_seq: None,
+            limit: None,
+            row: Some(peer_row),
+        }),
+    )
+    .await
+    .expect("an absent row is still an answer");
+    let body = json_body(response).await;
+    assert_eq!(
+        body["rows"].as_array().map(Vec::len),
+        Some(0),
+        "the peer partition's row is not this conversation's"
+    );
+    assert_eq!(
+        body["undecodable"], 0,
+        "nothing was read, so nothing failed"
+    );
+    assert_eq!(body["next"], serde_json::Value::Null);
 }

@@ -5,9 +5,9 @@
 // terminals, errors), and status snapshots all arrive on the one multiplexed
 // SSE, demuxed here by the `event:` field name.
 //
-// A lagged subscriber gets a `gap` frame in place of the frames it missed:
-// the server names the last durable row this connection had delivered, and
-// the store pulls the hole back through the history cursor.
+// A lagged subscriber gets a `missed` frame in place of the frames it lost:
+// the marker carries no payload, because the reader's own cursor already says
+// where it stopped, and it repairs the hole with a history pull from there.
 //
 // The Transport contract exposes three streams (`replies` + `signals` +
 // `status`) but the direct wire is one SSE, so an internal drain fans each
@@ -58,14 +58,13 @@ export interface DirectAuthoredPayload {
 
 /** One frame on the direct external SSE, discriminated by the SSE `event:`
  * field. Authored content is persisted/replayable on the tagma; signals and
- * status are ephemeral; a gap marker replaces the frames a lagged
- * subscriber missed; closing says the tagma is shutting down and nothing
- * follows. */
+ * status are ephemeral; `missed` replaces the frames a lagged subscriber lost;
+ * closing says the tagma is shutting down and nothing follows. */
 export type DirectFrame =
   | { readonly kind: "authored"; readonly payload: DirectAuthoredPayload }
   | { readonly kind: "signal"; readonly event: SignalEvent }
   | { readonly kind: "status"; readonly payload: DirectStatusPayload }
-  | { readonly kind: "gap"; readonly after: number | null }
+  | { readonly kind: "missed" }
   | { readonly kind: "closing" };
 
 /** Map the snake_case direct status payload to the transport-neutral
@@ -132,11 +131,10 @@ export class DirectTransport implements Transport {
    * the store at attach: "reconnecting" when the retry loop takes over,
    * "resumed" once a fresh connection is live. Null drops the event. */
   onState: ((s: TransportState) => void) | null = null;
-  /** A lagged subscriber's gap marker: the last durable row this stream
-   *  had delivered, or null when it had delivered none yet. Wired by the
-   *  store, which pulls the hole back through the history cursor. Null
-   *  drops the marker. */
-  onGap: ((after: number | null) => void) | null = null;
+  /** A lagged subscriber's repair marker: frames were lost, so the reader
+   *  resumes from its own position cursor. Wired by the store, which pulls the
+   *  hole back through the history cursor; null drops the marker. */
+  onMissed: (() => void) | null = null;
   /** Abort for the CURRENT stream attempt only; the transport's own
    * controller stays reserved for user-initiated close. */
   private streamCtl: AbortController | null = null;
@@ -262,8 +260,8 @@ export class DirectTransport implements Transport {
             case "status":
               this.statusQueue.push(toSummary(f.payload));
               break;
-            case "gap":
-              this.onGap?.(f.after);
+            case "missed":
+              this.onMissed?.();
               break;
           }
         }
@@ -425,16 +423,10 @@ export class DirectTransport implements Transport {
               payload: JSON.parse(f.data) as DirectStatusPayload,
             };
             break;
-          case "gap": {
-            const payload = JSON.parse(f.data) as {
-              readonly after?: number | null;
-            };
-            yield {
-              kind: "gap",
-              after: typeof payload.after === "number" ? payload.after : null,
-            };
+          case "missed":
+            // No payload: the reader's own cursor says where to resume.
+            yield { kind: "missed" };
             break;
-          }
           case "closing":
             yield { kind: "closing" };
             break;

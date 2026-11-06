@@ -287,8 +287,10 @@ export class ChannelsStore {
       if (cached.length > 0) {
         const lines: ConversationLine[] = cached.map(cachedLineToLine);
         conv.transcript = { lines, status: "idle" };
-        conv.minRendered = cached[0]!.historyId;
-        conv.maxRendered = cached[cached.length - 1]!.historyId;
+        // The cached rows carry their own positions: seeding them makes
+        // the catch-up below continue from the newest one instead of
+        // re-pulling the window it just restored.
+        conv.seedRenderedPositions(lines);
       }
     } catch {
       // IndexedDB unavailable (e.g. private mode): proceed with an empty
@@ -357,12 +359,9 @@ export class ChannelsStore {
     try {
       const cached = await readTail(channel.conversationId, WINDOW_PAGE);
       if (cached.length > 0) {
-        conv.transcript = {
-          lines: cached.map(cachedLineToLine),
-          status: "idle",
-        };
-        conv.minRendered = cached[0]!.historyId;
-        conv.maxRendered = cached[cached.length - 1]!.historyId;
+        const lines: ConversationLine[] = cached.map(cachedLineToLine);
+        conv.transcript = { lines, status: "idle" };
+        conv.seedRenderedPositions(lines);
       }
     } catch {
       // IndexedDB unavailable (e.g. private mode): proceed empty; the
@@ -516,8 +515,8 @@ export class ChannelsStore {
           lines: cached.map(cachedLineToLine),
           status: "idle",
         };
-        conv.minRendered = cached[0]!.historyId;
-        conv.maxRendered = cached[cached.length - 1]!.historyId;
+        conv.minRowId = cached[0]!.historyId;
+        conv.maxRowId = cached[cached.length - 1]!.historyId;
       }
     } catch {
       // IndexedDB unavailable (private mode): proceed empty.
@@ -548,8 +547,8 @@ export class ChannelsStore {
           lines: cached.map(cachedLineToLine),
           status: "idle",
         };
-        conv.minRendered = cached[0]!.historyId;
-        conv.maxRendered = cached[cached.length - 1]!.historyId;
+        conv.minRowId = cached[0]!.historyId;
+        conv.maxRowId = cached[cached.length - 1]!.historyId;
       }
     } catch {
       // IndexedDB unavailable (private mode): proceed empty.

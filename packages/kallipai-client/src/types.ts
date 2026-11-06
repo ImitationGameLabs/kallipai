@@ -98,13 +98,20 @@ export interface MessageResponse {
 /** `GET /agents/{id}/external/history` -- a cursor-driven history window for
  * the direct (offline) path. `rows` are decoded `HistoryEntry` frames (the
  * sender paired with an authored `event` / `user_message` echo); `more` is true
- * only for paginated (`after`/`before`) queries that returned a full page.
+ * when rows exist beyond the page it returned.
  * Mirrors the relay `TagmaControl::History` shape. */
 export interface ExternalHistoryResponse {
   /** History entries: the sender paired with the content-only reply (mirrors
    * the live `{sender, body}` shape). */
   readonly rows: readonly HistoryEntry[];
   readonly more: boolean;
+  /** The page edge in the direction the query read: the newest position for
+   * an `after_seq` page, the oldest for a `before_seq` one. It says where the
+   * page stopped, not where the reader has rendered up to -- a page can skip
+   * rows the tagma could not decode (`undecodable`), so a caller advances its
+   * own cursor row by row and uses this only as the next request's start.
+   * Absent on payloads from a tagma that predates the field. */
+  readonly next?: number | null;
   /** Rows the window held that the tagma could not decode. They are not in
    * `rows`, so a non-zero count means this page is a hole in the history
    * rather than a complete window. Absent on payloads from a tagma that

@@ -256,6 +256,7 @@ function eventRow(id: number, text = `msg ${id}`): HistoryEntry {
       kind: "event",
       event: { type: "assistant_content", content: text },
       history_id: id,
+      seq: id,
       created_at: `2026-08-23T00:00:${String(id % 60).padStart(2, "0")}Z`,
     },
   };
@@ -264,7 +265,7 @@ function eventRow(id: number, text = `msg ${id}`): HistoryEntry {
 function userRow(id: number, text = `note ${id}`): HistoryEntry {
   return {
     sender: USER,
-    reply: { kind: "user_message", history_id: id, text },
+    reply: { kind: "user_message", history_id: id, seq: id, text },
   };
 }
 
@@ -284,8 +285,8 @@ Deno.test("catchUp on an empty window takes one recent batch", async () => {
   const conv = makeConv(channel);
   await conv.catchUp();
   assertEquals(conv.transcript.lines.length, 2);
-  assertEquals(conv.minRendered, 1);
-  assertEquals(conv.maxRendered, 2);
+  assertEquals(conv.minRowId, 1);
+  assertEquals(conv.maxRowId, 2);
 });
 
 Deno.test("a short recent batch disarms the sentinel", async () => {
@@ -305,13 +306,13 @@ Deno.test(
     );
     const channel = new FakeChannel([{ rows, more: true }]);
     const conv = makeConv(channel);
-    conv.minRendered = 60;
-    conv.maxRendered = 80;
+    conv.minRowId = 60;
+    conv.maxRowId = 80;
     conv.transcript = { lines: [lineOf(60)], status: "idle" };
     await conv.loadOlder();
     assertEquals(conv.transcript.lines[0]!.historyId, 10);
     assertEquals(conv.transcript.lines.length, 1 + WINDOW_PAGE);
-    assertEquals(conv.minRendered, 10);
+    assertEquals(conv.minRowId, 10);
     assertEquals(conv.hasMoreOlder, true); // server said more
   },
 );
@@ -324,23 +325,23 @@ Deno.test(
     ]);
     const conv = makeConv(channel);
     conv.pullTimeoutMs = 50;
-    conv.minRendered = 60;
-    conv.maxRendered = 80;
+    conv.minRowId = 60;
+    conv.maxRowId = 80;
     await conv.loadOlder();
     assertEquals(conv.transcript.lines.length, 2);
-    assertEquals(conv.minRendered, 10);
+    assertEquals(conv.minRowId, 10);
     assertEquals(conv.hasMoreOlder, true); // timeout proves nothing: retry
   },
 );
 
 Deno.test("an old user row never consumes the in-flight echo", () => {
   // c-pin #1: a before-page row whose text matches the in-flight send must
-  // not be mis-read as the send's ack (id 42 <= maxRendered 80 reroutes
+  // not be mis-read as the send's ack (id 42 <= maxRowId 80 reroutes
   // into the page buffer; the echo correlation never sees it).
   const channel = new FakeChannel([]);
   const conv = makeConv(channel);
-  conv.minRendered = 60;
-  conv.maxRendered = 80;
+  conv.minRowId = 60;
+  conv.maxRowId = 80;
   (conv as unknown as { pendingInFlight: unknown }).pendingInFlight = {
     localId: -1,
     text: "note 42",
@@ -356,11 +357,11 @@ Deno.test("an old user row never consumes the in-flight echo", () => {
 });
 
 Deno.test("fresh-device mount race does not permanently disarm", async () => {
-  // c-pin #2: readTail empty -> minRendered 0 -> loadOlder must no-op until
+  // c-pin #2: readTail empty -> minRowId 0 -> loadOlder must no-op until
   // the window forms (no recent pull at all).
   const channel = new FakeChannel([]);
   const conv = makeConv(channel);
-  assertEquals(conv.minRendered, 0);
+  assertEquals(conv.minRowId, 0);
   await conv.loadOlder();
   assertEquals(channel.script.length, 0); // no request issued
   assertEquals(conv.hasMoreOlder, true);
@@ -384,7 +385,7 @@ Deno.test(
     // starts at 0; a partial hydrate leaves the floor below the replay
     // range) would each fire a notification. maybeNotifyBackground needs
     // document/Notification (absent here), so pin the floor itself: MAX for
-    // the whole replay, reset to the live edge (maxRendered) after.
+    // the whole replay, reset to the live edge (maxRowId) after.
     const channel = new FakeChannel([
       { rows: [eventRow(1), eventRow(2), eventRow(3)], more: false },
     ]);
@@ -482,7 +483,7 @@ Deno.test(
       { rows: [eventRow(13)], more: true },
     ]);
     const conv = makeConv(channel);
-    conv.maxRendered = 10;
+    conv.maxRowId = 10;
     await conv.catchUp();
     assertEquals(channel.calls.length, 1);
     assertEquals(channel.calls[0], {
@@ -494,8 +495,8 @@ Deno.test(
       conv.transcript.lines.map((l) => l.historyId),
       [11, 12],
     );
-    assertEquals(conv.minRendered, 11);
-    assertEquals(conv.maxRendered, 12);
+    assertEquals(conv.minRowId, 11);
+    assertEquals(conv.maxRowId, 12);
   },
 );
 
@@ -593,6 +594,7 @@ Deno.test(
 Deno.test("a line landing while viewing reports the cursor; closed, no", () => {
   unreadStore.reset();
   const conv = makeConv(new FakeChannel([]));
+  conv.lastSeq = 20; // a window is rendered; these frames continue it
   landWindowNow(conv);
   const sent: number[] = [];
   conv.readCursorSender = (cursor) => {
@@ -606,6 +608,7 @@ Deno.test("a line landing while viewing reports the cursor; closed, no", () => {
       kind: "event",
       event: { type: "assistant_content", content: "first" },
       history_id: 21,
+      seq: 21,
       created_at: "2026-08-23T00:00:21Z",
     },
     AGENT,
@@ -617,6 +620,7 @@ Deno.test("a line landing while viewing reports the cursor; closed, no", () => {
       kind: "event",
       event: { type: "assistant_content", content: "second" },
       history_id: 22,
+      seq: 22,
       created_at: "2026-08-23T00:00:22Z",
     },
     AGENT,
@@ -627,6 +631,7 @@ Deno.test("a line landing while viewing reports the cursor; closed, no", () => {
 Deno.test("a burst lands one PUT, and the unmount lands the last one", () => {
   unreadStore.reset();
   const conv = makeConv(new FakeChannel([]));
+  conv.lastSeq = 30; // a window is rendered; these frames continue it
   const sent: number[] = [];
   conv.readCursorSender = (cursor) => {
     sent.push(cursor);
@@ -645,6 +650,7 @@ Deno.test("a burst lands one PUT, and the unmount lands the last one", () => {
         kind: "event",
         event: { type: "assistant_content", content: `line ${id}` },
         history_id: id,
+        seq: id,
         created_at: "2026-08-23T00:00:31Z",
       },
       AGENT,
@@ -659,6 +665,7 @@ Deno.test("a burst lands one PUT, and the unmount lands the last one", () => {
       kind: "event",
       event: { type: "assistant_content", content: "line 34" },
       history_id: 34,
+      seq: 34,
       created_at: "2026-08-23T00:00:34Z",
     },
     AGENT,
@@ -667,6 +674,34 @@ Deno.test("a burst lands one PUT, and the unmount lands the last one", () => {
   conv.flushReadCursor(); // the page unmounted
   assertEquals(sent, [33, 34]);
 });
+
+Deno.test(
+  "a window pull reports its newest position once, and it is the row's own",
+  async () => {
+    unreadStore.reset();
+    const channel = new FakeChannel([{ rows: [eventRow(5), eventRow(6)] }]);
+    const conv = makeConv(channel);
+    landWindowNow(conv);
+    const sent: number[] = [];
+    conv.readCursorSender = (cursor) => {
+      sent.push(cursor);
+      return Promise.resolve();
+    };
+    unreadStore.enter(tagmaKey("tagma-1"));
+    await conv.catchUp();
+    assertEquals(
+      sent,
+      [6],
+      "one PUT for the page, carrying its newest position",
+    );
+    const line = conv.transcript.lines.find((l) => l.historyId === 6);
+    assertEquals(
+      line?.seq,
+      6,
+      "the reported number is the pulled row's own position",
+    );
+  },
+);
 
 Deno.test(
   "the window landing reports the newest rendered id to the tagma",
@@ -701,8 +736,8 @@ Deno.test(
     ]);
     const conv = makeConv(channel);
     conv.transcript = { lines: [100, 101, 102].map(lineOf), status: "idle" };
-    conv.minRendered = 100;
-    conv.maxRendered = 102;
+    conv.minRowId = 100;
+    conv.maxRowId = 102;
     await conv.catchUp();
     // Keeping the old cache tail beside the new window would render an unknown
     // gap between them that no page can fill; the window becomes the window.
@@ -710,8 +745,8 @@ Deno.test(
       conv.transcript.lines.map((l) => l.historyId),
       [500, 501, 502],
     );
-    assertEquals(conv.minRendered, 500);
-    assertEquals(conv.maxRendered, 502);
+    assertEquals(conv.minRowId, 500);
+    assertEquals(conv.maxRowId, 502);
     // Scroll-up continues from the adopted head (the dropped tail is not a
     // paging cursor any more), and the server page is the contiguous source.
     channel.script.push({ rows: [eventRow(490)], more: true });
@@ -753,8 +788,8 @@ Deno.test(
     ]);
     const conv = makeConv(channel);
     conv.transcript = { lines: [500, 501, 502].map(lineOf), status: "idle" };
-    conv.minRendered = 500;
-    conv.maxRendered = 502;
+    conv.minRowId = 500;
+    conv.maxRowId = 502;
     stubCachedPage(conv, cachedRows([100, 101]));
     await conv.loadOlder();
     assertEquals(channel.calls[0], {
@@ -766,7 +801,7 @@ Deno.test(
       conv.transcript.lines.map((l) => l.historyId),
       [490, 491, 500, 501, 502],
     );
-    assertEquals(conv.minRendered, 490);
+    assertEquals(conv.minRowId, 490);
   },
 );
 
@@ -776,8 +811,8 @@ Deno.test(
     const channel = new FakeChannel([{ rows: [], more: false }]);
     const conv = makeConv(channel);
     conv.transcript = { lines: [500, 501, 502].map(lineOf), status: "idle" };
-    conv.minRendered = 500;
-    conv.maxRendered = 502;
+    conv.minRowId = 500;
+    conv.maxRowId = 502;
     // 499 abuts the head: a continuous segment, safe to render.
     stubCachedPage(conv, cachedRows([497, 498, 499]));
     await conv.loadOlder();
@@ -785,7 +820,7 @@ Deno.test(
       conv.transcript.lines.map((l) => l.historyId),
       [497, 498, 499, 500, 501, 502],
     );
-    assertEquals(conv.minRendered, 497);
+    assertEquals(conv.minRowId, 497);
     // The server page continues BELOW the merged rows: re-fetching 497..499
     // would fold to nothing and disarm the sentinel with history still below.
     assertEquals(channel.calls[0]?.before, 497);
@@ -800,7 +835,7 @@ Deno.test("the cursor write addresses the root the roster names", async () => {
   const conv = makeConv(channel);
   landWindowNow(conv);
   unreadStore.enter(tagmaKey("tagma-1"));
-  conv.maxRendered = 42;
+  conv.lastSeq = 42;
   conv.markRead();
   await settle();
   assertEquals(channel.manages, [
@@ -825,7 +860,7 @@ Deno.test("a rejected cursor write keeps its retry point", async () => {
   const conv = makeConv(channel);
   landWindowNow(conv);
   unreadStore.enter(tagmaKey("tagma-1"));
-  conv.maxRendered = 42;
+  conv.lastSeq = 42;
   conv.markRead();
   await settle();
   const puts = () =>
@@ -850,7 +885,7 @@ Deno.test("an unreadable roster sends no cursor write", async () => {
   const conv = makeConv(channel);
   landWindowNow(conv);
   unreadStore.enter(tagmaKey("tagma-1"));
-  conv.maxRendered = 42;
+  conv.lastSeq = 42;
   conv.markRead();
   await settle();
   assertEquals(
@@ -870,10 +905,10 @@ Deno.test("a settled write does not clear a newer one's marker", async () => {
     return new Promise<void>((resolve) => pending.push(resolve));
   };
   unreadStore.enter(tagmaKey("tagma-1"));
-  conv.maxRendered = 10;
+  conv.lastSeq = 10;
   conv.markRead();
   assertEquals(sent, [10]);
-  conv.maxRendered = 20;
+  conv.lastSeq = 20;
   conv.markRead();
   assertEquals(sent, [10, 20]);
   pending[0](); // the older write lands while the newer is still in flight
@@ -883,7 +918,7 @@ Deno.test("a settled write does not clear a newer one's marker", async () => {
   assertEquals(sent, [10, 20]);
   pending[1]();
   await settle();
-  conv.maxRendered = 21;
+  conv.lastSeq = 21;
   conv.markRead();
   assertEquals(sent, [10, 20, 21]);
 });
@@ -906,10 +941,10 @@ Deno.test("a rootless install warns once per tunnel", async () => {
     warnings.push(args.map((arg) => String(arg)).join(" "));
   };
   try {
-    conv.maxRendered = 42;
+    conv.lastSeq = 42;
     conv.markRead();
     await settle();
-    conv.maxRendered = 43;
+    conv.lastSeq = 43;
     conv.markRead();
     await settle();
   } finally {
@@ -927,8 +962,8 @@ Deno.test("a rootless install warns once per tunnel", async () => {
 /** A window holding only row 60, with the floor and head set as the page
  *  would leave them after a catch-up. */
 function windowAt60(conv: RelayConv): void {
-  conv.minRendered = 60;
-  conv.maxRendered = 80;
+  conv.minRowId = 60;
+  conv.maxRowId = 80;
   conv.transcript = { lines: [lineOf(60)], status: "idle" };
 }
 
@@ -967,7 +1002,7 @@ Deno.test("a scroll-up page is not disarmed by a probe in flight", async () => {
   assertEquals(conv.hasMoreOlder, true);
   assertEquals(conv.transcript.lines.length, 1 + WINDOW_PAGE);
   assertEquals(conv.transcript.lines[0]!.historyId, 10);
-  assertEquals(conv.minRendered, 10);
+  assertEquals(conv.minRowId, 10);
 });
 
 Deno.test(
@@ -1009,7 +1044,7 @@ Deno.test(
     assertEquals(await conv.peekRow(30), "deleted");
     // A read, not a merge: the window and its floor are untouched.
     assertEquals(conv.transcript.lines.length, 1);
-    assertEquals(conv.minRendered, 60);
+    assertEquals(conv.minRowId, 60);
     assertEquals(channel.calls.length, 1);
   },
 );

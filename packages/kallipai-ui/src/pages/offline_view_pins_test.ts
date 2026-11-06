@@ -38,7 +38,7 @@ function attachFn(src: string, name: string): string {
   const body = src.slice(start, start + 2000);
   assert(body.includes("readTail("), `${name} must hydrate via readTail`);
   assert(
-    body.includes("minRendered") && body.includes("maxRendered"),
+    body.includes("minRowId") && body.includes("maxRowId"),
     `${name} must establish the window bounds (loadOlderPage's guard)`,
   );
   return body;

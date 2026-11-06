@@ -135,6 +135,12 @@ export type TagmaReply =
       /** RFC 3339 send time of the outbound row. Absent on frames with no durable
        * row and on payloads serialized before the field existed. */
       readonly created_at?: string;
+      /** The row's position in this conversation's log (`chat_history.seq`):
+       * dense and never reused, so a reader can hold it across reconnects and
+       * ask for what follows. Absent when the row carried no position (a
+       * frame the projector did not stamp) or on payloads from a tagma that
+       * predates it. */
+      readonly seq?: number | null;
     }
   | {
       readonly kind: "user_message";
@@ -143,6 +149,9 @@ export type TagmaReply =
       /** RFC 3339 send time of the original inbound row. Absent on payloads
        * serialized before the field existed. */
       readonly created_at?: string;
+      /** The row's position in this conversation's log; see the `event` arm
+       * for the full contract. */
+      readonly seq?: number | null;
       /** The row's attachment, when the inbound message carried one. Absent on
        * rows persisted before the field existed (replayed as no file). */
       readonly attachment?: FileAttachment;

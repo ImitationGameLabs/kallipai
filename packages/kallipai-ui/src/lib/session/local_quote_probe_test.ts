@@ -1,8 +1,9 @@
 // The local leaf's quote probe: a quoted row the loaded window does not hold
-// is resolved with one before-page straight off the transport. That page is
-// all this leaf contributes -- the split between a contiguous miss (`deleted`)
-// and a read the client could not answer (`error`, retryable) is the base's
-// single decision, and the leaf answers null for a probe it cannot serve.
+// is resolved with one read naming that row, straight off the transport.
+// That answer is all this leaf contributes -- the split between a contiguous
+// contiguous miss (`deleted`) and a read the client could not answer (`error`,
+// retryable) is the base's single decision, and the leaf answers null for a
+// probe it cannot serve.
 //
 // The module under test is rune-bearing and `deno test` runs it uncompiled, so
 // a passthrough `$state` shim lets it run with plain fields.
@@ -21,8 +22,9 @@ import { DirectMessageSender } from "./messageSender.svelte.ts";
 import { LOCAL_OPERATOR_SENDER } from "../transcript.ts";
 
 type PageRequest = {
-  after?: number | null;
-  before?: number | null;
+  afterSeq?: number | null;
+  row?: number | null;
+  beforeSeq?: number | null;
   limit?: number;
 };
 
@@ -33,6 +35,7 @@ function userRow(historyId: number, text = "row") {
     reply: {
       kind: "user_message",
       history_id: historyId,
+      seq: historyId,
       text,
       created_at: "2026-10-22T00:00:00Z",
     },
@@ -46,6 +49,7 @@ function blankRow(historyId: number) {
     reply: {
       kind: "user_message",
       history_id: historyId,
+      seq: historyId,
       text: "   ",
       created_at: "2026-10-22T00:00:00Z",
     },
@@ -78,7 +82,8 @@ function conversation(script: (opts: PageRequest) => unknown) {
     "conv-local",
     new DirectMessageSender(client as never, "root"),
   );
-  conv.maxRendered = 20;
+  // A rendered head: the probe only answers ids at or below it.
+  conv.maxRowId = 20;
   return { conv, seen };
 }
 
@@ -95,8 +100,8 @@ Deno.test("a probed row resolves from the page just below it", async () => {
   assertEquals(line.text, "hello");
   assertEquals(
     seen,
-    [{ before: 10, limit: 1 }],
-    "one before-page, one row, at the id's own cursor",
+    [{ row: 9, limit: 1 }],
+    "one read naming the row, nothing else",
   );
 });
 
@@ -138,8 +143,8 @@ Deno.test("a probe reads its page and leaves the window alone", async () => {
   const lines = conv.transcript.lines.length;
   await conv.peekRow(9);
   assertEquals(conv.transcript.lines.length, lines, "no row is merged");
-  assertEquals(conv.maxRendered, 20, "the head does not advance");
-  assertEquals(conv.minRendered, 0, "the floor does not move");
+  assertEquals(conv.maxRowId, 20, "the head does not advance");
+  assertEquals(conv.minRowId, 0, "the floor does not move");
 });
 
 Deno.test(

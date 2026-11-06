@@ -363,19 +363,18 @@ Deno.test("a body of keepalive comments alone never reconnects", async () => {
   }
 });
 
-Deno.test("a gap frame decodes with and without a cursor", async () => {
-  // The wire omits `after` when the connection has delivered no durable
-  // row, so an empty payload must read as "no anchor", not as a frame the
-  // demux could not decode.
+Deno.test("a missed frame decodes with no payload", async () => {
+  // The marker says frames were lost; it names no position, because the
+  // reader's own cursor already says where to resume. An empty payload must
+  // therefore read as the marker, not as a frame the demux could not decode.
   const { client } = streamClient([
-    liveStream(
-      { event: "gap", data: JSON.stringify({ after: 7 }) },
-      { event: "gap", data: "{}" },
-    ),
+    liveStream({ event: "missed", data: "{}" }),
   ]);
   const t = new DirectTransport(client, "root", LOCAL_OPERATOR_SENDER, [1]);
-  const seen: (number | null)[] = [];
-  t.onGap = (after) => seen.push(after);
+  let missed = 0;
+  t.onMissed = () => {
+    missed += 1;
+  };
   const drain = (async () => {
     for await (const _ of t.status()) {
       /* wait */
@@ -384,7 +383,7 @@ Deno.test("a gap frame decodes with and without a cursor", async () => {
   await tick(80);
   t.close();
   await drain;
-  assertEquals(seen, [7, null]);
+  assertEquals(missed, 1);
 });
 
 /** The closing marker as it arrives on the wire: a named event, empty JSON. */

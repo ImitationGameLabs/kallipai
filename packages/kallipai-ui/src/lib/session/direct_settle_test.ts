@@ -62,7 +62,7 @@ Deno.test(
     );
     assertEquals(lines[0]!.status, "sent", "the line is confirmed");
     assertEquals(
-      conv.maxRendered,
+      conv.maxRowId,
       0,
       "the cursor stays with the read path, not the response id",
     );
@@ -263,7 +263,7 @@ Deno.test(
     assertEquals(lines[0]!.historyId, 42);
     assertEquals(lines[0]!.status, "sent");
     assertEquals(
-      conv.maxRendered,
+      conv.maxRowId,
       0,
       "a replay moves no cursor: it proves only that this row is here",
     );
@@ -288,11 +288,11 @@ Deno.test("a row below a settled id lands and one above advances", async () => {
     2,
     "the lower row is not swallowed by the settled id",
   );
-  assertEquals(conv.maxRendered, 42);
+  assertEquals(conv.maxRowId, 42);
 
   feedFrame(conv, 44);
   assertEquals(conv.transcript.lines.length, 3);
-  assertEquals(conv.maxRendered, 44, "new rows move the cursor");
+  assertEquals(conv.maxRowId, 44, "new rows move the cursor");
 });
 
 Deno.test("a replay cannot pull the cursor over a hole below it", async () => {
@@ -314,10 +314,10 @@ Deno.test("a replay cannot pull the cursor over a hole below it", async () => {
   // cursor -- doing so would make the backfill skip 6..9 for good.
   conv.send("hello");
   await tick();
-  assertEquals(conv.maxRendered, 0, "the settled row moves no cursor");
+  assertEquals(conv.maxRowId, 0, "the settled row moves no cursor");
   feedFrame(conv, 10);
   assertEquals(conv.transcript.lines.length, 1, "the replay renders nothing");
-  assertEquals(conv.maxRendered, 0, "the replay moves no cursor either");
+  assertEquals(conv.maxRowId, 0, "the replay moves no cursor either");
   await conv.catchUp();
   assertEquals(pulls.length, 1);
   const after = (pulls[0] as { after?: number | null }).after;

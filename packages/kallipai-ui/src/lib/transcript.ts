@@ -110,6 +110,12 @@ export interface ConversationLine {
    *  text: the bubble resolves it against the loaded lines, so a target that
    *  is gone renders as a placeholder instead of stale copy. */
   readonly quote?: number;
+  /** The line's position in its conversation's log (`chat_history.seq`),
+   *  when the wire carried one: the unit the resume cursor and the read
+   *  watermark are expressed in. Absent on optimistic lines, on signal-
+   *  produced system lines, and on rows a tagma did not stamp -- a line
+   *  without a position moves neither. */
+  readonly seq?: number;
 }
 
 type ConversationStatus = "idle" | "busy" | "error";
@@ -247,6 +253,7 @@ export function historyEntryLine(entry: HistoryEntry): ConversationLine | null {
       text,
       sender: cs,
       createdAt: reply.created_at,
+      ...(reply.seq != null ? { seq: reply.seq } : {}),
     };
   }
   if (reply.kind === "user_message") {
@@ -264,6 +271,7 @@ export function historyEntryLine(entry: HistoryEntry): ConversationLine | null {
         ? { attachment: reply.attachment }
         : {}),
       ...(reply.quote !== undefined ? { quote: reply.quote } : {}),
+      ...(reply.seq != null ? { seq: reply.seq } : {}),
     };
   }
   return null;
@@ -273,9 +281,11 @@ export function historyEntryLine(entry: HistoryEntry): ConversationLine | null {
  * single lines rebuild per batch — the batch, not each row, is the
  * granularity the live drain never offers. Rows whose id already sits in
  * the window are dropped (idempotent against re-pulls and cache/server
- * overlap); everything else is inserted in id order, before the durable
- * ids but always behind the optimistic tail (synthetic negative ids must
- * stay last so the sending pulse stays pinned to the bottom). */
+ * overlap); a row already on screen takes the position the page names for it
+ * when it has none (a live frame rendered it before the page arrived);
+ * everything else is inserted in id order, before the durable ids but always
+ * behind the optimistic tail (synthetic negative ids must stay last so the
+ * sending pulse stays pinned to the bottom). */
 export function mergeHistoryLines(
   state: ConversationTranscript,
   rows: ConversationLine[],
@@ -283,10 +293,18 @@ export function mergeHistoryLines(
   if (rows.length === 0) return { transcript: state, added: 0 };
   const durable = state.lines.filter((l) => l.historyId > 0);
   const tail = state.lines.filter((l) => l.historyId <= 0);
+  const byId = new Map(
+    rows.filter((l) => l.historyId > 0).map((l) => [l.historyId, l]),
+  );
   const have = new Set(durable.map((l) => l.historyId));
   const fresh = rows.filter((l) => l.historyId > 0 && !have.has(l.historyId));
-  if (fresh.length === 0) return { transcript: state, added: 0 };
-  const lines = [...durable, ...fresh].sort(
+  const named = (l: ConversationLine): ConversationLine => {
+    const row = byId.get(l.historyId);
+    return l.seq == null && row?.seq != null ? { ...l, seq: row.seq } : l;
+  };
+  const filled = durable.some((l) => named(l) !== l);
+  if (fresh.length === 0 && !filled) return { transcript: state, added: 0 };
+  const lines = [...durable.map(named), ...fresh].sort(
     (a, b) => a.historyId - b.historyId,
   );
   return {
@@ -640,6 +658,26 @@ export function markLineSent(
   };
 }
 
+/** Give the line carrying `historyId` the position the frame reports for it.
+ *  An echo arrives for a row the transcript already renders (an ack promoted
+ *  it, or the row is a replay), so its position belongs on that line instead
+ *  of a second copy of the row. No-op when the line is gone or already
+ *  carries the position. */
+export function stampPosition(
+  state: ConversationTranscript,
+  historyId: number,
+  seq: number,
+): ConversationTranscript {
+  const target = state.lines.find((l) => l.historyId === historyId);
+  if (target === undefined || target.seq === seq) return state;
+  return {
+    ...state,
+    lines: state.lines.map((l) =>
+      l.historyId === historyId ? { ...l, seq } : l,
+    ),
+  };
+}
+
 /** The cacheable content line for a reply, or `null` if it carries no durable
  * authored content (acks, batch markers, op errors) or has no real
  * `history_id` (synthetic / un-stored frames are not cached). Only authored
@@ -658,6 +696,7 @@ export function cacheLineOf(
   createdAt?: string;
   attachment?: FileAttachment;
   quote?: number;
+  seq?: number;
 } | null {
   const cs = sender ? toSender(sender) : undefined;
   if (reply.kind === "user_message") {
@@ -672,6 +711,7 @@ export function cacheLineOf(
             ? { attachment: reply.attachment }
             : {}),
           ...(reply.quote !== undefined ? { quote: reply.quote } : {}),
+          ...(reply.seq != null ? { seq: reply.seq } : {}),
         }
       : null;
   }
@@ -685,6 +725,7 @@ export function cacheLineOf(
       text: reply.event.content,
       sender: cs,
       createdAt: reply.created_at,
+      ...(reply.seq != null ? { seq: reply.seq } : {}),
     };
   }
   return null;

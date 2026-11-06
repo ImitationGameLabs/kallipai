@@ -21,8 +21,8 @@ import { DirectMessageSender } from "./messageSender.svelte.ts";
 import { LOCAL_OPERATOR_SENDER } from "../transcript.ts";
 
 type PageRequest = {
-  after?: number | null;
-  before?: number | null;
+  afterSeq?: number | null;
+  beforeSeq?: number | null;
   limit?: number;
 };
 
@@ -40,6 +40,7 @@ function userRow(historyId: number) {
     reply: {
       kind: "user_message",
       history_id: historyId,
+      seq: historyId,
       text: `row ${historyId}`,
       created_at: "2026-10-22T00:00:00Z",
     },
@@ -113,8 +114,9 @@ Deno.test(
       more: true,
       undecodable: 3,
     }));
-    conv.minRendered = 20;
-    conv.maxRendered = 20;
+    conv.minRowId = 20;
+    conv.minSeq = 20;
+    conv.maxRowId = 20;
     await conv.loadOlder(3);
     assertEquals(conv.hasMoreOlder, false);
     await conv.loadOlder(3);
@@ -131,8 +133,9 @@ Deno.test(
       more: false,
       undecodable: 0,
     }));
-    conv.minRendered = 20;
-    conv.maxRendered = 20;
+    conv.minRowId = 20;
+    conv.minSeq = 20;
+    conv.maxRowId = 20;
     await conv.loadOlder(3);
     assertEquals(conv.hasMoreOlder, false);
   },

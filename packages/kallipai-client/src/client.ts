@@ -144,12 +144,12 @@ export class TagmaClient {
 
   /** Subscribe to the agent's external event stream (the chat-room API): one
    * multiplexed SSE discriminated by the `event:` field ("authored" | "signal"
-   * | "status" | "gap" | "closing"). Yields raw `{ event, data }` frames; the
-   * caller decodes each payload per its event name, a `gap` names the last
-   * durable row the dropped frames followed, and `closing` says the tagma is
-   * shutting down and nothing follows. This is the frontend's sole
-   * window onto the tagma -- authored assistant messages, runtime signals,
-   * status snapshots, gap markers and the closing frame all arrive here. */
+   * | "status" | "missed" | "closing"). Yields raw `{ event, data }` frames; the
+   * caller decodes each payload per its event name. `missed` carries no payload:
+   * it says frames were lost and the reader repairs from its own cursor. `closing`
+   * says the tagma is shutting down and nothing follows. This is the frontend's
+   * sole window onto the tagma -- new messages, runtime signals, status snapshots,
+   * the repair marker and the closing frame all arrive here. */
   async *externalEventStream(
     id: AgentId,
     signal?: AbortSignal,
@@ -180,18 +180,29 @@ export class TagmaClient {
     }
   }
 
-  /** Pull a cursor-driven history window for the direct (offline) path. The
-   * direct SSE is live-only, so the frontend asks for back-log here using its
-   * `maxRendered` high-water mark — symmetric with the relay's
-   * `TagmaControl::History`. Omit `after`/`before` for the most recent `limit`
-   * (a first-time device with an empty cache). */
+  /** Pull a history page for the direct (offline) path. The direct SSE is
+   * live-only and lossy, so the frontend asks for the log here: `afterSeq`
+   * continues from the last position it rendered, `beforeSeq` reads the page
+   * above a scroll-up anchor, `row` asks for one row by id (the read behind a
+   * quoted reference), and omitting all three reads the newest `limit` rows (a
+   * first-time device with an empty cache). `next` in the answer says where
+   * the same request continues. Symmetric with the relay's
+   * `TagmaControl::History`, in position numbering rather than row ids. */
   externalHistory(
     id: AgentId,
-    opts: { after?: number | null; before?: number | null; limit?: number },
+    opts: {
+      afterSeq?: number | null;
+      beforeSeq?: number | null;
+      /** One row by id; never combined with a position cursor. */
+      row?: number | null;
+      limit?: number;
+    },
   ): Promise<ExternalHistoryResponse> {
     const params = new URLSearchParams();
-    if (opts.after != null) params.set("after", String(opts.after));
-    if (opts.before != null) params.set("before", String(opts.before));
+    if (opts.afterSeq != null) params.set("after_seq", String(opts.afterSeq));
+    if (opts.beforeSeq != null)
+      params.set("before_seq", String(opts.beforeSeq));
+    if (opts.row != null) params.set("row", String(opts.row));
     if (opts.limit != null) params.set("limit", String(opts.limit));
     const qs = params.toString();
     const path = `/agents/${id}/external/history${qs ? `?${qs}` : ""}`;

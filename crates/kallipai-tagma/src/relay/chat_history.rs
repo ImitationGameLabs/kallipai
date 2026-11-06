@@ -366,8 +366,10 @@ struct PendingRow<'a> {
 ///
 /// Typed on purpose: SQLite's own wording is engine text, and matching it
 /// would also swallow an unrelated error that happens to carry those words.
-/// `SQLITE_BUSY` is 5, `SQLITE_LOCKED` is 6; by the time either surfaces the
-/// configured `busy_timeout` has already been spent waiting.
+/// `SQLITE_BUSY` is 5 and `SQLITE_LOCKED` is 6, but sqlx hands back the
+/// extended code (`SQLITE_BUSY_RECOVERY` is 261, `SQLITE_BUSY_SNAPSHOT` is
+/// 517), so the class lives in the low byte; by the time either surfaces
+/// the configured `busy_timeout` has already been spent waiting.
 fn is_busy(err: &anyhow::Error) -> bool {
     err.chain().any(|cause| {
         cause
@@ -376,7 +378,11 @@ fn is_busy(err: &anyhow::Error) -> bool {
                 sqlx::Error::Database(db) => db.code(),
                 _ => None,
             })
-            .is_some_and(|code| code.as_ref() == "5" || code.as_ref() == "6")
+            .is_some_and(|code| {
+                code.as_ref()
+                    .parse::<i64>()
+                    .is_ok_and(|c| c & 0xff == 5 || c & 0xff == 6)
+            })
     })
 }
 

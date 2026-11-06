@@ -79,7 +79,7 @@ export class ManageChannelError extends Error {
  *
  * History is pull-based: the channel does NOT auto-request it; the UI store
  * hydrates its local cache and then sends a `TagmaControl::History`
- * (`after: maxRendered` for incremental, or `latest` for an empty cache) to
+ * (`after: maxRowId` for incremental, or `latest` for an empty cache) to
  * fetch what it is missing, drained through the normal `replies()` stream.
  * Throws if the tagma is offline / not owned / the signature fails to verify.
  */

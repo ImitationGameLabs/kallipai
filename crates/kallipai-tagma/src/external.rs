@@ -702,14 +702,57 @@ impl ExternalProjector {
         })
     }
 
+    /// One row, by id, as a page of at most one entry: the read behind a quote
+    /// probe, which asks whether the quoted row is still there and what it says.
+    ///
+    /// Addressed by id inside the caller's partition, not by a window past it:
+    /// row ids are minted across every partition, so the first id above a given
+    /// row is not that row, and only a lookup by id answers whether it is here.
+    /// `next` names the row's own position, `more` is false (one id names one
+    /// row), and `undecodable` counts a row that is there but unreadable -- a
+    /// hole, not an absence. A row this partition does not hold is the default
+    /// page: no entry, nothing undecodable, and no position.
+    pub(crate) async fn read_row(
+        &self,
+        user_id: Option<&str>,
+        row: i64,
+    ) -> Result<HistoryPage, HistoryReadError> {
+        let Some(db) = self.inner.history.clone() else {
+            return Ok(HistoryPage::default());
+        };
+        let stored = chat_history::read_by_id(&db, user_id, row)
+            .await
+            .map_err(|e| {
+                error!("row read failed: {e:#}");
+                HistoryReadError::Store(e)
+            })?;
+        let Some(stored) = stored else {
+            return Ok(HistoryPage::default());
+        };
+        // The position comes off the stored row before decoding: a row that
+        // fails to decode still holds a position, and naming it keeps the
+        // caller from reading the same hole twice.
+        let next = Some(stored.seq);
+        let sender = resolve_sender(&stored, &self.agent_sender());
+        let entry = chat_history::decode_row(stored, sender);
+        if entry.is_none() {
+            warn!(row, "the quoted row did not decode; the page is a hole");
+        }
+        Ok(HistoryPage {
+            undecodable: u32::from(entry.is_none()),
+            entries: entry.into_iter().collect(),
+            more: false,
+            next,
+        })
+    }
+
     /// Read one window in the numbering the caller's cursor lives in and answer
     /// `(rows, more, next)`: rows oldest-first, whether another page exists that
     /// way, and where the same request continues.
     ///
-    /// A row-addressed window answers `next = None`: its caller already holds the
-    /// ids of the rows it rendered, and it keeps the marker rule it has always
-    /// had (`more` means the window filled to `limit`), so the relay's pull is
-    /// unchanged by anything here.
+    /// The two numberings answer different questions, so each has its own
+    /// reader below and the meaning of `more` and `next` follows the one that
+    /// ran.
     async fn read_window(
         &self,
         db: &chat_history::Db,
@@ -720,26 +763,51 @@ impl ExternalProjector {
     ) -> anyhow::Result<(Vec<chat_history::HistoryRow>, bool, Option<i64>)> {
         match (after, before) {
             (Some(HistoryCursor::Position(a)), _) => {
+                self.read_position_window(db, user_id, Some(a), None, limit)
+                    .await
+            }
+            (None, Some(HistoryCursor::Position(b))) => {
+                self.read_position_window(db, user_id, None, Some(b), limit)
+                    .await
+            }
+            (Some(HistoryCursor::Row(a)), _) => {
+                self.read_row_window(db, user_id, a, false, limit).await
+            }
+            (None, Some(HistoryCursor::Row(b))) => {
+                self.read_row_window(db, user_id, b, true, limit).await
+            }
+            (None, None) => {
+                self.read_position_window(db, user_id, None, None, limit)
+                    .await
+            }
+        }
+    }
+
+    /// A window in the partition's own numbering: `after` reads forward from a
+    /// position, `before` reads backward, and neither reads the newest rows.
+    /// `more` is asked of the store rather than inferred from a filled page, so
+    /// a resuming reader can stop; `next` is the page's edge in the direction it
+    /// was read, echoed back when the page came back empty.
+    async fn read_position_window(
+        &self,
+        db: &chat_history::Db,
+        user_id: Option<&str>,
+        after: Option<i64>,
+        before: Option<i64>,
+        limit: u32,
+    ) -> anyhow::Result<(Vec<chat_history::HistoryRow>, bool, Option<i64>)> {
+        match (after, before) {
+            (Some(a), _) => {
                 let rows = chat_history::read_after_seq(db, user_id, a, limit).await?;
                 let newest = rows.last().map(|r| r.seq);
                 let more = chat_history::has_after_seq(db, user_id, newest.unwrap_or(a)).await?;
                 Ok((rows, more, Some(newest.unwrap_or(a))))
             }
-            (Some(HistoryCursor::Row(a)), _) => {
-                let rows = chat_history::read_after(db, user_id, a, limit).await?;
-                let more = rows.len() as u32 == limit;
-                Ok((rows, more, None))
-            }
-            (None, Some(HistoryCursor::Position(b))) => {
+            (None, Some(b)) => {
                 let rows = chat_history::read_before_seq(db, user_id, b, limit).await?;
                 let oldest = rows.first().map(|r| r.seq);
                 let more = chat_history::has_before_seq(db, user_id, oldest.unwrap_or(b)).await?;
                 Ok((rows, more, Some(oldest.unwrap_or(b))))
-            }
-            (None, Some(HistoryCursor::Row(b))) => {
-                let rows = chat_history::read_before(db, user_id, b, limit).await?;
-                let more = rows.len() as u32 == limit;
-                Ok((rows, more, None))
             }
             (None, None) => {
                 let rows = chat_history::read_last_n(db, user_id, limit as u64).await?;
@@ -747,6 +815,28 @@ impl ExternalProjector {
                 Ok((rows, false, next))
             }
         }
+    }
+
+    /// A window in row ids: `backwards` reads the rows before `cursor`, forward
+    /// the rows after it. This caller already holds the ids it rendered, so
+    /// `more` keeps its oldest meaning (the window filled to `limit`) and `next`
+    /// stays `None`: a row id says which row came last, not where in its
+    /// conversation that row sits.
+    async fn read_row_window(
+        &self,
+        db: &chat_history::Db,
+        user_id: Option<&str>,
+        cursor: i64,
+        backwards: bool,
+        limit: u32,
+    ) -> anyhow::Result<(Vec<chat_history::HistoryRow>, bool, Option<i64>)> {
+        let rows = if backwards {
+            chat_history::read_before(db, user_id, cursor, limit).await?
+        } else {
+            chat_history::read_after(db, user_id, cursor, limit).await?
+        };
+        let more = rows.len() as u32 == limit;
+        Ok((rows, more, None))
     }
 
     /// Append an outbound row once, stamp its row id + `created_at` onto

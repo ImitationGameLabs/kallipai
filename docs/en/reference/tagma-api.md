@@ -782,25 +782,33 @@ on a non-root id, `503` if direct serving is not initialized).
 The pull face of the same conversation, and how a reader recovers what the
 stream no longer holds. Root-only. Query params: `after_seq` (rows newer than
 that position, oldest-first), `before_seq` (rows older than it, also rendered
-oldest-first), and `limit` (capped at 50). At most one cursor is accepted and a
-zero `limit` is refused, both with `400`; `503` answers when no store can.
-
+oldest-first), `row` (one row, by id), and `limit` (capped at 50). At most one
+cursor is accepted, as is a zero `limit` on a window read, both with `400`; `503`
+answers when no store can.
 The response is `{ "rows", "more", "undecodable", "next" }`. Each row is a
 `HistoryEntry`, and a replayed row carries the position it was stored under as
 `seq`. `next` names where the same request continues: the newest position of a
-catch-up page, the oldest of a scroll-up page, and the cursor the caller sent
-when the page came back empty. A reader resumes from `next` instead of inferring
-a position from the rows it happens to hold. `more` says whether a row exists
+catch-up page, the oldest of a scroll-up page, the cursor the caller sent when
+the page came back empty, or the row's own position for a `row` read. It is
+where the next request starts, not a rendered position: a reader's own cursor
+still follows the rows it rendered. `more` says whether a row exists
 beyond the page in the direction asked; it is an existence probe, not a
 fullness test, so a page that fills `limit` with nothing behind it answers
 `false`. A request with no cursor reads the newest page and answers
 `more: false`.
 
+`row=<id>` asks for one row instead of a window, in the same response shape:
+at most one entry, `more: false`, `next` naming that row's position, and
+`undecodable` set when the row is there but cannot be decoded. An empty page
+answers an id this conversation does not hold -- an absence, not an error --
+which is what a quoted reference is resolved against. `limit` does not apply
+to a `row` read. `row` never shares a request with `after_seq` or `before_seq`.
+
 Positions are local to one conversation and assigned in store order from 1.
 They are not row ids: an id is global across partitions, a position is local to
 one. `undecodable` counts rows the window held that the decoder could not read;
-the position still advances past them, so the next read continues beyond the
-hole instead of landing on it again.
+`next` still names the page's edge over them, so the next read continues
+beyond the hole instead of landing on it again.
 
 ##### `PUT /agents/{id}/external/read-cursor`: Mark How Far the User Read
 

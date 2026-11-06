@@ -39,6 +39,7 @@ import {
   replaceLineId,
   retryLine,
   sendFailed,
+  stampPosition,
   toSender,
   withUserLine,
 } from "../transcript.ts";
@@ -131,6 +132,7 @@ export function cachedLineToLine(c: CachedLine): ConversationLine {
     createdAt: c.createdAt,
     attachment: c.attachment,
     quote: c.quote,
+    seq: c.seq,
   };
 }
 
@@ -141,6 +143,14 @@ function contentId(reply: TagmaReply): number {
   return reply.kind === "event" || reply.kind === "user_message"
     ? (reply.history_id ?? 0)
     : 0;
+}
+/** The position a content frame carries (null for markers, acks, and frames
+ *  the tagma did not stamp): the content test of {@link contentId}, in the
+ *  numbering the resume cursor lives in. */
+function contentSeq(reply: TagmaReply): number | null {
+  const seq =
+    reply.kind === "event" || reply.kind === "user_message" ? reply.seq : null;
+  return seq != null && seq > 0 ? seq : null;
 }
 
 /** Transport-status surface: the sidebar dot + the chat-page disabled gate. */
@@ -199,11 +209,31 @@ export abstract class ConversationBase {
    *  this so a mode switch rehydrates from the same rows. Falls back to the
    *  store key when the tagma is not enrolled (no durable history). */
   readonly cacheConversationId: string;
-  /** The pull anchor: the highest confirmed history_id rendered. `catchUp`
-   *  reads from it, as do the read-cursor report and peekRow's upper bound.
-   *  Not a dedup threshold -- see `minRendered` and applyReplyCore's identity
-   *  check for that. */
-  maxRendered = $state(0);
+  /** The newest durable row id rendered: the window's upper edge, peekRow's
+   *  upper bound, and the id the cache pages by. It is not the read
+   *  watermark -- a row id says nothing about how far into its own
+   *  conversation the row sits. See `lastSeq` for the position the tagma
+   *  counts unread against, and `minRowId` for the dedup floor. */
+  maxRowId = $state(0);
+  /** The newest rendered position (`chat_history.seq`) with no hole below
+   *  it: the resume cursor and the read watermark. Positions are dense and
+   *  never reused, so one survives a reconnect, and `after_seq = lastSeq`
+   *  asks the tagma for exactly what this device has not rendered yet. 0
+   *  means no position is known: a cold start opens the newest window rather
+   *  than asking from zero, which would pull the whole log. Moved by rows
+   *  only -- a stamped frame that continues the run, or a pulled page's
+   *  newest row. A frame without a position moves nothing, and a page's
+   *  `next` says where the request continues, never where the reader has
+   *  rendered to. */
+  lastSeq = $state(0);
+  /** The oldest rendered position: the scroll-up anchor (`before_seq`).
+   *  0 = nothing loaded. */
+  minSeq = $state(0);
+  /** True while a repair pass runs (single-flight guard). */
+  private resuming = false;
+  /** Set when a repair is asked for while one runs: the running pass takes
+   *  one more sweep instead of stacking pulls. */
+  private resumeAgain = false;
   /** Rendered optimistic user lines awaiting their POST. Each entry's line is
    *  already in `transcript` (status "sending"); the single-in-flight send pump
    *  drains this one ack at a time. */
@@ -245,13 +275,13 @@ export abstract class ConversationBase {
   >(undefined);
 
   /** The oldest durable id in the loaded window (the scroll-up cursor).
-   *  `0` = nothing loaded. Together with `maxRendered` it brackets what
+   *  `0` = nothing loaded. Together with `maxRowId` it brackets what
    *  the transcript currently holds; rows outside the bracket are fetched
    *  on demand (catch-up above, scroll-paging below), never up front.
    *  Second duty, dedup: a content frame below this floor was rendered and
    *  then let go, so it is a replay; anything at or above the floor is still
    *  eligible to land. */
-  minRendered = $state(0);
+  minRowId = $state(0);
   /** True while a scroll-up page is in flight (single-flight guard + the
    *  top sentinel's busy state). */
   loadingOlder = $state(false);
@@ -473,13 +503,6 @@ export abstract class ConversationBase {
    *  flips `live` on `history_batch_end` and fires background notifications). */
   protected onReply(_reply: TagmaReply): void {}
 
-  /** Line-entry hook: one NEW line landed through the live reducer (post
-   *  dedup). `realId` is the durable id (0 for a synthetic line). Pulled
-   *  batches -- the catch-up window and every scroll page -- never reach
-   *  here: they fold through applyPulledRows, so a leaf that counts unread
-   *  sees live lines only. The base no-op keeps the offline leaf unhooked. */
-  protected onLineLanded(_reply: TagmaReply, _realId: number): void {}
-
   /** Apply one authored reply through the shared core: dedup by `history_id`,
    *  promote an optimistic line on a stamped `user_message`, reduce, cache, and
    *  advance the cursor. `sender` is the wire participant who authored the
@@ -531,9 +554,8 @@ export abstract class ConversationBase {
     const replayed =
       realId > 0 && this.transcript.lines.some((l) => l.historyId === realId);
     if (replayed) {
-      // A replay only reports that this row is already here; it says nothing
-      // about the rows below it, so it moves no cursor (a settled line can
-      // leave a hole under it, and advancing would pull straight past it).
+      // The row is on screen already: the frame only hands it its position.
+      this.adoptPosition(reply, realId, sender);
       this.onReply(reply);
       return;
     }
@@ -557,31 +579,10 @@ export abstract class ConversationBase {
           reply.created_at ?? undefined,
           wireSender,
         );
-        const confirmed = this.transcript.lines.find(
-          (l) => l.historyId === ackId,
-        );
-        if (confirmed) {
-          // Cache the confirmed user line. Use the plain `wireSender` -- NOT
-          // `confirmed.sender`: the line lives in a `$state` transcript, so its
-          // nested `sender` is a Svelte Proxy, which IndexedDB's structured clone
-          // rejects (DataCloneError). `put` swallows that error, so reading the
-          // proxy sender here silently dropped EVERY user message from the cache
-          // (they vanished on refresh). `wireSender` is a fresh plain object.
-          // `text`/`createdAt` are primitives, safe to read off the proxy line.
-          void cachePut({
-            conversationId: this.cacheConversationId,
-            historyId: ackId,
-            role: "user",
-            text: confirmed.text,
-            sender: wireSender,
-            createdAt: confirmed.createdAt,
-            attachment: confirmed.attachment,
-            quote: confirmed.quote,
-          });
-        }
+        this.adoptPosition(reply, ackId, sender);
+        if (ackId > this.maxRowId) this.maxRowId = ackId;
         // The send landed: the durable pending copy is no longer needed.
         void deletePending(this.pendingKey, localId);
-        if (ackId > this.maxRendered) this.maxRendered = ackId;
       } else {
         // Unstamped echo: keep the synthetic line, flip it to "sent". The echo
         // carries no new content, so drop it (never append) -- otherwise it
@@ -600,13 +601,26 @@ export abstract class ConversationBase {
     // Anything between that floor and the newest row is a row this
     // conversation never landed (a settled line can leave such a hole), and
     // it lands now.
-    if (this.minRendered > 0 && realId > 0 && realId < this.minRendered) {
+    if (this.minRowId > 0 && realId > 0 && realId < this.minRowId) {
+      this.onReply(reply);
+      return;
+    }
+    const seq = contentSeq(reply);
+    // A position at or below the cursor is already covered: the row is on
+    // screen, or was before paging let it go, so the frame is a replay and
+    // nothing about it may move the cursor again.
+    if (seq !== null && seq <= this.lastSeq) {
       this.onReply(reply);
       return;
     }
     const lineId = realId > 0 ? realId : (this.syntheticSeq -= 1);
     this.transcript = applyTagmaReply(this.transcript, reply, sender, lineId);
-    this.onLineLanded(reply, realId);
+    // The position a frame carries lands with the line it renders: a row that
+    // arrived on the stream is as placeable as one a page delivered, so a
+    // later page merging this id has nothing left to fill in.
+    if (seq !== null) {
+      this.transcript = stampPosition(this.transcript, lineId, seq);
+    }
     const cl = cacheLineOf(reply, sender);
     if (cl) {
       void cachePut({
@@ -618,8 +632,17 @@ export abstract class ConversationBase {
         createdAt: cl.createdAt,
         attachment: cl.attachment,
         quote: cl.quote,
+        seq: cl.seq,
       });
-      if (cl.historyId > this.maxRendered) this.maxRendered = cl.historyId;
+      if (cl.historyId > this.maxRowId) this.maxRowId = cl.historyId;
+    }
+    // Move the resume cursor over the position this frame carries. A frame
+    // that jumps above the cursor still renders (its content is real), but
+    // the cursor stays below the hole so one repair pulls the missing rows
+    // back; an unstamped frame moves nothing.
+    if (seq !== null) {
+      if (seq === this.lastSeq + 1) this.advancePositions([seq]);
+      else if (seq > this.lastSeq + 1) void this.resume();
     }
     this.onReply(reply);
   }
@@ -750,29 +773,36 @@ export abstract class ConversationBase {
   /** Fold one page of already-renderable lines into the window in a single
    *  transcript rebuild (the batch — not the row — is the update unit, so a
    *  50-row page costs one O(window) pass, not 50). Pure w.r.t. the
-   *  transcript; both window cursors recompute from the merged lines.
+   *  transcript; the window edges and the scroll-up position recompute
+   *  from the merged lines.
    *  Returns how many rows were newly added (0 = the page was fully
    *  redundant — the idempotency signal loadOlder uses to stop paging). */
   protected mergeWindowLines(rows: ConversationLine[]): number {
     const { transcript, added } = mergeHistoryLines(this.transcript, rows);
-    if (added === 0) return 0;
+    // A page can name the position of a row that is already on screen
+    // without adding a line: that fill is still a change, so it is applied
+    // before the idempotency answer the caller pages on.
+    if (added === 0 && transcript === this.transcript) return 0;
     this.transcript = transcript;
     let min = Infinity;
     let max = 0;
+    let minSeq = Infinity;
     for (const l of transcript.lines) {
       if (l.historyId > 0) {
         if (l.historyId < min) min = l.historyId;
         if (l.historyId > max) max = l.historyId;
       }
+      if (l.seq != null && l.seq > 0 && l.seq < minSeq) minSeq = l.seq;
     }
-    if (min !== Infinity) this.minRendered = min;
-    if (max > this.maxRendered) this.maxRendered = max;
+    if (min !== Infinity) this.minRowId = min;
+    if (max > this.maxRowId) this.maxRowId = max;
+    if (minSeq !== Infinity) this.minSeq = minSeq;
     return added;
   }
 
   /** Ingest one pulled history batch: persist every row to the cache first
    *  (the put is historyId-keyed, so re-pulls are idempotent), then fold
-   *  the rows into the window. Gap catch-up and scroll paging both land
+   *  the rows into the window. Resume paging and scroll paging both land
    *  here — the pulled path must cache what it renders, because unlike the
    *  live drain it bypasses applyReplyCore's cachePut. */
   protected applyPulledRows(rows: HistoryEntry[]): number {
@@ -789,35 +819,253 @@ export abstract class ConversationBase {
         createdAt: l.createdAt,
         attachment: l.attachment,
         quote: l.quote,
+        seq: l.seq,
       });
     }
+    this.advancePositions(lines.map((l) => l.seq ?? 0));
     return this.mergeWindowLines(lines);
   }
-  /** Recompute `minRendered` from the rendered durable lines. The
-   * drain-side batch path appends rows through applyReplyCore (which
-   * advances only maxRendered); this closes the window bracket once a
-   * batch has landed so the scroll sentinel can arm. Idempotent,
-   * O(window). */
+  /** Recompute the window floor (`minRowId`) and the scroll-up position
+   *  (`minSeq`) from the rendered lines. The drain-side
+   *  batch path appends rows through applyReplyCore (which advances only
+   *  `maxRowId`); this closes the bracket once a batch has landed so the
+   *  scroll sentinel can arm. The floor only moves down and the scroll-up
+   *  position only moves up, so a window that lost its oldest rendered row
+   *  keeps a floor it already proved. Idempotent, O(window). */
   protected recomputeMinRendered(): void {
     let min = Infinity;
+    let minSeq = Infinity;
     for (const l of this.transcript.lines) {
       if (l.historyId > 0 && l.historyId < min) min = l.historyId;
+      if (l.seq != null && l.seq > 0 && l.seq < minSeq) minSeq = l.seq;
     }
-    if (min !== Infinity) this.minRendered = min;
+    if (min !== Infinity) this.minRowId = min;
+    if (minSeq !== Infinity) this.minSeq = minSeq;
+  }
+  /** Adopt the rendered positions of a window that is already on screen (a
+   *  cache hydrate): its newest position becomes the resume cursor, its oldest
+   *  the scroll-up anchor, and the row-id edges follow the same lines. A
+   *  hydrate is the one place a whole window arrives at once -- every other
+   *  landing comes through applyReplyCore or applyPulledRows. */
+  seedRenderedPositions(lines: readonly ConversationLine[]): void {
+    let minId = Infinity;
+    let maxId = 0;
+    for (const l of lines) {
+      if (l.historyId > 0) {
+        if (l.historyId < minId) minId = l.historyId;
+        if (l.historyId > maxId) maxId = l.historyId;
+      }
+    }
+    if (minId !== Infinity) this.minRowId = minId;
+    if (maxId > this.maxRowId) this.maxRowId = maxId;
+    this.recomputeMinRendered();
+    this.advancePositions(lines.map((l) => l.seq ?? 0));
+  }
+
+  /** Move the resume cursor over positions this client just rendered. Only a
+   *  position that continues the run at `lastSeq + 1` advances it, so a row
+   *  landing above a hole never carries the cursor over that hole. A cursor
+   *  with nothing behind it (0) takes the lowest rendered position and runs on
+   *  from there: that window is the device's own start. */
+  protected advancePositions(seqs: readonly number[]): void {
+    const above = seqs.filter((s) => s > this.lastSeq).sort((a, b) => a - b);
+    let cursor = this.lastSeq;
+    for (const s of above) {
+      if (cursor === 0 || s === cursor + 1) cursor = s;
+      else break;
+    }
+    if (cursor === this.lastSeq) return;
+    this.lastSeq = cursor;
+    this.reportPosition(cursor);
+  }
+
+  /** Adopt the position a frame reports for a row the transcript already
+   *  renders: an ack-promoted line, or a replay of a settled one. The line
+   *  takes the position, its cache copy follows, and a position that continues
+   *  the run moves the cursor. A jump does not resume: the row is on screen,
+   *  so no hole sits under it. */
+  private adoptPosition(
+    reply: TagmaReply,
+    historyId: number,
+    sender: Participant | undefined,
+  ): void {
+    const seq = contentSeq(reply);
+    if (historyId <= 0) return;
+    if (seq !== null) {
+      this.transcript = stampPosition(this.transcript, historyId, seq);
+      if (seq === this.lastSeq + 1) this.advancePositions([seq]);
+    }
+    const cached = cacheLineOf(reply, sender);
+    if (cached === null) return;
+    void cachePut({
+      conversationId: this.cacheConversationId,
+      historyId: cached.historyId,
+      role: cached.role,
+      text: cached.text,
+      sender: cached.sender,
+      createdAt: cached.createdAt,
+      attachment: cached.attachment,
+      quote: cached.quote,
+      seq: cached.seq,
+    });
+  }
+
+  /** Report a read position to the tagma. The relay carries the write (its
+   *  manage bridge PUTs the cursor); the direct path has no bridge and leaves
+   *  the badge to the tagma's own unread frames, so it reports nothing. The
+   *  base hook keeps one call site for both leaves. */
+  protected reportPosition(_cursor: number): void {}
+
+  /** Catch up: repair the log above the resume cursor, or open the newest
+   *  window when this device holds no position yet. Live-safe and idempotent
+   *  (pulled rows merge by row id), so every entry point -- a fresh mount, a
+   *  resumed stream, a repair marker -- calls this and the worst case is a
+   *  redundant pull. */
+  async catchUp(k = WINDOW_PAGE): Promise<void> {
+    await this.resume(k);
+  }
+
+  /** Repair the log above the cursor: page `after_seq` forward from the
+   *  request anchor until the tagma reports nothing more, folding each page
+   *  as it lands. One repair at a time: a request arriving mid-flight asks
+   *  the running pass for one more sweep instead of stacking pulls, so a
+   *  burst of frames costs one sweep.
+   *
+   *  Two numbers drive the loop and they are not the same one. The anchor
+   *  says where the next request starts; it follows `next`, the page's own
+   *  edge over raw rows, so a tail this device could not decode is asked for
+   *  once instead of on every frame and every reconnect. The cursor says how
+   *  far this device has rendered, and it moves only over rows that landed:
+   *  a page carrying more rows than could be placed leaves it where it was.
+   *  Nothing rendered through a whole page means the rows above the cursor
+   *  are out of reach here (retention removed them, or the decoder cannot
+   *  read them): the cursor steps over that block once, with the block named
+   *  in the warning, instead of re-reading it forever. A `next` that names no
+   *  new position ends the sweep. */
+  async resume(k = WINDOW_PAGE): Promise<void> {
+    const sender = this.sender;
+    const pull = sender?.pullHistory;
+    if (pull === undefined) return;
+    if (this.resuming) {
+      this.resumeAgain = true;
+      return;
+    }
+    this.resuming = true;
+    try {
+      do {
+        this.resumeAgain = false;
+        await this.repairOnce(pull.bind(sender), k);
+      } while (this.resumeAgain && !this.closed);
+    } finally {
+      this.resuming = false;
+    }
+  }
+
+  /** One repair sweep: {@link resume}'s body, split out so the single-flight
+   *  loop reads as the loop it is. */
+  private async repairOnce(
+    pull: (opts: PullOpts) => Promise<HistoryPage>,
+    k: number,
+  ): Promise<void> {
+    let cursor = this.lastSeq;
+    let anchor = this.lastSeq;
+    try {
+      while (!this.closed) {
+        cursor = this.lastSeq;
+        anchor = Math.max(anchor, cursor);
+        if (cursor <= 0) {
+          await this.openNewest(pull, k);
+          return;
+        }
+        const page = await pull({ afterSeq: anchor, limit: k });
+        const first = page.rows
+          .map((r) => contentSeq(r.reply))
+          .find((s): s is number => s !== null);
+        if (first !== undefined && first > cursor + 1) {
+          // Two facts and no verdict: how wide the gap is, and how many rows
+          // of this page the decoder could not read. Either cause alone would
+          // explain the gap, and one page cannot say which one it was.
+          console.warn(
+            "[chat] " +
+              (first - cursor - 1) +
+              " row(s) between " +
+              cursor +
+              " and " +
+              first +
+              " are missing here; " +
+              page.undecodable +
+              " row(s) in this page did not decode; continuing from " +
+              first,
+          );
+          this.lastSeq = first - 1;
+        }
+        if (page.rows.length > 0) this.applyPulledRows(page.rows);
+        // `more` answers what lies above the page and `next` where the same
+        // request continues. The anchor follows `next`; the cursor follows
+        // rendered rows. A page whose tail did not decode leaves the cursor
+        // behind its edge: that block is stepped over once, with the block
+        // named, so the sweep does not ask for it again on every frame. The
+        // step happens even when the block runs to the newest row, where no
+        // page above it exists to carry the cursor forward.
+        const edge = page.next;
+        if (edge === null || edge <= anchor) return;
+        if (this.lastSeq < edge && page.undecodable > 0) {
+          console.warn(
+            "[chat] stepping from " +
+              this.lastSeq +
+              " to " +
+              edge +
+              "; " +
+              page.undecodable +
+              " row(s) in this page did not decode, so part of that span" +
+              " is not on screen",
+          );
+          this.lastSeq = edge;
+        }
+        if (!page.more) return;
+        anchor = edge;
+      }
+    } catch (e) {
+      // A failed pull is not a filled hole: the cursor stays where it was, so
+      // the next frame or the next mount asks again.
+      console.warn("[chat] resume failed above " + cursor + ":", e);
+    }
+  }
+
+  /** Open the newest window: the cold-start read, when there is no cursor to
+   *  continue from. Its newest rendered position becomes the cursor -- a
+   *  report of zero would claim nothing was ever read, leaving the tagma to
+   *  count rows this device already shows. */
+  protected async openNewest(
+    pull: (opts: PullOpts) => Promise<HistoryPage>,
+    k: number,
+  ): Promise<void> {
+    try {
+      const page = await pull({ limit: k });
+      if (page.rows.length > 0) this.applyPulledRows(page.rows);
+      // A window short of k raw rows IS all the history there is; one that
+      // arrived complete proves nothing about what lies below it.
+      if (page.rows.length + page.undecodable < k) this.hasMoreOlder = false;
+    } catch (e) {
+      // Dead carrier: the drain surfaces the status, the window stays as it
+      // is, and live frames keep arriving; say so anyway, because a cold
+      // start that quietly shows nothing looks like an empty log.
+      console.warn("[chat] could not open the newest window:", e);
+    }
   }
 
   /** Fetch one page older than the window head. Template method: the
    * shared guards, the single-flight flag, and the quiet error handling
    * live here; the leaf supplies the page source via loadOlderPage.
    *
-   *  minRendered === 0 means the window has not formed yet (hydrate or
+   *  minRowId === 0 means the window has not formed yet (hydrate or
    *  catch-up still in flight, or the server truly has nothing): paging
    *  older-than-nothing is ill-defined — and racing the initial fill here
    *  once issued a recent-N pull whose always-false `more` permanently
    *  disarmed the sentinel. Wait for a window head to exist. */
   async loadOlder(k = WINDOW_PAGE): Promise<void> {
     if (this.loadingOlder || !this.hasMoreOlder) return;
-    if (this.minRendered <= 0) return;
+    if (this.minRowId <= 0) return;
     this.loadingOlder = true;
     try {
       await this.loadOlderPage(k);
@@ -851,7 +1099,7 @@ export abstract class ConversationBase {
     // is not something a quote can point at, and its page would land above
     // the window as a live row (the reroute only catches ids at or below
     // the head), which is the hole the probe is meant never to open.
-    if (id > this.maxRendered) return "error";
+    if (id > this.maxRowId) return "error";
     const rows = await this.probePage(id);
     if (rows === null) return "error";
     for (const row of rows) {
@@ -862,15 +1110,13 @@ export abstract class ConversationBase {
     return "deleted";
   }
 
-  /** The leaf's page for one probe: the newest rows at or below `id`, read on
-   *  the same cursor the window pages on. That cursor -- and the contiguity
-   *  it buys -- is why `peekRow` may read an empty page as proof of absence;
-   *  the row count is not what makes the verdict sound.
-   *
-   *  Today both leaves that serve a page ask for `before: id + 1` with
-   *  `limit: 1`, so the page holds at most one row, the highest at or below
-   *  `id`. A row above `id` cannot occur on that contract, which is why
-   *  nothing defends against one.
+  /** The leaf's page for one probe: what the leaf answers for the row id
+   *  `id`, which the caller reads as proof of presence or absence. The direct
+   *  leaf asks the tagma for that one row by id; the relay asks its control
+   *  channel for the row just before `id + 1`, which names the same single
+   *  row. Either way the answer is about the id itself, and that is why
+   *  `peekRow` may read an empty page as proof of absence -- the row count of
+   *  a position window is not what makes the verdict sound.
    *
    *  Read and not merged -- or `null` when this leaf cannot give a COMPLETE
    *  page right now (no history source, a stream that is not open, a catch-up
@@ -1144,7 +1390,7 @@ export class RelayConversation extends ConversationBase {
    * gate with an id test — no marker arrival required, so the gate can
    * never wedge. Set to MAX_SAFE_INTEGER for the whole catch-up replay
    * (suppress everything, batch rows included), reset to the live edge
-   * (the final maxRendered) when catch-up ends. */
+   * (the final maxRowId) when catch-up ends. */
   private notifyFloor = 0;
 
   /** How the client reports a read cursor: a manage PUT on this
@@ -1215,11 +1461,17 @@ export class RelayConversation extends ConversationBase {
 
   /** The conversation page mounted: tell the tagma how far this device has
    *  read, so it stamps the badge empty. Rows landing while the page stays
-   *  mounted report through {@link onLineLanded}; a lost report self-heals on
-   *  the next line or the next mount, because the cursor is monotonic
-   *  server-side. */
+   *  mounted move the position cursor, which reports through
+   *  {@link reportPosition}; a lost report self-heals on the next row or the
+   *  next mount, because the cursor is monotonic server-side. */
   markRead(): void {
-    this.reportReadCursor(this.maxRendered);
+    this.reportReadCursor(this.lastSeq);
+  }
+
+  /** The relay carries the read-cursor write; the base calls this whenever a
+   *  rendered position advances the cursor. */
+  protected override reportPosition(cursor: number): void {
+    this.reportReadCursor(cursor);
   }
 
   /** Report a read cursor, page mounted only: a conversation nobody is
@@ -1294,7 +1546,7 @@ export class RelayConversation extends ConversationBase {
   }
 
   /** Reroute replay rows into the in-flight before-page. The core's dedup
-   * floors on minRendered (rows below it were rendered and let go), so a
+   * floors on minRowId (rows below it were rendered and let go), so a
    * scroll-up page's older rows would vanish; worse, a user_message whose
    * text matches the in-flight send would be mis-consumed as its echo,
    * promoting the optimistic line to a duplicate old id. Genuine echoes
@@ -1307,7 +1559,7 @@ export class RelayConversation extends ConversationBase {
   ): void {
     const id = contentId(reply);
     const page = this.beforePull;
-    if (page && sender && id > 0 && id <= this.maxRendered) {
+    if (page && sender && id > 0 && id <= this.maxRowId) {
       page.rows.push({ sender, reply });
       return;
     }
@@ -1331,15 +1583,6 @@ export class RelayConversation extends ConversationBase {
     );
   }
 
-  /** Live lines are the cursor's business, never the badge's. While the page
-   *  is mounted the newest rendered id is reported as read; a line landing
-   *  with the page closed needs nothing from this client -- the tagma stamps
-   *  those itself, and the stamp arrives as a batch marker's count or a live
-   *  `tagma_unread` frame. */
-  protected override onLineLanded(reply: TagmaReply, realId: number): void {
-    super.onLineLanded(reply, realId);
-    if (realId > 0) this.reportReadCursor(realId);
-  }
   protected override onReply(reply: TagmaReply): void {
     if (reply.kind === "history_batch_end") {
       // The tagma's count travels with the marker: assign it, never count the
@@ -1360,7 +1603,7 @@ export class RelayConversation extends ConversationBase {
         pull.settle?.(reply.count, reply.more, reply.undecodable ?? 0);
       }
       // Close the window bracket: drain-side batches advance only
-      // maxRendered, so the scroll sentinel needs minRendered recomputed
+      // maxRowId, so the scroll sentinel needs minRowId recomputed
       // once the batch has landed (idempotent; before-pages recompute
       // again through the merge).
       this.recomputeMinRendered();
@@ -1382,7 +1625,7 @@ export class RelayConversation extends ConversationBase {
    *  applyPulledRows (one transcript update, one cache pass); the badge is
    *  derived from the same rows in one store update.
    */
-  async catchUp(k = WINDOW_PAGE): Promise<void> {
+  override async catchUp(k = WINDOW_PAGE): Promise<void> {
     if (this.windowPull !== null) return; // one window at a time
     // Content frames carry no request id: a window pull and a before-page
     // cannot be in flight together (see runPagePull). Waiting on the queue
@@ -1393,8 +1636,8 @@ export class RelayConversation extends ConversationBase {
     if (this.windowPull !== null) return;
     // Suppress notifications for the whole window: every row in it is old news
     // re-arriving, and a fresh device's window starts below no floor at all
-    // (maxRendered 0) -- either way one notification per row would be spam.
-    // The floor resets to the live edge (the final maxRendered) when the window
+    // (maxRowId 0) -- either way one notification per row would be spam.
+    // The floor resets to the live edge (the final maxRowId) when the window
     // lands, so only frames newer than it can ever notify.
     this.notifyFloor = Number.MAX_SAFE_INTEGER;
     try {
@@ -1411,7 +1654,7 @@ export class RelayConversation extends ConversationBase {
       // Marker or not, whatever landed forms the window bracket (covers a
       // timed-out window that streamed rows but no marker).
       this.recomputeMinRendered();
-      this.notifyFloor = this.maxRendered;
+      this.notifyFloor = this.maxRowId;
     }
   }
 
@@ -1430,11 +1673,10 @@ export class RelayConversation extends ConversationBase {
     const head = Math.min(...ids);
     this.pruneRenderedBefore(head);
     this.applyPulledRows(rows);
-    // The window is what this device has now read: report the newest rendered
-    // id so a conversation opened with unread rows clears on the server too,
-    // not only through the badge `enter` zeroed locally. The report is a no-op
-    // when the page is not mounted (reportReadCursor checks viewing).
-    this.reportReadCursor(this.maxRendered);
+    // The window is what this device has now read: folding its rows moved
+    // the position cursor (applyPulledRows), so a conversation opened with
+    // unread rows clears on the server too, not only through the badge the
+    // `enter` zeroed locally.
   }
 
   /** Drop rendered durable rows that the adopted window does not reach. They
@@ -1475,7 +1717,7 @@ export class RelayConversation extends ConversationBase {
     const cached = await this.readCachedPage(k);
     if (cached.length > 0) {
       const cachedTop = cached[cached.length - 1]!.historyId;
-      if (cachedTop >= this.minRendered - 1) {
+      if (cachedTop >= this.minRowId - 1) {
         this.mergeWindowLines(cached.map(cachedLineToLine));
         if (cached.length >= k) return;
       }
@@ -1485,7 +1727,7 @@ export class RelayConversation extends ConversationBase {
     // just rendered (a re-fetch folds to `added === 0` and would disarm the
     // sentinel with history still below).
     const { rows, more, timedOut } = await this.pullPage({
-      before: this.minRendered,
+      before: this.minRowId,
       limit: k,
     });
     const added = this.applyPulledRows(rows);
@@ -1498,7 +1740,7 @@ export class RelayConversation extends ConversationBase {
    *  testable without IndexedDB (the production read is the shared per-tagma
    *  cache -- the same key the offline entry uses). */
   protected readCachedPage(k: number): Promise<CachedLine[]> {
-    return readTailBefore(this.cacheConversationId, this.minRendered, k);
+    return readTailBefore(this.cacheConversationId, this.minRowId, k);
   }
 
   /** Issue one cursor page and await ITS batch_end marker
@@ -1691,23 +1933,16 @@ export class LocalConversation extends ConversationBase {
     return pull === undefined ? null : pull.bind(sender);
   }
 
-  /** The gap pull pump: one fill at a time. A gap frame arriving while a
-   *  fill runs does not start a second pass; it records the smallest hole
-   *  still owed, and the running fill takes one more sweep when it lands. */
-  private gapPulling = false;
-  /** The smallest hole still owed a sweep: `undefined` = none, `null` = the
-   *  recent page (no cursor to start from), a number = that cursor. A failed
-   *  sweep leaves it set, so the next resume returns to it. */
-  private gapPending: number | null | undefined = undefined;
-
   /** Wire the stream's retry lifecycle for whichever transport drives the read
-   *  path right now -- the first attach and every rebuild. */
+   *  path right now -- the first attach and every rebuild. A `missed` frame
+   *  carries no position: this device's own cursor says where to resume, so
+   *  the repair starts there. */
   protected override onStreamAttached(): void {
     const t = this.transport;
     if (t instanceof DirectTransport) {
       t.onState = (s) => this.onTransportState(s);
-      t.onGap = (after) => {
-        void this.onGapFrame(after);
+      t.onMissed = () => {
+        void this.resume();
       };
     }
   }
@@ -1715,9 +1950,9 @@ export class LocalConversation extends ConversationBase {
   /** Stream lifecycle from the direct transport's retry loop (wired by
    *  onStreamAttached): "reconnecting" flips the status -- the chat page shows
    *  an in-chat spinner and the channel lamp goes dark, while the composer
-   *  keeps writing (canWrite does not read the stream);
-   * "resumed" restores "open" and backfills whatever frames the reconnect
-   * gap dropped (cursor-based catch-up is idempotent and live-safe). */
+   *  keeps writing (canWrite does not read the stream); "resumed" restores
+   *  "open" and repairs whatever frames the reconnect dropped (resume is
+   *  idempotent and live-safe). */
   onTransportState(s: TransportState): void {
     if (!this.isLive()) return;
     if (s === "reconnecting") {
@@ -1725,147 +1960,12 @@ export class LocalConversation extends ConversationBase {
     } else {
       this.status = "open";
       this.resetRestartBackoff();
-      // Back online: flush the durable unsent lines once (M2: retrySend is
+      // Back online: flush the durable unsent lines once (retrySend is
       // idempotent, so racing retries collapse).
       void this.retryAllPending();
-      void this.catchUp();
+      void this.resume();
     }
   }
-
-  /** Backfill from the high-water mark to the newest server row, or from a
-   *  hole an earlier pull still owes: pages pullHistory({after: cursor})
-   *  until the tagma stops reporting a full page. On an empty window (a
-   *  fresh device with no cache) one recent batch replaces the loop. Live-
-   *  safe: applyPulledRows merges regardless of the order live frames land
-   *  in. Fire-and-forget from attachLocal -- the SSE drain runs concurrently
-   *  and the UI is interactive meanwhile. */
-  async catchUp(k = WINDOW_PAGE): Promise<void> {
-    // An owed hole owns the cursor: catching up from the rendered head would
-    // step straight over the rows the failed pull never fetched.
-    const owed = this.gapPending;
-    const anchor = owed === undefined ? this.maxRendered : (owed ?? 0);
-    const filled =
-      anchor > 0
-        ? await this.pullFrom(anchor, k)
-        : await this.pullRecentPage(k);
-    if (filled && this.gapPending === owed) this.gapPending = undefined;
-  }
-
-  /** A `gap` frame: this stream lost frames, and the tagma named the last
-   *  durable row it had delivered (null = none at all). Pull the hole back
-   *  through the history cursor. The drain carries on meanwhile, and the
-   *  order the two land in does not matter: pulled rows merge by id. */
-  onGapFrame(after: number | null): Promise<void> {
-    if (this.closed || !this.isLive()) return Promise.resolve();
-    // A stream that delivered no durable row has no server cursor to offer,
-    // so the window's own high-water mark stands in; with an empty window
-    // there is nothing to page from and the newest page fills it instead.
-    const anchor =
-      after !== null && after > 0
-        ? after
-        : this.maxRendered > 0
-          ? this.maxRendered
-          : null;
-    return this.fillGap(anchor);
-  }
-
-  /** Run one gap fill, or leave a re-run for the fill already running. */
-  private async fillGap(anchor: number | null): Promise<void> {
-    if (this.gapPulling) {
-      this.recordGap(anchor);
-      return;
-    }
-    this.gapPulling = true;
-    try {
-      let next: number | null | undefined = anchor;
-      while (next !== undefined) {
-        if (this.closed) return;
-        const covered: number | null = next;
-        const filled =
-          covered === null
-            ? await this.pullRecentPage(WINDOW_PAGE)
-            : await this.pullFrom(covered, WINDOW_PAGE);
-        if (!filled) {
-          // A failed pull is not a filled hole: gap frames do not repeat, so
-          // the anchor has to outlive the failure for the next attempt to find
-          // it. The transport panel already shows the connection state; this
-          // line names the hole so a silent retry is not read as success.
-          console.error("[chat] gap fill failed, the hole is kept:", covered);
-          this.recordGap(covered);
-          return;
-        }
-        // The anchor just swept is settled. Only a hole recorded while it ran
-        // is still owed, and that one starts the next round; without this the
-        // anchor recorded by a failed attempt would be pulled a second time.
-        if (this.gapPending === covered) this.gapPending = undefined;
-        next = this.gapPending;
-      }
-    } finally {
-      this.gapPulling = false;
-    }
-  }
-
-  /** Remember `anchor` as the smallest hole owed a sweep: a cursor beats
-   *  the recent page, and the smallest cursor beats a larger one. */
-  private recordGap(anchor: number | null): void {
-    const owed = this.gapPending;
-    if (owed === undefined) {
-      this.gapPending = anchor;
-    } else if (anchor !== null && (owed === null || anchor < owed)) {
-      this.gapPending = anchor;
-    }
-  }
-
-  /** Page from `cursor` to the newest row: keep going while the tagma
-   *  reports a full page and the page's last id advances the cursor. A pull
-   *  that throws leaves the hole, and the caller keeps the anchor. */
-  private async pullFrom(cursor: number, k: number): Promise<boolean> {
-    const pull = this.pull;
-    // No history pull on this transport: nothing to fetch, so the debt clears.
-    if (pull === null) return true;
-    try {
-      for (let at = cursor; ; ) {
-        const { rows, more } = await pull({ after: at, limit: k });
-        // Nothing rendered leaves the cursor nowhere to move, so stop here.
-        // An empty page the server called complete is the ordinary arrival at
-        // the newest row; only one that claims more behind it is worth naming.
-        if (rows.length === 0) {
-          if (more)
-            console.error("[chat] history page decoded zero rows at", at);
-          return true;
-        }
-        const last = rows.reduce(
-          (max, row) => Math.max(max, contentId(row.reply)),
-          0,
-        );
-        this.applyPulledRows(rows);
-        if (!more || last <= at) return true;
-        at = last;
-      }
-    } catch {
-      // Silence belongs to the caller: a mount catch-up runs on every start,
-      // and the transport status already shows an offline tagma.
-      return false;
-    }
-  }
-
-  /** Pull the newest page (no cursor): a batch short of k raw rows is the
-   *  whole server history, so the sentinel disarms. A pull that throws
-   *  leaves the hole, and the caller keeps the anchor. */
-  private async pullRecentPage(k: number): Promise<boolean> {
-    const pull = this.pull;
-    // No history pull on this transport: nothing to fetch, so the debt clears.
-    if (pull === null) return true;
-    try {
-      const { rows, undecodable } = await pull({ limit: k });
-      this.applyPulledRows(rows);
-      if (rows.length + undecodable < k) this.hasMoreOlder = false;
-      return true;
-    } catch {
-      return false;
-    }
-  }
-
   /** The local leaf's page source. Cache-first: a full cache page never
    *  touches the tagma (the offline degrade path — the cache holds everything
    *  ever rendered); a short cache page falls through to the server for the
@@ -1873,7 +1973,8 @@ export class LocalConversation extends ConversationBase {
    *  reachable row is already in the window). Guards, single-flight, and
    *  quiet error handling live in the base loadOlder. */
   protected override async loadOlderPage(k: number): Promise<void> {
-    const head = this.minRendered;
+    const head = this.minRowId;
+    const below = this.minSeq;
     const cached = await readTailBefore(this.cacheConversationId, head, k);
     if (cached.length > 0) {
       this.mergeWindowLines(cached.map(cachedLineToLine));
@@ -1881,25 +1982,30 @@ export class LocalConversation extends ConversationBase {
     if (cached.length >= k) return;
     const pull = this.pull;
     if (pull === null) return;
-    const { rows, more } = await pull({ before: head, limit: k });
+    // Below the window means below its oldest rendered position: a window
+    // read takes a position, and a page's `next` is its own edge, not the
+    // anchor the cache just extended.
+    if (below <= 0) return;
+    const { rows, more } = await pull({ beforeSeq: below, limit: k });
     const added = this.applyPulledRows(rows);
     // Same distinction as the relay leaf: !more reads the database, while
     // added === 0 reads this window -- all-dropped rows cannot move the cursor.
     if (!more || added === 0) this.hasMoreOlder = false;
   }
 
-  /** The local leaf's probe page: one before-page straight off the
-   *  transport, read and not merged -- the window keeps its floor, so a
-   *  mid-history segment cannot leave a hole. */
+  /** The local leaf's probe: one row, asked for by id, read straight off the
+   *  transport and not merged -- the window keeps its floor, so a mid-history
+   *  segment cannot leave a hole. An id names that row on the server, so the
+   *  answer does not depend on what this device holds: whether the row is
+   *  there, and what it says, come back as one entry or as an empty page.
+   *  `undecodable` still reads as a hole instead of an absence: a row that
+   *  exists but cannot be read proves nothing about what the quote points at. */
   protected async probePage(id: number): Promise<HistoryEntry[] | null> {
     const pull = this.pull;
     // No probe while the stream is down or reconnecting.
     if (pull === null || this.status !== "open") return null;
     try {
-      const { rows, undecodable } = await pull({
-        before: id + 1,
-        limit: 1,
-      });
+      const { rows, undecodable } = await pull({ row: id, limit: 1 });
       // A hole cannot prove a contiguous miss; the reply is one atomic JSON
       // body, so the only rows it can lose are the ones dropped in decode.
       return undecodable > 0 ? null : rows;
@@ -1970,7 +2076,7 @@ export class OfflineConversation extends ConversationBase {
   override retrySend(_localSeq: number): void {}
   /** Cache-first page source: offline there is nothing else. */
   protected override async loadOlderPage(k: number): Promise<void> {
-    const head = this.minRendered;
+    const head = this.minRowId;
     if (!head) return;
     const cached = await readTailBefore(this.cacheConversationId, head, k);
     this.mergeWindowLines(cached.map(cachedLineToLine));

@@ -153,9 +153,10 @@ pub async fn external_events(
 
 /// Query params for [`external_history`]: `after_seq` (incremental catch-up,
 /// rows at a position greater than it), `before_seq` (scroll-up, positions
-/// below it), or neither (the most recent `limit`). Both are positions in the
-/// conversation's own numbering (`chat_history.seq`), never row ids. Mirrors
-/// the relay `TagmaControl::History` modes.
+/// below it), `row` (one row by id, the read behind a quote probe), or none of
+/// them (the most recent `limit`). The first two are positions in the
+/// conversation's own numbering (`chat_history.seq`), never row ids; `row` is
+/// a row id, never a position. At most one of the three names the request.
 #[derive(Debug, Default, Deserialize)]
 pub struct ExternalHistoryQuery {
     #[serde(default)]
@@ -164,6 +165,10 @@ pub struct ExternalHistoryQuery {
     pub before_seq: Option<i64>,
     #[serde(default)]
     pub limit: Option<u32>,
+    /// One row by id: the probe behind a quoted reference, answered in the same
+    /// page shape with at most one entry. Never combined with a position cursor.
+    #[serde(default)]
+    pub row: Option<i64>,
 }
 
 /// The external projector behind a direct-surface read, after the root check
@@ -185,6 +190,10 @@ async fn external_projector<'a>(
 /// `more`, `next` (where the same request continues), and the count of rows the
 /// decoder could not read. A request naming two cursors, or a window of zero
 /// rows, is refused with 400; a store that cannot answer is refused with 503.
+///
+/// `row=<id>` asks the same page for one row instead of a window: at most one
+/// entry, `more` false, `next` the row's own position, and an empty page when
+/// the conversation does not hold that id (absence, not an error).
 /// history is always a frontend-initiated pull, symmetric with the relay's
 /// `TagmaControl::History`. The badge count does not ride this reply: it
 /// reaches the client on the unread frames the tagma pushes, so a history pull
@@ -201,9 +210,10 @@ pub struct ExternalHistoryResponse {
     pub undecodable: u32,
     /// Where the same request continues: the page's newest position for a
     /// catch-up or recent page, its oldest for a scroll-up page, the cursor the
-    /// caller sent when the page came back empty, and `null` for an empty recent
-    /// snapshot. Always present on the wire, so a client reads one field instead
-    /// of inferring a position from the rows it got.
+    /// caller sent when the page came back empty, the row's own position for a
+    /// row probe, and `null` for an empty recent snapshot. Always present on the
+    /// wire, so a client reads one field instead of inferring a position from
+    /// the rows it got.
     pub next: Option<i64>,
 }
 
@@ -214,6 +224,30 @@ pub async fn external_history(
     Query(query): Query<ExternalHistoryQuery>,
 ) -> Result<axum::response::Response, ApiError> {
     let projector = external_projector(&state, &id).await?;
+    // A row probe names one row instead of a window: the same page shape, at
+    // most one entry, so the frontend asks one route whether a quoted row is
+    // still there and what it says. One id is not a cursor a position can share
+    // a request with, and a non-positive id names no row.
+    if let Some(row) = query.row {
+        if query.after_seq.is_some() || query.before_seq.is_some() {
+            return Err(ApiError::bad_request(
+                "history takes at most one cursor (after_seq, before_seq or row)",
+            ));
+        }
+        if row <= 0 {
+            return Err(ApiError::bad_request("row id must be positive"));
+        }
+        return match projector.read_row(None, row).await {
+            Ok(page) => Ok(Json(ExternalHistoryResponse {
+                rows: page.entries,
+                more: page.more,
+                undecodable: page.undecodable,
+                next: page.next,
+            })
+            .into_response()),
+            Err(e) => Err(ApiError::unavailable(format!("history read failed: {e}"))),
+        };
+    }
     // Bound the page the same way the relay does (HISTORY_BATCH_MAX = 50); a
     // missing `limit` defaults to the cap.
     const DEFAULT_LIMIT: u32 = 50;
@@ -234,7 +268,7 @@ pub async fn external_history(
         // keeps the "an empty page means an empty history" reading intact.
         Err(HistoryReadError::BothCursors { .. }) => {
             return Err(ApiError::bad_request(
-                "history takes at most one cursor (after_seq or before_seq)",
+                "history takes at most one cursor (after_seq, before_seq or row)",
             ));
         }
         // A window of zero rows cannot be answered either: it would come back

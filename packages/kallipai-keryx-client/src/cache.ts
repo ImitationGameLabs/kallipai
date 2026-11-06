@@ -3,8 +3,8 @@
 import type { FileAttachment } from "@kallipai/kallipai-common";
 // The per-device IndexedDB cache of already-loaded chat lines: a durable
 // mirror of what the app has rendered, so a refresh/reopen restores the
-// conversation from local state and only asks the tagma for an incremental
-// delta (`History{after: maxRendered}`) instead of re-pulling the whole window.
+// conversation from local state and only asks the tagma for the rows after the
+// newest position it rendered (`after_seq`), instead of re-pulling the window.
 //
 // This is a DUMB key-value store of `{conversationId, historyId, role, text}`
 // tuples. It deliberately does NOT interpret `role` (a UI concept owned by
@@ -43,6 +43,11 @@ export interface CachedLine {
    *  replays the reference instead of losing it (the row's own copy wins
    *  on a merge, so a stale value cannot overwrite a fresher replay). */
   readonly quote?: number;
+  /** The row's position in its conversation's log (`chat_history.seq`): the unit
+   *  the resume cursor and the read watermark are expressed in. Absent when the
+   *  tagma did not stamp the row (a frame with no position), which leaves the
+   *  cursor where it was. */
+  readonly seq?: number;
 }
 
 const DB_NAME = "kallipai-keryx";
@@ -52,8 +57,10 @@ const DB_NAME = "kallipai-keryx";
 // rather than migrate rows. The pending store holds unsent sends and is
 // created once and never dropped. v6: the 1:1 read watermarks live in the
 // tagma, so the browser's copy is deleted on upgrade -- an old install would
-// otherwise keep rows nothing reads.
-const DB_VERSION = 6;
+// otherwise keep rows nothing reads. v7: rows gained the `seq` position, so
+// the store is dropped once more -- a row without a position cannot feed the
+// resume cursor.
+const DB_VERSION = 7;
 const STORE = "messages";
 const PENDING_STORE = "pending";
 /** The 1:1 watermark store that v4 added and v6 drops: one row per
@@ -74,9 +81,10 @@ function openDb(): Promise<IDBDatabase> {
     const req = indexedDB.open(DB_NAME, DB_VERSION);
     req.onupgradeneeded = (event) => {
       const d = req.result;
-      // Drop any pre-v3 store (older keyPath or row shape) and recreate. The
-      // cache is disposable and re-pulled from the tagma on the next open.
-      if (event.oldVersion < 3 && d.objectStoreNames.contains(STORE)) {
+      // Drop any older store (older keyPath, row shape, or rows without the
+      // `seq` position) and recreate. The cache is disposable and re-pulled
+      // from the tagma on the next open.
+      if (event.oldVersion < 7 && d.objectStoreNames.contains(STORE)) {
         d.deleteObjectStore(STORE);
       }
       if (!d.objectStoreNames.contains(STORE)) {

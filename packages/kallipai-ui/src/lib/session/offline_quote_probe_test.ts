@@ -24,7 +24,7 @@ function offline() {
     "tagma-1",
     LOCAL_OPERATOR_SENDER,
   );
-  conv.maxRendered = 9;
+  conv.maxRowId = 9;
   return conv;
 }
 
