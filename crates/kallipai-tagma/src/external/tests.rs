@@ -572,3 +572,152 @@ async fn read_history_refuses_a_zero_limit() {
         "expected ZeroLimit, got {err:?}"
     );
 }
+
+/// `broadcast::channel(1)` refuses a send that has no live receiver, so a
+/// successful send is proof the pump has subscribed to the root's broadcast.
+async fn send_when_subscribed(tx: &broadcast::Sender<SseEvent>, text: &str) {
+    for _ in 0..200 {
+        if tx
+            .send(SseEvent::AssistantContent {
+                content: text.into(),
+            })
+            .is_ok()
+        {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("the pump never subscribed to the root's broadcast");
+}
+
+async fn expect_authored(frames: &mut crate::bus::TopicReceiver<AuthoredFrame>) -> AuthoredFrame {
+    tokio::time::timeout(Duration::from_secs(10), frames.recv())
+        .await
+        .expect("no authored frame reached the bus within 10s")
+        .expect("the bus receiver closed")
+}
+
+/// A root restart looks like `RecvError::Closed` to the pump: the old entry
+/// (and every sender it held) is dropped, and a new live root appears later.
+/// The pump must wait for it rather than end.
+#[tokio::test]
+async fn pump_survives_root_restart() {
+    let state = make_state();
+    let root = AgentId::from("root".to_string());
+    let entry = make_entry(None, "tok".into());
+    let tx1 = entry.agent.events_tx.clone();
+    state
+        .registry
+        .write()
+        .await
+        .register_root(root.clone(), RegistryEntry::Live(entry))
+        .unwrap();
+    // No history store: `stamp` degrades to a no-op and the frame publishes
+    // anyway, which is all this test needs.
+    let _projector = ExternalProjector::new(
+        Arc::downgrade(&state),
+        None,
+        Some(ConversationId::for_tagma(&tagma_id())),
+        Some(tagma_id()),
+        Some("Tagma".into()),
+        MessageLimits::default(),
+    );
+    let mut frames = state.bus.subscribe::<AuthoredFrame>().unwrap();
+    send_when_subscribed(&tx1, "first").await;
+    let _ = expect_authored(&mut frames).await;
+
+    // Drop our sender clone too, or the channel never reports `Closed`.
+    drop(tx1);
+    assert!(state.registry.write().await.unregister(&root).is_some());
+    // Outlive the re-subscribe attempt made 2s after `Closed`: with no root
+    // to subscribe to, a pump that gives up here is already gone.
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+
+    let entry = make_entry(None, "tok".into());
+    let tx2 = entry.agent.events_tx.clone();
+    state
+        .registry
+        .write()
+        .await
+        .register_root(root.clone(), RegistryEntry::Live(entry))
+        .unwrap();
+    send_when_subscribed(&tx2, "second").await;
+    let second = expect_authored(&mut frames).await;
+    assert!(matches!(second.reply, TagmaReply::Event { .. }));
+}
+
+/// Boot with no root at all: the pump waits, and picks the root up the moment
+/// it is registered — the other half of "the root may be transiently absent".
+#[tokio::test]
+async fn pump_waits_for_a_root_that_never_existed() {
+    let state = make_state();
+    let _projector = ExternalProjector::new(
+        Arc::downgrade(&state),
+        None,
+        Some(ConversationId::for_tagma(&tagma_id())),
+        Some(tagma_id()),
+        Some("Tagma".into()),
+        MessageLimits::default(),
+    );
+    let mut frames = state.bus.subscribe::<AuthoredFrame>().unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let entry = make_entry(None, "tok".into());
+    let tx = entry.agent.events_tx.clone();
+    state
+        .registry
+        .write()
+        .await
+        .register_root(
+            AgentId::from("root".to_string()),
+            RegistryEntry::Live(entry),
+        )
+        .unwrap();
+    send_when_subscribed(&tx, "late").await;
+    let _ = expect_authored(&mut frames).await;
+}
+
+/// Cancel is one of the pump's two exits; it must take it promptly.
+#[tokio::test]
+async fn pump_exits_on_cancel() {
+    let state = make_state();
+    let projector = ExternalProjector::new(
+        Arc::downgrade(&state),
+        None,
+        None,
+        None,
+        None,
+        MessageLimits::default(),
+    );
+    let cancel = CancellationToken::new();
+    let handle = tokio::spawn(projector.clone().run_event_pump(cancel.clone()));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    cancel.cancel();
+    tokio::time::timeout(Duration::from_secs(2), handle)
+        .await
+        .expect("the pump did not exit on cancel")
+        .expect("the pump task panicked");
+}
+
+/// The other exit: the world goes away (the last `Arc<AppState>` drops) while
+/// the pump is still waiting for a root. It must end, not spin forever.
+#[tokio::test]
+async fn pump_exits_when_world_gone() {
+    let cancel = CancellationToken::new();
+    let state = make_state();
+    let projector = ExternalProjector::new(
+        Arc::downgrade(&state),
+        None,
+        None,
+        None,
+        None,
+        MessageLimits::default(),
+    );
+    let handle = tokio::spawn(projector.clone().run_event_pump(cancel.clone()));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    drop(state);
+    tokio::time::timeout(Duration::from_secs(6), handle)
+        .await
+        .expect("the pump did not exit when the world went away")
+        .expect("the pump task panicked");
+}

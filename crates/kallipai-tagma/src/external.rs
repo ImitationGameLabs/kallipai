@@ -675,20 +675,12 @@ impl ExternalProjector {
     /// The event pump: subscribe to the root agent's raw broadcast, project each
     /// event, persist the authored half once, and publish authored + signal
     /// frames. Retries until the root is live (it may be transiently absent
-    /// during restore/reactivation). Mirrors the prior two pumps' retry loops.
+    /// during restore/reactivation). The startup wait and the re-subscribe both
+    /// go through [`Self::wait_for_root`], so that retry rule exists once.
     async fn run_event_pump(self, cancel: CancellationToken) {
-        let mut rx = loop {
-            if let Some(rx) = self.subscribe_root().await {
-                break rx;
-            }
-            if cancel.is_cancelled() {
-                return;
-            }
-            tokio::select! {
-                biased;
-                _ = cancel.cancelled() => return,
-                _ = tokio::time::sleep(Duration::from_secs(2)) => {}
-            }
+        let Some(mut rx) = self.wait_for_root(&cancel).await else {
+            // Cancel or world gone: the pump's only two non-root exits.
+            return;
         };
         // NOTE: this start/stop pair is one-per-tagma-lifetime (boot-bounded),
         // unlike `relay/pump.rs` which cycles on every re-KEX — so INFO is
@@ -737,17 +729,38 @@ impl ExternalProjector {
                     }
                     Err(RecvError::Closed) => {
                         warn!("external projector: root stream closed; re-subscribing");
-                        tokio::select! {
-                            biased;
-                            _ = cancel.cancelled() => return,
-                            _ = tokio::time::sleep(Duration::from_secs(2)) => {}
-                        }
-                        rx = match self.subscribe_root().await {
-                            Some(r) => r,
+                        match self.wait_for_root(&cancel).await {
+                            Some(r) => rx = r,
                             None => return,
-                        };
+                        }
                     }
                 }
+            }
+        }
+    }
+
+    /// Wait until the root's broadcast is subscribable, retrying every 2s.
+    ///
+    /// This is the single definition of "the root may be transiently absent"
+    /// (restore/reactivation): the pump's startup and its re-subscribe both
+    /// call it, so neither can drift into a different retry rule. `None` means
+    /// the pump must end — `cancel` fired, or the world is gone and there is
+    /// nothing left to subscribe to.
+    async fn wait_for_root(
+        &self,
+        cancel: &CancellationToken,
+    ) -> Option<broadcast::Receiver<SseEvent>> {
+        loop {
+            if let Some(rx) = self.subscribe_root().await {
+                return Some(rx);
+            }
+            if cancel.is_cancelled() || self.inner.state.upgrade().is_none() {
+                return None;
+            }
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => return None,
+                _ = tokio::time::sleep(Duration::from_secs(2)) => {}
             }
         }
     }
