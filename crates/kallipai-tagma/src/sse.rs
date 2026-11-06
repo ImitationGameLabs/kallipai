@@ -1,4 +1,6 @@
 use std::convert::Infallible;
+use std::future::Future;
+use std::task::Poll;
 
 use axum::response::sse::{Event, KeepAlive, Sse};
 use futures_core::Stream;
@@ -14,7 +16,7 @@ use tokio_stream::wrappers::BroadcastStream;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
-use crate::bus::{AuthoredFrame, SignalFrame, StatusSnapshot, TopicReceiver};
+use crate::bus::{AuthoredFrame, SignalFrame, StatusSnapshot, TopicItem, TopicReceiver};
 
 /// One frame on the direct SSE stream — the endpoint's private wire-assembly
 /// enum, not a bus item.
@@ -35,6 +37,16 @@ pub enum DirectFrame {
     Signal(SignalEvent),
     /// An aggregate runtime snapshot. Ephemeral.
     Status(TagmaStatusPayload),
+    /// The authored source missed frames on this connection: the boundary was
+    /// crossed between two delivered events, and the payload names the last
+    /// durable row this connection delivered (`None` when it delivered none —
+    /// a connection that has seen no row cannot name a resume point). The
+    /// reader catches up over `/external/history`; nothing rides this frame.
+    Gap { authored_after: Option<i64> },
+    /// The tagma is shutting down: this is the last event on the stream.
+    /// The reader leaves on it instead of waiting for the body to end, so a
+    /// close the server intends is never mistaken for a dropped connection.
+    Closing,
 }
 
 /// The JSON payload serialized for an `authored` direct-SSE event: the sender
@@ -44,6 +56,30 @@ pub enum DirectFrame {
 pub(crate) struct DirectAuthoredPayload {
     pub sender: Participant,
     pub reply: TagmaReply,
+}
+
+/// The JSON payload serialized for a `gap` direct-SSE event: the last
+/// `chat_history.id` this connection delivered, omitted when there is none
+/// (the client then falls back to its own rendered window).
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub(crate) struct DirectGapPayload {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<i64>,
+}
+
+/// The `chat_history.id` a reply names, if it names a durable row. `0`
+/// means "no row recorded" and is not a resume point; replies that carry
+/// no id at all (acks, errors) say nothing about the cursor.
+fn authored_history_id(reply: &TagmaReply) -> Option<i64> {
+    match reply {
+        TagmaReply::Event { history_id, .. } | TagmaReply::UserMessage { history_id, .. } => {
+            match *history_id {
+                0 => None,
+                id => Some(id),
+            }
+        }
+        _ => None,
+    }
 }
 /// A shutdown-aware SSE stream over one agent's broadcast channel, with
 /// subscribe/unsubscribe transition logging.
@@ -152,10 +188,11 @@ fn event_stream(
     })
 }
 
-/// Merge the direct SSE's three sources — the two chat topics off the bus
-/// — now all three bus topics — into one [`DirectFrame`] stream. The
-/// SSE `event:` names and payload shapes are unchanged (the wire contract
-/// with the frontend).
+/// Merge the direct SSE's three bus topics (authored, signal, status) into
+/// one [`DirectFrame`] stream. A loss on the authored topic becomes a single
+/// `gap` frame naming the last durable row this connection delivered; a
+/// loss on either of the other two is dropped, because neither can name a
+/// resume point and no frame would say more than the loss itself.
 ///
 /// Cross-topic ordering (settled at this
 /// assembly point): intra-topic FIFO holds per source; across sources the
@@ -172,20 +209,37 @@ pub(crate) fn merge_direct_frames(
     signals: TopicReceiver<SignalFrame>,
     status: TopicReceiver<StatusSnapshot>,
 ) -> impl Stream<Item = DirectFrame> + Send {
-    let authored = authored.into_stream().map(|frame| DirectFrame::Authored {
-        sender: frame.sender,
-        reply: frame.reply,
+    // The authored source is the one that can name a resume point: track the
+    // last durable row it delivered and, when the bus reports a loss, say so
+    // once with that id. `0` is "no row recorded" and never becomes the
+    // cursor (a degraded frame cannot be resumed from).
+    let mut last_authored_id: Option<i64> = None;
+    let authored = authored.into_stream().map(move |item| match item {
+        TopicItem::Data(frame) => {
+            if let Some(id) = authored_history_id(&frame.reply) {
+                last_authored_id = Some(id);
+            }
+            DirectFrame::Authored {
+                sender: frame.sender,
+                reply: frame.reply,
+            }
+        }
+        TopicItem::Missed => DirectFrame::Gap {
+            authored_after: last_authored_id,
+        },
     });
-    let signals = signals
-        .into_stream()
-        .map(|frame| DirectFrame::Signal(frame.0));
-    let status = status
-        .into_stream()
-        .map(|frame| DirectFrame::Status(frame.0));
+    let signals = signals.into_stream().filter_map(|item| match item {
+        TopicItem::Data(frame) => Some(DirectFrame::Signal(frame.0)),
+        TopicItem::Missed => None,
+    });
+    let status = status.into_stream().filter_map(|item| match item {
+        TopicItem::Data(frame) => Some(DirectFrame::Status(frame.0)),
+        TopicItem::Missed => None,
+    });
     // Three erased sources, interleaved as they yield (no cross-source
-    // ordering promise); a lagged source is skipped here and its loss
-    // lands in the topic's lagged counter (`into_stream` keeps the
-    // counting leg at the bus core). All three sources are counted alike.
+    // ordering promise). A loss lands in the topic's lagged counter
+    // (`into_stream` keeps the counting leg at the bus core); the authored
+    // source expresses it as one `gap` frame, the other two drop it.
     let sources: Vec<std::pin::Pin<Box<dyn Stream<Item = DirectFrame> + Send>>> =
         vec![Box::pin(authored), Box::pin(signals), Box::pin(status)];
     futures_util::stream::select_all(sources)
@@ -193,8 +247,13 @@ pub(crate) fn merge_direct_frames(
 
 /// A shutdown-aware SSE stream over the direct serving channel. Each
 /// [`DirectFrame`] becomes one SSE `Event` whose `event:` name is the frame's
-/// channel discriminator (`authored` / `signal` / `status`) and whose `data:`
-/// is the inner value's JSON. The same shutdown contract as [`sse_stream`].
+/// channel discriminator (`authored` / `signal` / `status` / `gap` /
+/// `closing`) and whose `data:` is the inner value's JSON.
+///
+/// The shutdown contract is [`sse_stream`]'s plus one frame: when the token
+/// fires the stream yields a single `closing` frame and ends, so the reader
+/// can tell a close the server intends from a dropped connection; the
+/// wrapper that writes it is private to this module.
 ///
 /// `initial` is an optional one-shot frame prepended to the stream — used to
 /// push an immediate status snapshot on connect so the chat header renders at
@@ -206,6 +265,21 @@ pub fn direct_sse_stream(
     initial: Option<DirectFrame>,
     shutdown: CancellationToken,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    direct_sse_stream_with_keepalive(frames, initial, shutdown, KeepAlive::default())
+}
+
+/// [`direct_sse_stream`] with the keepalive cadence injected.
+///
+/// Production always passes `KeepAlive::default()`. The end-to-end shutdown
+/// test needs a cadence short enough to observe inside a test, and confining
+/// that knob to a private constructor keeps the serving path from picking a
+/// different one.
+fn direct_sse_stream_with_keepalive(
+    frames: impl Stream<Item = DirectFrame> + Send + 'static,
+    initial: Option<DirectFrame>,
+    shutdown: CancellationToken,
+    keep_alive: KeepAlive,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let initial_event = initial.and_then(|frame| match serialize_direct_frame(&frame) {
         Ok(event) => Some(Ok(event)),
         Err(e) => {
@@ -213,18 +287,72 @@ pub fn direct_sse_stream(
             None
         }
     });
-    let live = futures_util::stream::StreamExt::take_until(frames, shutdown.cancelled_owned())
-        .filter_map(|frame| match serialize_direct_frame(&frame) {
-            Ok(event) => Some(Ok(event)),
-            Err(e) => {
-                warn!(error = %e, "failed to serialize direct SSE frame, dropping");
-                None
-            }
-        });
+    let live = serialize_direct_frames(close_on_shutdown(frames, shutdown));
     // `stream::iter(Option)` yields the single initial event or nothing, then
     // chains into the live stream. One concrete stream type either way.
     let with_initial = futures_util::stream::iter(initial_event).chain(live);
-    Sse::new(with_initial).keep_alive(KeepAlive::default())
+    Sse::new(with_initial).keep_alive(keep_alive)
+}
+
+/// Serialize every frame, dropping the ones that fail: one malformed frame
+/// must not end the stream.
+fn serialize_direct_frames(
+    frames: impl Stream<Item = DirectFrame>,
+) -> impl Stream<Item = Result<Event, Infallible>> {
+    frames.filter_map(|frame| match serialize_direct_frame(&frame) {
+        Ok(event) => Some(Ok(event)),
+        Err(e) => {
+            warn!(error = %e, "failed to serialize direct SSE frame, dropping");
+            None
+        }
+    })
+}
+
+/// Where [`close_on_shutdown`] stands: watching the token, having just
+/// yielded the closing frame, or done.
+enum CloseState {
+    Watching,
+    ClosingSent,
+    Closed,
+}
+
+/// Wrap a direct frame stream so a tagma-wide shutdown becomes a
+/// [`DirectFrame::Closing`] on the wire instead of a silent end.
+///
+/// `take_until` ends a stream the instant the token fires, which is what
+/// graceful shutdown needs (see [`sse_stream`]) but leaves the reader unable
+/// to tell a planned close from a dropped connection. This wrapper keeps the
+/// prompt end and announces it: once the token fires it yields `Closing`, and
+/// the very next poll returns `None`. That second poll must not be `Pending` —
+/// the keepalive ticker would write a comment after the last event.
+fn close_on_shutdown<S>(frames: S, shutdown: CancellationToken) -> impl Stream<Item = DirectFrame>
+where
+    S: Stream<Item = DirectFrame> + Send,
+{
+    let mut frames = Box::pin(frames);
+    let mut cancelled = Box::pin(shutdown.cancelled_owned());
+    let mut state = CloseState::Watching;
+    futures_util::stream::poll_fn(move |cx| match state {
+        CloseState::Watching => {
+            if cancelled.as_mut().poll(cx).is_ready() {
+                state = CloseState::ClosingSent;
+                return Poll::Ready(Some(DirectFrame::Closing));
+            }
+            match frames.as_mut().poll_next(cx) {
+                Poll::Ready(Some(frame)) => Poll::Ready(Some(frame)),
+                Poll::Ready(None) => {
+                    state = CloseState::Closed;
+                    Poll::Ready(None)
+                }
+                Poll::Pending => Poll::Pending,
+            }
+        }
+        CloseState::ClosingSent => {
+            state = CloseState::Closed;
+            Poll::Ready(None)
+        }
+        CloseState::Closed => Poll::Ready(None),
+    })
 }
 
 fn serialize_direct_frame(frame: &DirectFrame) -> serde_json::Result<Event> {
@@ -240,6 +368,13 @@ fn serialize_direct_frame(frame: &DirectFrame) -> serde_json::Result<Event> {
             })?,
         ),
         DirectFrame::Signal(event) => ("signal", serde_json::to_string(event)?),
+        DirectFrame::Gap { authored_after } => (
+            "gap",
+            serde_json::to_string(&DirectGapPayload {
+                after: *authored_after,
+            })?,
+        ),
+        DirectFrame::Closing => ("closing", "{}".to_string()),
         DirectFrame::Status(payload) => ("status", serde_json::to_string(payload)?),
     };
     Ok(Event::default().event(name).data(data))
@@ -408,8 +543,328 @@ mod tests {
                     panic!("unexpected frame")
                 }
                 DirectFrame::Status(_) => status_n += 1,
+                DirectFrame::Gap { .. } => {
+                    panic!("no loss expected: one published frame per source")
+                }
+                DirectFrame::Closing => {
+                    panic!("only a shutdown emits the closing frame")
+                }
             }
         }
         assert_eq!((authored_n, busy, status_n), (1, true, 1));
+    }
+
+    /// A three-topic bus local to one test, with ring caps small enough to
+    /// force a loss without publishing hundreds of frames.
+    fn direct_bus() -> Arc<crate::bus::EventBus> {
+        crate::bus::EventBus::builder()
+            .topic::<AuthoredFrame>(4)
+            .topic::<SignalFrame>(4)
+            .topic::<StatusSnapshot>(4)
+            .build()
+            .expect("three distinct test topics")
+            .into()
+    }
+
+    /// An authored frame naming a durable row; `0` is the degraded shape a
+    /// failed history append produces.
+    fn authored_frame(history_id: i64) -> AuthoredFrame {
+        use kallipai_archeion_common::ids::{ParticipantId, ParticipantKind, UserId};
+        AuthoredFrame {
+            sender: Participant {
+                id: ParticipantId::for_user(&UserId::from("u".to_string())),
+                kind: ParticipantKind::Human,
+                handle: "Alice".into(),
+                tagma_id: None,
+            },
+            reply: TagmaReply::Event {
+                event: kallipai_common::protocol::AuthoredEvent::AssistantContent {
+                    content: format!("row {history_id}"),
+                },
+                history_id,
+                created_at: None,
+            },
+        }
+    }
+
+    /// A reader that was keeping up, then stopped: the loss is reported once,
+    /// and it names the last durable row the reader actually received.
+    #[tokio::test]
+    async fn gap_emitted_once_per_lag() {
+        let bus = direct_bus();
+        let mut frames = merge_direct_frames(
+            bus.subscribe::<AuthoredFrame>().unwrap(),
+            bus.subscribe::<SignalFrame>().unwrap(),
+            bus.subscribe::<StatusSnapshot>().unwrap(),
+        );
+        bus.publish(authored_frame(7)).unwrap();
+        assert!(matches!(
+            frames.next().await,
+            Some(DirectFrame::Authored { .. })
+        ));
+
+        for id in 8..18 {
+            bus.publish(authored_frame(id)).unwrap();
+        }
+
+        match frames.next().await {
+            Some(DirectFrame::Gap { authored_after }) => assert_eq!(
+                authored_after,
+                Some(7),
+                "the cursor is the last delivered durable row"
+            ),
+            other => panic!("expected one gap frame, got {other:?}"),
+        }
+        // One report per loss: what follows is the surviving tail, no gap.
+        assert!(matches!(
+            frames.next().await,
+            Some(DirectFrame::Authored { .. })
+        ));
+    }
+
+    /// A connection that delivered only degraded frames (`history_id == 0`)
+    /// has no resume point to name: the gap is still reported, without an
+    /// `after`, so the reader falls back to its own window instead of
+    /// replaying from the oldest row.
+    #[tokio::test]
+    async fn gap_without_anchor_when_nothing_was_delivered() {
+        let bus = direct_bus();
+        let mut frames = merge_direct_frames(
+            bus.subscribe::<AuthoredFrame>().unwrap(),
+            bus.subscribe::<SignalFrame>().unwrap(),
+            bus.subscribe::<StatusSnapshot>().unwrap(),
+        );
+        bus.publish(authored_frame(0)).unwrap();
+        assert!(matches!(
+            frames.next().await,
+            Some(DirectFrame::Authored { .. })
+        ));
+
+        for _ in 0..10 {
+            bus.publish(authored_frame(0)).unwrap();
+        }
+
+        match frames.next().await {
+            Some(DirectFrame::Gap { authored_after }) => assert_eq!(
+                authored_after, None,
+                "a degraded frame is not a resume point"
+            ),
+            other => panic!("expected one gap frame, got {other:?}"),
+        }
+    }
+
+    /// A loss on the signal topic is dropped, not turned into a gap: only
+    /// authored frames can name a resume point, so a gap from this source
+    /// would tell the reader nothing it could act on.
+    #[tokio::test]
+    async fn signal_loss_is_dropped_not_reported() {
+        let bus = direct_bus();
+        let mut frames = merge_direct_frames(
+            bus.subscribe::<AuthoredFrame>().unwrap(),
+            bus.subscribe::<SignalFrame>().unwrap(),
+            bus.subscribe::<StatusSnapshot>().unwrap(),
+        );
+        for _ in 0..10 {
+            bus.publish(SignalFrame(SignalEvent::Busy)).unwrap();
+        }
+        // Ten frames into a four-slot ring: the reader lagged, so the next
+        // frame is the surviving tail, never a gap.
+        match frames.next().await {
+            Some(DirectFrame::Signal(_)) => {}
+            other => panic!("a signal loss is not a gap, got {other:?}"),
+        }
+    }
+
+    /// The negative: a reader that keeps up is never told about a gap.
+    #[tokio::test]
+    async fn no_gap_without_loss() {
+        let bus = direct_bus();
+        let mut frames = merge_direct_frames(
+            bus.subscribe::<AuthoredFrame>().unwrap(),
+            bus.subscribe::<SignalFrame>().unwrap(),
+            bus.subscribe::<StatusSnapshot>().unwrap(),
+        );
+        for id in [1, 2] {
+            bus.publish(authored_frame(id)).unwrap();
+            assert!(matches!(
+                frames.next().await,
+                Some(DirectFrame::Authored { .. })
+            ));
+        }
+    }
+
+    /// The wire shape, asserted on the bytes the handler writes rather than
+    /// on the Rust value: `event: gap` with the cursor in `data`, and an
+    /// empty payload when this connection has no resume point.
+    #[tokio::test]
+    async fn gap_reaches_the_wire() {
+        use axum::response::IntoResponse;
+
+        async fn body_of(frame: DirectFrame) -> String {
+            let sse = direct_sse_stream(
+                futures_util::stream::iter(vec![frame]),
+                None,
+                CancellationToken::new(),
+            );
+            let body = sse.into_response().into_body();
+            let bytes = axum::body::to_bytes(body, 64 * 1024)
+                .await
+                .expect("the body is one gap event");
+            String::from_utf8(bytes.to_vec()).expect("SSE is UTF-8")
+        }
+
+        let with_anchor = body_of(DirectFrame::Gap {
+            authored_after: Some(7),
+        })
+        .await;
+        assert!(with_anchor.contains("event: gap"), "got {with_anchor:?}");
+        assert!(
+            with_anchor.contains("data: {\"after\":7}"),
+            "got {with_anchor:?}"
+        );
+
+        let without_anchor = body_of(DirectFrame::Gap {
+            authored_after: None,
+        })
+        .await;
+        assert!(
+            without_anchor.contains("data: {}"),
+            "an unknown cursor is omitted, got {without_anchor:?}"
+        );
+    }
+
+    /// The closing frame is the last thing the stream yields, and the poll
+    /// right after it ends the stream. A `Pending` there would let the
+    /// keepalive ticker write a comment after the last event.
+    #[tokio::test]
+    async fn closing_is_the_last_frame() {
+        let shutdown = CancellationToken::new();
+        let stream = close_on_shutdown(
+            futures_util::stream::pending::<DirectFrame>(),
+            shutdown.clone(),
+        );
+        tokio::pin!(stream);
+
+        // Nothing but the shutdown arm can produce a frame here.
+        shutdown.cancel();
+
+        let first = tokio::time::timeout(Duration::from_millis(100), stream.next()).await;
+        assert!(
+            matches!(first, Ok(Some(DirectFrame::Closing))),
+            "the shutdown yields one closing frame"
+        );
+        let second = tokio::time::timeout(Duration::from_millis(100), stream.next()).await;
+        assert!(
+            matches!(second, Ok(None)),
+            "the stream ends on the poll after closing"
+        );
+    }
+
+    /// `closing` on the wire: a named event carrying an empty JSON object.
+    /// The object is load-bearing -- the shared frontend parser drops frames
+    /// that carry no `data:` line, so a bare `event: closing` would never
+    /// reach a client.
+    #[tokio::test]
+    async fn closing_reaches_the_wire() {
+        use axum::response::IntoResponse;
+
+        let shutdown = CancellationToken::new();
+        let sse = direct_sse_stream(
+            futures_util::stream::pending::<DirectFrame>(),
+            None,
+            shutdown.clone(),
+        );
+        shutdown.cancel();
+        let bytes = axum::body::to_bytes(sse.into_response().into_body(), 64 * 1024)
+            .await
+            .expect("the closing body");
+        let body = String::from_utf8(bytes.to_vec()).expect("SSE is UTF-8");
+
+        assert!(body.contains("event: closing"), "got {body:?}");
+        assert!(body.contains("data: {}"), "got {body:?}");
+        let closing = body
+            .find("event: closing")
+            .expect("one closing event on the wire");
+        assert!(
+            !body[closing + "event: closing".len()..].contains("event: "),
+            "no event follows closing, got {body:?}"
+        );
+    }
+
+    /// A real graceful shutdown announces itself: the body's last event is
+    /// `closing`, and the connection ends right after it. Ten rounds, because
+    /// one pass could see the right order by luck.
+    #[tokio::test]
+    async fn shutdown_sends_closing_before_ending_the_stream() {
+        for round in 0..10 {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let shutdown = CancellationToken::new();
+            let route_token = shutdown.clone();
+            let app = axum::Router::new().route(
+                "/events",
+                axum::routing::get(move || {
+                    let token = route_token.clone();
+                    async move {
+                        direct_sse_stream_with_keepalive(
+                            futures_util::stream::pending::<DirectFrame>(),
+                            Some(DirectFrame::Status(TagmaStatusPayload {
+                                root_state: kallipai_common::protocol::AgentState::Idle,
+                                subagents_total: 0,
+                                subagents_active: 0,
+                                token_budget: 0,
+                                token_consumed: 0,
+                                token_budget_unlimited: false,
+                            })),
+                            token,
+                            KeepAlive::new().interval(Duration::from_millis(50)),
+                        )
+                    }
+                }),
+            );
+            let serving = tokio::spawn({
+                let token = shutdown.clone();
+                async move {
+                    axum::serve(listener, app)
+                        .with_graceful_shutdown(async move { token.cancelled().await })
+                        .await
+                        .expect("the test server serves");
+                }
+            });
+
+            let response = reqwest::Client::new()
+                .get(format!("http://{addr}/events"))
+                .send()
+                .await
+                .expect("the stream connects");
+            let body = response.bytes_stream();
+            tokio::pin!(body);
+
+            // Synchronise on the connect-time snapshot: cancelling before it
+            // lands would race the closing frame against the first event.
+            let mut seen = String::new();
+            while !seen.contains("event: status") {
+                let chunk = body.next().await.expect("a chunk before cancellation");
+                seen.push_str(&String::from_utf8_lossy(&chunk.expect("a body chunk")));
+            }
+            shutdown.cancel();
+            while let Some(chunk) = body.next().await {
+                seen.push_str(&String::from_utf8_lossy(&chunk.expect("a body chunk")));
+            }
+            tokio::time::timeout(Duration::from_secs(5), serving)
+                .await
+                .unwrap_or_else(|_| {
+                    panic!("round {round}: the server did not return after the stream ended")
+                })
+                .expect("the server task joins");
+
+            let closing = seen
+                .find("event: closing")
+                .unwrap_or_else(|| panic!("round {round}: no closing event in {seen:?}"));
+            assert!(
+                !seen[closing + "event: closing".len()..].contains("event: "),
+                "round {round}: closing is the last event, got {seen:?}"
+            );
+        }
     }
 }

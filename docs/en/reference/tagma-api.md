@@ -735,6 +735,8 @@ JSON `type` field); each frame's `data:` is the JSON payload:
 | `authored`    | `TagmaReply`         | An authored message (ack / op error / replayed user row / `assistant_content`).       |
 | `signal`      | `SignalEvent`        | A runtime signal (busy/idle/interrupted/cancelled/terminals/error).                   |
 | `status`      | `TagmaStatusPayload` | An aggregate runtime snapshot (root state, subagent counts, token budget). Ephemeral. |
+| `gap`         | `{"after"?: number}` | The authored source missed frames on this connection; `after` is the last durable `chat_history.id` it delivered (absent when none). |
+| `closing`     | `{}`                 | The tagma is shutting down; always the last event on the stream.                      |
 
 The `TagmaReply` shape mirrors the relay's envelope payload (`kind`-tagged,
 snake_case): `event` (authored `assistant_content`), `user_message` (a replayed
@@ -748,6 +750,29 @@ relayed path carries the same payload inside the E2EE
 envelope; the direct (offline) path serves it plaintext with no relay and no
 E2EE. Status snapshots are pushed on a fixed cadence; the transcript is driven
 by signals (busy/idle), not by these snapshots.
+
+The `gap` marker stands in for frames the subscriber missed. When a reader
+falls further behind than the bus ring, the authored source reports the
+boundary once rather than skipping silently, naming the last durable row it
+delivered (`after` is omitted when this connection had delivered none). The
+reader catches up over `/external/history` from that cursor, or from its own
+rendered head when the marker names none; nothing rides the frame itself.
+Signals and status carry no resume point, so a loss on those sources goes
+unreported.
+
+`closing` is the tagma's own notice that it is shutting down: at most one per
+stream, always the last event, and the body ends on the next poll (keepalive
+comments may come before it). A client leaves on it instead of waiting for the
+body to end -- a middlebox or a stalled writer can hold a body open
+indefinitely -- and reconnects as maintenance rather than as a failure. A
+stream that ends with no `closing` is a dropped connection: the client takes
+the failure path, spends the reconnect budget, and eventually surfaces the
+offline state. A tagma that keeps restarting therefore stays in the
+reconnecting state; the offline state appears only when a connection attempt
+itself fails. A client that is not reading its socket can miss the marker, and
+that close then degrades to the failure path -- the safe direction. Only this
+stream sends `closing`; the per-agent `/agents/{id}/events` stream has other
+legitimate ends and does not.
 
 Auth: any authenticated identity. See [Authentication and authorization](auth.md). Status: `200 OK` (`404`
 on a non-root id, `503` if direct serving is not initialized).
@@ -1493,10 +1518,11 @@ trail holds no snapshot at all omits the field rather than reporting zero.
 
 These are the **internal** event stream's variants (`GET /agents/{id}/events`),
 consumed by `kallip` and `kallipai-run`. The
-[external chat-room stream](#external-chat-room-api) is a separate surface that
-does not use this vocabulary — it discriminates frames by the SSE `event:`
-field (`authored` / `signal` / `status`) and carries only complete authored
-messages + runtime signals.
+[external chat-room stream](#external-chat-room-api) is a separate surface
+that does not use this vocabulary: it discriminates frames by the SSE
+`event:` field (`authored` / `signal` / `status` / `gap` / `closing`),
+reports lost frames as `gap` and the tagma's own shutdown as `closing`,
+and carries only complete authored messages + runtime signals.
 
 The internal event stream delivers JSON objects via Server-Sent Events. Each SSE
 `data` field contains a JSON object with a `type` field that identifies the

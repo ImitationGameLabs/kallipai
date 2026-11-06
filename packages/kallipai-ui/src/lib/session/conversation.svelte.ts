@@ -1691,12 +1691,25 @@ export class LocalConversation extends ConversationBase {
     return pull === undefined ? null : pull.bind(sender);
   }
 
+  /** The gap pull pump: one fill at a time. A gap frame arriving while a
+   *  fill runs does not start a second pass; it records the smallest hole
+   *  still owed, and the running fill takes one more sweep when it lands. */
+  private gapPulling = false;
+  /** The smallest hole still owed a sweep: `undefined` = none, `null` = the
+   *  recent page (no cursor to start from), a number = that cursor. A failed
+   *  sweep leaves it set, so the next resume returns to it. */
+  private gapPending: number | null | undefined = undefined;
+
   /** Wire the stream's retry lifecycle for whichever transport drives the read
    *  path right now -- the first attach and every rebuild. */
   protected override onStreamAttached(): void {
     const t = this.transport;
-    if (t instanceof DirectTransport)
+    if (t instanceof DirectTransport) {
       t.onState = (s) => this.onTransportState(s);
+      t.onGap = (after) => {
+        void this.onGapFrame(after);
+      };
+    }
   }
 
   /** Stream lifecycle from the direct transport's retry loop (wired by
@@ -1719,44 +1732,140 @@ export class LocalConversation extends ConversationBase {
     }
   }
 
-  /** Backfill from the high-water mark to the newest server row: pages
-   *  pullHistory({after: maxRendered}) until the batch stops advancing.
-   *  On an empty window (a fresh device with no cache) one recent batch
-   *  replaces the gap loop. Live-safe: applyPulledRows merges regardless
-   *  of the order live frames land in. Fire-and-forget from attachLocal —
-   *  the SSE drain runs concurrently and the UI is interactive meanwhile. */
+  /** Backfill from the high-water mark to the newest server row, or from a
+   *  hole an earlier pull still owes: pages pullHistory({after: cursor})
+   *  until the tagma stops reporting a full page. On an empty window (a
+   *  fresh device with no cache) one recent batch replaces the loop. Live-
+   *  safe: applyPulledRows merges regardless of the order live frames land
+   *  in. Fire-and-forget from attachLocal -- the SSE drain runs concurrently
+   *  and the UI is interactive meanwhile. */
   async catchUp(k = WINDOW_PAGE): Promise<void> {
+    // An owed hole owns the cursor: catching up from the rendered head would
+    // step straight over the rows the failed pull never fetched.
+    const owed = this.gapPending;
+    const anchor = owed === undefined ? this.maxRendered : (owed ?? 0);
+    const filled =
+      anchor > 0
+        ? await this.pullFrom(anchor, k)
+        : await this.pullRecentPage(k);
+    if (filled && this.gapPending === owed) this.gapPending = undefined;
+  }
+
+  /** A `gap` frame: this stream lost frames, and the tagma named the last
+   *  durable row it had delivered (null = none at all). Pull the hole back
+   *  through the history cursor. The drain carries on meanwhile, and the
+   *  order the two land in does not matter: pulled rows merge by id. */
+  onGapFrame(after: number | null): Promise<void> {
+    if (this.closed || !this.isLive()) return Promise.resolve();
+    // A stream that delivered no durable row has no server cursor to offer,
+    // so the window's own high-water mark stands in; with an empty window
+    // there is nothing to page from and the newest page fills it instead.
+    const anchor =
+      after !== null && after > 0
+        ? after
+        : this.maxRendered > 0
+          ? this.maxRendered
+          : null;
+    return this.fillGap(anchor);
+  }
+
+  /** Run one gap fill, or leave a re-run for the fill already running. */
+  private async fillGap(anchor: number | null): Promise<void> {
+    if (this.gapPulling) {
+      this.recordGap(anchor);
+      return;
+    }
+    this.gapPulling = true;
     try {
-      const pull = this.pull;
-      if (pull === null) return;
-      if (this.maxRendered > 0) {
-        for (;;) {
-          const { rows, more } = await pull({
-            after: this.maxRendered,
-            limit: k,
-          });
-          // Nothing rendered is no evidence of the end: the cursor has nowhere
-          // to go, so the loop stops here before `more` is consulted; whether
-          // older rows exist is left to the sentinel, which the next page
-          // settles.
-          if (rows.length === 0) break;
-          const before = this.maxRendered;
-          this.applyPulledRows(rows);
-          if (this.maxRendered <= before || !more) break;
+      let next: number | null | undefined = anchor;
+      while (next !== undefined) {
+        if (this.closed) return;
+        const covered: number | null = next;
+        const filled =
+          covered === null
+            ? await this.pullRecentPage(WINDOW_PAGE)
+            : await this.pullFrom(covered, WINDOW_PAGE);
+        if (!filled) {
+          // A failed pull is not a filled hole: gap frames do not repeat, so
+          // the anchor has to outlive the failure for the next attempt to find
+          // it. The transport panel already shows the connection state; this
+          // line names the hole so a silent retry is not read as success.
+          console.error("[chat] gap fill failed, the hole is kept:", covered);
+          this.recordGap(covered);
+          return;
         }
-      } else {
-        const { rows, undecodable } = await pull({ limit: k });
-        this.applyPulledRows(rows);
-        // A recent batch short of k RAW rows (decoded plus dropped) IS the
-        // whole server history (recent-N carries no `more`); disarm the
-        // sentinel so it never arms again for a page that cannot exist.
-        if (rows.length + undecodable < k) this.hasMoreOlder = false;
+        // The anchor just swept is settled. Only a hole recorded while it ran
+        // is still owed, and that one starts the next round; without this the
+        // anchor recorded by a failed attempt would be pulled a second time.
+        if (this.gapPending === covered) this.gapPending = undefined;
+        next = this.gapPending;
       }
-    } catch {
-      // Server unreachable: the drain surfaces transport status; the window
-      // stays on whatever the cache hydrated and live frames keep arriving.
+    } finally {
+      this.gapPulling = false;
     }
   }
+
+  /** Remember `anchor` as the smallest hole owed a sweep: a cursor beats
+   *  the recent page, and the smallest cursor beats a larger one. */
+  private recordGap(anchor: number | null): void {
+    const owed = this.gapPending;
+    if (owed === undefined) {
+      this.gapPending = anchor;
+    } else if (anchor !== null && (owed === null || anchor < owed)) {
+      this.gapPending = anchor;
+    }
+  }
+
+  /** Page from `cursor` to the newest row: keep going while the tagma
+   *  reports a full page and the page's last id advances the cursor. A pull
+   *  that throws leaves the hole, and the caller keeps the anchor. */
+  private async pullFrom(cursor: number, k: number): Promise<boolean> {
+    const pull = this.pull;
+    // No history pull on this transport: nothing to fetch, so the debt clears.
+    if (pull === null) return true;
+    try {
+      for (let at = cursor; ; ) {
+        const { rows, more } = await pull({ after: at, limit: k });
+        // Nothing rendered leaves the cursor nowhere to move, so stop here.
+        // An empty page the server called complete is the ordinary arrival at
+        // the newest row; only one that claims more behind it is worth naming.
+        if (rows.length === 0) {
+          if (more)
+            console.error("[chat] history page decoded zero rows at", at);
+          return true;
+        }
+        const last = rows.reduce(
+          (max, row) => Math.max(max, contentId(row.reply)),
+          0,
+        );
+        this.applyPulledRows(rows);
+        if (!more || last <= at) return true;
+        at = last;
+      }
+    } catch {
+      // Silence belongs to the caller: a mount catch-up runs on every start,
+      // and the transport status already shows an offline tagma.
+      return false;
+    }
+  }
+
+  /** Pull the newest page (no cursor): a batch short of k raw rows is the
+   *  whole server history, so the sentinel disarms. A pull that throws
+   *  leaves the hole, and the caller keeps the anchor. */
+  private async pullRecentPage(k: number): Promise<boolean> {
+    const pull = this.pull;
+    // No history pull on this transport: nothing to fetch, so the debt clears.
+    if (pull === null) return true;
+    try {
+      const { rows, undecodable } = await pull({ limit: k });
+      this.applyPulledRows(rows);
+      if (rows.length + undecodable < k) this.hasMoreOlder = false;
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   /** The local leaf's page source. Cache-first: a full cache page never
    *  touches the tagma (the offline degrade path — the cache holds everything
    *  ever rendered); a short cache page falls through to the server for the

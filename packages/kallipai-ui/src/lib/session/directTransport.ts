@@ -5,6 +5,10 @@
 // terminals, errors), and status snapshots all arrive on the one multiplexed
 // SSE, demuxed here by the `event:` field name.
 //
+// A lagged subscriber gets a `gap` frame in place of the frames it missed:
+// the server names the last durable row this connection had delivered, and
+// the store pulls the hole back through the history cursor.
+//
 // The Transport contract exposes three streams (`replies` + `signals` +
 // `status`) but the direct wire is one SSE, so an internal drain fans each
 // decoded frame out into three queues. The direct path has no
@@ -54,11 +58,15 @@ export interface DirectAuthoredPayload {
 
 /** One frame on the direct external SSE, discriminated by the SSE `event:`
  * field. Authored content is persisted/replayable on the tagma; signals and
- * status are ephemeral. */
+ * status are ephemeral; a gap marker replaces the frames a lagged
+ * subscriber missed; closing says the tagma is shutting down and nothing
+ * follows. */
 export type DirectFrame =
   | { readonly kind: "authored"; readonly payload: DirectAuthoredPayload }
   | { readonly kind: "signal"; readonly event: SignalEvent }
-  | { readonly kind: "status"; readonly payload: DirectStatusPayload };
+  | { readonly kind: "status"; readonly payload: DirectStatusPayload }
+  | { readonly kind: "gap"; readonly after: number | null }
+  | { readonly kind: "closing" };
 
 /** Map the snake_case direct status payload to the transport-neutral
  *  `TagmaStatusSummary` (the same shape the relay path's archeion-SSE status maps
@@ -97,6 +105,11 @@ const STREAM_WATCHDOG_MS = 3 * SSE_KEEPALIVE_HINT_MS;
  * ("resumed" — the conversation backfills the gap via catch-up). */
 export type TransportState = "reconnecting" | "resumed";
 
+/** Why a stream attempt ended that was not a failure: the watchdog tore
+ * down a half-open socket, the app came back to the foreground, or the
+ * tagma said it is shutting down. None of them spend the retry budget. */
+type RestartKind = "watchdog" | "foreground" | "planned";
+
 /**
  * Wraps a {@link TagmaClient} bound to the root agent and exposes the external
  * chat-room API: iterate {@link replies} / {@link signals} / {@link status}
@@ -119,6 +132,11 @@ export class DirectTransport implements Transport {
    * the store at attach: "reconnecting" when the retry loop takes over,
    * "resumed" once a fresh connection is live. Null drops the event. */
   onState: ((s: TransportState) => void) | null = null;
+  /** A lagged subscriber's gap marker: the last durable row this stream
+   *  had delivered, or null when it had delivered none yet. Wired by the
+   *  store, which pulls the hole back through the history cursor. Null
+   *  drops the marker. */
+  onGap: ((after: number | null) => void) | null = null;
   /** Abort for the CURRENT stream attempt only; the transport's own
    * controller stays reserved for user-initiated close. */
   private streamCtl: AbortController | null = null;
@@ -126,9 +144,8 @@ export class DirectTransport implements Transport {
   /** Resolves the in-flight reconnect backoff early (foreground fast path). */
   private kickSleep: (() => void) | null = null;
   /** Why the current stream attempt ended: null = organic end/failure;
-   * watchdog/foreground restarts are stream maintenance and must not spend
-   * the retry budget. */
-  private restartKind: "watchdog" | "foreground" | null = null;
+   * otherwise a maintenance restart (see [`RestartKind`]). */
+  private restartKind: RestartKind | null = null;
   private readonly streamRetryDelays: readonly number[];
   private readonly watchdogMs: number;
 
@@ -220,6 +237,18 @@ export class DirectTransport implements Transport {
         };
         this.armWatchdog();
         for await (const f of this.frames(this.streamCtl.signal, onLiveness)) {
+          if (f.kind === "closing") {
+            // The tagma is shutting down: leave now instead of waiting for
+            // the body to end (a middlebox or a stuck writer could hold it
+            // open). The reconnect is immediate stream maintenance, with no
+            // floor for repeated closes: a single attempt carries no signal
+            // to key one on (the connect snapshot always precedes the mark),
+            // and a tagma that stays down refuses new connections, which
+            // spends the retry ladder instead.
+            this.restartKind = "planned";
+            this.streamCtl?.abort();
+            break;
+          }
           switch (f.kind) {
             case "authored":
               this.replyQueue.push({
@@ -233,6 +262,9 @@ export class DirectTransport implements Transport {
             case "status":
               this.statusQueue.push(toSummary(f.payload));
               break;
+            case "gap":
+              this.onGap?.(f.after);
+              break;
           }
         }
       } catch (e) {
@@ -241,12 +273,11 @@ export class DirectTransport implements Transport {
         this.disarmWatchdog();
       }
       if (this.controller.signal.aborted) break; // user close: queues closed
-      // A proactive restart (watchdog / foreground return) is stream
-      // maintenance, not a failure: reconnect at once without spending the
-      // retry budget.
-      if (this.restartKind !== null) {
-        const kind = this.restartKind;
-        this.restartKind = null;
+      // A proactive restart (watchdog / foreground return) and a planned
+      // close (the server leaving) are stream maintenance, not failures:
+      // reconnect without spending the retry budget.
+      const kind = this.takeRestartKind();
+      if (kind !== null) {
         if (kind === "watchdog") {
           console.error(
             "[sse] no bytes for " +
@@ -320,6 +351,13 @@ export class DirectTransport implements Transport {
     }, this.watchdogMs);
   }
 
+  /** The reason this attempt ended as maintenance, cleared on read. */
+  private takeRestartKind(): RestartKind | null {
+    const kind = this.restartKind;
+    this.restartKind = null;
+    return kind;
+  }
+
   private feedWatchdog(): void {
     if (this.watchdog !== null) this.armWatchdog(); // re-arm on liveness
   }
@@ -386,6 +424,19 @@ export class DirectTransport implements Transport {
               kind: "status",
               payload: JSON.parse(f.data) as DirectStatusPayload,
             };
+            break;
+          case "gap": {
+            const payload = JSON.parse(f.data) as {
+              readonly after?: number | null;
+            };
+            yield {
+              kind: "gap",
+              after: typeof payload.after === "number" ? payload.after : null,
+            };
+            break;
+          }
+          case "closing":
+            yield { kind: "closing" };
             break;
           default:
             // Unknown event name: ignore (forward-compat with new frame kinds).

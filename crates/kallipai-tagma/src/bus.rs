@@ -444,23 +444,37 @@ impl<E: Event> TopicReceiver<E> {
     /// Stream form of the subscription: wraps the raw receiver the way
     /// `into_inner` did, but keeps the `Lagged` counting leg — the topic's
     /// counter stays the single loss-detection site for stream-based
-    /// consumers (the SSE assembler's merge). Losses surface as skips,
-    /// the same semantics the merge applies to lagged sources.
-    pub(crate) fn into_stream(self) -> impl Stream<Item = E> + Send {
+    /// consumers (the SSE assembler's merge). A loss surfaces as one
+    /// [`TopicItem::Missed`], so a consumer that can express a gap to its own
+    /// callers does, and one that cannot drops the item (the skip it had
+    /// before).
+    pub(crate) fn into_stream(self) -> impl Stream<Item = TopicItem<E>> + Send {
         let metrics = Arc::clone(&self.metrics);
         let name = self.name;
         let mut last_delivered = self.last_delivered;
         BroadcastStream::new(self.rx).filter_map(move |result| match result {
             Ok(sequenced) => {
                 last_delivered = Some(sequenced.seq);
-                Some(sequenced.event)
+                Some(TopicItem::Data(sequenced.event))
             }
             Err(BroadcastStreamRecvError::Lagged(n)) => {
                 record_loss(&metrics, &mut last_delivered, name, n);
-                None
+                Some(TopicItem::Missed)
             }
         })
     }
+}
+
+/// One item of a [stream-form subscription](TopicReceiver::into_stream).
+///
+/// `Missed` says only that this subscription crossed a loss boundary between
+/// two delivered events. It carries no count and no sequence: the loss is
+/// already recorded in the topic's metrics (the one loss-detection site), and
+/// what a consumer needs is the boundary, not the arithmetic.
+#[derive(Debug)]
+pub(crate) enum TopicItem<E> {
+    Data(E),
+    Missed,
 }
 
 /// Shared lag leg for all three consumption paths (`recv`, `try_recv`,

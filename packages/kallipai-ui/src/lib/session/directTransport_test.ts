@@ -362,3 +362,180 @@ Deno.test("a body of keepalive comments alone never reconnects", async () => {
     globalThis.fetch = original;
   }
 });
+
+Deno.test("a gap frame decodes with and without a cursor", async () => {
+  // The wire omits `after` when the connection has delivered no durable
+  // row, so an empty payload must read as "no anchor", not as a frame the
+  // demux could not decode.
+  const { client } = streamClient([
+    liveStream(
+      { event: "gap", data: JSON.stringify({ after: 7 }) },
+      { event: "gap", data: "{}" },
+    ),
+  ]);
+  const t = new DirectTransport(client, "root", LOCAL_OPERATOR_SENDER, [1]);
+  const seen: (number | null)[] = [];
+  t.onGap = (after) => seen.push(after);
+  const drain = (async () => {
+    for await (const _ of t.status()) {
+      /* wait */
+    }
+  })();
+  await tick(80);
+  t.close();
+  await drain;
+  assertEquals(seen, [7, null]);
+});
+
+/** The closing marker as it arrives on the wire: a named event, empty JSON. */
+const closingFrame: RawFrame = { event: "closing", data: "{}" };
+
+Deno.test("a planned close reconnects at once and fails nothing", async () => {
+  const { client, state } = streamClient([
+    liveStream(statusFrame(1), closingFrame),
+    liveStream(statusFrame(2)),
+  ]);
+  const states: string[] = [];
+  // A minute of backoff: anything but a maintenance reconnect would park
+  // here and the drain would never see the second connection.
+  const t = new DirectTransport(
+    client,
+    "root",
+    LOCAL_OPERATOR_SENDER,
+    [60_000],
+  );
+  t.onState = (s) => states.push(s);
+  const seen: number[] = [];
+  const drain = (async () => {
+    for await (const s of t.status()) seen.push(s.subagentsTotal);
+  })();
+  await tick(60);
+  t.close();
+  await drain;
+
+  assertEquals(state.connects, 2, "the planned close reconnects immediately");
+  assertEquals(seen, [1, 2], "the status queue survives the planned close");
+  assertEquals(
+    states,
+    ["resumed", "resumed"],
+    "no failure banner for a shutdown",
+  );
+});
+
+Deno.test("frames after the closing mark are dropped", async () => {
+  // A stuck writer (or a middlebox) can keep sending after `closing`. The
+  // client must leave on the mark instead of draining the body, so these
+  // trailing frames never reach a queue.
+  const { client, state } = streamClient([
+    liveStream(statusFrame(1), closingFrame, statusFrame(2), statusFrame(3)),
+    liveStream(statusFrame(4)),
+  ]);
+  const t = new DirectTransport(client, "root", LOCAL_OPERATOR_SENDER, [1]);
+  const seen: number[] = [];
+  const drain = (async () => {
+    for await (const s of t.status()) seen.push(s.subagentsTotal);
+  })();
+  await tick(80);
+  t.close();
+  await drain;
+
+  assertEquals(seen, [1, 4], "nothing past the closing mark is delivered");
+  assertEquals(
+    state.connects,
+    2,
+    "the client reconnected instead of reading on",
+  );
+});
+
+Deno.test("repeated planned closes reconnect at once", async () => {
+  // The shape a restarting tagma produces: the connect snapshot, the
+  // mark, then the connection goes away. Every attempt after that is
+  // immediate, and none of it spends the retry budget or reaches the
+  // reconnect banner.
+  const { client, state } = streamClient([
+    liveStream(statusFrame(1), closingFrame),
+    liveStream(statusFrame(2), closingFrame),
+    liveStream(statusFrame(3)),
+  ]);
+  const states: string[] = [];
+  const t = new DirectTransport(
+    client,
+    "root",
+    LOCAL_OPERATOR_SENDER,
+    [60_000],
+  );
+  t.onState = (s) => states.push(s);
+  const seen: number[] = [];
+  const drain = (async () => {
+    for await (const s of t.status()) seen.push(s.subagentsTotal);
+  })();
+  await tick(80);
+  t.close();
+  await drain;
+
+  assertEquals(state.connects, 3, "each planned close reconnects at once");
+  assertEquals(seen, [1, 2, 3], "every connect snapshot reaches the queue");
+  assertEquals(states, ["resumed", "resumed", "resumed"], "no banner");
+});
+
+Deno.test(
+  "a clean close without a closing mark is a fault, not a handoff",
+  async () => {
+    // The mark is the only thing that makes a close planned: a body that just
+    // ends keeps the failure path, so the user sees the reconnect state.
+    const endsClean: AttemptFactory = (_signal, onLiveness) => {
+      onLiveness(); // connection open, then the body ends with no frames
+      return {
+        [Symbol.asyncIterator]: () => ({
+          next: (): Promise<IteratorResult<RawFrame>> =>
+            Promise.resolve({ done: true, value: undefined }),
+        }),
+      };
+    };
+    const { client } = streamClient([
+      endsClean,
+      endsClean,
+      liveStream(statusFrame(9)),
+    ]);
+    const t = new DirectTransport(client, "root", LOCAL_OPERATOR_SENDER, [1]);
+    const states: string[] = [];
+    t.onState = (s) => states.push(s);
+    const seen: number[] = [];
+    const drain = (async () => {
+      for await (const s of t.status()) seen.push(s.subagentsTotal);
+    })();
+    await tick(80);
+    t.close();
+    await drain;
+
+    assertEquals(seen, [9], "the third connection carries the stream");
+    assertEquals(
+      states,
+      ["resumed", "reconnecting", "resumed", "reconnecting", "resumed"],
+      "each unannounced clean end spends a ladder step",
+    );
+  },
+);
+
+Deno.test("a closing frame decodes with no payload", async () => {
+  const { client } = streamClient([liveStream(closingFrame)]);
+  const t = new DirectTransport(
+    client,
+    "root",
+    LOCAL_OPERATOR_SENDER,
+    [10_000],
+  );
+  const kinds: string[] = [];
+  const drain = (async () => {
+    try {
+      for await (const f of t.frames(undefined, () => {})) kinds.push(f.kind);
+    } catch {
+      // close() aborts the underlying stream; the decode is what this pins.
+    }
+  })();
+  await tick(30);
+  t.close();
+  await drain;
+
+  assertEquals(kinds, ["closing"]);
+});

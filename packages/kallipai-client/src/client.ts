@@ -144,10 +144,12 @@ export class TagmaClient {
 
   /** Subscribe to the agent's external event stream (the chat-room API): one
    * multiplexed SSE discriminated by the `event:` field ("authored" | "signal"
-   * | "status"). Yields raw `{ event, data }` frames; the caller decodes each
-   * payload per its event name. This is the frontend's sole window onto the
-   * tagma -- authored assistant messages, runtime signals, and status
-   * snapshots all arrive here. */
+   * | "status" | "gap" | "closing"). Yields raw `{ event, data }` frames; the
+   * caller decodes each payload per its event name, a `gap` names the last
+   * durable row the dropped frames followed, and `closing` says the tagma is
+   * shutting down and nothing follows. This is the frontend's sole
+   * window onto the tagma -- authored assistant messages, runtime signals,
+   * status snapshots, gap markers and the closing frame all arrive here. */
   async *externalEventStream(
     id: AgentId,
     signal?: AbortSignal,

@@ -356,11 +356,11 @@ fn seq_monotonic_under_concurrent_publishers() {
     );
 }
 /// The SSE-face stream adapter keeps the counting leg: a consumer draining
-/// through `into_stream` has its `Lagged` absorbed as a skip yet still
-/// lands in the topic's counter — identical to a `recv` consumer (the
-/// merged SSE sources count through this path).
+/// through `into_stream` sees one `Missed` item where a `recv` consumer sees
+/// `Err(Lagged)` — and the loss still lands in the topic's counter, so the
+/// merged SSE sources count through this path.
 #[tokio::test]
-async fn into_stream_skips_lagged_and_counts_the_loss() {
+async fn into_stream_reports_lagged_and_counts_the_loss() {
     let bus = EventBus::builder()
         .topic::<Ping>(2)
         .build()
@@ -370,10 +370,18 @@ async fn into_stream_skips_lagged_and_counts_the_loss() {
         bus.publish(Ping(i)).unwrap();
     }
     let mut stream = rx.into_stream();
-    // Ring cap 2, four published: the first poll absorbs Lagged(2)
-    // (counted, skipped) and the two surviving frames arrive in order.
-    assert!(matches!(stream.next().await, Some(Ping(2))));
-    assert!(matches!(stream.next().await, Some(Ping(3))));
+    // Ring cap 2, four published: the first poll reports Lagged(2)
+    // (counted, surfaced as one `Missed`) and the two surviving frames
+    // arrive in order.
+    assert!(matches!(stream.next().await, Some(TopicItem::Missed)));
+    assert!(matches!(
+        stream.next().await,
+        Some(TopicItem::Data(Ping(2)))
+    ));
+    assert!(matches!(
+        stream.next().await,
+        Some(TopicItem::Data(Ping(3)))
+    ));
     let ping = bus
         .stats()
         .into_iter()
