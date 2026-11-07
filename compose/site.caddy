@@ -60,6 +60,13 @@
 (app-vite) {
 	import app-headers
 	route {
+		# The document reaches the edge without a cache header: vite stamps its
+		# modules and its optimized deps, not the shell SvelteKit renders. `?`
+		# sets the value only when none is present, so a reload revalidates the
+		# shell while `no-cache` on modules and the year-long `immutable` on deps
+		# pass through untouched. The runtime config answers below, and a stale
+		# apiBase is that same hazard, so the rule sits above it as well.
+		header ?Cache-Control "no-cache"
 		import app-config
 		reverse_proxy 127.0.0.1:5173
 	}

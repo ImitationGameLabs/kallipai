@@ -50,6 +50,33 @@ export default defineConfig({
         server.watcher.add(path.resolve(here, "../kallipai-ui/src"));
       },
     },
+    // The dev shell must revalidate: SvelteKit answers the document itself,
+    // before vite's send() stamps its cache rules, so the page arrives with
+    // an ETag and no Cache-Control and a browser can keep an old shell.
+    // `server.headers` is not the seam: it never reaches this response, and
+    // where vite does apply it the value lands after the one the handler
+    // chose, which would flatten the year-long cache on optimized deps. The
+    // hook fills in a missing value only, so those rules survive.
+    {
+      name: "document-no-cache",
+      apply: "serve",
+      configureServer(server) {
+        server.middlewares.use((_req, res, next) => {
+          const writeHead = res.writeHead.bind(res);
+          res.writeHead = ((...args: Parameters<typeof writeHead>) => {
+            // A 304 carries no headers of its own, and its response updates a
+            // stored entry: filling one here would shorten a dep's year.
+            const status =
+              typeof args[0] === "number" ? args[0] : res.statusCode;
+            if (status !== 304 && !res.hasHeader("cache-control")) {
+              res.setHeader("Cache-Control", "no-cache");
+            }
+            return writeHead(...args);
+          }) as typeof res.writeHead;
+          next();
+        });
+      },
+    },
   ],
   server: {
     // LAN-open so the operator can reach the fallback shell from other
