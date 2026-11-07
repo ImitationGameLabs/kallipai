@@ -1389,6 +1389,72 @@ async fn a_local_configuration_error_stops_without_walking_the_chain() {
     );
     assert_eq!(backend.take_requests().len(), 1);
 }
+/// The message a mid-stream failure hands the agent is the transport's own.
+/// Promotion wraps the error for classification, and the wrapper's own Display
+/// carries the backend family's name; that name must not reach the reader just
+/// because the failure was classified.
+#[tokio::test]
+async fn a_mid_stream_failure_tells_the_agent_what_the_transport_reported() {
+    let first = RecordingBackend::new();
+    first.queue_dropped_stream(
+        vec![just_llm_client::types::generation::GenerationEvent::Text {
+            delta: "partial".to_owned(),
+        }],
+        just_llm_client::TransportError::HttpStatus {
+            status: reqwest::StatusCode::UNAUTHORIZED,
+            body: "{\"error\":\"bad key\"}".to_owned(),
+        },
+    );
+    let second = RecordingBackend::new();
+    second.queue_stream("resp-1");
+    let source = Arc::new(MapSource(HashMap::from([
+        ("p1".to_string(), first.clone() as Arc<dyn LlmBackend>),
+        ("p2".to_string(), second.clone() as Arc<dyn LlmBackend>),
+    ])));
+    let mut ctx = ctx_from_source(
+        vec![profile("a", "p1", 100_000), profile("b", "p2", 100_000)],
+        source,
+        RetryPolicy::default(),
+    )
+    .await;
+    ctx.start_episode();
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+    let outcome = acquire_stream(
+        &mut ctx,
+        vec![user_msg("q1")],
+        Vec::new(),
+        &tx,
+        &tokio_util::sync::CancellationToken::new(),
+        0,
+    )
+    .await;
+
+    // The rejection is not one another send can help with, so the chain walks
+    // to the sibling profile and the request lands there.
+    assert!(
+        matches!(outcome, AcquireResult::Consumed(_)),
+        "the sibling profile serves the request"
+    );
+    let mut errors = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        if let crate::event::AgentEvent::StreamReset { error, .. } = event {
+            errors.push(error);
+        }
+    }
+    assert_eq!(errors.len(), 1, "one drop, one reset");
+    assert!(
+        errors[0].contains("api returned 401"),
+        "the transport's own wording survives: {}",
+        errors[0]
+    );
+    assert!(
+        !errors[0].contains("backend error"),
+        "the promotion's wrapper stays out of the text: {}",
+        errors[0]
+    );
+}
+
 /// The mid-stream path writes what the rejection taught too: the 401 that
 /// stops this endpoint leaves an endpoint-level credential fact.
 #[tokio::test]

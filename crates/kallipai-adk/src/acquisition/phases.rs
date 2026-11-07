@@ -28,9 +28,10 @@ use just_llm_client::types::generation::{
     GenerationRequest, Message, ToolChoice, ToolChoiceMode, ToolDefinition,
 };
 use kallipai_common::retry::{RetryAttempt, RetryRecord};
+use kallipai_common::telemetry::Settle;
 use kallipai_common::timefmt;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info};
+use tracing::{Instrument as _, debug, error, info};
 
 /// Within-set failover acquisition: rebuild the request per profile, retry, and on a `Failover`
 /// outcome advance the chain. Self-contained — owns `retry_records` and flushes them on every
@@ -50,9 +51,13 @@ pub(crate) async fn acquire_stream(
     round: usize,
 ) -> AcquireResult {
     let mut retry_records = Vec::new();
+    // The agent's id rides on every chat span: attributes do not inherit from
+    // the turn above, so the label is read once per acquisition.
+    let agent = crate::spans::agent_label(ctx.config.agent_id.as_ref());
     let consumed = loop {
         let provider_id = ctx.failover.current_profile().endpoint.clone();
         let profile_id = ctx.failover.current_profile().id.clone();
+        let model = ctx.failover.current_profile().model.clone();
         // The endpoint, the clock, the attempt origin and the table's reading are
         // all taken here, so a chain that advanced is seen with fresh values: the
         // verdict on them is `enter_attempt`'s, which owns what a carried fact means.
@@ -72,6 +77,11 @@ pub(crate) async fn acquire_stream(
             PreSend::Done(result) => return result,
         }
         let request = build_request(ctx, &messages, &tools);
+        // One span per request. The retry shell re-sends inside it, so the
+        // attempts attribute counts this request's sends; a failover to the
+        // next profile returns to the top of this loop and opens a new span.
+        let chat = crate::spans::chat_span(&model, &provider_id, &profile_id, &agent);
+        let settle = Settle::new(&chat);
         let result = {
             let fut = crate::retry::stream_with_retry(
                 crate::retry::RetryCall {
@@ -87,11 +97,13 @@ pub(crate) async fn acquire_stream(
                 tx,
                 &mut retry_records,
                 round_cancel.clone(),
-            );
+            )
+            .instrument(chat.clone());
             tokio::select! {
                 result = fut => result,
                 _ = round_cancel.cancelled() => {
                     flush_retry_records(ctx, &mut retry_records).await;
+                    settle.cancelled();
                     return AcquireResult::Outcome(AgentOutcome::Cancelled);
                 }
             }
@@ -119,12 +131,14 @@ pub(crate) async fn acquire_stream(
             }
             Err(crate::retry::RequestFailure::Fatal(e)) => {
                 flush_retry_records(ctx, &mut retry_records).await;
+                settle.failed(decision::classify(&e, Phase::Connect).code());
                 return AcquireResult::Error(e.into());
             }
             Err(crate::retry::RequestFailure::Failover(e)) => {
                 // Flush this endpoint's retries (each tagged with its endpoint id) before
                 // advancing.
                 flush_retry_records(ctx, &mut retry_records).await;
+                settle.failed(decision::classify(&e, Phase::Connect).code());
                 let reason = crate::llm_error::render_error(&e);
                 if let Some(result) = walk_or_finish(
                     ctx,
@@ -150,6 +164,7 @@ pub(crate) async fn acquire_stream(
                 block,
             }) => {
                 flush_retry_records(ctx, &mut retry_records).await;
+                settle.failed(decision::classify(&error, Phase::Connect).code());
                 let rendered = crate::llm_error::render_error(&error);
                 // A quota or payment block parks with the structured reason when
                 // the chain runs out; every other one-way switch keeps its own
@@ -183,6 +198,7 @@ pub(crate) async fn acquire_stream(
             }
             Err(crate::retry::RequestFailure::Stop { reason, error }) => {
                 flush_retry_records(ctx, &mut retry_records).await;
+                settle.failed(decision::classify(&error, Phase::Connect).code());
                 return AcquireResult::Stop {
                     message: stop_message(reason, ctx, &error, LOCAL_CONFIG_NOTE),
                 };
@@ -191,6 +207,7 @@ pub(crate) async fn acquire_stream(
                 // Cancel surfaced from within a retry backoff — flush this endpoint's
                 // retries and short-circuit to a cancelled round. Mirrors the Fatal arm's flush.
                 flush_retry_records(ctx, &mut retry_records).await;
+                settle.cancelled();
                 return AcquireResult::Outcome(AgentOutcome::Cancelled);
             }
         };
@@ -200,9 +217,16 @@ pub(crate) async fn acquire_stream(
         // a `StreamReset` event) and the same request is re-sent; a kept anchor turns the
         // retry into a delta continuation, while a drop with no anchor kept — a first send
         // that never reached one — resends the full context.
-        match consume_stream(stream, tx, round_cancel).await {
+        match consume_stream(stream, tx, round_cancel)
+            .instrument(chat.clone())
+            .await
+        {
             StreamOutcome::Completed(mut c) => {
                 flush_retry_records(ctx, &mut retry_records).await;
+                if let Some(usage) = c.usage.as_ref() {
+                    crate::spans::record_usage(&chat, usage);
+                }
+                settle.done();
                 if let Some(response) = c.response.take()
                     && let Err(error) = ctx.conversation.adopt(*response)
                 {
@@ -219,6 +243,7 @@ pub(crate) async fn acquire_stream(
             }
             StreamOutcome::Cancelled => {
                 flush_retry_records(ctx, &mut retry_records).await;
+                settle.cancelled();
                 return AcquireResult::Outcome(AgentOutcome::Cancelled);
             }
             StreamOutcome::Transient(e) => {
@@ -227,7 +252,8 @@ pub(crate) async fn acquire_stream(
                 // mid-stream retry remains within the episode's budget.
                 flush_retry_records(ctx, &mut retry_records).await;
                 if let Some(result) =
-                    on_mid_stream_failure(ctx, &mut messages, tx, round_cancel, round, e).await
+                    on_mid_stream_failure(ctx, &mut messages, tx, round_cancel, round, e, settle)
+                        .await
                 {
                     return result;
                 }
@@ -421,6 +447,7 @@ async fn on_mid_stream_failure(
     round_cancel: &CancellationToken,
     round: usize,
     e: just_llm_client::TransportError,
+    settle: Settle,
 ) -> Option<AcquireResult> {
     let provider_id = ctx.failover.current_profile().endpoint.clone();
     let profile_id = ctx.failover.current_profile().id.clone();
@@ -433,8 +460,13 @@ async fn on_mid_stream_failure(
     // happened in, and read the exit from the episode ledger. A repeated
     // response shape stops the round here just as it does before the stream
     // opens: the class picks the exit, not the transport nature of the error.
+    //
+    // The promotion feeds the classification and the span's failure code; the
+    // message the agent reads stays the transport error's own, so a wrapped
+    // error does not gain the backend family's prefix on this path only.
     let promoted = just_llm_client::BackendError::provider(ctx.client.family(), e);
     let class = decision::classify(&promoted, Phase::MidStream);
+    settle.failed(class.code());
     let attempt_facts = Attempt::failed(
         Phase::MidStream,
         class,

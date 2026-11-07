@@ -15,6 +15,7 @@ use serde::de::DeserializeOwned;
 use thiserror::Error;
 use tracing::{debug, instrument};
 
+use kallipai_common::SPAN_TARGET;
 use kallipai_common::agentid::AgentId;
 use kallipai_cron_common::{
     CreateScheduleRequest, Schedule, ScheduleStatus, SchedulesListResponse, StatusResponse,
@@ -127,7 +128,7 @@ impl CronClient {
 
     // -- endpoints --
 
-    #[instrument(skip(self))]
+    #[instrument(target = SPAN_TARGET, skip(self))]
     pub async fn health(&self) -> Result<String, CronClientError> {
         // /health returns a plain-text body (not JSON), so bypass `handle`.
         let resp = self.request(reqwest::Method::GET, "/health").send().await?;
@@ -146,7 +147,7 @@ impl CronClient {
     }
 
     /// Daemon status scoped to `agent` (that agent's active/pending counts + next fire).
-    #[instrument(skip(self))]
+    #[instrument(target = SPAN_TARGET, skip(self))]
     pub async fn status(&self, agent: &AgentId) -> Result<StatusResponse, CronClientError> {
         let resp = self
             .request(reqwest::Method::GET, "/status")
@@ -156,7 +157,7 @@ impl CronClient {
         Self::handle(resp).await
     }
 
-    #[instrument(skip(self, req))]
+    #[instrument(target = SPAN_TARGET, skip(self, req))]
     pub async fn create(&self, req: CreateScheduleRequest) -> Result<Schedule, CronClientError> {
         // `agent_id` travels in the body (the verified caller).
         let resp = self
@@ -168,7 +169,7 @@ impl CronClient {
     }
 
     /// List `agent`'s schedules, optionally filtered by status/tag.
-    #[instrument(skip(self))]
+    #[instrument(target = SPAN_TARGET, skip(self))]
     pub async fn list(
         &self,
         agent: &AgentId,
@@ -191,7 +192,7 @@ impl CronClient {
 
     /// Get one of `agent`'s schedules by id; `None` if not found or owned by
     /// another agent (the daemon returns `404` for both, uniformly).
-    #[instrument(skip(self))]
+    #[instrument(target = SPAN_TARGET, skip(self))]
     pub async fn get(
         &self,
         agent: &AgentId,
@@ -210,7 +211,7 @@ impl CronClient {
     }
 
     /// `agent`'s earliest-fire schedule, or `None`.
-    #[instrument(skip(self))]
+    #[instrument(target = SPAN_TARGET, skip(self))]
     pub async fn next(&self, agent: &AgentId) -> Result<Option<Schedule>, CronClientError> {
         let resp = self
             .request(reqwest::Method::GET, "/schedules/next")
@@ -222,7 +223,7 @@ impl CronClient {
     }
 
     /// Delete one of `agent`'s schedules; `false` if not found / cross-owner.
-    #[instrument(skip(self))]
+    #[instrument(target = SPAN_TARGET, skip(self))]
     pub async fn delete(&self, agent: &AgentId, id: &str) -> Result<bool, CronClientError> {
         let resp = self
             .request(reqwest::Method::DELETE, &format!("/schedules/{id}"))
@@ -237,7 +238,7 @@ impl CronClient {
     }
 
     /// Update one of `agent`'s schedules (status-only: pause/resume).
-    #[instrument(skip(self, req))]
+    #[instrument(target = SPAN_TARGET, skip(self, req))]
     pub async fn update(
         &self,
         agent: &AgentId,

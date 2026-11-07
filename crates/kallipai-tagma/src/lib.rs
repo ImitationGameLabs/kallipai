@@ -725,8 +725,7 @@ pub fn init_logging(filter: &tracing_subscriber::EnvFilter) -> kallipai_common::
     use tracing_subscriber::prelude::*;
 
     let config = kallipai_common::telemetry::config_from_env();
-    let (export, telemetry) =
-        kallipai_common::telemetry::export_layer(config.as_ref(), filter, "tagma");
+    let (export, telemetry) = kallipai_common::telemetry::export_layer(config.as_ref(), "tagma");
 
     let stderr_layer = || {
         tracing_subscriber::fmt::layer()

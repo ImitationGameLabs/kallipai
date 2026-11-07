@@ -472,6 +472,25 @@ impl FailureClass {
             Self::Unclassified => "unclassified failure",
         }
     }
+
+    /// The class as one stable lowercase word.
+    ///
+    /// This is what a span's `error.type` carries: a trace groups on it, so it
+    /// never holds the prose [`Self::label`] writes for a log reader. The
+    /// `match` has no catch-all arm — a class added later fails to compile
+    /// here rather than reaching a dashboard as an empty code.
+    pub(crate) fn code(self) -> &'static str {
+        match self {
+            Self::Transient(_) => "transient",
+            Self::QuotaBlocked => "quota_blocked",
+            Self::Throttled => "throttled",
+            Self::EndpointPermanent => "endpoint_permanent",
+            Self::RequestPermanent => "request_permanent",
+            Self::LocalConfig => "local_config",
+            Self::ResponseShape => "response_shape",
+            Self::Unclassified => "unclassified",
+        }
+    }
 }
 
 /// Evidence substrings that make a 403 a quota rejection.
@@ -1982,6 +2001,42 @@ mod tests {
         assert_eq!(
             fact_reason(BlockKind::EndpointShape),
             "endpoint response shape rejected"
+        );
+    }
+
+    /// Every class names a code, and every code is a lowercase word a dashboard
+    /// can group on. The closed set is the compiler's (`code()` matches every
+    /// variant); this test holds the form, and that no two classes share a code.
+    #[test]
+    fn every_failure_class_names_its_own_lowercase_code() {
+        let codes: Vec<&'static str> = [
+            FailureClass::Transient(TransientKind::Transport),
+            FailureClass::Transient(TransientKind::Timeout),
+            FailureClass::Transient(TransientKind::Server),
+            FailureClass::Transient(TransientKind::Truncated),
+            FailureClass::QuotaBlocked,
+            FailureClass::Throttled,
+            FailureClass::EndpointPermanent,
+            FailureClass::RequestPermanent,
+            FailureClass::LocalConfig,
+            FailureClass::ResponseShape,
+            FailureClass::Unclassified,
+        ]
+        .into_iter()
+        .map(FailureClass::code)
+        .collect();
+
+        for code in &codes {
+            assert!(
+                !code.is_empty() && code.chars().all(|c| c.is_ascii_lowercase() || c == '_'),
+                "a code is a lowercase word: {code}"
+            );
+        }
+        let distinct: std::collections::BTreeSet<&str> = codes.iter().copied().collect();
+        assert_eq!(
+            distinct.len(),
+            8,
+            "one code per class, the transient kinds sharing theirs: {codes:?}"
         );
     }
 }

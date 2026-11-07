@@ -16,9 +16,9 @@
 //! A dropped span leaves no trace of its own: the SDK counts drops but reports
 //! them only through its internal logs, which this crate leaves off, so a
 //! deployment notices loss from the collector's intake and not from here. The
-//! export layer shares the event filter, so `RUST_LOG=warn` filters the spans
-//! out with the events; a call whose span never existed injects nothing, so at
-//! that level the chain is cut rather than quiet.
+//! export layer carries its own filter, so a quiet `RUST_LOG` takes neither the
+//! span nor the `traceparent` it injects: the chain stays whole at any log
+//! level.
 //!
 //! A setup that cannot be built at all (a malformed endpoint, say) degrades:
 //! one stderr line, tracing stays local, the service starts. Telemetry is not
@@ -77,6 +77,8 @@ const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(6);
 /// `OTEL_RESOURCE_ATTRIBUTES=service.instance.id=<slug>`, which the SDK's
 /// environment detector folds into this resource.
 const RESOURCE_NAMESPACE: &str = "kallipai";
+
+pub use crate::SPAN_TARGET;
 
 /// The path the OTLP HTTP exporter posts traces to; a configured base gains it.
 const TRACES_PATH: &str = "/v1/traces";
@@ -281,7 +283,7 @@ where
     E: SpanExporter + 'static,
     F: FnOnce(&str) -> Result<E, String>,
 {
-    let (extra, guard) = export_layer_with(open, config, filter, service);
+    let (extra, guard) = export_layer_with(open, config, service);
     let subscriber = logging::service_layers_with(filter, service, dir, stdout, extra);
     (subscriber, guard)
 }
@@ -301,12 +303,15 @@ where
 ///
 /// `None` with an inert guard means nothing is exported: no endpoint is set,
 /// or the exporter could not be built (one stderr line, tracing stays local).
+///
+/// The layer carries its own filter, on [`SPAN_TARGET`], and is therefore not
+/// tied to `RUST_LOG`: a service whose log filter is `warn` still exports the
+/// spans it opens, while its INFO log lines stay out of the trace.
 pub fn export_layer(
     config: Option<&Config>,
-    filter: &EnvFilter,
     service: &str,
 ) -> (Option<Box<dyn Layer<Registry> + Send + Sync>>, Guard) {
-    export_layer_with(otlp_exporter, config, filter, service)
+    export_layer_with(otlp_exporter, config, service)
 }
 
 /// [`export_layer`] with the exporter construction injected, so the assembly
@@ -314,7 +319,6 @@ pub fn export_layer(
 fn export_layer_with<E, F>(
     open: F,
     config: Option<&Config>,
-    filter: &EnvFilter,
     service: &str,
 ) -> (Option<Box<dyn Layer<Registry> + Send + Sync>>, Guard)
 where
@@ -324,7 +328,7 @@ where
     let Some(config) = config else {
         return (None, Guard::inert());
     };
-    match build_export_layer_with(open, config, filter, service) {
+    match build_export_layer_with(open, config, service) {
         Ok((layer, provider)) => {
             opentelemetry::global::set_text_map_propagator(TraceContextPropagator::new());
             opentelemetry::global::set_tracer_provider(provider.clone());
@@ -403,6 +407,7 @@ pub fn request_span(
 
     let name = format!("{method} {route}");
     let span = tracing::info_span!(
+        target: SPAN_TARGET,
         "request",
         otel.name = %name,
         otel.kind = %SERVER_SPAN_KIND,
@@ -444,6 +449,102 @@ pub fn record_attribute(span: &tracing::Span, key: &str, value: impl Into<String
     use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 
     span.set_attribute(key.to_string(), value.into());
+}
+
+/// The attribute a settled span carries: the one word for how its scope ended.
+const OUTCOME: &str = "kallipai.outcome";
+/// A scope that finished its work.
+const OK: &str = "ok";
+/// A scope that failed at something.
+const FAILED: &str = "failed";
+/// A scope that was cancelled from outside rather than failing.
+const CANCELLED: &str = "cancelled";
+/// A scope that ended without saying how it ended.
+const ABANDONED: &str = "abandoned";
+
+/// Settles how one span ended, once, from the scope that opened it.
+///
+/// A span is dropped when its scope ends, and a scope that ends without a
+/// verdict -- an early `?`, a panic, a path nobody thought about -- would
+/// otherwise read as a success in the trace. The guard writes the verdict, and
+/// [`Drop`] writes `abandoned` for whatever the scope did not say.
+///
+/// The verdict has two axes, and they answer different questions.
+/// `kallipai.outcome` names how the scope ended, on every span. A failing
+/// status with `error.type` marks the ends where the work went wrong. A
+/// cancelled scope is neither: a daemon shutting down, a task removed, a round
+/// interrupted ends work that did not fail, so it keeps an unset status and
+/// reads as cancelled by its outcome alone. Counting a restart as an error
+/// would let operations drown out the failures the trace is read for.
+///
+/// Nothing here carries text: a code names a class (`tool_timeout`,
+/// `quota_blocked`), never a message. The span's attributes and status are
+/// what the trace keeps; the log line keeps the prose.
+///
+/// The guard lives as long as the scope: bind it (`let settle = ...`) and call
+/// one of the verdicts on the way out. A guard dropped at the end of its own
+/// statement settles the span early, which is why building one is `#[must_use]`.
+#[must_use = "the guard must live as long as the scope it settles"]
+pub struct Settle {
+    span: tracing::Span,
+    settled: bool,
+}
+
+impl Settle {
+    /// Take responsibility for how `span` ends.
+    pub fn new(span: &tracing::Span) -> Self {
+        Self {
+            span: span.clone(),
+            settled: false,
+        }
+    }
+
+    /// The scope finished its work.
+    pub fn done(mut self) {
+        self.outcome(OK);
+    }
+
+    /// The scope failed, and `code` names the class of the failure.
+    pub fn failed(mut self, code: &str) {
+        self.fail(FAILED, code);
+    }
+
+    /// The scope was cancelled from outside rather than failing.
+    pub fn cancelled(mut self) {
+        self.outcome(CANCELLED);
+    }
+
+    /// Write the outcome word, which every span gets.
+    fn outcome(&mut self, word: &str) {
+        use tracing_opentelemetry::OpenTelemetrySpanExt as _;
+
+        self.span
+            .set_attribute(OUTCOME.to_string(), word.to_string());
+        self.settled = true;
+    }
+
+    /// Write a failure: the outcome word, the class as `error.type`, and a
+    /// failed status carrying the same class, so a trace filters on either.
+    /// `outcome` and `code` differ only for the abandoned fallback, whose
+    /// class is the same word as its verdict.
+    fn fail(&mut self, outcome: &str, code: &str) {
+        use opentelemetry::trace::Status;
+        use tracing_opentelemetry::OpenTelemetrySpanExt as _;
+
+        self.span
+            .set_attribute(OUTCOME.to_string(), outcome.to_string());
+        self.span.set_attribute("error.type", code.to_string());
+        self.span.set_status(Status::error(code.to_string()));
+        self.settled = true;
+    }
+}
+
+impl Drop for Settle {
+    fn drop(&mut self) {
+        if !self.settled {
+            self.fail(ABANDONED, ABANDONED);
+        }
+    }
 }
 
 /// The server span for one request, as axum middleware: mount it with
@@ -603,6 +704,7 @@ impl Middleware for TracePropagation {
         let method = request.method().clone();
         let name = format!("{method} {url_path}");
         let span = tracing::info_span!(
+            target: SPAN_TARGET,
             "request",
             otel.name = %name,
             otel.kind = %CLIENT_SPAN_KIND,
@@ -675,7 +777,6 @@ impl opentelemetry::propagation::Injector for HeaderInjector<'_> {
 fn build_export_layer_with<E, F>(
     open: F,
     config: &Config,
-    filter: &EnvFilter,
     service: &str,
 ) -> Result<(Box<dyn Layer<Registry> + Send + Sync>, SdkTracerProvider), String>
 where
@@ -711,9 +812,22 @@ where
     let tracer = provider.tracer(service.to_string());
     let layer = tracing_opentelemetry::layer()
         .with_tracer(tracer)
-        .with_filter(filter.clone())
+        .with_filter(span_filter())
         .boxed();
     Ok((layer, provider))
+}
+
+/// The export layer's own filter: spans on [`SPAN_TARGET`], no event at all.
+///
+/// An event is what carries text -- a message, an upstream error body, up to
+/// the capture cap -- so no level of event reaches the trace; span status and
+/// attributes say what happened instead. The largest carrier on the agent path
+/// is an `error!` that prints an upstream error body: a truth worth keeping out
+/// of a collector for good. Nothing is lost by dropping the rest: every span
+/// this workspace publishes settles its own status, from [`Settle`] on an agent
+/// path and from [`record_response`] or the propagation shell on a request path.
+fn span_filter() -> EnvFilter {
+    EnvFilter::new(format!("off,{SPAN_TARGET}=info"))
 }
 
 /// The OTLP/HTTP exporter for a resolved traces endpoint.
@@ -1139,7 +1253,7 @@ mod tests {
 
     #[test]
     fn export_layer_stays_inert_without_a_configuration() {
-        let (layer, mut guard) = export_layer(None, &test_filter(), "tagma");
+        let (layer, mut guard) = export_layer(None, "tagma");
         assert!(layer.is_none(), "an unconfigured service exports nothing");
         assert!(!guard.shutdown(), "an inert guard owns no provider");
     }
@@ -1147,7 +1261,7 @@ mod tests {
     #[test]
     fn export_layer_carries_the_layer_and_the_guard_when_configured() {
         let dead = config("http://127.0.0.1:1");
-        let (layer, mut guard) = export_layer(Some(&dead), &test_filter(), "tagma");
+        let (layer, mut guard) = export_layer(Some(&dead), "tagma");
         assert!(
             layer.is_some(),
             "a configured service exports through this layer"
@@ -1628,6 +1742,30 @@ mod tests {
             .unwrap_or_else(|| panic!("the call left one {kind:?} span, not: {spans:?}"))
     }
 
+    /// The observing stack a test installs, with the log filter it names: a
+    /// subscriber that exports into a recording exporter, the guard that owns
+    /// what it published, and the exporter whose spans the test reads back.
+    fn recording_with(
+        filter: EnvFilter,
+    ) -> (
+        impl tracing::Subscriber + Send + Sync + 'static,
+        Guard,
+        RecordingExporter,
+    ) {
+        let recording = RecordingExporter::default();
+        let handed = recording.clone();
+        let config = config("http://collector:4318");
+        let (subscriber, guard) = service_layers_with_exporter(
+            move |_endpoint: &str| Ok(handed),
+            Some(&config),
+            &filter,
+            "archeion",
+            None,
+            Captured::default(),
+        );
+        (subscriber, guard, recording)
+    }
+
     /// The observing stack a test installs: a subscriber that exports into a
     /// recording exporter, the guard that owns what it published, and the
     /// exporter whose spans the test reads afterwards.
@@ -1667,7 +1805,7 @@ mod tests {
         // while the subscriber is installed: the call joins it from there.
         let root_span_context = {
             let _subscribed = tracing::subscriber::set_default(subscriber);
-            let root = tracing::info_span!("root");
+            let root = tracing::info_span!(target: SPAN_TARGET, "root");
             let root_context = root.context();
             let span_context = root_context.span().span_context().clone();
             let response = async { client.get(format!("http://{addr}/files/abc")).send().await }
@@ -2036,6 +2174,171 @@ mod tests {
             );
         }
     }
+    #[tokio::test]
+    async fn a_span_reaches_the_exporter_while_no_event_does() {
+        // The red line is about text, and text travels in events: a message, an
+        // upstream error body. A span's own attributes are the vocabulary this
+        // workspace chose, so an event must not ride along at any level.
+        const SENTINEL: &str = "SENTINEL-b0dy-do-not-export";
+        let recording = RecordingExporter::default();
+        let handed = recording.clone();
+        let config = config("http://collector:4318");
+        let (subscriber, mut guard) = service_layers_with_exporter(
+            move |_endpoint: &str| Ok(handed),
+            Some(&config),
+            &EnvFilter::new("warn"),
+            "archeion",
+            None,
+            Captured::default(),
+        );
+        {
+            let _subscribed = tracing::subscriber::set_default(subscriber);
+            // RUST_LOG=warn leaves this callsite uninterested for the log
+            // layer; the export layer's own filter is what keeps the span.
+            let span = tracing::info_span!(target: SPAN_TARGET, "work");
+            span.in_scope(|| {
+                tracing::info!(body = SENTINEL, "a note");
+                tracing::warn!(body = SENTINEL, "a warning carries text too");
+                tracing::error!(body = SENTINEL, "and so does this one");
+            });
+        }
+        assert!(guard.shutdown(), "a configured guard owns a provider");
+        let spans = recording.batches();
+        assert_eq!(spans.len(), 1, "one span, recorded despite the log filter");
+        assert!(
+            spans[0].events.is_empty(),
+            "no event reaches the trace, at any level: {:?}",
+            spans[0].events
+        );
+        assert!(
+            !format!("{:?}", spans[0]).contains(SENTINEL),
+            "the exported span carries no event text"
+        );
+    }
+
+    #[test]
+    fn the_request_span_carries_the_span_target() {
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(std::io::sink)
+                .with_ansi(false),
+        );
+        tracing::subscriber::with_default(subscriber, || {
+            let span = request_span("GET", "/files/{id}", "/files/abc", &http::HeaderMap::new());
+            assert_eq!(
+                span.metadata().map(|meta| meta.target()),
+                Some(SPAN_TARGET),
+                "the export layer selects on this target"
+            );
+        });
+    }
+
+    #[cfg(feature = "axum")]
+    #[tokio::test]
+    async fn a_client_span_and_its_traceparent_survive_a_quiet_log_filter() {
+        use opentelemetry::trace::SpanKind;
+
+        let (addr, served, seen) =
+            service_on_loopback("/files/abc", axum::http::StatusCode::OK).await;
+        let recording = RecordingExporter::default();
+        let handed = recording.clone();
+        let config = config("http://collector:4318");
+        let (subscriber, mut guard) = service_layers_with_exporter(
+            move |_endpoint: &str| Ok(handed),
+            Some(&config),
+            &EnvFilter::new("warn"),
+            "archeion",
+            None,
+            Captured::default(),
+        );
+        {
+            let _subscribed = tracing::subscriber::set_default(subscriber);
+            let client = http_client(reqwest::Client::builder()).expect("a client");
+            let response = client
+                .get(format!("http://{addr}/files/abc"))
+                .send()
+                .await
+                .expect("the service answers");
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+        }
+        served.abort();
+        assert!(guard.shutdown(), "a configured guard owns a provider");
+
+        let traceparent = seen
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("the header travelled with the call");
+        let spans = recording.batches();
+        let client_span = span_of_kind(&spans, SpanKind::Client);
+        let parts: Vec<&str> = traceparent.split('-').collect();
+        assert_eq!(
+            parts[2],
+            client_span.span_context.span_id().to_string(),
+            "the header names the span the call opened"
+        );
+        let trace_id = client_span.span_context.trace_id().to_string();
+        assert_eq!(parts[1], trace_id, "and the trace it belongs to");
+        assert_eq!(client_span.name, "GET /files/abc");
+    }
+
+    #[tokio::test]
+    async fn a_scope_that_ends_without_a_verdict_reads_as_abandoned() {
+        let (subscriber, mut guard, recording) = recording_with(EnvFilter::new("info"));
+        {
+            let _subscribed = tracing::subscriber::set_default(subscriber);
+            let unfinished = tracing::info_span!(target: SPAN_TARGET, "unfinished");
+            {
+                let _settle = Settle::new(&unfinished);
+            }
+            let failed = tracing::info_span!(target: SPAN_TARGET, "failed");
+            Settle::new(&failed).failed("tool_timeout");
+            let cancelled = tracing::info_span!(target: SPAN_TARGET, "cancelled");
+            Settle::new(&cancelled).cancelled();
+            let finished = tracing::info_span!(target: SPAN_TARGET, "finished");
+            Settle::new(&finished).done();
+        }
+        assert!(guard.shutdown(), "a configured guard owns a provider");
+
+        let spans = recording.observed();
+        let find = |name: &str| {
+            spans
+                .iter()
+                .find(|span| span.name == name)
+                .unwrap_or_else(|| panic!("the {name} span: {spans:#?}"))
+        };
+        assert_eq!(
+            find("unfinished").attribute("kallipai.outcome"),
+            Some(ABANDONED),
+            "a scope that said nothing did not succeed"
+        );
+        assert_eq!(find("unfinished").attribute("error.type"), Some(ABANDONED));
+        assert!(find("unfinished").status.starts_with("error"));
+        assert_eq!(find("failed").attribute("kallipai.outcome"), Some(FAILED));
+        assert_eq!(find("failed").attribute("error.type"), Some("tool_timeout"));
+        assert!(find("failed").status.starts_with("error"));
+        assert_eq!(
+            find("cancelled").attribute("kallipai.outcome"),
+            Some(CANCELLED)
+        );
+        assert_eq!(
+            find("cancelled").attribute("error.type"),
+            None,
+            "a cancelled scope is not a failure"
+        );
+        assert_eq!(
+            find("cancelled").status,
+            "unset",
+            "a shutdown must not read as an error"
+        );
+        assert_eq!(find("finished").attribute("kallipai.outcome"), Some(OK));
+        assert_eq!(
+            find("finished").attribute("error.type"),
+            None,
+            "a finished scope carries no failure"
+        );
+        assert_eq!(find("finished").status, "unset");
+    }
 }
 
 /// The export boundary, for tests: spans leave through a recorder kept in
@@ -2192,10 +2495,13 @@ pub mod test_observability {
             Self { exporter, tracer }
         }
 
-        /// The layer that hands spans to this recorder's exporter.
+        /// The layer that hands spans to this recorder's exporter, filtered
+        /// as the service bootstrap filters it: a span the bootstrap would
+        /// drop is not recorded here either.
         pub fn layer(&self) -> Box<dyn Layer<Registry> + Send + Sync> {
             tracing_opentelemetry::layer()
                 .with_tracer(self.tracer.clone())
+                .with_filter(super::span_filter())
                 .boxed()
         }
 
@@ -2218,9 +2524,9 @@ pub mod test_observability {
             let subscriber = tracing_subscriber::registry().with(recorder.layer());
             let spans = {
                 let _subscribed = tracing::subscriber::set_default(subscriber);
-                let probe = tracing::info_span!("probe", answer = 42);
+                let probe = tracing::info_span!(target: crate::telemetry::SPAN_TARGET, "probe", answer = 42);
                 let entered = probe.enter();
-                let inner = tracing::info_span!("inner");
+                let inner = tracing::info_span!(target: crate::telemetry::SPAN_TARGET, "inner");
                 drop(inner);
                 drop(entered);
                 drop(probe);

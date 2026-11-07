@@ -565,6 +565,11 @@ pub(crate) struct RecordingBackend {
     requests: Mutex<Vec<GenerationRequest>>,
     failures: Mutex<VecDeque<just_llm_client::BackendError>>,
     streams: Mutex<VecDeque<CannedStream>>,
+    /// Set while the next `send` should block: the one stage this backend
+    /// otherwise answers instantly, and the stage a real request spends its
+    /// time in.
+    hang_send: std::sync::atomic::AtomicBool,
+    send_release: Arc<tokio::sync::Notify>,
 }
 
 impl RecordingBackend {
@@ -574,6 +579,8 @@ impl RecordingBackend {
             requests: Mutex::new(Vec::new()),
             failures: Mutex::new(VecDeque::new()),
             streams: Mutex::new(VecDeque::new()),
+            hang_send: std::sync::atomic::AtomicBool::new(false),
+            send_release: Arc::new(tokio::sync::Notify::new()),
         })
     }
 
@@ -585,6 +592,8 @@ impl RecordingBackend {
             requests: Mutex::new(Vec::new()),
             failures: Mutex::new(VecDeque::new()),
             streams: Mutex::new(VecDeque::new()),
+            hang_send: std::sync::atomic::AtomicBool::new(false),
+            send_release: Arc::new(tokio::sync::Notify::new()),
         })
     }
 
@@ -692,6 +701,15 @@ impl RecordingBackend {
             .push_back(CannedStream::Drop { events, error });
     }
 
+    /// Hold the next `send` open until the returned handle is notified: the
+    /// request is in flight, which is where a real backend spends its time and
+    /// where nothing below can see a cancel arrive.
+    pub(crate) fn queue_hanging_send(&self) -> Arc<tokio::sync::Notify> {
+        self.hang_send
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.send_release.clone()
+    }
+
     /// Queue a stream that never yields an item (a cancel test hangs on it).
     pub(crate) fn queue_pending_stream(&self) {
         self.streams
@@ -762,6 +780,12 @@ impl LlmBackend for RecordingBackend {
         &self,
         _prepared: reqwest::Request,
     ) -> Result<reqwest::Response, just_llm_client::BackendError> {
+        if self
+            .hang_send
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            self.send_release.notified().await;
+        }
         let response = http::Response::builder()
             .status(reqwest::StatusCode::OK)
             .header("content-type", "text/event-stream")

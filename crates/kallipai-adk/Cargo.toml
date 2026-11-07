@@ -9,7 +9,7 @@ license.workspace = true
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 kallipai-blob-store = { workspace = true }
-kallipai-common = { workspace = true }
+kallipai-common = { workspace = true, features = ["telemetry"] }
 kallipai-shell = { workspace = true }
 just-llm-client = { workspace = true }
 base64 = { workspace = true }
@@ -53,3 +53,5 @@ http = { workspace = true }
 wiremock = { workspace = true }
 serial_test = { workspace = true }
 kallipai-testkit = { workspace = true }
+kallipai-common = { workspace = true, features = ["test-support"] }
+tracing-subscriber = { workspace = true }

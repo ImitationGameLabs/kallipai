@@ -115,6 +115,102 @@ The match is only as precise as those two fields: two requests to one route in
 the same instant spell the same prefix, and only the timestamp tells them apart,
 so a tight race is not separable this way.
 
+## Inside an agent: the wake tree
+
+The services answer under one request span. An agent does not work that way: a
+wake runs rounds until something ends it, and every round may send to a model
+and call tools before it ends. Its trace has a shape of its own.
+
+```text
+invoke_agent <role>            one wake
+└── turn                      one round, kallipai.turn.index
+    ├── chat <model>          one request to a model endpoint
+    └── execute_tool <tool>   one tool call
+```
+
+These spans belong to the `tagma` process (`service.name=tagma`), not to one of
+the services above. Every one of them is created on the `kallipai.spans`
+target, so the export layer records it whatever `RUST_LOG` says. Names stay low
+cardinality: a role, a model or a tool name may appear in them, while ids,
+indices and outcomes travel as attributes.
+
+| Span | Name (`otel.name`) | Attributes |
+| --- | --- | --- |
+| wake | `invoke_agent <role>` | `gen_ai.operation.name`, `gen_ai.agent.id`, `gen_ai.agent.name`, `gen_ai.conversation.id`, `kallipai.wake.origin`, `kallipai.wake.outcome` |
+| round | `turn` | `gen_ai.agent.id`, `gen_ai.agent.name`, `gen_ai.conversation.id`, `kallipai.turn.index`, `kallipai.turn.messages`, `kallipai.turn.prompt_tokens`, `kallipai.turn.outcome` |
+| model request | `chat <model>` | `gen_ai.operation.name`, `gen_ai.provider.name`, `gen_ai.request.model`, `gen_ai.agent.id`, `gen_ai.conversation.id`, `kallipai.profile.id`, `kallipai.chat.attempts`, the `gen_ai.usage.*` counters |
+| tool call | `execute_tool <tool>` | `gen_ai.operation.name`, `gen_ai.tool.name`, `gen_ai.tool.call.id`, `gen_ai.agent.id`, `gen_ai.conversation.id`, `kallipai.tool.outcome` |
+
+`kallipai.wake.origin` is `external` or `system`: the two ways a wake starts.
+
+`kallipai.wake.outcome` says what the wake left behind: `awake` when nothing
+holds the loop, `held` when a park, a re-checking gate or an armed backoff does,
+`terminated` when a lifecycle cancel ended the run.
+
+`kallipai.turn.index` counts rounds from zero within the wake.
+`kallipai.turn.outcome` says how the round ended: `break` when the agent said it
+was done, `bare` for a round that answered with no tool call (the loop
+re-enters), `park` for a round that ended parked, `recompose` when the round
+rebuilt the context before going on, `continue` when the loop simply went on,
+`cancelled` when the lifecycle stopped the round, and `error` for a round that
+failed.
+
+`kallipai.chat.attempts` counts the sends one request made. A send the retry
+shell repeats stays in the same span, and every send overwrites the count, so
+the span ends holding the total. A request issued again from the top of the
+acquisition loop opens a span of its own: that is the request after a
+mid-stream failure, and the first request on each new profile a failover
+reaches. One round can therefore hold several chat spans, and a slow round
+reads as the sum of them plus the tool calls between.
+
+The usage counters tell what the response cost: `gen_ai.usage.input_tokens` and
+`gen_ai.usage.output_tokens` always, `gen_ai.usage.cache_read.input_tokens` and
+`gen_ai.usage.cache_write.input_tokens` only when the provider reported them. A
+counter the provider said nothing about stays absent rather than reading as
+zero, because "no cache was used" and "the provider does not report cache" are
+different facts about a request.
+
+`kallipai.tool.outcome` names how a call ended: `success`, `failed`, `timeout`,
+`deferred`, `cancelled` or `skipped`. `skipped` marks a call the loop dropped
+because an earlier call stopped it; `deferred` one the tool moved to the
+background; both settle as `ok`, since neither is this call's fault. `timeout`
+is the run loop's own deadline expiring on the call, kept apart from a tool that
+reports a failure of its own.
+
+### How an agent span ends
+
+Every agent span carries `kallipai.outcome`: `ok`, `failed`, `cancelled` or
+`abandoned`. A span that failed also carries `error.type` and a failed status
+holding the same word, so a trace filters on either. The two axes answer
+different questions, and `cancelled` is why they are separate: a daemon shutting
+down or a task being removed ends work that did not go wrong, so it keeps an
+unset status and reads as cancelled by its outcome alone. Counting a restart as
+an error would drown the failures a trace is read for.
+
+`abandoned` is the fallback for a scope that ended without a verdict, an early
+return or a panic: without it such a scope would read as a success. Failure
+codes are a closed set of lowercase words naming a class, never a message. The
+model and stream failures use the retry classifier's own codes (`transient`,
+`quota_blocked`, `throttled`, `endpoint_permanent`, `request_permanent`,
+`local_config`, `response_shape`, `unclassified`); a tool uses `tool_failed` or
+`tool_timeout`; a round that failed carries `round_failed`.
+
+The prose stays in the log line, and only there: no event reaches the trace at
+any level, so a message or an upstream error body cannot ride along as one. No
+attribute carries a prompt, a tool's arguments or result, a model's answer or a
+credential either; tests plant a sentinel in the conversation and check that no
+attribute of the trace contains it, and another plants one in an `error!` and
+checks that the exported span has no events.
+
+### Reading an agent's trace
+
+The agent's spans are the ones with a `turn` beneath them, so the wake's own
+`invoke_agent <role>` name is the entry point: search by it, or by
+`service.name=tagma` and the attribute `kallipai.turn.outcome=error` to find the
+rounds that failed first. The round's span is where a wake's duration is
+explained: the chat spans under it are the time spent waiting on a model, the
+tool spans the time spent in this process.
+
 ## Switches and cost
 
 | Variable | Effect |
@@ -122,7 +218,7 @@ so a tight race is not separable this way.
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | the collector's OTLP base URL; a base URL gains `/v1/traces`. Unset or blank installs no exporter at all: tracing stays local and no span leaves the process |
 | `OTEL_TRACES_SAMPLER` | `parentbased_always_on` (the default), `parentbased_always_off`, `parentbased_traceidratio`, `always_on`, `always_off`, `traceidratio` |
 | `OTEL_TRACES_SAMPLER_ARG` | the ratio for the two `traceidratio` families; an unparseable or out-of-range value keeps the default |
-| `RUST_LOG` | one filter for both the events and the export layer: a span below it is never created, so it never reaches the trace. Default `info`; the store spans need `trace` |
+| `RUST_LOG` | the log filter: what is printed, and, with no exporter installed, which span callsites are interested. Default `info`; the store spans need `trace`. Once an exporter is configured the export layer carries its own filter and records every span on the `kallipai.spans` target at `info`, so a quiet `RUST_LOG` no longer drops spans or the `traceparent` they inject; no log event reaches the trace at any level, and the prose stays in the log line. The split is by target, so `RUST_LOG=kallipai_common=info` no longer selects those spans by module path |
 
 An instance the daemon starts receives the daemon's `OTEL_EXPORTER_OTLP_ENDPOINT`
 and sampler values, plus `service.instance.id=<slug>` whenever its environment
@@ -148,6 +244,17 @@ reports every skip. Its budgets are 5 GiB and 72 hours, overridable with
 
 ## Known gaps
 
+- A model request carries no trace context onward: the request is sent inside
+  the client library, which offers no hook to inject one, so what is missing is
+  an upstream seam (an injectable client, or the send step made public), not a
+  header this side declines to set. A provider's own spans therefore never join
+  this trace.
+- The summarize call a compaction makes opens no chat span: it builds its
+  request against the client outside the acquisition loop, so its tokens and
+  its failures land on the round's span and in the log only.
+- A wake and the delivery that triggered it are two traces: a trigger arrives
+  through an asynchronous queue that carries no trace context, so a wake's root
+  has no parent even when a message asked for it.
 - The forwarded leg is proxied by pingora, which opens no client span: the
   gateway injects no `traceparent` into that leg and starts no span for it, so
   a provider joins this trace only when the caller's own `traceparent` reaches

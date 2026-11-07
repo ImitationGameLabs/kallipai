@@ -1591,8 +1591,12 @@ async fn bash_exec_is_exempt_from_outer_timeout() {
         tokio::time::sleep(Duration::from_millis(300)).await;
         ToolCallOutcome::Success("{\"ok\":true}".to_string())
     };
-    let out = run_tool_bounded("bash_exec", Duration::from_millis(50), slow).await;
+    let (out, timed_out) = run_tool_bounded("bash_exec", Duration::from_millis(50), slow).await;
     assert!(matches!(out, ToolCallOutcome::Success(_)), "got {out:?}");
+    assert!(
+        !timed_out,
+        "the tool bounds itself: the outer timeout never fires"
+    );
 }
 
 /// Every other tool is still bounded: blowing past the runner timeout fails the
@@ -1603,7 +1607,8 @@ async fn other_tools_remain_bounded_by_outer_timeout() {
         tokio::time::sleep(Duration::from_millis(300)).await;
         ToolCallOutcome::Success("{\"ok\":true}".to_string())
     };
-    let out = run_tool_bounded("bash_read", Duration::from_millis(50), slow).await;
+    let (out, timed_out) = run_tool_bounded("bash_read", Duration::from_millis(50), slow).await;
+    assert!(timed_out, "the outer timeout produced this failure");
     match out {
         ToolCallOutcome::Failed(s) => assert!(s.contains("timed out after"), "got {s}"),
         other => panic!("expected Failed, got {other:?}"),

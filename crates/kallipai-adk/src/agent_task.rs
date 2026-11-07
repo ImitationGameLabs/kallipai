@@ -13,6 +13,7 @@ use crate::lifecycle::LifecycleState;
 use crate::tools::DEFAULT_BREAK_TIMEOUT_SECS;
 use kallipai_common::facts::{MIN_RETRY_INTERVAL_SECS, window_end};
 use kallipai_common::protocol::{AgentState, ParkedReason, TransientRetryInfo};
+use kallipai_common::telemetry::{Settle, record_attribute};
 use kallipai_common::timefmt;
 
 use crate::approval::ApprovalStore;
@@ -29,6 +30,7 @@ use crate::runner;
 use crate::text_slice::converge_under_cap;
 use just_llm_client::types::generation::Message;
 use kallipai_shell::spill::{self, MESSAGE_SPILL, spill_root};
+use tracing::Instrument;
 
 /// Consecutive context-persist failures before the streak escalates from a
 /// per-failure warning to an "agent is losing its window" error.
@@ -279,12 +281,7 @@ impl AgentContext {
     pub fn settle(&self, next: LifecycleState, cause: &'static str) {
         let mut guard = self.lifecycle.lock().unwrap_or_else(|e| e.into_inner());
         let from = state_label(&guard);
-        let agent = self
-            .config
-            .agent_id
-            .as_ref()
-            .map(|id| id.to_string())
-            .unwrap_or_else(|| "unbound".to_string());
+        let agent = crate::spans::agent_label(self.config.agent_id.as_ref());
         guard.transition(next);
         let to = state_label(&guard);
         match &*guard {
@@ -931,6 +928,43 @@ pub async fn run_and_report(
     prompt_rx: &mut tokio::sync::mpsc::Receiver<String>,
     origin: AttemptOrigin,
 ) -> WakeDisposition {
+    let span = crate::spans::wake_span(
+        &ctx.config.role,
+        &crate::spans::agent_label(ctx.config.agent_id.as_ref()),
+        match origin {
+            AttemptOrigin::External => "external",
+            AttemptOrigin::System => "system",
+        },
+    );
+    let settle = Settle::new(&span);
+    let disposition = run_and_report_inner(ctx, agent_tx, prompt_rx, origin)
+        .instrument(span.clone())
+        .await;
+    match disposition {
+        WakeDisposition::Terminated => {
+            record_attribute(&span, "kallipai.wake.outcome", "terminated");
+            settle.cancelled();
+        }
+        WakeDisposition::Awake => {
+            record_attribute(&span, "kallipai.wake.outcome", "awake");
+            settle.done();
+        }
+        WakeDisposition::Held => {
+            record_attribute(&span, "kallipai.wake.outcome", "held");
+            settle.done();
+        }
+    }
+    disposition
+}
+
+/// The wake's work, under [`run_and_report`]'s span: the heartbeat loop, the
+/// rounds it runs, and the park or exit the loop leaves behind.
+async fn run_and_report_inner(
+    ctx: &mut AgentContext,
+    agent_tx: &tokio::sync::mpsc::Sender<AgentEvent>,
+    prompt_rx: &mut tokio::sync::mpsc::Receiver<String>,
+    origin: AttemptOrigin,
+) -> WakeDisposition {
     // The wake that caused this execution decides how its first attempt reads:
     // an external one is served once even against a marked endpoint, a timer one
     // is not. Taken by the first pre-send reading below.
@@ -1355,6 +1389,8 @@ fn schedule_transient_retry(ctx: &AgentContext) -> (tokio::time::Instant, f64) {
     *ctx.retry_at.lock().unwrap_or_else(|e| e.into_inner()) = Some(deadline);
     let notify = ctx.retry_notify.clone();
     let cancel = ctx.cancel.clone();
+    // A timer, not work: it carries no context of its own, so the bare
+    // spawn is right here.
     tokio::spawn(async move {
         tokio::select! {
             _ = tokio::time::sleep_until(deadline) => notify.notify_one(),
@@ -1381,6 +1417,8 @@ fn arm_wait_timer(ctx: &mut AgentContext, timeout_secs: u64) -> tokio::time::Ins
     ctx.wait_armed_secs = timeout_secs;
     let notify = ctx.wait_notify.clone();
     let cancel = ctx.cancel.clone();
+    // A timer, not work: it carries no context of its own, so the bare
+    // spawn is right here.
     tokio::spawn(async move {
         tokio::select! {
             _ = tokio::time::sleep_until(deadline) => notify.notify_one(),
@@ -1440,6 +1478,8 @@ fn arm_pacing_wake(ctx: &AgentContext, profile_id: &str) -> tokio::time::Instant
     *ctx.pacing_wake_at.lock().unwrap_or_else(|e| e.into_inner()) = Some(deadline);
     let notify = ctx.pacing_notify.clone();
     let cancel = ctx.cancel.clone();
+    // A timer, not work: it carries no context of its own, so the bare
+    // spawn is right here.
     tokio::spawn(async move {
         tokio::select! {
             _ = tokio::time::sleep_until(deadline) => notify.notify_one(),

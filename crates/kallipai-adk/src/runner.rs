@@ -9,9 +9,9 @@
 
 use std::time::{Duration, Instant};
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
+use tracing::{Instrument, info, warn};
 
 use crate::acquisition::{
     AcquireResult, acquire_stream, degrade_on_image_rejection, release_unspent_window,
@@ -24,6 +24,7 @@ use crate::event::{AgentEvent, AgentOutcome};
 use crate::history::TurnAttempt;
 use crate::tool_execution::{ToolExecResult, execute_tool_calls};
 use just_llm_client::types::generation::Message;
+use kallipai_common::telemetry::{Settle, record_attribute};
 
 // ---------------------------------------------------------------------------
 // Round-loop control-flow signals
@@ -88,8 +89,37 @@ pub(crate) async fn run_agent_rounds(
     outcome
 }
 
+/// Which way one round sent the loop.
+enum TurnStep {
+    /// The round gave its window back; the loop goes on with the next round.
+    Recompose,
+    /// The round ran to its end; the loop starts the next one.
+    Next,
+    /// The round settled the run.
+    Done(Result<RoundOutcome>),
+}
+
+/// The one word a round's span carries when the round failed.
+const ROUND_FAILED: &str = "round_failed";
+
+/// The one word a round's span carries for how the round ended. A round the
+/// lifecycle cancelled does not come through here: it is settled as
+/// `cancelled` where the round's span is closed.
+fn turn_outcome_label(outcome: &RoundOutcome) -> &'static str {
+    match outcome {
+        RoundOutcome::Break(_) => "break",
+        RoundOutcome::BareAssistant { .. } => "bare",
+        RoundOutcome::Park(_) => "park",
+    }
+}
+
 /// The round loop itself; [`run_agent_rounds`] wraps it so that every exit,
 /// including an error, ends with the window accounted for.
+///
+/// Every round runs inside its own span. The span is entered here, around the
+/// whole round body, because the body awaits gates that open spans of their
+/// own: a span entered from inside the body would be lost across those awaits,
+/// and the compaction call would hang off the trace root instead.
 async fn run_rounds(
     ctx: &mut AgentContext,
     tx: &tokio::sync::mpsc::Sender<AgentEvent>,
@@ -97,147 +127,224 @@ async fn run_rounds(
     round_cancel: &CancellationToken,
 ) -> Result<RoundOutcome> {
     let tool_timeout = Duration::from_secs(ctx.config.tool_timeout_secs);
+    let role = ctx.config.role.clone();
+    let agent = crate::spans::agent_label(ctx.config.agent_id.as_ref());
 
     for round in 0..ctx.config.max_tool_rounds {
-        // The round clock the history record carries: from here to the response
-        // being consumed, tool execution excluded.
-        let round_start = Instant::now();
-        // A tool round is a new execution: its sends get a fresh budget and deadline.
-        // This is the only per-round reset of the ledger; the prompt entry does not
-        // seed one, so a round never inherits the previous round's sends.
-        ctx.start_episode();
-        drain_interjections(ctx, prompt_rx).await;
-
-        // -- Pre-call token budget check (shared tree-wide counter) --
-        let snap = ctx.token_budget.snapshot();
-        if snap.is_exceeded() {
-            return Ok(RoundOutcome::Park(AgentOutcome::TokenBudgetExceeded {
-                consumed: snap.consumed,
-                budget: snap.budget,
-            }));
-        }
-
-        // -- Approval notification injection --
-        let notifications = ctx.approvals.lock().await.drain_notifications();
-        if !notifications.is_empty() {
-            let msg = format_approval_notifications(&notifications);
-            ctx.record_turn(vec![Message::user(&msg)]).await;
-        }
-
-        // -- Context composition and token estimation --
-        let messages = compose_context(ctx.store.clone()).await;
-        let tools = ctx.store.lock().await.tool_definitions().to_vec();
-        let prompt_tokens = {
-            let system_prompt = ctx.client.system_prompt().map(str::to_owned);
-            let estimate = estimate_context_tokens(
-                &ctx.client,
-                &ctx.store,
-                &messages,
-                &tools,
-                system_prompt.as_deref(),
-            );
-            tokio::select! {
-                result = estimate => match result {
-                    Ok(tokens) => tokens,
-                    Err(e) => {
-                        warn!("token estimation failed, sending request anyway: {e:#}");
-                        0
-                    }
-                },
-                _ = round_cancel.cancelled() => return Ok(RoundOutcome::Park(AgentOutcome::Cancelled)),
+        let turn = crate::spans::turn_span(&role, &agent, round);
+        let settle = Settle::new(&turn);
+        let step = run_round_body(ctx, tx, prompt_rx, round_cancel, round, tool_timeout, &turn)
+            .instrument(turn.clone())
+            .await;
+        match step {
+            TurnStep::Recompose => {
+                record_attribute(&turn, "kallipai.turn.outcome", "recompose");
+                settle.done();
             }
-        };
-
-        match enforce_pre_call_budget(ctx, prompt_tokens, round, round_cancel).await {
-            BudgetAction::Recompose => continue,
-            BudgetAction::Return(outcome) => return Ok(RoundOutcome::Park(outcome)),
-            BudgetAction::Proceed => {}
-            // A compaction failure no send can help with ends the round: the error
-            // carries the verdict's message and parks the agent (see the caller).
-            BudgetAction::Fail(error) => return Err(error),
+            TurnStep::Next => {
+                record_attribute(&turn, "kallipai.turn.outcome", "continue");
+                settle.done();
+            }
+            TurnStep::Done(Ok(outcome)) => {
+                // A round the lifecycle cancelled is neither a failure nor a
+                // round that finished: the word says which, so the trace can
+                // tell a restart from work that went wrong.
+                if matches!(outcome, RoundOutcome::Park(AgentOutcome::Cancelled)) {
+                    record_attribute(&turn, "kallipai.turn.outcome", "cancelled");
+                    settle.cancelled();
+                } else {
+                    record_attribute(&turn, "kallipai.turn.outcome", turn_outcome_label(&outcome));
+                    settle.done();
+                }
+                return Ok(outcome);
+            }
+            TurnStep::Done(Err(error)) => {
+                record_attribute(&turn, "kallipai.turn.outcome", "error");
+                settle.failed(ROUND_FAILED);
+                return Err(error);
+            }
         }
+    }
 
-        // -- Within-set failover acquisition: consume the stream with mid-stream transport
-        // retry in-place and failover on endpoint-level failures. A 4xx while the request
-        // carried images triggers the runtime degrade (strip, retry once, invalidate on
-        // success — see `degrade_on_image_rejection`). --
-        let consumed = match acquire_stream(ctx, messages, tools.clone(), tx, round_cancel, round)
-            .await
-        {
-            AcquireResult::Consumed(c) => c,
-            // A stop carries the whole verdict in its message: the round errors with
-            // it directly. Degrading images and resending would re-send a request the
-            // chain already ruled out (a quota rejection reads as a provider
-            // rejection), so the stop must not go through that path.
-            AcquireResult::Stop { message } => return Err(anyhow::Error::msg(message)),
-            AcquireResult::Outcome(outcome) => return Ok(RoundOutcome::Park(outcome)),
-            AcquireResult::Error(e) => {
-                match degrade_on_image_rejection(ctx, &e, tools, tx, round_cancel, round).await {
-                    Some(AcquireResult::Consumed(c)) => c,
-                    Some(AcquireResult::Outcome(outcome)) => {
-                        return Ok(RoundOutcome::Park(outcome));
-                    }
-                    Some(AcquireResult::Error(_)) | None => return Err(e),
-                    Some(AcquireResult::Stop { message }) => {
-                        return Err(anyhow::Error::msg(message));
-                    }
+    Ok(RoundOutcome::Park(AgentOutcome::MaxRoundsExceeded))
+}
+
+/// One round: from the fresh episode to the record it leaves behind.
+///
+/// It reports how the loop goes on rather than `continue`-ing, so the caller
+/// owns the loop and the round's span covers this whole future. `turn` is the
+/// span, handed over to record what only the body knows (how many messages the
+/// round sent, what the budget gate estimated): the parenting comes from the
+/// caller's `instrument`, not from this handle.
+#[allow(clippy::too_many_arguments)]
+async fn run_round_body(
+    ctx: &mut AgentContext,
+    tx: &tokio::sync::mpsc::Sender<AgentEvent>,
+    prompt_rx: &mut tokio::sync::mpsc::Receiver<String>,
+    round_cancel: &CancellationToken,
+    round: usize,
+    tool_timeout: Duration,
+    turn: &tracing::Span,
+) -> TurnStep {
+    // The round clock the history record carries: from here to the response
+    // being consumed, tool execution excluded.
+    let round_start = Instant::now();
+    // A tool round is a new execution: its sends get a fresh budget and deadline.
+    // This is the only per-round reset of the ledger; the prompt entry does not
+    // seed one, so a round never inherits the previous round's sends.
+    ctx.start_episode();
+    drain_interjections(ctx, prompt_rx).await;
+
+    // -- Pre-call token budget check (shared tree-wide counter) --
+    let snap = ctx.token_budget.snapshot();
+    if snap.is_exceeded() {
+        return TurnStep::Done(Ok(RoundOutcome::Park(AgentOutcome::TokenBudgetExceeded {
+            consumed: snap.consumed,
+            budget: snap.budget,
+        })));
+    }
+
+    // -- Approval notification injection --
+    let notifications = ctx.approvals.lock().await.drain_notifications();
+    if !notifications.is_empty() {
+        let msg = format_approval_notifications(&notifications);
+        ctx.record_turn(vec![Message::user(&msg)]).await;
+    }
+
+    // -- Context composition and token estimation --
+    let messages = compose_context(ctx.store.clone()).await;
+    let tools = ctx.store.lock().await.tool_definitions().to_vec();
+    record_attribute(
+        turn,
+        "kallipai.turn.messages",
+        (messages.len() as u64).to_string(),
+    );
+    let prompt_tokens = {
+        let system_prompt = ctx.client.system_prompt().map(str::to_owned);
+        let estimate = estimate_context_tokens(
+            &ctx.client,
+            &ctx.store,
+            &messages,
+            &tools,
+            system_prompt.as_deref(),
+        );
+        tokio::select! {
+            result = estimate => match result {
+                Ok(tokens) => tokens,
+                Err(e) => {
+                    warn!("token estimation failed, sending request anyway: {e:#}");
+                    0
+                }
+            },
+            _ = round_cancel.cancelled() => {
+                return TurnStep::Done(Ok(RoundOutcome::Park(AgentOutcome::Cancelled)));
+            }
+        }
+    };
+    record_attribute(
+        turn,
+        "kallipai.turn.prompt_tokens",
+        prompt_tokens.to_string(),
+    );
+
+    match enforce_pre_call_budget(ctx, prompt_tokens, round, round_cancel).await {
+        BudgetAction::Recompose => return TurnStep::Recompose,
+        BudgetAction::Return(outcome) => {
+            return TurnStep::Done(Ok(RoundOutcome::Park(outcome)));
+        }
+        BudgetAction::Proceed => {}
+        // A compaction failure no send can help with ends the round: the error
+        // carries the verdict's message and parks the agent (see the caller).
+        BudgetAction::Fail(error) => return TurnStep::Done(Err(error)),
+    }
+
+    // -- Within-set failover acquisition: consume the stream with mid-stream transport
+    // retry in-place and failover on endpoint-level failures. A 4xx while the request
+    // carried images triggers the runtime degrade (strip, retry once, invalidate on
+    // success — see `degrade_on_image_rejection`). --
+    let consumed = match acquire_stream(ctx, messages, tools.clone(), tx, round_cancel, round).await
+    {
+        AcquireResult::Consumed(c) => c,
+        // A stop carries the whole verdict in its message: the round errors with
+        // it directly. Degrading images and resending would re-send a request the
+        // chain already ruled out (a quota rejection reads as a provider
+        // rejection), so the stop must not go through that path.
+        AcquireResult::Stop { message } => {
+            return TurnStep::Done(Err(anyhow::Error::msg(message)));
+        }
+        AcquireResult::Outcome(outcome) => {
+            return TurnStep::Done(Ok(RoundOutcome::Park(outcome)));
+        }
+        AcquireResult::Error(e) => {
+            match degrade_on_image_rejection(ctx, &e, tools, tx, round_cancel, round).await {
+                Some(AcquireResult::Consumed(c)) => c,
+                Some(AcquireResult::Outcome(outcome)) => {
+                    return TurnStep::Done(Ok(RoundOutcome::Park(outcome)));
+                }
+                Some(AcquireResult::Error(_)) | None => return TurnStep::Done(Err(e)),
+                Some(AcquireResult::Stop { message }) => {
+                    return TurnStep::Done(Err(anyhow::Error::msg(message)));
                 }
             }
-        };
-
-        match enforce_post_stream_budget(ctx, consumed.usage.as_ref()).await {
-            BudgetAction::Recompose => continue,
-            BudgetAction::Return(outcome) => return Ok(RoundOutcome::Park(outcome)),
-            BudgetAction::Proceed => {}
-            // The post-stream gate does not compact, so no failure verdict can
-            // reach it; the arm keeps the shared verdict type total.
-            BudgetAction::Fail(error) => return Err(error),
         }
+    };
 
-        // Snapshot what served this round before the response moves into tool
-        // execution: the profile in flight and the usage are gone after that
-        // move; the round clock is already running.
-        let attempt = ctx.turn_attempt(
-            round,
-            consumed.usage.as_ref(),
-            round_start.elapsed().as_millis() as u64,
-        );
+    match enforce_post_stream_budget(ctx, consumed.usage.as_ref()).await {
+        BudgetAction::Recompose => return TurnStep::Recompose,
+        BudgetAction::Return(outcome) => {
+            return TurnStep::Done(Ok(RoundOutcome::Park(outcome)));
+        }
+        BudgetAction::Proceed => {}
+        // The post-stream gate does not compact, so no failure verdict can
+        // reach it; the arm keeps the shared verdict type total.
+        BudgetAction::Fail(error) => return TurnStep::Done(Err(error)),
+    }
 
-        // -- Bare assistant response (no tool calls): the agent did not call `break`,
-        //    so this does NOT terminate the run. Surface the content to the outer
-        //    loop, which injects a heartbeat prompt and re-loops (or force-idles via
-        //    the no-progress guardrail). An empty response is malformed and errors. --
-        if consumed.tool_calls.is_empty() {
-            if consumed.content.is_empty() {
-                bail!("assistant returned neither tool calls nor final content");
+    // Snapshot what served this round before the response moves into tool
+    // execution: the profile in flight and the usage are gone after that
+    // move; the round clock is already running.
+    let attempt = ctx.turn_attempt(
+        round,
+        consumed.usage.as_ref(),
+        round_start.elapsed().as_millis() as u64,
+    );
+
+    // -- Bare assistant response (no tool calls): the agent did not call `break`,
+    //    so this does NOT terminate the run. Surface the content to the outer
+    //    loop, which injects a heartbeat prompt and re-loops (or force-idles via
+    //    the no-progress guardrail). An empty response is malformed and errors. --
+    if consumed.tool_calls.is_empty() {
+        if consumed.content.is_empty() {
+            return TurnStep::Done(Err(anyhow::anyhow!(
+                "assistant returned neither tool calls nor final content"
+            )));
+        }
+        return TurnStep::Done(Ok(RoundOutcome::BareAssistant {
+            content: consumed.content,
+            reasoning: consumed.reasoning,
+            attempt: Box::new(attempt),
+        }));
+    }
+
+    // -- Tool execution --
+    let turn_messages =
+        match execute_tool_calls(ctx, tx, consumed, tool_timeout, round_cancel).await {
+            ToolExecResult::Cancelled => {
+                return TurnStep::Done(Ok(RoundOutcome::Park(AgentOutcome::Cancelled)));
             }
-            return Ok(RoundOutcome::BareAssistant {
-                content: consumed.content,
-                reasoning: consumed.reasoning,
-                attempt: Box::new(attempt),
-            });
-        }
-
-        // -- Tool execution --
-        let turn_messages = match execute_tool_calls(ctx, tx, consumed, tool_timeout, round_cancel)
-            .await
-        {
-            ToolExecResult::Cancelled => return Ok(RoundOutcome::Park(AgentOutcome::Cancelled)),
             ToolExecResult::Break(msgs, until) => {
                 // `break` parks as Idle, but the calls preceding it in this round
                 // still produced real work — record it before yielding.
                 ctx.record_turn_with_attempt(msgs, attempt).await;
                 ctx.persist().await;
-                return Ok(RoundOutcome::Break(until));
+                return TurnStep::Done(Ok(RoundOutcome::Break(until)));
             }
             ToolExecResult::Messages(msgs) => msgs,
         };
 
-        ctx.record_turn_with_attempt(turn_messages, attempt).await;
-        ctx.persist().await;
-    }
-
-    Ok(RoundOutcome::Park(AgentOutcome::MaxRoundsExceeded))
+    ctx.record_turn_with_attempt(turn_messages, attempt).await;
+    ctx.persist().await;
+    TurnStep::Next
 }
 
 /// Consume queued interjections (prompts/commands) and record them as

@@ -243,6 +243,11 @@ pub async fn stream_with_retry(
         pacing,
     } = call;
 
+    // The episode's ledger counts the whole episode — retries and mid-stream
+    // re-entries of earlier calls included. This answers the narrower question
+    // a chat span asks: how many sends this one request needed.
+    let mut sends: u32 = 0;
+
     loop {
         // Before each send: the core's verdict on the episode's ledger. This is
         // the fail-closed guard, not the preflight: the table reading is taken in
@@ -275,6 +280,12 @@ pub async fn stream_with_retry(
         // Charge the send before making it: an attempt cancelled in flight still
         // happened, and this count is the budget.
         *episode = episode.after_attempt();
+        sends += 1;
+        // The span handed in is the chat span this request runs under
+        // (`acquire_stream` instruments this future with it); the count belongs
+        // to that request, not to the episode.
+        let chat = tracing::Span::current();
+        crate::spans::count_chat_send(&chat, sends);
         let error = match conversation.stream_generate(request.clone()).await {
             Ok(stream) => {
                 // A stream that opened is a window served: the record a paced

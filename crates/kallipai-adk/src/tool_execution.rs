@@ -9,7 +9,9 @@
 use std::future::Future;
 use std::time::Duration;
 
+use kallipai_common::telemetry::Settle;
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument as _;
 
 use crate::acquisition::StreamConsumed;
 use crate::agent_task::AgentContext;
@@ -96,22 +98,27 @@ fn with_banner(total: usize, full_est: usize, parts: &(usize, usize, String)) ->
 
 /// Run one tool call, applying the outer timeout only when the tool does
 /// not own its own bound (see [`OWNS_TIMEOUT_TOOLS`]).
+///
+/// Returns the outcome and whether the outer timeout produced it. A hung tool
+/// and a tool that answered with an error both arrive as `Failed` with an
+/// envelope; the trace's outcome word is the one place that tells them apart.
 pub(crate) async fn run_tool_bounded<F>(
     tool_name: &str,
     tool_timeout: Duration,
     fut: F,
-) -> ToolCallOutcome
+) -> (ToolCallOutcome, bool)
 where
     F: Future<Output = ToolCallOutcome>,
 {
     if OWNS_TIMEOUT_TOOLS.contains(&tool_name) {
-        fut.await
+        (fut.await, false)
     } else {
         match tokio::time::timeout(tool_timeout, fut).await {
-            Ok(outcome) => outcome,
-            Err(_) => {
-                ToolCallOutcome::Failed(timed_out_tool_result(tool_name, tool_timeout.as_secs()))
-            }
+            Ok(outcome) => (outcome, false),
+            Err(_) => (
+                ToolCallOutcome::Failed(timed_out_tool_result(tool_name, tool_timeout.as_secs())),
+                true,
+            ),
         }
     }
 }
@@ -145,6 +152,10 @@ pub(crate) async fn execute_tool_calls(
     // agent re-issues them after reviewing what happened.
     let mut skip: Option<(String, String)> = None;
 
+    // Attributes do not inherit from the turn above: every tool span carries
+    // the agent it ran for.
+    let agent = crate::spans::agent_label(ctx.config.agent_id.as_ref());
+
     for call in consumed.tool_calls {
         // `break` is a control-flow primitive, not a normal tool: hoist its check
         // above the skip branch so it always terminates the round — even when an
@@ -169,8 +180,16 @@ pub(crate) async fn execute_tool_calls(
             return ToolExecResult::Break(turn_messages, until);
         }
 
+        // One span per call, the ones this round will not run included: a
+        // skipped call is a fact about the round, and a gap in the trace would
+        // hide what the agent asked for.
+        let span = crate::spans::tool_span(&call.name, &call.id, &agent);
+        let settle = Settle::new(&span);
+
         let result = if let Some((prior_name, reason)) = &skip {
             // Earlier call did not cleanly succeed: do not execute this one.
+            crate::spans::record_tool_outcome(&span, "skipped");
+            settle.done();
             skipped_tool_result(&call.name, prior_name, reason)
         } else {
             tx.send(AgentEvent::ToolCall {
@@ -179,16 +198,19 @@ pub(crate) async fn execute_tool_calls(
             })
             .await
             .ok();
-            let outcome = {
+            let (outcome, timed_out) = {
                 let tool_fut = run_tool_bounded(
                     &call.name,
                     tool_timeout,
                     ctx.executor.execute(&call.name, &call.arguments),
-                );
+                )
+                .instrument(span.clone());
                 tokio::select! {
                     result = tool_fut => result,
                     _ = round_cancel.cancelled() => {
                         tracing::info!(tool = %call.name, "tool execution cancelled");
+                        crate::spans::record_tool_outcome(&span, "cancelled");
+                        settle.cancelled();
                         return ToolExecResult::Cancelled;
                     }
                 }
@@ -225,13 +247,28 @@ pub(crate) async fn execute_tool_calls(
             // Record the result envelope; if it was not a clean success, arm
             // the skip flag so the rest of the round is skipped.
             match outcome {
-                ToolCallOutcome::Success(s) => s,
+                ToolCallOutcome::Success(s) => {
+                    crate::spans::record_tool_outcome(&span, "success");
+                    settle.done();
+                    s
+                }
                 ToolCallOutcome::Failed(s) => {
                     skip = Some((call.name.clone(), "did not succeed".to_string()));
+                    // The two failures a tool call can be: its own answer, or
+                    // this runner's timeout cutting it off.
+                    let (word, code) = if timed_out {
+                        ("timeout", "tool_timeout")
+                    } else {
+                        ("failed", "tool_failed")
+                    };
+                    crate::spans::record_tool_outcome(&span, word);
+                    settle.failed(code);
                     s
                 }
                 ToolCallOutcome::Deferred(s) => {
                     skip = Some((call.name.clone(), "is pending approval".to_string()));
+                    crate::spans::record_tool_outcome(&span, "deferred");
+                    settle.done();
                     s
                 }
             }

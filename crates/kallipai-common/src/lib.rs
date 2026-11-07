@@ -29,4 +29,18 @@ pub mod sse;
 #[cfg(feature = "telemetry")]
 pub mod telemetry;
 
+/// The target every span this workspace publishes carries: the name the export
+/// layer's filter selects on, so a span is recorded however `RUST_LOG` says.
+///
+/// Spans and log events are separated by target, not by level. The layer
+/// records this target at `info` and no event at any level, so a configured
+/// exporter keeps its spans and the trace carries no log text. A span opened
+/// without this target is not recorded at all: the filter's default directive
+/// is `off`, which is why a span built by `#[instrument]` must name the target.
+///
+/// It sits outside the `telemetry` feature because opening a span does not need
+/// the exporter. One literal serves both sides: a second copy would keep
+/// compiling after a rename and silently export nothing.
+pub const SPAN_TARGET: &str = "kallipai.spans";
+
 pub use agentid::AgentId;
