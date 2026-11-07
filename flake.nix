@@ -281,6 +281,7 @@
                 inherit pkgs;
                 src = self;
                 inherit (pkgs) deno;
+                buildId = self.shortRev or self.dirtyShortRev or "dev";
               };
             };
             kallipai-dev-image = import ./nix/packages/docker-images/dev-platform.nix {
@@ -316,6 +317,7 @@
               inherit pkgs;
               src = self;
               inherit (pkgs) deno;
+              buildId = self.shortRev or self.dirtyShortRev or "dev";
             };
           })
           # Re-export aifed's FHS tarball so the benchmark pins both in one lock.

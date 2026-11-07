@@ -820,6 +820,91 @@ async fn text_body(response: axum::response::Response) -> String {
     String::from_utf8(bytes.to_vec()).expect("the body is utf-8")
 }
 
+// -- the numbering the page is written under rides every answer shape --
+
+/// A window read and a row probe are one page type, so both name the
+/// numbering contract they follow. A reader without that field has to assume
+/// its own numbering fits the tagma's; the field retires that assumption, and
+/// it costs one integer per page.
+#[tokio::test]
+async fn external_history_names_the_numbering_contract() {
+    let state = make_state();
+    install_inbox_store(&state).await;
+    let (db, _frames, _dir) = install_projector(&state).await;
+    let root = AgentId::random();
+    let (entry, _rx) = make_entry_with_rx(None, "root".into());
+    state
+        .registry
+        .write()
+        .await
+        .register_root(root.clone(), RegistryEntry::Live(entry))
+        .unwrap();
+    let (row, _, _) = crate::relay::chat_history::append(
+        &db,
+        None,
+        None,
+        "inbound",
+        "a numbered row",
+        None,
+        None,
+    )
+    .await
+    .expect("seed a row");
+
+    let window = json_body(
+        external_history(
+            State(state.clone()),
+            AuthIdentity::test_new(Identity::Operator),
+            Path(root.clone()),
+            Query(ExternalHistoryQuery {
+                after_seq: None,
+                before_seq: None,
+                limit: Some(50),
+                row: None,
+            }),
+        )
+        .await
+        .expect("the window read succeeds"),
+    )
+    .await;
+    assert_eq!(
+        // The literal is deliberate: packages/kallipai-client/src/types.ts holds
+        // the client's HISTORY_SCHEMA_VERSION, and its test pins the same 1.
+        // Comparing against this crate's own constant would stay green while
+        // the two halves drifted, and a drifted pair does not degrade -- every
+        // reader freezes.
+        window["schema_version"],
+        1,
+        "a window read names its numbering: {window}"
+    );
+
+    let probe = json_body(
+        external_history(
+            State(state.clone()),
+            AuthIdentity::test_new(Identity::Operator),
+            Path(root),
+            Query(ExternalHistoryQuery {
+                after_seq: None,
+                before_seq: None,
+                limit: None,
+                row: Some(row),
+            }),
+        )
+        .await
+        .expect("the row probe succeeds"),
+    )
+    .await;
+    assert_eq!(
+        probe["schema_version"], 1,
+        "a row probe names the same numbering: {probe}"
+    );
+    assert_eq!(
+        probe["rows"].as_array().map(Vec::len),
+        Some(1),
+        "the probe answers the row it named"
+    );
+}
+
 // -- unreadable is not empty: the history read refuses what it cannot answer --
 
 /// A query naming two cursors asks for two windows at once. The read is

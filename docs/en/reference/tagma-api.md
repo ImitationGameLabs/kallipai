@@ -785,8 +785,8 @@ that position, oldest-first), `before_seq` (rows older than it, also rendered
 oldest-first), `row` (one row, by id), and `limit` (capped at 50). At most one
 cursor is accepted, as is a zero `limit` on a window read, both with `400`; `503`
 answers when no store can.
-The response is `{ "rows", "more", "undecodable", "next" }`. Each row is a
-`HistoryEntry`, and a replayed row carries the position it was stored under as
+The response is `{ "schema_version", "rows", "more", "undecodable", "next" }`. Each
+row is a `HistoryEntry`, and a replayed row carries the position it was stored under as
 `seq`. `next` names where the same request continues: the newest position of a
 catch-up page, the oldest of a scroll-up page, the cursor the caller sent when
 the page came back empty, or the row's own position for a `row` read. It is
@@ -809,6 +809,19 @@ They are not row ids: an id is global across partitions, a position is local to
 one. `undecodable` counts rows the window held that the decoder could not read;
 `next` still names the page's edge over them, so the next read continues
 beyond the hole instead of landing on it again.
+
+`schema_version` names the numbering the page is written under: what a position means, and
+therefore how `after_seq`, `before_seq` and `next` read. Raise it whenever that meaning
+changes without a change of shape: a renumbering, a different origin, positions reused.
+A reader that kept going would pair rows from two logs. A reader that receives a version
+it does not read stops placing rows, keeps rendering what the stream still sends, and
+says so, and offers a reload that helps once both deployments are updated; a payload
+without the field predates it and is read as the reader's own numbering.
+
+A numbered change is a lockstep release: the tagma and the web bundle that reads the new
+number ship together. A mixed pair freezes history on the side that speaks the other
+number, and reloading that page cannot fix it, because the same bundle comes back.
+Sends keep working through the freeze, and the window resumes once the deployments match.
 
 ##### `PUT /agents/{id}/external/read-cursor`: Mark How Far the User Read
 

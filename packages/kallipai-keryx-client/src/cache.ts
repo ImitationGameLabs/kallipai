@@ -34,8 +34,8 @@ import type { FileAttachment } from "@kallipai/kallipai-common";
 //     reads and writes never open on their own, so a blocked open cannot be
 //     retried once per arriving frame. The pending store is the one
 //     exception: those rows exist nowhere else, so a send may ask for a
-//     permit itself (see `durableDb`). A failure -- open or read --
-//     starts a cooldown that no automatic path crosses; a user's
+//     permit itself (see `durableDb`). A failure -- open, epoch check or
+//     read -- starts a cooldown that no automatic path crosses; a user's
 //     explicit retry lifts it (`permitRetry()`), and the permit, the budget
 //     and single flight still bound the attempt that follows.
 //
@@ -87,9 +87,16 @@ const DB_NAME = "kallipai-keryx";
 // otherwise keep rows nothing reads. v7: rows gained the `seq` position, so
 // the store is dropped once more -- a row without a position cannot feed the
 // resume cursor.
-const DB_VERSION = 7;
+// v8: rows are stamped with the numbering they were read under, in a `meta`
+// store; rows from another numbering are cleared on open, in the same
+// transaction that writes the stamp.
+const DB_VERSION = 8;
 const STORE = "messages";
 const PENDING_STORE = "pending";
+const META_STORE = "meta";
+/** The one key of META_STORE: the history numbering the rows were read
+ *  under. */
+const EPOCH_KEY = "historySchema";
 /** The 1:1 watermark store that v4 added and v6 drops: one row per
  *  conversation. */
 const V5_WATERMARK_STORE = "read_watermarks";
@@ -121,6 +128,13 @@ let cooldownUntil = 0;
 let openRequest: Promise<IDBDatabase> | null = null;
 /** The attempt that started the in-flight open already gave up. */
 let openAbandoned = false;
+
+/** The numbering the cached rows are known to be valid under, once a check
+ *  has completed for this connection. Null until the first check. */
+let preparedSchema: number | null = null;
+/** The epoch check in flight, so two attaches with the same numbering share
+ *  one transaction instead of queueing two. */
+let epochPending: Promise<void> | null = null;
 
 /** The one open request of this document. The legacy migration calls this
  * too (it cannot go through db(), which awaits that very migration), so the
@@ -182,6 +196,11 @@ function openOnce(): Promise<IDBDatabase> {
           keyPath: ["tagmaId", "localSeq"],
         });
       }
+      if (!d.objectStoreNames.contains(META_STORE)) {
+        // v8: facts about the cache itself, one key each. No keyPath: the
+        // next fact is a new key, not another version.
+        d.createObjectStore(META_STORE);
+      }
     };
     req.onsuccess = () => {
       const d = req.result;
@@ -198,6 +217,7 @@ function openOnce(): Promise<IDBDatabase> {
         d.onversionchange = () => {
           d.close();
           if (dbPromise) dbPromise = null;
+          preparedSchema = null;
         };
         resolve(d);
       });
@@ -321,8 +341,8 @@ function db(): Promise<IDBDatabase> {
 
 /** The one failure response: forget the connection, spend any permit, and
  *  touch nothing here for a cooldown. Every failing leg lands here -- a
- *  blocked or over-budget open -- so "a broken cache goes quiet" is one rule
- *  instead of one per path. */
+ *  blocked or over-budget open, a refused epoch transaction -- so "a broken
+ *  cache goes quiet" is one rule instead of one per path. */
 function cacheFailed(connection?: IDBDatabase): void {
   if (connection) {
     try {
@@ -332,6 +352,7 @@ function cacheFailed(connection?: IDBDatabase): void {
     }
   }
   dbPromise = null;
+  preparedSchema = null;
   openPermit = false;
   cooldownUntil = Date.now() + cooldownMs;
   // A budget that expired over a still-pending request abandons it; a
@@ -375,11 +396,15 @@ function durableDb(): Promise<IDBDatabase> {
  * retries, so "the cache is opened before it is read" is ordinary code order
  * rather than an import-order convention. Resolves when the connection is
  * usable; rejects (CacheUnavailable) when it is not -- callers degrade. */
-export async function prepareCache(): Promise<void> {
+export async function prepareCache(historySchema?: number): Promise<void> {
   if (!dbPromise) {
     openPermit = true;
     await db();
   }
+  // Without a numbering there is nothing to compare against, and a clear is
+  // worse than a stale row: a caller that never passed one keeps the cache it
+  // has (null is not a "clear everything" default).
+  if (historySchema !== undefined) await checkEpoch(historySchema);
 }
 
 /** A user's explicit retry: it releases the cooldown, because a click is the
@@ -388,6 +413,67 @@ export async function prepareCache(): Promise<void> {
  *  budget per attempt -- so a retry loosens nothing else. */
 export function permitRetry(): void {
   cooldownUntil = 0;
+}
+
+/** Mark the rows as read under `historySchema`, retiring the ones read under
+ *  another. A numbering that changed means row ids moved, so every cached row
+ *  is a position the tagma may hand to something else; the cache is derived
+ *  data and is re-pulled, so dropping it is the cheap side of the trade. */
+async function checkEpoch(historySchema: number): Promise<void> {
+  if (preparedSchema === historySchema) return;
+  if (epochPending !== null) {
+    await epochPending;
+    if (preparedSchema === historySchema) return;
+  }
+  let connection: IDBDatabase | undefined;
+  const attempt = (async () => {
+    const d = await db();
+    connection = d;
+    await epochTransaction(d, historySchema);
+    preparedSchema = historySchema;
+  })();
+  epochPending = attempt;
+  try {
+    await attempt;
+  } catch (error) {
+    // A refused transaction is a failed cache, not a bad row: the check
+    // cools down like a failed open, so the retry a catch-up would make
+    // cannot reopen it once per arrival.
+    cacheFailed(connection);
+    throw error;
+  } finally {
+    if (epochPending === attempt) epochPending = null;
+  }
+}
+
+/** The read, the clear and the new stamp ride ONE transaction: a clear that
+ *  committed without its stamp would run again on every open, and a stamp
+ *  without its clear would leave rows the next read cannot place. */
+function epochTransaction(
+  d: IDBDatabase,
+  historySchema: number,
+): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const tx = d.transaction([META_STORE, STORE], "readwrite");
+    const meta = tx.objectStore(META_STORE);
+    const read = meta.get(EPOCH_KEY);
+    read.onsuccess = () => {
+      if (read.result === historySchema) return;
+      tx.objectStore(STORE).clear();
+      meta.put(historySchema, EPOCH_KEY);
+    };
+    tx.oncomplete = () => resolve();
+    // Every failure leaves through CacheUnavailable: the cache contract is
+    // "rejects, so the caller degrades", and a raw DOMException would put a
+    // second error shape on that path.
+    const failed = (what: string) => {
+      const error = new CacheUnavailable("cache epoch check " + what);
+      if (tx.error !== null) Object.assign(error, { cause: tx.error });
+      reject(error);
+    };
+    tx.onerror = () => failed("failed");
+    tx.onabort = () => failed("aborted");
+  });
 }
 
 /** Run the legacy migration at most once per document lifetime, ahead of the

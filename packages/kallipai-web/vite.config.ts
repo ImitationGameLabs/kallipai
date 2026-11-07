@@ -52,6 +52,17 @@ export default defineConfig({
       adapter: adapter({
         fallback: "index.html",
       }),
+      // The build's own id: written into `_app/version.json` and read back
+      // as `$app/environment`'s `version`. Two bundles of different trees
+      // must not share an id, so nix passes the source revision (a dirty
+      // local build appends -dirty); a build with the variable unset falls
+      // back to its clock. `pollInterval` stays 0: kit's own version store
+      // has no start point in this version, and the shell runs its own
+      // watch (lib/shell/buildVersion.ts).
+      version: {
+        name: process.env.KALLIPAI_WEB_BUILD_ID || Date.now().toString(),
+        pollInterval: 0,
+      },
     }),
     // kallipai-ui is consumed as live source from a sibling workspace package,
     // outside this package's watch root. Explicitly add it to the dev watcher so

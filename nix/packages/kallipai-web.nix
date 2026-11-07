@@ -14,6 +14,12 @@
   deno,
   # The repository source (flake `self`), cleaned of gitignored build state.
   src,
+  # The id the bundle reports as its version (`_app/version.json`, read
+  # back by the shell's update watch). The flake passes the source
+  # revision: a deploy is built from a clean checkout, so its id is the
+  # revision it was built from. A build off a dirty tree appends -dirty,
+  # and a standalone build with the variable unset uses its own clock.
+  buildId,
   # One universal dist: deployment values (domain, TLS shape, offline
   # login) are runtime config — see the web app's /config.js and the
   # NixOS module's services.kallipai.web.runtimeConfig option.
@@ -186,6 +192,7 @@ pkgs.stdenvNoCC.mkDerivation {
 
   buildPhase = ''
     export HOME=$TMPDIR
+    export KALLIPAI_WEB_BUILD_ID="${buildId}"
     # Compile the paraglide messages first: the inlang plugins load from
     # this tree's node_modules per the project's settings.json, and the
     # compile sits in this derivation's regular input graph, so i18n

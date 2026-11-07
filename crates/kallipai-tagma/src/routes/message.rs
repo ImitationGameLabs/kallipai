@@ -184,6 +184,14 @@ async fn external_projector<'a>(
         .ok_or_else(|| ApiError::unavailable("external projector not initialized"))
 }
 
+/// The numbering contract a history page is written under: what a position
+/// (`seq`) means, and therefore how the cursors read it. A client compares the
+/// `schema_version` it receives against the one it was built for and stops
+/// placing rows when they differ: a page from another contract orders rows
+/// against a different log. Bumped whenever that meaning changes without a
+/// shape change, which is the one thing a client cannot see for itself.
+pub const EXTERNAL_HISTORY_SCHEMA_VERSION: u32 = 1;
+
 /// `GET /agents/{id}/external/history` -- the pull-based history window for the
 /// direct (offline) path, paged by the last position the client rendered.
 /// Root-only and projector-owned; returns the decoded entries (sender + reply),
@@ -200,6 +208,12 @@ async fn external_projector<'a>(
 /// never doubles as a count read.
 #[derive(Debug, Serialize)]
 pub struct ExternalHistoryResponse {
+    /// The numbering contract `rows` positions and `next` follow (see
+    /// [`EXTERNAL_HISTORY_SCHEMA_VERSION`]). Always present, so a client reads
+    /// one field instead of assuming its own contract: a client that predates
+    /// the field ignores it, and one that reads a different number refuses the
+    /// page instead of pairing rows from two numberings.
+    pub schema_version: u32,
     pub rows: Vec<kallipai_lesche_common::message::HistoryEntry>,
     pub more: bool,
     /// Rows the window held that the decoder could not read: they are not in
@@ -239,6 +253,7 @@ pub async fn external_history(
         }
         return match projector.read_row(None, row).await {
             Ok(page) => Ok(Json(ExternalHistoryResponse {
+                schema_version: EXTERNAL_HISTORY_SCHEMA_VERSION,
                 rows: page.entries,
                 more: page.more,
                 undecodable: page.undecodable,
@@ -282,6 +297,7 @@ pub async fn external_history(
         }
     };
     Ok(Json(ExternalHistoryResponse {
+        schema_version: EXTERNAL_HISTORY_SCHEMA_VERSION,
         rows: page.entries,
         more: page.more,
         undecodable: page.undecodable,

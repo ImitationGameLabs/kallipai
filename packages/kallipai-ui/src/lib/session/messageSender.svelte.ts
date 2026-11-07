@@ -6,7 +6,10 @@
 // The single-in-flight pump ({@link ConversationBase.pumpPending}) drives both
 // transports through this seam, so the relay keeps one pump rather than a
 // fork of its own.
-import type { TagmaClient } from "@kallipai/kallipai-client";
+import {
+  HISTORY_SCHEMA_VERSION,
+  type TagmaClient,
+} from "@kallipai/kallipai-client";
 import type { AgentId } from "@kallipai/kallipai-common";
 import type { HistoryEntry } from "@kallipai/kallipai-lesche-client";
 import type { RelayChannel } from "@kallipai/kallipai-keryx-client";
@@ -47,6 +50,23 @@ export interface PullOpts {
   readonly limit?: number;
 }
 
+/** The tagma numbers history under a contract this build does not read. Not
+ *  a transport failure: the page arrived, and its rows cannot be placed
+ *  because a position from another numbering orders rows against a different
+ *  log. The conversation freezes on it (see `ConversationBase.historyFrozen`)
+ *  and a reload is the way out, since the disagreement is between the running
+ *  bundle and the tagma rather than between one request and its answer. */
+export class HistorySchemaMismatch extends Error {
+  constructor(
+    readonly received: number,
+    readonly expected: number,
+  ) {
+    super(
+      `the tagma numbers history under v${received}; this build reads v${expected}`,
+    );
+    this.name = "HistorySchemaMismatch";
+  }
+}
 export interface MessageSender {
   /** Whether the carrier is still alive: `available = !closed`, so it says
    *  "this sender was not closed", not "a send can go through now". Both
@@ -96,6 +116,19 @@ export class DirectMessageSender implements MessageSender {
 
   async pullHistory(opts: PullOpts): Promise<HistoryPage> {
     const resp = await this.client.externalHistory(this.agentId, opts);
+    // A page that does not say which numbering it is written under predates
+    // the field: only this build's contract could have produced it, so it
+    // passes. A page that names another one has to stop here rather than
+    // below, where its positions would be placed against this build's log.
+    if (
+      resp.schema_version !== undefined &&
+      resp.schema_version !== HISTORY_SCHEMA_VERSION
+    ) {
+      throw new HistorySchemaMismatch(
+        resp.schema_version,
+        HISTORY_SCHEMA_VERSION,
+      );
+    }
     return {
       rows: resp.rows as HistoryEntry[],
       more: resp.more,

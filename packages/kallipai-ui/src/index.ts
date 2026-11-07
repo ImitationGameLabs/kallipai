@@ -81,6 +81,11 @@ export {
   type GateDecision,
   isPublicRoute,
 } from "./lib/shell/gate.ts";
+export {
+  startVersionWatch,
+  type VersionDocument,
+  type VersionWatchOptions,
+} from "./lib/shell/buildVersion.ts";
 
 // Route page bodies (consumed by each app's thin +page.svelte wrappers).
 export { default as ChannelChatPage } from "./pages/ChannelChatPage.svelte";

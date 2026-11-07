@@ -2,8 +2,8 @@
   // Tone -> Skeleton `preset-filled-*` utility. Each bundles the solid tone
   // fill with its paired contrast text, so the banner reads boldly, never lets
   // the content beneath bleed through, and stays in lockstep with Skeleton's
-  // own component styling. Add tones here; `error`
-  // is the only one wired today.
+  // own component styling. Add tones here; callers pick the one a notice
+  // needs (the update notice takes `info`).
   export const bannerTones = {
     error: "preset-filled-error-500",
     warning: "preset-filled-warning-500",
@@ -23,6 +23,7 @@
     tone = "error",
     icon = undefined,
     floating = false,
+    polite = false,
     children,
   }: {
     title: string;
@@ -37,6 +38,9 @@
     // outside AppShell) so an archeion-unreachable error floats over the centered
     // form with breathing room from the top edge.
     floating?: boolean;
+    // Announce without interrupting: a standing notice like the deployed-
+    // version hint is `status`, not the assertive `alert` an error earns.
+    polite?: boolean;
     children?: Snippet;
   } = $props();
 
@@ -67,7 +71,7 @@
   long messages wrap inside a readable measure. Inline by default; `floating`
   lifts it to a fixed viewport-top position for surfaces without AppShell chrome.
 -->
-<div role="alert" class={rootClass}>
+<div role={polite ? "status" : "alert"} class={rootClass}>
   <div class={boxClass}>
     {#if icon}{@render icon({ class: "size-4 shrink-0" })}{/if}
     <span class="font-medium">{title}</span>

@@ -43,6 +43,7 @@ import {
   prepareCache,
   readTail,
 } from "@kallipai/kallipai-keryx-client";
+import { HISTORY_SCHEMA_VERSION } from "@kallipai/kallipai-client";
 import { configStore } from "../config/config.svelte.ts";
 import { type ConversationLine, LOCAL_OPERATOR_SENDER } from "../transcript.ts";
 
@@ -287,7 +288,7 @@ export class ChannelsStore {
       // An open needs an explicit permit, and attach is where it is granted:
       // a cache that cannot open rejects here and the page runs cache-less,
       // instead of parking this attach behind an IndexedDB upgrade.
-      await prepareCache();
+      await prepareCache(HISTORY_SCHEMA_VERSION);
       const cached = await readTail(cacheConversationId, WINDOW_PAGE);
       if (cached.length > 0) {
         const lines: ConversationLine[] = cached.map(cachedLineToLine);
@@ -362,7 +363,7 @@ export class ChannelsStore {
     // only the delta (mirrors attachLocal; the same per-tagma cache the
     // offline entry uses, so a mode switch rehydrates from the same rows).
     try {
-      await prepareCache();
+      await prepareCache(HISTORY_SCHEMA_VERSION);
       const cached = await readTail(channel.conversationId, WINDOW_PAGE);
       if (cached.length > 0) {
         const lines: ConversationLine[] = cached.map(cachedLineToLine);
@@ -515,7 +516,7 @@ export class ChannelsStore {
     // same per-tagma cache the live conversation reads; a blocked cache
     // just leaves an empty transcript, sends still land in the store).
     try {
-      await prepareCache();
+      await prepareCache(HISTORY_SCHEMA_VERSION);
       const cached = await readTail(conversationId, WINDOW_PAGE);
       if (cached.length > 0) {
         conv.transcript = {
@@ -548,7 +549,7 @@ export class ChannelsStore {
     // Hydrate the cached tail (same shape as the tagma offline view; a
     // blocked cache just leaves an empty transcript, sends still land).
     try {
-      await prepareCache();
+      await prepareCache(HISTORY_SCHEMA_VERSION);
       const cached = await readTail(conversationId, WINDOW_PAGE);
       if (cached.length > 0) {
         conv.transcript = {

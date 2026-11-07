@@ -101,6 +101,12 @@ export interface MessageResponse {
  * when rows exist beyond the page it returned.
  * Mirrors the relay `TagmaControl::History` shape. */
 export interface ExternalHistoryResponse {
+  /** The numbering contract `rows` positions and `next` follow: the tagma
+   * bumps it when a row's position changes meaning (see
+   * `HISTORY_SCHEMA_VERSION` for the value this build reads). Absent on
+   * payloads from a tagma that predates the field, and a page without it can
+   * only follow this build's contract, so it is read as matching. */
+  readonly schema_version?: number;
   /** History entries: the sender paired with the content-only reply (mirrors
    * the live `{sender, body}` shape). */
   readonly rows: readonly HistoryEntry[];
@@ -879,6 +885,16 @@ export interface TurnsPage {
   /** True when the byte cap, not the row limit, ended the page early. */
   readonly page_truncated: boolean;
 }
+
+/** The numbering this client reads history rows under. Bump it whenever the
+ *  meaning of a row's position changes without a wire-level break: cached
+ *  rows carry positions, so a cache filled under another numbering holds ids
+ *  the tagma may already have given to something else. The cache clears on
+ *  a mismatch; the wire check lives on the page's own `schema_version`. The
+ *  pair is pinned across builds: crates/kallipai-tagma/src/routes/message.rs
+ *  holds the tagma's EXTERNAL_HISTORY_SCHEMA_VERSION, and both test suites
+ *  assert the literal, so a one-sided bump fails instead of freezing readers. */
+export const HISTORY_SCHEMA_VERSION = 1;
 
 /** One turn as the read face shows it. The model-round facts are nested and
  * optional: a record no model round produced (a prompt, a heartbeat) has no

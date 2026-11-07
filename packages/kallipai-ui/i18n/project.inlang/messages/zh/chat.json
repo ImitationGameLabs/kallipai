@@ -55,6 +55,8 @@
   "chat_conversation_unknown": "本设备没有这个会话的记录，它可能属于此浏览器从未连接过的 tagma。",
   "chat_send_timed_out": "发送超时，请检查连接后重试。",
   "chat_offline_no_history": "本设备尚未保存过该 tagma 的消息。对方当前处于离线状态；待其恢复在线后，新消息会显示在这里。",
+  "chat_history_stale": "本页面与 tagma 对消息位置的理解不同。两个部署都更新后再刷新即可恢复；发送不受影响。",
+  "chat_history_stale_action": "仍然刷新",
   "chat_history_unavailable": "历史消息未能加载。新消息仍会到达；可以重试加载。",
   "chat_quote_action": "引用",
   "chat_quote_action_aria": "引用这条消息",

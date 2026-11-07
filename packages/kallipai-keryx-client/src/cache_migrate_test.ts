@@ -537,6 +537,7 @@ Deno.test(
       assertEquals(db?.stores.has("read_watermarks"), false);
       assertEquals([...(db?.stores.keys() ?? [])].sort(), [
         "messages",
+        "meta",
         "pending",
       ]);
     } finally {

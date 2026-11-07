@@ -26,6 +26,7 @@
     permitRetry,
     ProjectionClient,
   } from "@kallipai/kallipai-keryx-client";
+  import { HISTORY_SCHEMA_VERSION } from "@kallipai/kallipai-client";
   import { keryxBaseUrlOrFail } from "../lib/session/archeion.svelte.ts";
   import { managementBackend } from "../lib/manage/client.ts";
   import { conversationStorageKey } from "../lib/session/drafts.ts";
@@ -35,6 +36,8 @@
   import { createUnresolvedGuard } from "../lib/session/unresolvedGuard.svelte.ts";
   import {
     chat_conversation_unknown,
+    chat_history_stale,
+    chat_history_stale_action,
     chat_history_unavailable,
     chat_offline_no_history,
     common_retry,
@@ -268,7 +271,7 @@
   function retryHistory(): void {
     if (!conv) return;
     permitRetry();
-    void prepareCache()
+    void prepareCache(HISTORY_SCHEMA_VERSION)
       .catch(() => undefined)
       .then(() => conv?.catchUp());
   }
@@ -580,6 +583,20 @@
                     onclick={retryHistory}
                   >
                     {common_retry()}
+                  </button>
+                </p>
+              {/if}
+              {#if conv.historyError === "protocol"}
+                <p
+                  class="flex items-center justify-center gap-2 text-xs text-warning-500 dark:text-warning-400"
+                >
+                  {chat_history_stale()}
+                  <button
+                    type="button"
+                    class="underline"
+                    onclick={() => location.reload()}
+                  >
+                    {chat_history_stale_action()}
                   </button>
                 </p>
               {/if}

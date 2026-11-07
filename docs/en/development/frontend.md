@@ -150,6 +150,37 @@ the single navigation primitive this repo consumes: components call it
 after the host's bootstrap `initShell(goto)` injection, and host
 wrappers use it too so route changes flow through one choke point.
 
+### Update Notice and Bundle Caching
+
+Every build writes an id into `_app/version.json` (`version.name` in
+`packages/kallipai-web/vite.config.ts`). Nix passes the source revision
+through `KALLIPAI_WEB_BUILD_ID` (`nix/packages/kallipai-web.nix`, and
+both `flake.nix` call sites pass `self.shortRev or self.dirtyShortRev or
+"dev"`). A deploy is built from a clean checkout, so its id is the
+revision it was built from; a build off a dirty tree appends `-dirty`,
+and a standalone build with the variable unset uses its own clock.
+
+The web app starts `startVersionWatch` (`kallipai-ui/src/lib/shell/
+buildVersion.ts`) on mount: it reads the running bundle's id from
+`$app/environment`'s `version`, asks `_app/version.json?t=<now>` once at
+start, on an interval, and when the page returns to the foreground, and
+reports an id that differs from the running one. Kit's own version store
+polls nothing in the installed version (`pollInterval` stays 0), so the
+watch is the only start point. The notice offers a reload and never
+performs one: a reload the user did not ask for throws away the message
+they are typing.
+
+The probe carries `?t=`, so it works even where the edge caches the
+file. The entry document's `Cache-Control` is still the edge's call:
+`compose/site.caddy` sends `no-cache` for the bundle and caches
+`/_app/immutable/*` for a year, with both rules inside one `route` block.
+That block runs its handlers in the order written, and the order has to
+come from it: written as two flat directives, caddy hoists the header that
+carries a matcher ahead of the one that carries none, so the broad rule
+runs last and assets revalidate with the document. A deployment serving
+through another edge needs the same rule, or a reload can hand back the
+cached document and never boot the new bundle.
+
 ### Formatting
 
 Two formatters, split by file type:

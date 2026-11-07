@@ -55,6 +55,8 @@
   "chat_conversation_unknown": "This conversation is not known on this device; it may belong to a tagma this browser never opened.",
   "chat_send_timed_out": "Sending timed out. Check the connection and retry.",
   "chat_offline_no_history": "No messages from this tagma are stored on this device yet. The tagma is currently offline; new messages will appear here when it comes back online.",
+  "chat_history_stale": "This app and the tagma read message positions differently. Reloading helps once both deployments are updated; messages you send still arrive.",
+  "chat_history_stale_action": "Reload anyway",
   "chat_history_unavailable": "History could not be loaded. New messages still arrive; retry to load it.",
   "chat_quote_action": "Quote",
   "chat_quote_action_aria": "Quote this message",

@@ -5,6 +5,7 @@
   import AccountMenu from "../../components/AccountMenu.svelte";
   import TagmaStatusLine from "../../components/TagmaStatusLine.svelte";
   import AgentDrawerList from "../../components/AgentDrawerList.svelte";
+  import Banner from "../../components/Banner.svelte";
   import { Dialog, Portal } from "@skeletonlabs/skeleton-svelte";
   import { attachEdgeSwipe } from "./edgeSwipe.ts";
   import { classifyError } from "../errors.ts";
@@ -45,6 +46,8 @@
     nav_manage,
     room_label_fallback,
     settings_heading,
+    shell_update_action,
+    shell_update_available,
     tagma_status_aria,
   } from "../../paraglide/messages.js";
 
@@ -53,12 +56,17 @@
     search,
     appKind,
     icons,
+    updateAvailable = false,
     children,
   }: {
     pathname: string;
     search: string;
     appKind: "app" | "web";
     icons: NavIcons;
+    /** A deployed bundle differs from the running one. The app owns the
+     *  watch (it alone can read `$app/environment`'s `version`); the shell
+     *  renders the notice and offers the reload. */
+    updateAvailable?: boolean;
     children: Snippet;
   } = $props();
 
@@ -535,6 +543,18 @@
        appGateDecision), so this branch is only the brief resolving window.
        Never a protected AppShell, so no gated content flashes. -->
   <div class="p-4"><p class="opacity-60">Loading…</p></div>
+{/if}
+
+<!-- A deployed bundle differs from the running one: say so and offer the
+     reload, never perform it. The user may be mid-message, and a reload
+     they did not ask for would throw the draft away. Floating, so the
+     notice rides over both shell forms without entering their layout. -->
+{#if updateAvailable}
+  <Banner floating polite tone="info" title={shell_update_available()}>
+    <button type="button" class="underline" onclick={() => location.reload()}>
+      {shell_update_action()}
+    </button>
+  </Banner>
 {/if}
 
 <!-- The mobile agents drawer: a left-anchored panel over the

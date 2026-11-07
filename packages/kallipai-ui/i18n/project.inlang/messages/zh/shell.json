@@ -30,6 +30,8 @@
   "shell_connecting": "连接中",
   "shell_offline": "离线",
   "shell_error": "错误",
+  "shell_update_available": "应用的新版本已部署。",
+  "shell_update_action": "重新加载应用",
   "account_logout": "退出登录",
   "account_menu": "账号"
 }

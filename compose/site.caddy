@@ -39,7 +39,16 @@
 (app-bundle) {
 	root * /srv/web
 	import app-headers
+	# Cache-Control for the bundle, with both rules inside the route below:
+	# a route runs its handlers in the order written, so the broad rule sets
+	# the entry document to revalidate (a reload has to pick up the
+	# deployment) and the asset rule written after it replaces the value for
+	# the content-addressed directory. Flat directives cannot express that:
+	# caddy hoists a header that carries a matcher ahead of one that carries
+	# none, so the broad rule always ran last and the asset rule never held.
 	route {
+		header Cache-Control "no-cache"
+		header /_app/immutable/* Cache-Control "public, max-age=31536000, immutable"
 		import app-config
 		try_files {path} /index.html
 		file_server

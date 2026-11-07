@@ -58,8 +58,8 @@ import type { CachedLine, RelayChannel } from "@kallipai/kallipai-keryx-client";
 import { manageOk } from "@kallipai/kallipai-keryx-client";
 import { relayRootAgentId } from "./rootAgent.ts";
 import {
-  deletePending,
   clearConvCache,
+  deletePending,
   isFailedPending,
   markPendingFailed,
   type PendingLine,
@@ -74,7 +74,10 @@ import type {
   MessageSender,
   PullOpts,
 } from "./messageSender.svelte.ts";
-import { RelayMessageSender } from "./messageSender.svelte.ts";
+import {
+  HistorySchemaMismatch,
+  RelayMessageSender,
+} from "./messageSender.svelte.ts";
 import { DirectTransport, type TransportState } from "./directTransport.ts";
 import { DataPlaneApiError } from "@kallipai/kallipai-lesche-client";
 import { KallipaiError } from "@kallipai/kallipai-common";
@@ -235,8 +238,8 @@ export abstract class ConversationBase {
   /** Set when a repair is asked for while one runs: the running pass takes
    *  one more sweep instead of stacking pulls. */
   private resumeAgain = false;
-  /** The probe in flight: a catch-up joining it shares its answer instead
-   *  of asking the tagma the same question again. */
+  /** The probe in flight: a catch-up joining it shares its answer instead of
+   *  asking the tagma the same question again. */
   private probe: Promise<void> | null = null;
   /** Rendered optimistic user lines awaiting their POST. Each entry's line is
    *  already in `transcript` (status "sending"); the single-in-flight send pump
@@ -294,15 +297,33 @@ export abstract class ConversationBase {
    *  pull is cheap, a missed page is not). */
   hasMoreOlder = $state(true);
 
-  /** Set when the history could not be brought up -- a pull that failed
-   *  or a cache that could not open. The page shows it with a retry
-   *  instead of an empty transcript that reads as an empty
-   *  conversation. Cleared by the next page that lands. */
-  historyError = $state<null | "unavailable">(null);
+  /** Set when the history could not be brought up -- a pull that failed, a
+   *  cache that could not open, or a page written under a numbering this
+   *  build does not read: that last one is `"protocol"`, which freezes the
+   *  window (see {@link historyFrozen}). The page shows it with a retry, or
+   *  with a reload when no retry can help, instead of an empty transcript
+   *  that reads as an empty conversation. Cleared by the next page that
+   *  lands. */
+  historyError = $state<null | "unavailable" | "protocol">(null);
 
-  /** Record a failed history pull: the page offers a retry. */
-  protected notePullFailure(): void {
-    this.historyError = "unavailable";
+  /** True once the tagma answered under a numbering this build does not
+   *  read: the window keeps rendering what arrives and stops placing it -- no
+   *  position stamp, no cursor move, no cache row, no repair -- because a
+   *  position from another numbering orders rows against a different log.
+   *  Only a reload ends it: the disagreement is between the running bundle and
+   *  the tagma, not between one request and its answer. */
+  get historyFrozen(): boolean {
+    return this.historyError === "protocol";
+  }
+
+  /** Record a failed history pull: an answer written under another numbering
+   *  freezes the window, anything else is the retryable case. A freeze is
+   *  never downgraded -- the mismatch stands until a reload, whatever fails
+   *  next. */
+  protected notePullFailure(e: unknown): void {
+    if (this.historyFrozen) return;
+    this.historyError =
+      e instanceof HistorySchemaMismatch ? "protocol" : "unavailable";
   }
 
   constructor(
@@ -624,7 +645,9 @@ export abstract class ConversationBase {
     // A position at or below the cursor is already covered: the row is on
     // screen, or was before paging let it go, so the frame is a replay and
     // nothing about it may move the cursor again.
-    if (seq !== null && seq <= this.lastSeq) {
+    // A frozen window has no cursor to compare against: its positions come
+    // from another numbering, so frames render and only row ids dedup.
+    if (!this.historyFrozen && seq !== null && seq <= this.lastSeq) {
       this.onReply(reply);
       return;
     }
@@ -633,29 +656,33 @@ export abstract class ConversationBase {
     // The position a frame carries lands with the line it renders: a row that
     // arrived on the stream is as placeable as one a page delivered, so a
     // later page merging this id has nothing left to fill in.
-    if (seq !== null) {
+    if (!this.historyFrozen && seq !== null) {
       this.transcript = stampPosition(this.transcript, lineId, seq);
     }
     const cl = cacheLineOf(reply, sender);
+    // A frozen window keeps rows off the cache: a cached row carries a
+    // position, and this build cannot tell which numbering minted it.
     if (cl) {
-      void cachePut({
-        conversationId: this.cacheConversationId,
-        historyId: cl.historyId,
-        role: cl.role,
-        text: cl.text,
-        sender: cl.sender,
-        createdAt: cl.createdAt,
-        attachment: cl.attachment,
-        quote: cl.quote,
-        seq: cl.seq,
-      });
+      if (!this.historyFrozen) {
+        void cachePut({
+          conversationId: this.cacheConversationId,
+          historyId: cl.historyId,
+          role: cl.role,
+          text: cl.text,
+          sender: cl.sender,
+          createdAt: cl.createdAt,
+          attachment: cl.attachment,
+          quote: cl.quote,
+          seq: cl.seq,
+        });
+      }
       if (cl.historyId > this.maxRowId) this.maxRowId = cl.historyId;
     }
     // Move the resume cursor over the position this frame carries. A frame
     // that jumps above the cursor still renders (its content is real), but
     // the cursor stays below the hole so one repair pulls the missing rows
     // back; an unstamped frame moves nothing.
-    if (seq !== null) {
+    if (!this.historyFrozen && seq !== null) {
       if (seq === this.lastSeq + 1) this.advancePositions([seq]);
       else if (seq > this.lastSeq + 1) void this.resume();
     }
@@ -745,7 +772,10 @@ export abstract class ConversationBase {
       wireSender,
     );
     const confirmed = this.transcript.lines.find((l) => l.historyId === ackId);
-    if (confirmed) {
+    if (confirmed && !this.historyFrozen) {
+      // A frozen window writes no cache rows: the id this row just took
+      // belongs to a numbering this build does not read, and a cached row
+      // is a position the next hydrate would trust.
       // Plain `wireSender`, never the $state proxy (structured clone rejects it).
       void cachePut({
         conversationId: this.cacheConversationId,
@@ -824,20 +854,24 @@ export abstract class ConversationBase {
     const lines = rows
       .map(historyEntryLine)
       .filter((l): l is ConversationLine => l !== null);
-    for (const l of lines) {
-      void cachePut({
-        conversationId: this.cacheConversationId,
-        historyId: l.historyId,
-        role: l.role,
-        text: l.text,
-        sender: l.sender,
-        createdAt: l.createdAt,
-        attachment: l.attachment,
-        quote: l.quote,
-        seq: l.seq,
-      });
+    // A page already in flight when the freeze landed still renders below:
+    // it hands over neither a cache row nor a position.
+    if (!this.historyFrozen) {
+      for (const l of lines) {
+        void cachePut({
+          conversationId: this.cacheConversationId,
+          historyId: l.historyId,
+          role: l.role,
+          text: l.text,
+          sender: l.sender,
+          createdAt: l.createdAt,
+          attachment: l.attachment,
+          quote: l.quote,
+          seq: l.seq,
+        });
+      }
+      this.advancePositions(lines.map((l) => l.seq ?? 0));
     }
-    this.advancePositions(lines.map((l) => l.seq ?? 0));
     return this.mergeWindowLines(lines);
   }
   /** Recompute the window floor (`minRowId`) and the scroll-up position
@@ -861,8 +895,10 @@ export abstract class ConversationBase {
    *  cache hydrate): its newest position becomes the resume cursor, its oldest
    *  the scroll-up anchor, and the row-id edges follow the same lines. A
    *  hydrate is the one place a whole window arrives at once -- every other
-   *  landing comes through applyReplyCore or applyPulledRows. */
+   *  landing comes through applyReplyCore or applyPulledRows. A frozen
+   *  window has no positions to adopt, so it places nothing. */
   seedRenderedPositions(lines: readonly ConversationLine[]): void {
+    if (this.historyFrozen) return;
     let minId = Infinity;
     let maxId = 0;
     for (const l of lines) {
@@ -906,6 +942,9 @@ export abstract class ConversationBase {
   ): void {
     const seq = contentSeq(reply);
     if (historyId <= 0) return;
+    // Frozen: the row renders, but its position comes from a numbering
+    // this build cannot place (see `historyFrozen`).
+    if (this.historyFrozen) return;
     if (seq !== null) {
       this.transcript = stampPosition(this.transcript, historyId, seq);
       if (seq === this.lastSeq + 1) this.advancePositions([seq]);
@@ -961,6 +1000,9 @@ export abstract class ConversationBase {
     const sender = this.sender;
     const pull = sender?.pullHistory;
     if (pull === undefined) return;
+    // A frozen window pulls nothing: every page would carry positions this
+    // build cannot place, and a reload is the way out.
+    if (this.historyFrozen) return;
     if (this.resuming) {
       this.resumeAgain = true;
       return;
@@ -982,6 +1024,7 @@ export abstract class ConversationBase {
     pull: (opts: PullOpts) => Promise<HistoryPage>,
     k: number,
   ): Promise<void> {
+    if (this.historyFrozen) return;
     let cursor = this.lastSeq;
     let anchor = this.lastSeq;
     try {
@@ -1064,7 +1107,7 @@ export abstract class ConversationBase {
       // A failed pull is not a filled hole: the cursor stays where it was, so
       // the next frame or the next mount asks again.
       console.warn("[chat] resume failed above " + cursor + ":", e);
-      this.notePullFailure();
+      this.notePullFailure(e);
     }
   }
 
@@ -1129,6 +1172,7 @@ export abstract class ConversationBase {
     pull: (opts: PullOpts) => Promise<HistoryPage>,
     k: number,
   ): Promise<void> {
+    if (this.historyFrozen) return;
     try {
       const page = await pull({ limit: k });
       this.historyError = null;
@@ -1141,7 +1185,7 @@ export abstract class ConversationBase {
       // is, and live frames keep arriving; say so anyway, because a cold
       // start that quietly shows nothing looks like an empty log.
       console.warn("[chat] could not open the newest window:", e);
-      this.notePullFailure();
+      this.notePullFailure(e);
     }
   }
 
@@ -1155,6 +1199,9 @@ export abstract class ConversationBase {
    *  once issued a recent-N pull whose always-false `more` permanently
    *  disarmed the sentinel. Wait for a window head to exist. */
   async loadOlder(k = WINDOW_PAGE): Promise<void> {
+    // A frozen window pages nothing: rows would land without positions and
+    // without a cache copy, so it stops asking until a reload.
+    if (this.historyFrozen) return;
     if (this.loadingOlder || !this.hasMoreOlder) return;
     if (this.minRowId <= 0) return;
     this.loadingOlder = true;

@@ -1,5 +1,8 @@
 <script lang="ts">
   import { goto } from "$app/navigation";
+  import { version } from "$app/environment";
+  import { base } from "$app/paths";
+  import { onMount } from "svelte";
   import { page } from "$app/state";
   import "../app.css";
   import {
@@ -11,6 +14,7 @@
     initInstances,
     initRelays,
     localStorageConfigStorage,
+    startVersionWatch,
     type NavIcons,
   } from "@kallipai/kallipai-ui";
   import { serviceUrl } from "../lib/service-urls.ts";
@@ -70,6 +74,30 @@
     files: Folder,
   };
 
+  // A newer bundle may be deployed while this page stays open: the shell
+  // asks `_app/version.json` and shows a notice. `version` is this bundle's
+  // id, written by the build (see vite.config.ts); the probe carries `?t=`
+  // so an edge that caches the file cannot hide the deployment, and the
+  // notice never reloads on its own -- the user may be mid-message.
+  let updateAvailable = $state(false);
+
+  async function fetchBuildVersion(): Promise<unknown> {
+    const res = await fetch(`${base}/_app/version.json?t=${Date.now()}`);
+    if (!res.ok) return null;
+    const body: unknown = await res.json();
+    return typeof body === "object" && body !== null && "version" in body
+      ? body.version
+      : null;
+  }
+
+  onMount(() =>
+    startVersionWatch({
+      current: version,
+      fetchVersion: fetchBuildVersion,
+      onAvailable: () => (updateAvailable = true),
+    }),
+  );
+
   let { children } = $props();
 </script>
 
@@ -78,6 +106,7 @@
   search={page.url.search}
   appKind="web"
   {icons}
+  {updateAvailable}
 >
   {@render children()}
 </RootLayout>
