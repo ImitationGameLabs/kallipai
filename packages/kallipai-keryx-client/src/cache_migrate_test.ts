@@ -56,20 +56,22 @@ class FakeKeyRange {
 }
 
 interface FakeStore {
-  keyPath: string | string[];
+  keyPath?: string | string[];
   rows: Map<string, FakeRow>;
 }
 
 class FakeDatabase {
   readonly stores = new Map<string, FakeStore>();
+  /** Handles closed so far: the migration's own, and any handle leaked. */
+  closed = 0;
   objectStoreNames = { contains: (name: string) => this.stores.has(name) };
   constructor(
     readonly name: string,
     public version: number,
   ) {}
 
-  createObjectStore(name: string, opts: { keyPath: string | string[] }) {
-    this.stores.set(name, { keyPath: opts.keyPath, rows: new Map() });
+  createObjectStore(name: string, opts?: { keyPath?: string | string[] }) {
+    this.stores.set(name, { keyPath: opts?.keyPath, rows: new Map() });
   }
   deleteObjectStore(name: string) {
     this.stores.delete(name);
@@ -77,6 +79,7 @@ class FakeDatabase {
 
   private keyOf(store: FakeStore, row: FakeRow): string {
     const kp = store.keyPath;
+    if (kp === undefined) throw new Error("store has no keyPath");
     return Array.isArray(kp)
       ? kp.map((k) => String(row[k])).join("/")
       : String(row[kp]);
@@ -137,32 +140,56 @@ class FakeDatabase {
     };
   }
   close() {
-    // connection accounting is not modelled; deletes never block here
+    // Every connection this fake hands out is the same object, so counting
+    // closes is the closest thing to connection accounting: a handle nobody
+    // closed shows up as a count that falls short.
+    this.closed += 1;
   }
 }
 
 const databases = new Map<string, FakeDatabase>();
 let failNextPuts = 0;
 let blockNextDelete = false;
+let holdNextLegacyOpen = false;
+let failNextTargetOpen = false;
+let heldOpen: (() => void) | null = null;
 
 const fakeIndexedDB = {
   open: (name: string, version?: number) => {
     const req = new FakeOpenRequest();
-    queueMicrotask(() => {
-      const existing = databases.get(name);
-      const db = existing ?? new FakeDatabase(name, version ?? 1);
-      if (!existing) databases.set(name, db);
-      const oldVersion = existing ? existing.version : 0;
-      if (oldVersion === 0 || (version !== undefined && version > oldVersion)) {
-        const aborted = req.upgrade(db, oldVersion);
-        if (aborted) {
-          if (!existing) databases.delete(name);
-          req.fail("AbortError");
-          return;
+    if (failNextTargetOpen && name === "kallipai-keryx") {
+      failNextTargetOpen = false;
+      throw new Error("target open failed");
+    }
+    const run = () => {
+      queueMicrotask(() => {
+        const existing = databases.get(name);
+        const db = existing ?? new FakeDatabase(name, version ?? 1);
+        if (!existing) databases.set(name, db);
+        const oldVersion = existing ? existing.version : 0;
+        if (
+          oldVersion === 0 ||
+          (version !== undefined && version > oldVersion)
+        ) {
+          const aborted = req.upgrade(db, oldVersion);
+          if (aborted) {
+            if (!existing) databases.delete(name);
+            req.fail("AbortError");
+            return;
+          }
         }
-      }
-      req.fire(db);
-    });
+        req.fire(db);
+      });
+    };
+    // Another tab holding the legacy database open: the request stays
+    // pending until the case releases it, which is what lets a budget
+    // expire in the middle of the chain.
+    if (holdNextLegacyOpen && name === "kallipai-relay") {
+      holdNextLegacyOpen = false;
+      heldOpen = run;
+      return req;
+    }
+    run();
     return req;
   },
   deleteDatabase: (name: string) => {
@@ -182,11 +209,21 @@ const fakeIndexedDB = {
   },
 };
 
+/** Let the held legacy open proceed, the way the other tab letting go would. */
+function releaseHeldOpen(): void {
+  const run = heldOpen;
+  heldOpen = null;
+  run?.();
+}
+
 function installFakes(): () => void {
   // each case starts from a clean world (module state, not per-case)
   databases.clear();
   failNextPuts = 0;
   blockNextDelete = false;
+  holdNextLegacyOpen = false;
+  failNextTargetOpen = false;
+  heldOpen = null;
   const g = globalThis as Record<string, unknown>;
   const prevIdb = g.indexedDB;
   const prevRange = g.IDBKeyRange;
@@ -259,7 +296,7 @@ function seedCurrent(
   databases.set("kallipai-keryx", db);
 }
 
-const { assertEquals } = await import("@std/assert");
+const { assertEquals, assertRejects } = await import("@std/assert");
 
 Deno.test(
   "legacy migration copies durable rows and drops the legacy db",
@@ -502,6 +539,98 @@ Deno.test(
         "messages",
         "pending",
       ]);
+    } finally {
+      restore();
+    }
+  },
+);
+
+Deno.test("the migration closes the connection it opened", async () => {
+  const restore = installFakes();
+  try {
+    seedLegacy(5, {
+      pendings: [
+        {
+          tagmaId: "t-1",
+          localSeq: -1,
+          text: "unsent",
+          createdAt: "2026-10-08T01:00:00Z",
+        },
+      ],
+    });
+    const cache = await import("./cache.ts?case=one-connection");
+    await cache.prepareCache();
+    // The copy landed through the migration's own handle, and that handle
+    // was closed before db() opened the connection it keeps: one close for
+    // the one connection the migration held.
+    assertEquals(databases.has("kallipai-relay"), false);
+    assertEquals(databases.get("kallipai-keryx")!.closed, 1);
+    assertEquals((await cache.readPendingByTagma("t-1")).length, 1);
+  } finally {
+    restore();
+  }
+});
+
+Deno.test(
+  "a budget that expires mid-migration leaves no connection behind",
+  async () => {
+    const restore = installFakes();
+    try {
+      seedLegacy(5, {
+        pendings: [
+          {
+            tagmaId: "t-1",
+            localSeq: -1,
+            text: "unsent",
+            createdAt: "2026-10-08T01:00:00Z",
+          },
+        ],
+      });
+      const cache = await import("./cache.ts?case=abandoned-chain");
+      cache.setOpenBudgetForTests(1);
+      holdNextLegacyOpen = true;
+      await assertRejects(() => cache.prepareCache(), cache.CacheUnavailable);
+      // The other tab lets go, and the abandoned chain runs to the end: the
+      // migration closes its handle, and the connection the chain opens after
+      // it is closed too instead of living on unwatched.
+      releaseHeldOpen();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      assertEquals(databases.get("kallipai-keryx")!.closed, 2);
+      // A user's retry still opens, and reads the rows the migration copied.
+      cache.permitRetry();
+      await cache.prepareCache();
+      assertEquals((await cache.readPendingByTagma("t-1")).length, 1);
+    } finally {
+      restore();
+    }
+  },
+);
+
+Deno.test(
+  "a target that will not open still closes the legacy handle",
+  async () => {
+    const restore = installFakes();
+    try {
+      seedLegacy(5, {
+        pendings: [
+          {
+            tagmaId: "t-1",
+            localSeq: -1,
+            text: "unsent",
+            createdAt: "2026-10-08T01:00:00Z",
+          },
+        ],
+      });
+      const cache = await import("./cache.ts?case=target-open-fails");
+      failNextTargetOpen = true;
+      // The page path logs a failed migration and retries next load; here
+      // the migration answers its own caller.
+      await assertRejects(() => cache.migrateLegacyCache());
+      // The legacy handle belongs to the migration even when the target
+      // never opens: one close, and the copy stays for the next page to
+      // copy again.
+      assertEquals(databases.get("kallipai-relay")!.closed, 1);
+      assertEquals(databases.has("kallipai-relay"), true);
     } finally {
       restore();
     }

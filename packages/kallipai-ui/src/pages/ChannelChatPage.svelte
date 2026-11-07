@@ -22,6 +22,8 @@
   import { OnlineBackend } from "../lib/manage/backend.ts";
   import {
     ManageRestClient,
+    prepareCache,
+    permitRetry,
     ProjectionClient,
   } from "@kallipai/kallipai-keryx-client";
   import { keryxBaseUrlOrFail } from "../lib/session/archeion.svelte.ts";
@@ -33,7 +35,9 @@
   import { createUnresolvedGuard } from "../lib/session/unresolvedGuard.svelte.ts";
   import {
     chat_conversation_unknown,
+    chat_history_unavailable,
     chat_offline_no_history,
+    common_retry,
   } from "../paraglide/messages.js";
   import { realtimeStore } from "../lib/session/realtime.svelte";
   import {
@@ -254,6 +258,19 @@
     const owner = storageKey;
     setAttachment(owner, id, { status: "uploading" });
     void uploadOne(item, conv.tagmaId, owner);
+  }
+
+  /** Retry the history after a failed bring-up. The cache gets a permit first:
+   *  it may be the piece that could not open. A click is explicit consent, so
+   *  the cooldown that fences automatic attaches is released first -- the
+   *  bounds that matter (one attempt, single flight, per-attempt budget) stay.
+   */
+  function retryHistory(): void {
+    if (!conv) return;
+    permitRetry();
+    void prepareCache()
+      .catch(() => undefined)
+      .then(() => conv?.catchUp());
   }
 
   function removeAttachment(id: string): void {
@@ -550,6 +567,20 @@
               {#if conv.kind === "offline-view" && conv.transcript.lines.length === 0}
                 <p class="text-xs opacity-70 text-center">
                   {chat_offline_no_history()}
+                </p>
+              {/if}
+              {#if conv.historyError === "unavailable"}
+                <p
+                  class="flex items-center justify-center gap-2 text-xs text-warning-500 dark:text-warning-400"
+                >
+                  {chat_history_unavailable()}
+                  <button
+                    type="button"
+                    class="underline"
+                    onclick={retryHistory}
+                  >
+                    {common_retry()}
+                  </button>
                 </p>
               {/if}
               {#if conv.status === "offline"}

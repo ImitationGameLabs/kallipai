@@ -16,6 +16,33 @@ import type { FileAttachment } from "@kallipai/kallipai-common";
 // host/device trust model (the tagma's SQLite store is plaintext too). Logout
 // clears it.
 
+// --- open contract ----------------------------------------------------------
+//
+// The cache is derived data: a failure here degrades the page to a direct
+// re-pull and never gates it. Three rules keep that true.
+//
+//  1. One open per document, single flight. `db()` memoizes the connection
+//     and the legacy migration's own `openDb()` joins the same request, so
+//     the two never race for the upgrade lock. The migration closes its
+//     handle once the copy lands; `db()` opens the connection it keeps.
+//  2. The whole chain -- legacy probe, migration, open -- runs under ONE
+//     budget. An open that another tab blocks, or one that never settles,
+//     rejects instead of waiting: waiting is what left every open tab
+//     staring at an empty history after a version upgrade.
+//  3. Opening needs a permit. `prepareCache()` is the only grant on the
+//     ordinary path (attach points and an explicit retry); message-store
+//     reads and writes never open on their own, so a blocked open cannot be
+//     retried once per arriving frame. The pending store is the one
+//     exception: those rows exist nowhere else, so a send may ask for a
+//     permit itself (see `durableDb`). A failure -- open or read --
+//     starts a cooldown that no automatic path crosses; a user's
+//     explicit retry lifts it (`permitRetry()`), and the permit, the budget
+//     and single flight still bound the attempt that follows.
+//
+// A connection that arrives after its promise settled -- budget spent, or an
+// open reported blocked that completed later -- is closed on arrival: leaving
+// it open puts a version block in front of the next page load.
+
 /** One cached content line. `historyId` is the tagma `chat_history.id`; the
  * (conversationId, historyId) pair is the IndexedDB primary key. `role` is an
  * opaque string the UI (which owns the role vocabulary) writes and reads back
@@ -69,15 +96,61 @@ const V5_WATERMARK_STORE = "read_watermarks";
 
 let dbPromise: Promise<IDBDatabase> | null = null;
 
-/** Lazily open (and upgrade-create) the `kallipai-keryx` DB, after a
- * one-shot migration of any legacy `kallipai-relay` database (below).
- * Cached for the document lifetime; rejects if IndexedDB is unavailable. */
+/** The cache could not be opened: blocked by another tab, budget spent, or no
+ *  permit. Every caller degrades to a direct re-pull; it never reaches the
+ *  user as an error. */
+export class CacheUnavailable extends Error {
+  constructor(message = "cache unavailable") {
+    super(message);
+    this.name = "CacheUnavailable";
+  }
+}
+
+const OPEN_BUDGET_MS = 1000;
+const COOLDOWN_MS = 10_000;
+
+/** Real timers; tests shrink them through the setters at the end of file. */
+let openBudgetMs = OPEN_BUDGET_MS;
+let cooldownMs = COOLDOWN_MS;
+
+/** Granted by prepareCache(), spent by the next open attempt. */
+let openPermit = false;
+/** No open may start before this wall-clock time (0 = open). */
+let cooldownUntil = 0;
+/** The in-flight open, so the migration and db() share one request. */
+let openRequest: Promise<IDBDatabase> | null = null;
+/** The attempt that started the in-flight open already gave up. */
+let openAbandoned = false;
+
+/** The one open request of this document. The legacy migration calls this
+ * too (it cannot go through db(), which awaits that very migration), so the
+ * two paths share one request and one connection. */
 function openDb(): Promise<IDBDatabase> {
+  if (openRequest) return openRequest;
+  const attempt = openOnce();
+  openRequest = attempt;
+  const release = () => {
+    if (openRequest === attempt) openRequest = null;
+  };
+  attempt.then(release, release);
+  return attempt;
+}
+
+/** Lazily open (and upgrade-create) the `kallipai-keryx` DB. A blocked open
+ * rejects at once: another tab holding the older version open is not a wait
+ * that ends by itself, so waiting only hides the page behind it. */
+function openOnce(): Promise<IDBDatabase> {
   return new Promise<IDBDatabase>((resolve, reject) => {
     if (typeof indexedDB === "undefined") {
-      reject(new Error("IndexedDB unavailable"));
+      reject(new CacheUnavailable("IndexedDB unavailable"));
       return;
     }
+    let settled = false;
+    const settle = (act: () => void) => {
+      if (settled) return;
+      settled = true;
+      act();
+    };
     const req = indexedDB.open(DB_NAME, DB_VERSION);
     req.onupgradeneeded = (event) => {
       const d = req.result;
@@ -110,8 +183,31 @@ function openDb(): Promise<IDBDatabase> {
         });
       }
     };
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error ?? new Error("indexedDB open failed"));
+    req.onsuccess = () => {
+      const d = req.result;
+      // Late arrival: the budget was spent or the open was reported
+      // blocked. Closing it is the whole point -- an unclosed connection
+      // would block the NEXT page load's upgrade.
+      if (settled || openAbandoned) {
+        d.close();
+        return;
+      }
+      settle(() => {
+        // Yield the version lock when another tab wants to upgrade: this
+        // page then rides the cache-less path until an explicit retry.
+        d.onversionchange = () => {
+          d.close();
+          if (dbPromise) dbPromise = null;
+        };
+        resolve(d);
+      });
+    };
+    req.onblocked = () =>
+      settle(() =>
+        reject(new CacheUnavailable("cache open blocked by another tab")),
+      );
+    req.onerror = () =>
+      settle(() => reject(req.error ?? new CacheUnavailable("open failed")));
   });
 }
 
@@ -154,21 +250,144 @@ export async function migrateLegacyCache(): Promise<"migrated" | "absent"> {
   if (!legacy) {
     return "absent";
   }
-  // openDb, not db: db() awaits this very migration.
-  const target = await openDb();
-  const pendings = await readLegacyRows(legacy, PENDING_STORE);
-  for (const row of pendings) {
-    await putRowOn(target, PENDING_STORE, row);
+  // openDb, not db: db() awaits this very migration. The open sits inside
+  // the try with the copy: a failed open leaves no target to close, and the
+  // legacy handle must not outlive this function either.
+  let target: IDBDatabase | null = null;
+  try {
+    target = await openDb();
+    const pendings = await readLegacyRows(legacy, PENDING_STORE);
+    for (const row of pendings) {
+      await putRowOn(target, PENDING_STORE, row);
+    }
+  } finally {
+    // Both handles belong to this migration alone: the memo behind openDb
+    // is released the moment the open lands, so db() opens the connection
+    // it keeps after this resolves. Leaving either open would hold a second
+    // connection for every document that had a legacy database.
+    legacy.close();
+    target?.close();
   }
-  legacy.close();
   await deleteLegacyDb();
   return "migrated";
 }
 
+/** The connection, or a rejection: no permit, cooling down, or the attempt
+ * failed. This never opens on its own -- one prepareCache() buys one attempt,
+ * which is what stops a blocked open from being retried once per frame.
+ *
+ * A permit buys one attempt; every path below that does not start one spends
+ * it, so a permission never outlives the request that took it. */
 function db(): Promise<IDBDatabase> {
-  if (dbPromise) return dbPromise;
-  dbPromise = ensureMigrated().then(() => openDb());
-  return dbPromise;
+  if (dbPromise) {
+    openPermit = false;
+    return dbPromise;
+  }
+  if (!openPermit) {
+    return Promise.reject(new CacheUnavailable("no open permit"));
+  }
+  if (Date.now() < cooldownUntil) {
+    openPermit = false;
+    return Promise.reject(new CacheUnavailable("cache is cooling down"));
+  }
+  openPermit = false;
+  openAbandoned = false;
+  // The attempt's own flag, not the shared one: a budget can expire over the
+  // legacy probe, before any open request exists, and the chain goes on to
+  // open a connection nobody will use. Wherever that connection lands, this
+  // chain closes it.
+  let abandoned = false;
+  const attempt = withinBudget(
+    ensureMigrated()
+      .then(() => openDb())
+      .then((connection) => {
+        if (abandoned) {
+          connection.close();
+          throw new CacheUnavailable("cache open abandoned");
+        }
+        return connection;
+      }),
+  );
+  dbPromise = attempt;
+  attempt.then(
+    () => undefined,
+    () => {
+      abandoned = true;
+      if (dbPromise === attempt) cacheFailed();
+    },
+  );
+  return attempt;
+}
+
+/** The one failure response: forget the connection, spend any permit, and
+ *  touch nothing here for a cooldown. Every failing leg lands here -- a
+ *  blocked or over-budget open -- so "a broken cache goes quiet" is one rule
+ *  instead of one per path. */
+function cacheFailed(connection?: IDBDatabase): void {
+  if (connection) {
+    try {
+      connection.close();
+    } catch {
+      // A connection already closing needs nothing from us.
+    }
+  }
+  dbPromise = null;
+  openPermit = false;
+  cooldownUntil = Date.now() + cooldownMs;
+  // A budget that expired over a still-pending request abandons it; a
+  // connection arriving later is closed (see openOnce).
+  if (openRequest) openAbandoned = true;
+}
+
+/** Reject after `openBudgetMs` unless `work` settled first. The budget
+ * covers the whole chain the caller started (legacy probe, migration, open),
+ * not one request inside it: each leg can wait on another tab. */
+function withinBudget<T>(work: Promise<T>): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new CacheUnavailable("cache open exceeded its budget")),
+      openBudgetMs,
+    );
+    work.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+}
+
+/** An open on behalf of the durable pending store. Those rows are the only
+ * copy of an unsent message, so this path may ask for an open itself; it is
+ * driven by user sends and flushes, orders of magnitude rarer than the
+ * per-frame message writes the permit rule fences off. */
+function durableDb(): Promise<IDBDatabase> {
+  openPermit = true;
+  return db();
+}
+
+/** Grant one open attempt and wait for it: the ONLY way an open starts. Call
+ * it before the first cache read of an attach, and again when the user
+ * retries, so "the cache is opened before it is read" is ordinary code order
+ * rather than an import-order convention. Resolves when the connection is
+ * usable; rejects (CacheUnavailable) when it is not -- callers degrade. */
+export async function prepareCache(): Promise<void> {
+  if (!dbPromise) {
+    openPermit = true;
+    await db();
+  }
+}
+
+/** A user's explicit retry: it releases the cooldown, because a click is the
+ *  strongest statement that this page should try again. The bounds that
+ *  matter stay elsewhere -- one attempt per call, single flight, and a
+ *  budget per attempt -- so a retry loosens nothing else. */
+export function permitRetry(): void {
+  cooldownUntil = 0;
 }
 
 /** Run the legacy migration at most once per document lifetime, ahead of the
@@ -200,20 +419,34 @@ function ensureMigrated(): Promise<void> {
 /** Open the legacy database without ever creating it: an upgrade event here
  * means it does not exist, and aborting the upgrade fails the open, which
  * maps to null. Stores absent from an older legacy version (pending is v5)
- * read as empty. */
+ * read as empty. Bounded by the caller's budget; a connection that arrives
+ * after that budget is spent is closed on arrival (same rule as openOnce). */
 function openLegacyIfExists(): Promise<IDBDatabase | null> {
   return new Promise((resolve, reject) => {
     if (typeof indexedDB === "undefined") {
       resolve(null);
       return;
     }
+    let settled = false;
+    const settle = (act: () => void) => {
+      if (settled) return;
+      settled = true;
+      act();
+    };
     const req = indexedDB.open(LEGACY_DB_NAME);
     req.onupgradeneeded = () => req.transaction?.abort();
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => {
-      if (req.error?.name === "AbortError") resolve(null);
-      else reject(req.error ?? new Error("legacy cache open failed"));
+    req.onsuccess = () => {
+      if (settled) {
+        req.result.close();
+        return;
+      }
+      settle(() => resolve(req.result));
     };
+    req.onerror = () =>
+      settle(() => {
+        if (req.error?.name === "AbortError") resolve(null);
+        else reject(req.error ?? new Error("legacy cache open failed"));
+      });
   });
 }
 
@@ -282,21 +515,35 @@ function conversationRange(conversationId: string): IDBKeyRange {
   );
 }
 
+/** Run a single request on one store of an open connection. */
+function requestOn<T>(
+  d: IDBDatabase,
+  mode: IDBTransactionMode,
+  fn: (store: IDBObjectStore) => IDBRequest<T>,
+  store: string,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const req = fn(d.transaction(store, mode).objectStore(store));
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error ?? new Error("idb request failed"));
+  });
+}
+
 /** Run a single request on one store (default: the messages cache). */
 function run<T>(
   mode: IDBTransactionMode,
   fn: (store: IDBObjectStore) => IDBRequest<T>,
   store: string = STORE,
 ): Promise<T> {
-  return db().then(
-    (d) =>
-      new Promise<T>((resolve, reject) => {
-        const req = fn(d.transaction(store, mode).objectStore(store));
-        req.onsuccess = () => resolve(req.result);
-        req.onerror = () =>
-          reject(req.error ?? new Error("idb request failed"));
-      }),
-  );
+  return db().then((d) => requestOn(d, mode, fn, store));
+}
+
+/** As run(), for the durable pending store: that store may open on its own. */
+function runDurable<T>(
+  mode: IDBTransactionMode,
+  fn: (store: IDBObjectStore) => IDBRequest<T>,
+): Promise<T> {
+  return durableDb().then((d) => requestOn(d, mode, fn, PENDING_STORE));
 }
 
 /** Collect up to `k` rows scanning `range` NEWEST-first with a cursor, then
@@ -422,7 +669,7 @@ export interface PendingLine {
  * is lost on reload, the same degrade the in-memory queue already has). */
 export async function putPending(row: PendingLine): Promise<void> {
   try {
-    await run("readwrite", (s) => s.put(row), PENDING_STORE);
+    await runDurable("readwrite", (s) => s.put(row));
   } catch {
     // best-effort
   }
@@ -450,7 +697,7 @@ export async function markPendingFailed(
   error: string,
 ): Promise<void> {
   try {
-    const d = await db();
+    const d = await durableDb();
     await new Promise<void>((resolve, reject) => {
       const tx = d.transaction(PENDING_STORE, "readwrite");
       const store = tx.objectStore(PENDING_STORE);
@@ -476,7 +723,7 @@ export async function deletePending(
 ): Promise<void> {
   try {
     pendingDeleteObserver?.(tagmaId, localSeq);
-    await run("readwrite", (s) => s.delete([tagmaId, localSeq]), PENDING_STORE);
+    await runDurable("readwrite", (s) => s.delete([tagmaId, localSeq]));
   } catch {
     // best-effort
   }
@@ -523,13 +770,10 @@ export async function readPendingByTagma(
 ): Promise<PendingLine[]> {
   if (pendingRowsOverride) return pendingRowsOverride(tagmaId);
   try {
-    const rows = await run<PendingLine[]>(
-      "readonly",
-      (s) =>
-        s.getAll(
-          IDBKeyRange.bound([tagmaId], [tagmaId, Number.MAX_SAFE_INTEGER]),
-        ),
-      PENDING_STORE,
+    const rows = await runDurable<PendingLine[]>("readonly", (s) =>
+      s.getAll(
+        IDBKeyRange.bound([tagmaId], [tagmaId, Number.MAX_SAFE_INTEGER]),
+      ),
     );
     return sortPendingOldestFirst(rows);
   } catch {
@@ -541,8 +785,21 @@ export async function readPendingByTagma(
  * the message cache -- these carry the user's own unsent words). */
 export async function clearPendings(): Promise<void> {
   try {
-    await run("readwrite", (s) => s.clear(), PENDING_STORE);
+    await runDurable("readwrite", (s) => s.clear());
   } catch {
     // best-effort
   }
+}
+
+/** Test seam: shrink (or restore with null) the open budget. Production never
+ *  sets it; a test needs a failure inside its own lifetime, not a full second. */
+export function setOpenBudgetForTests(ms: number | null): void {
+  openBudgetMs = ms ?? OPEN_BUDGET_MS;
+}
+
+/** Test seam: shrink (or restore with null) the cooldown, and release any
+ *  cooldown already running, so a case does not have to wait one out. */
+export function setCacheCooldownForTests(ms: number | null): void {
+  cooldownMs = ms ?? COOLDOWN_MS;
+  cooldownUntil = 0;
 }

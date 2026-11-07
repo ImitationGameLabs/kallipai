@@ -59,6 +59,7 @@ import { manageOk } from "@kallipai/kallipai-keryx-client";
 import { relayRootAgentId } from "./rootAgent.ts";
 import {
   deletePending,
+  clearConvCache,
   isFailedPending,
   markPendingFailed,
   type PendingLine,
@@ -234,6 +235,9 @@ export abstract class ConversationBase {
   /** Set when a repair is asked for while one runs: the running pass takes
    *  one more sweep instead of stacking pulls. */
   private resumeAgain = false;
+  /** The probe in flight: a catch-up joining it shares its answer instead
+   *  of asking the tagma the same question again. */
+  private probe: Promise<void> | null = null;
   /** Rendered optimistic user lines awaiting their POST. Each entry's line is
    *  already in `transcript` (status "sending"); the single-in-flight send pump
    *  drains this one ack at a time. */
@@ -289,6 +293,17 @@ export abstract class ConversationBase {
    *  arming. Stays true while unknown (conservative: an extra empty
    *  pull is cheap, a missed page is not). */
   hasMoreOlder = $state(true);
+
+  /** Set when the history could not be brought up -- a pull that failed
+   *  or a cache that could not open. The page shows it with a retry
+   *  instead of an empty transcript that reads as an empty
+   *  conversation. Cleared by the next page that lands. */
+  historyError = $state<null | "unavailable">(null);
+
+  /** Record a failed history pull: the page offers a retry. */
+  protected notePullFailure(): void {
+    this.historyError = "unavailable";
+  }
 
   constructor(
     readonly conversationId: string,
@@ -978,6 +993,26 @@ export abstract class ConversationBase {
           return;
         }
         const page = await pull({ afterSeq: anchor, limit: k });
+        this.historyError = null;
+        if (
+          page.rows.length === 0 &&
+          !page.more &&
+          !page.undecodable &&
+          cursor > 0
+        ) {
+          // An empty page that also ends the sweep answers one of two
+          // things and cannot say which: this position is the live tail, or
+          // rows were numbered differently since it was written. The newest
+          // page answers it without a cursor to walk from.
+          // Every such page asks, however recently one answered: a
+          // remembered tail saves one request and risks a verdict that a
+          // renumbering makes wrong for the rest of the page's life.
+          // A page with rows that did not decode is not this case: it proves
+          // rows exist above the cursor, and the step-over below moves past
+          // them instead.
+          await this.probeNewest(pull, cursor, k);
+          return;
+        }
         const first = page.rows
           .map((r) => contentSeq(r.reply))
           .find((s): s is number => s !== null);
@@ -1029,7 +1064,61 @@ export abstract class ConversationBase {
       // A failed pull is not a filled hole: the cursor stays where it was, so
       // the next frame or the next mount asks again.
       console.warn("[chat] resume failed above " + cursor + ":", e);
+      this.notePullFailure();
     }
+  }
+
+  /** Ask the newest page what the tagma actually holds, then judge: nothing
+   *  at all or an older numbering (either way the window resets), and
+   *  otherwise the empty page was the live tail. A catch-up arriving
+   *  mid-probe waits for the answer instead of asking it again. */
+  private async probeNewest(
+    pull: (opts: PullOpts) => Promise<HistoryPage>,
+    cursor: number,
+    k: number,
+  ): Promise<void> {
+    if (this.probe !== null) {
+      await this.probe;
+      return;
+    }
+    const probe = (async () => {
+      const page = await pull({ limit: 1 });
+      const newest = page.next;
+      // No history at all, or rows numbered lower than this cursor: either
+      // way the position is not a place on the tagma's log. Anything else
+      // means the empty page was the live tail.
+      if (newest === null || newest < cursor) await this.resetWindow(pull, k);
+    })();
+    this.probe = probe;
+    try {
+      await probe;
+    } finally {
+      if (this.probe === probe) this.probe = null;
+    }
+  }
+
+  /** Drop the position and the rows it ordered, then open the newest window
+   *  again. Moving the cursor alone would leave old-numbered rows on screen,
+   *  and the next scroll-up would page by ids the tagma has since given to
+   *  other rows. Lines still owed a send stay, the one the pump holds in
+   *  flight included: each exists nowhere else. */
+  private async resetWindow(
+    pull: (opts: PullOpts) => Promise<HistoryPage>,
+    k: number,
+  ): Promise<void> {
+    await clearConvCache(this.cacheConversationId);
+    const unsent = this.transcript.lines.filter(
+      (line) =>
+        this.pending.some((entry) => entry.localId === line.historyId) ||
+        line.historyId === this.pendingInFlight?.localId,
+    );
+    this.transcript = { ...EMPTY_TRANSCRIPT, lines: unsent };
+    this.lastSeq = 0;
+    this.minSeq = 0;
+    this.minRowId = 0;
+    this.maxRowId = 0;
+    this.hasMoreOlder = true;
+    await this.openNewest(pull, k);
   }
 
   /** Open the newest window: the cold-start read, when there is no cursor to
@@ -1042,6 +1131,7 @@ export abstract class ConversationBase {
   ): Promise<void> {
     try {
       const page = await pull({ limit: k });
+      this.historyError = null;
       if (page.rows.length > 0) this.applyPulledRows(page.rows);
       // A window short of k raw rows IS all the history there is; one that
       // arrived complete proves nothing about what lies below it.
@@ -1051,6 +1141,7 @@ export abstract class ConversationBase {
       // is, and live frames keep arriving; say so anyway, because a cold
       // start that quietly shows nothing looks like an empty log.
       console.warn("[chat] could not open the newest window:", e);
+      this.notePullFailure();
     }
   }
 
@@ -1858,8 +1949,9 @@ export class RelayConversation extends ConversationBase {
     // A live catch-up window owns the drain's content frames: a probe now
     // would divide them between two buffers, so the block stays retryable
     // until the catch-up ends.
-    if (this.transport === null || this.closed || this.windowPull !== null)
+    if (this.transport === null || this.closed || this.windowPull !== null) {
       return null;
+    }
     try {
       const { rows, count, timedOut, undecodable } = await this.pullPage({
         before: id + 1,

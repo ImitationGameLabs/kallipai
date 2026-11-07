@@ -183,7 +183,13 @@ Deno.test(
 );
 
 Deno.test("a warm cache resumes from its highest position", async () => {
-  const { conv, seen } = conversation(() => page([], false));
+  // An empty page at the front means one of two things, so it is probed:
+  // the script answers "still the live tail" at this position.
+  const { conv, seen } = conversation((opts) =>
+    opts.limit === 1
+      ? { rows: [row(9)], more: false, next: 9 }
+      : page([], false),
+  );
   conv.seedRenderedPositions([
     { historyId: 7, role: "assistant", text: "a", seq: 7 },
     { historyId: 8, role: "assistant", text: "b", seq: 8 },
@@ -191,11 +197,131 @@ Deno.test("a warm cache resumes from its highest position", async () => {
   ]);
   assertEquals(conv.lastSeq, 9);
   await conv.catchUp(3);
-  assertEquals(seen, [{ afterSeq: 9, limit: 3 }]);
+  assertEquals(seen, [{ afterSeq: 9, limit: 3 }, { limit: 1 }]);
+});
+
+Deno.test(
+  "a cursor the newest page no longer reaches resets the window",
+  async () => {
+    const { conv, seen } = conversation((opts) => {
+      if (opts.afterSeq === 900) return { rows: [], more: false, next: null };
+      if (opts.limit === 1) return { rows: [row(30)], more: false, next: 30 };
+      return page([row(28), row(29), row(30)], false);
+    });
+    conv.seedRenderedPositions([
+      { historyId: 898, role: "assistant", text: "a", seq: 898 },
+      { historyId: 899, role: "assistant", text: "b", seq: 899 },
+      { historyId: 900, role: "assistant", text: "c", seq: 900 },
+    ]);
+
+    await conv.catchUp(3);
+
+    assertEquals(seen, [
+      { afterSeq: 900, limit: 3 },
+      { limit: 1 },
+      { limit: 3 },
+    ]);
+    // The rows and the cursor move together: old-numbered lines gone, the
+    // window re-opened from the newest page.
+    assertEquals(conv.lastSeq, 30);
+    assertEquals(
+      conv.transcript.lines.map((l) => l.historyId),
+      [28, 29, 30],
+    );
+  },
+);
+
+Deno.test(
+  "a sweep at the tail probes again, and a renumbered log resets it",
+  async () => {
+    let renumbered = false;
+    const { conv, seen } = conversation((opts) => {
+      if (opts.limit === 1) {
+        return renumbered
+          ? { rows: [row(30)], more: false, next: 30 }
+          : { rows: [row(900)], more: false, next: 900 };
+      }
+      if (opts.afterSeq != null) return { rows: [], more: false, next: null };
+      return page([row(28), row(29), row(30)], false);
+    });
+    conv.lastSeq = 900;
+
+    // The tail leaves the cursor alone; the next sweep asks again, so a store
+    // rebuilt under new ids is not hidden behind an answer that was true once.
+    await conv.catchUp(3);
+    assertEquals(seen.filter((o) => o.limit === 1).length, 1);
+    assertEquals(conv.lastSeq, 900);
+
+    renumbered = true;
+    await conv.catchUp(3);
+    assertEquals(seen.filter((o) => o.limit === 1).length, 2);
+    assertEquals(conv.lastSeq, 30);
+    assertEquals(
+      conv.transcript.lines.map((l) => l.historyId),
+      [28, 29, 30],
+    );
+  },
+);
+
+Deno.test("a log that holds no history at all resets the window", async () => {
+  let emptied = false;
+  const { conv, seen } = conversation((opts) => {
+    if (opts.limit === 1 || opts.afterSeq != null || emptied) {
+      return { rows: [], more: false, next: null };
+    }
+    return page([row(28), row(29)], false);
+  });
+  // A window from a store that exists, holding its position.
+  await conv.catchUp(3);
+  assertEquals(
+    conv.transcript.lines.map((l) => l.historyId),
+    [28, 29],
+  );
+  assertEquals(conv.lastSeq, 29);
+
+  // The store is gone: an empty sweep, a probe that finds nothing, and rows
+  // on screen that belong to no log. The position goes with them.
+  emptied = true;
+  conv.lastSeq = 900;
+  await conv.catchUp(3);
+
+  assertEquals(seen.filter((o) => o.limit === 1).length, 1);
+  assertEquals(conv.transcript.lines.length, 0);
+  assertEquals(conv.lastSeq, 0);
+});
+
+Deno.test("a reset keeps the line the pump holds in flight", async () => {
+  const { conv } = conversation((opts) => {
+    if (opts.limit === 1) return { rows: [row(30)], more: false, next: 30 };
+    if (opts.afterSeq != null) return { rows: [], more: false, next: null };
+    return page([row(28), row(29), row(30)], false);
+  });
+  conv.lastSeq = 900;
+  // The pump shifted this line out of `pending` and its POST is still out,
+  // so a reset must keep it: nothing else holds the text.
+  conv.transcript = withUserLine(
+    EMPTY_TRANSCRIPT,
+    "hello",
+    -7,
+    LOCAL_OPERATOR_SENDER,
+  );
+  conv.pendingInFlight = { localId: -7, text: "hello" };
+
+  await conv.catchUp(3);
+
+  assertEquals(
+    conv.transcript.lines.map((l) => l.historyId).sort((a, b) => a - b),
+    [-7, 28, 29, 30],
+  );
+  assertEquals(conv.lastSeq, 30);
 });
 
 Deno.test("a missed frame repairs from the local cursor", async () => {
-  const { conv, seen } = conversation(() => page([], false));
+  const { conv, seen } = conversation((opts) =>
+    opts.limit === 1
+      ? { rows: [row(10)], more: false, next: 10 }
+      : page([], false),
+  );
   conv.lastSeq = 10;
   const wire = (
     conv as unknown as {
@@ -204,8 +330,9 @@ Deno.test("a missed frame repairs from the local cursor", async () => {
   ).transport;
   wire.onMissed?.();
   await conv.catchUp(3);
-  assertEquals(seen.length, 1);
+  assertEquals(seen.length, 2);
   assertEquals(seen[0]?.afterSeq, 10, "the marker resumes from the cursor");
+  assertEquals(seen[1], { limit: 1 }, "an empty page is probed once");
 });
 
 Deno.test(
@@ -322,6 +449,28 @@ Deno.test(
     assertEquals(seen, [{ afterSeq: 10, limit: 3 }], "the tail asks once");
     assertEquals(conv.lastSeq, 13, "the cursor lands on the tail's edge");
     assertEquals(warns.length, 1, "the block is named once");
+  },
+);
+
+Deno.test(
+  "a dead tail with nothing decoded is stepped over, not probed",
+  async () => {
+    const { conv, seen } = conversation((opts) =>
+      opts.afterSeq == null
+        ? page([], false)
+        : { rows: [], more: false, undecodable: 3, next: opts.afterSeq + 3 },
+    );
+    conv.lastSeq = 10;
+
+    // Nothing decoded and nothing lies above: rows exist up there all the
+    // same, so this is neither the live tail nor an older numbering.
+    await conv.catchUp(3);
+    assertEquals(seen.filter((o) => o.limit === 1).length, 0);
+    assertEquals(conv.lastSeq, 13);
+
+    await conv.catchUp(3);
+    assertEquals(seen[seen.length - 1]?.afterSeq, 13);
+    assertEquals(conv.lastSeq, 16);
   },
 );
 

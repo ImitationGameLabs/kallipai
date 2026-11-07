@@ -26,12 +26,15 @@ export { ManageRestClient } from "./manageRest.ts";
 export { LinearBackoff, ProjectionClient } from "./projection.ts";
 export {
   type CachedLine,
+  CacheUnavailable,
   clear as clearConvCache,
   clearPendings,
   deletePending,
   isFailedPending,
   markPendingFailed,
   type PendingLine,
+  prepareCache,
+  permitRetry,
   put,
   putPending,
   readPendingByTagma,
