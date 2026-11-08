@@ -44,7 +44,8 @@ pub(crate) fn wake_span(role: &str, agent_id: &str, origin: &'static str) -> Spa
     )
 }
 
-/// The span of one round inside a wake.
+/// The span of one round inside a wake. The wire calls a round a turn: the span
+/// is named `turn` and its attributes are `kallipai.turn.*`.
 ///
 /// A round is the unit the budget, the tools and the history record are
 /// organised around. The index is an attribute rather than part of the name, so
@@ -458,6 +459,11 @@ mod tests {
         assert_eq!(
             failed_round.attribute("kallipai.turn.outcome"),
             Some("error")
+        );
+        assert_eq!(
+            failed_round.attribute("error.type"),
+            Some("turn_failed"),
+            "a failed turn names its class"
         );
         assert!(
             failed_round.status.starts_with("error: "),

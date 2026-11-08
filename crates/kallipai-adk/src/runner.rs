@@ -99,12 +99,13 @@ enum TurnStep {
     Done(Result<RoundOutcome>),
 }
 
-/// The one word a round's span carries when the round failed.
-const ROUND_FAILED: &str = "round_failed";
+/// The one word a turn's span carries as `error.type` and in its failed status
+/// when the turn failed.
+const TURN_FAILED: &str = "turn_failed";
 
-/// The one word a round's span carries for how the round ended. A round the
+/// The one word a turn's span carries for how the turn ended. A turn the
 /// lifecycle cancelled does not come through here: it is settled as
-/// `cancelled` where the round's span is closed.
+/// `cancelled` where the turn's span is closed.
 fn turn_outcome_label(outcome: &RoundOutcome) -> &'static str {
     match outcome {
         RoundOutcome::Break(_) => "break",
@@ -160,7 +161,7 @@ async fn run_rounds(
             }
             TurnStep::Done(Err(error)) => {
                 record_attribute(&turn, "kallipai.turn.outcome", "error");
-                settle.failed(ROUND_FAILED);
+                settle.failed(TURN_FAILED);
                 return Err(error);
             }
         }

@@ -120,18 +120,20 @@ The body names every check it made, so a degraded report says which one:
 {
   "status": "degraded",
   "checks": {
-    "store": { "ok": true },
-    "profiles": { "ok": true },
-    "relay": { "state": "connected" },
-    "engine": { "ok": true },
-    "background": { "ok": false, "stale": [], "failed": ["history_gc"] }
+    "history_store": { "ok": true },
+    "profile_bundle": { "ok": true },
+    "relay": { "ok": false, "state": "down" },
+    "work_schedule_engine": { "ok": true },
+    "background_loops": { "ok": false, "stale": [], "failed": ["history_gc"] }
   }
 }
 ```
 
-`relay.state` is `connected`, `local_only` or `down`; `background.stale`
-and `background.failed` name the loops that are late, or whose last pass
-failed.
+Every check is an object carrying `ok`, so a monitor reads the verdicts the
+same way and names the ones that are not ok. `relay.ok` derives from
+`relay.state`, which is `connected`, `local_only` or `down`.
+`background_loops.stale` and `background_loops.failed` name the loops that are
+late, or whose last pass failed.
 
 ### Agent Management
 

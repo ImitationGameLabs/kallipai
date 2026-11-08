@@ -18,12 +18,12 @@
 //! atomics, the heartbeat table. No network call, no SQL, no wait -- the handler
 //! is meant to stay under a millisecond.
 //!
-//! That is the limit of the `store` check as well: it asks whether the handle
-//! is there and open, never whether the file behind it still answers. A store
-//! whose disk went away keeps reading ready here, and the failure surfaces on
-//! the first query that needs it. A probe that proved the file would be a
-//! second query on a health path, which is the wait this endpoint exists to
-//! avoid.
+//! That is the limit of the `history_store` check as well: it asks whether the
+//! handle is there and open, never whether the file behind it still answers. A
+//! store whose disk went away keeps reading ready here, and the failure
+//! surfaces on the first query that needs it. A probe that proved the file
+//! would be a second query on a health path, which is the wait this endpoint
+//! exists to avoid.
 //!
 //! Background loops report two separate facts: how long ago they last beat, and
 //! whether that pass failed. Late and failing both degrade, but they name
@@ -71,6 +71,19 @@ pub enum RelayState {
     Down,
 }
 
+impl RelayState {
+    /// The verdict this state stands for. Only `down` is a fault: a local-only
+    /// tagma is a complete deployment. The match names both healthy states
+    /// rather than negating the fault, so a state added later does not compile
+    /// until it is judged here.
+    fn is_ok(self) -> bool {
+        match self {
+            RelayState::Connected | RelayState::LocalOnly => true,
+            RelayState::Down => false,
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct HealthReport {
     status: HealthStatus,
@@ -79,20 +92,25 @@ pub struct HealthReport {
 
 #[derive(Debug, Serialize)]
 struct Checks {
-    store: Presencer,
-    profiles: Presencer,
+    history_store: Check,
+    profile_bundle: Check,
     relay: RelayCheck,
-    engine: Presencer,
-    background: BackgroundCheck,
+    work_schedule_engine: Check,
+    background_loops: BackgroundCheck,
 }
 
+/// A check with nothing to add beyond its verdict. Every entry under `checks`
+/// is an object carrying `ok`, so a monitor loops over them alike; a check with
+/// detail puts it beside `ok`.
 #[derive(Debug, Serialize)]
-struct Presencer {
+struct Check {
     ok: bool,
 }
 
 #[derive(Debug, Serialize)]
 struct RelayCheck {
+    /// Derived from `state` in one place, so the two cannot disagree.
+    ok: bool,
     state: RelayState,
 }
 
@@ -144,11 +162,14 @@ pub fn evaluate(state: &SharedState) -> HealthReport {
     HealthReport {
         status,
         checks: Checks {
-            store: Presencer { ok: store_ok },
-            profiles: Presencer { ok: profiles_ok },
-            relay: RelayCheck { state: relay },
-            engine: Presencer { ok: engine_ok },
-            background: BackgroundCheck {
+            history_store: Check { ok: store_ok },
+            profile_bundle: Check { ok: profiles_ok },
+            relay: RelayCheck {
+                ok: relay.is_ok(),
+                state: relay,
+            },
+            work_schedule_engine: Check { ok: engine_ok },
+            background_loops: BackgroundCheck {
                 ok: stale.is_empty() && failed.is_empty(),
                 stale,
                 failed,
@@ -179,7 +200,7 @@ fn judge(
 ) -> HealthStatus {
     if !store_ok || !profiles_ok {
         HealthStatus::NotReady
-    } else if relay == RelayState::Down || !engine_ok || !stale.is_empty() || !failed.is_empty() {
+    } else if !relay.is_ok() || !engine_ok || !stale.is_empty() || !failed.is_empty() {
         HealthStatus::Degraded
     } else {
         HealthStatus::Ok
@@ -271,13 +292,14 @@ mod tests {
         let report = HealthReport {
             status: HealthStatus::Degraded,
             checks: Checks {
-                store: Presencer { ok: true },
-                profiles: Presencer { ok: true },
+                history_store: Check { ok: true },
+                profile_bundle: Check { ok: true },
                 relay: RelayCheck {
+                    ok: false,
                     state: RelayState::Down,
                 },
-                engine: Presencer { ok: true },
-                background: BackgroundCheck {
+                work_schedule_engine: Check { ok: true },
+                background_loops: BackgroundCheck {
                     ok: false,
                     stale: vec!["history_gc"],
                     failed: Vec::new(),
@@ -287,7 +309,7 @@ mod tests {
         let rendered = serde_json::to_string(&report).expect("the report serialises");
         assert_eq!(
             rendered,
-            "{\"status\":\"degraded\",\"checks\":{\"store\":{\"ok\":true},\"profiles\":{\"ok\":true},\"relay\":{\"state\":\"down\"},\"engine\":{\"ok\":true},\"background\":{\"ok\":false,\"stale\":[\"history_gc\"],\"failed\":[]}}}"
+            "{\"status\":\"degraded\",\"checks\":{\"history_store\":{\"ok\":true},\"profile_bundle\":{\"ok\":true},\"relay\":{\"ok\":false,\"state\":\"down\"},\"work_schedule_engine\":{\"ok\":true},\"background_loops\":{\"ok\":false,\"stale\":[\"history_gc\"],\"failed\":[]}}}"
         );
         let ready = serde_json::to_string(&HealthStatus::Ok).expect("the status serialises");
         assert_eq!(ready, "\"ok\"", "a ready report says ok");
@@ -308,19 +330,58 @@ mod tests {
         metrics.beat(Beat::HistoryGc, crate::metrics::PassOutcome::Failed);
         let report = evaluate(&state);
         assert!(
-            report.checks.background.failed.contains(&"history_gc"),
+            report
+                .checks
+                .background_loops
+                .failed
+                .contains(&"history_gc"),
             "the failed pass is named: {:?}",
-            report.checks.background.failed
+            report.checks.background_loops.failed
         );
-        assert!(!report.checks.background.ok);
+        assert!(!report.checks.background_loops.ok);
 
         metrics.beat(Beat::HistoryGc, crate::metrics::PassOutcome::Completed);
         assert!(
             !evaluate(&state)
                 .checks
-                .background
+                .background_loops
                 .failed
                 .contains(&"history_gc")
         );
+    }
+    /// The relay's verdict is derived, not picked: a tagma with no relay
+    /// must read `local_only` and ok, a relay with no tunnel open must read
+    /// `down` and not ok, and an open tunnel must read `connected` and ok.
+    /// Both gauges are process-wide, so this snapshots them, drains the
+    /// tunnel count to zero, and puts both back in the state it found them.
+    #[test]
+    fn the_relay_check_follows_its_state() {
+        let state = crate::test_helpers::make_state();
+        let metrics = metrics();
+        let saved_configured = metrics.relays_configured();
+        let saved_connected = metrics.relays_connected();
+        for _ in 0..saved_connected {
+            metrics.relay_down();
+        }
+
+        metrics.set_relays_configured(0);
+        let local = evaluate(&state);
+        metrics.set_relays_configured(1);
+        let down = evaluate(&state);
+        metrics.relay_up();
+        let connected = evaluate(&state);
+        metrics.relay_down();
+
+        metrics.set_relays_configured(saved_configured);
+        for _ in 0..saved_connected {
+            metrics.relay_up();
+        }
+
+        assert_eq!(local.checks.relay.state, RelayState::LocalOnly);
+        assert!(local.checks.relay.ok, "a local-only tagma is ok");
+        assert_eq!(down.checks.relay.state, RelayState::Down);
+        assert!(!down.checks.relay.ok, "a down relay is not ok");
+        assert_eq!(connected.checks.relay.state, RelayState::Connected);
+        assert!(connected.checks.relay.ok, "a connected relay is ok");
     }
 }

@@ -316,7 +316,7 @@ mod tests {
         // the failing check named -- and that is exactly what a monitor needs.
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert!(body.contains("\"status\":\"not_ready\""), "{body}");
-        assert!(body.contains("\"store\":{\"ok\":false}"), "{body}");
+        assert!(body.contains("\"history_store\":{\"ok\":false}"), "{body}");
     }
     /// The timing layer's own contract: a routed request is counted once, an
     /// unmatched path is counted under the placeholder, and neither

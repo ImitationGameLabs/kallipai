@@ -245,7 +245,7 @@ codes are a closed set of lowercase words naming a class, never a message. The
 model and stream failures use the retry classifier's own codes (`transient`,
 `quota_blocked`, `throttled`, `endpoint_permanent`, `request_permanent`,
 `local_config`, `response_shape`, `unclassified`); a tool uses `tool_failed` or
-`tool_timeout`; a turn that failed carries `round_failed`.
+`tool_timeout`; a turn that failed carries `turn_failed`.
 
 The prose stays in the log line, and only there: no event reaches the trace at
 any level, so a message or an upstream error body cannot ride along as one. No
@@ -356,7 +356,7 @@ The families the collector encodes, with the label names the code uses:
 | `kallipai_tagma_telemetry_exported_total` | counter | none | spans the collector accepted |
 | `kallipai_tagma_telemetry_export_failed_total` | counter | `reason`: `timeout`, `unavailable`, `other` | failed batches |
 | `kallipai_tagma_telemetry_last_export_timestamp` | gauge | none | Unix seconds of the last accepted export, 0 while none has landed |
-| `kallipai_tagma_background_task_age_seconds` | gauge | `task` | seconds since each loop last started a pass |
+| `kallipai_tagma_background_task_age_seconds` | gauge | `task`: `history_gc`, `engine` | seconds since each loop last started a pass; `engine` is the loop `/health` reports as `work_schedule_engine` |
 
 The same measurements appear in traces under different names: a scrape family
 is `kallipai_tagma_*`, a span attribute is dotted (`gateway.outcome`). Session,
@@ -365,15 +365,15 @@ disagrees with the lesche about them.
 
 `/health` answers `ok`, `degraded` or `not_ready`, with one entry per check.
 Only `not_ready` (503) means "take this instance out of service", and it is
-reserved for what the process cannot serve without: the chat-history store
-handle, and a profile bundle with neither sets nor a default. A configured relay
-with no open tunnel, a stopped engine tick, or a late background loop is
-`degraded` (200): removing the instance would not fix a dead relay, and the
-endpoint exists to make the fault visible rather than to blank a dashboard.
+reserved for what the process cannot serve without: the `history_store`
+handle, and a `profile_bundle` with neither sets nor a default. A configured
+relay with no open tunnel, a stopped work-schedule engine, or a late background
+loop is `degraded` (200): removing the instance would not fix a dead relay, and
+the endpoint exists to make the fault visible rather than to blank a dashboard.
 A loop that is on time with a failed last pass degrades the same way, and
-`background.failed` names it. The store check is a handle check: it never
-queries the file behind the handle, so a store whose disk went away keeps
-reading ready until the first query that needs it fails.
+`background_loops.failed` names it. The `history_store` check is a handle
+check: it never queries the file behind the handle, so a store whose disk went
+away keeps reading ready until the first query that needs it fails.
 
 ## Switches and cost
 
