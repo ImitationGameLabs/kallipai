@@ -626,6 +626,14 @@ export class ChannelsStore {
     if (tagma) void this.ensureOpen(tagma, { explicit: true });
   }
 
+  /** Whether `retryTagma` would find something to reopen -- the same registry
+   *  lookup, so the button the page offers and the handler it fires agree. */
+  canRetryTagma(tagmaId: string): boolean {
+    return archeionSession.tagmata.some(
+      (t) => t.tagma_id === tagmaId && t.state === "enrolled",
+    );
+  }
+
   /** Clock seam for the budget's cooldown math; overridable in tests. */
   protected now(): number {
     return Date.now();

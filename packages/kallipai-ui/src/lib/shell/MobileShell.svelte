@@ -106,7 +106,7 @@
       </div>
     {/if}
     {#if error}
-      <Banner title={error.title} detail={error.detail} hint={error.hint} />
+      <Banner title={error.title} hint={error.hint} />
     {/if}
     <div class="flex-1 min-h-0 overflow-hidden">
       {@render children()}

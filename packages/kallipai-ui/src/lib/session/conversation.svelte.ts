@@ -57,6 +57,7 @@ import type {
 import type { CachedLine, RelayChannel } from "@kallipai/kallipai-keryx-client";
 import { manageOk } from "@kallipai/kallipai-keryx-client";
 import { relayRootAgentId } from "./rootAgent.ts";
+import { WriteRefusal } from "./writeRefusal.ts";
 import {
   clearConvCache,
   deletePending,
@@ -388,9 +389,7 @@ export abstract class ConversationBase {
    *  POST's `user_message` frame promotes the line via `applyReplyCore`). */
   send(text: string, options?: SendOptions): void {
     if (!this.canWrite) {
-      this.error = new Error(
-        this.closed ? "conversation closed" : "not connected",
-      );
+      this.error = new WriteRefusal(this.closed ? "closed" : "carrier-absent");
       return;
     }
     const trimmed = text.trim();
@@ -1341,6 +1340,9 @@ export abstract class ConversationBase {
     if (failure !== null) {
       this.status = "error";
       this.error = failure;
+      // The shell banner owns this error on the local surface; a relay
+      // conversation has no such owner, so record it where it is set.
+      console.error(failure);
     } else if (this.status === "opening" || this.status === "open") {
       this.status = "offline";
     }
@@ -2212,7 +2214,7 @@ export class OfflineConversation extends ConversationBase {
    *  there is nothing to pump into until a real channel opens. */
   override send(text: string, options?: SendOptions): void {
     if (!this.canWrite) {
-      this.error = new Error("conversation closed");
+      this.error = new WriteRefusal("closed");
       return;
     }
     const trimmed = text.trim();

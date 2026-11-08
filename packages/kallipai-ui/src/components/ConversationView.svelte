@@ -62,6 +62,8 @@
     downloadAttachment,
     fileButton,
     attachmentBar,
+    disabledNotice,
+    disabledAction,
     sessionKey,
     quoteBar,
     onCancelQuote,
@@ -99,6 +101,12 @@
     /** Optional file-attach affordance, forwarded to the composer verbatim
      *  (omitted = the button never renders). */
     fileButton?: { onFilesPicked: (files: File[]) => void };
+    /** Why the composer is disabled, forwarded verbatim. Omitted = the
+     *  composer's own pairing notice. */
+    disabledNotice?: string;
+    /** Optional affordance shown with that notice, forwarded verbatim
+     *  (a page-owned Retry, say). */
+    disabledAction?: Snippet;
     /** The page-supplied download I/O for message file cards, forwarded
      *  verbatim (omitted = the cards render without a download button). */
     downloadAttachment?: (attachment: FileAttachment) => Promise<void>;
@@ -528,6 +536,8 @@
     {composer}
     {disabled}
     {pendingCount}
+    {disabledNotice}
+    {disabledAction}
     {attachmentBar}
     {fileButton}
     {quoteBar}

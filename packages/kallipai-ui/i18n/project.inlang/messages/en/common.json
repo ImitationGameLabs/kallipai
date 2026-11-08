@@ -6,6 +6,7 @@
   "error_couldnt_reach": "Couldn't reach the tagma",
   "error_hint_check_settings": "Check that the tagma is running and the URL in Settings is correct.",
   "error_unknown": "Something went wrong",
+  "error_conversation_not_connected": "This conversation is not connected.",
   "remaining_days": "{d}d",
   "remaining_hours": "{h}h",
   "remaining_minutes": "{m}min",

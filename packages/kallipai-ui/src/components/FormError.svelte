@@ -6,11 +6,9 @@
   // is caller-supplied (already localized) -- this component adds none.
   let {
     message,
-    detail = undefined,
     hint = undefined,
   }: {
     message: string | null | undefined;
-    detail?: string;
     hint?: string;
   } = $props();
 </script>
@@ -24,7 +22,6 @@
       <TriangleAlert class="size-4.5 shrink-0" aria-hidden="true" />
       {message}
     </p>
-    {#if detail}<p class="opacity-80">{detail}</p>{/if}
     {#if hint}<p class="opacity-60">{hint}</p>{/if}
   </div>
 {/if}

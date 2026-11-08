@@ -66,6 +66,15 @@ export class RoomConversation {
   lastSeq: number | null = $state(null);
   status: RoomStatus = $state<RoomStatus>("loading");
   error: string | null = $state(null);
+  /** Whether a line can be written here. The room's carrier is the shared
+   *  lesche client rather than a per-room transport, and a send renders an
+   *  optimistic line that a failure marks in place for retry -- so the gate is
+   *  the last page fetch, not "a route to a tagma is attached". `fetchPage`
+   *  sets the status and both `open` and `refresh` call it, so a refresh that
+   *  fails closes the composer until one lands again. */
+  get historyLoaded(): boolean {
+    return this.status === "open";
+  }
   /** The latest roster snapshot (members + epoch + is_creator), refreshed by
    * `refreshRoster`. Null until the first refresh lands. The view shows the
    * member count + creator badge; per-member handle resolution is a separate

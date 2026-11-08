@@ -1,24 +1,27 @@
 // Headless error classification. Projects a raw thrown value (TransportError,
-// KallipaiError, or anything else) into the { title, detail, hint } a user-facing
+// KallipaiError, or anything else) into the { title, hint } a user-facing
 // banner can render, so we never leak internal paths like
 // `tagma request failed: /agents/<id>/events` to the user. The full error
 // (with cause chain) is logged separately to the browser console by the caller.
+// Raw messages stay in the console: a server sentence or an arbitrary Error's
+// .message is diagnostic, and the view carries only copy of our own.
 //
 // Pure, no runes, no app imports — stays reusable across consuming apps (the
 // paraglide messages it renders are this package's own compiled output).
 
 import { KallipaiError, TransportError } from "@kallipai/kallipai-common";
 import {
+  error_conversation_not_connected,
   error_couldnt_reach,
   error_hint_check_settings,
   error_request_rejected,
   error_tagma,
   error_unknown,
 } from "../paraglide/messages.js";
+import { isWriteRefusal } from "./session/writeRefusal.ts";
 
 export interface ErrorView {
   readonly title: string;
-  readonly detail?: string;
   readonly hint?: string;
 }
 
@@ -39,6 +42,10 @@ function isKallipaiError(e: unknown): e is KallipaiError {
 }
 
 export function classifyError(e: unknown): ErrorView {
+  // A refused write is ours, not the transport's, so it has copy of its own.
+  if (isWriteRefusal(e)) {
+    return { title: error_conversation_not_connected() };
+  }
   if (isKallipaiError(e)) {
     // Guard `.api`: the name-based fallback above can match an Error renamed to
     // "KallipaiError" that lacks the `api` field, and this runs in a $derived, so
@@ -51,7 +58,6 @@ export function classifyError(e: unknown): ErrorView {
         typeof status === "number" && status >= 500
           ? error_tagma()
           : error_request_rejected(),
-      detail: e.api?.message,
     };
   }
   if (isTransportError(e)) {
@@ -62,6 +68,5 @@ export function classifyError(e: unknown): ErrorView {
   }
   return {
     title: error_unknown(),
-    detail: e instanceof Error ? e.message : undefined,
   };
 }

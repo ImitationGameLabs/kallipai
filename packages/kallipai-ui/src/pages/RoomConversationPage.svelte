@@ -255,7 +255,7 @@
     },
   });
 
-  const disabled = $derived(conv?.status !== "open");
+  const disabled = $derived(!conv?.historyLoaded);
 
   // The togglable member side-panel (online dots driven by the room's live
   // online-member set + roster identity).
@@ -296,7 +296,7 @@
       return roomConversationsStore.send(roomId, text, { mentions, quote });
     },
     // Busy is not a gate: send renders the optimistic line at once + posts.
-    canSubmit: () => conv?.status === "open",
+    canSubmit: () => conv?.historyLoaded ?? false,
   });
 
   // Draft storage: rooms key on the room id.

@@ -34,6 +34,7 @@
   import { channelsStore } from "../lib/session/channels.svelte";
   import { tagmaForConversation } from "../lib/session/convOf.ts";
   import { createUnresolvedGuard } from "../lib/session/unresolvedGuard.svelte.ts";
+  import { composerState } from "../lib/session/composerState.ts";
   import {
     chat_conversation_unknown,
     chat_history_stale,
@@ -70,6 +71,7 @@
     chat_cached_until,
     chat_notice_local,
     chat_notice_offline,
+    error_conversation_not_connected,
   } from "../paraglide/messages.js";
 
   let {
@@ -447,7 +449,34 @@
   // composer live, and the offline view writes to its pending store by design.
   const disabled = $derived(!conv || !conv.canWrite);
   const pendingCount = $derived(conv?.pending.length ?? 0);
+  // What the composer says once the write axis is gone, and whether it can
+  // offer a way back. The mapping is pure (see composerState); this page only
+  // turns its notice into copy and renders the Retry it asks for.
+  const composerUi = $derived(conv ? composerState(conv) : null);
+  const disabledNotice = $derived(
+    composerUi?.notice === "opening"
+      ? chat_opening()
+      : composerUi?.notice === "not-connected"
+        ? error_conversation_not_connected()
+        : undefined,
+  );
+  // The tagma that owns this conversation, for the retry the notice offers.
+  // Read from the conversation rather than the stored mapping: the mapping is
+  // written once the channel opens, and a deep link resolves before that.
+  const owningTagma = $derived(
+    conv instanceof RelayConversation ? conv.tagmaId : undefined,
+  );
 </script>
+
+{#snippet retryChannel()}
+  <button
+    type="button"
+    class="btn btn-sm preset-outlined-primary-500 hover:preset-filled-primary-500"
+    onclick={() => channelsStore.retryTagma(owningTagma!)}
+  >
+    {common_retry()}
+  </button>
+{/snippet}
 
 <svelte:head
   ><title>{isLocal ? chat_title_local() : chat_title_channel()}</title
@@ -550,6 +579,12 @@
             {composer}
             {disabled}
             {pendingCount}
+            {disabledNotice}
+            disabledAction={composerUi?.retry &&
+            owningTagma &&
+            channelsStore.canRetryTagma(owningTagma)
+              ? retryChannel
+              : undefined}
             onRetry={conv instanceof OfflineConversation
               ? undefined
               : (id) => conv?.retrySend(id)}
@@ -601,15 +636,17 @@
                 </p>
               {/if}
               {#if conv.status === "offline"}
-                <p
-                  class="text-xs text-error-500 dark:text-error-400 text-center"
-                >
-                  {#if isLocal}
-                    {chat_notice_local()}
-                  {:else}
-                    {chat_notice_offline()}
-                  {/if}
-                </p>
+                {#if conv.canWrite}
+                  <p
+                    class="text-xs text-error-500 dark:text-error-400 text-center"
+                  >
+                    {#if isLocal}
+                      {chat_notice_local()}
+                    {:else}
+                      {chat_notice_offline()}
+                    {/if}
+                  </p>
+                {/if}
                 {#if lastCachedAt}
                   <p class="text-xs opacity-60 text-center">
                     {chat_cached_until({

@@ -18,7 +18,6 @@
 
   let {
     title,
-    detail = undefined,
     hint = undefined,
     tone = "error",
     icon = undefined,
@@ -27,7 +26,6 @@
     children,
   }: {
     title: string;
-    detail?: string;
     hint?: string;
     tone?: BannerTone;
     // Optional leading icon (e.g. an @lucide/svelte component); kept caller-
@@ -75,7 +73,6 @@
   <div class={boxClass}>
     {#if icon}{@render icon({ class: "size-4 shrink-0" })}{/if}
     <span class="font-medium">{title}</span>
-    {#if detail}<span class="opacity-80">{detail}</span>{/if}
     {#if hint}<span class="opacity-60">{hint}</span>{/if}
     {@render children?.()}
   </div>

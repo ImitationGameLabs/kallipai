@@ -143,11 +143,7 @@
     </label>
 
     {#if connectView}
-      <FormError
-        message={connectView.title}
-        detail={connectView.detail}
-        hint={connectView.hint}
-      />
+      <FormError message={connectView.title} hint={connectView.hint} />
     {/if}
     {#if error}
       <FormError message={error} />

@@ -6,6 +6,7 @@
   "error_couldnt_reach": "无法连接智能体编队",
   "error_hint_check_settings": "请检查智能体编队是否在运行，以及“设置”中的 URL 是否正确。",
   "error_unknown": "出了点问题",
+  "error_conversation_not_connected": "该会话未连接。",
   "remaining_days": "{d} 天",
   "remaining_hours": "{h} 小时",
   "remaining_minutes": "{m} 分钟",

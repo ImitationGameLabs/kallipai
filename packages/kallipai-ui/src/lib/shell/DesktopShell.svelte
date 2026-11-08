@@ -106,7 +106,7 @@
 
   <main class="flex flex-col min-h-0 min-w-0 overflow-hidden">
     {#if error}
-      <Banner title={error.title} detail={error.detail} hint={error.hint} />
+      <Banner title={error.title} hint={error.hint} />
     {/if}
     {#if trail}
       <!-- The single breadcrumb bar: one row, one divider, the same

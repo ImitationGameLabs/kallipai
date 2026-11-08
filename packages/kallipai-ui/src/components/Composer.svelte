@@ -20,6 +20,7 @@
     disabled,
     pendingCount,
     disabledNotice,
+    disabledAction,
     fileButton,
     attachmentBar,
     quoteBar,
@@ -39,6 +40,9 @@
     // -- correct for the bilateral (offline-tagma) chat surface, wrong for a
     // room error, so the room page passes a room-appropriate string here.
     disabledNotice?: string;
+    // Optional affordance shown with that notice (a Retry button, say). The
+    // page owns the action and its label; the composer only places it.
+    disabledAction?: Snippet;
     // Optional snippet rendered just under the input card (the attachment
     // bar). The page owns the items and handlers; the composer only
     // places it.
@@ -320,7 +324,8 @@
           >{composer_queued({ count: pendingCount })}</span
         >
       </div>
-    {:else if disabled}
+    {/if}
+    {#if disabled}
       <div class="mt-1.5 text-xs opacity-60">
         {#if disabledNotice}
           {disabledNotice}
@@ -333,6 +338,9 @@
           {composer_connect_tail()}
         {/if}
       </div>
+      {#if disabledAction}
+        <div class="mt-1.5">{@render disabledAction()}</div>
+      {/if}
     {/if}
   </div>
 </div>
