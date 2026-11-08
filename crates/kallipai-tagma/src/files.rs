@@ -4,6 +4,7 @@
 //! lives on; the restore path (re-assembly after a restart) reads the
 //! tagma's own attachment store instead.
 
+use crate::metrics::metrics;
 use kallipai_common::credential::Credential;
 use kallipai_common::protocol::ApiError;
 use kallipai_common::telemetry::HttpClient;
@@ -41,7 +42,13 @@ pub(crate) async fn fetch_record_bytes(
     let mut asked = Vec::with_capacity(accesses.len());
     for access in accesses {
         asked.push(access.name.as_str());
-        if let Some(bytes) = fetch_from_face(http, access, record_id).await? {
+        let fetched = metrics()
+            .observe_outbound(
+                crate::metrics::Leg::Files,
+                fetch_from_face(http, access, record_id),
+            )
+            .await?;
+        if let Some(bytes) = fetched {
             return Ok(bytes);
         }
     }

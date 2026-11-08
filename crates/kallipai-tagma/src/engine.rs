@@ -27,6 +27,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
 use crate::duty::DutyStatus;
+use crate::metrics::metrics;
 use crate::state::{AgentId, SharedState};
 use crate::work_schedule::spec::Spec;
 use crate::work_schedule::{WorkSchedule, WorkScheduleStatus};
@@ -433,6 +434,10 @@ async fn run(state: SharedState, notify: std::sync::Arc<Notify>, shutdown: Cance
                 next_deadline = run_recompute(&state, &mut cycles).await;
             }
             _ = tick.tick() => {
+                // The tick is a deadline comparison, not a pass: only
+                // freshness moves here, so a failure the last pass recorded
+                // stays on `/health` until a pass reports success again.
+                metrics().beat_alive(crate::metrics::Beat::Engine);
                 if next_deadline.is_some_and(|d| deadline_due(d, OffsetDateTime::now_utc())) {
                     next_deadline = run_recompute(&state, &mut cycles).await;
                 }
@@ -450,9 +455,22 @@ async fn run_recompute(
     cycles: &mut HashMap<String, CycleState>,
 ) -> Option<OffsetDateTime> {
     match recompute(state, cycles).await {
-        Ok(deadline) => deadline,
+        Ok(deadline) => {
+            metrics().beat(
+                crate::metrics::Beat::Engine,
+                crate::metrics::PassOutcome::Completed,
+            );
+            deadline
+        }
         Err(e) => {
             error!(error = %e, "work schedule engine recompute failed");
+            // The loop still ticks, so freshness alone would call it healthy:
+            // the pass itself is what failed, and /health says so until one
+            // succeeds.
+            metrics().beat(
+                crate::metrics::Beat::Engine,
+                crate::metrics::PassOutcome::Failed,
+            );
             Some(retry_anchor(OffsetDateTime::now_utc()))
         }
     }

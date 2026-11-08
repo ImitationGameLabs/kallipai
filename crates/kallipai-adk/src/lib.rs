@@ -25,6 +25,7 @@ pub(crate) mod lifecycle;
 // construction (spawn/restore); all transitions stay adk-internal.
 pub use lifecycle::LifecycleState;
 pub(crate) mod llm_error;
+pub mod metrics;
 pub(crate) mod persisted_message;
 pub mod persistence;
 pub mod policy;

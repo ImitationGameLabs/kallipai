@@ -43,18 +43,20 @@ pub mod spans;
 pub use crate::SPAN_TARGET;
 #[cfg(feature = "telemetry")]
 pub use export::{
-    Config, ENDPOINT_VAR, Guard, SAMPLER_ARG_VAR, SAMPLER_VAR, SamplerSpec, config_from_env,
-    config_from_lookup, export_layer, init_service_telemetry,
+    Config, ENDPOINT_VAR, ExportSnapshot, ExportStats, Guard, SAMPLER_ARG_VAR, SAMPLER_VAR,
+    SamplerSpec, config_from_env, config_from_lookup, export_layer, export_stats,
+    init_service_telemetry,
 };
 #[cfg(feature = "axum")]
-pub use server::{server_span, with_server_span};
+pub use server::{server_span, with_server_span, with_server_span_except};
 pub use spans::{HttpClient, Settle, http_client, record_attribute, record_response, request_span};
 
 // The tests reach the halves' internals through this module, so this is the
 // only place that has to name them.
 #[cfg(all(test, feature = "telemetry"))]
 pub(crate) use export::{
-    HintOnceExporter, service_layers, service_layers_with_exporter, traces_endpoint,
+    CountingExporter, HintOnceExporter, service_layers, service_layers_with_exporter,
+    traces_endpoint,
 };
 #[cfg(all(feature = "telemetry", any(test, feature = "test-support")))]
 pub(crate) use export::{RESOURCE_NAMESPACE, span_filter};

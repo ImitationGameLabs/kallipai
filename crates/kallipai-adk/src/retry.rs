@@ -193,6 +193,24 @@ pub struct RetryCall<'a> {
     /// The shared fact table, when the caller has one: a failure this call
     /// settles writes what it learned about that profile.
     pub pacing: Option<&'a dyn ProfilePacing>,
+    /// Where this call's sends report. One observation per send: the send's own
+    /// time, never the backoff before it.
+    pub metrics: &'a crate::metrics::AdkMetrics,
+}
+
+/// A stream that opened, with the moment its send began.
+///
+/// The caller times the attempt from `started` at the point it learns how the
+/// attempt ended, so a backoff between sends stays out of model time.
+pub struct Sent {
+    pub stream: ConversationStream,
+    pub started: std::time::Instant,
+}
+
+impl std::fmt::Debug for Sent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Sent { stream, started }")
+    }
 }
 
 /// Open a streaming generation through the caller's conversation, retrying transient errors.
@@ -231,7 +249,7 @@ pub async fn stream_with_retry(
     event_tx: &tokio::sync::mpsc::Sender<AgentEvent>,
     retry_log: &mut Vec<RetryRecord>,
     cancel: CancellationToken,
-) -> Result<ConversationStream, RequestFailure> {
+) -> Result<Sent, RequestFailure> {
     let RetryCall {
         conversation,
         request,
@@ -241,6 +259,7 @@ pub async fn stream_with_retry(
         provider_id,
         profile_id,
         pacing,
+        metrics,
     } = call;
 
     // The episode's ledger counts the whole episode — retries and mid-stream
@@ -286,6 +305,7 @@ pub async fn stream_with_retry(
         // to that request, not to the episode.
         let chat = tracing::Span::current();
         crate::spans::count_chat_send(&chat, sends);
+        let send_started = std::time::Instant::now();
         let error = match conversation.stream_generate(request.clone()).await {
             Ok(stream) => {
                 // A stream that opened is a window served: the record a paced
@@ -293,10 +313,23 @@ pub async fn stream_with_retry(
                 if let Some(pacing) = pacing {
                     pacing.note_success(profile_id);
                 }
-                return Ok(stream);
+                return Ok(Sent {
+                    stream,
+                    started: send_started,
+                });
             }
             Err(error) => error,
         };
+        // The send failed, so this attempt's outcome is known here: count it and
+        // stop its clock now. A backoff before the next send is the policy's
+        // time, not the model's, so it is never part of an attempt's duration.
+        let outcome = match decision::classify(&error, decision::Phase::Connect) {
+            decision::FailureClass::Transient(decision::TransientKind::Timeout) => {
+                crate::metrics::ModelOutcome::Timeout
+            }
+            _ => crate::metrics::ModelOutcome::Error,
+        };
+        metrics.record_model_call(outcome, send_started.elapsed());
         let attempt = episode.attempts();
         let class = decision::classify(&error, decision::Phase::Connect);
         let attempt_facts = decision::Attempt::failed(
@@ -599,6 +632,7 @@ mod tests {
                 provider_id: "test",
                 profile_id: "test",
                 pacing: None,
+                metrics: &Default::default(),
             },
             &tx,
             &mut retry_log,
@@ -653,6 +687,7 @@ mod tests {
                 provider_id: "test",
                 profile_id: "test",
                 pacing: None,
+                metrics: &Default::default(),
             },
             &tx,
             &mut retry_log,
@@ -709,6 +744,7 @@ mod tests {
                 provider_id: "test",
                 profile_id: "test",
                 pacing: None,
+                metrics: &Default::default(),
             },
             &tx,
             &mut retry_log,
@@ -748,6 +784,7 @@ mod tests {
                 provider_id: "test",
                 profile_id: "test",
                 pacing: None,
+                metrics: &Default::default(),
             },
             &tx,
             &mut retry_log,
@@ -780,6 +817,7 @@ mod tests {
                 provider_id: "test",
                 profile_id: "test",
                 pacing: None,
+                metrics: &Default::default(),
             },
             &tx,
             &mut retry_log,
@@ -813,6 +851,7 @@ mod tests {
                 provider_id: "test",
                 profile_id: "test",
                 pacing: None,
+                metrics: &Default::default(),
             },
             &tx,
             &mut retry_log,
@@ -852,6 +891,7 @@ mod tests {
                 provider_id: "test",
                 profile_id: "test",
                 pacing: None,
+                metrics: &Default::default(),
             },
             &tx,
             &mut retry_log,
@@ -896,6 +936,7 @@ mod tests {
                 provider_id: "test",
                 profile_id: "test",
                 pacing: None,
+                metrics: &Default::default(),
             },
             &tx,
             &mut retry_log,
@@ -939,13 +980,15 @@ mod tests {
                 provider_id: "test",
                 profile_id: "test",
                 pacing: None,
+                metrics: &Default::default(),
             },
             &tx,
             &mut retry_log,
             CancellationToken::new(),
         )
         .await
-        .expect("2xx yields a stream");
+        .expect("2xx yields a stream")
+        .stream;
 
         assert!(retry_log.is_empty());
         assert_eq!(retrying_count(&mut rx), 0);
@@ -992,6 +1035,7 @@ mod tests {
                 provider_id: "test",
                 profile_id: "test",
                 pacing: Some(pacing.as_ref()),
+                metrics: &Default::default(),
             },
             &tx,
             &mut retry_log,
@@ -1027,6 +1071,7 @@ mod tests {
                 provider_id: "test",
                 profile_id: "test",
                 pacing: None,
+                metrics: &Default::default(),
             },
             &tx,
             &mut retry_log,
@@ -1061,12 +1106,14 @@ mod tests {
                 provider_id: "test",
                 profile_id: "test",
                 pacing: None,
+                metrics: &Default::default(),
             },
             &tokio::sync::mpsc::channel(16).0,
             &mut Vec::new(),
             CancellationToken::new(),
         )
-        .await?;
+        .await?
+        .stream;
         while let Some(event) = stream.next().await {
             event.expect("turn events are healthy");
         }
@@ -1181,25 +1228,37 @@ mod tests {
                 body: "upstream failed".to_owned(),
             },
         ));
+        // A real counter set and a backoff long enough to see: the two sends of
+        // this turn must count once each, and the wait between them must stay
+        // out of their durations.
+        let metrics = crate::metrics::AdkMetrics::new();
+        let policy = RetryPolicy {
+            max_retries: 2,
+            base_delay: Duration::from_millis(120),
+            max_delay: Duration::from_millis(120),
+            retry_timeout: Duration::from_secs(10),
+        };
 
         let mut retry_log = Vec::new();
         let mut stream = stream_with_retry(
             RetryCall {
                 conversation: &mut conversation,
                 request: request("test-model", vec![user_msg("q1"), mirror, user_msg("q2")]),
-                policy: &fast_policy(2),
+                policy: &policy,
                 round: 0,
                 episode: &mut Episode::new(timefmt::now_epoch()),
                 provider_id: "test",
                 profile_id: "test",
                 pacing: None,
+                metrics: &metrics,
             },
             &tokio::sync::mpsc::channel(16).0,
             &mut retry_log,
             CancellationToken::new(),
         )
         .await
-        .expect("turn 2 succeeds on retry");
+        .expect("turn 2 succeeds on retry")
+        .stream;
         while let Some(event) = stream.next().await {
             event.expect("turn 2 events are healthy");
         }
@@ -1224,6 +1283,25 @@ mod tests {
             requests[2].messages,
             vec![user_msg("q2")],
             "delta only — the stored prefix is not resent"
+        );
+
+        // This walk books the send it could not open; the send it did open is
+        // booked by whoever owns the stream, so only the failure is visible
+        // here. What this test pins is the clock: 120ms of backoff passed
+        // between the two sends and none of it is in the attempt's duration.
+        let snapshot = metrics.snapshot();
+        let failed = snapshot
+            .model_requests_total
+            .iter()
+            .find(|(name, _)| *name == "error")
+            .map(|(_, value)| *value)
+            .expect("error is part of the outcome vocabulary");
+        assert_eq!(failed, 1, "the send that could not open is counted");
+        assert_eq!(snapshot.model_duration.count, 1);
+        assert!(
+            snapshot.model_duration.sum_seconds < 0.06,
+            "the backoff never lands in a duration: {:?}",
+            snapshot.model_duration
         );
     }
 
@@ -1256,6 +1334,7 @@ mod tests {
                 provider_id: "test",
                 profile_id: "test",
                 pacing: None,
+                metrics: &Default::default(),
             },
             &tx,
             &mut retry_log,
@@ -1301,6 +1380,7 @@ mod tests {
                 provider_id: "test",
                 profile_id: "test",
                 pacing: None,
+                metrics: &Default::default(),
             },
             &tx,
             &mut retry_log,
@@ -1346,6 +1426,7 @@ mod tests {
                 provider_id: "test",
                 profile_id: "test",
                 pacing: None,
+                metrics: &Default::default(),
             },
             &tx,
             &mut retry_log,
@@ -1392,6 +1473,7 @@ mod tests {
                 provider_id: "test",
                 profile_id: "test",
                 pacing: None,
+                metrics: &Default::default(),
             },
             &tx,
             &mut retry_log,
@@ -1436,6 +1518,7 @@ mod tests {
                 provider_id: "test",
                 profile_id: "test",
                 pacing: None,
+                metrics: &Default::default(),
             },
             &tx,
             &mut retry_log,
@@ -1484,6 +1567,7 @@ mod tests {
                 provider_id: "test",
                 profile_id: "test",
                 pacing: None,
+                metrics: &Default::default(),
             },
             &tx,
             &mut retry_log,
@@ -1526,6 +1610,7 @@ mod tests {
                 provider_id: "test",
                 profile_id: "test",
                 pacing: Some(pacing.as_ref()),
+                metrics: &Default::default(),
             },
             &tx,
             &mut retry_log,
@@ -1578,6 +1663,7 @@ mod tests {
                 provider_id: "test",
                 profile_id: "test",
                 pacing: None,
+                metrics: &Default::default(),
             },
             &tx,
             &mut retry_log,

@@ -98,9 +98,40 @@ single operator comparison additionally uses a constant-time compare.
 | `GET`    | `/tasks`                                              | One page of task rows (filter and paging query params)                                                          | any                          |
 | `GET`    | `/tasks/{id}`                                         | One task with its full event trail                                                                              | any                          |
 | `POST`   | `/tasks`, `/tasks/{id}/…`                             | Write verbs: `create` plus start, confirm, review, pause, resume, note, close, reopen, archive; see Task Ledger | any                          |
+| `GET`    | `/metrics`                                            | Prometheus text exposition of the counters this process keeps                                                   | loopback peer only           |
+| `GET`    | `/health`                                             | Readiness and degradation report (JSON)                                                                         | loopback peer only           |
 
 The `kallip policy` CLI wraps the exec-policy reads and writes
 (`kallip policy show` / `exec-get` / `exec-set`).
+
+These two answer on the same listener and take no token: they are
+unauthenticated by design, and a peer that is not loopback (or whose address
+cannot be established) is refused with 403. `--metrics=false` /
+`--health=false` (or `KALLIPAI_TAGMA_METRICS` / `KALLIPAI_TAGMA_HEALTH` set to
+`false`) leave the route unmounted, which a client reads as a missing route.
+`/health` reports `ok`, `degraded` or `not_ready`, where only `not_ready` (503)
+means the instance cannot serve; [observability](../development/observability.md)
+describes the families `/metrics` carries and which condition lands in which
+state.
+
+The body names every check it made, so a degraded report says which one:
+
+```json
+{
+  "status": "degraded",
+  "checks": {
+    "store": { "ok": true },
+    "profiles": { "ok": true },
+    "relay": { "state": "connected" },
+    "engine": { "ok": true },
+    "background": { "ok": false, "stale": [], "failed": ["history_gc"] }
+  }
+}
+```
+
+`relay.state` is `connected`, `local_only` or `down`; `background.stale`
+and `background.failed` name the loops that are late, or whose last pass
+failed.
 
 ### Agent Management
 

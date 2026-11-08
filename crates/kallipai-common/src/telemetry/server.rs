@@ -65,3 +65,37 @@ where
 {
     router.layer(axum::middleware::from_fn(server_span))
 }
+
+/// [`with_server_span`] with paths that get no span at all.
+///
+/// An endpoint that measures the process must not appear in the trace of the
+/// process it measures: a scrape every fifteen seconds would be an entry in
+/// every trace around it, and its own latency would read as server work. The
+/// match is on the request path, so it needs no route template and holds
+/// whether or not the router recognised the path.
+pub fn with_server_span_except<S>(
+    router: axum::Router<S>,
+    exempt: &'static [&'static str],
+) -> axum::Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
+    router.layer(axum::middleware::from_fn(
+        move |request: axum::extract::Request, next: axum::middleware::Next| {
+            server_span_except(exempt, request, next)
+        },
+    ))
+}
+
+/// The body of [`with_server_span_except`]: an exempt path is answered
+/// straight through, so no span is created for it.
+async fn server_span_except(
+    exempt: &'static [&'static str],
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    if exempt.contains(&request.uri().path()) {
+        return next.run(request).await;
+    }
+    server_span(request, next).await
+}

@@ -28,6 +28,7 @@ sea-orm-migration = { workspace = true, features = ["sqlx-sqlite"] }
 sqlx = { workspace = true }
 serde_urlencoded = "0.7"
 just-llm-client = { workspace = true }
+prometheus = { workspace = true }
 async-trait = { workspace = true }
 reqwest = { workspace = true }
 reqwest-middleware = { workspace = true }

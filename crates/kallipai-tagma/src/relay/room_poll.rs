@@ -12,6 +12,7 @@
 //! directly by the descendant test module.
 
 use super::*;
+use crate::metrics::metrics;
 
 impl RelayHandle {
     /// Poll the lesche for this tagma's rooms and refresh the joined-rooms
@@ -25,7 +26,13 @@ impl RelayHandle {
     /// the next tick; a stale cache only transiently misroutes an inbound
     /// envelope, never leaks a room (the lesche enforces membership).
     pub(super) async fn poll_rooms(&self) {
-        let rooms = match self.inner.client.list_my_rooms(&self.inner.tagma_id).await {
+        let rooms = match metrics()
+            .observe_outbound(
+                crate::metrics::Leg::Lesche,
+                self.inner.client.list_my_rooms(&self.inner.tagma_id),
+            )
+            .await
+        {
             Ok(rooms) => rooms,
             Err(e) => {
                 warn!(
@@ -50,7 +57,13 @@ impl RelayHandle {
     /// on the next tick -- the lesche member-gates every direct route, so a
     /// stale entry never leaks a session.
     pub(super) async fn poll_direct_sessions(&self) {
-        let sessions = match self.inner.client.list_direct_sessions().await {
+        let sessions = match metrics()
+            .observe_outbound(
+                crate::metrics::Leg::Lesche,
+                self.inner.client.list_direct_sessions(),
+            )
+            .await
+        {
             Ok(sessions) => sessions,
             Err(e) => {
                 warn!(

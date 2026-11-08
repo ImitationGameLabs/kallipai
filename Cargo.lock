@@ -3416,6 +3416,7 @@ dependencies = [
  "kallipai-testkit",
  "libc",
  "percent-encoding",
+ "prometheus",
  "reqwest",
  "reqwest-middleware",
  "sea-orm",

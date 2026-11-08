@@ -39,6 +39,9 @@ pub(crate) struct StreamConsumed {
     /// `End`) or the stream never completed; the caller adopts only when this is `Some`.
     /// Boxed so this struct stays small next to the variants that carry it.
     pub(crate) response: Option<Box<just_llm_client::types::generation::GenerationResponse>>,
+    /// When the first content-bearing delta arrived: the wait the user felt.
+    /// `None` for a stream that carried none (a bare tool-call response).
+    pub(crate) first_delta_at: Option<std::time::Instant>,
 }
 
 /// Consume an SSE stream, accumulating content, reasoning, tool calls, and usage.
@@ -54,6 +57,7 @@ pub(super) async fn consume_stream(
     let mut reasoning = String::new();
     let mut tool_acc = ToolCallAccumulator::new();
     let mut response_usage: Option<just_llm_client::types::generation::Usage> = None;
+    let mut first_delta_at: Option<std::time::Instant> = None;
 
     loop {
         tokio::select! {
@@ -74,12 +78,14 @@ pub(super) async fn consume_stream(
                 };
                 match event {
                     GenerationEvent::Text { delta } => {
+                        first_delta_at.get_or_insert_with(std::time::Instant::now);
                         content.push_str(&delta);
                         tx.send(AgentEvent::AssistantContentDelta { delta })
                             .await
                             .ok();
                     }
                     GenerationEvent::Reasoning { delta } => {
+                        first_delta_at.get_or_insert_with(std::time::Instant::now);
                         reasoning.push_str(&delta);
                         tx.send(AgentEvent::ReasoningDelta { delta }).await.ok();
                     }
@@ -114,6 +120,7 @@ pub(super) async fn consume_stream(
         tool_calls: tool_acc.finish(),
         usage: response_usage,
         response,
+        first_delta_at,
     })
 }
 

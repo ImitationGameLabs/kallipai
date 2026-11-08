@@ -8,14 +8,15 @@
 
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use opentelemetry::KeyValue;
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry_otlp::{SpanExporter as OtlpExporter, WithExportConfig as _};
 use opentelemetry_sdk::Resource;
-use opentelemetry_sdk::error::OTelSdkResult;
+use opentelemetry_sdk::error::{OTelSdkError, OTelSdkResult};
 use opentelemetry_sdk::propagation::TraceContextPropagator;
 use opentelemetry_sdk::runtime;
 use opentelemetry_sdk::trace::span_processor_with_async_runtime::BatchSpanProcessor;
@@ -235,13 +236,14 @@ pub(crate) fn service_layers<W>(
     config: Option<&Config>,
     filter: &EnvFilter,
     service: &str,
+    attrs: &[(&str, &str)],
     dir: Option<&Path>,
     stdout: W,
 ) -> (impl tracing::Subscriber, Guard)
 where
     W: for<'a> tracing_subscriber::fmt::MakeWriter<'a> + Send + Sync + 'static,
 {
-    service_layers_with_exporter(otlp_exporter, config, filter, service, dir, stdout)
+    service_layers_with_exporter(otlp_exporter, config, filter, service, attrs, dir, stdout)
 }
 
 /// The same composition with the exporter construction injected: `open`
@@ -254,6 +256,7 @@ pub(crate) fn service_layers_with_exporter<W, E, F>(
     config: Option<&Config>,
     filter: &EnvFilter,
     service: &str,
+    attrs: &[(&str, &str)],
     dir: Option<&Path>,
     stdout: W,
 ) -> (impl tracing::Subscriber + use<W, E, F>, Guard)
@@ -262,7 +265,7 @@ where
     E: SpanExporter + 'static,
     F: FnOnce(&str) -> Result<E, String>,
 {
-    let (extra, guard) = export_layer_with(open, config, service);
+    let (extra, guard) = export_layer_with(open, config, service, attrs);
     let subscriber = logging::service_layers_with(filter, service, dir, stdout, extra);
     (subscriber, guard)
 }
@@ -286,11 +289,17 @@ where
 /// The layer carries its own filter, on [`SPAN_TARGET`], and is therefore not
 /// tied to `RUST_LOG`: a service whose log filter is `warn` still exports the
 /// spans it opens, while its INFO log lines stay out of the trace.
+///
+/// `attrs` become resource attributes on every span this process exports, so
+/// an identity only the caller knows (a tagma id, say) rides along without a
+/// second plumbing path. `export_stats()` answers what the pipeline did with
+/// those spans afterwards.
 pub fn export_layer(
     config: Option<&Config>,
     service: &str,
+    attrs: &[(&str, &str)],
 ) -> (Option<Box<dyn Layer<Registry> + Send + Sync>>, Guard) {
-    export_layer_with(otlp_exporter, config, service)
+    export_layer_with(otlp_exporter, config, service, attrs)
 }
 
 /// [`export_layer`] with the exporter construction injected, so the assembly
@@ -299,6 +308,7 @@ fn export_layer_with<E, F>(
     open: F,
     config: Option<&Config>,
     service: &str,
+    attrs: &[(&str, &str)],
 ) -> (Option<Box<dyn Layer<Registry> + Send + Sync>>, Guard)
 where
     E: SpanExporter + 'static,
@@ -307,7 +317,7 @@ where
     let Some(config) = config else {
         return (None, Guard::inert());
     };
-    match build_export_layer_with(open, config, service) {
+    match build_export_layer_with(open, config, service, attrs) {
         Ok((layer, provider)) => {
             opentelemetry::global::set_text_map_propagator(TraceContextPropagator::new());
             opentelemetry::global::set_tracer_provider(provider.clone());
@@ -331,10 +341,12 @@ where
 /// the OTLP exporter that feeds it, publishing the process-wide tracer
 /// provider and the W3C propagator with it. Returns the guard; hold it for
 /// the life of the process so the queue is flushed on the way out.
+///
+/// This process reports no resource attributes of its own.
 pub fn init_service_telemetry(filter: &EnvFilter, service: &str, dir: Option<&Path>) -> Guard {
     let config = config_from_env();
     let (subscriber, guard) =
-        service_layers(config.as_ref(), filter, service, dir, std::io::stdout);
+        service_layers(config.as_ref(), filter, service, &[], dir, std::io::stdout);
     subscriber.try_init().ok();
     guard
 }
@@ -348,6 +360,7 @@ fn build_export_layer_with<E, F>(
     open: F,
     config: &Config,
     service: &str,
+    attrs: &[(&str, &str)],
 ) -> Result<(Box<dyn Layer<Registry> + Send + Sync>, SdkTracerProvider), String>
 where
     E: SpanExporter + 'static,
@@ -361,29 +374,37 @@ where
         .with_max_export_timeout(EXPORT_TIMEOUT)
         .build();
     let processor = BatchSpanProcessor::builder(
-        HintOnceExporter {
-            inner: exporter,
-            hinted: Arc::new(AtomicBool::new(false)),
+        CountingExporter {
+            inner: HintOnceExporter {
+                inner: exporter,
+                hinted: Arc::new(AtomicBool::new(false)),
+            },
+            stats: export_stats(),
         },
         runtime::TokioCurrentThread,
     )
     .with_batch_config(batch)
     .build();
-    let provider = SdkTracerProvider::builder()
-        .with_sampler(config.sampler().sampler())
-        .with_resource(
-            Resource::builder()
-                .with_service_name(service.to_string())
-                .with_attribute(KeyValue::new("service.namespace", RESOURCE_NAMESPACE))
-                .build(),
-        )
-        .with_span_processor(processor)
-        .build();
+    let provider =
+        SdkTracerProvider::builder()
+            .with_sampler(config.sampler().sampler())
+            .with_resource(
+                Resource::builder()
+                    .with_service_name(service.to_string())
+                    .with_attribute(KeyValue::new("service.namespace", RESOURCE_NAMESPACE))
+                    .with_attributes(attrs.iter().map(|(key, value)| {
+                        KeyValue::new((*key).to_string(), (*value).to_string())
+                    }))
+                    .build(),
+            )
+            .with_span_processor(processor)
+            .build();
     let tracer = provider.tracer(service.to_string());
     let layer = tracing_opentelemetry::layer()
         .with_tracer(tracer)
         .with_filter(span_filter())
         .boxed();
+    export_stats().mark_enabled();
     Ok((layer, provider))
 }
 
@@ -442,6 +463,159 @@ impl<E: SpanExporter> SpanExporter for HintOnceExporter<E> {
 
     // The resource reaches an exporter through this call and nowhere else: a
     // wrapper that swallows it exports spans without the service name.
+    fn set_resource(&mut self, resource: &Resource) {
+        self.inner.set_resource(resource);
+    }
+}
+
+/// What one process's export pipeline has done so far.
+///
+/// The batch processor is the only writer, so a snapshot is a moment of the
+/// pipeline and never a batch counted twice.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ExportSnapshot {
+    /// Whether an export layer was installed at all. False means the spans
+    /// stay in this process: no endpoint, or an exporter that failed to build.
+    pub enabled: bool,
+    /// Spans the collector accepted.
+    pub exported_spans: u64,
+    /// Failed exports by reason; the three sum to every failed attempt.
+    pub failed_timeout: u64,
+    pub failed_unavailable: u64,
+    pub failed_other: u64,
+    /// Unix seconds of the last accepted export; 0 while none has landed.
+    pub last_success_unix: u64,
+}
+
+/// The process-wide export tally behind [`ExportSnapshot`].
+///
+/// One pipeline per process means one tally: [`export_layer`] publishes it, and
+/// a reader (a metrics collector, in practice) takes a snapshot without
+/// touching the exporter.
+#[derive(Debug, Default)]
+pub struct ExportStats {
+    enabled: AtomicBool,
+    exported_spans: AtomicU64,
+    failed_timeout: AtomicU64,
+    failed_unavailable: AtomicU64,
+    failed_other: AtomicU64,
+    last_success_unix: AtomicU64,
+}
+
+impl ExportStats {
+    fn mark_enabled(&self) {
+        self.enabled.store(true, Ordering::Relaxed);
+    }
+
+    /// Account one export attempt. The result is read, never changed: this is a
+    /// tally beside the pipeline, not a decision about it.
+    fn record(&self, spans: usize, result: &OTelSdkResult) {
+        match result {
+            Ok(()) => {
+                self.exported_spans
+                    .fetch_add(spans as u64, Ordering::Relaxed);
+                self.last_success_unix
+                    .store(crate::timefmt::now_epoch(), Ordering::Relaxed);
+            }
+            Err(error) => {
+                let counter = match failure_reason(error) {
+                    ExportFailure::Timeout => &self.failed_timeout,
+                    ExportFailure::Unavailable => &self.failed_unavailable,
+                    ExportFailure::Other => &self.failed_other,
+                };
+                counter.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    pub fn snapshot(&self) -> ExportSnapshot {
+        ExportSnapshot {
+            enabled: self.enabled.load(Ordering::Relaxed),
+            exported_spans: self.exported_spans.load(Ordering::Relaxed),
+            failed_timeout: self.failed_timeout.load(Ordering::Relaxed),
+            failed_unavailable: self.failed_unavailable.load(Ordering::Relaxed),
+            failed_other: self.failed_other.load(Ordering::Relaxed),
+            last_success_unix: self.last_success_unix.load(Ordering::Relaxed),
+        }
+    }
+}
+
+/// The process's export tally. One `OnceLock` for the same reason the tracer
+/// provider is process-wide: exactly one pipeline is ever published.
+pub fn export_stats() -> &'static ExportStats {
+    static STATS: OnceLock<ExportStats> = OnceLock::new();
+    STATS.get_or_init(ExportStats::default)
+}
+
+/// Why an export failed, as far as the tally can tell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExportFailure {
+    Timeout,
+    Unavailable,
+    Other,
+}
+
+/// Classify one SDK error into the tally's three reasons.
+///
+/// `Timeout` is the SDK's own variant. The OTLP exporter reports an unreachable
+/// or refusing collector as `Internal` with the transport error appended, so
+/// "cannot reach it" has to be read off the message; anything else under
+/// `Internal` (a body that would not serialize, say) is the honest `other`.
+/// A connect error or a deadline that surfaced as `Internal` counts as
+/// `unavailable` too: the OTLP stack does not always tell the two apart.
+fn failure_reason(error: &OTelSdkError) -> ExportFailure {
+    match error {
+        OTelSdkError::Timeout(_) => ExportFailure::Timeout,
+        OTelSdkError::InternalFailure(message) => {
+            let lowered = message.to_ascii_lowercase();
+            let unreachable = [
+                "connect",
+                "unavailable",
+                "refused",
+                "dns",
+                "timeout",
+                "deadline",
+            ]
+            .iter()
+            .any(|needle| lowered.contains(needle));
+            if unreachable {
+                ExportFailure::Unavailable
+            } else {
+                ExportFailure::Other
+            }
+        }
+        OTelSdkError::AlreadyShutdown => ExportFailure::Other,
+    }
+}
+
+/// Wraps the exporter so the pipeline reports what it did. Every method
+/// forwards unchanged -- the tally is taken on the way through, never instead
+/// of the call -- and `set_resource` in particular must keep forwarding, or the
+/// spans leave without the attributes the resource carries.
+#[derive(Debug)]
+pub(crate) struct CountingExporter<E> {
+    pub(crate) inner: E,
+    /// Where the tally goes. Injected rather than read from the process
+    /// singleton, so a test can watch one exporter's accounting alone.
+    pub(crate) stats: &'static ExportStats,
+}
+
+impl<E: SpanExporter> SpanExporter for CountingExporter<E> {
+    async fn export(&self, batch: Vec<SpanData>) -> OTelSdkResult {
+        let spans = batch.len();
+        let result = self.inner.export(batch).await;
+        self.stats.record(spans, &result);
+        result
+    }
+
+    fn force_flush(&self) -> OTelSdkResult {
+        self.inner.force_flush()
+    }
+
+    fn shutdown_with_timeout(&self, timeout: Duration) -> OTelSdkResult {
+        self.inner.shutdown_with_timeout(timeout)
+    }
+
     fn set_resource(&mut self, resource: &Resource) {
         self.inner.set_resource(resource);
     }

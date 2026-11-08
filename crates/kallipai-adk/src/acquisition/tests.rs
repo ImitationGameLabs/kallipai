@@ -151,13 +151,15 @@ async fn failover_advance_rebuilds_the_conversation_chain() {
             provider_id: "p1",
             profile_id: "a",
             pacing: None,
+            metrics: &Default::default(),
         },
         &tokio::sync::mpsc::channel(16).0,
         &mut Vec::new(),
         CancellationToken::new(),
     )
     .await
-    .expect("turn streams");
+    .expect("turn streams")
+    .stream;
     while let Some(event) = stream.next().await {
         event.expect("turn events are healthy");
     }
@@ -194,13 +196,15 @@ async fn failover_advance_rebuilds_the_conversation_chain() {
             provider_id: "p2",
             profile_id: "b",
             pacing: None,
+            metrics: &Default::default(),
         },
         &tokio::sync::mpsc::channel(16).0,
         &mut Vec::new(),
         CancellationToken::new(),
     )
     .await
-    .expect("post-failover turn streams");
+    .expect("post-failover turn streams")
+    .stream;
     while let Some(event) = stream.next().await {
         event.expect("turn events are healthy");
     }

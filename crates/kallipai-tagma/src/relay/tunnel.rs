@@ -8,6 +8,7 @@
 //! modules and are already `pub(super)`.
 
 use super::*;
+use crate::metrics::metrics;
 
 impl RelayHandle {
     /// Hold the keryx tunnel open, reconnecting with a small backoff on any
@@ -19,6 +20,7 @@ impl RelayHandle {
     /// are cancel-safe at every `.await` — a cancel mid-op loses the partial op,
     /// which the app retries via host-history re-pull on reconnect.
     pub async fn run(self, shutdown: CancellationToken) {
+        let mut reconnecting = false;
         loop {
             tokio::select! {
                 biased;
@@ -26,11 +28,14 @@ impl RelayHandle {
                     self.stop_workers().await;
                     return;
                 }
-                r = self.clone().connect_and_drain() => match r {
+                r = self.clone().connect_and_drain(reconnecting) => match r {
                     Ok(()) => info!("relay tunnel stream ended; reconnecting"),
                     Err(e) => warn!("relay tunnel error: {e:#}; reconnecting"),
                 }
             }
+            // A segment that ended (either way) means the next connect is a
+            // reconnect, and the counter should say so before it starts.
+            reconnecting = true;
             tokio::select! {
                 biased;
                 _ = shutdown.cancelled() => {
@@ -69,12 +74,19 @@ impl RelayHandle {
     /// task so a long-running op does not stall the stream reader). The status
     /// pump is bounded to this tunnel session: started once the tunnel is up,
     /// stopped when the stream ends so a reconnect installs a fresh pump.
-    async fn connect_and_drain(self) -> Result<()> {
+    async fn connect_and_drain(self, reconnecting: bool) -> Result<()> {
         let stream = self
             .inner
             .client
             .open_tunnel(&self.inner.device, &self.inner.tagma_id)
             .await?;
+        {
+            let metrics = metrics();
+            if reconnecting {
+                metrics.relay_reconnected();
+            }
+            metrics.relay_up();
+        }
         self.start_status_pump().await;
         self.start_room_pump().await;
         self.start_projection_pump().await;
@@ -96,6 +108,7 @@ impl RelayHandle {
         self.stop_projection_pump().await;
         self.stop_upstream_flusher().await;
         self.stop_room_pump().await;
+        metrics().relay_down();
         Ok(())
     }
 
@@ -244,7 +257,12 @@ impl RelayHandle {
                 status: 404,
                 body: serde_json::json!({"error":{"message":"not on the manage frame surface"}}),
             };
-            let _ = self.inner.client.post_manage_reply(&reply).await;
+            let _ = metrics()
+                .observe_outbound(
+                    crate::metrics::Leg::Lesche,
+                    self.inner.client.post_manage_reply(&reply),
+                )
+                .await;
             return;
         }
         debug!(
@@ -272,7 +290,12 @@ impl RelayHandle {
             status,
             body,
         };
-        let _ = self.inner.client.post_manage_reply(&out).await;
+        let _ = metrics()
+            .observe_outbound(
+                crate::metrics::Leg::Lesche,
+                self.inner.client.post_manage_reply(&out),
+            )
+            .await;
     }
 }
 

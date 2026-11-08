@@ -170,12 +170,12 @@ so a tight race is not separable this way.
 ## Inside an agent: the wake tree
 
 The services answer under one request span. An agent does not work that way: a
-wake runs rounds until something ends it, and every round may send to a model
+wake runs turns until something ends it, and every turn may send to a model
 and call tools before it ends. Its trace has a shape of its own.
 
 ```text
 invoke_agent <role>            one wake
-└── turn                      one round, kallipai.turn.index
+└── turn                      one turn, kallipai.turn.index
     ├── chat <model>          one request to a model endpoint
     └── execute_tool <tool>   one tool call
 ```
@@ -189,7 +189,7 @@ indices and outcomes travel as attributes.
 | Span | Name (`otel.name`) | Attributes |
 | --- | --- | --- |
 | wake | `invoke_agent <role>` | `gen_ai.operation.name`, `gen_ai.agent.id`, `gen_ai.agent.name`, `gen_ai.conversation.id`, `kallipai.wake.origin`, `kallipai.wake.outcome` |
-| round | `turn` | `gen_ai.agent.id`, `gen_ai.agent.name`, `gen_ai.conversation.id`, `kallipai.turn.index`, `kallipai.turn.messages`, `kallipai.turn.prompt_tokens`, `kallipai.turn.outcome` |
+| turn | `turn` | `gen_ai.agent.id`, `gen_ai.agent.name`, `gen_ai.conversation.id`, `kallipai.turn.index`, `kallipai.turn.messages`, `kallipai.turn.prompt_tokens`, `kallipai.turn.outcome` |
 | model request | `chat <model>` | `gen_ai.operation.name`, `gen_ai.provider.name`, `gen_ai.request.model`, `gen_ai.agent.id`, `gen_ai.conversation.id`, `kallipai.profile.id`, `kallipai.chat.attempts`, the `gen_ai.usage.*` counters |
 | tool call | `execute_tool <tool>` | `gen_ai.operation.name`, `gen_ai.tool.name`, `gen_ai.tool.call.id`, `gen_ai.agent.id`, `gen_ai.conversation.id`, `kallipai.tool.outcome` |
 
@@ -199,12 +199,12 @@ indices and outcomes travel as attributes.
 holds the loop, `held` when a park, a re-checking gate or an armed backoff does,
 `terminated` when a lifecycle cancel ended the run.
 
-`kallipai.turn.index` counts rounds from zero within the wake.
-`kallipai.turn.outcome` says how the round ended: `break` when the agent said it
-was done, `bare` for a round that answered with no tool call (the loop
-re-enters), `park` for a round that ended parked, `recompose` when the round
+`kallipai.turn.index` counts turns from zero within the wake.
+`kallipai.turn.outcome` says how the turn ended: `break` when the agent said it
+was done, `bare` for a turn that answered with no tool call (the loop
+re-enters), `park` for a turn that ended parked, `recompose` when the turn
 rebuilt the context before going on, `continue` when the loop simply went on,
-`cancelled` when the lifecycle stopped the round, and `error` for a round that
+`cancelled` when the lifecycle stopped the turn, and `error` for a turn that
 failed.
 
 `kallipai.chat.attempts` counts the sends one request made. A send the retry
@@ -212,7 +212,7 @@ shell repeats stays in the same span, and every send overwrites the count, so
 the span ends holding the total. A request issued again from the top of the
 acquisition loop opens a span of its own: that is the request after a
 mid-stream failure, and the first request on each new profile a failover
-reaches. One round can therefore hold several chat spans, and a slow round
+reaches. One turn can therefore hold several chat spans, and a slow turn
 reads as the sum of them plus the tool calls between.
 
 The usage counters tell what the response cost: `gen_ai.usage.input_tokens` and
@@ -245,7 +245,7 @@ codes are a closed set of lowercase words naming a class, never a message. The
 model and stream failures use the retry classifier's own codes (`transient`,
 `quota_blocked`, `throttled`, `endpoint_permanent`, `request_permanent`,
 `local_config`, `response_shape`, `unclassified`); a tool uses `tool_failed` or
-`tool_timeout`; a round that failed carries `round_failed`.
+`tool_timeout`; a turn that failed carries `round_failed`.
 
 The prose stays in the log line, and only there: no event reaches the trace at
 any level, so a message or an upstream error body cannot ride along as one. No
@@ -259,9 +259,121 @@ checks that the exported span has no events.
 The agent's spans are the ones with a `turn` beneath them, so the wake's own
 `invoke_agent <role>` name is the entry point: search by it, or by
 `service.name=tagma` and the attribute `kallipai.turn.outcome=error` to find the
-rounds that failed first. The round's span is where a wake's duration is
+turns that failed first. The turn's span is where a wake's duration is
 explained: the chat spans under it are the time spent waiting on a model, the
 tool spans the time spent in this process.
+
+## The scrape face: `/metrics` and `/health`
+
+A trace answers "why was this request slow"; the scrape face answers "how many,
+how often, how long, and is a loop still ticking". Both endpoints ride the API
+listener (no second port), both are unauthenticated by design and therefore
+**loopback only**: a peer that is not `127.0.0.1`/`::1`, or a caller whose peer
+address cannot be established, gets 403. `--metrics=false` and `--health=false`
+(the same switches read `KALLIPAI_TAGMA_METRICS` and `KALLIPAI_TAGMA_HEALTH`)
+leave the route unmounted, which reads as 404.
+
+The gate is a peer-address test, and that shapes two deployments. A scrape
+from another container or namespace arrives with that container's address,
+so it is refused: scrape from the same network namespace, or run the
+collector's agent inside it. A reverse proxy on the same machine connects
+from `127.0.0.1`, so what it forwards reaches both endpoints; putting a
+proxy in front of the API widens who can read them to everyone the proxy
+admits.
+
+`/metrics` renders the Prometheus text format from three groups of families:
+
+- **This crate's own counters.** `kallipai_tagma_http_requests_total{route,
+  method,status_class}` and `..._http_request_duration_seconds{route}`: the
+  route is the matched template, so an id-bearing path collapses into one
+  series, and a request that matched nothing is `route="unmatched"`. `method`
+  is one of the methods this listener answers, or `other`: the timing layer
+  runs outside the token check, so the value must not be peer-controlled. The relay
+  gauges (`relays_configured`, `relays_connected`, `relay_reconnects_total`),
+  the outbound client counters (`outbound_requests_total{leg,outcome}` and
+  `outbound_request_duration_seconds{leg}`, with legs `files`, `profiles`,
+  `lesche` and `archeion`). A leg counts calls: opening a stream is one, and a
+  tunnel that then stays open is not, because `relays_connected` and
+  `relay_reconnects_total` already describe it. `build_info{version,tagma_id}`
+  carries the enrolled id (`none` before enrollment, so enrolling changes a
+  label value and never the series shape), and the same id is `tagma.id` on the
+  exporter's resource: one value, dotted in the trace, underscored in the
+  scrape label. Both observability endpoints are exempt from
+  `http_requests_total` and the request histogram: a scrape measures the
+  process, and counting scrapes would let a scraper's cadence dominate. The
+  exemption is by path rather than by peer, so a scrape refused at the loopback
+  gate leaves no series either; its only trace is a debug log line. Neither
+  endpoint opens a span either: the two paths are answered outside the server
+  span, so a scrape is not an entry in the traces it sits beside.
+- **Tallies another owner keeps**, encoded on each gather by a collector
+  instead of mirrored into a gauge: the agent loop's wakes, one count per
+  finished wake, from its entry to the point where it hands control back, and
+  its model requests, first-token wait, tokens by kind, tool calls and requests
+  in flight. A metric wake is the trace's `invoke_agent` span: the turns inside
+  a wake, and the model and tool calls they make, stay in the trace and are
+  not a family of their own. The label is `completed`, `failed` or
+  `cancelled`: a wake the trace calls `held` always counts `failed`, and both
+  an interrupt and a lifecycle cancellation count `cancelled`, so only the
+  trace tells those two apart.
+  A `failed` wake is one that did not finish its work, not an error: an armed
+  backoff and a quota window park that way too, while a `break(wait)` ended
+  its work and counts `completed`.
+  A model counter and its duration move once per
+  send attempt, timed from that send to the attempt's end, so a backoff
+  between attempts never lands in a duration; the first-token wait is the
+  adopted stream's own send. A send cancelled while it was still being
+  connected is not counted at all: the cancellation lands either in a send or
+  in a backoff between attempts, and the arm cannot tell which, so no ending
+  of an attempt is known. Then the event
+  bus's publishes and its dropped-to-lag counts per topic; the agent roster and
+  how many agents are off duty; the export pipeline's accepted spans and its
+  failed exports by reason. A monotone value is encoded as a counter, so
+  `rate()` works on it; a value that goes up and down is a gauge.
+- **Loop freshness.** `background_task_age_seconds{task}` for the chat-history
+  GC and the work-schedule engine. A loop that has never beaten reports the
+  process age, so a loop that died at boot looks fresh for its window and then
+  turns late: an operator sees it once it is past its deadline, not at the
+  moment it dies. A loop whose last pass failed is a separate fact, reported in
+  `/health` rather than guessed from the age.
+
+The families the collector encodes, with the label names the code uses:
+
+| Family | Type | Labels | What it measures |
+| --- | --- | --- | --- |
+| `kallipai_tagma_agents` | gauge | `state`: `live`, `faulted`, `off_duty` | roster entries by registry state, plus how many of them are off duty; the off-duty count cuts the same set, so the three do not add up |
+| `kallipai_tagma_agent_wakes_total` | counter | `outcome` | finished wakes |
+| `kallipai_tagma_agent_wake_duration_seconds` | histogram | `outcome` | how long a wake ran |
+| `kallipai_tagma_model_requests_total` | counter | `outcome` | send attempts |
+| `kallipai_tagma_model_request_duration_seconds` | histogram | none | one attempt, from its send to its end |
+| `kallipai_tagma_model_first_token_seconds` | histogram | none | send to the first streamed delta |
+| `kallipai_tagma_model_tokens_total` | counter | `kind` | tokens as the provider reported them |
+| `kallipai_tagma_model_in_flight` | gauge | none | requests in flight right now |
+| `kallipai_tagma_tool_calls_total` | counter | `outcome` | tool calls |
+| `kallipai_tagma_tool_call_duration_seconds` | histogram | `outcome` | how long a tool call ran |
+| `kallipai_tagma_bus_events_total` | counter | `topic` | events published per topic |
+| `kallipai_tagma_bus_lagged_total` | counter | `topic` | events a subscriber missed |
+| `kallipai_tagma_telemetry_export_enabled` | gauge | none | 1 when an export layer is installed |
+| `kallipai_tagma_telemetry_exported_total` | counter | none | spans the collector accepted |
+| `kallipai_tagma_telemetry_export_failed_total` | counter | `reason`: `timeout`, `unavailable`, `other` | failed batches |
+| `kallipai_tagma_telemetry_last_export_timestamp` | gauge | none | Unix seconds of the last accepted export, 0 while none has landed |
+| `kallipai_tagma_background_task_age_seconds` | gauge | `task` | seconds since each loop last started a pass |
+
+The same measurements appear in traces under different names: a scrape family
+is `kallipai_tagma_*`, a span attribute is dotted (`gateway.outcome`). Session,
+room and message totals stay the platform's to count, so this face never
+disagrees with the lesche about them.
+
+`/health` answers `ok`, `degraded` or `not_ready`, with one entry per check.
+Only `not_ready` (503) means "take this instance out of service", and it is
+reserved for what the process cannot serve without: the chat-history store
+handle, and a profile bundle with neither sets nor a default. A configured relay
+with no open tunnel, a stopped engine tick, or a late background loop is
+`degraded` (200): removing the instance would not fix a dead relay, and the
+endpoint exists to make the fault visible rather than to blank a dashboard.
+A loop that is on time with a failed last pass degrades the same way, and
+`background.failed` names it. The store check is a handle check: it never
+queries the file behind the handle, so a store whose disk went away keeps
+reading ready until the first query that needs it fails.
 
 ## Switches and cost
 
@@ -303,7 +415,7 @@ reports every skip. Its budgets are 5 GiB and 72 hours, overridable with
   this trace.
 - The summarize call a compaction makes opens no chat span: it builds its
   request against the client outside the acquisition loop, so its tokens and
-  its failures land on the round's span and in the log only.
+  its failures land on the turn's span and in the log only.
 - A wake and the delivery that triggered it are two traces: a trigger arrives
   through an asynchronous queue that carries no trace context, so a wake's root
   has no parent even when a message asked for it.

@@ -21,6 +21,7 @@ pub mod files;
 pub mod inbox;
 pub mod lifecycle;
 pub mod messaging;
+pub mod metrics;
 pub mod probe;
 pub mod profile_pacing;
 pub mod profile_source;
@@ -41,6 +42,7 @@ pub mod work_schedule;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_helpers;
 
+use crate::metrics::metrics;
 use anyhow::{Context, Result};
 use kallipai_adk::profile::ProfileRegistry;
 use kallipai_common::authtoken::{MintedToken, OPERATOR_TOKEN_ENV_KEY, OPERATOR_TOKEN_FILE};
@@ -420,7 +422,16 @@ pub async fn run(args: Args, operator_pin: Option<String>) -> Result<()> {
                     biased;
                     _ = shutdown.cancelled() => return,
                     _ = interval.tick() => {
-                        let reaped = relay::chat_history::gc(&history, ttl_secs, history_cap).await;
+                        let (reaped, swept) =
+                            relay::chat_history::gc(&history, ttl_secs, history_cap).await;
+                        metrics().beat(
+                            crate::metrics::Beat::HistoryGc,
+                            if swept {
+                                crate::metrics::PassOutcome::Completed
+                            } else {
+                                crate::metrics::PassOutcome::Failed
+                            },
+                        );
                         if reaped > 0 {
                             tracing::info!(reaped, "chat_history gc");
                         }
@@ -444,6 +455,7 @@ pub async fn run(args: Args, operator_pin: Option<String>) -> Result<()> {
     // serial keeps failure attribution clear and boot logs readable).
     // Runtime activation failures degrade that entry alone to local-only
     // (logged, skipped); configuration errors already aborted boot above.
+    let relay_count = relay_plan.len();
     for (entry, boot) in relay_plan {
         if let Err(e) = activate_relay(&state, &entry, boot).await {
             tracing::error!(
@@ -453,13 +465,27 @@ pub async fn run(args: Args, operator_pin: Option<String>) -> Result<()> {
         }
     }
 
-    let app = routes::router().with_state(state.clone());
+    // Observability, installed before the first request: a scrape in the
+    // first second already sees the build identity and the configured relay
+    // count (which is what tells "configured but down" from local-only).
+    let observability = metrics();
+    observability.attach_state(&state);
+    observability.set_build_info(env!("CARGO_PKG_VERSION"), stored_tagma_id(&args).as_deref());
+    observability.set_relays_configured(relay_count as i64);
+
+    let mut app = routes::router();
+    if args.metrics || args.health {
+        app = app.merge(crate::metrics::routes::router(args.metrics, args.health));
+    }
+    let app = app.with_state(state.clone());
 
     // Layering: each `.layer` wraps what was built so far, so the LAST layer
     // added is outermost and the body size limit is innermost.
     // The limit is enforced when the body is extracted, and neither CORS nor
     // tracing consumes it in passing. When max_body_size_kb > 0, enforce the
     // configured limit; when 0, axum's built-in default (2 MB) applies.
+    // Outside CORS and the body limit, inside the server span: the timing
+    // layer measures what the handler did, and the spans stay outermost.
     let app = if args.max_body_size_kb > 0 {
         app.layer(axum::extract::DefaultBodyLimit::max(
             args.max_body_size_kb * 1024,
@@ -467,8 +493,14 @@ pub async fn run(args: Args, operator_pin: Option<String>) -> Result<()> {
     } else {
         app
     }
-    .layer(routes::cors_layer());
-    let app = kallipai_common::telemetry::with_server_span(app);
+    .layer(routes::cors_layer())
+    .layer(axum::middleware::from_fn(
+        crate::metrics::routes::http_timing,
+    ));
+    let app = kallipai_common::telemetry::with_server_span_except(
+        app,
+        &crate::metrics::routes::EXEMPT_ROUTES,
+    );
 
     let listener = tokio::net::TcpListener::bind(&args.listen_addr)
         .await
@@ -498,9 +530,12 @@ pub async fn run(args: Args, operator_pin: Option<String>) -> Result<()> {
     // discover it by. There is no unmarked mode left to stay silent in.
     write_instance_state(&data_root()?, &listener)?;
     let shutdown_token = state.shutdown.clone();
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal(shutdown_token))
-        .await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal(shutdown_token))
+    .await?;
 
     // Drain the relay task first (it tears down the tunnel + pump), then the
     // agents. Both observe the tagma-wide `shutdown` token.
@@ -721,11 +756,20 @@ fn logs_target() -> Result<std::path::PathBuf> {
 /// and the W3C propagator; the returned guard flushes the queue on exit. The
 /// exported `service.name` is `tagma`, while the log file prefix stays
 /// `instance`, the role name the daemon's instance log listing keys on.
-pub fn init_logging(filter: &tracing_subscriber::EnvFilter) -> kallipai_common::telemetry::Guard {
+///
+/// `attrs` become resource attributes on every exported span. The daemon
+/// passes `tagma_id` here: it labels the whole process rather than one span,
+/// and it is known before the runtime exists. A first-run enrollment has
+/// none, and an absent attribute is right there -- never an empty one.
+pub fn init_logging(
+    filter: &tracing_subscriber::EnvFilter,
+    attrs: &[(&str, &str)],
+) -> kallipai_common::telemetry::Guard {
     use tracing_subscriber::prelude::*;
 
     let config = kallipai_common::telemetry::config_from_env();
-    let (export, telemetry) = kallipai_common::telemetry::export_layer(config.as_ref(), "tagma");
+    let (export, telemetry) =
+        kallipai_common::telemetry::export_layer(config.as_ref(), "tagma", attrs);
 
     let stderr_layer = || {
         tracing_subscriber::fmt::layer()
@@ -944,12 +988,11 @@ fn resolve_primary_identity(
     Option<kallipai_archeion_common::ids::ConversationId>,
 )> {
     let root = credentials_dir()?;
-    for (entry, _) in plan {
-        if let Some(stored) = credentials::load_tagma(&root.join(&entry.name)) {
-            let tid = kallipai_archeion_common::ids::TagmaId::from(stored.id);
-            let cid = kallipai_archeion_common::ids::ConversationId::for_tagma(&tid);
-            return Ok((Some(tid), Some(cid)));
-        }
+    let names = plan.iter().map(|(entry, _)| entry.name.as_str());
+    if let Some(stored) = first_stored(&root, names) {
+        let tid = kallipai_archeion_common::ids::TagmaId::from(stored.id);
+        let cid = kallipai_archeion_common::ids::ConversationId::for_tagma(&tid);
+        return Ok((Some(tid), Some(cid)));
     }
     Ok((None, None))
 }
@@ -1174,6 +1217,56 @@ fn resolve_relay_plan(args: &args::Args) -> Result<Vec<(RelayEntry, EnrollEntry)
     Ok(plan)
 }
 
+/// The enrolled tagma id, read before the runtime exists so every exported
+/// span can carry it as a resource attribute.
+///
+/// `None` covers a first-run enrollment (nothing stored yet) and any
+/// resolution failure alike: telemetry must not be able to fail a boot.
+///
+/// Read-only and cheap on purpose: it asks the same configuration the boot
+/// serves and reads the first entry, in configuration order, that has stored
+/// credentials — the rule `resolve_primary_identity` applies to the
+/// projector's identity, so the two never name different tagmas. Before the
+/// layout migration has run the enrollment is still in the flat files, so
+/// those are read where they are.
+///
+/// Nothing here creates a directory or moves a file: a boot with no
+/// credentials at all has no id yet, which is exactly what an unenrolled
+/// instance reports.
+pub fn stored_tagma_id(args: &args::Args) -> Option<String> {
+    let root = credentials_dir().ok()?;
+    let entries = resolve_relay_entries(args).ok()?;
+    stored_id_under(&root, &entries)
+}
+
+/// The identity rule on its own, with the environment taken out: the first
+/// entry in configuration order that has credentials on disk, and the flat
+/// files when the layout migration has not run yet.
+///
+/// This is [`resolve_primary_identity`]'s rule without the enrollment half:
+/// a host whose first entry is not enrolled yet while a later one is must
+/// still report the id of the tagma the process is about to serve.
+fn stored_id_under(root: &std::path::Path, entries: &[RelayEntry]) -> Option<String> {
+    let names = entries.iter().map(|entry| entry.name.as_str());
+    first_stored(root, names)
+        .map(|stored| stored.id)
+        // The flat layout, before `migrate_legacy_layout` moves it: the same
+        // files, one level up.
+        .or_else(|| credentials::load_tagma(root).map(|stored| stored.id))
+}
+
+/// The first entry, in configuration order, whose credentials are on disk.
+///
+/// Both the boot's primary identity and the trace resource's id resolve
+/// through this rule; keeping it in one place is what makes the two agree on a
+/// host where an earlier entry has no credentials yet.
+fn first_stored<'a>(
+    root: &std::path::Path,
+    mut names: impl Iterator<Item = &'a str>,
+) -> Option<credentials::StoredTagma> {
+    names.find_map(|name| credentials::load_tagma(&root.join(name)))
+}
+
 /// The instance data root, slug-derived (see `boot_identity`).
 pub(crate) fn data_root() -> Result<std::path::PathBuf> {
     kallipai_adk::persistence::data_dir_root()
@@ -1383,13 +1476,14 @@ async fn activate_relay(
             )
         }
         EnrollEntry::Fresh { code } => {
-            let (tagma_id, token) = kallipai_archeion_client::ArcheionClient::builder(&format!(
+            let client = kallipai_archeion_client::ArcheionClient::builder(&format!(
                 "{}/v1/archeion",
                 entry.polis_url
             ))
-            .build()?
-            .enroll(&code, &device)
-            .await?;
+            .build()?;
+            let (tagma_id, token) = metrics()
+                .observe_outbound(crate::metrics::Leg::Archeion, client.enroll(&code, &device))
+                .await?;
             credentials::save_tagma(&entry_dir, tagma_id.as_ref(), &token, &entry.polis_url)?;
             info!(relay = %entry.name, tagma = %tagma_id, "relay: enrolled with archeion");
             // First-run enroll boot: the projector's write-once ids are

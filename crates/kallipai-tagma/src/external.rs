@@ -266,6 +266,13 @@ impl ExternalProjector {
         let _ = self.inner.tagma_id.set(id);
     }
 
+    /// Whether the chat-history store handle is present: the `/health`
+    /// readiness check. The handle is opened unconditionally at boot, so a
+    /// `false` here means the boot skipped it, not that the file is empty.
+    pub(crate) fn history_ready(&self) -> bool {
+        self.inner.history.is_some()
+    }
+
     /// The agent sender for outbound frames: the tagma id + its label. The agent
     /// exists (it is this tagma), so its id/handle are always real; only the
     /// enrolled `tagma_id` is honestly `None` for a never-enrolled tagma (the

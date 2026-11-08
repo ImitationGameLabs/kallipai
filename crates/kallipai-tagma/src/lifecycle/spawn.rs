@@ -27,6 +27,7 @@ use tracing::info;
 use super::identity::{compose_system_prompt, inject_identity_env};
 use super::workspace::{establish_lock_api_error, establish_workspace_lock, exec_gate_failure};
 use crate::bridge::{BridgeCells, bridge_task};
+use crate::metrics::metrics;
 use crate::state::{
     Agent, AgentEntry, AgentIdentity, AgentState, FaultedEntry, RegistryEntry, SharedState,
 };
@@ -279,6 +280,7 @@ pub(crate) async fn spawn_agent(mut args: SpawnArgs) -> anyhow::Result<(Agent, A
         pacing_notify: Arc::new(tokio::sync::Notify::new()),
         token_budget: token_budget.clone(),
         usage_stats: usage_stats.clone(),
+        metrics: metrics().adk(),
         profile_pacing: Some(args.shared_state.profile_pacing.clone()),
         pending_profile_reset: pending_profile_reset.clone(),
         park_epoch: park_epoch.clone(),

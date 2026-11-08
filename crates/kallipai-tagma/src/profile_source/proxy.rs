@@ -39,6 +39,7 @@ use serde::de::DeserializeOwned;
 use tracing::{error, info, warn};
 
 use super::{ProfileSource, ProfileSourceKind};
+use crate::metrics::metrics;
 
 // -- Wire DTOs: mirrors of the distribution face's serialize types. -----
 // The face serves no profile ids (sets are the addressable unit), so the
@@ -384,6 +385,13 @@ impl ProxyProfileSource {
     }
 
     async fn fetch_and_adapt(&self) -> Result<ProfileConfig, FetchError> {
+        metrics()
+            .observe_outbound(crate::metrics::Leg::Profiles, self.fetch_and_adapt_inner())
+            .await
+    }
+
+    /// The refresh itself, measured by the wrapper above.
+    async fn fetch_and_adapt_inner(&self) -> Result<ProfileConfig, FetchError> {
         // One read: the gateway serves the collection this tagma
         // selected, with its member sets already sanitized. No
         // selection answers 404, which reads here as the empty

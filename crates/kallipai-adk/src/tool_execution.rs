@@ -183,12 +183,15 @@ pub(crate) async fn execute_tool_calls(
         // One span per call, the ones this round will not run included: a
         // skipped call is a fact about the round, and a gap in the trace would
         // hide what the agent asked for.
+        let call_started = std::time::Instant::now();
         let span = crate::spans::tool_span(&call.name, &call.id, &agent);
         let settle = Settle::new(&span);
 
         let result = if let Some((prior_name, reason)) = &skip {
             // Earlier call did not cleanly succeed: do not execute this one.
             crate::spans::record_tool_outcome(&span, "skipped");
+            ctx.metrics
+                .record_tool_call(crate::metrics::ToolOutcome::Skipped, call_started.elapsed());
             settle.done();
             skipped_tool_result(&call.name, prior_name, reason)
         } else {
@@ -210,6 +213,10 @@ pub(crate) async fn execute_tool_calls(
                     _ = round_cancel.cancelled() => {
                         tracing::info!(tool = %call.name, "tool execution cancelled");
                         crate::spans::record_tool_outcome(&span, "cancelled");
+                        ctx.metrics.record_tool_call(
+                            crate::metrics::ToolOutcome::Cancelled,
+                            call_started.elapsed(),
+                        );
                         settle.cancelled();
                         return ToolExecResult::Cancelled;
                     }
@@ -249,6 +256,10 @@ pub(crate) async fn execute_tool_calls(
             match outcome {
                 ToolCallOutcome::Success(s) => {
                     crate::spans::record_tool_outcome(&span, "success");
+                    ctx.metrics.record_tool_call(
+                        crate::metrics::ToolOutcome::Success,
+                        call_started.elapsed(),
+                    );
                     settle.done();
                     s
                 }
@@ -262,12 +273,24 @@ pub(crate) async fn execute_tool_calls(
                         ("failed", "tool_failed")
                     };
                     crate::spans::record_tool_outcome(&span, word);
+                    ctx.metrics.record_tool_call(
+                        if timed_out {
+                            crate::metrics::ToolOutcome::Timeout
+                        } else {
+                            crate::metrics::ToolOutcome::Failed
+                        },
+                        call_started.elapsed(),
+                    );
                     settle.failed(code);
                     s
                 }
                 ToolCallOutcome::Deferred(s) => {
                     skip = Some((call.name.clone(), "is pending approval".to_string()));
                     crate::spans::record_tool_outcome(&span, "deferred");
+                    ctx.metrics.record_tool_call(
+                        crate::metrics::ToolOutcome::Deferred,
+                        call_started.elapsed(),
+                    );
                     settle.done();
                     s
                 }

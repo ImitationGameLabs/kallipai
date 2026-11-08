@@ -78,7 +78,7 @@ pub(crate) enum RoundOutcome {
 /// Every exit gives an unspent window back to the table: a round can take a
 /// window at a gate and then stop before the send that would spend it, and the
 /// record it left must not pace the round after it.
-pub(crate) async fn run_agent_rounds(
+pub(crate) async fn run_rounds_and_release_window(
     ctx: &mut AgentContext,
     tx: &tokio::sync::mpsc::Sender<AgentEvent>,
     prompt_rx: &mut tokio::sync::mpsc::Receiver<String>,
@@ -113,8 +113,8 @@ fn turn_outcome_label(outcome: &RoundOutcome) -> &'static str {
     }
 }
 
-/// The round loop itself; [`run_agent_rounds`] wraps it so that every exit,
-/// including an error, ends with the window accounted for.
+/// The round loop itself; [`run_rounds_and_release_window`] wraps it so that
+/// every exit, including an error, ends with the window accounted for.
 ///
 /// Every round runs inside its own span. The span is entered here, around the
 /// whole round body, because the body awaits gates that open spans of their

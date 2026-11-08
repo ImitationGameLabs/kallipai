@@ -18,6 +18,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
 use super::RelayHandle;
+use crate::metrics::metrics;
 
 /// Reconnect backoff bounds: retry quickly after a clean server-side close,
 /// capped so a lesche that refuses connections cannot busy-loop the tagma.
@@ -69,7 +70,16 @@ async fn drain_once(handle: &RelayHandle) -> CarrierStats {
     let tagma_id = handle.tagma_id().clone();
     let client = handle.lesche_client();
     let mut stats = CarrierStats::default();
-    let stream = match client.open_agent_events(&tagma_id).await {
+    // The call is the opening: the stream itself can stay open for hours, and a
+    // duration for that would measure the carrier's uptime, not the platform's
+    // answer. The open is what a leg can time.
+    let stream = match metrics()
+        .observe_outbound(
+            crate::metrics::Leg::Lesche,
+            client.open_agent_events(&tagma_id),
+        )
+        .await
+    {
         Ok(s) => s,
         Err(e) => {
             tracing::warn!(tagma = %tagma_id, "agent SSE open failed: {e:#}");

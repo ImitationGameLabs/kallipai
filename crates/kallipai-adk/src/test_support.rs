@@ -115,8 +115,9 @@ pub(crate) fn test_config() -> AgentConfig {
 }
 
 /// Build an `AgentContext` over `profiles` backed by `source`, with `retry_policy`. The store
-/// starts empty (seed a user turn for `run_agent_rounds` tests); `summarize_and_evict` no-ops
-/// on it. `profiles[0]` must be buildable (its client is constructed here).
+/// starts empty (seed a user turn for `run_rounds_and_release_window` tests);
+/// `summarize_and_evict` no-ops on it. `profiles[0]` must be buildable (its client
+/// is constructed here).
 pub(crate) async fn ctx_from_source(
     profiles: Vec<Profile>,
     source: Arc<dyn BackendSource>,
@@ -200,6 +201,7 @@ pub(crate) async fn ctx_from_source_with_tools(
         pacing_notify: Arc::new(tokio::sync::Notify::new()),
         token_budget: TokenBudget::new(1_000_000, 0),
         usage_stats: crate::usage_stats::UsageStats::default(),
+        metrics: crate::metrics::AdkMetrics::default(),
         profile_pacing: None,
         pending_profile_reset: Arc::new(std::sync::Mutex::new(None)),
         park_epoch: Arc::new(AtomicU64::new(0)),

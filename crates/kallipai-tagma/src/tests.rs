@@ -659,3 +659,52 @@ async fn instance_state_dir_gets_runtime_json_owner_only() {
         .collect();
     assert_eq!(entries.len(), 1, "exactly runtime.json, no tmp leftovers");
 }
+
+/// The identity rule `build_info` and the trace resource read, on disk: a
+/// host whose first configured entry is not enrolled yet while a later one is
+/// must name the tagma the boot actually serves, not report nothing.
+#[test]
+fn the_stored_id_follows_the_first_entry_that_has_credentials() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let root = dir.path().join("credentials");
+    std::fs::create_dir_all(root.join("second")).unwrap();
+    credentials::save_tagma(
+        &root.join("second"),
+        "tagma-b",
+        "token-b",
+        "https://edge.example",
+    )
+    .unwrap();
+    let entries = vec![
+        RelayEntry {
+            name: "first".to_owned(),
+            polis_url: "https://edge.example".to_owned(),
+            enrollment_code: None,
+        },
+        RelayEntry {
+            name: "second".to_owned(),
+            polis_url: "https://edge.example".to_owned(),
+            enrollment_code: None,
+        },
+    ];
+    assert_eq!(stored_id_under(&root, &entries).as_deref(), Some("tagma-b"));
+}
+
+/// The upgrade path: the enrollment is still at the root of the credentials
+/// directory because the layout migration has not run, and the boot that
+/// follows still has to report the id it serves.
+#[test]
+fn the_flat_layout_is_read_before_the_migration_runs() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let root = dir.path().join("credentials");
+    std::fs::create_dir_all(&root).unwrap();
+    credentials::save_tagma(&root, "tagma-flat", "token", "https://edge.example").unwrap();
+    assert_eq!(stored_id_under(&root, &[]).as_deref(), Some("tagma-flat"));
+}
+
+#[test]
+fn no_credentials_anywhere_reads_as_unenrolled() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let root = dir.path().join("credentials");
+    assert_eq!(stored_id_under(&root, &[]), None);
+}

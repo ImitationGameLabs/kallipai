@@ -33,6 +33,16 @@ use kallipai_common::timefmt;
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument as _, debug, error, info};
 
+/// Count one attempt: its clock started at the send, and this is where its
+/// outcome is booked, so a retry before it stays out of the duration.
+fn record_model(
+    metrics: &crate::metrics::AdkMetrics,
+    outcome: crate::metrics::ModelOutcome,
+    started: std::time::Instant,
+) {
+    metrics.record_model_call(outcome, started.elapsed());
+}
+
 /// Within-set failover acquisition: rebuild the request per profile, retry, and on a `Failover`
 /// outcome advance the chain. Self-contained — owns `retry_records` and flushes them on every
 /// early-exit arm and after a successful break.
@@ -54,6 +64,9 @@ pub(crate) async fn acquire_stream(
     // The agent's id rides on every chat span: attributes do not inherit from
     // the turn above, so the label is read once per acquisition.
     let agent = crate::spans::agent_label(ctx.config.agent_id.as_ref());
+    // One handle for the whole acquisition: recording must not borrow `ctx`,
+    // which every arm below still needs mutably.
+    let metrics = ctx.metrics.clone();
     let consumed = loop {
         let provider_id = ctx.failover.current_profile().endpoint.clone();
         let profile_id = ctx.failover.current_profile().id.clone();
@@ -82,6 +95,9 @@ pub(crate) async fn acquire_stream(
         // next profile returns to the top of this loop and opens a new span.
         let chat = crate::spans::chat_span(&model, &provider_id, &profile_id, &agent);
         let settle = Settle::new(&chat);
+        // Held until this request settles, whichever way it leaves: a cleanup
+        // path that returns early must still give the slot back.
+        let _in_flight = metrics.model_in_flight();
         let result = {
             let fut = crate::retry::stream_with_retry(
                 crate::retry::RetryCall {
@@ -93,6 +109,7 @@ pub(crate) async fn acquire_stream(
                     provider_id: &provider_id,
                     profile_id: &profile_id,
                     pacing: ctx.profile_pacing.as_deref(),
+                    metrics: &ctx.metrics,
                 },
                 tx,
                 &mut retry_records,
@@ -103,13 +120,18 @@ pub(crate) async fn acquire_stream(
                 result = fut => result,
                 _ = round_cancel.cancelled() => {
                     flush_retry_records(ctx, &mut retry_records).await;
+                    // The select covers the whole retry walk, so the cancel lands either
+                    // in a send or in a backoff between attempts and this arm cannot
+                    // tell which: a send cancelled mid-stream is counted where its
+                    // stream ends, and a wait that never became a send has no
+                    // attempt to count. Nothing is recorded here.
                     settle.cancelled();
                     return AcquireResult::Outcome(AgentOutcome::Cancelled);
                 }
             }
         };
-        let stream = match result {
-            Ok(stream) => {
+        let sent = match result {
+            Ok(sent) => {
                 // The first successful send that crosses the fact the table
                 // carries: how long the profile stayed refused, measured from the
                 // moment the record's window began. Log channel only — the record
@@ -127,7 +149,7 @@ pub(crate) async fn acquire_stream(
                         "a send crossed the shared fact the table carries"
                     );
                 }
-                stream
+                sent
             }
             Err(crate::retry::RequestFailure::Fatal(e)) => {
                 flush_retry_records(ctx, &mut retry_records).await;
@@ -211,6 +233,10 @@ pub(crate) async fn acquire_stream(
                 return AcquireResult::Outcome(AgentOutcome::Cancelled);
             }
         };
+        // The send that opened this stream, and when it began: the attempt's clock
+        // starts there, so a backoff before it is never part of model time.
+        let stream = sent.stream;
+        let send_started = sent.started;
 
         // Consume the acquired stream. A mid-stream transport drop is retryable in-place:
         // the partial content is abandoned (already-emitted deltas are voided downstream by
@@ -227,6 +253,10 @@ pub(crate) async fn acquire_stream(
                     crate::spans::record_usage(&chat, usage);
                 }
                 settle.done();
+                record_model(&metrics, crate::metrics::ModelOutcome::Ok, send_started);
+                if let Some(first) = c.first_delta_at {
+                    metrics.record_first_token(first.saturating_duration_since(send_started));
+                }
                 if let Some(response) = c.response.take()
                     && let Err(error) = ctx.conversation.adopt(*response)
                 {
@@ -244,6 +274,11 @@ pub(crate) async fn acquire_stream(
             StreamOutcome::Cancelled => {
                 flush_retry_records(ctx, &mut retry_records).await;
                 settle.cancelled();
+                record_model(
+                    &metrics,
+                    crate::metrics::ModelOutcome::Cancelled,
+                    send_started,
+                );
                 return AcquireResult::Outcome(AgentOutcome::Cancelled);
             }
             StreamOutcome::Transient(e) => {
@@ -251,6 +286,7 @@ pub(crate) async fn acquire_stream(
                 // them first so the observation log is complete before we decide whether a
                 // mid-stream retry remains within the episode's budget.
                 flush_retry_records(ctx, &mut retry_records).await;
+                record_model(&metrics, crate::metrics::ModelOutcome::Error, send_started);
                 if let Some(result) =
                     on_mid_stream_failure(ctx, &mut messages, tx, round_cancel, round, e, settle)
                         .await

@@ -234,6 +234,7 @@ pub(crate) async fn summarize_and_evict(ctx: &AgentContext) -> Result<CompactOut
             ctx.store.lock().await.accumulate_usage_no_anchor(u);
             ctx.token_budget
                 .record_usage(u.prompt_tokens as u64, u.completion_tokens as u64);
+            ctx.metrics.record_usage(u);
             if let Some(agent_id) = ctx.config.agent_id.as_ref() {
                 ctx.usage_stats.record(agent_id, u);
             }

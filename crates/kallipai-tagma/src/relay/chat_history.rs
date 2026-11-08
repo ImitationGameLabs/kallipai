@@ -680,8 +680,12 @@ fn history_row_from_model(m: Model) -> HistoryRow {
 /// oldest rows past the cap. If a future phase wants per-peer fairness, scope
 /// the count + trim per `user_id` (the schema and read paths are already
 /// multi-peer ready); TTL is age-based and peer-agnostic, so it stays as-is.
-pub(crate) async fn gc(db: &Db, ttl_secs: u64, cap: u64) -> usize {
+/// One sweep, and whether every statement in it succeeded: the caller reports
+/// the pass to `/health`, so a sweep that ran and failed is visible apart from a
+/// sweep that stopped running.
+pub(crate) async fn gc(db: &Db, ttl_secs: u64, cap: u64) -> (usize, bool) {
     let mut deleted = 0usize;
+    let mut ok = true;
     // Guard against a huge env-configured TTL overflowing i64 (u64::MAX as i64
     // is -1, which would make the cutoff future-dated and match every row).
     let ttl = ttl_secs.min(i64::MAX as u64) as i64;
@@ -693,12 +697,22 @@ pub(crate) async fn gc(db: &Db, ttl_secs: u64, cap: u64) -> usize {
         .await
     {
         Ok(r) => deleted += r.rows_affected as usize,
-        Err(e) => warn!(error = %e, "chat_history gc: ttl delete failed"),
+        Err(e) => {
+            ok = false;
+            warn!(error = %e, "chat_history gc: ttl delete failed");
+        }
     }
     // Capacity cap: if over cap, trim the oldest (count - cap) rows. The cap is
     // a runaway backstop, not a usage quota (see DEFAULT_HISTORY_CAP), so
     // trimming is an abnormal signal worth a warn.
-    if let Ok(count) = Entity::find().count(db).await
+    // A count that fails is a pass that failed: the cap went unenforced, so the
+    // caller must see it rather than read a healthy sweep.
+    let counted = Entity::find().count(db).await;
+    if let Err(e) = &counted {
+        ok = false;
+        warn!(error = %e, "chat_history gc: cap count failed");
+    }
+    if let Ok(count) = counted
         && count > cap
     {
         let over = count - cap;
@@ -717,10 +731,13 @@ pub(crate) async fn gc(db: &Db, ttl_secs: u64, cap: u64) -> usize {
         );
         match db.execute_unprepared(&sql).await {
             Ok(r) => deleted += r.rows_affected() as usize,
-            Err(e) => warn!(error = %e, "chat_history gc: cap trim failed"),
+            Err(e) => {
+                ok = false;
+                warn!(error = %e, "chat_history gc: cap trim failed");
+            }
         }
     }
-    deleted
+    (deleted, ok)
 }
 
 fn unix_secs() -> i64 {
@@ -872,7 +889,7 @@ mod tests {
         db.execute_unprepared("UPDATE chat_history SET created_at = created_at - 1000 WHERE 1;")
             .await
             .unwrap();
-        let deleted = gc(&db, 60, 10_000).await;
+        let (deleted, _) = gc(&db, 60, 10_000).await;
         assert_eq!(deleted, 3);
         assert!(read_last_n(&db, Some("u1"), 100).await.unwrap().is_empty());
     }
@@ -884,10 +901,25 @@ mod tests {
             ap(&db, Some("u1"), "outbound", "x").await;
         }
         let ten_years_secs = 10 * 365 * 24 * 3600;
-        let deleted = gc(&db, ten_years_secs, 2).await;
+        let (deleted, _) = gc(&db, ten_years_secs, 2).await;
         assert_eq!(deleted, 3);
         let remaining = read_last_n(&db, Some("u1"), 100).await.unwrap();
         assert_eq!(remaining.len(), 2, "only the 2 newest survive");
+    }
+
+    /// A sweep whose statements failed says so: that flag is the pass verdict
+    /// `/health` reports, and the cap count feeds the same one. Here the TTL
+    /// statement is what fails first (the table is gone), so this pins the
+    /// verdict, not the cap branch on its own.
+    #[tokio::test]
+    async fn gc_reports_a_pass_whose_statements_failed() {
+        let (db, _d) = open_tmp().await;
+        ap(&db, Some("u1"), "outbound", "x").await;
+        db.execute_unprepared("DROP TABLE chat_history;")
+            .await
+            .unwrap();
+        let (_, ok) = gc(&db, 60, 10_000).await;
+        assert!(!ok, "a statement that failed makes the pass a failure");
     }
 
     #[tokio::test]

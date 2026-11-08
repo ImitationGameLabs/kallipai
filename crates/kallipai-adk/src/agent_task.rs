@@ -24,6 +24,7 @@ use crate::context::{
     CompactionLedger, ContextStore, ContextSummarizer, TurnId, assistant_message, estimate_text,
 };
 use crate::history::{HistoryWriter, RecordKind};
+use crate::metrics::WakeOutcome;
 use crate::policy::AuthorizedToolExecutor;
 use crate::retry::{AttemptOrigin, Episode};
 use crate::runner;
@@ -208,6 +209,12 @@ pub struct AgentContext {
     /// Cloned from `AppState` — same underlying map across all agents;
     /// the two accounting points record into one shared view.
     pub usage_stats: crate::usage_stats::UsageStats,
+    /// Wake, model and tool counters, shared process-wide.
+    /// Taken from the process's own set, not from the tagma state: recording
+    /// happens deep in the acquisition loop, below the layers that hold that
+    /// state. A context built outside a running tagma (tests, tools) keeps its
+    /// own set, which no scrape reads.
+    pub metrics: crate::metrics::AdkMetrics,
     /// Tagma-wide upstream-fact table, shared by every agent. Cloned from
     /// `AppState`; `None` in contexts with no tagma behind them (unit
     /// tests), which reads as no facts at all — every read is fail-open.
@@ -909,6 +916,68 @@ pub enum WakeDisposition {
     Terminated,
 }
 
+/// How a wake ended, in the two vocabularies that ask about it: the
+/// disposition the task's loop reads, and the outcome the wake family counts.
+///
+/// One wake, one count: [`run_and_report`] books the pair once, from its
+/// entry to the point where it hands control back — a park, an idle, or a
+/// termination. The turns a wake runs are the model and tool counters'
+/// business, and the trace's `invoke_agent` span is the same unit as this
+/// family.
+///
+/// The disposition and the outcome are two vocabularies, and the map between
+/// them is written out because it is not one-to-one:
+///
+/// | how the wake ended | disposition | wake outcome |
+/// | --- | --- | --- |
+/// | `break`, `Idle`, the heartbeat guardrail | `Awake` | `Completed` |
+/// | a turn an interrupt cancelled | `Awake` | `Cancelled` |
+/// | a lifecycle cancel | `Terminated` | `Cancelled` |
+/// | chain exhausted, quota block, token budget, max rounds, a fatal error,
+///   the modality gate | `Held` | `Failed` |
+///
+/// A wake that holds the loop is not thereby a success: the park an operator
+/// reads in the log and the failure this family counts have to agree.
+struct WakeEnd {
+    disposition: WakeDisposition,
+    outcome: WakeOutcome,
+}
+
+impl WakeEnd {
+    /// The wake finished its work: `break`, `Idle`, or the heartbeat guardrail.
+    fn done() -> Self {
+        Self {
+            disposition: WakeDisposition::Awake,
+            outcome: WakeOutcome::Completed,
+        }
+    }
+
+    /// An interrupt cancelled the turn; the task itself stays alive.
+    fn interrupted() -> Self {
+        Self {
+            disposition: WakeDisposition::Awake,
+            outcome: WakeOutcome::Cancelled,
+        }
+    }
+
+    /// A lifecycle cancel ended the run: the task terminates.
+    fn terminated() -> Self {
+        Self {
+            disposition: WakeDisposition::Terminated,
+            outcome: WakeOutcome::Cancelled,
+        }
+    }
+
+    /// The wake did not finish its work and parks instead: a gate refusal, a
+    /// spent chain, a quota window, budget, rounds, or a fatal error.
+    fn failed() -> Self {
+        Self {
+            disposition: WakeDisposition::Held,
+            outcome: WakeOutcome::Failed,
+        }
+    }
+}
+
 /// Run agent rounds for one external wake and send results via channel.
 ///
 /// Owns the heartbeat loop: a bare-assistant round (no `break`, no tool calls) no
@@ -937,10 +1006,16 @@ pub async fn run_and_report(
         },
     );
     let settle = Settle::new(&span);
-    let disposition = run_and_report_inner(ctx, agent_tx, prompt_rx, origin)
+    let started = std::time::Instant::now();
+    let end = run_and_report_inner(ctx, agent_tx, prompt_rx, origin)
         .instrument(span.clone())
         .await;
-    match disposition {
+    // One wake, one count: from this entry to the point where it hands control
+    // back, a park, an idle, or a termination. The turns inside it belong to the
+    // model and tool families, and the trace draws the same boundary at the
+    // `invoke_agent` span.
+    ctx.metrics.record_wake(end.outcome, started.elapsed());
+    match end.disposition {
         WakeDisposition::Terminated => {
             record_attribute(&span, "kallipai.wake.outcome", "terminated");
             settle.cancelled();
@@ -954,7 +1029,7 @@ pub async fn run_and_report(
             settle.done();
         }
     }
-    disposition
+    end.disposition
 }
 
 /// The wake's work, under [`run_and_report`]'s span: the heartbeat loop, the
@@ -964,7 +1039,7 @@ async fn run_and_report_inner(
     agent_tx: &tokio::sync::mpsc::Sender<AgentEvent>,
     prompt_rx: &mut tokio::sync::mpsc::Receiver<String>,
     origin: AttemptOrigin,
-) -> WakeDisposition {
+) -> WakeEnd {
     // The wake that caused this execution decides how its first attempt reads:
     // an external one is served once even against a marked endpoint, a timer one
     // is not. Taken by the first pre-send reading below.
@@ -1009,7 +1084,7 @@ async fn run_and_report_inner(
             },
             "modality gate",
         );
-        return WakeDisposition::Held;
+        return WakeEnd::failed();
     }
     let mut no_progress: u32 = 0;
     loop {
@@ -1019,7 +1094,8 @@ async fn run_and_report_inner(
         *ctx.round_cancel.lock().unwrap_or_else(|e| e.into_inner()) = Some(round.clone());
 
         agent_tx.send(AgentEvent::Busy).await.ok();
-        let result = runner::run_agent_rounds(ctx, agent_tx, prompt_rx, round.handle()).await;
+        let result =
+            runner::run_rounds_and_release_window(ctx, agent_tx, prompt_rx, round.handle()).await;
 
         // Always clear the slot: a stale token cancelled by a later interrupt would be a
         // no-op (nobody selects on it), but clearing keeps the invariant tight.
@@ -1045,7 +1121,7 @@ async fn run_and_report_inner(
                             .ok();
                     }
                 }
-                return WakeDisposition::Awake;
+                return WakeEnd::done();
             }
             Ok(runner::RoundOutcome::BareAssistant {
                 content,
@@ -1060,7 +1136,7 @@ async fn run_and_report_inner(
                     // Self-monologue guardrail: force-idle instead of looping forever.
                     ctx.settle(LifecycleState::Idle, "heartbeat limit");
                     agent_tx.send(AgentEvent::Idle).await.ok();
-                    return WakeDisposition::Awake;
+                    return WakeEnd::done();
                 }
                 ctx.record_turn_with_attempt(
                     vec![assistant_message(Some(content), Vec::new(), &reasoning)],
@@ -1079,7 +1155,7 @@ async fn run_and_report_inner(
                             "agent task: lifecycle cancel mid-round, persisting and exiting"
                         );
                         terminate_cancelled(ctx, agent_tx).await;
-                        return WakeDisposition::Terminated;
+                        return WakeEnd::terminated();
                     }
                     // Only the round token was cancelled (interrupt) → keep living.
                     // An interrupt cancels this round, not the queue: a buffered
@@ -1091,7 +1167,7 @@ async fn run_and_report_inner(
                     CancelKind::Interrupt => {
                         agent_tx.send(AgentEvent::Interrupted).await.ok();
                         ctx.settle(LifecycleState::Idle, "interrupt");
-                        return WakeDisposition::Awake;
+                        return WakeEnd::interrupted();
                     }
                 }
             }
@@ -1138,7 +1214,7 @@ async fn run_and_report_inner(
                 // The retry fuse is a backoff this wake armed, so the wake is
                 // held: draining now would spend the next attempt without the
                 // backoff and charge the transient count twice.
-                return WakeDisposition::Held;
+                return WakeEnd::failed();
             }
             Ok(runner::RoundOutcome::Park(AgentOutcome::QuotaBlocked(info))) => {
                 // A quota or payment block: park with the structured reason and
@@ -1161,7 +1237,7 @@ async fn run_and_report_inner(
                     },
                     "quota blocked",
                 );
-                return WakeDisposition::Held;
+                return WakeEnd::failed();
             }
             Ok(runner::RoundOutcome::Park(AgentOutcome::TokenBudgetExceeded {
                 consumed,
@@ -1189,7 +1265,7 @@ async fn run_and_report_inner(
                 // takes — a pre-call reading, or a response already consumed and
                 // charged — and it re-checks itself on the next probe wake, so
                 // the buffered inbox message stays in the inbox.
-                return WakeDisposition::Held;
+                return WakeEnd::failed();
             }
             Ok(runner::RoundOutcome::Park(AgentOutcome::MaxRoundsExceeded)) => {
                 ctx.transient_fails = 0;
@@ -1201,7 +1277,7 @@ async fn run_and_report_inner(
                     "max rounds",
                 );
                 agent_tx.send(AgentEvent::MaxRoundsExceeded).await.ok();
-                return WakeDisposition::Held;
+                return WakeEnd::failed();
             }
             Ok(runner::RoundOutcome::Park(AgentOutcome::Idle)) => {
                 // Not produced by the round loop today (only Break/BareAssistant/Park
@@ -1209,7 +1285,7 @@ async fn run_and_report_inner(
                 ctx.transient_fails = 0;
                 ctx.settle(LifecycleState::Idle, "park(idle)");
                 agent_tx.send(AgentEvent::Idle).await.ok();
-                return WakeDisposition::Awake;
+                return WakeEnd::done();
             }
             Err(e) => {
                 // Permanent (Fatal) error — park and surface; the operator acts.
@@ -1227,32 +1303,32 @@ async fn run_and_report_inner(
                 agent_tx.send(AgentEvent::Error(rendered)).await.ok();
                 // A fatal park holds the wake: a drained round would meet the
                 // same gate and report the failure twice.
-                return WakeDisposition::Held;
+                return WakeEnd::failed();
             }
         }
     }
 }
 
-/// Run one wake and, when its first round ended awake, deliver what the inbox
-/// buffered into one more round.
+/// Run one wake and, when it ended awake, deliver what the inbox buffered into
+/// a second wake. Each of the two is a full wake — its own `invoke_agent` span,
+/// its own count in the wake family — so one drain can book two.
 ///
-/// A first round that ended awake has left the agent free to run another
-/// round — the kick round is the case that called for this — so messages
-/// that arrived while parked (or during the round) are pulled here instead
-/// of waiting for the next notify: the parked guard consumes notify
-/// permits, so notify alone never delivers them while the agent stays
-/// parked. `pull_undelivered` is an atomic drain, so a racing notify arm
-/// simply finds nothing left to pull. Only a round that ended awake
-/// delivers here; any other verdict leaves its buffered message in the
-/// inbox.
+/// A first wake that ended awake has left the agent free to run again — the
+/// kick wake is the case that called for this — so messages that arrived while
+/// parked (or during the wake) are pulled here instead of waiting for the next
+/// notify: the parked guard consumes notify permits, so notify alone never
+/// delivers them while the agent stays parked. `pull_undelivered` is an atomic
+/// drain, so a racing notify arm simply finds nothing left to pull. Only a wake
+/// that ended awake delivers here; any other verdict leaves its buffered
+/// message in the inbox.
 ///
-/// The second round runs as `External`: the pulled message is new work from
+/// The second wake runs as `External`: the pulled message is new work from
 /// outside, so it forces the pacing window open rather than obeying a record
 /// this agent's own episode wrote.
 ///
-/// One layer only: a message that arrives during the second round waits for the
-/// next wake. Both rounds read the same [`WakeDisposition`] contract, so a
-/// second-round `Held` never delivers a third message.
+/// One layer only: a message that arrives during the second wake waits for the
+/// next one. Both wakes read the same [`WakeDisposition`] contract, so a
+/// second-wake `Held` never delivers a third message.
 ///
 /// Six entrances reach it: the task's first prompt, a prompt message, the notify
 /// wake (inbox pull and approvals), and the three timer fuses (retry, wait,
@@ -3249,6 +3325,25 @@ mod tests {
             run_and_report(&mut ctx, &tx, &mut prompt_rx, AttemptOrigin::System).await,
             WakeDisposition::Held,
             "{from}: a blocked wake parks instead of starting a round"
+        );
+        // The wake boundary is where the count lands. A refusal is a failed
+        // wake, so the park above and this count tell one story.
+        let snapshot = ctx.metrics.snapshot();
+        assert_eq!(
+            snapshot
+                .wakes_total
+                .iter()
+                .find(|(outcome, _)| *outcome == "failed")
+                .map(|(_, count)| *count),
+            Some(1),
+            "{from}: a refused wake is counted once, as failed"
+        );
+        assert!(
+            snapshot
+                .wakes_total
+                .iter()
+                .all(|(outcome, count)| *outcome == "failed" || *count == 0),
+            "{from}: the same wake is not counted under another outcome"
         );
         let parked = ctx
             .lifecycle

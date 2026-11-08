@@ -12,8 +12,15 @@ fn main() -> Result<()> {
 
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    // The enrolled tagma id rides the exporter's resource under `tagma.id`.
+    // A first-run enrollment has none yet, and the boot resolves that later.
+    let tagma_id = kallipai_tagma::stored_tagma_id(&args);
+    let attrs: Vec<(&str, &str)> = tagma_id
+        .as_deref()
+        .map(|id| vec![("tagma.id", id)])
+        .unwrap_or_default();
     // The guard keeps the span exporter alive to the end of main.
-    let _telemetry = init_logging(&filter);
+    let _telemetry = init_logging(&filter, &attrs);
 
     // Env governance before the async runtime exists: edition 2024 marks
     // remove_var unsafe because a concurrent getenv on another thread is

@@ -1,5 +1,5 @@
 use opentelemetry_sdk::Resource;
-use opentelemetry_sdk::error::OTelSdkResult;
+use opentelemetry_sdk::error::{OTelSdkError, OTelSdkResult};
 use opentelemetry_sdk::trace::{SpanData, SpanExporter};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -118,6 +118,7 @@ fn without_a_config_the_bootstrap_matches_the_logging_one() {
         None,
         &test_filter(),
         "archeion",
+        &[],
         None,
         telemetry_out.clone(),
     );
@@ -143,14 +144,21 @@ fn a_config_keeps_the_log_line_and_adds_the_export_layer() {
         Some(&dead),
         &test_filter(),
         "archeion",
+        &[],
         None,
         enabled_out.clone(),
     );
     tracing::subscriber::with_default(subscriber, || tracing::info!("kallipai telemetry marker"));
 
     let plain_out = Captured::default();
-    let (subscriber, _guardian) =
-        service_layers(None, &test_filter(), "archeion", None, plain_out.clone());
+    let (subscriber, _guardian) = service_layers(
+        None,
+        &test_filter(),
+        "archeion",
+        &[],
+        None,
+        plain_out.clone(),
+    );
     tracing::subscriber::with_default(subscriber, || tracing::info!("kallipai telemetry marker"));
 
     assert_eq!(
@@ -173,6 +181,7 @@ fn a_refused_export_does_not_reach_the_caller() {
         Some(&dead),
         &test_filter(),
         "archeion",
+        &[],
         None,
         captured.clone(),
     );
@@ -371,7 +380,7 @@ async fn an_unmatched_request_carries_the_unmatched_route_as_an_attribute() {
 
 #[test]
 fn export_layer_stays_inert_without_a_configuration() {
-    let (layer, mut guard) = export_layer(None, "tagma");
+    let (layer, mut guard) = export_layer(None, "tagma", &[]);
     assert!(layer.is_none(), "an unconfigured service exports nothing");
     assert!(!guard.shutdown(), "an inert guard owns no provider");
 }
@@ -379,7 +388,7 @@ fn export_layer_stays_inert_without_a_configuration() {
 #[test]
 fn export_layer_carries_the_layer_and_the_guard_when_configured() {
     let dead = config("http://127.0.0.1:1");
-    let (layer, mut guard) = export_layer(Some(&dead), "tagma");
+    let (layer, mut guard) = export_layer(Some(&dead), "tagma", &[]);
     assert!(
         layer.is_some(),
         "a configured service exports through this layer"
@@ -510,6 +519,7 @@ async fn exported_spans(
         Some(&config),
         &test_filter(),
         "archeion",
+        &[],
         None,
         Captured::default(),
     );
@@ -586,6 +596,49 @@ async fn a_request_span_reaches_the_exporter() {
         Some("kallipai")
     );
     assert_eq!(span.status, opentelemetry::trace::Status::Unset);
+}
+
+/// The exemption is a promise on the wire: the scrape leaves no span, while
+/// the path beside it still opens one, so a trace of the process does not
+/// carry the requests that measure it.
+#[cfg(feature = "axum")]
+#[tokio::test]
+async fn an_exempt_path_opens_no_server_span_and_its_neighbour_still_does() {
+    use tower::ServiceExt as _;
+
+    let app = axum::Router::new()
+        .route("/metrics", axum::routing::get(|| async { "scrape" }))
+        .route("/other", axum::routing::get(|| async { "work" }));
+    let app = with_server_span_except(app, &["/metrics"]);
+
+    let (subscriber, mut guard, recording) = recording_with(test_filter());
+    {
+        let _subscribed = tracing::subscriber::set_default(subscriber);
+        for path in ["/metrics", "/other"] {
+            let response = app
+                .clone()
+                .oneshot(request_for(path, &[]))
+                .await
+                .expect("the router answers");
+            assert_eq!(response.status(), axum::http::StatusCode::OK);
+        }
+    }
+    assert!(guard.shutdown(), "a configured guard owns a provider");
+
+    let spans = recording.batches();
+    assert_eq!(
+        spans.len(),
+        1,
+        "the exempt path opens no span: {:?}",
+        spans
+            .iter()
+            .map(|span| span.name.clone())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        attribute(&spans[0], "http.route").as_deref(),
+        Some("/other")
+    );
 }
 
 #[cfg(feature = "axum")]
@@ -878,6 +931,7 @@ fn recording_with(
         Some(&config),
         &filter,
         "archeion",
+        &[],
         None,
         Captured::default(),
     );
@@ -902,6 +956,7 @@ fn recording_telemetry() -> (
         Some(&config),
         &filter,
         "archeion",
+        &[],
         None,
         Captured::default(),
     );
@@ -1391,6 +1446,7 @@ async fn a_span_reaches_the_exporter_while_no_event_does() {
         Some(&config),
         &EnvFilter::new("warn"),
         "archeion",
+        &[],
         None,
         Captured::default(),
     );
@@ -1450,6 +1506,7 @@ async fn a_client_span_and_its_traceparent_survive_a_quiet_log_filter() {
         Some(&config),
         &EnvFilter::new("warn"),
         "archeion",
+        &[],
         None,
         Captured::default(),
     );
@@ -1540,4 +1597,124 @@ async fn a_scope_that_ends_without_a_verdict_reads_as_abandoned() {
         "a finished scope carries no failure"
     );
     assert_eq!(find("finished").status, "unset");
+}
+
+/// An exporter that answers the way the test asks and keeps what the wrapper
+/// handed it: the counting wrapper's two obligations in one fake.
+#[derive(Debug, Clone)]
+struct ScriptedExporter {
+    answer: Answer,
+    resource: Arc<Mutex<Option<Resource>>>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum Answer {
+    Ok,
+    Unreachable,
+    Timeout,
+    Other,
+}
+
+impl SpanExporter for ScriptedExporter {
+    async fn export(&self, _batch: Vec<SpanData>) -> OTelSdkResult {
+        match self.answer {
+            Answer::Ok => Ok(()),
+            Answer::Unreachable => Err(OTelSdkError::InternalFailure(
+                "connection refused by the collector".to_string(),
+            )),
+            Answer::Timeout => Err(OTelSdkError::Timeout(std::time::Duration::from_secs(1))),
+            Answer::Other => Err(OTelSdkError::InternalFailure(
+                "the body would not serialize".to_string(),
+            )),
+        }
+    }
+
+    fn set_resource(&mut self, resource: &Resource) {
+        *self.resource.lock().unwrap() = Some(resource.clone());
+    }
+}
+
+/// A tally of its own, so one test's accounting cannot be read from another's.
+fn scripted_stats() -> &'static ExportStats {
+    Box::leak(Box::new(ExportStats::default()))
+}
+
+#[tokio::test]
+async fn the_counting_wrapper_books_the_answer_and_returns_it_unchanged() {
+    let stats = scripted_stats();
+    let mut counting = CountingExporter {
+        inner: ScriptedExporter {
+            answer: Answer::Unreachable,
+            resource: Arc::new(Mutex::new(None)),
+        },
+        stats,
+    };
+
+    assert!(
+        counting.export(Vec::new()).await.is_err(),
+        "the wrapper returns the exporter's failure as it found it"
+    );
+    let snapshot = stats.snapshot();
+    assert_eq!(
+        snapshot.failed_unavailable, 1,
+        "a refused connection is unreachable"
+    );
+    assert_eq!(snapshot.failed_timeout, 0);
+    assert_eq!(snapshot.failed_other, 0);
+
+    counting.inner.answer = Answer::Timeout;
+    assert!(counting.export(Vec::new()).await.is_err());
+    counting.inner.answer = Answer::Other;
+    assert!(counting.export(Vec::new()).await.is_err());
+
+    let snapshot = stats.snapshot();
+    assert_eq!(snapshot.failed_unavailable, 1);
+    assert_eq!(snapshot.failed_timeout, 1, "the SDK's own timeout variant");
+    assert_eq!(
+        snapshot.failed_other, 1,
+        "an internal failure that is not transport"
+    );
+    assert_eq!(snapshot.exported_spans, 0);
+}
+
+#[tokio::test]
+async fn the_counting_wrapper_forwards_the_resource_and_counts_the_spans() {
+    let stats = scripted_stats();
+    let inner = ScriptedExporter {
+        answer: Answer::Ok,
+        resource: Arc::new(Mutex::new(None)),
+    };
+    let kept = inner.clone();
+    let mut counting = CountingExporter { inner, stats };
+
+    let resource = Resource::builder().with_service_name("probe").build();
+    counting.set_resource(&resource);
+    let forwarded = kept.resource.lock().unwrap().clone();
+    assert_eq!(
+        forwarded.map(|given| format!("{given:?}")),
+        Some(format!("{resource:?}")),
+        "set_resource must reach the exporter, or spans leave without the resource"
+    );
+
+    let (subscriber, mut guard, recorder) = recording_with(EnvFilter::new("info"));
+    {
+        let _subscribed = tracing::subscriber::set_default(subscriber);
+        let span = tracing::info_span!(target: SPAN_TARGET, "probe");
+        let _entered = span.enter();
+    }
+    guard.shutdown();
+    let batch = recorder.batches();
+    assert!(
+        !batch.is_empty(),
+        "the recording stack handed over one span"
+    );
+    let spans = batch.len() as u64;
+
+    assert!(counting.export(batch).await.is_ok());
+    let snapshot = stats.snapshot();
+    assert_eq!(snapshot.exported_spans, spans);
+    assert!(
+        snapshot.last_success_unix > 0,
+        "a success stamps the moment"
+    );
 }

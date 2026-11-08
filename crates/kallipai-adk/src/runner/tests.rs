@@ -393,7 +393,8 @@ async fn advance_all_infeasible_chain_exhausted() {
     );
 }
 
-// --- run_agent_rounds integration tests (wiremock, one MockServer per profile) ---
+// --- run_rounds_and_release_window integration tests (wiremock, one MockServer per
+// profile) ---
 
 /// Fast retry policy so the wiremock suite stays snappy.
 fn fast_policy() -> crate::retry::RetryPolicy {
@@ -560,14 +561,15 @@ fn wiremock_source(map: HashMap<String, Arc<dyn LlmBackend>>) -> Arc<dyn Backend
     Arc::new(MapSource(map))
 }
 
-/// Drive one `run_agent_rounds`: seed a user turn, mint a round token, run, collect events.
-async fn run_rounds(ctx: &mut AgentContext) -> (Result<RoundOutcome>, Vec<AgentEvent>) {
+/// Drive one `run_rounds_and_release_window`: seed a user turn, mint a round token,
+/// run, collect events.
+async fn run_one_window(ctx: &mut AgentContext) -> (Result<RoundOutcome>, Vec<AgentEvent>) {
     ctx.record_turn(vec![user_msg("respond with the single word: done")])
         .await;
     let round = RoundToken::new(&ctx.cancel);
     let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentEvent>(256);
     let (_prompt_tx, mut prompt_rx) = tokio::sync::mpsc::channel::<String>(16);
-    let outcome = run_agent_rounds(ctx, &tx, &mut prompt_rx, round.handle()).await;
+    let outcome = run_rounds_and_release_window(ctx, &tx, &mut prompt_rx, round.handle()).await;
     let mut events = Vec::new();
     while let Ok(ev) = rx.try_recv() {
         events.push(ev);
@@ -698,7 +700,7 @@ async fn failover_primary_down_backup_succeeds() {
     let profiles = vec![profile("p1", "ep1", 500_000), profile("p2", "ep2", 500_000)];
     let mut ctx = ctx_from_source(profiles, wiremock_source(map), fast_policy()).await;
 
-    let (outcome, events) = run_rounds(&mut ctx).await;
+    let (outcome, events) = run_one_window(&mut ctx).await;
 
     let content = match outcome {
         Ok(RoundOutcome::BareAssistant { content, .. }) => content,
@@ -872,7 +874,7 @@ async fn break_tool_call_yields_break_outcome() {
     let profiles = vec![profile("p1", "ep1", 500_000)];
     let mut ctx = ctx_from_source(profiles, wiremock_source(map), fast_policy()).await;
 
-    let (outcome, _events) = run_rounds(&mut ctx).await;
+    let (outcome, _events) = run_one_window(&mut ctx).await;
     assert!(
         matches!(outcome, Ok(RoundOutcome::Break(_))),
         "expected RoundOutcome::Break, got {outcome:?}"
@@ -1480,6 +1482,40 @@ async fn bare_assistant_heartbeats_then_force_idles_at_cap() {
         .count();
     assert_eq!(busy, 3, "three bare rounds ran before the cap tripped");
     assert_eq!(idle, 1, "force-idle emits exactly one Idle");
+
+    // Three rounds ran inside one wake. The count belongs to the wake
+    // boundary, so it is one; a count kept per round would read three.
+    let wakes = ctx.metrics.snapshot().wakes_total;
+    let total: u64 = wakes.iter().map(|(_, count)| *count).sum();
+    assert_eq!(
+        wakes
+            .iter()
+            .find(|(outcome, _)| *outcome == "completed")
+            .map(|(_, count)| *count),
+        Some(1),
+        "a wake that ran three rounds is counted once"
+    );
+    assert_eq!(total, 1, "no other outcome also counted this wake");
+    for outcome in ["failed", "cancelled"] {
+        assert_eq!(
+            wakes
+                .iter()
+                .find(|(name, _)| *name == outcome)
+                .map(|(_, count)| *count),
+            Some(0),
+            "{outcome}: a wake that finished books nothing else"
+        );
+    }
+    // The duration is booked at the same boundary: one sample, not three.
+    let durations = ctx.metrics.snapshot().wake_duration;
+    assert_eq!(
+        durations
+            .iter()
+            .find(|(outcome, _)| *outcome == "completed")
+            .map(|(_, histogram)| histogram.count),
+        Some(1),
+        "one duration per wake, not per round"
+    );
 }
 
 #[tokio::test]
@@ -1492,7 +1528,7 @@ async fn fatal_400_no_failover() {
     let profiles = vec![profile("p1", "ep1", 500_000), profile("p2", "ep2", 500_000)];
     let mut ctx = ctx_from_source(profiles, wiremock_source(map), fast_policy()).await;
 
-    let (outcome, events) = run_rounds(&mut ctx).await;
+    let (outcome, events) = run_one_window(&mut ctx).await;
 
     assert!(outcome.is_err(), "400 is Fatal → round errors");
     assert_eq!(ctx.failover.profile_idx(), 0);
@@ -1512,7 +1548,7 @@ async fn chain_exhausted_single_profile_500() {
     let profiles = vec![profile("p1", "ep1", 500_000)]; // single-profile set
     let mut ctx = ctx_from_source(profiles, wiremock_source(map), fast_policy()).await;
 
-    let (outcome, events) = run_rounds(&mut ctx).await;
+    let (outcome, events) = run_one_window(&mut ctx).await;
 
     match outcome {
         Ok(RoundOutcome::Park(AgentOutcome::FailoverChainExhausted {
@@ -1537,9 +1573,14 @@ async fn mid_stream_drop_retries_and_emits_stream_reset() {
     let mut map = HashMap::new();
     map.insert("ep1".into(), wiremock_backend(&uri));
     let profiles = vec![profile("p1", "ep1", 500_000)];
-    let mut ctx = ctx_from_source(profiles, wiremock_source(map), fast_policy()).await;
+    // A backoff wide enough to notice: had the wait between the two sends
+    // leaked into an attempt's clock, the durations below would carry it.
+    let mut policy = fast_policy();
+    policy.base_delay = Duration::from_millis(120);
+    policy.max_delay = Duration::from_millis(120);
+    let mut ctx = ctx_from_source(profiles, wiremock_source(map), policy).await;
 
-    let (outcome, events) = run_rounds(&mut ctx).await;
+    let (outcome, events) = run_one_window(&mut ctx).await;
 
     let content = match outcome {
         Ok(RoundOutcome::BareAssistant { content, .. }) => content,
@@ -1551,6 +1592,26 @@ async fn mid_stream_drop_retries_and_emits_stream_reset() {
     assert_eq!(stream_resets(&events), vec![(1, 2)]);
     // No failover: the same endpoint recovered.
     assert!(failover_hops(&events).is_empty());
+
+    // The whole path books both sends into the context's counters: the one
+    // that dropped mid-stream and the one that finished.
+    let snapshot = ctx.metrics.snapshot();
+    let attempts = |label: &str| {
+        snapshot
+            .model_requests_total
+            .iter()
+            .find(|(name, _)| *name == label)
+            .map(|(_, value)| *value)
+            .unwrap_or(0)
+    };
+    assert_eq!(attempts("error"), 1, "the dropped stream is one attempt");
+    assert_eq!(attempts("ok"), 1, "the retried stream is another");
+    assert_eq!(snapshot.model_duration.count, 2);
+    assert!(
+        snapshot.model_duration.sum_seconds < 0.06,
+        "the backoff stays out of both durations: {:?}",
+        snapshot.model_duration
+    );
 }
 
 #[tokio::test]
@@ -1564,7 +1625,7 @@ async fn mid_stream_drop_budget_exhausted_failovers() {
     let profiles = vec![profile("p1", "ep1", 500_000)];
     let mut ctx = ctx_from_source(profiles, wiremock_source(map), fast_policy()).await;
 
-    let (outcome, events) = run_rounds(&mut ctx).await;
+    let (outcome, events) = run_one_window(&mut ctx).await;
 
     match outcome {
         Ok(RoundOutcome::Park(AgentOutcome::FailoverChainExhausted {
@@ -2270,7 +2331,7 @@ async fn a_tool_round_does_not_inherit_the_previous_rounds_send_budget() {
     ctx.config.max_tool_rounds = 2;
     ctx.config.retry_policy.max_retries = 0;
 
-    let (outcome, _events) = run_rounds(&mut ctx).await;
+    let (outcome, _events) = run_one_window(&mut ctx).await;
 
     assert!(
         matches!(outcome, Ok(RoundOutcome::BareAssistant { ref content, .. }) if content == "done"),
@@ -2358,7 +2419,7 @@ async fn attempts_are_bounded_by_the_ledger_not_the_round_count() {
     seed_over_budget_store(&mut ctx).await;
 
     for round in 0..3 {
-        let (outcome, _events) = run_rounds(&mut ctx).await;
+        let (outcome, _events) = run_one_window(&mut ctx).await;
         assert!(
             matches!(outcome, Ok(RoundOutcome::BareAssistant { .. })),
             "round {round} must finish on its own answer, got {outcome:?}"
@@ -2405,7 +2466,7 @@ async fn bare_assistant_carries_the_streams_reasoning() {
     let profiles = vec![profile("p1", "ep1", 500_000)];
     let mut ctx = ctx_from_source(profiles, wiremock_source(map), fast_policy()).await;
 
-    let (outcome, _events) = run_rounds(&mut ctx).await;
+    let (outcome, _events) = run_one_window(&mut ctx).await;
 
     match outcome {
         Ok(RoundOutcome::BareAssistant {
