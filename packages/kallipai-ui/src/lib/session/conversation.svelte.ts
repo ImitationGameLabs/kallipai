@@ -357,14 +357,22 @@ export abstract class ConversationBase {
       this.canWrite && this.transport !== null && this.status !== "reconnecting"
     );
   }
-  /** The write axis: whether a line can go out at all. Three inputs: the
-   *  conversation is open for writing, a carrier is mounted, and that carrier
-   *  has not closed. All three inputs are runes (`sender` and `closed` here,
-   *  the sender's flag in its own class), so a page deriving from this
-   *  re-evaluates on mount, on close, and on a sender closing under it. A
-   *  stream rebuilding leaves all three true; `connected` adds stream health. */
+  /** The write axis: whether a line typed now has a path to land. Two inputs:
+   *  the conversation is open, and this leaf's carrier exists (`carrierLive`).
+   *  Both are runes (the fields behind them are `$state`), so a page deriving
+   *  from this re-evaluates on close and on a carrier changing under it. A
+   *  stream rebuilding leaves both true; `connected` adds stream health. */
   get canWrite(): boolean {
-    return !this.closed && this.sender !== null && this.sender.available;
+    return !this.closed && this.carrierLive;
+  }
+
+  /** The leaf's share of the write axis: does the path a line travels exist
+   *  right now. The direct leaf's carrier outlives its stream, so this is a
+   *  mounted sender that has not closed; the relay leaf's path is its own
+   *  channel; the offline view writes into the pending store. `available` says
+   *  'this sender was not closed', never 'a send can go through now'. */
+  protected get carrierLive(): boolean {
+    return this.sender !== null && this.sender.available;
   }
 
   /** Tear down the underlying transport. The run() drain then ends; its stale
@@ -381,7 +389,7 @@ export abstract class ConversationBase {
   send(text: string, options?: SendOptions): void {
     if (!this.canWrite) {
       this.error = new Error(
-        this.closed ? "conversation closed" : "no live sender",
+        this.closed ? "conversation closed" : "not connected",
       );
       return;
     }
@@ -1492,11 +1500,13 @@ export class RelayConversation extends ConversationBase {
   }
 
   /** The relay's write path is the channel itself: there is no separate
-   *  carrier that outlives it, so writability follows the channel's status
-   *  (and matches the room page's gate) instead of the direct path's
-   *  carrier-outlives-the-stream rule. */
-  override get canWrite(): boolean {
-    return !this.closed && this.status === "open";
+   *  carrier that outlives it, so the path exists exactly while a transport is
+   *  attached and the channel is open. The two are one fact, and this is where
+   *  that fact is stated: composing both into the write axis puts the
+   *  guarantee in the definition, so no order of assignments in run()'s
+   *  terminal branch can open a window. */
+  protected override get carrierLive(): boolean {
+    return this.transport !== null && this.status === "open";
   }
 
   readonly tagmaId: string;
@@ -1993,9 +2003,11 @@ export class RelayConversation extends ConversationBase {
    *  it. A before-page returns the newest rows at or below the cursor, which
    *  is what lets the base read a contiguous miss as `deleted`. */
   protected async probePage(id: number): Promise<HistoryEntry[] | null> {
-    // A live catch-up window owns the drain's content frames: a probe now
-    // would divide them between two buffers, so the block stays retryable
-    // until the catch-up ends.
+    // Three guards, one per way the answer is unusable: no transport, a closed
+    // conversation, and a live catch-up window that owns the drain's content
+    // frames. `closed` also overlaps pullPage's fold (closed reads as timed
+    // out, which reads as no answer), but that equivalence lives in another
+    // method, so the short circuit stays here as defence in depth.
     if (this.transport === null || this.closed || this.windowPull !== null) {
       return null;
     }
@@ -2179,10 +2191,12 @@ export class OfflineConversation extends ConversationBase {
   get pendingKey(): string {
     return this.tagmaId;
   }
-  /** Writable without a carrier: the offline view's line is a durable pending
-   *  row that a later real channel flushes. Only a closed view stops it. */
-  override get canWrite(): boolean {
-    return !this.closed;
+  /** Writable without sending anything now: the offline view's path is the
+   *  pending store, which always takes a line (a durable row a later real
+   *  channel flushes). So its carrier fact is unconditionally true, and only
+   *  `closed`, composed by the base, stops it. */
+  protected override get carrierLive(): boolean {
+    return true;
   }
 
   /** The offline view pages its cache for scroll-up but holds no history

@@ -11,7 +11,7 @@ import { assert } from "@std/assert";
 //   attachOfflineView / attachLocalOfflineView hydrate from readTail;
 //   OfflineConversation pins status "offline" (composer gates engage);
 //   the composer's canSubmit and disabled gates read canWrite, which the
-//   offline view keeps true without a carrier (queued-to-store sends);
+//   offline view keeps true (its path is the pending store, no carrier);
 //   single-line retry is suppressed for the offline view (no transport);
 //   the cached-time stamp skips unconfirmed lines;
 //   the tagma chat page renders the offline view through ChannelChatPage.
@@ -76,15 +76,6 @@ Deno.test("the composer gates on the write axis, not the stream", () => {
   const gate = src.slice(disabledAt, disabledAt + 120);
   assert(gate.includes("canWrite"), "the composer reads canWrite");
   assert(!gate.includes('"open"'), "stream status is not a write gate");
-  const convSrc = source(CONVERSATION);
-  // Scoped to the offline class: the relay leaf overrides canWrite too, so a
-  // whole-file substring went green even with this override deleted.
-  const offlineAt = convSrc.indexOf("export class OfflineConversation");
-  assert(offlineAt !== -1, "the offline view class must exist");
-  assert(
-    convSrc.slice(offlineAt).includes("override get canWrite"),
-    "the offline view must override canWrite (no carrier, still writable)",
-  );
 });
 
 Deno.test("single-line retry is suppressed for the offline view", () => {

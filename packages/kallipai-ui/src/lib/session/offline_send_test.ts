@@ -76,3 +76,13 @@ Deno.test("the store gate asks the write axis, not the status", () => {
   store.send("no-such-conversation", "hello");
   assertEquals(conv.transcript.lines.length, 1, "an unknown id adds nothing");
 });
+
+Deno.test("the offline view stops writing only when it closes", () => {
+  const conv = offlineConv();
+  assertEquals(conv.canWrite, true, "the pending store takes a line");
+  conv.close();
+  assertEquals(conv.canWrite, false);
+  conv.send("after close");
+  assertEquals(conv.transcript.lines.length, 0, "nothing lands");
+  assertEquals(conv.error instanceof Error, true, "the refusal is observable");
+});

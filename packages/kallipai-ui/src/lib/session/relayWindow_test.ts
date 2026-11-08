@@ -500,6 +500,20 @@ Deno.test(
   },
 );
 
+Deno.test("an open channel with no transport is not writable", () => {
+  // Status open with the transport gone is constructible, and a line typed
+  // into it would have nowhere to go. The leaf's carrier fact asks for both
+  // halves, so the composer closes and send() refuses instead of queueing a
+  // line the channel would never take.
+  const conv = makeConv(new FakeChannel([]));
+  conv.status = "open";
+  (conv as unknown as { transport: null }).transport = null;
+  assertEquals(conv.canWrite, false);
+  conv.send("into the void");
+  assertEquals(conv.transcript.lines.length, 0, "nothing lands");
+  assertEquals(conv.error instanceof Error, true, "the refusal is observable");
+});
+
 Deno.test("the adopted window folds in one transcript update", async () => {
   const run = async (ids: number[]) => {
     const channel = new FakeChannel([{ rows: ids.map((id) => eventRow(id)) }]);

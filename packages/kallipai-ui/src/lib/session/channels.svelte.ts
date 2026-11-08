@@ -640,7 +640,8 @@ export class ChannelsStore {
     // offline views, whose carrier outlives the stream: a line typed while the
     // stream rebuilds still renders and queues (the pump posts it once the
     // carrier returns). A relay channel's write path is the channel itself, so
-    // its canWrite follows the channel status instead (see RelayConversation).
+    // its canWrite requires the channel's transport as well as its open
+    // status (see RelayConversation.carrierLive).
     // Either way this only asks whether there is a conversation to write into.
     // A closed or carrier-less one says so through conv.send (conv.error),
     // never by swallowing the text.

@@ -35,8 +35,8 @@ function recording(): { conv: RelayConv; sends: SendOptions[] } {
     async *status() {},
     close() {},
   } as unknown as Transport;
-  // The write path's carrier: the transport no longer sends, so the harness
-  // records what the sender was handed instead.
+  // The harness keeps the transport read-only and records sends on the
+  // sender, so this asserts what the sender was handed.
   const sender = {
     available: true,
     send(_text: string, options?: SendOptions) {
