@@ -382,7 +382,10 @@ relay with no open tunnel, a stopped work-schedule engine, or a late background
 loop is `degraded` (200): removing the instance would not fix a dead relay, and
 the endpoint exists to make the fault visible rather than to blank a dashboard.
 A loop that is on time with a failed last pass degrades the same way, and
-`background_loops.failed` names it. The `history_store` check is a handle
+`background_loops.failed` names it. `telemetry_export` degrades when an export
+layer is installed and its last attempt failed with no success after it; an
+uninstalled layer is ok, and so is a process that has exported nothing, because
+a quiet tagma has no failure to report. The `history_store` check is a handle
 check: it never queries the file behind the handle, so a store whose disk went
 away keeps reading ready until the first query that needs it fails.
 
@@ -405,8 +408,11 @@ these keys.
 The default sampler follows the parent, so a trace is sampled or dropped as a
 whole across a hop rather than half-recorded. Batching bounds the cost: up to
 2048 spans queued, exported in batches of 512, a batch leaving every 5 seconds
-or when full, and each export call bounded at 3 seconds so a stalled collector
-cannot pin the queue. Shutdown flushes what is queued.
+or when full. One export call meets three bounds: the HTTP client bounds a
+single attempt, the processor's 3 second budget bounds the whole call with
+its retries, and the exporter stops itself 250 ms earlier, where the tally
+also stops, so a collector that stops answering is counted and logged
+instead of being cancelled unread. Shutdown flushes what is queued.
 
 The spend is per request and per call it makes — one forwarded request is a
 handful of spans — so the sampler is the knob for cost, not the batch sizes.

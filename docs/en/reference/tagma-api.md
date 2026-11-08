@@ -124,7 +124,8 @@ The body names every check it made, so a degraded report says which one:
     "profile_bundle": { "ok": true },
     "relay": { "ok": false, "state": "down" },
     "work_schedule_engine": { "ok": true },
-    "background_loops": { "ok": false, "stale": [], "failed": ["history_gc"] }
+    "background_loops": { "ok": false, "stale": [], "failed": ["history_gc"] },
+    "telemetry_export": { "ok": true }
   }
 }
 ```
@@ -134,6 +135,9 @@ same way and names the ones that are not ok. `relay.ok` derives from
 `relay.state`, which is `connected`, `local_only` or `down`.
 `background_loops.stale` and `background_loops.failed` name the loops that are
 late, or whose last pass failed.
+`telemetry_export.ok` is false when an export layer is installed and its last
+failure is newer than its last success; an uninstalled layer is ok, because a
+tagma that exports nothing has no failure to report.
 
 ### Agent Management
 

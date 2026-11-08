@@ -16,15 +16,24 @@
 //! client) enables `propagation` and keeps an [`HttpClient`] in the field it
 //! sends its requests from.
 //!
+//! A span records a piece of work rather than a call, so the two sides of a
+//! call are not the only places for one. A detached task (`tokio::spawn`)
+//! inherits no scope: work that has to stay in the trace opens its span inside
+//! the task or instruments the task's future ([`spans::background_span`]),
+//! while a timer that only wakes a waiter carries no context to hand down and
+//! spawns bare.
+//!
 //! The exporter never sits in a request path: spans go through a batch
 //! processor whose queue is bounded, and a full queue drops spans instead of
 //! blocking the caller. The queue drains on a thread with its own runtime, so
 //! a collector that is down costs spans, never latency. The first failed
 //! export says so once on the log channel and then stays quiet.
 //!
-//! A dropped span leaves no trace of its own: the SDK counts drops but reports
-//! them only through its internal logs, which this crate leaves off, so a
-//! deployment notices loss from the collector's intake and not from here. The
+//! A span dropped at a full queue leaves no trace of its own: the SDK counts
+//! those drops but reports them only through its internal logs, which this
+//! crate leaves off, so that loss is read from the collector's intake and
+//! not from here. A failed export is the other case: [`export_stats`] counts
+//! it and stamps it, which is what the health face reads. The
 //! export layer carries its own filter, so a quiet `RUST_LOG` takes neither the
 //! span nor the `traceparent` it injects: the chain stays whole at any log
 //! level.
@@ -49,7 +58,10 @@ pub use export::{
 };
 #[cfg(feature = "axum")]
 pub use server::{server_span, with_server_span, with_server_span_except};
-pub use spans::{HttpClient, Settle, http_client, record_attribute, record_response, request_span};
+pub use spans::{
+    HttpClient, Settle, background_span, http_client, record_attribute, record_response,
+    request_span,
+};
 
 // The tests reach the halves' internals through this module, so this is the
 // only place that has to name them.

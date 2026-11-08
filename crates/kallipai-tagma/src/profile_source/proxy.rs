@@ -33,7 +33,7 @@ use kallipai_adk::profile::{Profile, ProfileConfig, ProfileSet, Provider};
 use kallipai_common::collection::CollectionRef;
 use kallipai_common::credential::Credential;
 use kallipai_common::protocol::Modality;
-use kallipai_common::telemetry::HttpClient;
+use kallipai_common::telemetry::{HttpClient, Settle, background_span};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use tracing::{error, info, warn};
@@ -591,27 +591,50 @@ impl ProfileSource for ProxyProfileSource {
     }
 
     async fn handle_gateway_signal(&self, signal: &kallipai_adk::GatewaySignal) {
+        use tracing::Instrument as _;
+
         // One refresh per signal; the poison decision rides on the refresh
         // outcome (load() marks it), never on the signal alone. 401 and 403
         // differ only in log framing: 401 says dead token, 403 says scope.
-        let outcome = self.load().await;
+        //
+        // The refresh runs under a background span: the task that delivers a
+        // signal is detached, so without one this refresh is a trace of its
+        // own with nothing saying what asked for it.
+        let span = background_span("refresh_gateway_profile");
+        // Taken before the first await: a cancelled or panicking refresh
+        // must leave the span saying it never finished.
+        let settle = Settle::new(&span);
+        let outcome = self.load().instrument(span.clone()).await;
         let poisoned = self.state.lock().await.poisoned;
-        match outcome {
-            Ok(_) => info!(
-                status = signal.status,
-                code = signal.code.as_deref().unwrap_or("none"),
-                "gateway auth signal: snapshot refreshed cleanly"
-            ),
-            Err(error) if poisoned => error!(
-                status = signal.status,
-                error = %error,
-                "gateway auth signal: refresh confirms the stored credential is dead; spawns and profile-set binds stay refused until the credential file holds a different value"
-            ),
-            Err(error) => warn!(
-                status = signal.status,
-                error = %error,
-                "gateway auth signal: refresh failed without token evidence; token health unchanged"
-            ),
+        // The log lines below report the same event the span records: entered
+        // here, they carry its trace and span ids, so a reader of the log can
+        // find the trace and a reader of the trace can find the prose.
+        let _entered = span.enter();
+        match &outcome {
+            Ok(_) => {
+                info!(
+                    status = signal.status,
+                    code = signal.code.as_deref().unwrap_or("none"),
+                    "gateway auth signal: snapshot refreshed cleanly"
+                );
+                settle.done();
+            }
+            Err(error) if poisoned => {
+                error!(
+                    status = signal.status,
+                    error = %error,
+                    "gateway auth signal: refresh confirms the stored credential is dead; spawns and profile-set binds stay refused until the credential file holds a different value"
+                );
+                settle.failed("poisoned");
+            }
+            Err(error) => {
+                warn!(
+                    status = signal.status,
+                    error = %error,
+                    "gateway auth signal: refresh failed without token evidence; token health unchanged"
+                );
+                settle.failed("refresh_failed");
+            }
         }
     }
 }
@@ -715,7 +738,7 @@ mod tests {
     use axum::response::IntoResponse;
     use axum::routing::get;
     use kallipai_common::telemetry::test_observability::{
-        client_span_of, recorder, span_of, spans_until,
+        client_span_of, recorder, span_of, spans_until, spans_when,
     };
     use serde_json::json;
     use std::sync::Arc;
@@ -1261,6 +1284,41 @@ mod tests {
         assert_eq!(health.token_state, super::super::TokenState::Revoked);
         let err = source.ensure_usable().await.unwrap_err();
         assert!(format!("{err:#}").contains("token revoked"), "got: {err:#}");
+    }
+
+    /// The refresh a signal triggers runs under a background span: the task
+    /// that delivers the signal is detached, so the refresh would otherwise
+    /// start a trace with nothing saying what asked for it.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn a_gateway_signal_refresh_reaches_the_exporter() {
+        crate::test_helpers::ensure_test_data_dir();
+        let (recorder, subscriber) = recorder("tagma");
+        let _subscribed = tracing::subscriber::set_default(subscriber);
+        let base = spawn_rejecting_gateway(StatusCode::UNAUTHORIZED, "key_revoked").await;
+        let source = ProxyProfileSource::new(&base, Credential::fixed("tagma-token-1")).unwrap();
+        source
+            .handle_gateway_signal(&kallipai_adk::GatewaySignal {
+                status: 401,
+                code: Some("key_revoked".into()),
+            })
+            .await;
+
+        let spans = spans_when(&recorder, "the refresh span", |spans| {
+            spans
+                .iter()
+                .any(|span| span.name == "refresh_gateway_profile")
+        })
+        .await;
+        let span = span_of(&spans, "refresh_gateway_profile", "internal");
+        assert_eq!(span.attribute("kallipai.outcome"), Some("failed"));
+        assert_eq!(span.attribute("error.type"), Some("poisoned"));
+        let child = client_span_of(&spans, "GET", "/selected-collection");
+        assert_eq!(
+            child.parent_span_id.as_deref(),
+            Some(span.span_id.as_str()),
+            "the gateway call hangs under the refresh that asked for it"
+        );
     }
 
     #[tokio::test]

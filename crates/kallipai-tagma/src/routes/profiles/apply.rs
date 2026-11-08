@@ -9,9 +9,11 @@ use axum::Json;
 use axum::extract::State;
 use kallipai_adk::profile::ProfileConfig;
 use kallipai_common::protocol::ApiError;
+use kallipai_common::telemetry::{Settle, background_span};
 use serde::Serialize;
 use std::sync::Arc;
 use std::time::Duration;
+use tracing::Instrument as _;
 use tracing::{info, warn};
 
 /// Response body for POST /profiles/apply.
@@ -158,7 +160,7 @@ fn config_matches(live: &ProfileConfig, snapshot: &ProfileConfig) -> bool {
 /// loaded per attempt, and a source swapped mid-fetch means the result
 /// belongs to a source no longer live — it is dropped instead of
 /// stored (the switch that replaced it owns the state from there).
-pub(super) async fn repull_once(state: &SharedState) -> RepullOutcome {
+async fn repull_attempt(state: &SharedState) -> RepullOutcome {
     let source = state.profile_source.load_full().source();
     if source.kind() != ProfileSourceKind::Proxy {
         return RepullOutcome::NotProxy;
@@ -219,6 +221,26 @@ pub(super) async fn repull_once(state: &SharedState) -> RepullOutcome {
         }
         Err(error) => RepullOutcome::Retrying(format!("{error:#}")),
     }
+}
+
+/// One attempt, as the task's trace sees it: the attempt opens a background
+/// span (nothing spawned this task with a context to inherit) and settles it
+/// with the round's verdict, so a recovered bundle, a poisoned credential and
+/// a still-failing fetch read as different endings.
+pub(super) async fn repull_once(state: &SharedState) -> RepullOutcome {
+    let span = background_span("repull_profile_source");
+    // Taken before the first await: a task cancelled there, or a panic on the
+    // way, must leave the span saying the attempt never finished.
+    let settle = Settle::new(&span);
+    let outcome = repull_attempt(state).instrument(span.clone()).await;
+    match &outcome {
+        RepullOutcome::Recovered { .. } | RepullOutcome::NotProxy | RepullOutcome::Healthy => {
+            settle.done()
+        }
+        RepullOutcome::Poisoned => settle.failed("poisoned"),
+        RepullOutcome::Retrying(_) => settle.failed("retrying"),
+    }
+    outcome
 }
 
 /// The boot task for a degraded model-gateway source: while the live

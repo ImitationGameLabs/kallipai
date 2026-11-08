@@ -1273,6 +1273,36 @@ async fn degraded_repull_recovers_the_bundle_and_broadcasts() {
     assert!(reset.registry.sets().contains_key("recovered"));
 }
 
+/// The round runs under a background span of its own: the task is detached,
+/// so the trace has no request to hang the attempt under, and a poisoned
+/// credential must read differently from a recovered one.
+#[tokio::test]
+async fn a_repull_attempt_opens_a_span_carrying_its_verdict() {
+    use kallipai_common::telemetry::test_observability::{recorder, span_of, spans_when};
+
+    let (recorder, subscriber) = recorder("tagma");
+    let _subscribed = tracing::subscriber::set_default(subscriber);
+    let state = make_state_with_source(std::sync::Arc::new(StubGatewaySource {
+        flags: std::sync::Arc::new(std::sync::Mutex::new(StubGatewayFlags {
+            poisoned: true,
+            degraded: true,
+            ..Default::default()
+        })),
+    }));
+
+    assert!(matches!(repull_once(&state).await, RepullOutcome::Poisoned));
+
+    let spans = spans_when(&recorder, "the repull span", |spans| {
+        spans
+            .iter()
+            .any(|span| span.name == "repull_profile_source")
+    })
+    .await;
+    let span = span_of(&spans, "repull_profile_source", "internal");
+    assert_eq!(span.attribute("kallipai.outcome"), Some("failed"));
+    assert_eq!(span.attribute("error.type"), Some("poisoned"));
+}
+
 /// The gate arms only for a degraded, unpoisoned gateway source: a
 /// local source, a healthy gateway source, and a poisoned one all
 /// skip the fetch.

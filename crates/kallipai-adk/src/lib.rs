@@ -1,12 +1,10 @@
 //! The agent development kit: the context an agent runs in, the policy that
 //! gates its tools, and the loop that serves its rounds.
 //!
-//! A span records a piece of work rather than a call, so the work that opens
-//! one puts its whole future inside it (`Instrument`) and everything it awaits
-//! stays under it. A `tokio::spawn` starts a new task and inherits nothing, so
-//! work that has to stay in the trace opens its span inside the task or
-//! instruments the task's future; a timer that only wakes a waiter carries no
-//! context to hand down and spawns bare.
+//! A span records a piece of work rather than a call. Where one goes, and what
+//! a detached task does with it, is [`kallipai_common::telemetry`]'s rule and
+//! not this crate's: the crates that spawn tasks outnumber the one that keeps
+//! the agent loop.
 
 pub(crate) mod acquisition;
 pub mod agent_task;

@@ -17,8 +17,14 @@ propagation = [
   "dep:reqwest",
   "dep:reqwest-middleware",
 ]
-telemetry = ["propagation", "logging", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp"]
-test-support = ["telemetry", "axum", "dep:tokio"]
+telemetry = [
+  "propagation",
+  "logging",
+  "dep:opentelemetry_sdk",
+  "dep:opentelemetry-otlp",
+  "dep:tokio",
+]
+test-support = ["telemetry", "axum"]
 
 [dependencies]
 axum = { workspace = true, optional = true }

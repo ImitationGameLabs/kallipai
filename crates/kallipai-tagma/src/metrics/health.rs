@@ -11,12 +11,15 @@
 //! is `not_ready` (503), because a tagma that cannot resolve a profile cannot
 //! answer a single agent turn. Degradation is "serving, but something needs
 //! attention": a configured relay that is down, a periodic loop that stopped
-//! ticking. It answers 200 -- pulling this instance out of service would not
-//! fix a dead relay, and the endpoint exists to make the fault visible.
+//! ticking, an installed exporter whose last attempt failed and has not
+//! succeeded since. It answers 200 -- pulling this instance out of service
+//! would not fix a dead relay, and the endpoint exists to make the fault
+//! visible.
 //!
-//! Every check reads memory: the store handle, the swapped profile bundle, two
-//! atomics, the heartbeat table. No network call, no SQL, no wait -- the handler
-//! is meant to stay under a millisecond.
+//! Every check reads memory: the store handle, the swapped profile bundle, the
+//! relay counters, the heartbeat table, and the export counters' snapshot. No
+//! network call, no SQL, no wait -- the handler is meant to stay under a
+//! millisecond.
 //!
 //! That is the limit of the `history_store` check as well: it asks whether the
 //! handle is there and open, never whether the file behind it still answers. A
@@ -34,6 +37,7 @@ use serde::Serialize;
 
 use super::{Beat, metrics};
 use crate::state::SharedState;
+use kallipai_common::telemetry::ExportSnapshot;
 
 /// The three states `/health` reports.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -97,6 +101,7 @@ struct Checks {
     relay: RelayCheck,
     work_schedule_engine: Check,
     background_loops: BackgroundCheck,
+    telemetry_export: Check,
 }
 
 /// A check with nothing to add beyond its verdict. Every entry under `checks`
@@ -157,7 +162,16 @@ pub fn evaluate(state: &SharedState) -> HealthReport {
         .map(|beat| beat.as_str())
         .collect();
 
-    let status = judge(store_ok, profiles_ok, relay, engine_ok, &stale, &failed);
+    let export = kallipai_common::telemetry::export_stats().snapshot();
+    let status = judge(
+        store_ok,
+        profiles_ok,
+        relay,
+        engine_ok,
+        &export,
+        &stale,
+        &failed,
+    );
 
     HealthReport {
         status,
@@ -173,6 +187,9 @@ pub fn evaluate(state: &SharedState) -> HealthReport {
                 ok: stale.is_empty() && failed.is_empty(),
                 stale,
                 failed,
+            },
+            telemetry_export: Check {
+                ok: export_ok(&export),
             },
         },
     }
@@ -195,16 +212,33 @@ fn judge(
     profiles_ok: bool,
     relay: RelayState,
     engine_ok: bool,
+    export: &ExportSnapshot,
     stale: &[&'static str],
     failed: &[&'static str],
 ) -> HealthStatus {
     if !store_ok || !profiles_ok {
         HealthStatus::NotReady
-    } else if !relay.is_ok() || !engine_ok || !stale.is_empty() || !failed.is_empty() {
+    } else if !relay.is_ok()
+        || !engine_ok
+        || !export_ok(export)
+        || !stale.is_empty()
+        || !failed.is_empty()
+    {
         HealthStatus::Degraded
     } else {
         HealthStatus::Ok
     }
+}
+
+/// Whether the export pipeline is reaching its collector.
+///
+/// An uninstalled layer is not a fault: the spans stay in this process by
+/// choice. For an installed one the test is `last_failure_unix >
+/// last_success_unix` -- a failure nothing has recovered from -- and not the
+/// age of the last success, because a process with nothing to export exports
+/// nothing and would otherwise read as broken on a quiet morning.
+fn export_ok(export: &ExportSnapshot) -> bool {
+    !export.enabled || export.last_failure_unix <= export.last_success_unix
 }
 
 #[cfg(test)]
@@ -214,11 +248,27 @@ mod tests {
     #[test]
     fn readiness_outranks_degradation() {
         assert_eq!(
-            judge(false, true, RelayState::Down, false, &["history_gc"], &[]),
+            judge(
+                false,
+                true,
+                RelayState::Down,
+                false,
+                &ExportSnapshot::default(),
+                &["history_gc"],
+                &[]
+            ),
             HealthStatus::NotReady
         );
         assert_eq!(
-            judge(true, false, RelayState::LocalOnly, true, &[], &[]),
+            judge(
+                true,
+                false,
+                RelayState::LocalOnly,
+                true,
+                &ExportSnapshot::default(),
+                &[],
+                &[]
+            ),
             HealthStatus::NotReady
         );
     }
@@ -226,11 +276,27 @@ mod tests {
     #[test]
     fn each_degradation_cause_degrades_on_its_own() {
         assert_eq!(
-            judge(true, true, RelayState::Down, true, &[], &[]),
+            judge(
+                true,
+                true,
+                RelayState::Down,
+                true,
+                &ExportSnapshot::default(),
+                &[],
+                &[]
+            ),
             HealthStatus::Degraded
         );
         assert_eq!(
-            judge(true, true, RelayState::Connected, false, &[], &[]),
+            judge(
+                true,
+                true,
+                RelayState::Connected,
+                false,
+                &ExportSnapshot::default(),
+                &[],
+                &[]
+            ),
             HealthStatus::Degraded
         );
         assert_eq!(
@@ -239,6 +305,7 @@ mod tests {
                 true,
                 RelayState::Connected,
                 true,
+                &ExportSnapshot::default(),
                 &["history_gc"],
                 &[]
             ),
@@ -252,6 +319,7 @@ mod tests {
                 true,
                 RelayState::LocalOnly,
                 true,
+                &ExportSnapshot::default(),
                 &[],
                 &["history_gc"]
             ),
@@ -262,8 +330,85 @@ mod tests {
     #[test]
     fn a_local_only_tagma_with_live_loops_is_healthy() {
         assert_eq!(
-            judge(true, true, RelayState::LocalOnly, true, &[], &[]),
+            judge(
+                true,
+                true,
+                RelayState::LocalOnly,
+                true,
+                &ExportSnapshot::default(),
+                &[],
+                &[]
+            ),
             HealthStatus::Ok
+        );
+    }
+
+    /// The export check reads two stamps and no clock: a failure nothing has
+    /// recovered from degrades the report, while a quiet process whose last
+    /// success is old -- it has nothing to export -- stays ok.
+    #[test]
+    fn a_failed_export_nothing_recovered_from_degrades_the_report() {
+        assert!(
+            export_ok(&ExportSnapshot::default()),
+            "an uninstalled layer keeps spans in this process by choice"
+        );
+
+        let quiet = ExportSnapshot {
+            enabled: true,
+            exported_spans: 4,
+            last_success_unix: 100,
+            ..Default::default()
+        };
+        assert!(export_ok(&quiet), "an old success is not a failure");
+
+        let recovered = ExportSnapshot {
+            enabled: true,
+            failed_timeout: 1,
+            last_failure_unix: 100,
+            last_success_unix: 200,
+            ..Default::default()
+        };
+        assert!(export_ok(&recovered), "a later success is the recovery");
+
+        let down = ExportSnapshot {
+            enabled: true,
+            failed_unavailable: 1,
+            last_failure_unix: 200,
+            last_success_unix: 100,
+            ..Default::default()
+        };
+        assert!(
+            !export_ok(&down),
+            "a failure newer than the success is a fault"
+        );
+        assert_eq!(
+            judge(true, true, RelayState::LocalOnly, true, &down, &[], &[]),
+            HealthStatus::Degraded
+        );
+
+        let never = ExportSnapshot {
+            enabled: true,
+            failed_unavailable: 3,
+            last_failure_unix: 200,
+            ..Default::default()
+        };
+        assert!(
+            !export_ok(&never),
+            "an exporter that never landed a batch is not serving"
+        );
+        // The shape a collector that stops answering leaves: the tally books
+        // the wrapper's deadline as a timeout, and the judgement reads stamps.
+        let hung = ExportSnapshot {
+            enabled: true,
+            failed_timeout: 1,
+            last_failure_unix: 200,
+            last_success_unix: 100,
+            ..Default::default()
+        };
+        assert!(!export_ok(&hung), "a hung collector reads as a fault");
+        assert_eq!(
+            judge(true, true, RelayState::LocalOnly, true, &hung, &[], &[]),
+            HealthStatus::Degraded
         );
     }
 
@@ -304,12 +449,13 @@ mod tests {
                     stale: vec!["history_gc"],
                     failed: Vec::new(),
                 },
+                telemetry_export: Check { ok: false },
             },
         };
         let rendered = serde_json::to_string(&report).expect("the report serialises");
         assert_eq!(
             rendered,
-            "{\"status\":\"degraded\",\"checks\":{\"history_store\":{\"ok\":true},\"profile_bundle\":{\"ok\":true},\"relay\":{\"ok\":false,\"state\":\"down\"},\"work_schedule_engine\":{\"ok\":true},\"background_loops\":{\"ok\":false,\"stale\":[\"history_gc\"],\"failed\":[]}}}"
+            "{\"status\":\"degraded\",\"checks\":{\"history_store\":{\"ok\":true},\"profile_bundle\":{\"ok\":true},\"relay\":{\"ok\":false,\"state\":\"down\"},\"work_schedule_engine\":{\"ok\":true},\"background_loops\":{\"ok\":false,\"stale\":[\"history_gc\"],\"failed\":[]},\"telemetry_export\":{\"ok\":false}}}"
         );
         let ready = serde_json::to_string(&HealthStatus::Ok).expect("the status serialises");
         assert_eq!(ready, "\"ok\"", "a ready report says ok");

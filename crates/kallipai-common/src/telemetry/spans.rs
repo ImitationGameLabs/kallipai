@@ -124,6 +124,35 @@ pub fn record_attribute(span: &tracing::Span, key: &str, value: impl Into<String
     span.set_attribute(key.to_string(), value.into());
 }
 
+/// The span kind a background attempt declares: no caller waits on its answer.
+pub(crate) const INTERNAL_SPAN_KIND: &str = "internal";
+
+/// The span for one attempt of work that no request asked for.
+///
+/// `tokio::spawn` carries no scope: a task detached from whatever spawned it
+/// starts outside the spawner's span, so a trace that should carry the
+/// attempt has to start it here. It is a root by construction, not by the
+/// call site's luck: `info_span!` takes whatever span the creating task is
+/// in as the parent, so `parent: None` is what stops a request that reaches
+/// this function from hanging the attempt under itself.
+///
+/// Entering it around the attempt (`Instrument::instrument`) is what puts the
+/// client calls the attempt makes under it; created and dropped without being
+/// entered, it carries the attempt's duration and nothing below it.
+///
+/// The name is one name per kind of attempt (`repull_profile_source`), so
+/// every attempt of that kind aggregates into one series, the way a request
+/// span aggregates on its route template.
+pub fn background_span(name: &str) -> tracing::Span {
+    tracing::info_span!(
+        target: SPAN_TARGET,
+        parent: None,
+        "background",
+        otel.name = %name,
+        otel.kind = %INTERNAL_SPAN_KIND,
+    )
+}
+
 /// The attribute a settled span carries: the one word for how its scope ended.
 const OUTCOME: &str = "kallipai.outcome";
 /// A scope that finished its work.

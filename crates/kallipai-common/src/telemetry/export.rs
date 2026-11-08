@@ -14,7 +14,9 @@ use std::time::Duration;
 
 use opentelemetry::KeyValue;
 use opentelemetry::trace::TracerProvider as _;
-use opentelemetry_otlp::{SpanExporter as OtlpExporter, WithExportConfig as _};
+use opentelemetry_otlp::{
+    RetryPolicy, SpanExporter as OtlpExporter, WithExportConfig as _, WithHttpConfig as _,
+};
 use opentelemetry_sdk::Resource;
 use opentelemetry_sdk::error::{OTelSdkError, OTelSdkResult};
 use opentelemetry_sdk::propagation::TraceContextPropagator;
@@ -43,11 +45,29 @@ const QUEUE_SIZE: usize = 2048;
 const BATCH_SIZE: usize = 512;
 /// How often a batch leaves, quiet traffic or not.
 const SCHEDULED_DELAY: Duration = Duration::from_secs(5);
-/// Upper bound on one export call, so a stalled collector cannot pin the queue.
-const EXPORT_TIMEOUT: Duration = Duration::from_secs(3);
+/// The budget for one export call: the batch processor cancels the call when
+/// it runs out, so a stalled collector cannot pin the queue.
+///
+/// This is the outer of three bounds. One HTTP attempt is bounded by the
+/// client the exporter builds; this budget bounds the whole call the
+/// processor makes, retries included; and [`EXPORT_DEADLINE`] sits one step
+/// inside it, because a call the processor cancels is a call nothing can
+/// report on.
+pub(crate) const EXPORT_BUDGET: Duration = Duration::from_secs(3);
+/// The deadline the exporter and the tally hold themselves to: the budget
+/// less the margin the processor needs to cancel and record the call.
+///
+/// The processor cancels by dropping the export future, and every tally in
+/// [`CountingExporter`] is written after that future returns -- so the one
+/// failure an operator most needs counted, a collector that stopped
+/// answering, would be the one that left no mark and no log line. Two things
+/// therefore stop here: the counting wrapper's own timeout, so it books the
+/// expiry itself, and the exporter's retry deadline, so the dependency ends
+/// its attempt before the ceiling rather than being cut off by it.
+pub(crate) const EXPORT_DEADLINE: Duration = Duration::from_millis(2750);
 /// Passed to `shutdown_with_timeout`, which the SDK ignores: a shutdown flushes
 /// and then waits for one more export, so the real bound is about twice
-/// `EXPORT_TIMEOUT` -- six seconds, inside the ten a default container stop
+/// `EXPORT_BUDGET` -- six seconds, inside the ten a default container stop
 /// before the process is killed.
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(6);
 
@@ -371,15 +391,18 @@ where
         .with_max_queue_size(QUEUE_SIZE)
         .with_max_export_batch_size(BATCH_SIZE)
         .with_scheduled_delay(SCHEDULED_DELAY)
-        .with_max_export_timeout(EXPORT_TIMEOUT)
+        .with_max_export_timeout(EXPORT_BUDGET)
         .build();
     let processor = BatchSpanProcessor::builder(
-        CountingExporter {
-            inner: HintOnceExporter {
+        // The hint wraps the tally: the failure the wrapper books by cutting a
+        // hung call has to reach the log, or the one line saying a collector
+        // stopped answering is the casualty of where the bound sits.
+        HintOnceExporter {
+            inner: CountingExporter {
                 inner: exporter,
-                hinted: Arc::new(AtomicBool::new(false)),
+                stats: export_stats(),
             },
-            stats: export_stats(),
+            hinted: Arc::new(AtomicBool::new(false)),
         },
         runtime::TokioCurrentThread,
     )
@@ -426,7 +449,11 @@ fn otlp_exporter(endpoint: &str) -> Result<OtlpExporter, String> {
     OtlpExporter::builder()
         .with_http()
         .with_endpoint(endpoint)
-        .with_timeout(EXPORT_TIMEOUT)
+        .with_timeout(EXPORT_DEADLINE)
+        // Spelled out rather than inherited: three retries from 100ms fit
+        // inside the deadline only because a refusal comes back at once, and
+        // an SDK default that changed under us must not move that bar.
+        .with_retry_policy(RetryPolicy::recommended())
         .build()
         .map_err(|error| error.to_string())
 }
@@ -485,6 +512,13 @@ pub struct ExportSnapshot {
     pub failed_other: u64,
     /// Unix seconds of the last accepted export; 0 while none has landed.
     pub last_success_unix: u64,
+    /// Unix seconds of the last failed attempt; 0 while none has failed.
+    ///
+    /// Read beside `last_success_unix`: a failure stamped later is what says
+    /// the collector is unreachable now. A success and a failure in the same
+    /// second compare equal, which reads as nothing lost; the next batch
+    /// settles it. Both zero means nothing has been attempted.
+    pub last_failure_unix: u64,
 }
 
 /// The process-wide export tally behind [`ExportSnapshot`].
@@ -500,6 +534,7 @@ pub struct ExportStats {
     failed_unavailable: AtomicU64,
     failed_other: AtomicU64,
     last_success_unix: AtomicU64,
+    last_failure_unix: AtomicU64,
 }
 
 impl ExportStats {
@@ -524,6 +559,8 @@ impl ExportStats {
                     ExportFailure::Other => &self.failed_other,
                 };
                 counter.fetch_add(1, Ordering::Relaxed);
+                self.last_failure_unix
+                    .store(crate::timefmt::now_epoch(), Ordering::Relaxed);
             }
         }
     }
@@ -536,6 +573,7 @@ impl ExportStats {
             failed_unavailable: self.failed_unavailable.load(Ordering::Relaxed),
             failed_other: self.failed_other.load(Ordering::Relaxed),
             last_success_unix: self.last_success_unix.load(Ordering::Relaxed),
+            last_failure_unix: self.last_failure_unix.load(Ordering::Relaxed),
         }
     }
 }
@@ -603,7 +641,12 @@ pub(crate) struct CountingExporter<E> {
 impl<E: SpanExporter> SpanExporter for CountingExporter<E> {
     async fn export(&self, batch: Vec<SpanData>) -> OTelSdkResult {
         let spans = batch.len();
-        let result = self.inner.export(batch).await;
+        // The wrapper holds the call to a deadline of its own rather than
+        // trusting the processor's: a cancelled call never returns, the tally
+        // is written after it returns, and the failure most worth counting is
+        // the one that would leave no mark.
+        let attempt = tokio::time::timeout(EXPORT_DEADLINE, self.inner.export(batch)).await;
+        let result = attempt.unwrap_or(Err(OTelSdkError::Timeout(EXPORT_DEADLINE)));
         self.stats.record(spans, &result);
         result
     }

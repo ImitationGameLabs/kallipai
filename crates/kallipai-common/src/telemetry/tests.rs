@@ -598,6 +598,68 @@ async fn a_request_span_reaches_the_exporter() {
     assert_eq!(span.status, opentelemetry::trace::Status::Unset);
 }
 
+/// A background attempt starts a trace of its own, and the span carries how
+/// the attempt ended. The parent is `None` at construction, so a span the
+/// task happens to be in cannot adopt the attempt.
+#[tokio::test]
+async fn a_background_span_starts_its_own_trace_and_carries_its_verdict() {
+    let recording = RecordingExporter::default();
+    let handed = recording.clone();
+    let config = config("http://collector:4318");
+    let (subscriber, mut guard) = service_layers_with_exporter(
+        move |_endpoint: &str| Ok(handed),
+        Some(&config),
+        &test_filter(),
+        "tagma",
+        &[],
+        None,
+        Captured::default(),
+    );
+    {
+        let _subscribed = tracing::subscriber::set_default(subscriber);
+        let caller = tracing::info_span!(target: SPAN_TARGET, "caller");
+        let _entered = caller.enter();
+        let span = spans::background_span("repull_profile_source");
+        Settle::new(&span).failed("retrying");
+    }
+    assert!(guard.shutdown(), "a configured guard owns a provider");
+
+    let spans = recording.batches();
+    assert_eq!(
+        spans.len(),
+        2,
+        "the span the task was in and the attempt: {:?}",
+        spans
+            .iter()
+            .map(|span| span.name.clone())
+            .collect::<Vec<_>>()
+    );
+    let span = spans
+        .iter()
+        .find(|span| span.name == "repull_profile_source")
+        .expect("the attempt exports a span of its own");
+    let caller = spans
+        .iter()
+        .find(|span| span.name == "caller")
+        .expect("the span the task was in exports too");
+    assert_eq!(span.span_kind, opentelemetry::trace::SpanKind::Internal);
+    assert_eq!(
+        span.parent_span_id,
+        opentelemetry::trace::SpanId::INVALID,
+        "a root even with a span around the task"
+    );
+    assert_ne!(
+        span.span_context.trace_id(),
+        caller.span_context.trace_id(),
+        "the attempt starts a trace rather than joining the one around it"
+    );
+    assert_eq!(
+        attribute(span, "kallipai.outcome").as_deref(),
+        Some("failed")
+    );
+    assert_eq!(attribute(span, "error.type").as_deref(), Some("retrying"));
+}
+
 /// The exemption is a promise on the wire: the scrape leaves no span, while
 /// the path beside it still opens one, so a trace of the process does not
 /// carry the requests that measure it.
@@ -1613,6 +1675,8 @@ enum Answer {
     Unreachable,
     Timeout,
     Other,
+    /// A collector that takes the connection and never answers.
+    Hung,
 }
 
 impl SpanExporter for ScriptedExporter {
@@ -1626,6 +1690,7 @@ impl SpanExporter for ScriptedExporter {
             Answer::Other => Err(OTelSdkError::InternalFailure(
                 "the body would not serialize".to_string(),
             )),
+            Answer::Hung => std::future::pending().await,
         }
     }
 
@@ -1675,6 +1740,14 @@ async fn the_counting_wrapper_books_the_answer_and_returns_it_unchanged() {
         "an internal failure that is not transport"
     );
     assert_eq!(snapshot.exported_spans, 0);
+    assert!(
+        snapshot.last_failure_unix > 0,
+        "a failed attempt stamps the moment"
+    );
+    assert_eq!(
+        snapshot.last_success_unix, 0,
+        "nothing has landed, so the two stamps cannot agree"
+    );
 }
 
 #[tokio::test]
@@ -1717,4 +1790,91 @@ async fn the_counting_wrapper_forwards_the_resource_and_counts_the_spans() {
         snapshot.last_success_unix > 0,
         "a success stamps the moment"
     );
+    assert_eq!(
+        snapshot.last_failure_unix, 0,
+        "an export that never failed leaves no failure stamp"
+    );
+}
+
+/// A collector that takes the connection and never answers is the failure
+/// an operator most needs counted, and the batch processor would cancel the
+/// call before any tally ran: the wrapper's own deadline is what makes it
+/// visible.
+#[tokio::test]
+async fn a_collector_that_never_answers_is_booked_as_a_timeout() {
+    let stats = scripted_stats();
+    let counting = CountingExporter {
+        inner: ScriptedExporter {
+            answer: Answer::Hung,
+            resource: Arc::new(Mutex::new(None)),
+        },
+        stats,
+    };
+
+    let answer = counting.export(Vec::new()).await;
+
+    assert!(
+        matches!(answer, Err(OTelSdkError::Timeout(_))),
+        "the wrapper answers its own deadline: {answer:?}"
+    );
+    let snapshot = stats.snapshot();
+    assert_eq!(snapshot.failed_timeout, 1, "a hung call is a timeout");
+    assert_eq!(snapshot.failed_unavailable, 0);
+    assert_eq!(snapshot.failed_other, 0);
+    assert!(
+        snapshot.last_failure_unix > 0,
+        "the failure is stamped, which is what /health reads"
+    );
+    assert_eq!(snapshot.last_success_unix, 0);
+}
+
+/// The deadline sits between the retry budget it has to leave room for and
+/// the processor's budget it has to undercut: below the retries, it spends
+/// the call on sleeping; above the processor's, the call is cancelled
+/// before the tally runs and the failure is never seen.
+#[test]
+fn the_export_deadline_leaves_room_for_the_recommended_retries() {
+    // The recommended policy retries three times, sleeping 100ms, 200ms and
+    // 400ms: 700ms before the last attempt is even made.
+    assert!(
+        export::EXPORT_DEADLINE >= std::time::Duration::from_millis(700),
+        "a deadline under the retry budget spends it on sleeping"
+    );
+    assert!(
+        export::EXPORT_DEADLINE < export::EXPORT_BUDGET,
+        "the deadline must undercut the budget, or the tally never runs"
+    );
+}
+
+/// The hint wraps the tally in the pipeline the layer builds, so a call the
+/// wrapper cuts still gets its one line: the log and the count are written
+/// by different layers, and the ordering is what lets the log see the cut.
+#[tokio::test]
+async fn a_cut_export_is_announced_once_and_counted() {
+    let counter = WarnCounter::default();
+    let subscriber = tracing_subscriber::registry().with(counter.clone());
+    let stats = scripted_stats();
+    let exporter = HintOnceExporter {
+        inner: CountingExporter {
+            inner: ScriptedExporter {
+                answer: Answer::Hung,
+                resource: Arc::new(Mutex::new(None)),
+            },
+            stats,
+        },
+        hinted: Arc::new(AtomicBool::new(false)),
+    };
+
+    let answer = {
+        let _quiet = tracing::subscriber::set_default(subscriber);
+        exporter.export(Vec::new()).await
+    };
+
+    assert!(matches!(answer, Err(OTelSdkError::Timeout(_))));
+    assert_eq!(
+        counter.0.load(Ordering::Relaxed),
+        1,
+        "the cut is announced once, like any other failure"
+    );
+    assert_eq!(stats.snapshot().failed_timeout, 1);
 }
