@@ -1683,12 +1683,16 @@ async fn the_archeion_check_of_a_rejected_request_hangs_under_its_request_span()
     assert_eq!(response.status(), reqwest::StatusCode::UNAUTHORIZED);
 
     // Only this fixture wires the real verifier, so the checks into the fake
-    // archeion are the ones this request caused.
+    // archeion are the ones this request caused. A client span is named for its
+    // method alone, so the path attribute is what picks the verifier's calls.
+    let is_check = |span: &ObservedSpan| {
+        span.kind == "client"
+            && span
+                .attribute("url.path")
+                .is_some_and(|path| path.starts_with("/internal/"))
+    };
     let spans = await_spans(|spans| {
-        let checks: Vec<&ObservedSpan> = spans
-            .iter()
-            .filter(|span| span.name.starts_with("POST /internal/"))
-            .collect();
+        let checks: Vec<&ObservedSpan> = spans.iter().filter(|span| is_check(span)).collect();
         // The request span ends with the terminal phase, after the checks
         // it caused have ended, so the wait covers both halves of the pair.
         !checks.is_empty()
@@ -1699,10 +1703,7 @@ async fn the_archeion_check_of_a_rejected_request_hangs_under_its_request_span()
             })
     })
     .await;
-    let checks: Vec<&ObservedSpan> = spans
-        .iter()
-        .filter(|span| span.name.starts_with("POST /internal/"))
-        .collect();
+    let checks: Vec<&ObservedSpan> = spans.iter().filter(|span| is_check(span)).collect();
     assert!(
         !checks.is_empty(),
         "the verifier's calls left client spans: {spans:#?}"

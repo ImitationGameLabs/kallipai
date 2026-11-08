@@ -9,18 +9,16 @@ license.workspace = true
 default = ["axum"]
 axum = ["dep:axum", "dep:tower-http"]
 logging = ["dep:tracing-subscriber", "dep:tracing-appender"]
-telemetry = [
-  "logging",
+propagation = [
   "dep:opentelemetry",
-  "dep:opentelemetry_sdk",
-  "dep:opentelemetry-otlp",
   "dep:tracing-opentelemetry",
   "dep:async-trait",
   "dep:http",
   "dep:reqwest",
   "dep:reqwest-middleware",
 ]
-test-support = ["telemetry"]
+telemetry = ["propagation", "logging", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp"]
+test-support = ["telemetry", "axum", "dep:tokio"]
 
 [dependencies]
 axum = { workspace = true, optional = true }
@@ -44,6 +42,7 @@ async-trait = { workspace = true, optional = true }
 http = { workspace = true, optional = true }
 reqwest = { workspace = true, optional = true }
 reqwest-middleware = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
 uuid = { workspace = true }
 base64 = { workspace = true }
 getrandom = { workspace = true }

@@ -96,11 +96,12 @@ async fn mint_within(timeout: std::time::Duration, polis: &str, token: &str) -> 
     // deadline, but passing one keeps the failure text below tied to the
     // number it names; redirects are off because a bearer-bearing POST has no
     // business following one.
-    let http = reqwest::Client::builder()
-        .timeout(timeout)
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .context("building the HTTP client")?;
+    let http = kallipai_common::telemetry::http_client(
+        reqwest::Client::builder()
+            .timeout(timeout)
+            .redirect(reqwest::redirect::Policy::none()),
+    )
+    .context("building the HTTP client")?;
     let client = ArcheionClient::builder(&base)
         .access_token(token)
         .http_client(http)
@@ -153,7 +154,7 @@ fn describe(err: anyhow::Error, polis: &str, timeout: std::time::Duration) -> an
             ),
         };
     }
-    if let Some(http) = err.downcast_ref::<reqwest::Error>() {
+    if let Some(http) = transport_of(&err) {
         if http.is_timeout() {
             return anyhow::anyhow!(
                 "archeion at {polis} did not answer within {}s",
@@ -170,6 +171,19 @@ fn describe(err: anyhow::Error, polis: &str, timeout: std::time::Duration) -> an
     }
     // Anything else reached the far end and came back unreadable.
     anyhow::anyhow!("minting an enrollment code: {err:#}")
+}
+
+/// The transport failure an error carries, wherever it sits: the mint goes
+/// through a middleware client, so a failure below that chain arrives one
+/// level down.
+fn transport_of(err: &anyhow::Error) -> Option<&reqwest::Error> {
+    if let Some(http) = err.downcast_ref::<reqwest::Error>() {
+        return Some(http);
+    }
+    match err.downcast_ref::<reqwest_middleware::Error>() {
+        Some(reqwest_middleware::Error::Reqwest(http)) => Some(http),
+        _ => None,
+    }
 }
 
 #[cfg(test)]

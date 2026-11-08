@@ -5,7 +5,8 @@
 //! retry control flow lives here once.
 
 use kallipai_common::credential::{Credential, retry_value_after_401};
-use reqwest::{RequestBuilder, Response};
+use reqwest::Response;
+use reqwest_middleware::RequestBuilder;
 
 /// The response plus the credential value the request that produced it
 /// carried: a `401` retried with the reloaded value answers with that value,
@@ -24,11 +25,15 @@ pub(crate) struct Presented {
 /// id, a JSON body) needs no special case. Only the response head is
 /// inspected — the body stays unconsumed — so the caller still decides what a
 /// remaining `401` means.
+///
+/// `build` hands back the client's middleware request builder, so a retry takes
+/// the same chain as the first attempt, and a failure comes back as the
+/// middleware's error: the caller formats it and keeps its own error type.
 pub(crate) async fn send_authorized(
     credential: &Credential,
     surface: &str,
     build: impl Fn(&str) -> RequestBuilder,
-) -> reqwest::Result<Presented> {
+) -> Result<Presented, reqwest_middleware::Error> {
     let sent = credential.current();
     let response = build(&sent).send().await?;
     if response.status() != reqwest::StatusCode::UNAUTHORIZED {

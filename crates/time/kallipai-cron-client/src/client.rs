@@ -17,6 +17,7 @@ use tracing::{debug, instrument};
 
 use kallipai_common::SPAN_TARGET;
 use kallipai_common::agentid::AgentId;
+use kallipai_common::telemetry::HttpClient;
 use kallipai_cron_common::{
     CreateScheduleRequest, Schedule, ScheduleStatus, SchedulesListResponse, StatusResponse,
     UpdateScheduleRequest,
@@ -35,11 +36,19 @@ const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 #[derive(Debug, Error)]
 pub enum CronClientError {
     #[error("network error: {0}")]
-    Network(#[from] ReqwestError),
+    Network(#[from] reqwest_middleware::Error),
     #[error("api error (HTTP {status}): {message}")]
     Api { status: u16, message: String },
     #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
+}
+
+/// A failure below the middleware chain lands in the same bucket: callers
+/// branch on the variant, not on which layer refused.
+impl From<ReqwestError> for CronClientError {
+    fn from(error: ReqwestError) -> Self {
+        CronClientError::Network(reqwest_middleware::Error::Reqwest(error))
+    }
 }
 
 impl CronClientError {
@@ -54,7 +63,7 @@ impl CronClientError {
 
 struct Inner {
     base_url: String,
-    http: Client,
+    http: HttpClient,
     /// Agent bearer (`KALLIPAI_AUTH_TOKEN`); the daemon verifies it against the
     /// claimed agent id via the tagma on every request.
     token: String,
@@ -99,7 +108,7 @@ impl CronClient {
         &self.0.base_url
     }
 
-    fn request(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
+    fn request(&self, method: reqwest::Method, path: &str) -> reqwest_middleware::RequestBuilder {
         let url = format!("{}{}", self.0.base_url, path);
         self.0.http.request(method, url).bearer_auth(&self.0.token)
     }
@@ -265,7 +274,7 @@ impl CronClient {
 pub struct CronClientBuilder {
     base_url: String,
     token: String,
-    http: Option<Client>,
+    http: Option<HttpClient>,
     timeout: Option<Duration>,
 }
 
@@ -278,7 +287,7 @@ impl CronClientBuilder {
     /// Inject a pre-built reqwest client. When set, [`Self::timeout`] and the
     /// default timeout are ignored — the caller owns the client's configuration
     /// (caller-knows-best; mirrors `TagmaClientBuilder`).
-    pub fn http_client(mut self, http: Client) -> Self {
+    pub fn http_client(mut self, http: HttpClient) -> Self {
         self.http = Some(http);
         self
     }
@@ -293,10 +302,9 @@ impl CronClientBuilder {
     pub fn build(self) -> Result<CronClient, CronClientError> {
         let http = match self.http {
             Some(c) => c,
-            None => Client::builder()
-                .timeout(self.timeout.unwrap_or(DEFAULT_REQUEST_TIMEOUT))
-                .build()
-                .map_err(CronClientError::Network)?,
+            None => kallipai_common::telemetry::http_client(
+                Client::builder().timeout(self.timeout.unwrap_or(DEFAULT_REQUEST_TIMEOUT)),
+            )?,
         };
         Ok(CronClient(Arc::new(Inner {
             base_url: self.base_url,
@@ -337,5 +345,123 @@ mod tests {
         let env: Envelope =
             serde_json::from_str(r#"{"error":{"message":"invalid cron token"}}"#).unwrap();
         assert_eq!(env.error.message, "invalid cron token");
+    }
+
+    // -- the trace a call belongs to -----------------------------------------
+
+    /// A daemon that answers the list call, with the server span layered on so
+    /// a recorder sees a request arrive.
+    async fn spawn_daemon_stub() -> String {
+        let app = kallipai_common::telemetry::with_server_span(axum::Router::new().route(
+            "/schedules",
+            axum::routing::get(|| async {
+                axum::Json(serde_json::json!({ "schedules": [], "total": 0 }))
+            }),
+        ));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        format!("http://{addr}")
+    }
+
+    /// The span a caller would be in when it asks the daemon.
+    fn caller_span() -> tracing::Span {
+        kallipai_common::telemetry::request_span(
+            "POST",
+            "/agent/turn",
+            "/agent/turn",
+            &axum::http::HeaderMap::new(),
+        )
+    }
+
+    /// A list made inside a caller's span keeps that span's trace: the daemon
+    /// answers inside the span of the call, which sits inside the method's own
+    /// span, which sits inside the caller's.
+    #[tokio::test]
+    async fn a_list_carries_the_context_of_the_request_it_serves() {
+        use kallipai_common::telemetry::test_observability::{
+            client_span_of, recorder, span_of, spans_until,
+        };
+        use tracing::Instrument as _;
+
+        let base = spawn_daemon_stub().await;
+        let agent = AgentId::from("dev".to_owned());
+        let (recorder, subscriber) = recorder("kallipai-cron-client");
+        {
+            let _subscribed = tracing::subscriber::set_default(subscriber);
+            let client = CronClient::builder(&base).token("sek").build().unwrap();
+            async { client.list(&agent, None, None).await.expect("list lands") }
+                .instrument(caller_span())
+                .await;
+        }
+
+        let spans = spans_until(&recorder, 4).await;
+        let asked = span_of(&spans, "POST /agent/turn", "server");
+        let method = span_of(&spans, "list", "internal");
+        let call = client_span_of(&spans, "GET", "/schedules");
+        let answered = span_of(&spans, "GET /schedules", "server");
+        assert_eq!(
+            method.parent_span_id.as_deref(),
+            Some(asked.span_id.as_str()),
+            "the method's span sits under the caller's"
+        );
+        assert_eq!(
+            call.parent_span_id.as_deref(),
+            Some(method.span_id.as_str()),
+            "the call hangs under the method that made it"
+        );
+        assert_eq!(
+            answered.parent_span_id.as_deref(),
+            Some(call.span_id.as_str()),
+            "the daemon answered inside the span of the call"
+        );
+        assert_eq!(
+            answered.trace_id, call.trace_id,
+            "one trace spans the list, not a second one at the daemon"
+        );
+        assert_eq!(
+            call.trace_id, asked.trace_id,
+            "and that trace is the caller's"
+        );
+    }
+
+    /// The same call on a client with no middleware: nothing puts a header on
+    /// the wire, so the daemon starts a trace of its own. Without this, the
+    /// test above would pass on a header read back at the caller.
+    #[tokio::test]
+    async fn a_list_that_carries_no_header_leaves_the_daemon_its_own_trace() {
+        use kallipai_common::telemetry::test_observability::{recorder, span_of, spans_until};
+        use tracing::Instrument as _;
+
+        let base = spawn_daemon_stub().await;
+        let agent = AgentId::from("dev".to_owned());
+        let (recorder, subscriber) = recorder("kallipai-cron-client");
+        {
+            let _subscribed = tracing::subscriber::set_default(subscriber);
+            // The bypass, written out: a client with no middleware.
+            let bare = reqwest_middleware::ClientWithMiddleware::from(reqwest::Client::new());
+            let client = CronClient::builder(&base)
+                .token("sek")
+                .http_client(bare)
+                .build()
+                .unwrap();
+            async { client.list(&agent, None, None).await.expect("list lands") }
+                .instrument(caller_span())
+                .await;
+        }
+
+        let spans = spans_until(&recorder, 3).await;
+        let asked = span_of(&spans, "POST /agent/turn", "server");
+        let answered = span_of(&spans, "GET /schedules", "server");
+        assert_eq!(
+            answered.parent_span_id, None,
+            "a request with no header is a root at the daemon"
+        );
+        assert_ne!(
+            answered.trace_id, asked.trace_id,
+            "the daemon did not join the caller's trace"
+        );
     }
 }

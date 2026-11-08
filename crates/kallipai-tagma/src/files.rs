@@ -6,6 +6,7 @@
 
 use kallipai_common::credential::Credential;
 use kallipai_common::protocol::ApiError;
+use kallipai_common::telemetry::HttpClient;
 
 /// One platform the tagma can fetch records from: the relay entry's name
 /// (the error's attribution), that entry's origin, and the credential
@@ -28,7 +29,7 @@ pub(crate) struct FilesAccess {
 /// Whole-body: the service caps uploads, so a stream would add plumbing
 /// without changing the memory story.
 pub(crate) async fn fetch_record_bytes(
-    http: &reqwest::Client,
+    http: &HttpClient,
     accesses: &[FilesAccess],
     record_id: uuid::Uuid,
 ) -> Result<Vec<u8>, ApiError> {
@@ -49,7 +50,7 @@ pub(crate) async fn fetch_record_bytes(
 
 /// One platform's attempt: its own origin, its own bearer; 404 is a miss.
 async fn fetch_from_face(
-    http: &reqwest::Client,
+    http: &HttpClient,
     access: &FilesAccess,
     record_id: uuid::Uuid,
 ) -> Result<Option<Vec<u8>>, ApiError> {
@@ -133,6 +134,9 @@ pub(crate) async fn fetch_local(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kallipai_common::telemetry::test_observability::{
+        client_span_of, recorder, span_of, spans_until,
+    };
 
     #[test]
     fn files_upstream_error_folds_every_status_into_bad_gateway() {
@@ -249,6 +253,12 @@ mod tests {
             credential: Credential::fixed(token),
         }
     }
+    /// The client these tests fetch with, built the way the service builds the
+    /// one it stores: a call made under a subscriber leaves a client span and
+    /// puts its context on the wire.
+    fn test_client() -> HttpClient {
+        kallipai_common::telemetry::http_client(reqwest::Client::builder()).expect("a client")
+    }
 
     #[tokio::test]
     async fn the_walk_takes_the_first_platform_that_has_the_record() {
@@ -259,7 +269,7 @@ mod tests {
             access("alpha", &first_origin, "alpha-token"),
             access("beta", &second_origin, "beta-token"),
         ];
-        let bytes = fetch_record_bytes(&reqwest::Client::new(), &accesses, uuid::Uuid::nil())
+        let bytes = fetch_record_bytes(&test_client(), &accesses, uuid::Uuid::nil())
             .await
             .unwrap();
         assert_eq!(bytes, b"the bytes".to_vec());
@@ -314,7 +324,7 @@ mod tests {
             origin: format!("http://{addr}"),
             credential: Credential::watching("stale-token", || Some("fresh-token".to_owned())),
         }];
-        let bytes = fetch_record_bytes(&reqwest::Client::new(), &accesses, uuid::Uuid::nil())
+        let bytes = fetch_record_bytes(&test_client(), &accesses, uuid::Uuid::nil())
             .await
             .expect("the reloaded credential must carry the fetch");
         assert_eq!(bytes, b"the bytes".to_vec());
@@ -335,7 +345,7 @@ mod tests {
     async fn a_rejected_credential_with_no_new_value_is_one_attempt() {
         let (origin, seen) = crate::test_helpers::spawn_files_stub(401, b"").await;
         let accesses = [access("alpha", &origin, "dead-token")];
-        let err = fetch_record_bytes(&reqwest::Client::new(), &accesses, uuid::Uuid::nil())
+        let err = fetch_record_bytes(&test_client(), &accesses, uuid::Uuid::nil())
             .await
             .unwrap_err();
         assert_eq!(err.status, 502);
@@ -354,7 +364,7 @@ mod tests {
             access("alpha", &first_origin, "a-token"),
             access("beta", &second_origin, "b-token"),
         ];
-        let err = fetch_record_bytes(&reqwest::Client::new(), &accesses, uuid::Uuid::nil())
+        let err = fetch_record_bytes(&test_client(), &accesses, uuid::Uuid::nil())
             .await
             .unwrap_err();
         assert_eq!(err.status, 404);
@@ -385,7 +395,7 @@ mod tests {
             access("alpha", &first_origin, "a-token"),
             access("beta", &second_origin, "b-token"),
         ];
-        let err = fetch_record_bytes(&reqwest::Client::new(), &accesses, uuid::Uuid::nil())
+        let err = fetch_record_bytes(&test_client(), &accesses, uuid::Uuid::nil())
             .await
             .unwrap_err();
         assert_eq!(err.status, 502);
@@ -404,7 +414,7 @@ mod tests {
             access("alpha", "http://127.0.0.1:1", "a-token"),
             access("beta", &second_origin, "b-token"),
         ];
-        let err = fetch_record_bytes(&reqwest::Client::new(), &accesses, uuid::Uuid::nil())
+        let err = fetch_record_bytes(&test_client(), &accesses, uuid::Uuid::nil())
             .await
             .unwrap_err();
         assert_eq!(err.status, 503);
@@ -418,7 +428,7 @@ mod tests {
 
     #[tokio::test]
     async fn no_enrolled_platform_is_unavailable() {
-        let err = fetch_record_bytes(&reqwest::Client::new(), &[], uuid::Uuid::nil())
+        let err = fetch_record_bytes(&test_client(), &[], uuid::Uuid::nil())
             .await
             .unwrap_err();
         assert_eq!(err.status, 503);
@@ -426,6 +436,123 @@ mod tests {
             err.message.contains("enrolled on no platform"),
             "got: {}",
             err.message
+        );
+    }
+
+    // -- the trace the fetch belongs to -------------------------------------
+
+    /// A files service on loopback under a real server span, so the recorder
+    /// sees the request arrive as a span of its own.
+    async fn span_files_service(
+        status: u16,
+        body: &'static [u8],
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let app = kallipai_common::telemetry::with_server_span(axum::Router::new().route(
+            "/v1/files/{id}",
+            axum::routing::get(move || async move {
+                (axum::http::StatusCode::from_u16(status).unwrap(), body)
+            }),
+        ));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let served = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        (format!("http://{addr}"), served)
+    }
+
+    /// A fetch of an attachment runs inside the request that asked for it: the
+    /// files service answers inside the span of the call, all in one trace.
+    #[tokio::test]
+    async fn a_files_fetch_carries_the_context_of_the_request_it_serves() {
+        use tracing::Instrument as _;
+
+        let (origin, served) = span_files_service(200, b"the bytes").await;
+        let (recorder, subscriber) = recorder("tagma");
+        let accesses = [access("alpha", &origin, "alpha-token")];
+        let client = test_client();
+        {
+            let _subscribed = tracing::subscriber::set_default(subscriber);
+            let request = kallipai_common::telemetry::request_span(
+                "GET",
+                "/agents/{id}/attachments/ingest",
+                "/agents/roots/attachments/ingest",
+                &axum::http::HeaderMap::new(),
+            );
+            let bytes = async { fetch_record_bytes(&client, &accesses, uuid::Uuid::nil()).await }
+                .instrument(request.clone())
+                .await
+                .expect("the record comes back");
+            assert_eq!(bytes, b"the bytes".to_vec());
+        }
+        served.abort();
+
+        let spans = spans_until(&recorder, 3).await;
+        let caller = span_of(&spans, "GET /agents/{id}/attachments/ingest", "server");
+        let call = client_span_of(&spans, "GET", &format!("/v1/files/{}", uuid::Uuid::nil()));
+        let answered = span_of(&spans, "GET /v1/files/{id}", "server");
+        assert_eq!(
+            call.parent_span_id.as_deref(),
+            Some(caller.span_id.as_str()),
+            "the call hangs under the request that made it"
+        );
+        assert_eq!(
+            answered.parent_span_id.as_deref(),
+            Some(call.span_id.as_str()),
+            "the files service answered inside the span of the call"
+        );
+        assert_eq!(
+            answered.trace_id, call.trace_id,
+            "one trace spans the fetch, not a second one at the service"
+        );
+        assert_eq!(
+            call.trace_id, caller.trace_id,
+            "and that trace is the request's"
+        );
+    }
+
+    /// The same call on a client with no middleware: nothing puts a header on
+    /// the wire, so the service starts a trace of its own. Without this, the
+    /// positive test would pass on a header read back at the caller.
+    #[tokio::test]
+    async fn a_call_that_carries_no_header_leaves_the_service_its_own_trace() {
+        use tracing::Instrument as _;
+
+        let (origin, served) = span_files_service(200, b"the bytes").await;
+        let (recorder, subscriber) = recorder("tagma");
+        {
+            let _subscribed = tracing::subscriber::set_default(subscriber);
+            let request = kallipai_common::telemetry::request_span(
+                "GET",
+                "/agents/{id}/attachments/ingest",
+                "/agents/roots/attachments/ingest",
+                &axum::http::HeaderMap::new(),
+            );
+            // A bare client, written out: `files_http` is typed so a call
+            // through the service cannot drop the propagation unnoticed.
+            let bare = reqwest::Client::new();
+            let response = async {
+                bare.get(format!("{origin}/v1/files/{}", uuid::Uuid::nil()))
+                    .send()
+                    .await
+            }
+            .instrument(request.clone())
+            .await
+            .expect("the service answers");
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+        }
+        served.abort();
+
+        let spans = spans_until(&recorder, 2).await;
+        let caller = span_of(&spans, "GET /agents/{id}/attachments/ingest", "server");
+        let answered = span_of(&spans, "GET /v1/files/{id}", "server");
+        assert_eq!(
+            answered.parent_span_id, None,
+            "a request with no header is a root at the service"
+        );
+        assert_ne!(
+            answered.trace_id, caller.trace_id,
+            "the service did not join the caller's trace"
         );
     }
 }

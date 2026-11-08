@@ -354,6 +354,138 @@ async fn put_ls_get_roundtrips_through_the_real_service() {
     assert_eq!(downloaded, content);
 }
 
+/// Wait until the recorder holds a span with this name and kind, then hand
+/// back everything it has: a service's span ends on its own task, after
+/// the call returns, so counting spans would race the export.
+async fn spans_once(
+    recorder: &kallipai_common::telemetry::test_observability::Recorder,
+    name: &str,
+    kind: &str,
+) -> Vec<kallipai_common::telemetry::test_observability::ObservedSpan> {
+    use kallipai_common::telemetry::test_observability::spans_when;
+
+    spans_when(recorder, &format!("a {kind} span named {name}"), |spans| {
+        spans
+            .iter()
+            .any(|span| span.name == name && span.kind == kind)
+    })
+    .await
+}
+
+/// A put made inside a traced command keeps that command's trace: the
+/// files service answers inside the span of the upload instead of opening
+/// a trace of its own. The service mounts the server-span layer itself;
+/// what this proves is the CLI's client putting the header on the wire.
+#[tokio::test]
+async fn a_put_carries_the_context_of_the_command_it_serves() {
+    use kallipai_common::telemetry::test_observability::{client_span_of, recorder, span_of};
+    use tracing::Instrument as _;
+
+    let world = spawn_world().await;
+    let scratch = TempDir::new().expect("scratch dir");
+    let local = scratch_file(&scratch, "report.txt", b"payload");
+    let target = format!(
+        "/users/{}/tagmas/{}/report.txt",
+        world.user1.as_ref(),
+        world.t1.as_ref()
+    );
+
+    let (recorder, subscriber) = recorder("kallip");
+    {
+        let _subscribed = tracing::subscriber::set_default(subscriber);
+        let client = FilesClient::new(world.files_url.clone(), world.t1_token.clone());
+        let command = kallipai_common::telemetry::request_span(
+            "PUT",
+            "/files",
+            "/files",
+            &axum::http::HeaderMap::new(),
+        );
+        async { client.put_file(&target, &local).await }
+            .instrument(command.clone())
+            .await
+            .expect("the upload lands");
+    }
+
+    let spans = spans_once(&recorder, "PUT /", "server").await;
+    let asked = span_of(&spans, "PUT /files", "server");
+    let call = client_span_of(&spans, "PUT", "/");
+    let answered = span_of(&spans, "PUT /", "server");
+    assert_eq!(
+        call.parent_span_id.as_deref(),
+        Some(asked.span_id.as_str()),
+        "the call hangs under the command that made it"
+    );
+    assert_eq!(
+        answered.parent_span_id.as_deref(),
+        Some(call.span_id.as_str()),
+        "the service answered inside the span of the call"
+    );
+    assert_eq!(
+        answered.trace_id, call.trace_id,
+        "one trace spans the upload, not a second one at the service"
+    );
+    assert_eq!(
+        call.trace_id, asked.trace_id,
+        "and that trace is the command's"
+    );
+}
+
+/// The same upload on a bare client: nothing puts a header on the wire, so
+/// the service starts a trace of its own. Without this, the test above
+/// would pass on a header read back at the caller.
+#[tokio::test]
+async fn a_put_that_carries_no_header_leaves_the_service_its_own_trace() {
+    use kallipai_common::telemetry::test_observability::{recorder, span_of};
+    use tracing::Instrument as _;
+
+    let world = spawn_world().await;
+    let scratch = TempDir::new().expect("scratch dir");
+    let local = scratch_file(&scratch, "report.txt", b"payload");
+    let body = std::fs::read(&local).expect("read scratch file");
+    let target = format!(
+        "/users/{}/tagmas/{}/report.txt",
+        world.user1.as_ref(),
+        world.t1.as_ref()
+    );
+
+    let (recorder, subscriber) = recorder("kallip");
+    {
+        let _subscribed = tracing::subscriber::set_default(subscriber);
+        let command = kallipai_common::telemetry::request_span(
+            "PUT",
+            "/files",
+            "/files",
+            &axum::http::HeaderMap::new(),
+        );
+        let bare = reqwest::Client::new();
+        let response = async {
+            bare.put(&world.files_url)
+                .query(&[("path", target.as_str())])
+                .header("authorization", format!("Bearer {}", world.t1_token))
+                .header(reqwest::header::CONTENT_LENGTH, body.len())
+                .body(body)
+                .send()
+                .await
+        }
+        .instrument(command.clone())
+        .await
+        .expect("the service answers");
+        assert_eq!(response.status().as_u16(), 201);
+    }
+
+    let spans = spans_once(&recorder, "PUT /", "server").await;
+    let asked = span_of(&spans, "PUT /files", "server");
+    let answered = span_of(&spans, "PUT /", "server");
+    assert_eq!(
+        answered.parent_span_id, None,
+        "a request with no header is a root at the service"
+    );
+    assert_ne!(
+        answered.trace_id, asked.trace_id,
+        "the service did not join the command's trace"
+    );
+}
+
 #[tokio::test]
 async fn send_lands_in_the_target_inbox_and_is_discoverable_there() {
     let world = spawn_world().await;

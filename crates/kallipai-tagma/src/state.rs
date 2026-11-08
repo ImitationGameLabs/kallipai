@@ -25,6 +25,7 @@ pub use kallipai_common::protocol::AgentSummary;
 use kallipai_common::protocol::ApiError;
 use kallipai_common::protocol::SseEvent;
 use kallipai_common::protocol::{BgTaskView, LockState, ParkedReason, TransientRetryInfo};
+use kallipai_common::telemetry::HttpClient;
 use tokio::sync::{Mutex, Notify, RwLock, broadcast, mpsc};
 use tokio::task::{AbortHandle, JoinHandle};
 use tokio_util::sync::CancellationToken;
@@ -336,10 +337,11 @@ pub struct AppState {
     /// `profile_source::spawn_gateway_signal_task`) drives refresh and poison
     /// state per signal (a no-op while the source is local).
     pub gateway_signals: Option<tokio::sync::mpsc::UnboundedSender<kallipai_adk::GatewaySignal>>,
-    /// Shared HTTP client for tagma-side outbound calls (the files-service
-    /// media fetch): one client reuses its connection pool across requests,
-    /// and clones are cheap (an internal `Arc`).
-    pub files_http: reqwest::Client,
+    /// Shared client for tagma-side outbound calls (the files-service media
+    /// fetch and the gateway profile face): one client reuses its connection
+    /// pool across requests, clones are cheap (an internal `Arc`), and every
+    /// call carries the span it was made under to the service that answers.
+    pub files_http: HttpClient,
     /// Tagma-wide directory write-lock coordinator. Shared across all agents so
     /// one agent holding a dir's write-lock blocks another. The tagma build
     /// enforces locks via landlock on Linux (mandatory); advisory elsewhere.
@@ -945,11 +947,12 @@ impl AppState {
             gateway_signals,
             // Bounded so a wedged files connection cannot hang a media
             // fetch, the ingest route being this client's only user.
-            files_http: reqwest::Client::builder()
-                .connect_timeout(Duration::from_secs(10))
-                .timeout(Duration::from_secs(60))
-                .build()
-                .expect("files HTTP client constructs without network"),
+            files_http: kallipai_common::telemetry::http_client(
+                reqwest::Client::builder()
+                    .connect_timeout(Duration::from_secs(10))
+                    .timeout(Duration::from_secs(60)),
+            )
+            .expect("files HTTP client constructs without network"),
             lock_manager: Arc::new(kallipai_adk::dirlock::DirLockManager::new()),
             relays: std::sync::Mutex::new(HashMap::new()),
             bus: crate::bus::tagma_bus().expect("static topic registry is conflict-free"),

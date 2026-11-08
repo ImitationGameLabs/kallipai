@@ -30,6 +30,7 @@ serde_urlencoded = "0.7"
 just-llm-client = { workspace = true }
 async-trait = { workspace = true }
 reqwest = { workspace = true }
+reqwest-middleware = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["sync"] }
@@ -119,6 +120,10 @@ x25519-dalek = { workspace = true, features = ["reusable_secrets"] }
 # KEX unit tests (relay::kex): initiator-side HKDF to assert both sides agree.
 hkdf = { workspace = true }
 sha2 = { workspace = true }
+# The recording exporter behind the propagation tests: spans leave through an
+# in-memory recorder instead of a collector (the `test-support` gate keeps it
+# out of the shipped lib).
+kallipai-common = { workspace = true, features = ["test-support"] }
 
 # The workspace-relocation suite re-points the process-wide instance-roots
 # singleton (via the test-support-gated test_helpers); it must only compile

@@ -10,7 +10,7 @@ anyhow = { workspace = true }
 base64 = { workspace = true }
 kallipai-blob-store = { workspace = true }
 kallipai-client = { workspace = true }
-kallipai-common = { workspace = true }
+kallipai-common = { workspace = true, features = ["propagation"] }
 kallipai-lesche-common = { workspace = true }
 tokio = { workspace = true, features = ["fs"] }
 tokio-util = { workspace = true, features = ["io"] }
@@ -23,6 +23,9 @@ serde_json = { workspace = true }
 tar = { workspace = true }
 uuid = { workspace = true }
 reqwest = { workspace = true }
+# The file client is a middleware client, so its requests are built by
+# reqwest-middleware's builder, and `.query` is the extension those calls need.
+reqwest-middleware = { workspace = true, features = ["query"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }
@@ -34,3 +37,4 @@ axum = { workspace = true }
 sea-orm = { workspace = true }
 testcontainers = { workspace = true, features = ["reusable-containers"] }
 testcontainers-modules = { workspace = true }
+kallipai-common = { workspace = true, features = ["test-support"] }

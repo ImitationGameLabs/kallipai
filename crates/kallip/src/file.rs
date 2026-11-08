@@ -8,6 +8,7 @@
 
 use std::path::Path;
 
+use kallipai_common::telemetry::HttpClient;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -58,7 +59,7 @@ struct ApiErrorMessage {
 pub struct FilesClient {
     base_url: String,
     token: String,
-    http: reqwest::Client,
+    http: HttpClient,
 }
 
 impl FilesClient {
@@ -79,10 +80,12 @@ impl FilesClient {
     pub fn new(base_url: String, token: String) -> Self {
         // A connect timeout bounds the dead-URL case; no request timeout --
         // large transfers are the point, and the server caps body sizes.
-        let http = reqwest::Client::builder()
-            .connect_timeout(std::time::Duration::from_secs(10))
-            .build()
-            .expect("reqwest client builds");
+        // The client carries the dispatch middleware, so an upload made
+        // inside a traced command lands in that command's trace.
+        let http = kallipai_common::telemetry::http_client(
+            reqwest::Client::builder().connect_timeout(std::time::Duration::from_secs(10)),
+        )
+        .expect("reqwest client builds");
         Self {
             base_url,
             token,

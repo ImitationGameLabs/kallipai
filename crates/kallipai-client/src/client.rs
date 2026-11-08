@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use kallipai_common::protocol::ApiError;
+use kallipai_common::telemetry::HttpClient;
 
 mod agents;
 mod approvals;
@@ -19,7 +20,7 @@ pub use lesche::{DirectReadQuery, MessageDelivery, RoomReadQuery};
 
 struct Inner {
     base_url: String,
-    http: reqwest::Client,
+    http: HttpClient,
     auth_token: Option<String>,
 }
 
@@ -69,7 +70,7 @@ impl TagmaClient {
     /// Use this when the caller needs to control TLS configuration (e.g.
     /// disabling cert verification for loopback-only connections in minimal
     /// containers).
-    pub fn from_env_with_http(http: reqwest::Client) -> Result<Self> {
+    pub fn from_env_with_http(http: HttpClient) -> Result<Self> {
         let (url, token) = read_env_config()?;
         Self::builder(&url)
             .auth_token(token)
@@ -88,7 +89,10 @@ impl TagmaClient {
     }
 
     /// Set Authorization: Bearer <token> if an auth token is configured.
-    fn with_auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+    fn with_auth(
+        &self,
+        req: reqwest_middleware::RequestBuilder,
+    ) -> reqwest_middleware::RequestBuilder {
         if let Some(ref token) = self.inner.auth_token {
             req.bearer_auth(token)
         } else {
@@ -144,14 +148,15 @@ fn read_env_config() -> Result<(String, String)> {
     Ok((url, token))
 }
 
-/// The process-wide default `reqwest::Client`, constructed once and shared by
-/// every `TagmaClient` that doesn't override `.http_client()`. Cloning a
-/// `reqwest::Client` is cheap and shares the underlying pool.
-fn shared_http() -> &'static reqwest::Client {
-    static HTTP: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+/// The process-wide default [`HttpClient`], constructed once and shared by
+/// every `TagmaClient` that doesn't override `.http_client()`. Cloning is
+/// cheap and shares the underlying pool. The client carries the dispatch
+/// middleware that injects the ambient trace context, so a call it makes
+/// lands in the trace of the work that asked for it.
+fn shared_http() -> &'static HttpClient {
+    static HTTP: std::sync::OnceLock<HttpClient> = std::sync::OnceLock::new();
     HTTP.get_or_init(|| {
-        reqwest::ClientBuilder::new()
-            .build()
+        kallipai_common::telemetry::http_client(reqwest::ClientBuilder::new())
             .expect("default reqwest client builds")
     })
 }
@@ -166,7 +171,7 @@ fn shared_http() -> &'static reqwest::Client {
 pub struct TagmaClientBuilder {
     base_url: String,
     auth_token: Option<String>,
-    http: Option<reqwest::Client>,
+    http: Option<HttpClient>,
 }
 
 impl TagmaClientBuilder {
@@ -176,24 +181,27 @@ impl TagmaClientBuilder {
         self
     }
 
-    /// Override the default [`reqwest::Client`].
+    /// Override the default [`HttpClient`].
     ///
     /// Use this when you need custom TLS settings (e.g. disabling cert
     /// verification for loopback-only connections in minimal containers).
-    pub fn http_client(mut self, client: reqwest::Client) -> Self {
+    /// The default client carries the dispatch middleware that publishes the
+    /// ambient trace context; a client built without it leaves the trace at
+    /// this process. Bypassing is a decision, so it is written out here.
+    pub fn http_client(mut self, client: HttpClient) -> Self {
         self.http = Some(client);
         self
     }
 
     /// Consume the builder and produce a [`TagmaClient`].
     ///
-    /// If no custom HTTP client was provided via `.http_client()`, a default
-    /// `reqwest::Client` is constructed here.  Construction can fail if the
-    /// system CA store is missing; callers that need to avoid this should
+    /// If no custom HTTP client was provided via `.http_client()`, the shared
+    /// default client is used.  Constructing it can fail if the system CA
+    /// store is missing; callers that need to avoid this should
     /// supply their own client via `.http_client()`.
     pub fn build(self) -> Result<TagmaClient> {
         // Callers that don't override `.http_client()` share one process-wide
-        // default `reqwest::Client` (constructed once, then cloned — the client
+        // default `HttpClient` (constructed once, then cloned — the client
         // is a cheap handle over a shared connection pool). This avoids churning
         // a fresh pool/TLS-state per built client (e.g. a peer service building
         // one per request). No blanket timeout is set here — it would clip the
@@ -372,5 +380,117 @@ mod tests {
         let response = send(&client, "/probe").await;
         let response = client.ensure_success(response).await.expect("2xx passes");
         assert_eq!(response.status().as_u16(), 200);
+    }
+
+    // -- the trace a call belongs to ----------------------------------------
+
+    /// Serve `app` on an ephemeral port and hand back its base URL.
+    async fn spawn_stub(app: axum::Router) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        format!("http://{addr}")
+    }
+
+    /// The tagma's answer to a timezone read, with the server span layered
+    /// on: a recorder sees the request arrive the way the daemon sees it.
+    async fn spawn_timezone_stub() -> String {
+        let app = kallipai_common::telemetry::with_server_span(axum::Router::new().route(
+            "/settings/timezone",
+            axum::routing::get(|| async { axum::Json(serde_json::json!({ "timezone": "UTC" })) }),
+        ));
+        spawn_stub(app).await
+    }
+
+    /// The span a caller would be in when it makes the call.
+    fn agent_request(method: &str, path: &str) -> tracing::Span {
+        kallipai_common::telemetry::request_span(method, path, path, &axum::http::HeaderMap::new())
+    }
+
+    /// A read made inside a request keeps that request's trace: the tagma
+    /// answers inside the span of the call.
+    #[tokio::test]
+    async fn a_read_carries_the_context_of_the_request_it_serves() {
+        use kallipai_common::telemetry::test_observability::{
+            client_span_of, recorder, span_of, spans_until,
+        };
+        use tracing::Instrument as _;
+
+        let base = spawn_timezone_stub().await;
+        let (recorder, subscriber) = recorder("kallipai-client");
+        {
+            let _subscribed = tracing::subscriber::set_default(subscriber);
+            let client = TagmaClient::builder(&base).build().expect("a client");
+            let request = agent_request("GET", "/agent/status");
+            let zone = async { client.get_timezone().await }
+                .instrument(request.clone())
+                .await
+                .expect("the read lands");
+            assert_eq!(zone.as_deref(), Some("UTC"));
+        }
+
+        let spans = spans_until(&recorder, 3).await;
+        let asked = span_of(&spans, "GET /agent/status", "server");
+        let call = client_span_of(&spans, "GET", "/settings/timezone");
+        let answered = span_of(&spans, "GET /settings/timezone", "server");
+        assert_eq!(
+            call.parent_span_id.as_deref(),
+            Some(asked.span_id.as_str()),
+            "the call hangs under the request that made it"
+        );
+        assert_eq!(
+            answered.parent_span_id.as_deref(),
+            Some(call.span_id.as_str()),
+            "the tagma answered inside the span of the call"
+        );
+        assert_eq!(
+            answered.trace_id, call.trace_id,
+            "one trace spans the read, not a second one at the tagma"
+        );
+        assert_eq!(
+            call.trace_id, asked.trace_id,
+            "and that trace is the request's"
+        );
+    }
+
+    /// The same read on a client with no middleware: nothing puts a header on
+    /// the wire, so the tagma starts a trace of its own. Without this, the
+    /// test above would pass on a header read back at the caller.
+    #[tokio::test]
+    async fn a_read_that_carries_no_header_leaves_the_tagma_its_own_trace() {
+        use kallipai_common::telemetry::test_observability::{recorder, span_of, spans_until};
+        use tracing::Instrument as _;
+
+        let base = spawn_timezone_stub().await;
+        let (recorder, subscriber) = recorder("kallipai-client");
+        {
+            let _subscribed = tracing::subscriber::set_default(subscriber);
+            // A bare client, written out: `http_client` is typed so a read
+            // through the client cannot drop the propagation unnoticed.
+            let bare = reqwest_middleware::ClientWithMiddleware::from(reqwest::Client::new());
+            let client = TagmaClient::builder(&base)
+                .http_client(bare)
+                .build()
+                .expect("a client");
+            let request = agent_request("GET", "/agent/status");
+            async { client.get_timezone().await }
+                .instrument(request.clone())
+                .await
+                .expect("the read lands");
+        }
+
+        let spans = spans_until(&recorder, 2).await;
+        let asked = span_of(&spans, "GET /agent/status", "server");
+        let answered = span_of(&spans, "GET /settings/timezone", "server");
+        assert_eq!(
+            answered.parent_span_id, None,
+            "a request with no header is a root at the tagma"
+        );
+        assert_ne!(
+            answered.trace_id, asked.trace_id,
+            "the tagma did not join the caller's trace"
+        );
     }
 }

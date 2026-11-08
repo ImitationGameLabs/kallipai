@@ -33,6 +33,31 @@ Everything the request causes then hangs under that span:
 
 A trace therefore reads as one request span with the calls and queries it
 caused beneath it, in the order they happened.
+The first-party calls are the ones that carry it on: an outbound request
+whose client came from `telemetry::http_client` opens a client span and, in
+a process that has published the propagator, injects `traceparent`, so the
+service that answers continues this trace instead of starting a second one.
+Those legs are:
+
+- the tagma fetching a record from the files service, and the profile
+  distribution face it pulls through;
+- the relay client posting an envelope, and the tunnel client opening its
+  stream;
+- the archeion client behind enrol and health: in the tagma, in the files
+  service's credential checks, in the admin console and in `kallipctl`;
+- the tagma client shared by agents, the CLI and the cron daemon, and the
+  CLI's own file client;
+- the cron CLI calling its daemon, and the keryx and instances
+  control-plane calls.
+
+A client built by hand carries nothing, and a process that never assembled
+the exporter injects nothing either, because the propagator is published
+with it (see [Known gaps](#known-gaps)).
+
+Five processes make first-party calls and assemble no export layer, so
+their calls carry the type's promise and no header yet: `kallip`,
+`kallipctl`, `kallipai-admin`, `kallipai-cron` and `kallipai-run` (see
+[Known gaps](#known-gaps)).
 
 The two faces end their span differently. The axum span ends when the handler
 hands back the response head, so a streamed body runs on outside it and a body
@@ -68,6 +93,33 @@ id in a span name would scatter one endpoint across a thousand names, so the
 path travels as an attribute instead. A 4xx records its status and stays
 `unset`: for a server span the semantic conventions reserve the error status
 for a 5xx.
+
+## The client span's attributes
+
+An outbound call through `telemetry::http_client` opens a span named for its
+method alone (`GET`, `POST`) with `otel.kind=client`, and records where the
+call went as attributes. This is the server rule's other face: a client call
+has no route template to aggregate on, and a path with an id in it would
+scatter one endpoint across a thousand names, so the name is a bucket and the
+target is an attribute. Those attributes are the call and nothing else:
+
+| Attribute | Value |
+| --- | --- |
+| `http.request.method` | the request method |
+| `url.path` | the path, capped at 256 characters |
+| `server.address` | the host the URL names, as written (never a resolved address) |
+| `server.port` | the port the call went to, the scheme's default when the URL omits it |
+| `http.response.status_code` | the status the service answered |
+| `error.type` and a failed status | a 4xx or 5xx from the service; `timeout`, `transport` or `middleware` for a call that got no response |
+
+The name also reaches the log prefix, so a line logged inside a client call
+reads `request{otel.name=GET otel.kind=client}`: the method, not the endpoint,
+which is on the span's attributes where the trace reads it.
+
+The span ends when the response head exists: a body that fails afterwards is
+the caller's error, and a streamed answer is recorded as the call that
+started it. A call made outside every span roots a new trace, which is the
+honest shape for work no request asked for.
 
 The gateway adds three attributes of its own. `gateway.outcome` is on every
 request routed to a generation endpoint, a refusal at a gate included.
@@ -266,3 +318,10 @@ reports every skip. Its budgets are 5 GiB and 72 hours, overridable with
   `traceparent` is adopted, and a rejected request's archeion checks hang under
   its request span); there is no automated assertion against a running
   collector.
+- Propagation lives only in a process that assembled the exporter: the global
+  propagator is published with it, so a process that never sets
+  `OTEL_EXPORTER_OTLP_ENDPOINT`, or never runs the bootstrap at all, injects
+  no `traceparent`, however its clients are typed.
+- The archeion OAuth exchange carries no trace context: it is the one
+  outbound call whose header set is kept to the protocol's own, so its
+  duration is on the log line only.

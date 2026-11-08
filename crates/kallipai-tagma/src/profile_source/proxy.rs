@@ -33,6 +33,7 @@ use kallipai_adk::profile::{Profile, ProfileConfig, ProfileSet, Provider};
 use kallipai_common::collection::CollectionRef;
 use kallipai_common::credential::Credential;
 use kallipai_common::protocol::Modality;
+use kallipai_common::telemetry::HttpClient;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use tracing::{error, info, warn};
@@ -157,7 +158,7 @@ fn parse_api_error(body: &str) -> (String, Option<String>) {
 /// (a refresh holds it across the fetches, so concurrent `load()` calls
 /// share one refresh instead of stampeding the face).
 pub struct ProxyProfileSource {
-    client: reqwest::Client,
+    client: HttpClient,
     /// The gateway's distribution base, no trailing slash: the
     /// api-edge segment; the `base_url` each
     /// profile carries comes from the gateway's own payload, not from
@@ -282,11 +283,12 @@ impl ProxyProfileSource {
                 "the derived gateway base {base:?} is not an http(s) URL; check the platform origin (KALLIPAI_POLIS_URL / polis.toml entry)"
             );
         }
-        let client = reqwest::Client::builder()
-            .connect_timeout(Duration::from_secs(10))
-            .timeout(Duration::from_secs(60))
-            .build()
-            .context("failed to build the gateway HTTP client")?;
+        let client = kallipai_common::telemetry::http_client(
+            reqwest::Client::builder()
+                .connect_timeout(Duration::from_secs(10))
+                .timeout(Duration::from_secs(60)),
+        )
+        .context("failed to build the gateway HTTP client")?;
         Ok(Self {
             client,
             base: base.to_owned(),
@@ -704,6 +706,9 @@ mod tests {
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
     use axum::routing::get;
+    use kallipai_common::telemetry::test_observability::{
+        client_span_of, recorder, span_of, spans_until,
+    };
     use serde_json::json;
     use std::sync::Arc;
 
@@ -779,46 +784,48 @@ mod tests {
     async fn spawn_mock_gateway() -> String {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let app = axum::Router::new()
-            .route(
-                "/selected-collection",
-                get(|| async {
-                    axum::Json(json!({
-                        "owner": "acc-x",
-                        "collection_name": "user-col",
-                        "description": "the account's own collection",
-                        "sets": [
-                            { "name": "alpha",
-                              "description": "primary",
-                              "profiles": [
-                                { "family": "openai-compatible",
-                                  "base_url": "http://gw.test:7501/v1",
-                                  "model": "gpt-x", "max_context_window": 128000,
-                                  "effort": "high", "store": true,
-                                  "modalities": ["text", "image"],
-                                  "api_key": "tagma-token-1" },
-                                { "family": "deepseek",
-                                  "base_url": "http://gw.test:7501/v1",
-                                  "model": "ds-x", "max_context_window": 64000,
-                                  "effort": null, "store": null, "modalities": [],
-                                  "api_key": "tagma-token-1" }
-                              ] }
-                        ],
-                        "default_set": "alpha"
-                    }))
-                }),
-            )
-            .route(
-                "/parking",
-                get(|| async {
-                    axum::Json(json!({ "profiles": [
-                        { "family": "deepseek", "base_url": "http://gw.test:7501/v1",
-                          "model": "unassigned-1", "max_context_window": 32000,
-                          "effort": null, "store": null, "modalities": [],
-                          "api_key": "tagma-token-1" }
-                    ]}))
-                }),
-            );
+        let app = kallipai_common::telemetry::with_server_span(
+            axum::Router::new()
+                .route(
+                    "/selected-collection",
+                    get(|| async {
+                        axum::Json(json!({
+                            "owner": "acc-x",
+                            "collection_name": "user-col",
+                            "description": "the account's own collection",
+                            "sets": [
+                                { "name": "alpha",
+                                  "description": "primary",
+                                  "profiles": [
+                                    { "family": "openai-compatible",
+                                      "base_url": "http://gw.test:7501/v1",
+                                      "model": "gpt-x", "max_context_window": 128000,
+                                      "effort": "high", "store": true,
+                                      "modalities": ["text", "image"],
+                                      "api_key": "tagma-token-1" },
+                                    { "family": "deepseek",
+                                      "base_url": "http://gw.test:7501/v1",
+                                      "model": "ds-x", "max_context_window": 64000,
+                                      "effort": null, "store": null, "modalities": [],
+                                      "api_key": "tagma-token-1" }
+                                  ] }
+                            ],
+                            "default_set": "alpha"
+                        }))
+                    }),
+                )
+                .route(
+                    "/parking",
+                    get(|| async {
+                        axum::Json(json!({ "profiles": [
+                            { "family": "deepseek", "base_url": "http://gw.test:7501/v1",
+                              "model": "unassigned-1", "max_context_window": 32000,
+                              "effort": null, "store": null, "modalities": [],
+                              "api_key": "tagma-token-1" }
+                        ]}))
+                    }),
+                ),
+        );
         tokio::spawn(async move {
             let _ = axum::serve(listener, app).await;
         });
@@ -1637,5 +1644,98 @@ mod tests {
         let health = source.health().await;
         assert!(!health.degraded, "token death is not a degraded boot");
         assert!(health.poisoned);
+    }
+
+    // -- the trace the refresh belongs to -----------------------------------
+
+    /// A profile refresh runs inside the request that asked for it: the gateway
+    /// answers inside the span of the call, all in one trace.
+    #[tokio::test]
+    async fn a_profile_refresh_carries_the_context_of_the_request_it_serves() {
+        use tracing::Instrument as _;
+
+        crate::test_helpers::ensure_test_data_dir();
+        let base = spawn_mock_gateway().await;
+        let (recorder, subscriber) = recorder("tagma");
+        let source = ProxyProfileSource::new(&base, Credential::fixed("tagma-token-1")).unwrap();
+        {
+            let _subscribed = tracing::subscriber::set_default(subscriber);
+            let request = kallipai_common::telemetry::request_span(
+                "GET",
+                "/profiles",
+                "/profiles",
+                &axum::http::HeaderMap::new(),
+            );
+            let cfg = async { source.load().await }
+                .instrument(request.clone())
+                .await
+                .expect("the refresh lands");
+            assert_eq!(cfg.default, "alpha");
+        }
+
+        // The request span, the selected-collection call and its answer, the parking
+        // call and its answer.
+        let spans = spans_until(&recorder, 5).await;
+        let caller = span_of(&spans, "GET /profiles", "server");
+        let call = client_span_of(&spans, "GET", "/selected-collection");
+        let answered = span_of(&spans, "GET /selected-collection", "server");
+        assert_eq!(
+            call.parent_span_id.as_deref(),
+            Some(caller.span_id.as_str()),
+            "the fetch hangs under the request that made it"
+        );
+        assert_eq!(
+            answered.parent_span_id.as_deref(),
+            Some(call.span_id.as_str()),
+            "the gateway answered inside the span of the call"
+        );
+        assert_eq!(
+            answered.trace_id, call.trace_id,
+            "one trace spans the refresh, not a second one at the gateway"
+        );
+        assert_eq!(
+            call.trace_id, caller.trace_id,
+            "and that trace is the request's"
+        );
+    }
+
+    /// The same fetch on a client with no middleware: nothing puts a header on
+    /// the wire, so the gateway starts a trace of its own. Without this, the
+    /// positive test would pass on a header read back at the caller.
+    #[tokio::test]
+    async fn a_fetch_that_carries_no_header_leaves_the_gateway_its_own_trace() {
+        use tracing::Instrument as _;
+
+        let base = spawn_mock_gateway().await;
+        let (recorder, subscriber) = recorder("tagma");
+        {
+            let _subscribed = tracing::subscriber::set_default(subscriber);
+            let request = kallipai_common::telemetry::request_span(
+                "GET",
+                "/profiles",
+                "/profiles",
+                &axum::http::HeaderMap::new(),
+            );
+            // A bare client, written out: `ProxyProfileSource` holds the
+            // propagating type, so no path through it drops the header.
+            let bare = reqwest::Client::new();
+            let response = async { bare.get(format!("{base}/selected-collection")).send().await }
+                .instrument(request.clone())
+                .await
+                .expect("the gateway answers");
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+        }
+
+        let spans = spans_until(&recorder, 2).await;
+        let caller = span_of(&spans, "GET /profiles", "server");
+        let answered = span_of(&spans, "GET /selected-collection", "server");
+        assert_eq!(
+            answered.parent_span_id, None,
+            "a request with no header is a root at the gateway"
+        );
+        assert_ne!(
+            answered.trace_id, caller.trace_id,
+            "the gateway did not join the caller's trace"
+        );
     }
 }

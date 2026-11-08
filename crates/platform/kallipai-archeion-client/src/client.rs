@@ -25,11 +25,12 @@ use kallipai_archeion_common::ids::TagmaId;
 use kallipai_archeion_common::mint::MintEnrollmentCodeResponse;
 use kallipai_archeion_common::proof::enroll_transcript;
 use kallipai_common::protocol::ApiError;
+use kallipai_common::telemetry::HttpClient;
 use kallipai_e2ee::DeviceKey;
 
 struct Inner {
     base_url: String,
-    http: reqwest::Client,
+    http: HttpClient,
     admin_token: Option<String>,
     /// The caller's personal access token: what a user-facing method (the
     /// self-service mint) authenticates with. Separate from `admin_token` so a
@@ -88,7 +89,10 @@ impl ArcheionClient {
         )
     }
 
-    fn with_admin_auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+    fn with_admin_auth(
+        &self,
+        req: reqwest_middleware::RequestBuilder,
+    ) -> reqwest_middleware::RequestBuilder {
         // Every admin method must call `require_admin_token()` first. Assert it
         // here so a future method that forgets the guard fails loudly in debug
         // builds rather than silently sending an unauthenticated request.
@@ -109,7 +113,10 @@ impl ArcheionClient {
             .context("access token required (set via builder.access_token)")
     }
 
-    fn with_access_auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+    fn with_access_auth(
+        &self,
+        req: reqwest_middleware::RequestBuilder,
+    ) -> reqwest_middleware::RequestBuilder {
         // Same discipline as `with_admin_auth`: the caller must have gone
         // through `require_access_token()` first, so a method that forgets the
         // guard fails loudly in a debug build instead of sending an anonymous
@@ -340,7 +347,7 @@ pub struct ArcheionClientBuilder {
     base_url: String,
     admin_token: Option<String>,
     access_token: Option<String>,
-    http: Option<reqwest::Client>,
+    http: Option<HttpClient>,
 }
 
 impl ArcheionClientBuilder {
@@ -358,8 +365,8 @@ impl ArcheionClientBuilder {
         self
     }
 
-    /// Override the default [`reqwest::Client`] (e.g. for custom TLS).
-    pub fn http_client(mut self, client: reqwest::Client) -> Self {
+    /// Override the default [`HttpClient`] (e.g. for custom TLS).
+    pub fn http_client(mut self, client: HttpClient) -> Self {
         self.http = Some(client);
         self
     }
@@ -372,9 +379,9 @@ impl ArcheionClientBuilder {
         // [`Self::http_client`].
         let http = match self.http {
             Some(client) => client,
-            None => reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(30))
-                .build()?,
+            None => kallipai_common::telemetry::http_client(
+                reqwest::Client::builder().timeout(std::time::Duration::from_secs(30)),
+            )?,
         };
         Ok(ArcheionClient {
             inner: Arc::new(Inner {
@@ -653,5 +660,137 @@ mod tests {
         assert!(api.message.ends_with('…'), "{}", api.message);
         assert_eq!(api.message.chars().count(), 201);
         assert!(api.code.is_none());
+    }
+
+    // -- the trace a call belongs to -----------------------------------------
+
+    /// Serve `app` on an ephemeral port and hand back its base URL.
+    async fn spawn_stub(app: axum::Router) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        format!("http://{addr}")
+    }
+
+    /// An archeion answering the two calls under test, with the server span
+    /// layered on so a recorder sees a request arrive.
+    async fn spawn_archeion_stub() -> String {
+        let app = kallipai_common::telemetry::with_server_span(
+            axum::Router::new()
+                .route(
+                    "/healthz",
+                    axum::routing::get(|| async { axum::http::StatusCode::OK }),
+                )
+                .route(
+                    "/tagmata/enroll",
+                    axum::routing::post(|| async {
+                        axum::Json(serde_json::json!({
+                            "tagma_id": "tagma-1",
+                            "tagma_token": "sk-tagma-x",
+                        }))
+                    }),
+                ),
+        );
+        spawn_stub(app).await
+    }
+
+    /// The span a caller would be in when it makes the call.
+    fn caller_span() -> tracing::Span {
+        kallipai_common::telemetry::request_span(
+            "PUT",
+            "/admin/tagmata",
+            "/admin/tagmata",
+            &axum::http::HeaderMap::new(),
+        )
+    }
+
+    /// Both calls of this client keep the caller's trace: the archeion answers
+    /// inside the span of the call.
+    #[tokio::test]
+    async fn a_call_carries_the_context_of_the_request_it_serves() {
+        use kallipai_common::telemetry::test_observability::{
+            client_span_of, recorder, span_of, spans_until,
+        };
+        use tracing::Instrument as _;
+
+        let base = spawn_archeion_stub().await;
+        let device = DeviceKey::generate();
+        let (recorder, subscriber) = recorder("kallipai-archeion-client");
+        {
+            let _subscribed = tracing::subscriber::set_default(subscriber);
+            let client = ArcheionClient::builder(&base).build().unwrap();
+            async {
+                client.healthz().await.expect("healthz");
+                client
+                    .enroll("sk-enroll-code", &device)
+                    .await
+                    .expect("enroll");
+            }
+            .instrument(caller_span())
+            .await;
+        }
+
+        let spans = spans_until(&recorder, 5).await;
+        let asked = span_of(&spans, "PUT /admin/tagmata", "server");
+        for (method, path) in [("GET", "/healthz"), ("POST", "/tagmata/enroll")] {
+            let call = client_span_of(&spans, method, path);
+            let answered = span_of(&spans, &format!("{method} {path}"), "server");
+            assert_eq!(
+                call.parent_span_id.as_deref(),
+                Some(asked.span_id.as_str()),
+                "{method} {path}: the call hangs under the request that made it"
+            );
+            assert_eq!(
+                answered.parent_span_id.as_deref(),
+                Some(call.span_id.as_str()),
+                "{method} {path}: the archeion answered inside the span of the call"
+            );
+            assert_eq!(
+                answered.trace_id, call.trace_id,
+                "{method} {path}: one trace spans the call, not a second one at the archeion"
+            );
+            assert_eq!(
+                call.trace_id, asked.trace_id,
+                "{method} {path}: the request's trace"
+            );
+        }
+    }
+
+    /// The same call on a client with no middleware: nothing puts a header on
+    /// the wire, so the archeion starts a trace of its own. Without this, the
+    /// test above would pass on a header read back at the caller.
+    #[tokio::test]
+    async fn a_call_that_carries_no_header_leaves_the_archeion_its_own_trace() {
+        use kallipai_common::telemetry::test_observability::{recorder, span_of, spans_until};
+        use tracing::Instrument as _;
+
+        let base = spawn_archeion_stub().await;
+        let (recorder, subscriber) = recorder("kallipai-archeion-client");
+        {
+            let _subscribed = tracing::subscriber::set_default(subscriber);
+            // The bypass, written out: a client with no middleware.
+            let bare = reqwest_middleware::ClientWithMiddleware::from(reqwest::Client::new());
+            let client = ArcheionClient::builder(&base)
+                .http_client(bare)
+                .build()
+                .unwrap();
+            async { client.healthz().await.expect("healthz") }
+                .instrument(caller_span())
+                .await;
+        }
+
+        let spans = spans_until(&recorder, 2).await;
+        let asked = span_of(&spans, "PUT /admin/tagmata", "server");
+        let answered = span_of(&spans, "GET /healthz", "server");
+        assert_eq!(
+            answered.parent_span_id, None,
+            "a request with no header is a root at the archeion"
+        );
+        assert_ne!(
+            answered.trace_id, asked.trace_id,
+            "the archeion did not join the caller's trace"
+        );
     }
 }

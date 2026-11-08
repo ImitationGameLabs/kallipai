@@ -1428,7 +1428,7 @@ fn tracing_attributes_merge_with_the_callers() {
 /// Renaming the constant there is a deliberate edit that touches this list.
 #[test]
 fn tracing_keys_match_the_tagma_reader() {
-    let source = include_str!("../../../../kallipai-common/src/telemetry.rs");
+    let source = include_str!("../../../../kallipai-common/src/telemetry/export.rs");
     for (constant, value) in [
         ("ENDPOINT_VAR", ENDPOINT_VAR),
         ("SAMPLER_VAR", SAMPLER_VAR),

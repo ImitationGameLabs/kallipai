@@ -2766,6 +2766,7 @@ dependencies = [
  "kallipai-lesche-common",
  "kallipai-testkit",
  "reqwest",
+ "reqwest-middleware",
  "sea-orm",
  "serde",
  "serde_json",
@@ -2883,13 +2884,16 @@ name = "kallipai-archeion-client"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "axum",
  "kallipai-archeion-common",
  "kallipai-common",
  "kallipai-e2ee",
  "reqwest",
+ "reqwest-middleware",
  "serde",
  "serde_json",
  "tokio",
+ "tracing",
  "wiremock",
 ]
 
@@ -2930,15 +2934,18 @@ name = "kallipai-client"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "axum",
  "futures-util",
  "just-llm-client",
  "kallipai-common",
  "kallipai-lesche-common",
  "percent-encoding",
  "reqwest",
+ "reqwest-middleware",
  "serde",
  "serde_json",
  "tokio",
+ "tracing",
  "wiremock",
 ]
 
@@ -2996,9 +3003,11 @@ dependencies = [
 name = "kallipai-cron-client"
 version = "0.1.0"
 dependencies = [
+ "axum",
  "kallipai-common",
  "kallipai-cron-common",
  "reqwest",
+ "reqwest-middleware",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -3261,6 +3270,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-stream",
+ "axum",
  "base64 0.22.1",
  "futures-core",
  "futures-util",
@@ -3270,11 +3280,13 @@ dependencies = [
  "kallipai-keryx-common",
  "kallipai-lesche-common",
  "reqwest",
+ "reqwest-middleware",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
  "time",
  "tokio",
+ "tracing",
  "wiremock",
 ]
 
@@ -3405,6 +3417,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "reqwest",
+ "reqwest-middleware",
  "sea-orm",
  "sea-orm-migration",
  "serde",
@@ -3487,6 +3500,7 @@ dependencies = [
  "kallipai-daemon-common",
  "libc",
  "reqwest",
+ "reqwest-middleware",
  "tempfile",
  "time",
  "tokio",

@@ -9,7 +9,7 @@ license.workspace = true
 kallipai-daemon-client = { workspace = true }
 kallipai-blob-store = { workspace = true }
 kallipai-daemon-common = { workspace = true }
-kallipai-common = { workspace = true }
+kallipai-common = { workspace = true, features = ["propagation"] }
 kallipai-archeion-client = { workspace = true }
 dirs = { workspace = true }
 libc = { workspace = true }
@@ -18,6 +18,7 @@ clap = { workspace = true }
 clap_complete = { workspace = true, features = ["unstable-dynamic"] }
 tokio = { workspace = true, features = ["rt", "macros", "time", "signal"] }
 reqwest = { workspace = true }
+reqwest-middleware = { workspace = true }
 time = { workspace = true }
 url = { workspace = true }
 

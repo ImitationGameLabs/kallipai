@@ -13,7 +13,7 @@
 //!
 //! # Two HTTP clients (load-bearing)
 //!
-//! The builder constructs two `reqwest::Client`s: one with a 30 s total timeout
+//! The builder constructs two [`HttpClient`]s: one with a 30 s total timeout
 //! for the request/reply POSTs, and one with **no total timeout** for the tunnel
 //! stream. `reqwest`'s `.timeout()` is a whole-response deadline that also
 //! covers the streaming body, so any finite value would kill the long-lived
@@ -32,6 +32,7 @@ use base64::Engine as _;
 use futures_util::StreamExt;
 use kallipai_archeion_common::ids::{ChannelId, ConversationId, TagmaId};
 use kallipai_common::credential::{Credential, retry_value_after_401};
+use kallipai_common::telemetry::HttpClient;
 use kallipai_e2ee::DeviceKey;
 use kallipai_keryx_common::control::KeyExchangeResponse;
 use kallipai_keryx_common::tunnel::ManageRestReply;
@@ -46,9 +47,9 @@ use kallipai_lesche_common::rooms::{RoomId, TagmaRoomView};
 struct Inner {
     base_url: String,
     /// Request/reply POSTs: carries a total timeout (natural request end).
-    http_post: reqwest::Client,
+    http_post: HttpClient,
     /// Long-lived tunnel stream: NO total timeout (see crate docs).
-    http_stream: reqwest::Client,
+    http_stream: HttpClient,
     /// The bearer every call presents. Fixed for [`LescheClient::builder`],
     /// reloadable when the caller supplies a watching handle
     /// ([`LescheClient::builder_with_credential`]).
@@ -203,7 +204,7 @@ impl LescheClient {
     async fn send_authorized(
         &self,
         surface: &str,
-        build: impl Fn(&str) -> reqwest::RequestBuilder,
+        build: impl Fn(&str) -> reqwest_middleware::RequestBuilder,
     ) -> Result<reqwest::Response> {
         let sent = self.inner.credential.current();
         let resp = build(&sent).send().await.context("lesche request failed")?;
@@ -813,15 +814,15 @@ fn parse_data_payload(event: &str) -> Option<String> {
 pub struct LescheClientBuilder {
     base_url: String,
     credential: Credential,
-    http_post: Option<reqwest::Client>,
-    http_stream: Option<reqwest::Client>,
+    http_post: Option<HttpClient>,
+    http_stream: Option<HttpClient>,
     keryx_url: Option<String>,
     clock: fn() -> i64,
 }
 
 impl LescheClientBuilder {
     /// Override the request/reply POST client (default: 30 s total timeout).
-    pub fn http_post_client(mut self, client: reqwest::Client) -> Self {
+    pub fn http_post_client(mut self, client: HttpClient) -> Self {
         self.http_post = Some(client);
         self
     }
@@ -829,7 +830,7 @@ impl LescheClientBuilder {
     /// Override the long-lived tunnel-stream client (default: NO total timeout).
     /// The supplied client MUST NOT carry a total timeout, or the tunnel SSE
     /// will be killed mid-flight.
-    pub fn http_stream_client(mut self, client: reqwest::Client) -> Self {
+    pub fn http_stream_client(mut self, client: HttpClient) -> Self {
         self.http_stream = Some(client);
         self
     }
@@ -846,9 +847,9 @@ impl LescheClientBuilder {
     pub fn build(self) -> Result<LescheClient> {
         let http_post = match self.http_post {
             Some(c) => c,
-            None => reqwest::Client::builder()
-                .timeout(Duration::from_secs(30))
-                .build()?,
+            None => kallipai_common::telemetry::http_client(
+                reqwest::Client::builder().timeout(Duration::from_secs(30)),
+            )?,
         };
         let http_stream = match self.http_stream {
             Some(c) => c,
@@ -857,10 +858,11 @@ impl LescheClientBuilder {
                 // comments arrive every 15 s, so anything quieter than the
                 // read window means half-open. No total timeout -- the stream
                 // is meant to live as long as both ends do.
-                reqwest::Client::builder()
-                    .read_timeout(Duration::from_secs(90))
-                    .tcp_keepalive(Duration::from_secs(15))
-                    .build()?
+                kallipai_common::telemetry::http_client(
+                    reqwest::Client::builder()
+                        .read_timeout(Duration::from_secs(90))
+                        .tcp_keepalive(Duration::from_secs(15)),
+                )?
             }
         };
         Ok(LescheClient {
@@ -1695,6 +1697,226 @@ mod tests {
             second,
             first + 1,
             "the retry steps exactly one second past the first"
+        );
+    }
+
+    // -- the trace a call belongs to -----------------------------------------
+
+    /// Serve `app` on an ephemeral port and hand back its base URL.
+    async fn spawn_stub(app: axum::Router) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        format!("http://{addr}")
+    }
+
+    /// The daemon's answer to an envelope post, with the server span layered
+    /// on: a recorder sees a request arrive the way the service sees it.
+    async fn spawn_envelope_stub() -> String {
+        let app = kallipai_common::telemetry::with_server_span(axum::Router::new().route(
+            "/conversations/{conv}/envelopes",
+            axum::routing::post(|| async { axum::http::StatusCode::NO_CONTENT }),
+        ));
+        spawn_stub(app).await
+    }
+
+    /// The keryx's answer to a tunnel open: one SSE event, then the body ends.
+    async fn spawn_tunnel_stub() -> String {
+        let body = "data: {\"kind\":\"key_exchange\",\"conversation_id\":\"c1\",\
+                    \"init\":{\"ephemeral_public\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"}}\n\n";
+        let app = kallipai_common::telemetry::with_server_span(
+            axum::Router::new().route("/tunnel", axum::routing::get(move || async move { body })),
+        );
+        spawn_stub(app).await
+    }
+
+    /// The span a caller would be in when it makes the call.
+    fn agent_request(method: &str, path: &str) -> tracing::Span {
+        kallipai_common::telemetry::request_span(method, path, path, &axum::http::HeaderMap::new())
+    }
+
+    /// A post made inside a request keeps that request's trace: the daemon
+    /// answers inside the span of the call.
+    #[tokio::test]
+    async fn a_post_carries_the_context_of_the_request_it_serves() {
+        use kallipai_common::telemetry::test_observability::{
+            client_span_of, recorder, span_of, spans_until,
+        };
+        use tracing::Instrument as _;
+
+        let base = spawn_envelope_stub().await;
+        let conv = conv();
+        let (recorder, subscriber) = recorder("kallipai-lesche-client");
+        {
+            let _subscribed = tracing::subscriber::set_default(subscriber);
+            let client = LescheClient::builder(&base, "sk-tagma-test")
+                .build()
+                .unwrap();
+            let request = agent_request("POST", "/agent/turn");
+            async { client.post_envelope(&conv, &sample_envelope(0)).await }
+                .instrument(request.clone())
+                .await
+                .expect("the post lands");
+        }
+
+        let spans = spans_until(&recorder, 3).await;
+        let asked = span_of(&spans, "POST /agent/turn", "server");
+        // The client span is named for its method and carries the dialled path as
+        // an attribute; the server span is named for the template it matched.
+        let path = format!("/conversations/{conv}/envelopes");
+        let call = client_span_of(&spans, "POST", &path);
+        let answered = span_of(&spans, "POST /conversations/{conv}/envelopes", "server");
+        assert_eq!(
+            call.parent_span_id.as_deref(),
+            Some(asked.span_id.as_str()),
+            "the call hangs under the request that made it"
+        );
+        assert_eq!(
+            answered.parent_span_id.as_deref(),
+            Some(call.span_id.as_str()),
+            "the daemon answered inside the span of the call"
+        );
+        assert_eq!(
+            answered.trace_id, call.trace_id,
+            "one trace spans the post, not a second one at the daemon"
+        );
+        assert_eq!(
+            call.trace_id, asked.trace_id,
+            "and that trace is the request's"
+        );
+    }
+
+    /// The same post on a client with no middleware: nothing puts a header on
+    /// the wire, so the daemon starts a trace of its own. Without this, the
+    /// test above would pass on a header read back at the caller.
+    #[tokio::test]
+    async fn a_post_that_carries_no_header_leaves_the_daemon_its_own_trace() {
+        use kallipai_common::telemetry::test_observability::{recorder, span_of, spans_until};
+        use tracing::Instrument as _;
+
+        let base = spawn_envelope_stub().await;
+        let conv = conv();
+        let (recorder, subscriber) = recorder("kallipai-lesche-client");
+        {
+            let _subscribed = tracing::subscriber::set_default(subscriber);
+            // The bypass, written out: a client with no middleware.
+            let bare = reqwest_middleware::ClientWithMiddleware::from(reqwest::Client::new());
+            let client = LescheClient::builder(&base, "sk-tagma-test")
+                .http_post_client(bare)
+                .build()
+                .unwrap();
+            let request = agent_request("POST", "/agent/turn");
+            async { client.post_envelope(&conv, &sample_envelope(0)).await }
+                .instrument(request.clone())
+                .await
+                .expect("the post lands");
+        }
+
+        let spans = spans_until(&recorder, 2).await;
+        let asked = span_of(&spans, "POST /agent/turn", "server");
+        let answered = span_of(&spans, "POST /conversations/{conv}/envelopes", "server");
+        assert_eq!(
+            answered.parent_span_id, None,
+            "a request with no header is a root at the daemon"
+        );
+        assert_ne!(
+            answered.trace_id, asked.trace_id,
+            "the daemon did not join the caller's trace"
+        );
+    }
+
+    /// A tunnel opened inside a request keeps the caller's trace: the keryx
+    /// answers inside the span of the open. The span ends when the response
+    /// head arrives, so the event that follows is outside this assertion.
+    #[tokio::test]
+    async fn a_tunnel_open_carries_the_context_of_the_request_it_serves() {
+        use kallipai_common::telemetry::test_observability::{
+            client_span_of, recorder, span_of, spans_until,
+        };
+        use tracing::Instrument as _;
+
+        let base = spawn_tunnel_stub().await;
+        let device = DeviceKey::generate();
+        let tagma_id = TagmaId::from("tagma-1".to_string());
+        let (recorder, subscriber) = recorder("kallipai-lesche-client");
+        {
+            let _subscribed = tracing::subscriber::set_default(subscriber);
+            let client = LescheClient::builder(&base, "sk-tagma-test")
+                .build()
+                .unwrap();
+            let request = agent_request("GET", "/agent/tunnel");
+            let stream = async { client.open_tunnel(&device, &tagma_id).await }
+                .instrument(request.clone())
+                .await
+                .expect("the tunnel opens");
+            let seen: Vec<_> = stream.collect::<Vec<_>>().await;
+            assert_eq!(seen.len(), 1, "one event arrives before the body ends");
+            assert!(seen[0].is_ok(), "and it parses");
+        }
+
+        let spans = spans_until(&recorder, 3).await;
+        let asked = span_of(&spans, "GET /agent/tunnel", "server");
+        let call = client_span_of(&spans, "GET", "/tunnel");
+        let answered = span_of(&spans, "GET /tunnel", "server");
+        assert_eq!(
+            call.parent_span_id.as_deref(),
+            Some(asked.span_id.as_str()),
+            "the open hangs under the request that made it"
+        );
+        assert_eq!(
+            answered.parent_span_id.as_deref(),
+            Some(call.span_id.as_str()),
+            "the keryx answered inside the span of the open"
+        );
+        assert_eq!(
+            answered.trace_id, call.trace_id,
+            "one trace spans the tunnel open, not a second one at the keryx"
+        );
+        assert_eq!(
+            call.trace_id, asked.trace_id,
+            "and that trace is the request's"
+        );
+    }
+
+    /// The tunnel leg on a client with no middleware: the keryx starts a trace
+    /// of its own, which is what makes the assertion above mean something.
+    #[tokio::test]
+    async fn a_tunnel_open_without_a_header_leaves_the_keryx_its_own_trace() {
+        use kallipai_common::telemetry::test_observability::{recorder, span_of, spans_until};
+        use tracing::Instrument as _;
+
+        let base = spawn_tunnel_stub().await;
+        let device = DeviceKey::generate();
+        let tagma_id = TagmaId::from("tagma-1".to_string());
+        let (recorder, subscriber) = recorder("kallipai-lesche-client");
+        {
+            let _subscribed = tracing::subscriber::set_default(subscriber);
+            let bare = reqwest_middleware::ClientWithMiddleware::from(reqwest::Client::new());
+            let client = LescheClient::builder(&base, "sk-tagma-test")
+                .http_stream_client(bare)
+                .build()
+                .unwrap();
+            let request = agent_request("GET", "/agent/tunnel");
+            let stream = async { client.open_tunnel(&device, &tagma_id).await }
+                .instrument(request.clone())
+                .await
+                .expect("the tunnel opens");
+            let seen: Vec<_> = stream.collect::<Vec<_>>().await;
+            assert_eq!(seen.len(), 1, "one event arrives before the body ends");
+        }
+
+        let spans = spans_until(&recorder, 2).await;
+        let asked = span_of(&spans, "GET /agent/tunnel", "server");
+        let answered = span_of(&spans, "GET /tunnel", "server");
+        assert_eq!(
+            answered.parent_span_id, None,
+            "a request with no header is a root at the keryx"
+        );
+        assert_ne!(
+            answered.trace_id, asked.trace_id,
+            "the keryx did not join the caller's trace"
         );
     }
 }

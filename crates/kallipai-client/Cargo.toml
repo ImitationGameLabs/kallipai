@@ -6,11 +6,12 @@ version.workspace = true
 license.workspace = true
 
 [dependencies]
-kallipai-common = { workspace = true }
+kallipai-common = { workspace = true, features = ["propagation"] }
 kallipai-lesche-common = { workspace = true }
 just-llm-client = { workspace = true }
 anyhow = { workspace = true }
 reqwest = { workspace = true }
+reqwest-middleware = { workspace = true, features = ["query"] }
 percent-encoding = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -19,4 +20,7 @@ futures-util = { workspace = true }
 
 [dev-dependencies]
 wiremock = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt"] }
+tokio = { workspace = true, features = ["macros", "rt", "net"] }
+axum = { workspace = true }
+tracing = { workspace = true }
+kallipai-common = { workspace = true, features = ["test-support"] }

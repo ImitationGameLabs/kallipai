@@ -26,7 +26,7 @@ pub mod cors;
 pub mod logging;
 #[cfg(feature = "axum")]
 pub mod sse;
-#[cfg(feature = "telemetry")]
+#[cfg(feature = "propagation")]
 pub mod telemetry;
 
 /// The target every span this workspace publishes carries: the name the export
