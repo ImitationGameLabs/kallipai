@@ -294,7 +294,12 @@ admits.
   `outbound_request_duration_seconds{leg}`, with legs `files`, `profiles`,
   `lesche` and `archeion`). A leg counts calls: opening a stream is one, and a
   tunnel that then stays open is not, because `relays_connected` and
-  `relay_reconnects_total` already describe it. `build_info{version,tagma_id}`
+  `relay_reconnects_total` already describe it. The 1:1 conversation envelope
+  POST and the upstream batch are calls like any other, so a failed one shows
+  up as an `error` on the `lesche` leg. Room and direct-session delivery are
+  not counted: their failures reach the caller as an error, but no leg
+  counter records them and no log line names them.
+  `build_info{version,tagma_id}`
   carries the enrolled id (`none` before enrollment, so enrolling changes a
   label value and never the series shape), and the same id is `tagma.id` on the
   exporter's resource: one value, dotted in the trace, underscored in the
@@ -305,6 +310,12 @@ admits.
   gate leaves no series either; its only trace is a debug log line. Neither
   endpoint opens a span either: the two paths are answered outside the server
   span, so a scrape is not an entry in the traces it sits beside.
+  `relay_dropped_total{reason}` counts inbound frames on the 1:1 op path that
+  the tagma discarded because the two ends disagree: `decrypt`, `decode` or
+  `unknown_op`. The
+  family is absent until a drop happens, and healthy traffic never creates
+  it, because a replay or an envelope arriving before the key exchange is
+  not a disagreement.
 - **Tallies another owner keeps**, encoded on each gather by a collector
   instead of mirrored into a gauge: the agent loop's wakes, one count per
   finished wake, from its entry to the point where it hands control back, and

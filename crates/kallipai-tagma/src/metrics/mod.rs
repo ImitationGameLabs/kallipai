@@ -148,6 +148,10 @@ pub enum Leg {
     /// tunnel that then stays open is not a call -- `relays_connected` and
     /// `relay_reconnects_total` describe it, and a duration for its lifetime
     /// would measure uptime rather than an answer.
+    ///
+    /// One observed call is one caller-level attempt: a client's own retry
+    /// loop stays inside it (the envelope POST rides out 503s for about half a
+    /// minute), so that one call's duration can be the loop's total.
     Lesche,
     /// An archeion client call (enrollment, management).
     Archeion,
@@ -178,6 +182,30 @@ impl LegOutcome {
             LegOutcome::Ok => "ok",
             LegOutcome::Error => "error",
             LegOutcome::Timeout => "timeout",
+        }
+    }
+}
+
+/// Why an inbound relay frame was discarded. A closed set: every value names a
+/// disagreement -- keys, shape, or vocabulary -- whose non-zero count is itself
+/// the signal. Drops that are normal protocol behaviour (a replay after a
+/// client retry, an envelope arriving before the key exchange) are not counted.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DropReason {
+    /// The session key did not authenticate the ciphertext.
+    Decrypt,
+    /// The payload authenticated but did not parse into what this build serves.
+    Decode,
+    /// The payload parsed, and its `op` is not one this build serves.
+    UnknownOp,
+}
+
+impl DropReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DropReason::Decrypt => "decrypt",
+            DropReason::Decode => "decode",
+            DropReason::UnknownOp => "unknown_op",
         }
     }
 }
@@ -238,6 +266,7 @@ pub struct Metrics {
     relays_configured: IntGauge,
     relays_connected: IntGauge,
     relay_reconnects: IntCounter,
+    relay_dropped: IntCounterVec,
     outbound_requests: IntCounterVec,
     outbound_duration: HistogramVec,
     build_info: IntGaugeVec,
@@ -288,6 +317,14 @@ impl Metrics {
             "Relay tunnel sessions that ended and were reopened.",
         )
         .expect("a statically named counter");
+        let relay_dropped = IntCounterVec::new(
+            Opts::new(
+                "kallipai_tagma_relay_dropped_total",
+                "Inbound 1:1 relay frames the tagma received and discarded, by cause. A count here means the two ends disagree; drops that are normal protocol behaviour are not counted.",
+            ),
+            &["reason"],
+        )
+        .expect("a statically named counter");
         let outbound_requests = IntCounterVec::new(
             Opts::new(
                 "kallipai_tagma_outbound_requests_total",
@@ -320,6 +357,7 @@ impl Metrics {
             Box::new(relays_configured.clone()),
             Box::new(relays_connected.clone()),
             Box::new(relay_reconnects.clone()),
+            Box::new(relay_dropped.clone()),
             Box::new(outbound_requests.clone()),
             Box::new(outbound_duration.clone()),
             Box::new(build_info.clone()),
@@ -336,6 +374,7 @@ impl Metrics {
             relays_configured,
             relays_connected,
             relay_reconnects,
+            relay_dropped,
             outbound_requests,
             outbound_duration,
             build_info,
@@ -440,6 +479,14 @@ impl Metrics {
         self.relays_connected.dec();
     }
 
+    /// Count an inbound frame this tagma discarded, by cause. See [`DropReason`]
+    /// for the closed set and for which drops stay uncounted.
+    pub fn relay_dropped(&self, reason: DropReason) {
+        self.relay_dropped
+            .with_label_values(&[reason.as_str()])
+            .inc();
+    }
+
     /// The one-off identity series: which build, which tagma. Called once at
     /// boot. `tagma_id` is `None` on a local-only tagma, and the label says so
     /// rather than pretending an identity.
@@ -499,6 +546,18 @@ fn looks_like_timeout(error: &impl std::fmt::Display) -> bool {
     ["timed out", "timeout", "deadline"]
         .iter()
         .any(|needle| message.contains(needle))
+}
+
+/// One rendered counter's value from the process metrics. Tests that assert
+/// an increment at a call site (rather than inside [`Metrics::observe_outbound`])
+/// read the scrape text, the way an operator would.
+#[cfg(test)]
+pub(crate) fn counter_value(name: &str, labels: &str) -> u64 {
+    let text = metrics().render().expect("metrics render");
+    let needle = format!("{name}{{{labels}}} ");
+    text.lines()
+        .find_map(|line| line.strip_prefix(&needle)?.trim().parse().ok())
+        .unwrap_or(0)
 }
 
 /// The process's metrics.

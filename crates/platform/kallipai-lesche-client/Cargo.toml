@@ -8,11 +8,12 @@ license.workspace = true
 [dependencies]
 kallipai-archeion-common = { workspace = true }
 kallipai-lesche-common = { workspace = true }
-kallipai-common = { workspace = true, default-features = false, features = ["propagation"] }
+kallipai-common = { workspace = true, default-features = false, features = [
+  "propagation",
+] }
 kallipai-keryx-common = { workspace = true }
 kallipai-e2ee = { workspace = true }
 anyhow = { workspace = true }
-thiserror = { workspace = true }
 async-stream = { workspace = true }
 reqwest = { workspace = true }
 reqwest-middleware = { workspace = true, features = ["query"] }

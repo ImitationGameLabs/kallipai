@@ -10,6 +10,8 @@
 use super::*;
 use kallipai_archeion_common::ids::ChannelId;
 
+use crate::metrics::{DropReason, Leg, metrics};
+
 impl RelayHandle {
     /// Respond to a key exchange. This is also the re-KEX boundary: cancel any
     /// running pump, install the new key with reset counters, then (re)start the
@@ -139,6 +141,12 @@ impl RelayHandle {
         }
         // Bilateral 1:1 KEX path. Only user->tagma envelopes drive ops.
         if envelope.sender.kind != ParticipantKind::Human {
+            warn!(
+                conv = %envelope.channel_id,
+                sender = %envelope.sender.id,
+                kind = ?envelope.sender.kind,
+                "the 1:1 op path received a non-human envelope; dropping"
+            );
             return;
         }
         let mut c = self.inner.crypto.lock().await;
@@ -169,6 +177,7 @@ impl RelayHandle {
             Some(p) => p,
             None => {
                 warn!("op decrypt failed; dropping");
+                metrics().relay_dropped(DropReason::Decrypt);
                 return;
             }
         };
@@ -183,6 +192,7 @@ impl RelayHandle {
             Ok(v) => v,
             Err(e) => {
                 warn!("op decode failed: {e}");
+                metrics().relay_dropped(DropReason::Decode);
                 return;
             }
         };
@@ -195,6 +205,7 @@ impl RelayHandle {
                     Ok(r) => r,
                     Err(e) => {
                         warn!(req_id, "request decode failed: {e}");
+                        metrics().relay_dropped(DropReason::Decode);
                         return;
                     }
                 };
@@ -206,6 +217,7 @@ impl RelayHandle {
                     Ok(c) => c,
                     Err(e) => {
                         warn!(req_id, "control decode failed: {e}");
+                        metrics().relay_dropped(DropReason::Decode);
                         return;
                     }
                 };
@@ -226,6 +238,7 @@ impl RelayHandle {
                     Ok(c) => c,
                     Err(e) => {
                         warn!(req_id, "control decode failed: {e}");
+                        metrics().relay_dropped(DropReason::Decode);
                         return;
                     }
                 };
@@ -245,7 +258,10 @@ impl RelayHandle {
                 )
                 .await;
             }
-            other => warn!(req_id, op = other, "unknown op; dropping"),
+            other => {
+                warn!(req_id, op = other, "unknown op; dropping");
+                metrics().relay_dropped(DropReason::UnknownOp);
+            }
         }
     }
     /// Encrypt `reply` for the conversation and post an envelope attributed to
@@ -299,10 +315,12 @@ impl RelayHandle {
         // nonce reuse under the same epoch key. Burning a gap is safe: the app
         // applies envelopes by decryption, not sequence validation. Aborting the
         // POST on `cancel` (re-KEX / shutdown) likewise just burns the gap.
-        let post = self
-            .inner
-            .client
-            .post_envelope(&self.inner.conversation_id, &envelope);
+        let post = metrics().observe_outbound(
+            Leg::Lesche,
+            self.inner
+                .client
+                .post_envelope(&self.inner.conversation_id, &envelope),
+        );
         match cancel {
             Some(token) => tokio::select! {
                 biased;

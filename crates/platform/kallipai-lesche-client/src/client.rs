@@ -121,16 +121,49 @@ pub struct UpstreamAck {
 
 /// A lesche HTTP failure with its status code, so a caller can distinguish a
 /// member-gated 404 (unknown room / not a member) from a transport failure.
-/// Only the room-surface methods return this; the rest of the client still uses
-/// plain `anyhow::Error`.
-#[derive(Debug, thiserror::Error)]
-#[error("lesche {op} returned {status}")]
+/// The delivery POSTs also carry the start of the response body, on the error's
+/// source chain: the peer's text is frequently the only clue to a cause the
+/// status cannot name. `{}` stays the status line (what a caller classifies
+/// on), and a reader that walks the chain (`{:#}`) sees the peer's words.
+#[derive(Debug)]
 pub struct LescheHttpError {
     /// The operation that failed (for the message).
     op: &'static str,
     /// The HTTP status the lesche returned.
     pub status: reqwest::StatusCode,
+    /// The response body's opening bytes on one line; `None` where the caller
+    /// never read the body or the peer sent nothing.
+    detail: Option<FailureDetail>,
 }
+
+impl std::fmt::Display for LescheHttpError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "lesche {} returned {}", self.op, self.status)
+    }
+}
+
+impl std::error::Error for LescheHttpError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.detail
+            .as_ref()
+            .map(|detail| detail as &(dyn std::error::Error + 'static))
+    }
+}
+
+/// The opening of a failed response's body. Its own error type so it rides the
+/// source chain: the message a caller classifies on stays the status line, and
+/// only a reader that walks the chain (a log line, a gateway body) sees the
+/// peer's text.
+#[derive(Debug)]
+struct FailureDetail(String);
+
+impl std::fmt::Display for FailureDetail {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for FailureDetail {}
 
 impl LescheClient {
     /// Start building a [`LescheClient`]. `base_url` is the lesche service
@@ -221,11 +254,20 @@ impl LescheClient {
         Ok(resp)
     }
 
-    /// Post an agent envelope, retrying on 503 (app offline) with a bounded
-    /// backoff (500ms, 1s, 2s, 4s, 8s, 16s ~= 31s total). A dropped reply is
-    /// recovered by the app's host-history re-pull on reconnect, so the retry
-    /// only rides out transient reconnects.
-    pub async fn post_envelope(&self, conv_id: &ConversationId, envelope: &Envelope) -> Result<()> {
+    /// POST a delivery body, riding out 503s with a bounded backoff (500ms, 1s,
+    /// 2s, 4s, 8s, 16s: about half a minute of waiting in total, assuming the
+    /// peer answers promptly; each attempt also carries its own request
+    /// deadline, so a peer that keeps answering 503 slowly can hold the call
+    /// for minutes). Any other non-2xx is a hard failure, and so is a 503 whose
+    /// backoff is spent. Either way the call ends as one error carrying the
+    /// last response's status and the start of its body, read once at the end
+    /// so a rejected attempt does not pay for a body it will not report.
+    async fn deliver(
+        &self,
+        op: &'static str,
+        url: &str,
+        body: &impl serde::Serialize,
+    ) -> Result<()> {
         const BACKOFF: [Duration; 6] = [
             Duration::from_millis(500),
             Duration::from_secs(1),
@@ -234,31 +276,38 @@ impl LescheClient {
             Duration::from_secs(8),
             Duration::from_secs(16),
         ];
-        let url = self.keryx_route(&format!(
-            "/conversations/{}/envelopes",
-            path_segment(conv_id.as_ref())?
-        ));
-        for wait in BACKOFF {
+        let mut waits = BACKOFF.into_iter();
+        loop {
             let resp = self
-                .send_authorized("envelope POST", |token| {
-                    self.inner
-                        .http_post
-                        .post(&url)
-                        .bearer_auth(token)
-                        .json(envelope)
+                .send_authorized(op, |token| {
+                    self.inner.http_post.post(url).bearer_auth(token).json(body)
                 })
                 .await?;
             let status = resp.status();
             if status.is_success() {
                 return Ok(());
             }
-            // Retry only on 503 (peer offline). Other failures are not transient.
-            if status.as_u16() != 503 {
-                anyhow::bail!("lesche POST returned {}", status);
+            // Retry only on 503 (peer offline / lesche transiently unavailable):
+            // every other non-2xx is a hard failure.
+            if status.as_u16() == 503
+                && let Some(wait) = waits.next()
+            {
+                tokio::time::sleep(wait).await;
+                continue;
             }
-            tokio::time::sleep(wait).await;
+            return Err(http_failure(op, resp).await.into());
         }
-        anyhow::bail!("lesche POST exhausted retries (app offline)")
+    }
+
+    /// Post an agent envelope, retrying a 503 on the delivery backoff. A
+    /// dropped reply is recovered by the app's host-history re-pull on
+    /// reconnect, so the retry only rides out transient reconnects.
+    pub async fn post_envelope(&self, conv_id: &ConversationId, envelope: &Envelope) -> Result<()> {
+        let url = self.keryx_route(&format!(
+            "/conversations/{}/envelopes",
+            path_segment(conv_id.as_ref())?
+        ));
+        self.deliver("envelope POST", &url, envelope).await
     }
 
     /// Post an agent envelope to a multi-member room: `/rooms/{room_id}/
@@ -271,14 +320,6 @@ impl LescheClient {
     /// failure. A connect error also bails immediately (consistent with
     /// [`Self::post_envelope`]).
     pub async fn post_room_envelope(&self, room_id: &RoomId, envelope: &Envelope) -> Result<()> {
-        const BACKOFF: [Duration; 6] = [
-            Duration::from_millis(500),
-            Duration::from_secs(1),
-            Duration::from_secs(2),
-            Duration::from_secs(4),
-            Duration::from_secs(8),
-            Duration::from_secs(16),
-        ];
         // The room route rejects (400) any envelope whose `channel_id` does
         // not equal the path room. The field is dual-purpose -- a bilateral
         // `ConversationId` (v5) on the 1:1 path, a `RoomId` (v4) on the room
@@ -292,32 +333,7 @@ impl LescheClient {
             "/rooms/{}/envelopes",
             path_segment(room_id.as_ref())?
         ));
-        for wait in BACKOFF {
-            let resp = self
-                .send_authorized("room envelope POST", |token| {
-                    self.inner
-                        .http_post
-                        .post(&url)
-                        .bearer_auth(token)
-                        .json(&envelope)
-                })
-                .await?;
-            let status = resp.status();
-            if status.is_success() {
-                return Ok(());
-            }
-            // Retry only on 503 (lesche transiently unavailable); a 202 always
-            // returns on success, so any other non-2xx is a hard failure.
-            if status.as_u16() != 503 {
-                return Err(LescheHttpError {
-                    op: "room POST",
-                    status,
-                }
-                .into());
-            }
-            tokio::time::sleep(wait).await;
-        }
-        anyhow::bail!("lesche room POST exhausted retries (lesche unavailable)")
+        self.deliver("room envelope POST", &url, &envelope).await
     }
 
     /// Pull a room's message history: `GET /rooms/{room_id}/messages`. The
@@ -360,6 +376,7 @@ impl LescheClient {
             return Err(LescheHttpError {
                 op: "room history GET",
                 status,
+                detail: None,
             }
             .into());
         }
@@ -408,7 +425,9 @@ impl LescheClient {
             })
             .await?;
         if !resp.status().is_success() {
-            anyhow::bail!("lesche POST returned {}", resp.status());
+            return Err(http_failure("key-exchange response POST", resp)
+                .await
+                .into());
         }
         Ok(())
     }
@@ -429,7 +448,7 @@ impl LescheClient {
             })
             .await?;
         if !resp.status().is_success() {
-            anyhow::bail!("lesche POST returned {}", resp.status());
+            return Err(http_failure("manage reply POST", resp).await.into());
         }
         Ok(())
     }
@@ -461,7 +480,7 @@ impl LescheClient {
             })
             .await?;
         if !resp.status().is_success() {
-            anyhow::bail!("lesche POST returned {}", resp.status());
+            return Err(http_failure("upstream events POST", resp).await.into());
         }
         resp.json().await.context("decode upstream ack")
     }
@@ -562,6 +581,7 @@ impl LescheClient {
             return Err(LescheHttpError {
                 op: "direct-session POST",
                 status,
+                detail: None,
             }
             .into());
         }
@@ -594,46 +614,14 @@ impl LescheClient {
         session_id: &DirectSessionId,
         envelope: &Envelope,
     ) -> Result<()> {
-        const BACKOFF: [Duration; 6] = [
-            Duration::from_millis(500),
-            Duration::from_secs(1),
-            Duration::from_secs(2),
-            Duration::from_secs(4),
-            Duration::from_secs(8),
-            Duration::from_secs(16),
-        ];
         let mut envelope = envelope.clone();
         envelope.channel_id = ChannelId::from(session_id.as_ref().to_string());
         let url = self.url(&format!(
             "/direct-sessions/{}/messages",
             path_segment(session_id.as_ref())?
         ));
-        for wait in BACKOFF {
-            let resp = self
-                .send_authorized("direct-session message POST", |token| {
-                    self.inner
-                        .http_post
-                        .post(&url)
-                        .bearer_auth(token)
-                        .json(&envelope)
-                })
-                .await?;
-            let status = resp.status();
-            if status.is_success() {
-                return Ok(());
-            }
-            // Retry only on 503 (lesche transiently unavailable); a 202
-            // always returns on success, so anything else is a hard failure.
-            if status.as_u16() != 503 {
-                return Err(LescheHttpError {
-                    op: "direct-session message POST",
-                    status,
-                }
-                .into());
-            }
-            tokio::time::sleep(wait).await;
-        }
-        anyhow::bail!("lesche direct-session POST exhausted retries (lesche unavailable)")
+        self.deliver("direct-session message POST", &url, &envelope)
+            .await
     }
 
     /// Pull the session's message history
@@ -673,6 +661,7 @@ impl LescheClient {
             return Err(LescheHttpError {
                 op: "direct-session history GET",
                 status,
+                detail: None,
             }
             .into());
         }
@@ -709,6 +698,7 @@ impl LescheClient {
             return Err(LescheHttpError {
                 op: "direct-session cursor PUT",
                 status,
+                detail: None,
             }
             .into());
         }
@@ -894,6 +884,62 @@ fn unix_secs_now() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
+}
+
+/// How much of a failed response's body rides the error message: enough to name
+/// the cause, bounded so an edge's HTML error page cannot turn one failed call
+/// into a log wall.
+const FAILURE_DETAIL_LIMIT: usize = 256;
+
+/// The first [`FAILURE_DETAIL_LIMIT`] bytes of `body` on one line, `…` marking
+/// a cut. Control characters become spaces: a body's line structure means
+/// nothing once it is spliced into a log line.
+fn failure_detail(body: &str) -> String {
+    let mut out = String::new();
+    let mut cut = false;
+    for ch in body.chars() {
+        if out.len() + ch.len_utf8() > FAILURE_DETAIL_LIMIT {
+            cut = true;
+            break;
+        }
+        out.push(if ch.is_control() { ' ' } else { ch });
+    }
+    let out = out.trim().to_string();
+    if cut { format!("{out}…") } else { out }
+}
+
+/// Read a failed response into a [`LescheHttpError`] whose source carries the
+/// start of its body.
+async fn http_failure(op: &'static str, resp: reqwest::Response) -> LescheHttpError {
+    let status = resp.status();
+    LescheHttpError {
+        op,
+        status,
+        detail: failure_detail_of(resp).await,
+    }
+}
+
+/// The opening [`FAILURE_DETAIL_LIMIT`] bytes of a response body, or `None` when
+/// the peer sent none. Reading stops just past the limit: an edge's HTML error
+/// page can run to megabytes, and a full read would ride the caller's deadline
+/// for text that is about to be cut. The few bytes of slack are what let
+/// [`failure_detail`] see that there was more to cut, so the cut is marked.
+async fn failure_detail_of(mut resp: reqwest::Response) -> Option<FailureDetail> {
+    /// Bytes read before the body goes to the cutter: the limit, plus enough
+    /// slack to hold one more character whole.
+    const READ_LIMIT: usize = FAILURE_DETAIL_LIMIT + 4;
+    let mut body: Vec<u8> = Vec::new();
+    while body.len() < READ_LIMIT {
+        match resp.chunk().await {
+            Ok(Some(chunk)) => {
+                body.extend_from_slice(&chunk);
+                body.truncate(READ_LIMIT);
+            }
+            Ok(None) | Err(_) => break,
+        }
+    }
+    let detail = failure_detail(&String::from_utf8_lossy(&body));
+    (!detail.is_empty()).then_some(FailureDetail(detail))
 }
 
 /// The timestamp one tunnel attempt carries: `now`, or one second past the
@@ -1332,6 +1378,144 @@ mod tests {
             }),
             "piggybacked face counts surface to the caller",
         );
+    }
+
+    /// A rejected upstream POST carries the peer's own words. The 422 body names
+    /// the variant the receiver could not parse, which is the whole diagnosis:
+    /// without it the failure is a status code a deployment has to be compared to.
+    #[tokio::test]
+    async fn a_rejected_upstream_post_reports_the_peers_body() {
+        let server = MockServer::start().await;
+        let tagma_id = TagmaId::from("tagma-1".to_string());
+        Mock::given(method("POST"))
+            .and(path(format!("/tagmata/{tagma_id}/upstream")))
+            .respond_with(ResponseTemplate::new(422).set_body_string(
+                "Failed to deserialize the JSON body: unknown variant `future_op`",
+            ))
+            .mount(&server)
+            .await;
+        let error = client(&server)
+            .post_upstream(&tagma_id, &[])
+            .await
+            .expect_err("422 is a hard failure");
+        let message = format!("{error:#}");
+        assert!(message.contains("422"), "{message}");
+        assert!(
+            message.contains("unknown variant `future_op`"),
+            "the body's cause rides the error: {message}"
+        );
+    }
+
+    /// The message stays the status line even when the peer's body spells a
+    /// timeout: callers classify on `{}`, so a proxy page must not turn a hard
+    /// rejection into an `outcome="timeout"` count. The text still rides the
+    /// chain for the log (`{:#}`).
+    #[tokio::test]
+    async fn the_peers_body_stays_out_of_the_message() {
+        let server = MockServer::start().await;
+        let tagma_id = TagmaId::from("tagma-1".to_string());
+        Mock::given(method("POST"))
+            .and(path(format!("/tagmata/{tagma_id}/upstream")))
+            .respond_with(ResponseTemplate::new(502).set_body_string("Gateway Timeout"))
+            .mount(&server)
+            .await;
+        let error = client(&server)
+            .post_upstream(&tagma_id, &[])
+            .await
+            .expect_err("502 is a hard failure");
+        let message = format!("{error}");
+        assert!(message.contains("502"), "{message}");
+        assert!(
+            !message.contains("Timeout"),
+            "the message a caller classifies on carries no peer text: {message}"
+        );
+        assert!(
+            format!("{error:#}").contains("Gateway Timeout"),
+            "the body still reaches a chain-walking reader"
+        );
+    }
+
+    /// A body that runs past the limit still reads as cut: the marker is what
+    /// separates the peer's first words from its whole answer.
+    #[tokio::test]
+    async fn a_body_past_the_limit_is_marked_as_cut() {
+        let server = MockServer::start().await;
+        let tagma_id = TagmaId::from("tagma-1".to_string());
+        Mock::given(method("POST"))
+            .and(path(format!("/tagmata/{tagma_id}/upstream")))
+            .respond_with(ResponseTemplate::new(500).set_body_string("x".repeat(300)))
+            .mount(&server)
+            .await;
+        let error = client(&server)
+            .post_upstream(&tagma_id, &[])
+            .await
+            .expect_err("500 is a hard failure");
+        let message = format!("{error:#}");
+        assert!(message.ends_with('…'), "the cut is marked: {message}");
+    }
+
+    /// The body reader stops at the limit instead of waiting for the end: a peer
+    /// that sends a long error body and keeps the stream open must not hold the
+    /// error, and the cut marker still says the text was shortened.
+    #[tokio::test]
+    async fn a_rejected_body_is_read_only_up_to_the_limit() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind a scratch port");
+        let base = format!("http://{}", listener.local_addr().expect("local addr"));
+        std::thread::spawn(move || {
+            use std::io::{Read as _, Write as _};
+            let (mut socket, _) = listener.accept().expect("accept");
+            let mut head = Vec::new();
+            let mut buf = [0u8; 1024];
+            while !head.windows(4).any(|window| window == b"\r\n\r\n") {
+                let read = socket.read(&mut buf).expect("read the request");
+                assert!(read > 0, "the client closed before sending a request");
+                head.extend_from_slice(&buf[..read]);
+            }
+            let opening = "x".repeat(512);
+            let answer = format!(
+                "HTTP/1.1 500 Internal Server Error\r\nContent-Type: text/plain\r\nTransfer-Encoding: chunked\r\n\r\n{:x}\r\n{opening}\r\n",
+                opening.len()
+            );
+            socket
+                .write_all(answer.as_bytes())
+                .expect("write the answer");
+            socket.flush().expect("flush the answer");
+            // No terminating chunk: the body stays open, the way an edge holds a
+            // stream until its own deadline.
+            std::thread::sleep(std::time::Duration::from_secs(15));
+        });
+        let client = LescheClient::builder(&base, "sk-tagma-test")
+            .build()
+            .unwrap();
+        let tagma_id = TagmaId::from("tagma-1".to_string());
+        let error = tokio::time::timeout(
+            Duration::from_secs(10),
+            client.post_upstream(&tagma_id, &[]),
+        )
+        .await
+        .expect("the read stops at the limit, it does not wait for the end")
+        .expect_err("500 is a hard failure");
+        let message = format!("{error:#}");
+        assert!(message.ends_with('…'), "the cut is marked: {message}");
+    }
+
+    /// The detail is bounded and one-line: a proxy's HTML error page must not
+    /// become a log wall, and its line breaks must not become log lines.
+    #[test]
+    fn the_failure_detail_is_bounded_and_flattened() {
+        let body = format!("first line\r\nsecond line\n{}", "x".repeat(400));
+        let detail = failure_detail(&body);
+        assert!(
+            detail.len() <= FAILURE_DETAIL_LIMIT + 3,
+            "bounded: {}",
+            detail.len()
+        );
+        assert!(!detail.contains('\n') && !detail.contains('\r'), "{detail}");
+        assert!(detail.ends_with('…'), "the cut is marked: {detail}");
+        assert_eq!(failure_detail("  short  "), "short");
+        // A character is never split at the cut.
+        let wide = "é".repeat(200);
+        assert!(failure_detail(&wide).starts_with('é'));
     }
 
     #[tokio::test]

@@ -479,6 +479,97 @@ async fn garbage_ciphertext_does_not_advance_replay_window() {
     );
 }
 
+/// One drop-cause counter out of the process metrics.
+fn dropped(reason: &str) -> u64 {
+    let text = crate::metrics::metrics().render().expect("metrics render");
+    let needle = format!("kallipai_tagma_relay_dropped_total{{reason=\"{reason}\"}} ");
+    text.lines()
+        .find_map(|line| line.strip_prefix(&needle)?.trim().parse().ok())
+        .unwrap_or(0)
+}
+
+/// An envelope the session key cannot authenticate is counted as `decrypt`:
+/// the two ends disagree on the key, and one log line does not accumulate.
+#[tokio::test]
+async fn an_undecryptable_envelope_is_counted_as_a_decrypt_drop() {
+    let (handle, _key, _capture, _prompt_rx, _root_id, _state) = setup(1).await;
+    let conv = conv_of(&handle);
+    let forged = Envelope {
+        channel_id: ChannelId::from(conv.as_ref().to_string()),
+        sender: Participant {
+            id: ParticipantId::for_user(&UserId::from("u".to_string())),
+            kind: ParticipantKind::Human,
+            handle: "Alice".into(),
+            tagma_id: None,
+        },
+        sequence_n: 3,
+        trace_id: TraceId::from("t".to_string()),
+        timestamp: OffsetDateTime::now_utc(),
+        ciphertext: Ciphertext(vec![0u8; 16]),
+    };
+    let before = dropped("decrypt");
+    handle.handle_user_op(forged).await;
+    assert!(
+        dropped("decrypt") > before,
+        "an unauthenticated envelope is a decrypt drop"
+    );
+}
+
+/// A payload that authenticates but does not parse is counted as `decode`;
+/// one that parses with an op this build does not serve, as `unknown_op`.
+/// Those are the two shapes of an app/tagma version skew, and both lose the
+/// payload without anything else noticing.
+#[tokio::test]
+async fn skewed_payloads_are_counted_by_cause() {
+    let (handle, key, _capture, _prompt_rx, _root_id, _state) = setup(2).await;
+    let conv = conv_of(&handle);
+    let (decode, unknown_op) = (dropped("decode"), dropped("unknown_op"));
+    handle
+        .handle_user_op(payload_envelope(&key, &conv, 1, b"not json"))
+        .await;
+    handle
+        .handle_user_op(payload_envelope(
+            &key,
+            &conv,
+            2,
+            br#"{"op":"future_op","req_id":7}"#,
+        ))
+        .await;
+    assert!(
+        dropped("decode") > decode,
+        "an unparsable payload is a decode drop"
+    );
+    assert!(
+        dropped("unknown_op") > unknown_op,
+        "an op this build does not serve is an unknown_op drop"
+    );
+}
+
+/// A reply that reaches the app is one lesche call. The POST is wrapped in
+/// the outbound series at the call site, so a missing wrapper leaves the leg
+/// flat while deliveries keep happening.
+#[tokio::test]
+async fn a_delivered_reply_counts_on_the_lesche_leg() {
+    let (handle, _key, capture, _prompt_rx, _root_id, _state) = setup(1).await;
+    let name = "kallipai_tagma_outbound_requests_total";
+    let labels = "leg=\"lesche\",outcome=\"ok\"";
+    let delivered = crate::metrics::counter_value(name, labels);
+    handle
+        .emit(
+            &TraceId::from("t".to_string()),
+            peer(),
+            TagmaReply::Interrupted { req_id: 7 },
+            None,
+        )
+        .await
+        .expect("the mock keryx accepts the reply");
+    assert_eq!(capture.lock().await.len(), 1, "the reply reached the wire");
+    assert!(
+        crate::metrics::counter_value(name, labels) > delivered,
+        "a delivered reply counts on the lesche leg"
+    );
+}
+
 #[tokio::test]
 async fn pump_splits_authored_envelope_and_system_signal() {
     let events = vec![

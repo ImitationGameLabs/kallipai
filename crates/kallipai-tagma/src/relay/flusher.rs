@@ -23,7 +23,7 @@
 //!
 //! Per-topic policy (the parameterized strategy):
 //! - status / projection: keep-last. A failed POST retains the newest
-//!   snapshot per topic and retries on a short tick — snapshots are
+//!   snapshot per topic and retries on a doubling tick capped at a minute —
 //!   idempotent latest-wins server-side, so a retained retry can never
 //!   resurrect stale state. Upstream republication is change-gated (the
 //!   pump posts only when a capture differs from the last); the pump's
@@ -50,6 +50,8 @@ use kallipai_lesche_common::event::{UnreadSnapshot, UpstreamEvent};
 
 use crate::bus::{ProjectionSnapshot, SignalFrame, StatusSnapshot, UnreadFrame};
 
+use crate::metrics::{Leg, metrics};
+
 use super::RelayHandle;
 
 /// Stash an unread snapshot as keep-last for its peer: the batch then carries
@@ -69,6 +71,24 @@ fn seed_pending_unread(pending: &mut Vec<UnreadSnapshot>, snapshots: Vec<UnreadS
     for snapshot in snapshots {
         stash_unread(pending, snapshot);
     }
+}
+
+/// The most the retry tick stretches to: an idle install retries a failed
+/// POST a minute apart instead of every `flusher_retry_ms`. A frame on any
+/// topic still wakes the loop at once, so this bounds the retry tick, not
+/// how long a fresh snapshot waits.
+const FLUSH_RETRY_MAX: Duration = Duration::from_secs(60);
+
+/// The delay after `failures` consecutive upstream POST failures: the base
+/// doubled per failure, capped at [`FLUSH_RETRY_MAX`]. The base is the
+/// operator's `flusher_retry_ms` (2 s by default), so a healthy install's first
+/// retry is unchanged.
+fn retry_delay(base: Duration, failures: u32) -> Duration {
+    // `.min(10)` is what keeps the shift in range and what bounds the growth:
+    // ten doublings of a base under about 60 ms still fall short of the
+    // ceiling, so the duration cap binds only for the larger bases.
+    let doublings = failures.saturating_sub(1).min(10);
+    base.saturating_mul(1 << doublings).min(FLUSH_RETRY_MAX)
 }
 
 impl RelayHandle {
@@ -114,6 +134,10 @@ impl RelayHandle {
             seed_pending_unread(&mut pending_unread, projector.cold_start_unread().await);
         }
         let mut retry: Option<std::pin::Pin<Box<tokio::time::Sleep>>> = None;
+        // Consecutive failures of the upstream POST: drives the retry backoff
+        // and the once-per-cause rule on its log line.
+        let mut flush_failures: u32 = 0;
+        let mut last_failure: Option<String> = None;
 
         loop {
             // Drain: keep-last per snapshot topic, queue signals in order.
@@ -196,10 +220,12 @@ impl RelayHandle {
             batch.extend(signals.drain(..).map(UpstreamEvent::Signal));
 
             if !batch.is_empty() {
-                let flush = self
-                    .inner
-                    .client
-                    .post_upstream(&self.inner.tagma_id, &batch);
+                let flush = metrics().observe_outbound(
+                    Leg::Lesche,
+                    self.inner
+                        .client
+                        .post_upstream(&self.inner.tagma_id, &batch),
+                );
                 // Cancel-select'd: a tunnel-down aborts the in-flight POST
                 tokio::select! {
                     biased;
@@ -207,6 +233,8 @@ impl RelayHandle {
                     r = flush => match r {
                     Ok(ack) => {
                         retry = None;
+                        flush_failures = 0;
+                        last_failure = None;
                         // Piggyback reconcile: the response's
                         // per-face counts are the keryx's freshest truth;
                         // a diverging face flips through the same handlers
@@ -218,10 +246,25 @@ impl RelayHandle {
                         }
                     }
                         Err(e) => {
-                            warn!(
-                                tagma = %self.inner.tagma_id,
-                                "upstream flush failed: {e:#}; retaining snapshots"
-                            );
+                            flush_failures = flush_failures.saturating_add(1);
+                            let signature = format!("{e:#}");
+                            // One warn per cause: the counter carries the rate, so
+                            // repeating the same cause adds a line and no fact. A
+                            // change of signature (the status, or the body it now
+                            // carries) warns again.
+                            if last_failure.as_deref() != Some(signature.as_str()) {
+                                warn!(
+                                    tagma = %self.inner.tagma_id,
+                                    "upstream flush failed: {e:#}; retaining snapshots"
+                                );
+                                last_failure = Some(signature);
+                            } else {
+                                debug!(
+                                    tagma = %self.inner.tagma_id,
+                                    attempt = flush_failures,
+                                    "upstream flush failed again: {e:#}; retaining snapshots"
+                                );
+                            }
                             // Restore the snapshot elements for retry;
                             // signals stay dropped (fire-and-forget).
                             for event in batch {
@@ -242,8 +285,9 @@ impl RelayHandle {
                                 .inner
                                 .flusher_retry_ms
                                 .load(std::sync::atomic::Ordering::Relaxed);
-                            retry = Some(Box::pin(tokio::time::sleep(Duration::from_millis(
-                                retry_ms,
+                            retry = Some(Box::pin(tokio::time::sleep(retry_delay(
+                                Duration::from_millis(retry_ms),
+                                flush_failures,
                             ))));
                         }
                     },
@@ -308,7 +352,9 @@ impl RelayHandle {
                         return;
                     }
                 },
-                _ = wait_retry => {}
+                // The tick that just fired is spent: re-polling a finished
+                // `Sleep` returns at once, so arming it again would spin.
+                _ = wait_retry => retry = None,
                 _ = gate_wake => {}
             }
         }
@@ -419,6 +465,59 @@ mod tests {
         assert!(pending.iter().any(|s| s.peer == "peer-0" && s.unread == 5));
     }
 
+    /// The retry tick doubles off the operator's base and stops at the ceiling:
+    /// a long outage costs a slow tick, and a healthy install's first retry is
+    /// the base it configured.
+    #[test]
+    fn the_retry_tick_doubles_off_the_base_and_stops_at_the_ceiling() {
+        let base = Duration::from_secs(2);
+        let waited: Vec<u64> = (1..=8)
+            .map(|failures| retry_delay(base, failures).as_secs())
+            .collect();
+        assert_eq!(waited, vec![2, 4, 8, 16, 32, 60, 60, 60]);
+        assert_eq!(
+            retry_delay(Duration::from_secs(45), 3),
+            FLUSH_RETRY_MAX,
+            "a base already past the ceiling still stops at it"
+        );
+        assert_eq!(
+            retry_delay(Duration::from_millis(60), 1),
+            Duration::from_millis(60)
+        );
+    }
+
+    /// Every attempt fails: the tick the loop arms is `retry_delay`, so the
+    /// same window holds a handful of attempts instead of one per base. The
+    /// bound is one-sided on purpose: a slow machine only lowers the count.
+    #[tokio::test]
+    async fn a_failing_flush_backs_off_in_the_loop() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let url = spawn_failing_upstream_keryx(attempts.clone()).await;
+        let (handle, state) = setup_against(&url).await;
+        handle.inner.flusher_retry_ms.store(1, Ordering::Relaxed);
+        let name = "kallipai_tagma_outbound_requests_total";
+        let labels = "leg=\"lesche\",outcome=\"error\"";
+        let errors = crate::metrics::counter_value(name, labels);
+        handle.start_upstream_flusher().await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        state
+            .bus
+            .publish(BusStatus(status_payload(1)))
+            .expect("status topic");
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        handle.stop_upstream_flusher().await;
+        let tried = attempts.load(Ordering::SeqCst);
+        assert!(tried >= 2, "the tick retries at all: {tried} attempts");
+        assert!(
+            tried <= 12,
+            "the tick doubles off the base: {tried} attempts in 80 ms"
+        );
+        assert!(
+            crate::metrics::counter_value(name, labels) > errors,
+            "a failed upstream POST counts on the lesche leg"
+        );
+    }
+
     /// The cold-start warm reaches the wire, not just the helper: the store's
     /// partitions ride the first batch with nothing published on the bus -- a
     /// bus-seeded warm would be capped by the unread topic's ring.
@@ -504,6 +603,25 @@ mod tests {
         format!("http://{addr}")
     }
 
+    /// Spawn a mock keryx that fails every `POST /upstream` and counts the
+    /// attempts: what the retry tick does over a run of failures.
+    async fn spawn_failing_upstream_keryx(attempts: Arc<AtomicUsize>) -> String {
+        async fn handler(
+            axum::extract::State(n): axum::extract::State<Arc<AtomicUsize>>,
+        ) -> axum::response::Response {
+            use axum::response::IntoResponse;
+            n.fetch_add(1, Ordering::SeqCst);
+            (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "boom").into_response()
+        }
+        let app = axum::Router::new()
+            .route("/tagmata/{tagma}/upstream", axum::routing::post(handler))
+            .with_state(attempts);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async { axum::serve(listener, app).await.unwrap() });
+        format!("http://{addr}")
+    }
+
     fn status_payload(consumed: u64) -> TagmaStatusPayload {
         TagmaStatusPayload {
             root_state: AgentState::Idle,
@@ -535,10 +653,16 @@ mod tests {
     /// shortened flusher retry tick. Returns the handle and the state
     /// strong ref (the flusher holds a Weak).
     async fn setup(capture: Capture, fail_nth: Option<usize>) -> (RelayHandle, SharedState) {
+        let url = spawn_upstream_keryx(capture, fail_nth).await;
+        setup_against(&url).await
+    }
+
+    /// [`setup`] against an already-spawned mock: a test that counts its own
+    /// attempts brings the server.
+    async fn setup_against(url: &str) -> (RelayHandle, SharedState) {
         let state = make_state();
         let root = kallipai_common::agentid::AgentId::from("root".to_string());
-        let url = spawn_upstream_keryx(capture, fail_nth).await;
-        let client = LescheClient::builder(&url, "tok").build().unwrap();
+        let client = LescheClient::builder(url, "tok").build().unwrap();
         let handle = RelayHandle::new(
             client,
             "test".to_string(),

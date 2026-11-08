@@ -257,12 +257,19 @@ impl RelayHandle {
                 status: 404,
                 body: serde_json::json!({"error":{"message":"not on the manage frame surface"}}),
             };
-            let _ = metrics()
+            if let Err(error) = metrics()
                 .observe_outbound(
                     crate::metrics::Leg::Lesche,
                     self.inner.client.post_manage_reply(&reply),
                 )
-                .await;
+                .await
+            {
+                warn!(
+                    req_id,
+                    error = %format!("{error:#}"),
+                    "manage-reply POST failed; the caller waits out its timeout"
+                );
+            }
             return;
         }
         debug!(
@@ -290,12 +297,19 @@ impl RelayHandle {
             status,
             body,
         };
-        let _ = metrics()
+        if let Err(error) = metrics()
             .observe_outbound(
                 crate::metrics::Leg::Lesche,
                 self.inner.client.post_manage_reply(&out),
             )
-            .await;
+            .await
+        {
+            warn!(
+                req_id,
+                error = %format!("{error:#}"),
+                "manage-reply POST failed; the caller waits out its timeout"
+            );
+        }
     }
 }
 
