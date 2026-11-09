@@ -22,7 +22,9 @@ use just_llm_client::{LlmBackend, LlmTool, ToolDispatcher};
 use kallipai_common::facts::{
     Block, BlockedFact, Claim, FactView, ProfilePacing, claim_window, is_active,
 };
+use kallipai_common::telemetry::test_observability::Recorder;
 use tokio_util::sync::CancellationToken;
+use tracing_subscriber::prelude::*;
 
 use crate::agent_task::AgentContext;
 use crate::approval::ApprovalStore;
@@ -33,6 +35,26 @@ use crate::policy::{AgentPolicy, AuthorizedToolExecutor};
 use crate::profile::{BackendSource, Profile, ProfileRegistry, ProfileSet};
 use crate::retry::{AttemptOrigin, Episode, RetryPolicy};
 use crate::token_budget::TokenBudget;
+
+/// The one recorder a test binary exports through.
+///
+/// The subscriber is process-wide and can be installed once, and the
+/// callsite interest it computes is global too: a scoped default races the
+/// other tests' spans and drops them at random. So every test that exports a
+/// span shares this install, and asks for its own spans by name or trace id.
+pub(crate) fn install_recorder() -> &'static Recorder {
+    static RECORDER: std::sync::OnceLock<Recorder> = std::sync::OnceLock::new();
+
+    RECORDER.get_or_init(|| {
+        let recorder = Recorder::new("kallipai");
+        let subscriber = tracing_subscriber::registry().with(recorder.layer());
+        assert!(
+            tracing::subscriber::set_global_default(subscriber).is_ok(),
+            "no other test in this binary installs a subscriber"
+        );
+        recorder
+    })
+}
 
 /// Network-free DeepSeek backend (construction touches no network).
 pub(crate) fn ds_backend() -> Arc<dyn LlmBackend> {

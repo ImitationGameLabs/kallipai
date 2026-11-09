@@ -59,8 +59,8 @@ pub use export::{
 #[cfg(feature = "axum")]
 pub use server::{server_span, with_server_span, with_server_span_except};
 pub use spans::{
-    HttpClient, Settle, background_span, http_client, record_attribute, record_response,
-    request_span,
+    HttpClient, Settle, background_span, http_client, inject_current_context, record_attribute,
+    record_response, request_span,
 };
 
 // The tests reach the halves' internals through this module, so this is the

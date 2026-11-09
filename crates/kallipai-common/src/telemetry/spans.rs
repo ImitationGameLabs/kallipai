@@ -328,6 +328,30 @@ pub fn http_client(builder: reqwest::ClientBuilder) -> Result<HttpClient, reqwes
         .build())
 }
 
+/// Put this process's current trace context on an outgoing request's headers.
+///
+/// The middleware [`http_client`] installs does this for the calls it sends,
+/// and injects from the client span it opens for them. A call the caller
+/// cannot route through that client -- a library that owns its transport --
+/// injects from the span it runs under instead, so the far side joins this
+/// trace rather than starting one of its own.
+///
+/// A process that published no propagator (no exporter was assembled) writes
+/// nothing: an empty context carries nothing to inject.
+pub fn inject_current_context(headers: &mut reqwest::header::HeaderMap) {
+    use tracing_opentelemetry::OpenTelemetrySpanExt as _;
+
+    inject(&tracing::Span::current().context(), headers);
+}
+
+/// The one place a context becomes headers, whichever span it came from.
+fn inject(context: &opentelemetry::Context, headers: &mut reqwest::header::HeaderMap) {
+    let mut injector = HeaderInjector(headers);
+    opentelemetry::global::get_text_map_propagator(|propagator| {
+        propagator.inject_context(context, &mut injector);
+    });
+}
+
 /// Carries one call's context out with the request, and its outcome back onto
 /// the span opened for it.
 #[derive(Debug, Clone, Copy)]
@@ -371,13 +395,7 @@ impl Middleware for TracePropagation {
         }
         // Reading the context builds the span if it is still a builder, so the
         // headers carry this call's own span id and not the caller's.
-        let context = span.context();
-        {
-            let mut injector = HeaderInjector(request.headers_mut());
-            opentelemetry::global::get_text_map_propagator(|propagator| {
-                propagator.inject_context(&context, &mut injector);
-            });
-        }
+        inject(&span.context(), request.headers_mut());
         let result = next.run(request, extensions).instrument(span.clone()).await;
         match &result {
             Ok(response) => {
@@ -423,5 +441,27 @@ impl opentelemetry::propagation::Injector for HeaderInjector<'_> {
         ) {
             self.0.insert(name, value);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::inject;
+
+    /// An empty context carries nothing, so even a process that published a
+    /// propagator writes no header for a request that runs outside every span.
+    ///
+    /// The other half of the promise -- a process that published no propagator
+    /// at all -- stays untested here on purpose: the propagator is global, and
+    /// a test that set its own would decide the answer for every other test in
+    /// this binary.
+    #[test]
+    fn an_empty_context_writes_no_headers() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        inject(&opentelemetry::Context::new(), &mut headers);
+        assert!(
+            headers.is_empty(),
+            "an empty context carries nothing to inject: {headers:?}"
+        );
     }
 }

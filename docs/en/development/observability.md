@@ -48,11 +48,16 @@ Those legs are:
 - the tagma client shared by agents, the CLI and the cron daemon, and the
   CLI's own file client;
 - the cron CLI calling its daemon, and the keryx and instances
-  control-plane calls.
+  control-plane calls;
+- the tagma's model request to the model gateway: the client library owns that
+  transport, so the backend wrapper injects the context in its `send` instead
+  of a `telemetry::http_client` call.
 
-A client built by hand carries nothing, and a process that never assembled
-the exporter injects nothing either, because the propagator is published
-with it (see [Known gaps](#known-gaps)).
+A client built by hand carries nothing, with one exception: the model request
+is prepared by the client library on a transport it owns, and the backend
+wrapper injects the context in its `send`. A process that never assembled the
+exporter injects nothing either, because the propagator is published with it
+(see [Known gaps](#known-gaps)).
 
 Five processes make first-party calls and assemble no export layer, so
 their calls carry the type's promise and no header yet: `kallip`,
@@ -193,6 +198,13 @@ indices and outcomes travel as attributes.
 | model request | `chat <model>` | `gen_ai.operation.name`, `gen_ai.provider.name`, `gen_ai.request.model`, `gen_ai.agent.id`, `gen_ai.conversation.id`, `kallipai.profile.id`, `kallipai.chat.attempts`, the `gen_ai.usage.*` counters |
 | tool call | `execute_tool <tool>` | `gen_ai.operation.name`, `gen_ai.tool.name`, `gen_ai.tool.call.id`, `gen_ai.agent.id`, `gen_ai.conversation.id`, `kallipai.tool.outcome` |
 
+A chat span has one more thing under it that this process does not own: the
+model-gateway's request span for the same call. The request leaves with the
+chat span's `traceparent`, so the gateway continues this trace instead of
+starting one. A process that runs without an exporter injects nothing, and the
+gateway then starts a trace of its own. A deployment that points the tagma at a
+provider directly has no gateway in the path, so there is no span there at all.
+
 `kallipai.wake.origin` is `external` or `system`: the two ways a wake starts.
 
 `kallipai.wake.outcome` says what the wake left behind: `awake` when nothing
@@ -262,6 +274,11 @@ The agent's spans are the ones with a `turn` beneath them, so the wake's own
 turns that failed first. The turn's span is where a wake's duration is
 explained: the chat spans under it are the time spent waiting on a model, the
 tool spans the time spent in this process.
+
+When the gateway is instrumented too, its request span hangs under the chat
+span, and the chat span's duration splits there: the gateway span is its own
+work plus the wait on the model, the rest is this process's connection and
+queueing.
 
 ## The scrape face: `/metrics` and `/health`
 
@@ -515,14 +532,17 @@ reports every skip. Its budgets are 5 GiB and 72 hours, overridable with
 
 ## Known gaps
 
-- A model request carries no trace context onward: the request is sent inside
-  the client library, which offers no hook to inject one, so what is missing is
-  an upstream seam (an injectable client, or the send step made public), not a
-  header this side declines to set. A provider's own spans therefore never join
-  this trace.
+- The model request now carries this process's trace context: the backend is
+  wrapped so its send injects the span the request runs under, and the
+  gateway's request span hangs under the chat span. On the leg the gateway
+  forwards, the caller's `traceparent` travels on unchanged (see below), so a
+  provider that honours the header joins this trace and one that ignores it
+  leaves no span behind.
 - The summarize call a compaction makes opens no chat span: it builds its
   request against the client outside the acquisition loop, so its tokens and
-  its failures land on the turn's span and in the log only.
+  its failures land on the turn's span and in the log only. Its request still
+  goes through the wrapped backend, so it carries the context of the turn's
+  span and the gateway continues the trace there.
 - A wake and the delivery that triggered it are two traces: a trigger arrives
   through an asynchronous queue that carries no trace context, so a wake's root
   has no parent even when a message asked for it.

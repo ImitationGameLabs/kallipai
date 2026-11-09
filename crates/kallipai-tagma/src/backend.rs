@@ -24,6 +24,7 @@ use just_llm_client::{
     GenerationStream, Identifiable, LlmBackend,
 };
 use kallipai_adk::profile::{BackendSource, NO_PROFILE_HINT, ProfileConfig, Provider};
+use kallipai_adk::traced_backend::TracedBackend;
 use tracing::warn;
 
 /// Default timeout for establishing the outbound LLM HTTP connection (DNS + TCP + TLS). Distinct
@@ -120,6 +121,10 @@ fn validate_providers(cfg: &ProfileConfig, factory: &BackendFactory) -> Result<(
 /// illegal in a header value (e.g. CR/LF, control bytes) fails fast here —
 /// `reqwest::ClientBuilder::build` rejects it and the error bubbles up to the caller — at startup
 /// for the active set, lazily on first failover use otherwise.
+///
+/// The backend is wrapped in [`TracedBackend`], so every send it makes carries this
+/// process's trace context; the wrapper delegates everything else, so retry
+/// classification, streaming parsing and the conversation chain are unchanged.
 pub(crate) fn build_one(
     factory: &BackendFactory,
     provider: &Provider,
@@ -130,14 +135,15 @@ pub(crate) fn build_one(
         .read_timeout(DEFAULT_READ_TIMEOUT)
         .use_rustls_tls()
         .user_agent(user_agent);
-    factory
+    let backend = factory
         .create(
             &provider.family,
             builder,
             &provider.api_key,
             provider.base_url.as_deref(),
         )
-        .with_context(|| format!("failed to build backend for provider '{}'", provider.id))
+        .with_context(|| format!("failed to build backend for provider '{}'", provider.id))?;
+    Ok(TracedBackend::wrap(backend))
 }
 
 /// Validate the whole config, pre-build the **active set**, and return a lazily-constructing
@@ -601,5 +607,70 @@ mod tests {
     #[tokio::test]
     async fn override_user_agent_reaches_provider() {
         assert_user_agent_sent("acme-bot/9").await;
+    }
+
+    /// The sending span reaches the provider on the wire: the built backend is
+    /// wrapped, and its send injects the span it runs under. Same wire-level
+    /// shape as the `User-Agent` tests above, for the header that joins the
+    /// gateway's span to this trace.
+    #[tokio::test]
+    async fn the_sending_span_reaches_the_provider() {
+        use kallipai_common::telemetry::test_observability::recorder;
+        use tracing::Instrument as _;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let (recorder, subscriber) = recorder("kallipai");
+        let _scope = tracing::subscriber::set_default(subscriber);
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+
+        let endpoint = Provider {
+            id: "traced".into(),
+            family: family::OPENAI_COMPATIBLE.into(),
+            api_key: "test".into(),
+            base_url: Some(server.uri()),
+            model_list_base_url: None,
+        };
+        let backend = build_one(&BackendFactory::new(), &endpoint, DEFAULT_USER_AGENT)
+            .expect("backend builds");
+        let request = GenerationRequest::new("m", vec![Message::user("hi")]);
+        let prepared = backend.prepare(request).expect("prepare serializes");
+        let span = tracing::info_span!(target: kallipai_common::SPAN_TARGET, "probe");
+        backend
+            .send(prepared)
+            .instrument(span.clone())
+            .await
+            .expect("send succeeds");
+        drop(span);
+
+        let requests = server
+            .received_requests()
+            .await
+            .expect("the mock server records what it answered");
+        let header = requests
+            .first()
+            .expect("the mock server received the request")
+            .headers
+            .get("traceparent")
+            .expect("the request carries a traceparent")
+            .to_str()
+            .expect("a traceparent is ascii");
+        let parts: Vec<&str> = header.split('-').collect();
+        let probe = recorder
+            .observed()
+            .into_iter()
+            .find(|span| span.name == "probe")
+            .expect("the probe span was exported");
+        assert_eq!(
+            parts[1], probe.trace_id,
+            "the request joins the probe's trace"
+        );
+        assert_eq!(parts[2], probe.span_id, "and names the probe as its parent");
     }
 }

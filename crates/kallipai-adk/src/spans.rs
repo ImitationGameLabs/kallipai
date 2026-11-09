@@ -159,16 +159,15 @@ mod tests {
 
     use just_llm_client::LlmBackend;
     use kallipai_common::AgentId;
-    use kallipai_common::telemetry::test_observability::{ObservedSpan, Recorder};
-    use tracing_subscriber::prelude::*;
+    use kallipai_common::telemetry::test_observability::ObservedSpan;
 
     use crate::agent_task::{AgentContext, WakeDisposition, run_and_report};
     use crate::event::AgentEvent;
     use crate::history::HistoryWriter;
     use crate::retry::AttemptOrigin;
     use crate::test_support::{
-        GatedTool, MapSource, RecordingBackend, ctx_from_source_with_tools, profile,
-        usage_with_every_counter, user_msg,
+        GatedTool, MapSource, RecordingBackend, ctx_from_source_with_tools, install_recorder,
+        profile, usage_with_every_counter, user_msg,
     };
 
     fn named<'a>(spans: &'a [ObservedSpan], name: &str) -> &'a ObservedSpan {
@@ -176,26 +175,6 @@ mod tests {
             .iter()
             .find(|span| span.name == name)
             .unwrap_or_else(|| panic!("the {name} span: {spans:#?}"))
-    }
-
-    /// The one recorder a test binary exports through.
-    ///
-    /// The subscriber is process-wide and can be installed once, and the
-    /// callsite interest it computes is global too: a scoped default races the
-    /// other tests' spans and drops them at random. So every tree test shares
-    /// this install, and asks for its own spans by name or trace id.
-    pub(crate) fn install_recorder() -> &'static Recorder {
-        static RECORDER: std::sync::OnceLock<Recorder> = std::sync::OnceLock::new();
-
-        RECORDER.get_or_init(|| {
-            let recorder = Recorder::new("kallipai");
-            let subscriber = tracing_subscriber::registry().with(recorder.layer());
-            assert!(
-                tracing::subscriber::set_global_default(subscriber).is_ok(),
-                "no other test in this binary installs a subscriber"
-            );
-            recorder
-        })
     }
 
     /// The context a tree test runs its wake in: one profile `a` served through
