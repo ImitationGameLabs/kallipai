@@ -39,8 +39,9 @@
 //! `with_server_span_except`, so a scrape is not an entry in the traces it
 //! sits beside, and its latency is not read as server work.
 //!
-//! `build_info` always carries both labels: an instance with no stored tagma id
-//! reports `tagma_id="none"`, so enrolling it later changes a value, never the shape.
+//! `build_info` always carries both labels: an instance with no stored
+//! registration reports `tagma_registration="none"`, so enrolling it later
+//! changes a value, never the shape.
 //! Recording never allocates beyond a fixed label vector and never awaits: the
 //! request path pays a handful of atomic adds. A broken metrics family must not
 //! break serving, so nothing here returns an error to a caller.
@@ -55,6 +56,7 @@ use prometheus::{
     TextEncoder,
 };
 
+use crate::UNENROLLED_TAGMA_ID;
 use crate::state::SharedState;
 
 pub mod health;
@@ -345,9 +347,9 @@ impl Metrics {
         let build_info = IntGaugeVec::new(
             Opts::new(
                 "kallipai_tagma_build_info",
-                "Build metadata; the value is always 1, the labels carry the version and the tagma id.",
+                "Build metadata; the value is always 1, the labels carry the version and the registration id."
             ),
-            &["version", "tagma_id"],
+            &["version", "tagma_registration"],
         )
         .expect("a statically named gauge");
         let collector = snapshot::SnapshotCollector::new();
@@ -487,12 +489,15 @@ impl Metrics {
             .inc();
     }
 
-    /// The one-off identity series: which build, which tagma. Called once at
-    /// boot. `tagma_id` is `None` on a local-only tagma, and the label says so
+    /// The one-off identity series: which build, which registration. Called once at
+    /// boot. The registration id gets a label of its own because `tagma_id` in the
+    /// stores carries the door's slug; two meanings under one name merge into a
+    /// single joined value the moment an instance's slug and its registration differ.
+    /// `registration` is `None` on a local-only tagma, and the label says so
     /// rather than pretending an identity.
-    pub fn set_build_info(&self, version: &str, tagma_id: Option<&str>) {
+    pub fn set_build_info(&self, version: &str, registration: Option<&str>) {
         self.build_info
-            .with_label_values(&[version, tagma_id.unwrap_or("none")])
+            .with_label_values(&[version, registration.unwrap_or(UNENROLLED_TAGMA_ID)])
             .set(1);
     }
 
@@ -691,11 +696,20 @@ mod tests {
         let families = metrics.registry.gather();
         let build = family(&families, "kallipai_tagma_build_info");
         assert_eq!(
-            sample(build, &[("version", "1.2.3"), ("tagma_id", "none")]),
+            sample(
+                build,
+                &[
+                    ("version", "1.2.3"),
+                    ("tagma_registration", UNENROLLED_TAGMA_ID)
+                ]
+            ),
             Some(1.0)
         );
         assert_eq!(
-            sample(build, &[("version", "1.2.3"), ("tagma_id", "t-9")]),
+            sample(
+                build,
+                &[("version", "1.2.3"), ("tagma_registration", "t-9")]
+            ),
             Some(1.0)
         );
     }

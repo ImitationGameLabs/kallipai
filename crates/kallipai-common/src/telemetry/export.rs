@@ -6,6 +6,7 @@
 //! compile this file at all (feature `telemetry`) and still gets the
 //! propagation half.
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -34,6 +35,8 @@ use crate::logging;
 
 /// The collector's OTLP/HTTP base URL; the traces path is appended.
 pub const ENDPOINT_VAR: &str = "OTEL_EXPORTER_OTLP_ENDPOINT";
+/// The header an intake reads a bearer token from.
+const AUTHORIZATION_HEADER: &str = "authorization";
 /// The sampler override; absent means parent-based always-on.
 pub const SAMPLER_VAR: &str = "OTEL_TRACES_SAMPLER";
 /// The argument the ratio samplers read.
@@ -263,7 +266,15 @@ pub(crate) fn service_layers<W>(
 where
     W: for<'a> tracing_subscriber::fmt::MakeWriter<'a> + Send + Sync + 'static,
 {
-    service_layers_with_exporter(otlp_exporter, config, filter, service, attrs, dir, stdout)
+    service_layers_with_exporter(
+        |endpoint| otlp_exporter(endpoint, None),
+        config,
+        filter,
+        service,
+        attrs,
+        dir,
+        stdout,
+    )
 }
 
 /// The same composition with the exporter construction injected: `open`
@@ -319,7 +330,37 @@ pub fn export_layer(
     service: &str,
     attrs: &[(&str, &str)],
 ) -> (Option<Box<dyn Layer<Registry> + Send + Sync>>, Guard) {
-    export_layer_with(otlp_exporter, config, service, attrs)
+    export_layer_with(
+        |endpoint| otlp_exporter(endpoint, None),
+        config,
+        service,
+        attrs,
+    )
+}
+
+/// [`export_layer`] with the intake's credential attached to every export.
+///
+/// `token` is the credential itself, never a preformatted header: the scheme
+/// is this crate's business, so a caller reads its token from wherever it
+/// keeps it and knows nothing about the OTLP wire. `None` sends no
+/// `authorization` header at all, which is what an instance with no
+/// credential store has to send. Headers a deployment sets through
+/// `OTEL_EXPORTER_OTLP_HEADERS` still apply, because a process without a
+/// credential store of its own has no other way to carry one; an
+/// `authorization` set there overrides this token in silence, so the two
+/// sources must not both be set.
+pub fn export_layer_authorized(
+    config: Option<&Config>,
+    service: &str,
+    attrs: &[(&str, &str)],
+    token: Option<&str>,
+) -> (Option<Box<dyn Layer<Registry> + Send + Sync>>, Guard) {
+    export_layer_with(
+        |endpoint| otlp_exporter(endpoint, token),
+        config,
+        service,
+        attrs,
+    )
 }
 
 /// [`export_layer`] with the exporter construction injected, so the assembly
@@ -402,7 +443,7 @@ where
                 inner: exporter,
                 stats: export_stats(),
             },
-            hinted: Arc::new(AtomicBool::new(false)),
+            hinted: Arc::new(std::array::from_fn(|_| AtomicBool::new(false))),
         },
         runtime::TokioCurrentThread,
     )
@@ -445,17 +486,26 @@ pub(crate) fn span_filter() -> EnvFilter {
 }
 
 /// The OTLP/HTTP exporter for a resolved traces endpoint.
-fn otlp_exporter(endpoint: &str) -> Result<OtlpExporter, String> {
-    OtlpExporter::builder()
+///
+/// A token becomes `authorization: Bearer <token>` on every request; no token
+/// leaves the request headers to the environment alone.
+fn otlp_exporter(endpoint: &str, token: Option<&str>) -> Result<OtlpExporter, String> {
+    let exporter = OtlpExporter::builder()
         .with_http()
         .with_endpoint(endpoint)
         .with_timeout(EXPORT_DEADLINE)
         // Spelled out rather than inherited: three retries from 100ms fit
         // inside the deadline only because a refusal comes back at once, and
         // an SDK default that changed under us must not move that bar.
-        .with_retry_policy(RetryPolicy::recommended())
-        .build()
-        .map_err(|error| error.to_string())
+        .with_retry_policy(RetryPolicy::recommended());
+    let exporter = match token {
+        Some(token) => exporter.with_headers(HashMap::from([(
+            AUTHORIZATION_HEADER.to_string(),
+            format!("Bearer {token}"),
+        )])),
+        None => exporter,
+    };
+    exporter.build().map_err(|error| error.to_string())
 }
 
 /// Wraps the exporter so an unreachable collector says so once. Every failed
@@ -465,7 +515,9 @@ fn otlp_exporter(endpoint: &str) -> Result<OtlpExporter, String> {
 #[derive(Debug)]
 pub(crate) struct HintOnceExporter<E> {
     pub(crate) inner: E,
-    pub(crate) hinted: Arc<AtomicBool>,
+    /// One flag per reason: a first `unavailable` must not swallow a later
+    /// `unauthorized`, which is the one an operator can actually fix.
+    pub(crate) hinted: Arc<[AtomicBool; 4]>,
 }
 
 impl<E: SpanExporter> SpanExporter for HintOnceExporter<E> {
@@ -473,12 +525,12 @@ impl<E: SpanExporter> SpanExporter for HintOnceExporter<E> {
         let spans = batch.len();
         let result = self.inner.export(batch).await;
         if let Err(error) = &result
-            && !self.hinted.swap(true, Ordering::Relaxed)
+            && !self.hinted[failure_reason(error).index()].swap(true, Ordering::Relaxed)
         {
             tracing::warn!(
                 spans,
                 error = %error,
-                "telemetry export failed; spans are dropped while the collector stays unreachable"
+                "telemetry export failed; spans are dropped until the export path recovers"
             );
         }
         result
@@ -506,9 +558,12 @@ pub struct ExportSnapshot {
     pub enabled: bool,
     /// Spans the collector accepted.
     pub exported_spans: u64,
-    /// Failed exports by reason; the three sum to every failed attempt.
+    /// Failed exports by reason; the four sum to every failed attempt.
     pub failed_timeout: u64,
     pub failed_unavailable: u64,
+    /// The intake answered 401 or 403: the credential this process sends is
+    /// not the one the intake accepts.
+    pub failed_unauthorized: u64,
     pub failed_other: u64,
     /// Unix seconds of the last accepted export; 0 while none has landed.
     pub last_success_unix: u64,
@@ -532,6 +587,7 @@ pub struct ExportStats {
     exported_spans: AtomicU64,
     failed_timeout: AtomicU64,
     failed_unavailable: AtomicU64,
+    failed_unauthorized: AtomicU64,
     failed_other: AtomicU64,
     last_success_unix: AtomicU64,
     last_failure_unix: AtomicU64,
@@ -556,6 +612,7 @@ impl ExportStats {
                 let counter = match failure_reason(error) {
                     ExportFailure::Timeout => &self.failed_timeout,
                     ExportFailure::Unavailable => &self.failed_unavailable,
+                    ExportFailure::Unauthorized => &self.failed_unauthorized,
                     ExportFailure::Other => &self.failed_other,
                 };
                 counter.fetch_add(1, Ordering::Relaxed);
@@ -571,6 +628,7 @@ impl ExportStats {
             exported_spans: self.exported_spans.load(Ordering::Relaxed),
             failed_timeout: self.failed_timeout.load(Ordering::Relaxed),
             failed_unavailable: self.failed_unavailable.load(Ordering::Relaxed),
+            failed_unauthorized: self.failed_unauthorized.load(Ordering::Relaxed),
             failed_other: self.failed_other.load(Ordering::Relaxed),
             last_success_unix: self.last_success_unix.load(Ordering::Relaxed),
             last_failure_unix: self.last_failure_unix.load(Ordering::Relaxed),
@@ -590,10 +648,23 @@ pub fn export_stats() -> &'static ExportStats {
 enum ExportFailure {
     Timeout,
     Unavailable,
+    Unauthorized,
     Other,
 }
 
-/// Classify one SDK error into the tally's three reasons.
+impl ExportFailure {
+    /// Its slot in [`HintOnceExporter::hinted`], one flag per reason.
+    const fn index(self) -> usize {
+        match self {
+            ExportFailure::Timeout => 0,
+            ExportFailure::Unavailable => 1,
+            ExportFailure::Unauthorized => 2,
+            ExportFailure::Other => 3,
+        }
+    }
+}
+
+/// Classify one SDK error into the tally's four reasons.
 ///
 /// `Timeout` is the SDK's own variant. The OTLP exporter reports an unreachable
 /// or refusing collector as `Internal` with the transport error appended, so
@@ -601,11 +672,22 @@ enum ExportFailure {
 /// `Internal` (a body that would not serialize, say) is the honest `other`.
 /// A connect error or a deadline that surfaced as `Internal` counts as
 /// `unavailable` too: the OTLP stack does not always tell the two apart.
+///
+/// The intake answering 401 or 403 reads as `Internal` carrying
+/// `HTTP export failed with status code: <code>`. Its status is checked first:
+/// a rejected credential is a different fact from an unreachable collector, and
+/// a rejection body may well contain a word from the unreachable list.
 fn failure_reason(error: &OTelSdkError) -> ExportFailure {
     match error {
         OTelSdkError::Timeout(_) => ExportFailure::Timeout,
         OTelSdkError::InternalFailure(message) => {
             let lowered = message.to_ascii_lowercase();
+            let rejected = ["status code: 401", "status code: 403"]
+                .iter()
+                .any(|needle| lowered.contains(needle));
+            if rejected {
+                return ExportFailure::Unauthorized;
+            }
             let unreachable = [
                 "connect",
                 "unavailable",

@@ -228,8 +228,10 @@ relying party only show up on a browser path.
 The model gateway rides the same stack: `gateway` + `gateway-postgres` +
 `prometheus`. The gateway's data plane publishes loopback-only at
 `127.0.0.1:7501` (the port `compose.dev.yaml` publishes);
-prometheus serves `127.0.0.1:9090` and scrapes the gateway's metrics
-face every 30 seconds.
+prometheus scrapes the gateway's metrics face every 30 seconds, and Grafana
+queries it by service name. It takes no host port: the remote-write receiver
+the collector pushes into accepts writes without a credential, so the compose
+network stays the only way in.
 
 The trace stack rides it too: `otelcol` takes OTLP on `127.0.0.1:4318` and
 forwards to `tempo`, and `grafana` serves the UI on `127.0.0.1:3001`; a tagma

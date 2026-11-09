@@ -79,6 +79,8 @@ services:
 
   otelcol:
     image: otel/opentelemetry-collector-contrib:0.164.0@sha256:340c9ca6a36617084c6661bdc4f0fe92b7cda5a805d61673ec8db375fddc522b
+    # The span the per-instance intakes are given ports from, on loopback: the tagma and the agent that push there run on the host even when the rest of the platform is containers.
+    ports: ["127.0.0.1:12000-12019:12000-12019"]
 
   tempo:
     image: grafana/tempo:2.9.5@sha256:785fd6c81d7f26ff0973208cd7093ac6030e13946c288612ff32f02416941d3a

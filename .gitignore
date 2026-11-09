@@ -9,6 +9,7 @@
 /compose/.env
 /compose/.env.local
 /compose/.env.prod
+/compose/telemetry-instances.json
 # Retired root names: a checkout from before the move kept its service env
 # file at /.env.local or /.env.prod, and nothing regenerates that file, so
 # both stay ignored rather than exposed to a stray `git add -A`.

@@ -228,7 +228,7 @@ async fn a_failing_export_says_so_once() {
     let subscriber = tracing_subscriber::registry().with(counter.clone());
     let exporter = HintOnceExporter {
         inner: FailingExporter,
-        hinted: Arc::new(AtomicBool::new(false)),
+        hinted: Arc::new(std::array::from_fn(|_| AtomicBool::new(false))),
     };
     {
         let _quiet = tracing::subscriber::set_default(subscriber);
@@ -240,6 +240,48 @@ async fn a_failing_export_says_so_once() {
         counter.0.load(Ordering::Relaxed),
         1,
         "a collector that stays down must not log a line per export"
+    );
+}
+
+/// Says `unavailable` first and `unauthorized` after: two facts an operator
+/// reacts to differently, and the second one arrives after the first is old
+/// news.
+#[derive(Debug, Clone)]
+struct ReasonChangeExporter {
+    calls: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl SpanExporter for ReasonChangeExporter {
+    async fn export(&self, _batch: Vec<SpanData>) -> OTelSdkResult {
+        let call = self.calls.fetch_add(1, Ordering::Relaxed);
+        Err(if call == 0 {
+            OTelSdkError::InternalFailure("connection refused".to_string())
+        } else {
+            OTelSdkError::InternalFailure("HTTP export failed with status code: 401".to_string())
+        })
+    }
+}
+
+#[tokio::test]
+async fn a_later_unauthorized_is_not_swallowed_by_an_earlier_unavailable() {
+    let counter = WarnCounter::default();
+    let subscriber = tracing_subscriber::registry().with(counter.clone());
+    let exporter = HintOnceExporter {
+        inner: ReasonChangeExporter {
+            calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        },
+        hinted: Arc::new(std::array::from_fn(|_| AtomicBool::new(false))),
+    };
+    {
+        let _quiet = tracing::subscriber::set_default(subscriber);
+        for _ in 0..4 {
+            assert!(exporter.export(Vec::new()).await.is_err());
+        }
+    }
+    assert_eq!(
+        counter.0.load(Ordering::Relaxed),
+        2,
+        "one line per reason: the rejection must be said even after the outage"
     );
 }
 
@@ -1674,6 +1716,10 @@ enum Answer {
     Ok,
     Unreachable,
     Timeout,
+    /// The intake rejects the credential with this status. The message also
+    /// carries a transport word, the way a rejection body can, so the test
+    /// proves the status is read before the unreachable list.
+    Rejected(&'static str),
     Other,
     /// A collector that takes the connection and never answers.
     Hung,
@@ -1687,6 +1733,9 @@ impl SpanExporter for ScriptedExporter {
                 "connection refused by the collector".to_string(),
             )),
             Answer::Timeout => Err(OTelSdkError::Timeout(std::time::Duration::from_secs(1))),
+            Answer::Rejected(status) => Err(OTelSdkError::InternalFailure(format!(
+                "HTTP export failed with status code: {status}; the connection was closed"
+            ))),
             Answer::Other => Err(OTelSdkError::InternalFailure(
                 "the body would not serialize".to_string(),
             )),
@@ -1725,6 +1774,7 @@ async fn the_counting_wrapper_books_the_answer_and_returns_it_unchanged() {
         "a refused connection is unreachable"
     );
     assert_eq!(snapshot.failed_timeout, 0);
+    assert_eq!(snapshot.failed_unauthorized, 0);
     assert_eq!(snapshot.failed_other, 0);
 
     counting.inner.answer = Answer::Timeout;
@@ -1735,6 +1785,7 @@ async fn the_counting_wrapper_books_the_answer_and_returns_it_unchanged() {
     let snapshot = stats.snapshot();
     assert_eq!(snapshot.failed_unavailable, 1);
     assert_eq!(snapshot.failed_timeout, 1, "the SDK's own timeout variant");
+    assert_eq!(snapshot.failed_unauthorized, 0);
     assert_eq!(
         snapshot.failed_other, 1,
         "an internal failure that is not transport"
@@ -1747,6 +1798,47 @@ async fn the_counting_wrapper_books_the_answer_and_returns_it_unchanged() {
     assert_eq!(
         snapshot.last_success_unix, 0,
         "nothing has landed, so the two stamps cannot agree"
+    );
+}
+
+/// A rejected credential is its own fact: the intake answered, so calling it
+/// unreachable would send an operator to look at the network, and the
+/// rejection body often mentions the connection it closed.
+#[tokio::test]
+async fn a_rejected_credential_is_booked_as_unauthorized() {
+    let stats = scripted_stats();
+    let mut counting = CountingExporter {
+        inner: ScriptedExporter {
+            answer: Answer::Rejected("401"),
+            resource: Arc::new(Mutex::new(None)),
+        },
+        stats,
+    };
+
+    assert!(
+        counting.export(Vec::new()).await.is_err(),
+        "the wrapper returns the exporter's failure as it found it"
+    );
+
+    let snapshot = stats.snapshot();
+    assert_eq!(
+        snapshot.failed_unauthorized, 1,
+        "the status says the intake refused this token"
+    );
+    assert_eq!(
+        snapshot.failed_unavailable, 0,
+        "a rejection body that mentions the connection is still a rejection"
+    );
+    assert_eq!(snapshot.failed_other, 0);
+    assert_eq!(snapshot.exported_spans, 0);
+    assert!(snapshot.last_failure_unix > 0);
+
+    counting.inner.answer = Answer::Rejected("403");
+    assert!(counting.export(Vec::new()).await.is_err());
+    assert_eq!(
+        stats.snapshot().failed_unauthorized,
+        2,
+        "a forbidden credential is the same fact as a rejected one"
     );
 }
 
@@ -1862,7 +1954,7 @@ async fn a_cut_export_is_announced_once_and_counted() {
             },
             stats,
         },
-        hinted: Arc::new(AtomicBool::new(false)),
+        hinted: Arc::new(std::array::from_fn(|_| AtomicBool::new(false))),
     };
 
     let answer = {

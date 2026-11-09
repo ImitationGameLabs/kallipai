@@ -758,18 +758,28 @@ fn logs_target() -> Result<std::path::PathBuf> {
 /// `instance`, the role name the daemon's instance log listing keys on.
 ///
 /// `attrs` become resource attributes on every exported span. The daemon
-/// passes `tagma_id` here: it labels the whole process rather than one span,
-/// and it is known before the runtime exists. A first-run enrollment has
-/// none, and an absent attribute is right there -- never an empty one.
+/// passes [`telemetry_attrs`] here: `tagma.id` labels the whole process
+/// rather than one span, and it is known before the runtime exists.
+///
+/// `intake_token` is the enrollment credential the collector's intake
+/// accepts; the boot reads it from the same stored entry the id comes from.
+/// `None` means the instance has no credential yet, and the export carries no
+/// `authorization` header: the same value-changes-shape-stays rule the
+/// resource attribute follows.
 pub fn init_logging(
     filter: &tracing_subscriber::EnvFilter,
     attrs: &[(&str, &str)],
+    intake_token: Option<&str>,
 ) -> kallipai_common::telemetry::Guard {
     use tracing_subscriber::prelude::*;
 
     let config = kallipai_common::telemetry::config_from_env();
-    let (export, telemetry) =
-        kallipai_common::telemetry::export_layer(config.as_ref(), "tagma", attrs);
+    let (export, telemetry) = kallipai_common::telemetry::export_layer_authorized(
+        config.as_ref(),
+        "tagma",
+        attrs,
+        intake_token,
+    );
 
     let stderr_layer = || {
         tracing_subscriber::fmt::layer()
@@ -1239,6 +1249,37 @@ pub fn stored_tagma_id(args: &args::Args) -> Option<String> {
     stored_id_under(&root, &entries)
 }
 
+/// The token stored with the enrolled id, read at boot for the telemetry
+/// intake.
+///
+/// It resolves through the same walk as [`stored_tagma_id`], so the id a
+/// trace resource names and the credential that trace arrives with always
+/// come from one stored entry rather than two lookups that may disagree after
+/// a re-enrollment. `None` covers a first-run enrollment and any resolution
+/// failure alike: telemetry must not be able to fail a boot, and an instance
+/// with no credential exports without one.
+pub fn stored_tagma_token(args: &args::Args) -> Option<String> {
+    let root = credentials_dir().ok()?;
+    let entries = resolve_relay_entries(args).ok()?;
+    stored_token_under(&root, &entries)
+}
+
+/// The `tagma.id` value that stands in for an instance with no stored
+/// enrollment. The trace resource and the scrape face's `build_info` both
+/// report it, so a later enrollment changes a value and never the shape of
+/// what a collector has already been receiving.
+pub const UNENROLLED_TAGMA_ID: &str = "none";
+
+/// The exporter's resource attributes for a boot: `tagma.id` is always among
+/// them, carrying [`UNENROLLED_TAGMA_ID`] until an enrollment stores an id.
+///
+/// One spelling of "no id yet" serves both faces. A trace taken before
+/// enrollment and a scrape of the same instance carry the same key with the
+/// same stand-in, so the two stay comparable across the enrollment.
+pub fn telemetry_attrs(tagma_id: Option<&str>) -> Vec<(&'static str, &str)> {
+    vec![("tagma.id", tagma_id.unwrap_or(UNENROLLED_TAGMA_ID))]
+}
+
 /// The identity rule on its own, with the environment taken out: the first
 /// entry in configuration order that has credentials on disk, and the flat
 /// files when the layout migration has not run yet.
@@ -1247,12 +1288,23 @@ pub fn stored_tagma_id(args: &args::Args) -> Option<String> {
 /// a host whose first entry is not enrolled yet while a later one is must
 /// still report the id of the tagma the process is about to serve.
 fn stored_id_under(root: &std::path::Path, entries: &[RelayEntry]) -> Option<String> {
+    stored_under(root, entries).map(|stored| stored.id)
+}
+
+/// The token half of the same entry [`stored_id_under`] reads.
+fn stored_token_under(root: &std::path::Path, entries: &[RelayEntry]) -> Option<String> {
+    stored_under(root, entries).map(|stored| stored.token)
+}
+
+/// The stored entry behind both halves: the first configured entry with
+/// credentials on disk, or the flat files before `migrate_legacy_layout` has
+/// moved them (the same files, one level up).
+fn stored_under(
+    root: &std::path::Path,
+    entries: &[RelayEntry],
+) -> Option<credentials::StoredTagma> {
     let names = entries.iter().map(|entry| entry.name.as_str());
-    first_stored(root, names)
-        .map(|stored| stored.id)
-        // The flat layout, before `migrate_legacy_layout` moves it: the same
-        // files, one level up.
-        .or_else(|| credentials::load_tagma(root).map(|stored| stored.id))
+    first_stored(root, names).or_else(|| credentials::load_tagma(root))
 }
 
 /// The first entry, in configuration order, whose credentials are on disk.

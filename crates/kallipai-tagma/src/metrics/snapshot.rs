@@ -207,6 +207,7 @@ fn export_families() -> Vec<proto::MetricFamily> {
             vec![
                 (vec![("reason", "timeout")], export.failed_timeout),
                 (vec![("reason", "unavailable")], export.failed_unavailable),
+                (vec![("reason", "unauthorized")], export.failed_unauthorized),
                 (vec![("reason", "other")], export.failed_other),
             ],
         ),
@@ -544,6 +545,17 @@ mod tests {
             assert!(
                 detached.contains(&format!("# TYPE {family} ")),
                 "{family} needs no state and must be there: {detached}"
+            );
+        }
+        // Every failure reason is a series from the first scrape: the reason a
+        // token was refused has to be readable before the first failure, or an
+        // operator cannot tell a zero apart from a label that never existed.
+        for reason in ["timeout", "unavailable", "unauthorized", "other"] {
+            let series =
+                format!("kallipai_tagma_telemetry_export_failed_total{{reason=\"{reason}\"}} 0");
+            assert!(
+                detached.contains(&series),
+                "{series} is missing from the scrape: {detached}"
             );
         }
         // With no state attached the owner is absent, so the families that

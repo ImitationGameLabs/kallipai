@@ -8,13 +8,17 @@
 # render the two files the way a start would (compose reports a name it cannot
 # fill, so a broken environment stops before anything is built), build and load
 # the images this checkout needs (a teardown or an inspection skips that step),
-# make sure the shared platform network exists, and hand the two files to
-# `docker compose up -d`. The requirements are the docker CLI with the compose
-# plugin (2.20 or newer), the nix CLI for the images, and python3, which reads
-# the platform network's name out of the rendered config.
+# make sure the shared platform network exists, render the instance token files
+# and the collector agent's config under the telemetry root, and hand the two
+# files to `docker compose up -d`. The requirements are the docker CLI with the
+# compose plugin (2.20 or newer), the nix CLI for the images, and python3,
+# which reads the platform network's name out of the rendered config.
 # EXTRA replaces the default `up -d`, so `-- down` or `-- config` work the same
 # way.
 #
+# The agent container is in no compose file: this script starts it after a
+# start, restarts it on the next one, stops it on `stop` and removes it on
+# `down`, so it never outlives the stack it feeds.
 # The compose files never pull an application image: the names they interpolate
 # are what this script loaded into the local docker store moments earlier.
 #
@@ -176,6 +180,110 @@ env_value() {
     esac
   done <<<"$resolved"
   return 0
+}
+
+# The per-instance intake, rendered before compose starts: one token file per
+# instance, because the collector reads them through its own file provider and
+# a missing file leaves every push from that instance a 401 the collector does
+# not count and does not log. The credentials are the tagma's own; this copies
+# them, it never invents them. A table entry that cannot be honoured stops the
+# start instead of leaving an instance silently refused.
+#
+# The table is compose/telemetry-instances.json -- the same file the stack
+# build reads, so the ports in the rendered text and the files written here
+# cannot describe two different deployments.
+render_intake() {
+  local telemetry_base=$1
+  local table=${KALLIPAI_TELEMETRY_INSTANCES_FILE:-$repo_root/compose/telemetry-instances.json}
+  if [ -z "$telemetry_base" ]; then
+    echo "compose-up: TELEMETRY_BASE is empty, so the token files have no home (set it in compose/.env)" >&2
+    exit 1
+  fi
+  if [ ! -f "$table" ]; then
+    return 0
+  fi
+  python3 "$repo_root/scripts/render-intake.py" "$table" "$telemetry_base" "$KALLIPAI_STACK_DIR"
+}
+
+# --- the agent container ------------------------------------------------------
+# The agent scrapes each instance's management face over loopback and pushes to
+# that instance's intake, so it shares the host's network namespace instead of
+# joining the compose network. No compose file owns it: the collector image is
+# the same one, and a fixed name is what makes a second start a restart rather
+# than a second scraper.
+agent_container=kallipai-telemetry-agent
+# The image's own entrypoint reads this path, which is why the collector text
+# compose mounts lands there too.
+agent_config_path=/etc/otelcol-contrib/config.yaml
+
+# Named so a teardown can call it; `docker stop` leaves the container for the
+# next start, `docker rm -f` is what `down` means.
+halt_agent() {
+  if docker inspect "$agent_container" >/dev/null 2>&1; then
+    docker stop "$agent_container" >/dev/null
+  fi
+}
+
+remove_agent() {
+  if docker inspect "$agent_container" >/dev/null 2>&1; then
+    docker rm -f "$agent_container" >/dev/null
+  fi
+}
+# `docker run -d` and `docker restart` report what happened, not what followed:
+# a text the collector rejects or a mount it cannot read kills the process
+# while both return 0, and this agent is the only path metrics and traces have.
+require_agent_alive() {
+  sleep 2
+  local state
+  state=$(docker inspect --format '{{.State.Running}} {{.RestartCount}}' $agent_container 2>/dev/null || true)
+  # A crash loop can be running again by the time this asks, so one look is not
+  # enough: a container that already restarted itself is not healthy.
+  if [ "$state" = 'true 0' ]; then
+    return 0
+  fi
+  echo 'compose-up: the telemetry agent started and exited; its log:' >&2
+  docker logs --tail 20 $agent_container >&2 || true
+  return 1
+}
+
+
+start_agent() {
+  local telemetry_base=$1
+  local config=$telemetry_base/agent.yaml
+  local tokens=$telemetry_base/gateway/tokens
+  local source
+  if [ -z "$telemetry_base" ] || [ ! -f "$config" ]; then
+    return 0
+  fi
+  # The collector's own reference: one pinned image serves both, and the tag a
+  # start loaded is the one compose would run.
+  local image
+  image=$(compose config --format json | python3 -c 'import json, sys
+print(json.load(sys.stdin)["services"]["otelcol"]["image"])')
+  if [ -z "$image" ]; then
+    echo "compose-up: the collector names no image, so the agent has none to run" >&2
+    exit 1
+  fi
+  if docker inspect "$agent_container" >/dev/null 2>&1; then
+    # A telemetry root that moved would leave the old mounts behind, so the
+    # container is kept only when it already reads this config. A path match is
+    # enough: a restart re-creates the bind, so a file replaced at the same path
+    # reads new inside, while content written in place needs no restart at all.
+    source=$(docker inspect --format "{{range .Mounts}}{{if eq .Destination \"$agent_config_path\"}}{{.Source}}{{end}}{{end}}" "$agent_container")
+    if [ "$source" = "$config" ]; then
+      docker restart "$agent_container" >/dev/null
+      require_agent_alive || exit 1
+      return 0
+    fi
+    docker rm -f "$agent_container" >/dev/null
+  fi
+  # Root, like the collector: the token files are 0600 in a root-owned directory
+  # and the image's default user cannot read them.
+  docker run --detach --name "$agent_container" --network host --restart unless-stopped --user "0:0" \
+    --volume "$config:$agent_config_path:ro" \
+    --volume "$tokens:$tokens:ro" \
+    "$image" >/dev/null
+  require_agent_alive || exit 1
 }
 
 # The resolved values this script acts on itself.
@@ -429,11 +537,19 @@ if [ "$starts" = 1 ] && [ "$mode" = prod ]; then
   fi
 fi
 
-# The placeholder exported above is what the render checked; a start replaces it
-# with the texts this checkout builds.
+# The placeholder exported above is what the render checked; a verb that loads
+# images builds this checkout's texts, and a start writes the ones the collector
+# reads once at boot.
 if [ "$images" = 1 ]; then
-  KALLIPAI_STACK_DIR=$(nix build .#kallipai-stack --no-link --print-out-paths)
+  # --impure for one read: the instance table is deployment configuration and
+  # lives outside the store, so the build cannot carry it as a flake input.
+  export KALLIPAI_TELEMETRY_INSTANCES_FILE=${KALLIPAI_TELEMETRY_INSTANCES_FILE:-$repo_root/compose/telemetry-instances.json}
+  KALLIPAI_STACK_DIR=$(nix build .#kallipai-stack --impure --no-link --print-out-paths)
   export KALLIPAI_STACK_DIR
+fi
+if [ "$starts" = 1 ]; then
+  # Before the collector starts, and never after: it reads these files once.
+  render_intake "$(env_value TELEMETRY_BASE)"
 fi
 tag=""
 
@@ -494,5 +610,17 @@ fi
 if [ "$#" -eq 0 ]; then
   set -- up -d
 fi
+# The agent is not a compose service, so the teardown verbs have to collect it
+# here: a `down` removes it, a `stop` only stops it.
+case " $* " in
+  *" down "*) remove_agent ;;
+  *" stop "*) halt_agent ;;
+esac
 # compose still reads the fallback file on this call; the EXIT trap removes it.
 compose "$@"
+
+# After the stack, never before: the agent pushes into the collector, and one
+# started first would log a refused push for every scrape until it came up.
+case "$1" in
+  up | start | restart) start_agent "$(env_value TELEMETRY_BASE)" ;;
+esac

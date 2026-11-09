@@ -203,8 +203,11 @@ services:
   otelcol:
     # The upstream Cmd already names this path; the mount below matches it.
     depends_on: ["tempo"]
+    # The per-instance tokens sit under the telemetry root, mounted at the same path so a rendered text names one string for the host agent and the collector. Root reads them: the render step writes them 0600, and only root can.
+    user: "0:0"
     volumes:
       - ${KALLIPAI_STACK_DIR:?run scripts/compose-up.sh}/otelcol.yaml:/etc/otelcol-contrib/config.yaml:ro
+      - ${TELEMETRY_BASE:?set TELEMETRY_BASE}/gateway:${TELEMETRY_BASE:?set TELEMETRY_BASE}/gateway:ro
     logging: *logging
     restart: unless-stopped
 
@@ -239,7 +242,7 @@ services:
       GF_PATHS_PROVISIONING: /etc/grafana/provisioning
     volumes:
       - ${KALLIPAI_STACK_DIR:?run scripts/compose-up.sh}/grafana.ini:/etc/grafana/grafana.ini:ro
-      - ${KALLIPAI_STACK_DIR:?run scripts/compose-up.sh}/grafana-tempo-datasource.yaml:/etc/grafana/provisioning/datasources/tempo.yaml:ro
+      - ${KALLIPAI_STACK_DIR:?run scripts/compose-up.sh}/grafana-datasources.yaml:/etc/grafana/provisioning/datasources/kallipai.yaml:ro
       - ${TELEMETRY_BASE:?set TELEMETRY_BASE}/grafana:/var/lib/grafana
     logging: *logging
     restart: unless-stopped
@@ -249,6 +252,11 @@ services:
       - --config.file=/etc/prometheus/prometheus.yml
       - --storage.tsdb.path=/prometheus
       - --storage.tsdb.retention.time=30d
+      # The remote-write receiver the collector pushes metrics into. It carries
+      # no authentication, so this service publishes no host port: the write
+      # path is reachable from the compose network only, and Grafana reads the
+      # query path by service name as well.
+      - --web.enable-remote-write-receiver
     depends_on: ["gateway"]
     volumes:
       - prometheus_data:/prometheus

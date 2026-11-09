@@ -299,11 +299,11 @@ admits.
   up as an `error` on the `lesche` leg. Room and direct-session delivery are
   not counted: their failures reach the caller as an error, but no leg
   counter records them and no log line names them.
-  `build_info{version,tagma_id}`
-  carries the enrolled id (`none` before enrollment, so enrolling changes a
-  label value and never the series shape), and the same id is `tagma.id` on the
-  exporter's resource: one value, dotted in the trace, underscored in the
-  scrape label. Both observability endpoints are exempt from
+  `build_info{version,tagma_registration}`
+  carries the enrolled registration id (`none` before enrollment, so enrolling
+  changes a label value and never the series shape). It sits under a label of
+  its own because `tagma_id` in both stores means the door's slug: one name
+  with two value spaces arrives as a single joined `a;b` value. Both observability
   `http_requests_total` and the request histogram: a scrape measures the
   process, and counting scrapes would let a scraper's cadence dominate. The
   exemption is by path rather than by peer, so a scrape refused at the loopback
@@ -365,7 +365,7 @@ The families the collector encodes, with the label names the code uses:
 | `kallipai_tagma_bus_lagged_total` | counter | `topic` | events a subscriber missed |
 | `kallipai_tagma_telemetry_export_enabled` | gauge | none | 1 when an export layer is installed |
 | `kallipai_tagma_telemetry_exported_total` | counter | none | spans the collector accepted |
-| `kallipai_tagma_telemetry_export_failed_total` | counter | `reason`: `timeout`, `unavailable`, `other` | failed batches |
+| `kallipai_tagma_telemetry_export_failed_total` | counter | `reason`: `timeout`, `unavailable`, `unauthorized`, `other` | failed batches; `unauthorized` means the intake answered 401 or 403, so the token this process sends is not the one the intake accepts |
 | `kallipai_tagma_telemetry_last_export_timestamp` | gauge | none | Unix seconds of the last accepted export, 0 while none has landed |
 | `kallipai_tagma_background_task_age_seconds` | gauge | `task`: `history_gc`, `engine` | seconds since each loop last started a pass; `engine` is the loop `/health` reports as `work_schedule_engine` |
 
@@ -394,6 +394,7 @@ away keeps reading ready until the first query that needs it fails.
 | Variable | Effect |
 | --- | --- |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | the collector's OTLP base URL; a base URL gains `/v1/traces`. Unset or blank installs no exporter at all: tracing stays local and no span leaves the process |
+| `OTEL_EXPORTER_OTLP_HEADERS` | the generic header list the OTLP exporter reads on its own, for a service that has no credential of ours. `authorization` set here replaces the token a service passes to the exporter, so a deployment sets one or the other, never both. The per-signal `OTEL_EXPORTER_OTLP_TRACES_HEADERS` takes precedence over this one |
 | `OTEL_TRACES_SAMPLER` | `parentbased_always_on` (the default), `parentbased_always_off`, `parentbased_traceidratio`, `always_on`, `always_off`, `traceidratio` |
 | `OTEL_TRACES_SAMPLER_ARG` | the ratio for the two `traceidratio` families; an unparseable or out-of-range value keeps the default |
 | `RUST_LOG` | the log filter: what is printed, and, with no exporter installed, which span callsites are interested. Default `info`; the store spans need `trace`. Once an exporter is configured the export layer carries its own filter and records every span on the `kallipai.spans` target at `info`, so a quiet `RUST_LOG` no longer drops spans or the `traceparent` they inject; no log event reaches the trace at any level, and the prose stays in the log line. The split is by target, so `RUST_LOG=kallipai_common=info` no longer selects those spans by module path |
@@ -416,6 +417,95 @@ instead of being cancelled unread. Shutdown flushes what is queued.
 
 The spend is per request and per call it makes — one forwarded request is a
 handful of spans — so the sampler is the knob for cost, not the batch sizes.
+
+## The intake: one door per instance
+
+Every instance gets its own OTLP receiver, its own bearer token and a
+transform that writes `tagma.id` over whatever the client claimed: the tenant
+is the door, not a header the sender chose. The shared `4318` receiver stays
+for everything on the compose network and claims no tenant, so it deletes the
+`tagma.id` a client declares rather than forwarding a name it cannot check.
+Acceptance proves it on the wire: a token for one door that claims another
+instance's `tagma.id` in its resource attributes lands under the door's slug,
+and the claimed instance's trace count does not move.
+
+The doors come from `compose/telemetry-instances.json`, which is deployment
+configuration and stays out of the repository (placeholder paths are in
+`compose/telemetry-instances.example.json`). Each row is a slug, the intake
+port, the management port the host agent scrapes, the data root and the token
+file. Two readers take this one table: the stack build, which renders the
+texts, and `scripts/render-intake.py`, which writes the token files before the
+collector starts; `scripts/compose-up.sh` calls it with the table, the
+telemetry base, and the directory the stack build wrote.
+The build reads the file with `--impure`, the only read that leaves the store:
+with the variable unset it falls back to `compose/telemetry-instances.json`
+inside the source copy, which is not tracked, so a stack built without the
+export renders the shared intake alone. The check reads the rendered texts,
+not that fallback.
+
+Both compose overrides publish `127.0.0.1:12000-12019`, and evaluation refuses
+an instance whose port falls outside that span. The span is one line in the
+compose files whatever the number of instances, so adding a twentieth instance
+edits no compose file and a twenty-first is a refusal rather than a silent
+port clash.
+
+`scripts/render-intake.py`, called by `scripts/compose-up.sh` before the
+collector starts, writes the token files: it trims each credential, refuses
+an empty one, a control character or a path outside the mounted directory,
+and writes what survives as `0600`. A trailing newline from `$(cat)`
+otherwise makes every push a `401` the collector neither counts nor logs.
+
+The credential comes from `<dataRoot>/credentials/<entry>/tagma.token`,
+the path tagma resolves its own relay entry by. Fewer or more than one entry
+is a refusal rather than a guess: `has 0 credentials` means the instance never
+registered, or still carries the flat `credentials/tagma.token` that predates
+the layout. One boot moves that pair into `credentials/<entry>/` while exactly
+one relay entry is configured; with several entries the migration refuses
+instead, because the flat pair cannot be attributed to one of them, so the
+credential has to be placed there by hand. `has 2 credentials` counts the
+entries that carry a `tagma.token`; a directory without one adds nothing, and
+the render step stops instead of choosing between them.
+
+The token is the relay registration credential itself, so rotating it means
+rerunning `scripts/compose-up.sh`: nothing else rewrites the file.
+
+The agent is a container on the host network, not a compose service: it
+scrapes each instance's management face over loopback every 15 seconds and
+pushes to that instance's door with `Bearer` from the token file. The script
+starts it after the stack is up, restarts it rather than adding a second
+scraper, replaces it when the telemetry root moved, stops it on `stop` and
+removes it on `down`.
+An exporter is built once, at process start: a process that booted before its
+registration sends no `authorization` header for its whole life (the resource
+attribute still says `none`, which is a placeholder and not a credential) and
+shows up as `unauthorized` until it restarts. The agent's container name is
+fixed, so a second checkout on the same host takes this one over rather than
+adding a second scraper; what it reads is loopback, which is already per host.
+
+Metrics take a different road: the collector writes them into Prometheus over
+the remote-write protocol. That receiver has no credential of its own, so
+Prometheus publishes no host port in any of the three compose files; Grafana
+reaches it by service name, and the remote write converts resource attributes
+to labels, or `tagma_id` would live on `target_info` alone and every
+instance's numbers would arrive looking alike.
+
+A refused credential is counted where the sender sees it:
+`kallipai_tagma_telemetry_export_failed_total{reason="unauthorized"}`.
+The collector neither counts an auth refusal (it is rejected before intake)
+nor exports metrics of its own here, which is why the reason lives on
+the sender's side.
+
+Two boundaries the intake does not cross. The NixOS form has no
+authentication: tempo listens on `127.0.0.1` and the network is the boundary.
+And the container runs collector `0.164`, while nixpkgs still ships `0.155`;
+`scripts/obs-acceptance.sh` validates every rendered text with the pinned
+image before it starts anything, so a text that only parses on one of them
+fails there rather than at boot.
+
+`scripts/obs-acceptance.sh` is the end-to-end face: two `kallipai-tagma`
+processes with their own data roots and credentials, the real rendered texts,
+and six checks that each read a store. `--only 3` runs one of them; `--keep`
+leaves the scratch root and its logs in place.
 
 ## Retention
 

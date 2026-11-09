@@ -53,8 +53,8 @@ pub use crate::SPAN_TARGET;
 #[cfg(feature = "telemetry")]
 pub use export::{
     Config, ENDPOINT_VAR, ExportSnapshot, ExportStats, Guard, SAMPLER_ARG_VAR, SAMPLER_VAR,
-    SamplerSpec, config_from_env, config_from_lookup, export_layer, export_stats,
-    init_service_telemetry,
+    SamplerSpec, config_from_env, config_from_lookup, export_layer, export_layer_authorized,
+    export_stats, init_service_telemetry,
 };
 #[cfg(feature = "axum")]
 pub use server::{server_span, with_server_span, with_server_span_except};

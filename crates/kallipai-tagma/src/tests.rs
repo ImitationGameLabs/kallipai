@@ -688,6 +688,114 @@ fn the_stored_id_follows_the_first_entry_that_has_credentials() {
         },
     ];
     assert_eq!(stored_id_under(&root, &entries).as_deref(), Some("tagma-b"));
+    assert_eq!(
+        stored_token_under(&root, &entries).as_deref(),
+        Some("token-b"),
+        "the token comes from the same entry as the id"
+    );
+}
+
+/// An instance with no credentials still names itself in the trace resource,
+/// with the same stand-in the scrape face reports: enrollment later changes a
+/// value, not the shape of what a collector receives.
+#[test]
+fn the_trace_resource_names_an_unenrolled_instance() {
+    assert_eq!(
+        telemetry_attrs(None),
+        vec![("tagma.id", UNENROLLED_TAGMA_ID)]
+    );
+    assert_eq!(
+        telemetry_attrs(Some("tagma-b")),
+        vec![("tagma.id", "tagma-b")]
+    );
+}
+
+/// A collector on loopback that accepts whatever an export sends.
+async fn trace_collector() -> wiremock::MockServer {
+    let collector = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path("/v1/traces"))
+        .respond_with(wiremock::ResponseTemplate::new(200))
+        .mount(&collector)
+        .await;
+    collector
+}
+
+fn collector_config(collector: &wiremock::MockServer) -> kallipai_common::telemetry::Config {
+    kallipai_common::telemetry::config_from_lookup(|name| {
+        (name == kallipai_common::telemetry::ENDPOINT_VAR).then(|| collector.uri())
+    })
+    .expect("the collector's endpoint is the configuration")
+}
+
+/// One probe span through the real OTLP/HTTP client, flushed: what the
+/// collector received is then what the layer attached.
+fn export_one_span(config: &kallipai_common::telemetry::Config, token: Option<&str>) {
+    use tracing_subscriber::prelude::*;
+
+    let (layer, mut guard) =
+        kallipai_common::telemetry::export_layer_authorized(Some(config), "tagma", &[], token);
+    {
+        let subscriber = tracing_subscriber::registry().with(layer);
+        let _default = tracing::subscriber::set_default(subscriber);
+        tracing::info_span!(target: kallipai_common::SPAN_TARGET, "probe").in_scope(|| {});
+    }
+    assert!(guard.shutdown(), "a configured guard owns a provider");
+}
+
+/// The credential the export carries is the one stored on disk: the boot's
+/// token walk and the header meet at one value, so a re-enrollment that moved
+/// the entry cannot leave a trace arriving under another instance's key.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_stored_token_authenticates_the_trace_export() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let root = dir.path().join("credentials");
+    std::fs::create_dir_all(&root).unwrap();
+    credentials::save_tagma(&root, "tagma-x", "token-from-disk", "https://edge.example").unwrap();
+    let token = stored_token_under(&root, &[]);
+    assert_eq!(
+        token.as_deref(),
+        Some("token-from-disk"),
+        "the token half is read from the credential file, not the id beside it"
+    );
+
+    let collector = trace_collector().await;
+    export_one_span(&collector_config(&collector), token.as_deref());
+
+    let requests = collector.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 1, "one probe, one export");
+    assert_eq!(
+        requests[0]
+            .headers
+            .get("authorization")
+            .and_then(|value| value.to_str().ok()),
+        Some("Bearer token-from-disk"),
+        "the intake sees the fixture's token, not another file's value"
+    );
+}
+
+/// A first boot has no stored credential, and the export carries no header
+/// rather than borrowing whatever the environment happens to hold.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unenrolled_instance_exports_without_a_credential() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let root = dir.path().join("credentials");
+    let token = stored_token_under(&root, &[]);
+    assert_eq!(token, None, "no stored entry, no token");
+
+    let collector = trace_collector().await;
+    export_one_span(&collector_config(&collector), token.as_deref());
+
+    let requests = collector.received_requests().await.unwrap();
+    assert_eq!(
+        requests.len(),
+        1,
+        "the export still leaves, it just says nothing new"
+    );
+    assert!(
+        requests[0].headers.get("authorization").is_none(),
+        "an instance with no credential sends no authorization header"
+    );
 }
 
 /// The upgrade path: the enrollment is still at the root of the credentials
@@ -700,6 +808,11 @@ fn the_flat_layout_is_read_before_the_migration_runs() {
     std::fs::create_dir_all(&root).unwrap();
     credentials::save_tagma(&root, "tagma-flat", "token", "https://edge.example").unwrap();
     assert_eq!(stored_id_under(&root, &[]).as_deref(), Some("tagma-flat"));
+    assert_eq!(
+        stored_token_under(&root, &[]).as_deref(),
+        Some("token"),
+        "the flat layout carries the pair, not the id alone"
+    );
 }
 
 #[test]
