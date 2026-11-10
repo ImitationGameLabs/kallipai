@@ -1,5 +1,5 @@
-//! The verdict: [`Facts`] in, one [`Decision`] out, plus the wait that decision
-//! opens (the backoff schedule, its jitter cap, and the deadline clamp).
+//! The verdict: [`Facts`] in, one [`Decision`] out — including the wait that
+//! decision opens, read from [`crate::retry::wait`].
 
 use std::time::Duration;
 
@@ -8,6 +8,7 @@ use kallipai_common::facts::{Block, BlockKind, BlockedFact};
 use super::attempt::{Alternative, AttemptOrigin, Phase};
 use super::failure_class::{FailureClass, ShapeKey, THROTTLE_SENDS_ALLOWED, shape_sends_allowed};
 
+use crate::retry::wait::retry_after;
 use crate::retry::{RetryPolicy, max_sends};
 
 /// The verdict input. Its fields are readable across this module's facets, so
@@ -69,32 +70,6 @@ const DEADLINE_EXHAUSTED: &str = "retry deadline exhausted";
 /// The shape row with no key to compare: the failure cannot be named, so the
 /// row reads as a repeat.
 const SHAPE_UNIDENTIFIED: &str = "unidentifiable response shape, so another send would repeat it";
-
-/// The upper bound a wait's jitter is drawn from. The draw itself happens in the
-/// shell: this module keeps the bound as a value so the schedule stays pure.
-pub(crate) const RETRY_JITTER_MAX: Duration = Duration::from_secs(1);
-
-/// The backoff schedule before clamping: `min(base * 2^n, max_delay) + jitter`,
-/// with `n` the exponent the caller supplies: the sends already made in the
-/// episode for a retry, or the outer re-run index for the round-level wait.
-/// The jitter rides outside the cap, so the capped plateau carries it too;
-/// `max_delay` stays the schedule's own upper bound.
-pub(crate) fn backoff_schedule(policy: &RetryPolicy, exponent: u32, jitter: Duration) -> Duration {
-    let exp_delay = policy
-        .base_delay
-        .saturating_mul(1u32.checked_shl(exponent).unwrap_or(u32::MAX));
-    exp_delay.min(policy.max_delay).saturating_add(jitter)
-}
-
-/// The wait a retry performs: the schedule, clamped to what is left of the
-/// episode's deadline. The clamp lives here, not in the shell, so no caller can
-/// sleep past the deadline — and `saturating_sub` keeps a backwards clock from
-/// underflowing it.
-fn retry_after(facts: &Facts, policy: &RetryPolicy) -> Duration {
-    let exponent = facts.attempts.saturating_sub(1);
-    backoff_schedule(policy, exponent, facts.jitter)
-        .min(policy.retry_timeout.saturating_sub(facts.elapsed))
-}
 
 /// The verdict for one attempt: what the shell does next. The single exit of
 /// the retry logic.
@@ -211,7 +186,7 @@ fn retry_or_stop(facts: &Facts, policy: &RetryPolicy) -> Decision {
         };
     }
     Decision::Retry {
-        after: retry_after(facts, policy),
+        after: retry_after(facts.elapsed, facts.jitter, facts.attempts, policy),
     }
 }
 

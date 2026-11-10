@@ -171,7 +171,7 @@ mod tests {
     use super::*;
 
     use crate::context::CompactionLedger;
-    use crate::retry::decision::RETRY_JITTER_MAX;
+    use crate::retry::RETRY_JITTER_MAX;
     use crate::retry::{RetryPolicy, max_sends};
     use crate::test_support::{
         FAILURE_PIN_WINDOW, QUOTA_RESET_BODY, RecordingPacing, ctx_from_source, make_ctx,

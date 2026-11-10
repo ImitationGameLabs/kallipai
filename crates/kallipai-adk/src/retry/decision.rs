@@ -36,4 +36,4 @@ pub(crate) use attempt::{Alternative, Attempt, Phase, TableReading};
 pub(crate) use blocks::fact_of;
 pub(crate) use classify::{classify, shape_key};
 pub(crate) use failure_class::{FailureClass, ShapeKey, TransientKind, retry_kind};
-pub(crate) use verdict::{Decision, RETRY_JITTER_MAX, StopKind, backoff_schedule, decide};
+pub(crate) use verdict::{Decision, StopKind, decide};

@@ -6,8 +6,7 @@ use anyhow::{Context, Result, bail};
 
 use crate::context::KeepCaps;
 use crate::env_util::{DEFAULT_CONTEXT_WINDOW_TOKENS, parse_env, parse_env_list};
-use crate::retry::decision::{RETRY_JITTER_MAX, backoff_schedule};
-use crate::retry::{RetryPolicy, max_sends};
+use crate::retry::{RETRY_JITTER_MAX, RetryPolicy, backoff_schedule, max_sends};
 use kallipai_common::AgentId;
 use kallipai_common::protocol;
 
@@ -525,9 +524,9 @@ fn check_context_budget(
     Ok(())
 }
 
-/// Worst-case wall clock of one episode: the sum of the retry core's own backoff
-/// schedule over the waits an episode can make, plus one call per send at
-/// `CALL_WORST_ASSUMED`. Both the schedule and the send count come from the core,
+/// Worst-case wall clock of one episode: the sum of the backoff schedule over
+/// the waits an episode can make, plus one call per send at `CALL_WORST_ASSUMED`.
+/// The schedule comes from `retry::wait` and the send count from `retry::budget`,
 /// so this cannot drift from what the shells perform; the per-call term is the
 /// assumed one.
 fn retry_worst_case(policy: &RetryPolicy) -> Duration {
