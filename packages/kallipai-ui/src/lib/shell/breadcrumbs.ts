@@ -15,7 +15,7 @@
 import { archeionSession } from "../session/archeion.svelte.ts";
 import { channelsStore } from "../session/channels.svelte.ts";
 import { roomsStore } from "../session/rooms.svelte.ts";
-import { RelayConversation } from "../session/conversation.svelte.ts";
+import { RelayConversation } from "../session/conversation/relayConversation.svelte.ts";
 import { directSessionsStore } from "../session/directSessions.svelte.ts";
 import {
   tagmaAgentPath,

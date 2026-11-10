@@ -14,10 +14,8 @@
   import { createComposer } from "../lib/composer.svelte.ts";
   import { saveBlob } from "../lib/saveBlob.ts";
   import { bindDraft } from "../lib/session/drafts.svelte.ts";
-  import {
-    OfflineConversation,
-    RelayConversation,
-  } from "../lib/session/conversation.svelte.ts";
+  import { OfflineConversation } from "../lib/session/conversation/offlineConversation.svelte.ts";
+  import { RelayConversation } from "../lib/session/conversation/relayConversation.svelte.ts";
   import { statusCardStore } from "../lib/session/statusCard.svelte.ts";
   import { OnlineBackend } from "../lib/manage/backend.ts";
   import {
@@ -56,7 +54,6 @@
   } from "../lib/attachments.ts";
   import { createAttachmentTray } from "../lib/attachmentTray.svelte.ts";
   import type { FileAttachment } from "@kallipai/kallipai-lesche-client";
-  import { ConversationBase } from "../lib/session/conversation.svelte.ts";
   import { createQuotes } from "../lib/quotes.svelte.ts";
   import { unreadStore, tagmaKey } from "../lib/session/unread.svelte.ts";
   import { formatDateTime } from "../lib/tagmata.svelte";
@@ -95,7 +92,7 @@
   // cached line's timestamp (in-flight and failed local lines are not
   // server rows), so a returning reader knows how stale the view is.
   const lastCachedAt = $derived(
-    conv?.transcript.lines.findLast(
+    conv?.transcript.rows.findLast(
       (line) => line.status !== "sending" && line.status !== "failed",
     )?.createdAt,
   );
@@ -118,12 +115,15 @@
   });
   // The lazy-window pager runs on both transports; each conversation leaf
   // supplies its own page source behind the shared base loadOlder.
-  const loadOlder = $derived(
-    conv instanceof ConversationBase ? () => conv.loadOlder() : undefined,
-  );
+  // `channels.get` is typed `ConversationBase | undefined`, so the leaf check
+  // would only ever pass: the pager hangs off the base both leaves extend.
+  const loadOlder = $derived(conv ? () => conv.pager.older() : undefined);
   const windowStates = $derived(
-    conv instanceof ConversationBase
-      ? { hasMoreOlder: conv.hasMoreOlder, loadingOlder: conv.loadingOlder }
+    conv
+      ? {
+          hasMoreOlder: conv.pager.hasMoreOlder,
+          loadingOlder: conv.pager.loadingOlder,
+        }
       : {},
   );
 
@@ -333,7 +333,7 @@
     // Busy is not a gate: send renders the optimistic line at once and POSTs as
     // soon as the previous POST's user_message frame lands (single-in-flight
     // pump, shared by both transports).
-    canSubmit: () => (conv?.canWrite ?? false) && allReady(attachments),
+    canSubmit: () => (conv?.link.canWrite ?? false) && allReady(attachments),
     // (open = live; offline = queued to the store; a rebuilding stream still
     // writes, so health is not asked here -- see canWrite.)
     // An attachment-only submit (empty draft) is allowed once every
@@ -387,8 +387,8 @@
         // Reading status makes this effect re-run when the drain resurrects
         // the transport; connected guards the un-attached window so the
         // backend chain below cannot dereference a missing relay transport.
-        void conv.status;
-        if (!conv.connected) return;
+        void conv.link.status;
+        if (!conv.link.connected) return;
         statusCardStore.attach(
           new OnlineBackend(
             new ManageRestClient(keryxBaseUrlOrFail()),
@@ -410,7 +410,7 @@
   // immediate status-card refresh, so busy/idle flips paint at once. The
   // store's own interval is only the reconciliation backstop.
   $effect(() => {
-    void conv?.statusSnapshot;
+    void conv?.link.statusSnapshot;
     statusCardStore.nudge();
   });
 
@@ -423,8 +423,8 @@
   // push or focus.
   $effect(() => {
     if (!(conv instanceof RelayConversation)) return;
-    void conv.status;
-    if (!conv.connected) return;
+    void conv.link.status;
+    if (!conv.link.connected) return;
     const tagmaId = conv.relayTransport.relayChannel.tagmaId;
     let client: ProjectionClient;
     try {
@@ -447,12 +447,20 @@
 
   // The write axis decides, not the stream's health: a rebuild keeps the
   // composer live, and the offline view writes to its pending store by design.
-  const disabled = $derived(!conv || !conv.canWrite);
-  const pendingCount = $derived(conv?.pending.length ?? 0);
+  const disabled = $derived(!conv || !conv.link.canWrite);
+  const pendingCount = $derived(conv?.outbox.pending.length ?? 0);
   // What the composer says once the write axis is gone, and whether it can
   // offer a way back. The mapping is pure (see composerState); this page only
   // turns its notice into copy and renders the Retry it asks for.
-  const composerUi = $derived(conv ? composerState(conv) : null);
+  const composerUi = $derived(
+    conv
+      ? composerState({
+          kind: conv.kind,
+          status: conv.link.status,
+          canWrite: conv.link.canWrite,
+        })
+      : null,
+  );
   const disabledNotice = $derived(
     composerUi?.notice === "opening"
       ? chat_opening()
@@ -523,7 +531,7 @@
          because the shell top row owns it there. -->
         <div class={statusHeaderMobile ? "contents" : "hidden md:contents"}>
           <TagmaStatusHeader
-            status={conv.statusSnapshot}
+            status={conv.link.statusSnapshot}
             agentRows={{
               rootRow: statusCardStore.rootRow,
               subRows: statusCardStore.subRows,
@@ -551,7 +559,7 @@
             ? 'min-w-0'
             : ''} relative"
         >
-          {#if conv.status === "reconnecting"}
+          {#if conv.link.status === "reconnecting"}
             <!-- Silent SSE retry in progress (transport-level reconnect): the
              failure itself stays in the console. The overlay ignores pointer
              events so the transcript stays scrollable; the composer keeps writing
@@ -572,7 +580,7 @@
             </div>
           {/if}
           <ConversationView
-            lines={conv.transcript.lines}
+            lines={conv.transcript.rows}
             status={conv.transcript.status}
             error={conv.transcript.error}
             sessionKey={conversationId}
@@ -588,7 +596,7 @@
             onRetry={conv instanceof OfflineConversation
               ? undefined
               : (id) => conv?.retrySend(id)}
-            onDeleteFailed={(id) => conv?.discard(id) ?? false}
+            onDeleteFailed={(id) => conv?.outbox.discard(id) ?? false}
             {loadOlder}
             hasMoreOlder={windowStates.hasMoreOlder}
             loadingOlder={windowStates.loadingOlder}
@@ -602,12 +610,12 @@
             onCancelQuote={() => quotes.cancel()}
           >
             {#snippet notice()}
-              {#if conv.kind === "offline-view" && conv.transcript.lines.length === 0}
+              {#if conv.kind === "offline-view" && conv.transcript.rows.length === 0}
                 <p class="text-xs opacity-70 text-center">
                   {chat_offline_no_history()}
                 </p>
               {/if}
-              {#if conv.historyError === "unavailable"}
+              {#if conv.transcript.historyError === "unavailable"}
                 <p
                   class="flex items-center justify-center gap-2 text-xs text-warning-500 dark:text-warning-400"
                 >
@@ -621,7 +629,7 @@
                   </button>
                 </p>
               {/if}
-              {#if conv.historyError === "protocol"}
+              {#if conv.transcript.historyError === "protocol"}
                 <p
                   class="flex items-center justify-center gap-2 text-xs text-warning-500 dark:text-warning-400"
                 >
@@ -635,8 +643,8 @@
                   </button>
                 </p>
               {/if}
-              {#if conv.status === "offline"}
-                {#if conv.canWrite}
+              {#if conv.link.status === "offline"}
+                {#if conv.link.canWrite}
                   <p
                     class="text-xs text-error-500 dark:text-error-400 text-center"
                   >

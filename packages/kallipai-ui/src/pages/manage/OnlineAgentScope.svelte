@@ -64,14 +64,14 @@
     // so the channel chain below cannot dereference a missing relay
     // transport.
     void channelState.kind;
-    if (!conv.connected) {
+    if (!conv.link.connected) {
       backend = null;
       return;
     }
     try {
       // conv.kind === "relay" narrows to RelayConversation
       const relayConv =
-        conv as import("../../lib/session/conversation.svelte.ts").RelayConversation;
+        conv as import("../../lib/session/conversation/relayConversation.svelte.ts").RelayConversation;
       const channel = relayConv.relayTransport.relayChannel;
       backend = new OnlineBackend(
         new ManageRestClient(keryxBaseUrlOrFail()),

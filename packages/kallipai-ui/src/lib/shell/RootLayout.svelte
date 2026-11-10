@@ -438,7 +438,7 @@
   // landed before a local conversation existed). The banner classifies it; the
   // full error is mirrored to the console.
   const offlineError = $derived(
-    channelsStore.local?.error ?? channelsStore.localError,
+    channelsStore.local?.link.error ?? channelsStore.localError,
   );
   const errorView = $derived(offlineError ? classifyError(offlineError) : null);
   $effect(() => {
@@ -515,7 +515,7 @@
 {#snippet topRowSnippet()}
   {#if chatId}
     <TagmaStatusLine
-      status={channelsStore.get(chatId)?.statusSnapshot}
+      status={channelsStore.get(chatId)?.link.statusSnapshot}
       onOpen={() => (agentsDrawerOpen = true)}
       expanded={agentsDrawerOpen}
     />

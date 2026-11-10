@@ -51,8 +51,8 @@ type RoomStatus = "loading" | "open" | "error";
 /** The per-room conversation state. A `$state.class` (not a plain interface):
  * entries live in a `SvelteMap`, whose values are NOT deep-proxied, so per-field
  * reactivity must come from each entry's own runes -- mirroring `ConversationBase`
- * in conversation.svelte.ts. In-place field writes (`conv.lines = ...`,
- * `conv.status = ...`) therefore re-render the view. */
+ * in session/conversation/base.svelte.ts. In-place field writes
+ * (`room.lines = ...`, `room.status = ...`) therefore re-render the view. */
 export class RoomConversation {
   readonly roomId: string;
   /** The room's visibility, fixed at open from the registry view. Both

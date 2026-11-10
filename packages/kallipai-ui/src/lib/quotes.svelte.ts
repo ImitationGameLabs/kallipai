@@ -32,7 +32,7 @@ import {
   unresolvedQuote,
   type QuoteView,
 } from "./quote.ts";
-import type { ConversationBase } from "./session/conversation.svelte.ts";
+import type { ConversationBase } from "./session/conversation/base.svelte.ts";
 import type { ConversationLine } from "./transcript.ts";
 
 /** What a peek answered, or that it is still in flight. */
@@ -89,7 +89,7 @@ export function createQuotes(options: QuotesOptions): Quotes {
   let owner: ConversationBase | undefined;
 
   function loaded(): readonly ConversationLine[] {
-    return options.conversation()?.transcript.lines ?? [];
+    return options.conversation()?.transcript.rows ?? [];
   }
 
   /** Read the live conversation, dropping state that belonged to another
@@ -129,7 +129,7 @@ export function createQuotes(options: QuotesOptions): Quotes {
     if (!conv || peeked[id] !== undefined) return;
     peeked = { ...peeked, [id]: "pending" };
     try {
-      const row = await conv.peekRow(id);
+      const row = await conv.pager.peek(id);
       // The reader can move to another conversation while the read is in
       // flight; own() would have cleared the table for the new one, so this
       // answer would land in state it says nothing about. Drop it.

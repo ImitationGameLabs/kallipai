@@ -73,9 +73,9 @@ export interface MessageSender {
    *  implementations keep `closed` in `$state`, so a reader that derives from
    *  this flag re-evaluates when the sender closes (the write axis does).
    *
-   *  The queue is pumped by these explicit triggers, all in
-   *  conversation.svelte.ts: send() on a new line, pumpPending() after a
-   *  response settles a line, the reply echo (applyReplyCore), the send
+   *  The queue is pumped by these explicit triggers, all in the
+   *  conversation's own files: send() on a new line, pumpPending() after a
+   *  response settles a line, the reply echo (applyReply), the send
    *  watchdog, and onTransportState -> retryAllPending when the stream
    *  resumes. A queued line meets this flag as a gate at each pump entry; the
    *  flag going false does not itself pump anything, it only closes the door. */

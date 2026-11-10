@@ -21,10 +21,11 @@ declare global {
 
 type ChannelsStore = import("./channels.svelte.ts").ChannelsStore;
 type OfflineConversation =
-  import("./conversation.svelte.ts").OfflineConversation;
+  import("./conversation/offlineConversation.svelte.ts").OfflineConversation;
 const { assertEquals } = await import("@std/assert");
 const { ChannelsStore } = await import("./channels.svelte.ts");
-const { OfflineConversation } = await import("./conversation.svelte.ts");
+const { OfflineConversation } =
+  await import("./conversation/offlineConversation.svelte.ts");
 
 function storeWith(conv: OfflineConversation): ChannelsStore {
   const store = new ChannelsStore();
@@ -51,12 +52,12 @@ Deno.test(
       store as unknown as { conversations: Map<string, OfflineConversation> }
     ).conversations.get("conv-off")!;
 
-    assertEquals(conv.transcript.lines.length, 0, "starts empty");
+    assertEquals(conv.transcript.rows.length, 0, "starts empty");
     store.send("conv-off", "hello offline");
 
-    assertEquals(conv.transcript.lines.length, 1, "the line renders");
-    assertEquals(conv.transcript.lines[0].status, "failed");
-    assertEquals(conv.transcript.lines[0].text, "hello offline");
+    assertEquals(conv.transcript.rows.length, 1, "the line renders");
+    assertEquals(conv.transcript.rows[0].status, "failed");
+    assertEquals(conv.transcript.rows[0].text, "hello offline");
   },
 );
 
@@ -65,24 +66,28 @@ Deno.test("the store gate asks the write axis, not the status", () => {
   const conv = (
     store as unknown as { conversations: Map<string, OfflineConversation> }
   ).conversations.get("conv-off")!;
-  conv.status = "opening";
+  conv.link.status = "opening";
 
   store.send("conv-off", "too early");
   assertEquals(
-    conv.transcript.lines.length,
+    conv.transcript.rows.length,
     1,
     "a mid-handshake conversation takes the line",
   );
   store.send("no-such-conversation", "hello");
-  assertEquals(conv.transcript.lines.length, 1, "an unknown id adds nothing");
+  assertEquals(conv.transcript.rows.length, 1, "an unknown id adds nothing");
 });
 
 Deno.test("the offline view stops writing only when it closes", () => {
   const conv = offlineConv();
-  assertEquals(conv.canWrite, true, "the pending store takes a line");
+  assertEquals(conv.link.canWrite, true, "the pending store takes a line");
   conv.close();
-  assertEquals(conv.canWrite, false);
+  assertEquals(conv.link.canWrite, false);
   conv.send("after close");
-  assertEquals(conv.transcript.lines.length, 0, "nothing lands");
-  assertEquals(conv.error instanceof Error, true, "the refusal is observable");
+  assertEquals(conv.transcript.rows.length, 0, "nothing lands");
+  assertEquals(
+    conv.link.error instanceof Error,
+    true,
+    "the refusal is observable",
+  );
 });

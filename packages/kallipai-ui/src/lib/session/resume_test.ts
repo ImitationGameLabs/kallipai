@@ -13,7 +13,8 @@ declare global {
 (globalThis as Record<string, unknown>)["$state"] = (v: unknown) => v;
 
 const { assertEquals } = await import("@std/assert");
-const { LocalConversation } = await import("./conversation.svelte.ts");
+const { LocalConversation } =
+  await import("./conversation/localConversation.svelte.ts");
 import { DirectTransport } from "./directTransport.ts";
 import { DirectMessageSender } from "./messageSender.svelte.ts";
 import {
@@ -110,14 +111,14 @@ Deno.test(
         ? page([row(11), row(12)], true)
         : page([row(13)], false),
     );
-    conv.lastSeq = 10;
+    conv.transcript.lastSeq = 10;
     await conv.catchUp(3);
     assertEquals(seen, [
       { afterSeq: 10, limit: 3 },
       { afterSeq: 12, limit: 3 },
     ]);
     // The cursor lands on the newest rendered position, not on the page's edge.
-    assertEquals(conv.lastSeq, 13);
+    assertEquals(conv.transcript.lastSeq, 13);
   },
 );
 
@@ -127,7 +128,7 @@ Deno.test("a seq jump starts one repair, not one per frame", async () => {
       ? page([row(11), row(12), row(15)], false)
       : page([], false),
   );
-  conv.lastSeq = 10;
+  conv.transcript.lastSeq = 10;
   // Two frames above the hole: the first starts the repair, the second asks
   // the running pass for one more sweep instead of starting its own.
   feed(conv, frame(15, 15));
@@ -144,29 +145,33 @@ Deno.test("a seq jump starts one repair, not one per frame", async () => {
 
 Deno.test("a frame at or below the cursor is dropped", () => {
   const { conv } = conversation(() => page([], false));
-  conv.lastSeq = 10;
+  conv.transcript.lastSeq = 10;
   feed(conv, frame(9, 10));
   assertEquals(
-    conv.transcript.lines.length,
+    conv.transcript.rows.length,
     0,
     "a covered position renders nothing",
   );
-  assertEquals(conv.lastSeq, 10);
+  assertEquals(conv.transcript.lastSeq, 10);
 });
 
 Deno.test("an unstamped frame renders without moving the cursor", () => {
   const { conv } = conversation(() => page([], false));
-  conv.lastSeq = 10;
+  conv.transcript.lastSeq = 10;
   feed(conv, frame(11));
-  assertEquals(conv.transcript.lines.length, 1, "the row still renders");
-  assertEquals(conv.lastSeq, 10, "an unknown position moves nothing");
+  assertEquals(conv.transcript.rows.length, 1, "the row still renders");
+  assertEquals(
+    conv.transcript.lastSeq,
+    10,
+    "an unknown position moves nothing",
+  );
 });
 
 Deno.test(
   "a retention hole moves the cursor past it, and the warning names it",
   async () => {
     const { conv } = conversation(() => page([row(20), row(21)], false));
-    conv.lastSeq = 10;
+    conv.transcript.lastSeq = 10;
     const warns: string[] = [];
     const realWarn = console.warn;
     console.warn = (...args: unknown[]) => {
@@ -177,7 +182,7 @@ Deno.test(
     } finally {
       console.warn = realWarn;
     }
-    assertEquals(conv.lastSeq, 21);
+    assertEquals(conv.transcript.lastSeq, 21);
     assertEquals(warns.length, 1, "the hole is named once");
   },
 );
@@ -190,12 +195,12 @@ Deno.test("a warm cache resumes from its highest position", async () => {
       ? { rows: [row(9)], more: false, next: 9 }
       : page([], false),
   );
-  conv.seedRenderedPositions([
+  conv.transcript.restoreResume([
     { historyId: 7, role: "assistant", text: "a", seq: 7 },
     { historyId: 8, role: "assistant", text: "b", seq: 8 },
     { historyId: 9, role: "assistant", text: "c", seq: 9 },
   ]);
-  assertEquals(conv.lastSeq, 9);
+  assertEquals(conv.transcript.lastSeq, 9);
   await conv.catchUp(3);
   assertEquals(seen, [{ afterSeq: 9, limit: 3 }, { limit: 1 }]);
 });
@@ -208,7 +213,7 @@ Deno.test(
       if (opts.limit === 1) return { rows: [row(30)], more: false, next: 30 };
       return page([row(28), row(29), row(30)], false);
     });
-    conv.seedRenderedPositions([
+    conv.transcript.restoreResume([
       { historyId: 898, role: "assistant", text: "a", seq: 898 },
       { historyId: 899, role: "assistant", text: "b", seq: 899 },
       { historyId: 900, role: "assistant", text: "c", seq: 900 },
@@ -223,9 +228,9 @@ Deno.test(
     ]);
     // The rows and the cursor move together: old-numbered lines gone, the
     // window re-opened from the newest page.
-    assertEquals(conv.lastSeq, 30);
+    assertEquals(conv.transcript.lastSeq, 30);
     assertEquals(
-      conv.transcript.lines.map((l) => l.historyId),
+      conv.transcript.rows.map((l) => l.historyId),
       [28, 29, 30],
     );
   },
@@ -244,20 +249,20 @@ Deno.test(
       if (opts.afterSeq != null) return { rows: [], more: false, next: null };
       return page([row(28), row(29), row(30)], false);
     });
-    conv.lastSeq = 900;
+    conv.transcript.lastSeq = 900;
 
     // The tail leaves the cursor alone; the next sweep asks again, so a store
     // rebuilt under new ids is not hidden behind an answer that was true once.
     await conv.catchUp(3);
     assertEquals(seen.filter((o) => o.limit === 1).length, 1);
-    assertEquals(conv.lastSeq, 900);
+    assertEquals(conv.transcript.lastSeq, 900);
 
     renumbered = true;
     await conv.catchUp(3);
     assertEquals(seen.filter((o) => o.limit === 1).length, 2);
-    assertEquals(conv.lastSeq, 30);
+    assertEquals(conv.transcript.lastSeq, 30);
     assertEquals(
-      conv.transcript.lines.map((l) => l.historyId),
+      conv.transcript.rows.map((l) => l.historyId),
       [28, 29, 30],
     );
   },
@@ -274,20 +279,20 @@ Deno.test("a log that holds no history at all resets the window", async () => {
   // A window from a store that exists, holding its position.
   await conv.catchUp(3);
   assertEquals(
-    conv.transcript.lines.map((l) => l.historyId),
+    conv.transcript.rows.map((l) => l.historyId),
     [28, 29],
   );
-  assertEquals(conv.lastSeq, 29);
+  assertEquals(conv.transcript.lastSeq, 29);
 
   // The store is gone: an empty sweep, a probe that finds nothing, and rows
   // on screen that belong to no log. The position goes with them.
   emptied = true;
-  conv.lastSeq = 900;
+  conv.transcript.lastSeq = 900;
   await conv.catchUp(3);
 
   assertEquals(seen.filter((o) => o.limit === 1).length, 1);
-  assertEquals(conv.transcript.lines.length, 0);
-  assertEquals(conv.lastSeq, 0);
+  assertEquals(conv.transcript.rows.length, 0);
+  assertEquals(conv.transcript.lastSeq, 0);
 });
 
 Deno.test("a reset keeps the line the pump holds in flight", async () => {
@@ -296,24 +301,24 @@ Deno.test("a reset keeps the line the pump holds in flight", async () => {
     if (opts.afterSeq != null) return { rows: [], more: false, next: null };
     return page([row(28), row(29), row(30)], false);
   });
-  conv.lastSeq = 900;
+  conv.transcript.lastSeq = 900;
   // The pump shifted this line out of `pending` and its POST is still out,
   // so a reset must keep it: nothing else holds the text.
-  conv.transcript = withUserLine(
+  conv.transcript.state = withUserLine(
     EMPTY_TRANSCRIPT,
     "hello",
     -7,
     LOCAL_OPERATOR_SENDER,
   );
-  conv.pendingInFlight = { localId: -7, text: "hello" };
+  conv.outbox.pendingInFlight = { localId: -7, text: "hello" };
 
   await conv.catchUp(3);
 
   assertEquals(
-    conv.transcript.lines.map((l) => l.historyId).sort((a, b) => a - b),
+    conv.transcript.rows.map((l) => l.historyId).sort((a, b) => a - b),
     [-7, 28, 29, 30],
   );
-  assertEquals(conv.lastSeq, 30);
+  assertEquals(conv.transcript.lastSeq, 30);
 });
 
 Deno.test("a missed frame repairs from the local cursor", async () => {
@@ -322,12 +327,12 @@ Deno.test("a missed frame repairs from the local cursor", async () => {
       ? { rows: [row(10)], more: false, next: 10 }
       : page([], false),
   );
-  conv.lastSeq = 10;
+  conv.transcript.lastSeq = 10;
   const wire = (
     conv as unknown as {
-      transport: { onMissed: (() => void) | null };
+      link: { transport: { onMissed: (() => void) | null } };
     }
-  ).transport;
+  ).link.transport;
   wire.onMissed?.();
   await conv.catchUp(3);
   assertEquals(seen.length, 2);
@@ -345,43 +350,47 @@ Deno.test(
       [{ limit: 3 }],
       "no cursor: the newest window, not from zero",
     );
-    assertEquals(conv.lastSeq, 31);
+    assertEquals(conv.transcript.lastSeq, 31);
   },
 );
 
 Deno.test("an echo hands the promoted line its position", () => {
   const { conv, seen } = conversation(() => page([], false));
-  conv.lastSeq = 10;
-  conv.transcript = withUserLine(
+  conv.transcript.lastSeq = 10;
+  conv.transcript.state = withUserLine(
     EMPTY_TRANSCRIPT,
     "hello",
     -7,
     LOCAL_OPERATOR_SENDER,
   );
-  conv.pendingInFlight = { localId: -7, text: "hello" };
+  conv.outbox.pendingInFlight = { localId: -7, text: "hello" };
   feed(conv, {
     kind: "user_message",
     history_id: 41,
     seq: 11,
     text: "hello",
   });
-  assertEquals(conv.lastSeq, 11, "the row's position moves the cursor");
+  assertEquals(
+    conv.transcript.lastSeq,
+    11,
+    "the row's position moves the cursor",
+  );
   assertEquals(seen.length, 0, "the row was on screen: nothing to pull");
-  assertEquals(conv.transcript.lines[0]!.seq, 11, "the line carries it");
+  assertEquals(conv.transcript.rows[0]!.seq, 11, "the line carries it");
 });
 
 Deno.test("an echo after the ack still adopts the position", () => {
   const { conv, seen } = conversation(() => page([], false));
-  conv.lastSeq = 10;
+  conv.transcript.lastSeq = 10;
   // The POST response settled the line under its real id first.
-  conv.transcript = replaceLineId(
+  conv.transcript.state = replaceLineId(
     withUserLine(EMPTY_TRANSCRIPT, "hello", -7, LOCAL_OPERATOR_SENDER),
     -7,
     41,
   );
   feed(conv, { kind: "user_message", history_id: 41, seq: 11, text: "hello" });
-  assertEquals(conv.transcript.lines[0]!.seq, 11, "the settled line takes it");
-  assertEquals(conv.lastSeq, 11);
+  assertEquals(conv.transcript.rows[0]!.seq, 11, "the settled line takes it");
+  assertEquals(conv.transcript.lastSeq, 11);
   assertEquals(seen.length, 0);
 });
 
@@ -391,14 +400,14 @@ Deno.test("a page read through the anchor still lands its rows", async () => {
       ? page([row(11), row(12)], true)
       : page([row(13), row(14)], false),
   );
-  conv.lastSeq = 10;
+  conv.transcript.lastSeq = 10;
   await conv.catchUp(4);
   assertEquals(
-    conv.transcript.lines.map((l) => l.historyId),
+    conv.transcript.rows.map((l) => l.historyId),
     [11, 12, 13, 14],
     "every row of every page is on screen",
   );
-  assertEquals(conv.lastSeq, 14);
+  assertEquals(conv.transcript.lastSeq, 14);
 });
 
 Deno.test(
@@ -409,7 +418,7 @@ Deno.test(
         ? { rows: [], more: true, undecodable: 3, next: 13 }
         : page([row(14)], false),
     );
-    conv.lastSeq = 10;
+    conv.transcript.lastSeq = 10;
     await conv.catchUp(3);
     assertEquals(
       seen,
@@ -420,7 +429,7 @@ Deno.test(
       "the next read starts at the page edge, not at the cursor",
     );
     assertEquals(
-      conv.lastSeq,
+      conv.transcript.lastSeq,
       14,
       "the cursor steps over the block onto the next row",
     );
@@ -435,7 +444,7 @@ Deno.test(
       undecodable: 1,
       next: 13,
     }));
-    conv.lastSeq = 10;
+    conv.transcript.lastSeq = 10;
     const warns: string[] = [];
     const realWarn = console.warn;
     console.warn = (...args: unknown[]) => {
@@ -447,7 +456,11 @@ Deno.test(
       console.warn = realWarn;
     }
     assertEquals(seen, [{ afterSeq: 10, limit: 3 }], "the tail asks once");
-    assertEquals(conv.lastSeq, 13, "the cursor lands on the tail's edge");
+    assertEquals(
+      conv.transcript.lastSeq,
+      13,
+      "the cursor lands on the tail's edge",
+    );
     assertEquals(warns.length, 1, "the block is named once");
   },
 );
@@ -460,17 +473,17 @@ Deno.test(
         ? page([], false)
         : { rows: [], more: false, undecodable: 3, next: opts.afterSeq + 3 },
     );
-    conv.lastSeq = 10;
+    conv.transcript.lastSeq = 10;
 
     // Nothing decoded and nothing lies above: rows exist up there all the
     // same, so this is neither the live tail nor an older numbering.
     await conv.catchUp(3);
     assertEquals(seen.filter((o) => o.limit === 1).length, 0);
-    assertEquals(conv.lastSeq, 13);
+    assertEquals(conv.transcript.lastSeq, 13);
 
     await conv.catchUp(3);
     assertEquals(seen[seen.length - 1]?.afterSeq, 13);
-    assertEquals(conv.lastSeq, 16);
+    assertEquals(conv.transcript.lastSeq, 16);
   },
 );
 
@@ -481,40 +494,44 @@ Deno.test("a page whose edge does not move ends the sweep", async () => {
     undecodable: 1,
     next: 10,
   }));
-  conv.lastSeq = 10;
+  conv.transcript.lastSeq = 10;
   await conv.catchUp(3);
   assertEquals(seen, [{ afterSeq: 10, limit: 3 }], "asked once, never again");
-  assertEquals(conv.lastSeq, 10, "the cursor stays put with nothing rendered");
+  assertEquals(
+    conv.transcript.lastSeq,
+    10,
+    "the cursor stays put with nothing rendered",
+  );
 });
 
 Deno.test("a live row carries the position its frame names", () => {
   const { conv } = conversation(() => page([], false));
-  conv.lastSeq = 10;
+  conv.transcript.lastSeq = 10;
   feed(conv, frame(42, 11));
-  const line = conv.transcript.lines.find((l) => l.historyId === 42);
+  const line = conv.transcript.rows.find((l) => l.historyId === 42);
   assertEquals(line?.seq, 11, "the rendered row knows where it sits");
-  assertEquals(conv.lastSeq, 11);
+  assertEquals(conv.transcript.lastSeq, 11);
 });
 
 Deno.test(
   "a page names the position of a row the stream rendered without one",
   async () => {
     const { conv } = conversation(() => page([row(42, 11)], false));
-    conv.lastSeq = 10;
+    conv.transcript.lastSeq = 10;
     feed(conv, frame(42));
     assertEquals(
-      conv.transcript.lines[0]!.seq,
+      conv.transcript.rows[0]!.seq,
       undefined,
       "an unstamped frame names no position",
     );
     await conv.catchUp(1);
     assertEquals(
-      conv.transcript.lines[0]!.seq,
+      conv.transcript.rows[0]!.seq,
       11,
       "the page fills the hole in place",
     );
     assertEquals(
-      conv.transcript.lines.length,
+      conv.transcript.rows.length,
       1,
       "the same row, not a second copy",
     );

@@ -19,11 +19,13 @@ declare global {
 type Transport = import("./session/transport.ts").Transport;
 type SendOptions = import("./session/transport.ts").SendOptions;
 type ConversationLine = import("./transcript.ts").ConversationLine;
-type RelayConv = import("./session/conversation.svelte.ts").RelayConversation;
+type RelayConv =
+  import("./session/conversation/relayConversation.svelte.ts").RelayConversation;
 
 const { assertEquals } = await import("@std/assert");
 const { createQuotes } = await import("./quotes.svelte.ts");
-const { RelayConversation } = await import("./session/conversation.svelte.ts");
+const { RelayConversation } =
+  await import("./session/conversation/relayConversation.svelte.ts");
 
 /** A relay conversation whose transport records every send's options. */
 function recording(): { conv: RelayConv; sends: SendOptions[] } {
@@ -59,7 +61,7 @@ function recording(): { conv: RelayConv; sends: SendOptions[] } {
   // (channels.svelte.ts:383), and the write axis reads that status: these
   // cases exercise send on an open channel, which is the only channel a
   // reader can reach a composer on.
-  conv.status = "open";
+  conv.link.status = "open";
   return { conv, sends };
 }
 

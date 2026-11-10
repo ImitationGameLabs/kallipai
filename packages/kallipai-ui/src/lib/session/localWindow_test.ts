@@ -15,7 +15,8 @@ declare global {
 (globalThis as Record<string, unknown>)["$state"] = (v: unknown) => v;
 
 const { assertEquals } = await import("@std/assert");
-const { LocalConversation } = await import("./conversation.svelte.ts");
+const { LocalConversation } =
+  await import("./conversation/localConversation.svelte.ts");
 import { DirectTransport } from "./directTransport.ts";
 import { DirectMessageSender } from "./messageSender.svelte.ts";
 import { LOCAL_OPERATOR_SENDER } from "../transcript.ts";
@@ -84,8 +85,8 @@ Deno.test(
       undecodable: 1,
     }));
     await conv.catchUp(3);
-    assertEquals(conv.transcript.lines.length, 2);
-    assertEquals(conv.hasMoreOlder, true);
+    assertEquals(conv.transcript.rows.length, 2);
+    assertEquals(conv.pager.hasMoreOlder, true);
   },
 );
 
@@ -99,7 +100,7 @@ Deno.test(
       undecodable: 0,
     }));
     await conv.catchUp(3);
-    assertEquals(conv.hasMoreOlder, false);
+    assertEquals(conv.pager.hasMoreOlder, false);
   },
 );
 
@@ -114,12 +115,12 @@ Deno.test(
       more: true,
       undecodable: 3,
     }));
-    conv.minRowId = 20;
-    conv.minSeq = 20;
-    conv.maxRowId = 20;
-    await conv.loadOlder(3);
-    assertEquals(conv.hasMoreOlder, false);
-    await conv.loadOlder(3);
+    conv.transcript.minRowId = 20;
+    conv.transcript.minSeq = 20;
+    conv.transcript.maxRowId = 20;
+    await conv.pager.older(3);
+    assertEquals(conv.pager.hasMoreOlder, false);
+    await conv.pager.older(3);
     assertEquals(seen.length, 1, "a disarmed sentinel pages nothing");
   },
 );
@@ -133,10 +134,10 @@ Deno.test(
       more: false,
       undecodable: 0,
     }));
-    conv.minRowId = 20;
-    conv.minSeq = 20;
-    conv.maxRowId = 20;
-    await conv.loadOlder(3);
-    assertEquals(conv.hasMoreOlder, false);
+    conv.transcript.minRowId = 20;
+    conv.transcript.minSeq = 20;
+    conv.transcript.maxRowId = 20;
+    await conv.pager.older(3);
+    assertEquals(conv.pager.hasMoreOlder, false);
   },
 );

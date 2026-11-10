@@ -12,7 +12,8 @@ declare global {
 (globalThis as Record<string, unknown>)["$state"] = (v: unknown) => v;
 
 const { assertEquals, assertRejects } = await import("@std/assert");
-const { LocalConversation } = await import("./conversation.svelte.ts");
+const { LocalConversation } =
+  await import("./conversation/localConversation.svelte.ts");
 const { DirectMessageSender, HistorySchemaMismatch } =
   await import("./messageSender.svelte.ts");
 import { HISTORY_SCHEMA_VERSION } from "@kallipai/kallipai-client";
@@ -104,11 +105,14 @@ function frame(historyId: number, seq?: number, text = `line ${historyId}`) {
 
 /** The fields the freeze is about, reached through the protected seam. */
 type Core = {
-  historyError: string | null;
-  historyFrozen: boolean;
-  lastSeq: number;
-  notePullFailure(e: unknown): void;
-  applyPulledRows(rows: unknown[]): number;
+  applyReplyCore(reply: unknown, sender: unknown): void;
+  transcript: {
+    historyError: string | null;
+    frozen: boolean;
+    lastSeq: number;
+    notePullFailure(e: unknown): void;
+    applyPulled(rows: unknown[]): number;
+  };
 };
 
 Deno.test(
@@ -164,18 +168,18 @@ Deno.test(
 
 Deno.test("a page from another numbering freezes the window", async () => {
   const { conv, seen } = conversation(() => foreignPage());
-  conv.lastSeq = 10;
+  conv.transcript.lastSeq = 10;
   await conv.catchUp(3);
   const core = conv as unknown as Core;
-  assertEquals(core.historyError, "protocol");
-  assertEquals(conv.lastSeq, 10, "no position moves");
-  assertEquals(conv.transcript.lines.length, 0, "no rows are placed");
+  assertEquals(core.transcript.historyError, "protocol");
+  assertEquals(conv.transcript.lastSeq, 10, "no position moves");
+  assertEquals(conv.transcript.rows.length, 0, "no rows are placed");
   const asked = seen.length;
   assertEquals(asked, 1);
 
   await conv.catchUp(3);
-  conv.minRowId = 5;
-  await conv.loadOlder(3);
+  conv.transcript.minRowId = 5;
+  await conv.pager.older(3);
   assertEquals(seen.length, asked, "a frozen window asks nothing more");
 });
 
@@ -183,10 +187,10 @@ Deno.test(
   "a frozen window renders a live frame without placing it",
   async () => {
     const { conv } = conversation(() => foreignPage());
-    conv.lastSeq = 10;
+    conv.transcript.lastSeq = 10;
     await conv.catchUp(3);
     const core = conv as unknown as Core;
-    assertEquals(core.historyFrozen, true);
+    assertEquals(core.transcript.frozen, true);
 
     feed(conv, frame(99, 11, "after the freeze"));
     // A position below the stale cursor is not a replay here: the cursor is in
@@ -194,16 +198,16 @@ Deno.test(
     feed(conv, frame(98, 5, "older than the stale cursor"));
 
     assertEquals(
-      conv.transcript.lines.map((l) => l.text),
+      conv.transcript.rows.map((l) => l.text),
       ["after the freeze", "older than the stale cursor"],
     );
     assertEquals(
-      conv.lastSeq,
+      conv.transcript.lastSeq,
       10,
       "the cursor stays where the freeze found it",
     );
     assertEquals(
-      conv.transcript.lines.map((l) => l.seq),
+      conv.transcript.rows.map((l) => l.seq),
       [undefined, undefined],
       "a frozen window stamps no position",
     );
@@ -213,11 +217,13 @@ Deno.test(
 Deno.test("a freeze is not downgraded by a later failure", () => {
   const { conv } = conversation(() => page([], false));
   const core = conv as unknown as Core;
-  core.notePullFailure(new HistorySchemaMismatch(99, HISTORY_SCHEMA_VERSION));
-  assertEquals(core.historyError, "protocol");
-  core.notePullFailure(new Error("a plain failure"));
+  core.transcript.notePullFailure(
+    new HistorySchemaMismatch(99, HISTORY_SCHEMA_VERSION),
+  );
+  assertEquals(core.transcript.historyError, "protocol");
+  core.transcript.notePullFailure(new Error("a plain failure"));
   assertEquals(
-    core.historyError,
+    core.transcript.historyError,
     "protocol",
     "the mismatch stands until a reload",
   );
@@ -228,25 +234,33 @@ Deno.test(
   () => {
     const { conv } = conversation(() => page([], false));
     const core = conv as unknown as Core;
-    core.notePullFailure(new HistorySchemaMismatch(99, HISTORY_SCHEMA_VERSION));
-    const added = core.applyPulledRows([row(7, 1), row(8, 2)]);
+    core.transcript.notePullFailure(
+      new HistorySchemaMismatch(99, HISTORY_SCHEMA_VERSION),
+    );
+    const added = core.transcript.applyPulled([row(7, 1), row(8, 2)]);
     assertEquals(added, 2, "the page's text lands");
     // The rows carry the page's own positions, which is why they are text and
     // nothing more here: the cursor they would advance lives in another
     // numbering, so it stays where the freeze found it.
-    assertEquals(conv.lastSeq, 0, "no position moves");
+    assertEquals(conv.transcript.lastSeq, 0, "no position moves");
   },
 );
 Deno.test("a frozen window adopts no cached positions", () => {
   const { conv } = conversation(() => page([], false));
   const core = conv as unknown as Core;
-  core.notePullFailure(new HistorySchemaMismatch(99, HISTORY_SCHEMA_VERSION));
-  conv.lastSeq = 10;
-  conv.seedRenderedPositions([
+  core.transcript.notePullFailure(
+    new HistorySchemaMismatch(99, HISTORY_SCHEMA_VERSION),
+  );
+  conv.transcript.lastSeq = 10;
+  conv.transcript.restoreResume([
     { historyId: 7, role: "assistant", text: "a", seq: 7 },
     { historyId: 8, role: "assistant", text: "b", seq: 8 },
   ]);
-  assertEquals(conv.lastSeq, 10, "the cursor stays where the freeze found it");
+  assertEquals(
+    conv.transcript.lastSeq,
+    10,
+    "the cursor stays where the freeze found it",
+  );
 });
 
 Deno.test("the numbering this client reads is pinned to the literal", () => {

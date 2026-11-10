@@ -6,8 +6,8 @@
 // store routes each by conversation/tagma id to the owning conversation.
 //
 // The two leaves (RelayConversation / LocalConversation) share the conversation
-// reducer (../transcript.ts); see conversation.svelte.ts for the per-conversation
-// state and the transport-drain contract.
+// reducer (../transcript.ts); see session/conversation/base.svelte.ts for the
+// per-conversation state and the transport-drain contract.
 
 import { type TagmaView } from "@kallipai/kallipai-archeion-client";
 import {
@@ -29,14 +29,11 @@ import type { DirectConnection } from "./connect.ts";
 import { RelayMessageSender } from "./messageSender.svelte.ts";
 import { RelayTransport } from "./relayTransport.ts";
 import type { SendOptions } from "./transport.ts";
-import {
-  cachedLineToLine,
-  ConversationBase,
-  LocalConversation,
-  OfflineConversation,
-  RelayConversation,
-  WINDOW_PAGE,
-} from "./conversation.svelte.ts";
+import { ConversationBase } from "./conversation/base.svelte.ts";
+import { LocalConversation } from "./conversation/localConversation.svelte.ts";
+import { OfflineConversation } from "./conversation/offlineConversation.svelte.ts";
+import { RelayConversation } from "./conversation/relayConversation.svelte.ts";
+import { cachedLineToLine, WINDOW_PAGE } from "./conversation/shared.ts";
 import {
   clearConvCache,
   clearPendings,
@@ -174,7 +171,7 @@ export class ChannelsStore {
     }
     // A conv is normally inserted only after status "open"; the "opening" arm
     // is defensive for any future pre-open insertion path.
-    switch (conv.status) {
+    switch (conv.link.status) {
       case "open":
         return { kind: "open", conversationId: conv.conversationId };
       case "opening":
@@ -227,7 +224,7 @@ export class ChannelsStore {
    * owned by ensureOpen/close. */
   relayChannelOf(tagmaId: string): RelayChannel | null {
     const conv = this.findByTagma(tagmaId);
-    return conv instanceof RelayConversation && conv.status === "open"
+    return conv instanceof RelayConversation && conv.link.status === "open"
       ? conv.relayTransport.relayChannel
       : null;
   }
@@ -252,7 +249,7 @@ export class ChannelsStore {
   /** The channel lamp: the local conversation holds its destination now.
    *  False during a stream rebuild, so it is not the offline setup answer. */
   get localConnected(): boolean {
-    return this.local?.connected ?? false;
+    return this.local?.link.connected ?? false;
   }
 
   // --- offline (local) ---
@@ -292,11 +289,10 @@ export class ChannelsStore {
       const cached = await readTail(cacheConversationId, WINDOW_PAGE);
       if (cached.length > 0) {
         const lines: ConversationLine[] = cached.map(cachedLineToLine);
-        conv.transcript = { lines, status: "idle" };
+        conv.transcript.restoreResume(lines);
         // The cached rows carry their own positions: seeding them makes
         // the catch-up below continue from the newest one instead of
         // re-pulling the window it just restored.
-        conv.seedRenderedPositions(lines);
       }
     } catch {
       // IndexedDB unavailable (e.g. private mode): proceed with an empty
@@ -367,8 +363,7 @@ export class ChannelsStore {
       const cached = await readTail(channel.conversationId, WINDOW_PAGE);
       if (cached.length > 0) {
         const lines: ConversationLine[] = cached.map(cachedLineToLine);
-        conv.transcript = { lines, status: "idle" };
-        conv.seedRenderedPositions(lines);
+        conv.transcript.restoreResume(lines);
       }
     } catch {
       // IndexedDB unavailable (e.g. private mode): proceed empty; the
@@ -386,7 +381,7 @@ export class ChannelsStore {
       transport.close();
       return channel.conversationId;
     }
-    conv.status = "open";
+    conv.link.status = "open";
     // Backfill the status snapshot from the realtime store's cache (the archeion
     // SSE has been receiving tagma_status since login), so the header shows at
     // once instead of waiting up to the next status push (~2s). The realtime
@@ -394,7 +389,7 @@ export class ChannelsStore {
     // callback so this store stays decoupled from realtime (the shell binds
     // both directions, mirroring the envelope/signal sinks).
     if (this.statusBackfill) {
-      conv.setStatusSnapshot(this.statusBackfill(tagma.tagma_id));
+      conv.link.setStatusSnapshot(this.statusBackfill(tagma.tagma_id));
     }
     this.setRelayConv(channel.conversationId, conv);
     // Adopt the newest window (one batch; older rows page on scroll-up).
@@ -405,7 +400,7 @@ export class ChannelsStore {
     void conv.catchUp();
     // Flush the durable unsent lines (offline/failed sends) once the
     // transport is live: the relay face of the reconnect auto-retry.
-    void conv.retryAllPending();
+    void conv.outbox.retryAllPending();
     rememberConversationOf(tagma.tagma_id, channel.conversationId);
     return channel.conversationId;
   }
@@ -456,8 +451,8 @@ export class ChannelsStore {
     // (presence back online) drops it through to the tearDown + re-KEX below.
     if (
       existing &&
-      (existing.status === "opening" ||
-        (existing.status === "open" && !opts.refresh))
+      (existing.link.status === "opening" ||
+        (existing.link.status === "open" && !opts.refresh))
     ) {
       return;
     }
@@ -519,12 +514,7 @@ export class ChannelsStore {
       await prepareCache(HISTORY_SCHEMA_VERSION);
       const cached = await readTail(conversationId, WINDOW_PAGE);
       if (cached.length > 0) {
-        conv.transcript = {
-          lines: cached.map(cachedLineToLine),
-          status: "idle",
-        };
-        conv.minRowId = cached[0]!.historyId;
-        conv.maxRowId = cached[cached.length - 1]!.historyId;
+        conv.transcript.restore(cached.map(cachedLineToLine));
       }
     } catch {
       // IndexedDB unavailable (private mode): proceed empty.
@@ -552,12 +542,7 @@ export class ChannelsStore {
       await prepareCache(HISTORY_SCHEMA_VERSION);
       const cached = await readTail(conversationId, WINDOW_PAGE);
       if (cached.length > 0) {
-        conv.transcript = {
-          lines: cached.map(cachedLineToLine),
-          status: "idle",
-        };
-        conv.minRowId = cached[0]!.historyId;
-        conv.maxRowId = cached[cached.length - 1]!.historyId;
+        conv.transcript.restore(cached.map(cachedLineToLine));
       }
     } catch {
       // IndexedDB unavailable (private mode): proceed empty.
@@ -777,7 +762,7 @@ export class ChannelsStore {
     if (conv?.kind !== "relay") return;
     const rc = conv as RelayConversation;
     // Dead transport: the envelope drops like an unknown id.
-    if (!rc.connected) return;
+    if (!rc.link.connected) return;
     rc.relayTransport.relayChannel.enqueue(envelope);
   }
 
@@ -787,7 +772,7 @@ export class ChannelsStore {
   deliverSignal(tagmaId: string, signal: SignalEvent): void {
     // Dead transport: the signal drops like an unknown tagma id.
     const conv = this.findByTagma(tagmaId);
-    if (!conv?.connected) return;
+    if (!conv?.link.connected) return;
     conv.relayTransport.enqueueSignal(signal);
   }
 
@@ -799,7 +784,7 @@ export class ChannelsStore {
     tagmaId: string,
     snapshot: import("../tagmata.svelte.ts").TagmaStatusSummary | undefined,
   ): void {
-    this.findByTagma(tagmaId)?.setStatusSnapshot(snapshot);
+    this.findByTagma(tagmaId)?.link.setStatusSnapshot(snapshot);
   }
 }
 

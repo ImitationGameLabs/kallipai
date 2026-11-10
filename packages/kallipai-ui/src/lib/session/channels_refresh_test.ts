@@ -24,7 +24,8 @@ type TagmaView = import("@kallipai/kallipai-archeion-client").TagmaView;
 type Transport = import("./transport.ts").Transport;
 const { assertEquals } = await import("@std/assert");
 const { ChannelsStore } = await import("./channels.svelte.ts");
-const { RelayConversation } = await import("./conversation.svelte.ts");
+const { RelayConversation } =
+  await import("./conversation/relayConversation.svelte.ts");
 
 /** Minimal transport surface: the constructor reads localSender; close() is
  * the only method the teardown path calls. */
@@ -45,7 +46,7 @@ const fakeTransport: Transport = {
 class FakeEntry extends RelayConversation {
   constructor(id: string, tagmaId: string) {
     super(id, null as never, fakeTransport, tagmaId, "T");
-    this.status = "open";
+    this.link.status = "open";
   }
 }
 
@@ -165,7 +166,7 @@ Deno.test(
       const view = h.offlineViewOf("t-never");
       if (!view) throw new Error("synthetic offline view must mount");
       assertEquals(view.conversationId, "offline-t-never");
-      assertEquals(view.transcript.lines.length, 0);
+      assertEquals(view.transcript.rows.length, 0);
       // Idempotent: a second call does not duplicate.
       await h.attachOfflineView("t-never");
       assertEquals(h.offlineViewOf("t-never"), view);

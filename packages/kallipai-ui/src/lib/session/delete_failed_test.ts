@@ -15,7 +15,8 @@ declare global {
 
 type Transport = import("./transport.ts").Transport;
 const { assertEquals } = await import("@std/assert");
-const { RelayConversation } = await import("./conversation.svelte.ts");
+const { RelayConversation } =
+  await import("./conversation/relayConversation.svelte.ts");
 const { LOCAL_OPERATOR_SENDER, sendFailed, withUserLine } =
   await import("../transcript.ts");
 const { setPendingDeletesForTests } =
@@ -62,13 +63,22 @@ async function withDeletes(
 Deno.test("discard asks the pending store to drop the row", () =>
   withDeletes((seen) => {
     const conv = makeConv("tagma-del");
-    let t = withUserLine(conv.transcript, "hello", -7, LOCAL_OPERATOR_SENDER);
+    let t = withUserLine(
+      conv.transcript.state,
+      "hello",
+      -7,
+      LOCAL_OPERATOR_SENDER,
+    );
     t = sendFailed(t, -7, "boom");
-    conv.transcript = t;
+    conv.transcript.state = t;
 
-    assertEquals(conv.discard(-7), true, "the line left, so the answer is yes");
+    assertEquals(
+      conv.outbox.discard(-7),
+      true,
+      "the line left, so the answer is yes",
+    );
 
-    assertEquals(conv.transcript.lines, []);
+    assertEquals(conv.transcript.rows, []);
     assertEquals(conv.transcript.error, undefined);
     assertEquals(seen, [["tagma-del", -7]]);
   }),
@@ -77,20 +87,20 @@ Deno.test("discard asks the pending store to drop the row", () =>
 Deno.test("discard declines a line that never failed", () =>
   withDeletes((seen) => {
     const conv = makeConv("tagma-sending");
-    conv.transcript = withUserLine(
-      conv.transcript,
+    conv.transcript.state = withUserLine(
+      conv.transcript.state,
       "hello",
       -8,
       LOCAL_OPERATOR_SENDER,
     );
 
     assertEquals(
-      conv.discard(-8),
+      conv.outbox.discard(-8),
       false,
       "a line that never failed is not the reader's to take back",
     );
 
-    assertEquals(conv.transcript.lines.length, 1);
+    assertEquals(conv.transcript.rows.length, 1);
     assertEquals(seen, []);
   }),
 );
@@ -98,14 +108,21 @@ Deno.test("discard declines a line that never failed", () =>
 Deno.test("discard drops a re-queued copy from the send queue", () =>
   withDeletes((seen) => {
     const conv = makeConv("tagma-queue");
-    let t = withUserLine(conv.transcript, "hello", -9, LOCAL_OPERATOR_SENDER);
+    let t = withUserLine(
+      conv.transcript.state,
+      "hello",
+      -9,
+      LOCAL_OPERATOR_SENDER,
+    );
     t = sendFailed(t, -9, "boom");
-    conv.transcript = t;
-    conv.pending = [{ localId: -9, text: "hello", attachment: undefined }];
+    conv.transcript.state = t;
+    conv.outbox.pending = [
+      { localId: -9, text: "hello", attachment: undefined },
+    ];
 
-    assertEquals(conv.discard(-9), true);
+    assertEquals(conv.outbox.discard(-9), true);
 
-    assertEquals(conv.pending, []);
+    assertEquals(conv.outbox.pending, []);
     assertEquals(seen, [["tagma-queue", -9]]);
   }),
 );
@@ -114,17 +131,22 @@ Deno.test("discard survives a store that cannot be written", () => {
   // A discard must land even where IndexedDB is missing (private mode): the
   // durable delete is best-effort, the line still leaves the transcript.
   const conv = makeConv("tagma-nostore");
-  let t = withUserLine(conv.transcript, "hello", -13, LOCAL_OPERATOR_SENDER);
+  let t = withUserLine(
+    conv.transcript.state,
+    "hello",
+    -13,
+    LOCAL_OPERATOR_SENDER,
+  );
   t = sendFailed(t, -13, "boom");
-  conv.transcript = t;
+  conv.transcript.state = t;
 
   assertEquals(
-    conv.discard(-13),
+    conv.outbox.discard(-13),
     true,
     "a store that cannot be written still lets the line go",
   );
 
-  assertEquals(conv.transcript.lines, []);
+  assertEquals(conv.transcript.rows, []);
 });
 
 Deno.test(
@@ -139,13 +161,13 @@ Deno.test(
         await import("@kallipai/kallipai-keryx-client");
       const conv = makeConv("tagma-race");
       let t = withUserLine(
-        conv.transcript,
+        conv.transcript.state,
         "hello",
         -12,
         LOCAL_OPERATOR_SENDER,
       );
       t = sendFailed(t, -12, "boom");
-      conv.transcript = t;
+      conv.transcript.state = t;
       setPendingRowsForTests(() => [
         {
           tagmaId: "tagma-race",
@@ -157,8 +179,8 @@ Deno.test(
         },
       ]);
       try {
-        const flushing = conv.retryAllPending();
-        conv.discard(-12);
+        const flushing = conv.outbox.retryAllPending();
+        conv.outbox.discard(-12);
         // The action's own delete lands first; the flush's re-issue follows
         // once the durable read it was already inside lets go.
         assertEquals(seen.length, 1);
@@ -167,7 +189,7 @@ Deno.test(
         setPendingRowsForTests(null);
       }
 
-      assertEquals(conv.transcript.lines, []);
+      assertEquals(conv.transcript.rows, []);
       assertEquals(seen, [
         ["tagma-race", -12],
         ["tagma-race", -12],
@@ -179,12 +201,17 @@ Deno.test("discard declines a line that is still in flight", () => {
   // The POST is under way: the row is not the reader's to take back, and the
   // answer keeps the trigger in place instead of moving focus away from it.
   const conv = makeConv("tagma-inflight");
-  let t = withUserLine(conv.transcript, "hello", -14, LOCAL_OPERATOR_SENDER);
+  let t = withUserLine(
+    conv.transcript.state,
+    "hello",
+    -14,
+    LOCAL_OPERATOR_SENDER,
+  );
   t = sendFailed(t, -14, "boom");
-  conv.transcript = t;
-  conv.pendingInFlight = { localId: -14, text: "hello" };
+  conv.transcript.state = t;
+  conv.outbox.pendingInFlight = { localId: -14, text: "hello" };
 
-  assertEquals(conv.discard(-14), false);
+  assertEquals(conv.outbox.discard(-14), false);
 
-  assertEquals(conv.transcript.lines.length, 1, "the row is still there");
+  assertEquals(conv.transcript.rows.length, 1, "the row is still there");
 });

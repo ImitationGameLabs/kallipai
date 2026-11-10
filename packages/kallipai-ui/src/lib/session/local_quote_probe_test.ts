@@ -16,7 +16,8 @@ declare global {
 (globalThis as Record<string, unknown>)["$state"] = (v: unknown) => v;
 
 const { assertEquals } = await import("@std/assert");
-const { LocalConversation } = await import("./conversation.svelte.ts");
+const { LocalConversation } =
+  await import("./conversation/localConversation.svelte.ts");
 import { DirectTransport } from "./directTransport.ts";
 import { DirectMessageSender } from "./messageSender.svelte.ts";
 import { LOCAL_OPERATOR_SENDER } from "../transcript.ts";
@@ -83,7 +84,7 @@ function conversation(script: (opts: PageRequest) => unknown) {
     new DirectMessageSender(client as never, "root"),
   );
   // A rendered head: the probe only answers ids at or below it.
-  conv.maxRowId = 20;
+  conv.transcript.maxRowId = 20;
   return { conv, seen };
 }
 
@@ -92,7 +93,7 @@ Deno.test("a probed row resolves from the page just below it", async () => {
     rows: [userRow(9, "hello")],
     more: true,
   }));
-  const line = await conv.peekRow(9);
+  const line = await conv.pager.peek(9);
   if (line === "deleted" || line === "error") {
     throw new Error(`a rendered row resolves, got ${line}`);
   }
@@ -107,29 +108,29 @@ Deno.test("a probed row resolves from the page just below it", async () => {
 
 Deno.test("a contiguous run without the id reads as deleted", async () => {
   const { conv } = conversation(() => ({ rows: [userRow(5)], more: true }));
-  assertEquals(await conv.peekRow(9), "deleted");
+  assertEquals(await conv.pager.peek(9), "deleted");
 });
 
 Deno.test("an empty page reads as deleted too", async () => {
   const { conv } = conversation(() => ({ rows: [], more: false }));
-  assertEquals(await conv.peekRow(4), "deleted");
+  assertEquals(await conv.pager.peek(4), "deleted");
 });
 
 Deno.test("a failed read stays retryable", async () => {
   const { conv } = conversation(() => new Error("wire broke"));
-  assertEquals(await conv.peekRow(9), "error");
+  assertEquals(await conv.pager.peek(9), "error");
 });
 
 Deno.test("an id above the rendered head is not probed", async () => {
   const { conv, seen } = conversation(() => ({ rows: [], more: false }));
-  assertEquals(await conv.peekRow(21), "error");
+  assertEquals(await conv.pager.peek(21), "error");
   assertEquals(seen, [], "no page is pulled for an unrendered id");
 });
 
 Deno.test("a page row that maps to no line stays retryable", async () => {
   const { conv } = conversation(() => ({ rows: [blankRow(9)], more: true }));
   assertEquals(
-    await conv.peekRow(9),
+    await conv.pager.peek(9),
     "error",
     "an unreadable row cannot prove the quoted one is gone",
   );
@@ -140,11 +141,11 @@ Deno.test("a probe reads its page and leaves the window alone", async () => {
     rows: [userRow(9, "hello")],
     more: true,
   }));
-  const lines = conv.transcript.lines.length;
-  await conv.peekRow(9);
-  assertEquals(conv.transcript.lines.length, lines, "no row is merged");
-  assertEquals(conv.maxRowId, 20, "the head does not advance");
-  assertEquals(conv.minRowId, 0, "the floor does not move");
+  const lines = conv.transcript.rows.length;
+  await conv.pager.peek(9);
+  assertEquals(conv.transcript.rows.length, lines, "no row is merged");
+  assertEquals(conv.transcript.maxRowId, 20, "the head does not advance");
+  assertEquals(conv.transcript.minRowId, 0, "the floor does not move");
 });
 
 Deno.test(
@@ -154,8 +155,8 @@ Deno.test(
       rows: [userRow(9)],
       more: true,
     }));
-    conv.status = "reconnecting";
-    assertEquals(await conv.peekRow(9), "error");
+    conv.link.status = "reconnecting";
+    assertEquals(await conv.pager.peek(9), "error");
     assertEquals(seen, [], "no page is pulled while the leaf cannot answer");
   },
 );
@@ -167,7 +168,7 @@ Deno.test("a page that lost a row stays retryable, not deleted", async () => {
     undecodable: 1,
   }));
   assertEquals(
-    await conv.peekRow(9),
+    await conv.pager.peek(9),
     "error",
     "a page with a hole cannot prove the target is gone",
   );

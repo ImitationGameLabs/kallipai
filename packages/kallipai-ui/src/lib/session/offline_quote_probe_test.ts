@@ -13,7 +13,8 @@ declare global {
 (globalThis as Record<string, unknown>)["$state"] = (v: unknown) => v;
 
 const { assertEquals } = await import("@std/assert");
-const { OfflineConversation } = await import("./conversation.svelte.ts");
+const { OfflineConversation } =
+  await import("./conversation/offlineConversation.svelte.ts");
 import { LOCAL_OPERATOR_SENDER } from "../transcript.ts";
 
 /** The offline view over a store that holds nothing for it. */
@@ -24,7 +25,7 @@ function offline() {
     "tagma-1",
     LOCAL_OPERATOR_SENDER,
   );
-  conv.maxRowId = 9;
+  conv.transcript.maxRowId = 9;
   return conv;
 }
 
@@ -32,7 +33,7 @@ Deno.test(
   "the offline view answers error rather than claiming deletion",
   async () => {
     assertEquals(
-      await offline().peekRow(9),
+      await offline().pager.peek(9),
       "error",
       "no history source, so no proof the target is gone",
     );

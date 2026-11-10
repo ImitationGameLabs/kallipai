@@ -5,7 +5,7 @@
 // message, so the same sentence covers whichever reason left the axis dead --
 // a closed conversation and an absent carrier both just mean "not connected".
 
-import type { ConversationStatus } from "./conversation.svelte.ts";
+import type { LinkStatus } from "./conversation/shared.ts";
 
 /** What the composer says: the handshake first, then silence while the axis
  *  writes, else the notice that it is gone. */
@@ -21,7 +21,7 @@ export interface ComposerState {
  *  back on their own. The notice reads the write axis alone. */
 export function composerState(c: {
   kind: "local" | "relay" | "offline-view";
-  status: ConversationStatus;
+  status: LinkStatus;
   canWrite: boolean;
 }): ComposerState {
   if (c.status === "opening") return { notice: "opening", retry: false };

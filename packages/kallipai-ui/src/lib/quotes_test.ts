@@ -5,7 +5,7 @@
 // cache_quote_test and relayWindow_test use).
 
 import { assertEquals } from "@std/assert";
-import type { ConversationBase } from "./session/conversation.svelte.ts";
+import type { ConversationBase } from "./session/conversation/base.svelte.ts";
 import type { ConversationLine } from "./transcript.ts";
 
 declare global {
@@ -26,7 +26,10 @@ type Peek = (id: number) => Promise<ConversationLine | "deleted" | "error">;
 /** A conversation stub: the loaded window plus the one seam the controller
  *  reads. Cast through the base type -- the controller touches nothing else. */
 function stub(lines: ConversationLine[], peekRow: Peek): ConversationBase {
-  return { transcript: { lines }, peekRow } as unknown as ConversationBase;
+  return {
+    transcript: { rows: lines },
+    pager: { peek: peekRow },
+  } as unknown as ConversationBase;
 }
 
 /** Let a pending probe settle (it awaits one promise). */
@@ -150,12 +153,15 @@ function slidingStub(
   first: ConversationLine[],
   peekRow: Peek,
 ): { conv: ConversationBase; slide: (next: ConversationLine[]) => void } {
-  const transcript = { lines: first };
-  const conv = { transcript, peekRow } as unknown as ConversationBase;
+  const transcript = { rows: first };
+  const conv = {
+    transcript,
+    pager: { peek: peekRow },
+  } as unknown as ConversationBase;
   return {
     conv,
     slide: (next) => {
-      transcript.lines = next;
+      transcript.rows = next;
     },
   };
 }

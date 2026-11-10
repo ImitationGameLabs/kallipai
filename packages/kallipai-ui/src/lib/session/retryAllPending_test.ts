@@ -32,7 +32,8 @@ const assertNotIncludesId = (pending: { localId: number }[], id: number) => {
     false,
   );
 };
-const { RelayConversation } = await import("./conversation.svelte.ts");
+const { RelayConversation } =
+  await import("./conversation/relayConversation.svelte.ts");
 const { LOCAL_OPERATOR_SENDER, sendFailed, withUserLine } =
   await import("../transcript.ts");
 
@@ -73,8 +74,8 @@ Deno.test(
     const conv = makeConv("tagma-1");
     // No IDB global under deno test: readPendingByTagma returns [] per
     // its contract, so the flush no-ops -- and the call never rejects.
-    await conv.retryAllPending();
-    assertEquals(conv.pending.length, 0);
+    await conv.outbox.retryAllPending();
+    assertEquals(conv.outbox.pending.length, 0);
   },
 );
 
@@ -82,14 +83,21 @@ Deno.test(
   "retrySend is a no-op for a line already in the pending queue",
   () => {
     const conv = makeConv("tagma-2");
-    let t = withUserLine(conv.transcript, "hello", 42, LOCAL_OPERATOR_SENDER);
+    let t = withUserLine(
+      conv.transcript.state,
+      "hello",
+      42,
+      LOCAL_OPERATOR_SENDER,
+    );
     t = sendFailed(t, 42, "boom");
-    conv.transcript = t;
-    conv.pending = [{ localId: 42, text: "hello", attachment: undefined }];
+    conv.transcript.state = t;
+    conv.outbox.pending = [
+      { localId: 42, text: "hello", attachment: undefined },
+    ];
     // The queued-line guard returns before the pump: no double queue entry.
     conv.retrySend(42);
-    assertEquals(conv.pending.length, 1);
-    assertEquals(conv.pending[0].localId, 42);
+    assertEquals(conv.outbox.pending.length, 1);
+    assertEquals(conv.outbox.pending[0].localId, 42);
   },
 );
 
@@ -128,11 +136,11 @@ Deno.test(
       await import("@kallipai/kallipai-keryx-client");
     setPendingRowsForTests(() => stored);
     try {
-      await conv.retryAllPending();
+      await conv.outbox.retryAllPending();
     } finally {
       setPendingRowsForTests(null);
     }
-    const user = conv.transcript.lines.filter((l) => l.role === "user");
+    const user = conv.transcript.rows.filter((l) => l.role === "user");
     // Stored order == rendered order (single-loop, per-row branch).
     assertEquals(
       user.map((l) => l.historyId),
@@ -146,6 +154,6 @@ Deno.test(
     // The failed row is not enqueued: only the queued ones auto-send (the
     // pump may already have shifted the first queued row out by the time we
     // assert -- the race is fine, the failed id must simply never appear).
-    assertNotIncludesId(conv.pending, -301);
+    assertNotIncludesId(conv.outbox.pending, -301);
   },
 );

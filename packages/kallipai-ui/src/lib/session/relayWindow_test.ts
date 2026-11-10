@@ -18,7 +18,8 @@
 //   paths production uses in private mode.
 
 // Ambient rune types for the whole program (deno test type-checks the
-// graph; conversation.svelte.ts itself is normally covered by svelte-check).
+// graph; the conversation files themselves are normally covered by
+// svelte-check).
 declare global {
   function $state<T>(initial: T): T;
   function $state<T>(): T | undefined;
@@ -28,8 +29,9 @@ declare global {
 (globalThis as Record<string, unknown>)["$state"] = (v: unknown) => v;
 
 const { assertEquals } = await import("@std/assert");
-const { shouldNotify, WINDOW_PAGE, RelayConversation } =
-  await import("./conversation.svelte.ts");
+const { shouldNotify, RelayConversation } =
+  await import("./conversation/relayConversation.svelte.ts");
+const { WINDOW_PAGE } = await import("./conversation/shared.ts");
 const { unreadStore, tagmaKey } = await import("./unread.svelte.ts");
 type ConversationStoreLike = {
   get(id: string): unknown;
@@ -236,8 +238,8 @@ function makeConv(channel: FakeChannel): RelayConv {
  *  grows it once per row. */
 function countTranscriptGrowth(conv: RelayConv): () => number[] {
   const growth: number[] = [];
-  let current = conv.transcript;
-  Object.defineProperty(conv, "transcript", {
+  let current = conv.transcript.state;
+  Object.defineProperty(conv.transcript, "state", {
     configurable: true,
     get: () => current,
     set: (v) => {
@@ -284,16 +286,16 @@ Deno.test("catchUp on an empty window takes one recent batch", async () => {
   ]);
   const conv = makeConv(channel);
   await conv.catchUp();
-  assertEquals(conv.transcript.lines.length, 2);
-  assertEquals(conv.minRowId, 1);
-  assertEquals(conv.maxRowId, 2);
+  assertEquals(conv.transcript.rows.length, 2);
+  assertEquals(conv.transcript.minRowId, 1);
+  assertEquals(conv.transcript.maxRowId, 2);
 });
 
 Deno.test("a short recent batch disarms the sentinel", async () => {
   const channel = new FakeChannel([{ rows: [eventRow(1)] }]);
   const conv = makeConv(channel);
   await conv.catchUp();
-  assertEquals(conv.hasMoreOlder, false);
+  assertEquals(conv.pager.hasMoreOlder, false);
 });
 
 Deno.test(
@@ -306,14 +308,14 @@ Deno.test(
     );
     const channel = new FakeChannel([{ rows, more: true }]);
     const conv = makeConv(channel);
-    conv.minRowId = 60;
-    conv.maxRowId = 80;
-    conv.transcript = { lines: [lineOf(60)], status: "idle" };
-    await conv.loadOlder();
-    assertEquals(conv.transcript.lines[0]!.historyId, 10);
-    assertEquals(conv.transcript.lines.length, 1 + WINDOW_PAGE);
-    assertEquals(conv.minRowId, 10);
-    assertEquals(conv.hasMoreOlder, true); // server said more
+    conv.transcript.minRowId = 60;
+    conv.transcript.maxRowId = 80;
+    conv.transcript.state = { lines: [lineOf(60)], status: "idle" };
+    await conv.pager.older();
+    assertEquals(conv.transcript.rows[0]!.historyId, 10);
+    assertEquals(conv.transcript.rows.length, 1 + WINDOW_PAGE);
+    assertEquals(conv.transcript.minRowId, 10);
+    assertEquals(conv.pager.hasMoreOlder, true); // server said more
   },
 );
 
@@ -325,12 +327,12 @@ Deno.test(
     ]);
     const conv = makeConv(channel);
     conv.pullTimeoutMs = 50;
-    conv.minRowId = 60;
-    conv.maxRowId = 80;
-    await conv.loadOlder();
-    assertEquals(conv.transcript.lines.length, 2);
-    assertEquals(conv.minRowId, 10);
-    assertEquals(conv.hasMoreOlder, true); // timeout proves nothing: retry
+    conv.transcript.minRowId = 60;
+    conv.transcript.maxRowId = 80;
+    await conv.pager.older();
+    assertEquals(conv.transcript.rows.length, 2);
+    assertEquals(conv.transcript.minRowId, 10);
+    assertEquals(conv.pager.hasMoreOlder, true); // timeout proves nothing: retry
   },
 );
 
@@ -340,9 +342,11 @@ Deno.test("an old user row never consumes the in-flight echo", () => {
   // into the page buffer; the echo correlation never sees it).
   const channel = new FakeChannel([]);
   const conv = makeConv(channel);
-  conv.minRowId = 60;
-  conv.maxRowId = 80;
-  (conv as unknown as { pendingInFlight: unknown }).pendingInFlight = {
+  conv.transcript.minRowId = 60;
+  conv.transcript.maxRowId = 80;
+  (
+    conv as unknown as { outbox: { pendingInFlight: unknown } }
+  ).outbox.pendingInFlight = {
     localId: -1,
     text: "note 42",
   };
@@ -351,7 +355,8 @@ Deno.test("an old user row never consumes the in-flight echo", () => {
   conv.feed(userRow(42, "note 42").reply, USER);
   assertEquals(pull.rows.length, 1); // buffered, not consumed as an ack
   assertEquals(
-    (conv as unknown as { pendingInFlight: unknown }).pendingInFlight,
+    (conv as unknown as { outbox: { pendingInFlight: unknown } }).outbox
+      .pendingInFlight,
     { localId: -1, text: "note 42" },
   );
 });
@@ -361,10 +366,10 @@ Deno.test("fresh-device mount race does not permanently disarm", async () => {
   // the window forms (no recent pull at all).
   const channel = new FakeChannel([]);
   const conv = makeConv(channel);
-  assertEquals(conv.minRowId, 0);
-  await conv.loadOlder();
+  assertEquals(conv.transcript.minRowId, 0);
+  await conv.pager.older();
   assertEquals(channel.script.length, 0); // no request issued
-  assertEquals(conv.hasMoreOlder, true);
+  assertEquals(conv.pager.hasMoreOlder, true);
 });
 
 Deno.test("the id floor never notifies for replay frames", () => {
@@ -414,19 +419,19 @@ Deno.test("a dead transport folds pulls and drops deliveries", async () => {
   const conv = makeConv(channel);
   const transport = (
     conv as unknown as {
-      transport: { enqueueSignal: () => void };
+      link: { transport: { enqueueSignal: () => void } };
     }
-  ).transport;
+  ).link.transport;
   let signals = 0;
   transport.enqueueSignal = () => {
     signals++;
   };
   await conv.run(); // the empty fake replies end the drain: transport=null
-  assertEquals(conv.connected, false);
+  assertEquals(conv.link.connected, false);
 
   // A pull on the dead transport folds to a timed-out empty page, and the
   // timed-out page leaves the has-more sentinel armed instead of ending it.
-  conv.hasMoreOlder = true;
+  conv.pager.hasMoreOlder = true;
   const page = await (
     conv as unknown as {
       pullPage(opts: { limit: number }): Promise<{
@@ -450,7 +455,7 @@ Deno.test("a dead transport folds pulls and drops deliveries", async () => {
       loadOlderPage(k: number): Promise<void>;
     }
   ).loadOlderPage(10);
-  assertEquals(conv.hasMoreOlder, true);
+  assertEquals(conv.pager.hasMoreOlder, true);
 
   // Deliveries aimed at the dead transport drop without touching it.
   const { ChannelsStore } = await import("./channels.svelte.ts");
@@ -483,7 +488,7 @@ Deno.test(
       { rows: [eventRow(13)], more: true },
     ]);
     const conv = makeConv(channel);
-    conv.maxRowId = 10;
+    conv.transcript.maxRowId = 10;
     await conv.catchUp();
     assertEquals(channel.calls.length, 1);
     assertEquals(channel.calls[0], {
@@ -492,11 +497,11 @@ Deno.test(
       limit: WINDOW_PAGE,
     });
     assertEquals(
-      conv.transcript.lines.map((l) => l.historyId),
+      conv.transcript.rows.map((l) => l.historyId),
       [11, 12],
     );
-    assertEquals(conv.minRowId, 11);
-    assertEquals(conv.maxRowId, 12);
+    assertEquals(conv.transcript.minRowId, 11);
+    assertEquals(conv.transcript.maxRowId, 12);
   },
 );
 
@@ -506,12 +511,16 @@ Deno.test("an open channel with no transport is not writable", () => {
   // halves, so the composer closes and send() refuses instead of queueing a
   // line the channel would never take.
   const conv = makeConv(new FakeChannel([]));
-  conv.status = "open";
-  (conv as unknown as { transport: null }).transport = null;
-  assertEquals(conv.canWrite, false);
+  conv.link.status = "open";
+  (conv as unknown as { link: { transport: null } }).link.transport = null;
+  assertEquals(conv.link.canWrite, false);
   conv.send("into the void");
-  assertEquals(conv.transcript.lines.length, 0, "nothing lands");
-  assertEquals(conv.error instanceof Error, true, "the refusal is observable");
+  assertEquals(conv.transcript.rows.length, 0, "nothing lands");
+  assertEquals(
+    conv.link.error instanceof Error,
+    true,
+    "the refusal is observable",
+  );
 });
 
 Deno.test("the adopted window folds in one transcript update", async () => {
@@ -520,7 +529,7 @@ Deno.test("the adopted window folds in one transcript update", async () => {
     const conv = makeConv(channel);
     const growth = countTranscriptGrowth(conv);
     await conv.catchUp();
-    assertEquals(conv.transcript.lines.length, ids.length);
+    assertEquals(conv.transcript.rows.length, ids.length);
     return growth();
   };
   assertEquals(await run([1, 2, 3]), [3]); // one update for the page
@@ -608,7 +617,7 @@ Deno.test(
 Deno.test("a line landing while viewing reports the cursor; closed, no", () => {
   unreadStore.reset();
   const conv = makeConv(new FakeChannel([]));
-  conv.lastSeq = 20; // a window is rendered; these frames continue it
+  conv.transcript.lastSeq = 20; // a window is rendered; these frames continue it
   landWindowNow(conv);
   const sent: number[] = [];
   conv.readCursorSender = (cursor) => {
@@ -645,7 +654,7 @@ Deno.test("a line landing while viewing reports the cursor; closed, no", () => {
 Deno.test("a burst lands one PUT, and the unmount lands the last one", () => {
   unreadStore.reset();
   const conv = makeConv(new FakeChannel([]));
-  conv.lastSeq = 30; // a window is rendered; these frames continue it
+  conv.transcript.lastSeq = 30; // a window is rendered; these frames continue it
   const sent: number[] = [];
   conv.readCursorSender = (cursor) => {
     sent.push(cursor);
@@ -708,7 +717,7 @@ Deno.test(
       [6],
       "one PUT for the page, carrying its newest position",
     );
-    const line = conv.transcript.lines.find((l) => l.historyId === 6);
+    const line = conv.transcript.rows.find((l) => l.historyId === 6);
     assertEquals(
       line?.seq,
       6,
@@ -749,26 +758,29 @@ Deno.test(
       { rows: [eventRow(500), eventRow(501), eventRow(502)], more: false },
     ]);
     const conv = makeConv(channel);
-    conv.transcript = { lines: [100, 101, 102].map(lineOf), status: "idle" };
-    conv.minRowId = 100;
-    conv.maxRowId = 102;
+    conv.transcript.state = {
+      lines: [100, 101, 102].map(lineOf),
+      status: "idle",
+    };
+    conv.transcript.minRowId = 100;
+    conv.transcript.maxRowId = 102;
     await conv.catchUp();
     // Keeping the old cache tail beside the new window would render an unknown
     // gap between them that no page can fill; the window becomes the window.
     assertEquals(
-      conv.transcript.lines.map((l) => l.historyId),
+      conv.transcript.rows.map((l) => l.historyId),
       [500, 501, 502],
     );
-    assertEquals(conv.minRowId, 500);
-    assertEquals(conv.maxRowId, 502);
+    assertEquals(conv.transcript.minRowId, 500);
+    assertEquals(conv.transcript.maxRowId, 502);
     // Scroll-up continues from the adopted head (the dropped tail is not a
     // paging cursor any more), and the server page is the contiguous source.
     channel.script.push({ rows: [eventRow(490)], more: true });
-    conv.hasMoreOlder = true; // the scripted window is short; force the sentinel
-    await conv.loadOlder();
+    conv.pager.hasMoreOlder = true; // the scripted window is short; force the sentinel
+    await conv.pager.older();
     assertEquals(channel.calls[1]?.before, 500);
     assertEquals(
-      conv.transcript.lines.map((l) => l.historyId),
+      conv.transcript.rows.map((l) => l.historyId),
       [490, 500, 501, 502],
     );
   },
@@ -801,21 +813,24 @@ Deno.test(
       { rows: [eventRow(490), eventRow(491)], more: true },
     ]);
     const conv = makeConv(channel);
-    conv.transcript = { lines: [500, 501, 502].map(lineOf), status: "idle" };
-    conv.minRowId = 500;
-    conv.maxRowId = 502;
+    conv.transcript.state = {
+      lines: [500, 501, 502].map(lineOf),
+      status: "idle",
+    };
+    conv.transcript.minRowId = 500;
+    conv.transcript.maxRowId = 502;
     stubCachedPage(conv, cachedRows([100, 101]));
-    await conv.loadOlder();
+    await conv.pager.older();
     assertEquals(channel.calls[0], {
       after: null,
       before: 500,
       limit: WINDOW_PAGE,
     });
     assertEquals(
-      conv.transcript.lines.map((l) => l.historyId),
+      conv.transcript.rows.map((l) => l.historyId),
       [490, 491, 500, 501, 502],
     );
-    assertEquals(conv.minRowId, 490);
+    assertEquals(conv.transcript.minRowId, 490);
   },
 );
 
@@ -824,17 +839,20 @@ Deno.test(
   async () => {
     const channel = new FakeChannel([{ rows: [], more: false }]);
     const conv = makeConv(channel);
-    conv.transcript = { lines: [500, 501, 502].map(lineOf), status: "idle" };
-    conv.minRowId = 500;
-    conv.maxRowId = 502;
+    conv.transcript.state = {
+      lines: [500, 501, 502].map(lineOf),
+      status: "idle",
+    };
+    conv.transcript.minRowId = 500;
+    conv.transcript.maxRowId = 502;
     // 499 abuts the head: a continuous segment, safe to render.
     stubCachedPage(conv, cachedRows([497, 498, 499]));
-    await conv.loadOlder();
+    await conv.pager.older();
     assertEquals(
-      conv.transcript.lines.map((l) => l.historyId),
+      conv.transcript.rows.map((l) => l.historyId),
       [497, 498, 499, 500, 501, 502],
     );
-    assertEquals(conv.minRowId, 497);
+    assertEquals(conv.transcript.minRowId, 497);
     // The server page continues BELOW the merged rows: re-fetching 497..499
     // would fold to nothing and disarm the sentinel with history still below.
     assertEquals(channel.calls[0]?.before, 497);
@@ -849,7 +867,7 @@ Deno.test("the cursor write addresses the root the roster names", async () => {
   const conv = makeConv(channel);
   landWindowNow(conv);
   unreadStore.enter(tagmaKey("tagma-1"));
-  conv.lastSeq = 42;
+  conv.transcript.lastSeq = 42;
   conv.markRead();
   await settle();
   assertEquals(channel.manages, [
@@ -874,7 +892,7 @@ Deno.test("a rejected cursor write keeps its retry point", async () => {
   const conv = makeConv(channel);
   landWindowNow(conv);
   unreadStore.enter(tagmaKey("tagma-1"));
-  conv.lastSeq = 42;
+  conv.transcript.lastSeq = 42;
   conv.markRead();
   await settle();
   const puts = () =>
@@ -899,7 +917,7 @@ Deno.test("an unreadable roster sends no cursor write", async () => {
   const conv = makeConv(channel);
   landWindowNow(conv);
   unreadStore.enter(tagmaKey("tagma-1"));
-  conv.lastSeq = 42;
+  conv.transcript.lastSeq = 42;
   conv.markRead();
   await settle();
   assertEquals(
@@ -919,10 +937,10 @@ Deno.test("a settled write does not clear a newer one's marker", async () => {
     return new Promise<void>((resolve) => pending.push(resolve));
   };
   unreadStore.enter(tagmaKey("tagma-1"));
-  conv.lastSeq = 10;
+  conv.transcript.lastSeq = 10;
   conv.markRead();
   assertEquals(sent, [10]);
-  conv.lastSeq = 20;
+  conv.transcript.lastSeq = 20;
   conv.markRead();
   assertEquals(sent, [10, 20]);
   pending[0](); // the older write lands while the newer is still in flight
@@ -932,7 +950,7 @@ Deno.test("a settled write does not clear a newer one's marker", async () => {
   assertEquals(sent, [10, 20]);
   pending[1]();
   await settle();
-  conv.lastSeq = 21;
+  conv.transcript.lastSeq = 21;
   conv.markRead();
   assertEquals(sent, [10, 20, 21]);
 });
@@ -955,10 +973,10 @@ Deno.test("a rootless install warns once per tunnel", async () => {
     warnings.push(args.map((arg) => String(arg)).join(" "));
   };
   try {
-    conv.lastSeq = 42;
+    conv.transcript.lastSeq = 42;
     conv.markRead();
     await settle();
-    conv.lastSeq = 43;
+    conv.transcript.lastSeq = 43;
     conv.markRead();
     await settle();
   } finally {
@@ -976,9 +994,9 @@ Deno.test("a rootless install warns once per tunnel", async () => {
 /** A window holding only row 60, with the floor and head set as the page
  *  would leave them after a catch-up. */
 function windowAt60(conv: RelayConv): void {
-  conv.minRowId = 60;
-  conv.maxRowId = 80;
-  conv.transcript = { lines: [lineOf(60)], status: "idle" };
+  conv.transcript.minRowId = 60;
+  conv.transcript.maxRowId = 80;
+  conv.transcript.state = { lines: [lineOf(60)], status: "idle" };
 }
 
 Deno.test("two quote probes in flight each read their own page", async () => {
@@ -989,8 +1007,8 @@ Deno.test("two quote probes in flight each read their own page", async () => {
   const conv = makeConv(channel);
   windowAt60(conv);
   const [first, second] = await Promise.all([
-    conv.peekRow(30),
-    conv.peekRow(40),
+    conv.pager.peek(30),
+    conv.pager.peek(40),
   ]);
   assertEquals(typeof first === "string" ? first : first.historyId, 30);
   assertEquals(typeof second === "string" ? second : second.historyId, 40);
@@ -1009,14 +1027,14 @@ Deno.test("a scroll-up page is not disarmed by a probe in flight", async () => {
   ]);
   const conv = makeConv(channel);
   windowAt60(conv);
-  const [probe] = await Promise.all([conv.peekRow(30), conv.loadOlder()]);
+  const [probe] = await Promise.all([conv.pager.peek(30), conv.pager.older()]);
   assertEquals(typeof probe === "string" ? probe : probe.historyId, 30);
   // The scroll-up page landed whole: history below still exists, and the
   // rows are in the transcript rather than in the probe's buffer.
-  assertEquals(conv.hasMoreOlder, true);
-  assertEquals(conv.transcript.lines.length, 1 + WINDOW_PAGE);
-  assertEquals(conv.transcript.lines[0]!.historyId, 10);
-  assertEquals(conv.minRowId, 10);
+  assertEquals(conv.pager.hasMoreOlder, true);
+  assertEquals(conv.transcript.rows.length, 1 + WINDOW_PAGE);
+  assertEquals(conv.transcript.rows[0]!.historyId, 10);
+  assertEquals(conv.transcript.minRowId, 10);
 });
 
 Deno.test(
@@ -1027,8 +1045,8 @@ Deno.test(
     windowAt60(conv);
     // A target above the head cannot be quoted (only rendered rows can), and
     // its page would land above the window as a live row: refuse instead.
-    assertEquals(await conv.peekRow(90), "error");
-    assertEquals(conv.transcript.lines.length, 1);
+    assertEquals(await conv.pager.peek(90), "error");
+    assertEquals(conv.transcript.rows.length, 1);
     assertEquals(channel.calls.length, 0);
   },
 );
@@ -1041,8 +1059,8 @@ Deno.test(
     windowAt60(conv);
     // No row ever carried these ids, so "the row is gone" is not an answer
     // this client can give: a deletion is a fact about a contiguous history.
-    assertEquals(await conv.peekRow(0), "error");
-    assertEquals(await conv.peekRow(-3), "error");
+    assertEquals(await conv.pager.peek(0), "error");
+    assertEquals(await conv.pager.peek(-3), "error");
     assertEquals(channel.calls.length, 0);
   },
 );
@@ -1055,10 +1073,10 @@ Deno.test(
     const channel = new FakeChannel([{ rows: [eventRow(29)] }]);
     const conv = makeConv(channel);
     windowAt60(conv);
-    assertEquals(await conv.peekRow(30), "deleted");
+    assertEquals(await conv.pager.peek(30), "deleted");
     // A read, not a merge: the window and its floor are untouched.
-    assertEquals(conv.transcript.lines.length, 1);
-    assertEquals(conv.minRowId, 60);
+    assertEquals(conv.transcript.rows.length, 1);
+    assertEquals(conv.transcript.minRowId, 60);
     assertEquals(channel.calls.length, 1);
   },
 );
@@ -1072,7 +1090,7 @@ Deno.test(
     const conv = makeConv(channel);
     windowAt60(conv);
     conv.pullTimeoutMs = 50;
-    assertEquals(await conv.peekRow(30), "error");
+    assertEquals(await conv.pager.peek(30), "error");
   },
 );
 
@@ -1090,8 +1108,8 @@ Deno.test("a queued probe never runs inside the catch-up window", async () => {
   ]);
   const conv = makeConv(channel);
   windowAt60(conv);
-  const inFlight = conv.peekRow(30);
-  const queued = conv.peekRow(40); // waits in the shared before-page queue
+  const inFlight = conv.pager.peek(30);
+  const queued = conv.pager.peek(40); // waits in the shared before-page queue
   const caught = conv.catchUp(); // waits for that queue to drain
   const [first, second] = await Promise.all([inFlight, queued, caught]);
   // The window is the LAST request: a before-page that registered while it
@@ -1105,7 +1123,7 @@ Deno.test("a queued probe never runs inside the catch-up window", async () => {
   assertEquals(typeof first === "string" ? first : first.historyId, 30);
   assertEquals(typeof second === "string" ? second : second.historyId, 40);
   assertEquals(
-    conv.transcript.lines.map((line) => line.historyId),
+    conv.transcript.rows.map((line) => line.historyId),
     windowRows.map((_, i) => 200 + i),
   );
 });
@@ -1121,7 +1139,7 @@ Deno.test(
     ]);
     const conv = makeConv(channel);
     windowAt60(conv);
-    assertEquals(await conv.peekRow(30), "error");
+    assertEquals(await conv.pager.peek(30), "error");
     assertEquals(channel.calls.length, 1, "one probe page, one answer");
   },
 );
@@ -1138,8 +1156,8 @@ Deno.test("a window short by a hole keeps the sentinel armed", async () => {
   ]);
   const conv = makeConv(channel);
   await conv.catchUp(3);
-  assertEquals(conv.transcript.lines.length, 2);
-  assertEquals(conv.hasMoreOlder, true);
+  assertEquals(conv.transcript.rows.length, 2);
+  assertEquals(conv.pager.hasMoreOlder, true);
 });
 
 Deno.test("a window short without a hole disarms the sentinel", async () => {
@@ -1153,7 +1171,7 @@ Deno.test("a window short without a hole disarms the sentinel", async () => {
   ]);
   const conv = makeConv(channel);
   await conv.catchUp(3);
-  assertEquals(conv.hasMoreOlder, false);
+  assertEquals(conv.pager.hasMoreOlder, false);
 });
 
 Deno.test(
@@ -1167,9 +1185,9 @@ Deno.test(
     ]);
     const conv = makeConv(channel);
     windowAt60(conv);
-    await conv.loadOlder(3);
-    assertEquals(conv.hasMoreOlder, false);
-    await conv.loadOlder(3);
+    await conv.pager.older(3);
+    assertEquals(conv.pager.hasMoreOlder, false);
+    await conv.pager.older(3);
     assertEquals(channel.calls.length, 1, "a disarmed sentinel pages nothing");
   },
 );
@@ -1182,7 +1200,7 @@ Deno.test(
     const channel = new FakeChannel([{ rows: [], count: 1 }]);
     const conv = makeConv(channel);
     windowAt60(conv);
-    assertEquals(await conv.peekRow(30), "error");
+    assertEquals(await conv.pager.peek(30), "error");
     assertEquals(channel.calls.length, 1, "one probe page, one answer");
   },
 );
@@ -1193,13 +1211,13 @@ Deno.test("a closed conversation issues no history work", async () => {
   windowAt60(conv);
   // Control: an open conversation on a live channel pages, so the zero
   // counts below cannot pass on a pull that never worked in the first place.
-  await conv.loadOlder(10);
+  await conv.pager.older(10);
   assertEquals(channel.calls.length, 1, "an open conversation pages");
 
   conv.close();
-  conv.hasMoreOlder = true;
+  conv.pager.hasMoreOlder = true;
   const before = channel.calls.length;
-  await conv.loadOlder(10);
+  await conv.pager.older(10);
   assertEquals(
     channel.calls.length,
     before,
@@ -1220,7 +1238,7 @@ Deno.test("a closed conversation issues no history work", async () => {
     }
   ).probePage(30);
   assertEquals(probe, null);
-  assertEquals(await conv.peekRow(30), "error");
+  assertEquals(await conv.pager.peek(30), "error");
   assertEquals(channel.calls.length, before);
-  assertEquals(conv.hasMoreOlder, true);
+  assertEquals(conv.pager.hasMoreOlder, true);
 });
