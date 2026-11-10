@@ -34,7 +34,10 @@ Deno.test("the shell's save button reports submitability and busy", () => {
     src.includes("disabled={!canSubmit || busy}"),
     "the save button is disabled for both an unsubmittable form and a save in flight",
   );
-  assert(src.includes("{common_save()}"), "the save label is the shared one");
+  assert(
+    src.includes("{submitLabel ?? common_save()}"),
+    "the save label is the shared one unless the caller varies it",
+  );
 });
 
 Deno.test("the cancel button stays live while a save runs", () => {
@@ -133,3 +136,46 @@ Deno.test("the shell nests the dialog's layers in one order", () => {
     "each layer opens inside the one before it",
   );
 });
+
+Deno.test(
+  "the shell's destructive action opens the footer, disabled while saving",
+  () => {
+    const src = codeLines(SHELL);
+    const footer = src.indexOf('<div class="flex gap-2">');
+    const destructive = src.indexOf("{#if destructiveAction}");
+    const cancel = src.indexOf("onclick={onCancel}");
+    assert(
+      footer >= 0 && destructive >= 0 && cancel >= 0,
+      "all three anchors are present",
+    );
+    assert(
+      footer < destructive && destructive < cancel,
+      "the destructive action opens the footer, in front of cancel",
+    );
+    const close = src.indexOf("{/if}", destructive);
+    assert(close > destructive, "the destructive action sits behind a guard");
+    const block = src.slice(destructive, close);
+    assert(
+      block.includes(
+        'class="btn flex-1 preset-outlined-error-500 hover:preset-filled-error-500"',
+      ),
+      "the destructive action wears the preset the shell keeps for it",
+    );
+    assert(
+      block.includes('type="button"'),
+      "the button never submits the form the save key submits",
+    );
+    assert(
+      block.includes("disabled={busy}"),
+      "a save in flight disables the destructive action too",
+    );
+    assert(
+      block.includes("onclick={destructiveAction.onAction}"),
+      "the button runs the action the caller named",
+    );
+    assert(
+      block.includes("{destructiveAction.label}"),
+      "the label comes from the caller",
+    );
+  },
+);

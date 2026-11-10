@@ -12,6 +12,9 @@
   // stay in the caller, which passes them as `children`; nothing about
   // what is being edited reaches this file. Delete confirmations use
   // `ConfirmDialog` instead: they ask a question, they do not edit a draft.
+  // A caller may offer a destructive action beside save, such as removing
+  // what it edits. That button lives here too, so the shell owns its place,
+  // its error preset and its busy state in one spot.
   import type { Snippet } from "svelte";
   import { Dialog, Portal } from "@skeletonlabs/skeleton-svelte";
   import { common_cancel, common_save } from "../paraglide/messages.js";
@@ -25,6 +28,8 @@
     busy,
     error,
     canSubmit,
+    submitLabel = undefined,
+    destructiveAction = undefined,
     onSubmit,
     onCancel,
     onOpen = undefined,
@@ -41,10 +46,18 @@
     busy: boolean;
     error: string | null;
     canSubmit: boolean;
+    /** The save key's label. A caller may pass a string that follows its own
+     * busy state; the shell places the label and does not choose the words. */
+    submitLabel?: string;
     onSubmit: () => void;
     onCancel: () => void;
     /** Called on each open transition: the caller reseeds its drafts. */
     onOpen?: () => void;
+    /** A destructive action beside save, e.g. removing what this dialog
+     * edits. The slot is destructive by design: the shell writes the error
+     * preset, the place and the busy state, and the caller supplies only a
+     * label and a handler. */
+    destructiveAction?: { label: string; onAction: () => void };
     children: Snippet;
   } = $props();
 
@@ -93,6 +106,16 @@
           {/if}
 
           <div class="flex gap-2">
+            {#if destructiveAction}
+              <button
+                type="button"
+                class="btn flex-1 preset-outlined-error-500 hover:preset-filled-error-500"
+                onclick={destructiveAction.onAction}
+                disabled={busy}
+              >
+                {destructiveAction.label}
+              </button>
+            {/if}
             <button
               type="button"
               class="btn flex-1 preset-outlined-surface-500 hover:preset-filled-surface-500"
@@ -105,7 +128,7 @@
               class="btn flex-1 preset-filled-primary-500 text-on-primary-500 transition hover:brightness-110"
               disabled={!canSubmit || busy}
             >
-              {common_save()}
+              {submitLabel ?? common_save()}
             </button>
           </div>
         </form>

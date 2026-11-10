@@ -44,6 +44,7 @@
     publicRoomsError = null,
     busy = false,
     onCreate,
+    onCreated,
     onAcceptInvite,
     onOpenSettings,
     onOpen,
@@ -59,7 +60,10 @@
     publicRoomsError?: string | null;
     // True while a create is in flight (disables the create affordance).
     busy?: boolean;
-    onCreate?: (opts: CreateRoomOpts) => Promise<unknown> | unknown;
+    onCreate?: (opts: CreateRoomOpts) => Promise<string> | string;
+    // The id goes here rather than through `onCreate`: the page that owns
+    // navigation should not steer a dialog the user may have closed.
+    onCreated?: (roomId: string) => void;
     onAcceptInvite?: (invite: RoomInviteView) => void;
     // Navigate to a room's settings page (the management surface).
     onOpenSettings?: (roomId: string) => void;
@@ -74,18 +78,43 @@
   );
 
   // Create dialog: owns its open + error state here (the store call happens in
-  // the owning page's `onCreate` wrapper, which throws on failure). Closes on
-  // success, surfaces the error on failure.
+  // the owning page's `onCreate` wrapper, which throws on failure). A save in
+  // flight does not lock the dialog: cancel closes it, and the request already
+  // sent cannot be recalled. Cancel also forfeits that result, so a form
+  // reopened while it is out keeps its own result: the counter below decides,
+  // not the open flag, which a reopened form has set again. A result that
+  // lands after the cancel is dropped, navigation included, because the user
+  // said they did not want this room: the success path leaves the room in the
+  // list store, where the user meets it again if they do want it, and the
+  // failure path has no form left to show it on, so it is logged.
   let createOpen = $state(false);
   let createError = $state<string | null>(null);
+  // Requests are numbered: cancel bumps the number, and a result whose number
+  // is no longer current belongs to a form the user has let go.
+  let lastCreate = 0;
+  // Leaving the page forfeits the result as well: a back navigation lands
+  // while a create is out, and the success branch would otherwise steer a
+  // component that is gone.
+  // The body reads nothing reactive, so this runs once and cleans up on
+  // unmount only; a reactive read here would bump the number between reruns.
+  $effect(() => () => {
+    lastCreate += 1;
+  });
 
   async function doCreate(opts: CreateRoomOpts): Promise<void> {
     if (!onCreate) return;
+    const mine = ++lastCreate;
     createError = null;
     try {
-      await onCreate(opts);
+      const id = await onCreate(opts);
+      if (mine !== lastCreate) return;
       createOpen = false;
+      onCreated?.(id);
     } catch (err) {
+      if (mine !== lastCreate) {
+        console.error("[rooms] create failed after its form was retired:", err);
+        return;
+      }
       createError = msgOf(err);
     }
   }
@@ -302,6 +331,10 @@
   </div>
 </div>
 
+<!-- Cancelling closes the form and retires its request, so a form reopened
+     while it is out keeps its own result. A success still lands in the list
+     store, so the room is there to open; a failure has nowhere left to be
+     shown and is logged in doCreate. -->
 <CreateRoomDialog
   open={createOpen}
   {busy}
@@ -309,6 +342,7 @@
   onCreate={doCreate}
   onCancel={() => {
     createOpen = false;
+    lastCreate += 1;
     createError = null;
   }}
 />

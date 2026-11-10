@@ -9,6 +9,10 @@
   // drafts the fields and hands them to the owning page, which performs the
   // store calls and closes the dialog on success (failures come back down as
   // the `error` prop; `busy` disables every action while any call is out).
+  // This dialog keeps its own frame rather than the shared shell: its body is
+  // two different shapes (a form for the cloud path, a minted code with no
+  // fields for the local one), and each branch carries its own error line
+  // and its own footer instead of one form with one save button.
   export interface AdvancedSpawnFields {
     slug: string;
     workspace: string;

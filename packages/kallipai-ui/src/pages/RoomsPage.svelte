@@ -42,10 +42,8 @@
         invites={roomsStore.invites}
         {invitesPhase}
         busy={roomsStore.creating}
-        onCreate={async (opts) => {
-          const id = await roomConversationsStore.createRoom(opts);
-          navigate(`/rooms/${id}`);
-        }}
+        onCreate={async (opts) => await roomConversationsStore.createRoom(opts)}
+        onCreated={(id) => navigate(`/rooms/${id}`)}
         publicRooms={roomsStore.publicRooms}
         publicRoomsError={roomsStore.publicRoomsError}
         onJoinPublic={(roomId) =>
