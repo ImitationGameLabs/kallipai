@@ -374,14 +374,22 @@ let
       && countLines "      receivers: [otlp]" built.texts.otelcol == 2
       && !(lib.hasInfix "otlp/" built.texts.otelcol)
     ))
+    # A scrape receiver is what would make this text a scrape face; its return
+    # is a design change, so the check holds the shape of the text.
+    (expect "the collector text carries no scrape receiver" (
+      trimmedCount "prometheus:" built.texts.otelcol == 0
+      && !(lib.hasInfix "prometheus: " built.texts.otelcol)
+      # The named variant is also held by the receiver-shape group above.
+      && !(lib.hasInfix "prometheus/" built.texts.otelcol)
+    ))
     (expect "the intake still forwards traces to tempo and metrics to prometheus" (
       countLines "      exporters: [otlp]" built.texts.otelcol == 1
       && countLines "      exporters: [prometheusremotewrite]" built.texts.otelcol == 1
     ))
     # --- the deployment face -----------------------------------------------------
-    # The removal is proved from the files that carried it: one token mount where
-    # the text names it, no published instance span in either override, and no
-    # table, render step or scraper left in the files that had one.
+    # Two promises hold here: one token mount at the path the collector text
+    # names, and a start script that builds the stack from this flake instead of
+    # rendering a deployment of its own.
     (expect "compose mounts the platform token where the collector reads it" (
       occurrences "- \${KALLIPAI_TELEMETRY_INTAKE_TOKEN_FILE:?set KALLIPAI_TELEMETRY_INTAKE_TOKEN_FILE}:${stack.defaultIntakeTokenPath}:ro" compose
       == 1
