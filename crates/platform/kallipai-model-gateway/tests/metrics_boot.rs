@@ -82,7 +82,18 @@ async fn fresh_db_url() -> String {
     let n = DB_COUNTER.fetch_add(1, Ordering::Relaxed);
     let db_name = format!("{DB_PREFIX}{}_{n}", std::process::id());
     let root_url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
-    let root = Database::connect(&root_url)
+    // One bounded connection, on the terms `src/test_support.rs` sets for the
+    // in-process suite (`TEST_DB_POOL`, `ACQUIRE_TIMEOUT`, `CONNECT_TIMEOUT`, which
+    // are `cfg(test)` and so cannot be imported here): this binary shares the
+    // container and lives inside the same budget. The gateway it boots opens its own
+    // production pool, which does not.
+    let mut options = kallipai_db_helper::connect_options(&root_url, Duration::from_secs(1));
+    options
+        .max_connections(1)
+        .min_connections(1)
+        .acquire_timeout(Duration::from_secs(9))
+        .connect_timeout(Duration::from_secs(5));
+    let root = Database::connect(options)
         .await
         .expect("connect to the maintenance database");
     root.execute(Statement::from_string(

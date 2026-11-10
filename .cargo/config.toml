@@ -1,2 +1,12 @@
 [build]
 warnings = "deny"
+
+# Every database-class test shares one Postgres limit, the image's default 100
+# connections, and each holds one while it runs, so the thread count is the
+# concurrency bound. At 48 the worst case stays inside the limit.
+# The section applies to the whole workspace, to every crate's tests, since cargo
+# has no per-crate environment.
+# `cargo nextest` ignores this variable and sets threads its own way (profile
+# test-threads, --test-threads), so it needs its own pin.
+[env]
+RUST_TEST_THREADS = "48"

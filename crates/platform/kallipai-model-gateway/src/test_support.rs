@@ -5,12 +5,14 @@
 
 use std::io::Write;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use sea_orm::{ConnectionTrait, Database, DatabaseBackend, Statement};
 use testcontainers_modules::postgres::Postgres;
 use testcontainers_modules::testcontainers::runners::AsyncRunner;
 use testcontainers_modules::testcontainers::{ImageExt, ReuseDirective};
-use tokio::sync::OnceCell;
+use tokio::sync::{OnceCell, mpsc, oneshot};
 use tracing_subscriber::prelude::*;
 
 pub(crate) use kallipai_common::telemetry::test_observability::{ObservedSpan, Recorder};
@@ -307,6 +309,245 @@ static DB_COUNTER: AtomicU64 = AtomicU64::new(0);
 const CONTAINER_NAME: &str = "kallipai-testcontainers-pg-model-gateway";
 const DB_PREFIX: &str = "gateway_test_";
 
+/// Pool ceiling for each per-test database pool: one connection. The same handle
+/// also becomes the application under test's `AppState`, so a path that needs a
+/// second connection while the first is still held queues behind itself instead
+/// of opening another one.
+const TEST_DB_POOL: u32 = 1;
+
+/// Connections the maintenance pool may hold. Carving out a database costs tens
+/// of milliseconds inside `CREATE DATABASE`, so one connection would put the whole
+/// suite behind one queue: a trial with one connection left a suite run's
+/// longest wait at 708ms. Four keep that burst short.
+///
+/// The budget: each database-using test holds one connection. Counting test
+/// functions that reach a local fixture, attributes aware and comments skipped,
+/// gives 152; a measured round carves 153 databases, one more, so the bound below
+/// takes 153. No test function calls a fixture twice, so no test holds two
+/// databases at once. The harness runs up to `--test-threads` of them together, so
+/// the ceiling is min(threads, 153) + these four + the sweep's one against the
+/// image's default `max_connections` of 100: 53 at 48 threads, of which 52 can be
+/// live at once, because the sweep runs inside [`shared_pg_port`] before the first
+/// carve. A pool given up after a failed statement can overlap its successor for a
+/// moment, briefly adding up to four more connections. The repository pins 48 test
+/// threads in `.cargo/config.toml`, which covers a plain `cargo test` run from inside
+/// the repository. An exported `RUST_TEST_THREADS` takes precedence over the file, and
+/// in the gate the command-line flag has the last word. Cargo finds the file by
+/// walking up from its working directory, not from the manifest, so a run started
+/// outside the repository with `--manifest-path` would miss it.
+///
+/// Sampled peaks sit above that ceiling, not below it: 40, 45, 57 and 54 sessions at
+/// 1, 8, 48 and 256 threads, and 54 to 58 over the gate rounds. The one-thread
+/// figure carries the explanation: the structure allows 5 there and 40 were open,
+/// which is consistent with the sessions of dozens of finished tests still being
+/// open, though one thread cannot finish 40 tests in a moment. A snapshot at 52
+/// sessions found 34 of them idle on databases whose tests had already finished.
+/// What sets the peak is how long a connection outlives its test, a quantity no
+/// thread count bounds; why it lasts that long is undetermined here, whether a `Db`
+/// clone survives its test or the pool closes asynchronously. The peak can therefore
+/// only be measured: the ceiling is a construction and the peak an observation, and
+/// the remainder of the hundred is the margin. The probe counts `pg_stat_activity`
+/// every 100ms to 150ms, coarser than a pool's lifetime.
+const MAINTENANCE_POOL: u32 = 4;
+
+/// Wait for a pool connection before acquire gives up: four times the 2194ms
+/// longest wait logged with a `nix flake check` running beside the suite (p99
+/// 2164ms), which puts that bound at 8.8s; 9s keeps the margin. A shorter
+/// stopwatch would redden on the server's own fork spikes rather than on a real
+/// overrun.
+const ACQUIRE_TIMEOUT: Duration = Duration::from_secs(9);
+
+/// Ceiling on opening one connection, the server's auth round trip included. It
+/// is a separate knob from [`ACQUIRE_TIMEOUT`] because a slow handshake and a
+/// full pool fail for different reasons and want different patience.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Cap on one maintenance statement, so a blocked `CREATE DATABASE` cannot hold
+/// the shared connection and every waiter behind it. The channel itself carries
+/// no outer bound: a job waits as long as the queue ahead of it takes, and a
+/// carve sends two statements, so the queue can hold twice the carve count. A
+/// statement that does hit the cap costs the connection: the slot is emptied, so
+/// whichever job finds it next reconnects.
+const MAINTENANCE_STATEMENT_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Connect options for a pool that holds exactly `connections` connections: the
+/// ceiling is the budget, so it is set both as floor and cap.
+fn test_pool_options(url: &str, connections: u32) -> sea_orm::ConnectOptions {
+    let mut options = kallipai_db_helper::connect_options(url, Duration::from_secs(1));
+    options
+        .max_connections(connections)
+        .min_connections(connections)
+        .acquire_timeout(ACQUIRE_TIMEOUT)
+        .connect_timeout(CONNECT_TIMEOUT);
+    options
+}
+
+/// Append one wait sample to the file named by `KALLIPAI_TEST_WAIT_LOG`, when that
+/// variable is set. A sample covers the whole hop, queue plus work, which makes it
+/// an upper bound for the wait rather than the wait itself: the acquire a test body
+/// makes through its own pool has no per-call metric, so this probe bounds it from
+/// outside. The first sample of the process truncates the file, so a reader sees one
+/// round instead of every round so far. Truncation is per process, and this harness
+/// has one writer binary: point two test binaries at the same file and each would
+/// truncate once.
+fn record_wait(kind: &str, waited: Duration) {
+    let Some(path) = std::env::var_os("KALLIPAI_TEST_WAIT_LOG") else {
+        return;
+    };
+    // One writer at a time, flag and file together: a truncating open outside
+    // the lock would erase a sample another thread has just appended. A poisoned
+    // lock still leaves the file usable, so the flag is reached through the guard
+    // rather than around it.
+    static STARTED: Mutex<bool> = Mutex::new(false);
+    let mut first = STARTED.lock().unwrap_or_else(|e| e.into_inner());
+    let mut open = std::fs::OpenOptions::new();
+    // create+write only: `truncate` alone is refused without write access, and this
+    // branch is the one that has to make the file, so the flag is set only after
+    // the open succeeds.
+    open.create(true).write(true);
+    if *first {
+        open.append(true);
+    } else {
+        open.truncate(true);
+    }
+    let Ok(mut file) = open.open(path) else {
+        // A driver that asked for the log has to learn it is not getting one;
+        // eprintln keeps the trace in the captured test output.
+        eprintln!("test-db wait log: cannot open the path in KALLIPAI_TEST_WAIT_LOG");
+        return;
+    };
+    *first = true;
+    let line = format!("{kind} {}\n", waited.as_millis());
+    let _ = file.write_all(line.as_bytes());
+}
+
+/// One DDL request for the maintenance connection.
+struct MaintenanceJob {
+    sql: String,
+    reply: oneshot::Sender<Result<(), String>>,
+}
+
+/// The channel that carries [`MaintenanceJob`]s to the thread owning the
+/// connection: reached through [`maintenance_channel`] because it has to outlive
+/// any one test's runtime.
+static MAINTENANCE_TX: OnceLock<mpsc::UnboundedSender<MaintenanceJob>> = OnceLock::new();
+
+/// The maintenance connection shared by every test that carves out a database.
+/// It lives on a thread with its own runtime: a connection opened inside a
+/// `#[tokio::test]` runtime dies with that test, so anything the whole process
+/// shares cannot be opened inside one.
+///
+/// Handing the tests a handle to that runtime does not serve the asynchronous
+/// tests: tokio refuses a `block_on` inside a runtime. A helper reached from both
+/// kinds of test therefore has to serve a caller with a runtime and one without,
+/// and a channel to the maintenance thread is the one shape both can use.
+///
+/// `port` is read once, on the first call; later callers get the channel that
+/// exists, which is safe because the container port is fixed for the process for
+/// the same reason [`shared_pg_port`] is a cell.
+fn maintenance_channel(port: u16) -> &'static mpsc::UnboundedSender<MaintenanceJob> {
+    MAINTENANCE_TX.get_or_init(|| {
+        let (tx, mut jobs) = mpsc::unbounded_channel::<MaintenanceJob>();
+        std::thread::Builder::new()
+            .name("test-db-maintenance".to_owned())
+            .spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("maintenance runtime");
+                runtime.block_on(async move {
+                    let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+                    let root = std::sync::Arc::new(tokio::sync::Mutex::new(
+                        Database::connect(test_pool_options(&url, MAINTENANCE_POOL))
+                            .await
+                            .ok()
+                            .map(std::sync::Arc::new),
+                    ));
+                    while let Some(job) = jobs.recv().await {
+                        let root = std::sync::Arc::clone(&root);
+                        let url = url.clone();
+                        tokio::spawn(async move {
+                            let connection = {
+                                let mut slot = root.lock().await;
+                                if slot.is_none() {
+                                    // A start-up connect failure must not stick
+                                    // for the run: the slot is refilled per job,
+                                    // so one bad moment stays one bad moment.
+                                    *slot = Database::connect(test_pool_options(
+                                        &url,
+                                        MAINTENANCE_POOL,
+                                    ))
+                                    .await
+                                    .ok()
+                                    .map(std::sync::Arc::new);
+                                }
+                                slot.clone()
+                            };
+                            let result = match connection {
+                                Some(connection) => match tokio::time::timeout(
+                                    MAINTENANCE_STATEMENT_TIMEOUT,
+                                    connection.execute(Statement::from_string(
+                                        DatabaseBackend::Postgres,
+                                        job.sql,
+                                    )),
+                                )
+                                .await
+                                {
+                                    Ok(Ok(_)) => Ok(()),
+                                    // A failed statement may mean the connection itself
+                                    // is gone, as when the server restarts under a run.
+                                    // The pool is given up so the next job reconnects
+                                    // instead of inheriting the failure; there is no
+                                    // cooldown, so under a sustained outage each job
+                                    // pays the connect timeout once before the suite
+                                    // reddens.
+                                    Ok(Err(e)) => {
+                                        *root.lock().await = None;
+                                        Err(e.to_string())
+                                    }
+                                    Err(_) => {
+                                        // A statement that outlived its bound leaves a
+                                        // session no next job should inherit, so this
+                                        // connection is given up rather than passed on.
+                                        *root.lock().await = None;
+                                        Err("maintenance statement timed out".to_owned())
+                                    }
+                                },
+                                None => Err("maintenance connection is not up".to_owned()),
+                            };
+                            let _ = job.reply.send(result);
+                        });
+                    }
+                });
+            })
+            .expect("spawn maintenance thread");
+        tx
+    })
+}
+
+/// Run one DDL statement on the maintenance connection and record the wait in
+/// front of it, which is the only window where a queue builds up. A database carve
+/// sends two statements through here, a stale-drop and the create
+/// ([`raw_test_db`]), and one measured round made 153 carves through four
+/// connections. Both counts are read off this log: `raw_test_db` records one
+/// `test-pool-connect` sample per database it carves, so that line count is the
+/// database count, and the same round writes two `maintenance` samples per carve, 306
+/// in all.
+async fn maintenance_execute(port: u16, sql: String, what: &str) {
+    let started = Instant::now();
+    let (reply, answer) = oneshot::channel();
+    maintenance_channel(port)
+        .send(MaintenanceJob { sql, reply })
+        .unwrap_or_else(|_| panic!("{what}: maintenance thread is gone"));
+    let result = answer
+        .await
+        .unwrap_or_else(|_| panic!("{what}: maintenance reply dropped"));
+    record_wait("maintenance", started.elapsed());
+    if let Err(e) = result {
+        panic!("{what}: {e}");
+    }
+}
+
 /// Cold-start errors worth a retry: an ephemeral outbound source port
 /// snatching the picked host port, or a sibling test binary cold-starting
 /// at the same moment winning the container create. String matching is
@@ -372,7 +613,7 @@ fn owner_dead(db_name: &str) -> bool {
 /// swallowed.
 async fn sweep_dead_test_dbs(port: u16) {
     let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
-    let root = match Database::connect(&url).await {
+    let root = match Database::connect(test_pool_options(&url, TEST_DB_POOL)).await {
         Ok(root) => root,
         Err(e) => {
             eprintln!("dead-db sweep: connect failed: {e}");
@@ -421,30 +662,31 @@ async fn sweep_dead_test_dbs(port: u16) {
 /// the process and a per-process counter, and defensively drops a stale
 /// same-named database first (pid reuse). Dead databases disappear with the
 /// container (`docker rm -f {CONTAINER_NAME}`); no other cleanup exists by
-/// design.
+/// design. The pool behind the returned handle holds one connection, so the
+/// per-test ceiling is what keeps concurrent tests inside the server budget.
 pub(crate) async fn raw_test_db() -> Db {
     let port = shared_pg_port().await;
     let n = DB_COUNTER.fetch_add(1, Ordering::Relaxed);
     let db_name = format!("{DB_PREFIX}{}_{n}", std::process::id());
-    let root_url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
-    let root = Database::connect(&root_url)
-        .await
-        .expect("connect to postgres maintenance db");
-    root.execute(Statement::from_string(
-        DatabaseBackend::Postgres,
+    maintenance_execute(
+        port,
         format!("DROP DATABASE IF EXISTS \"{db_name}\""),
-    ))
-    .await
-    .expect("drop stale test database");
-    root.execute(Statement::from_string(
-        DatabaseBackend::Postgres,
+        "drop stale test database",
+    )
+    .await;
+    maintenance_execute(
+        port,
         format!("CREATE DATABASE \"{db_name}\""),
-    ))
-    .await
-    .expect("create test database");
-    drop(root);
+        "create test database",
+    )
+    .await;
     let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/{db_name}");
-    Database::connect(&url).await.expect("connect to test db")
+    let started = Instant::now();
+    let db = Database::connect(test_pool_options(&url, TEST_DB_POOL))
+        .await
+        .expect("connect to test db");
+    record_wait("test-pool-connect", started.elapsed());
+    db
 }
 
 /// A fresh test database with the schema applied (the files harness's
@@ -833,5 +1075,14 @@ mod tests {
         assert!(owner_dead(&format!("{DB_PREFIX}4000000000_0")));
         assert!(!owner_dead("gateway_test_4000000000"));
         assert!(!owner_dead("files_test_4000000000_0"));
+    }
+
+    #[test]
+    fn test_pool_options_cap_and_bound_the_pool() {
+        let options = test_pool_options("postgres://user:pass@host/db", TEST_DB_POOL);
+        assert_eq!(options.get_max_connections(), Some(TEST_DB_POOL));
+        assert_eq!(options.get_min_connections(), Some(TEST_DB_POOL));
+        assert_eq!(options.get_acquire_timeout(), Some(ACQUIRE_TIMEOUT));
+        assert_eq!(options.get_connect_timeout(), Some(CONNECT_TIMEOUT));
     }
 }
