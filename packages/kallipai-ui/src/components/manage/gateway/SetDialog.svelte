@@ -6,10 +6,8 @@
   // draft session) and hands the whole of it back: the page lands changed
   // rows as PUTs, then the description, then the order. Sets are never
   // here: the name is the registry key.
-  import { Dialog, Portal } from "@skeletonlabs/skeleton-svelte";
+  import FormDialog from "../../FormDialog.svelte";
   import {
-    common_cancel,
-    common_save,
     manage_gateway_set_members_order_hint,
     manage_profiles_set_dialog_edit_title,
     manage_profiles_set_dialog_description_label,
@@ -178,15 +176,11 @@
     edits = { ...edits, [id]: next };
   }
 
-  function onOpenChange(e: { open: boolean }): void {
-    if (!e.open && !busy) onCancel();
-  }
-
   // A drafted field the catalog would refuse stops the save instead of
   // riding along or being dropped with its form: the first offending row
   // opens, so the problem shows under the field that holds it.
   function submit(): void {
-    if (!canSubmit || set === null) return;
+    if (set === null) return;
     const offending = firstOffending(members, edits);
     if (offending !== undefined) {
       editingId = offending.profile_id;
@@ -201,86 +195,57 @@
   }
 </script>
 
-<Dialog {open} {onOpenChange}>
-  <Portal>
-    <Dialog.Backdrop class="fixed inset-0 bg-surface-50-950/60 z-50" />
-    <Dialog.Positioner class="fixed inset-0 z-50 grid place-items-center p-4">
-      <Dialog.Content
-        class="card preset-tonal-surface w-full max-w-xl p-6 flex flex-col gap-4 max-h-[85vh] overflow-y-auto"
-      >
-        <Dialog.Title class="text-lg font-semibold">
-          {manage_profiles_set_dialog_edit_title()}
-          <span class="font-mono opacity-80">{set?.name}</span>
-        </Dialog.Title>
+{#snippet titleExtra()}
+  <span class="font-mono opacity-80">{set?.name}</span>
+{/snippet}
 
-        <form
-          class="flex flex-col gap-4"
-          onsubmit={(e) => {
-            e.preventDefault();
-            submit();
-          }}
-        >
-          <label class="flex flex-col gap-1">
-            <span class="text-xs font-medium">
-              {manage_profiles_set_dialog_description_label()}
-            </span>
-            <input class="input text-sm" bind:value={descriptionDraft} />
-          </label>
+<FormDialog
+  {open}
+  title={manage_profiles_set_dialog_edit_title()}
+  {titleExtra}
+  size="xl"
+  tall
+  {busy}
+  {error}
+  {canSubmit}
+  onSubmit={submit}
+  {onCancel}
+>
+  <label class="flex flex-col gap-1">
+    <span class="text-xs font-medium">
+      {manage_profiles_set_dialog_description_label()}
+    </span>
+    <input class="input text-sm" bind:value={descriptionDraft} />
+  </label>
 
-          <p class="text-xs opacity-70">
-            {manage_gateway_set_members_order_hint()}
-          </p>
+  <p class="text-xs opacity-70">
+    {manage_gateway_set_members_order_hint()}
+  </p>
 
-          <div role="list" class="flex flex-col gap-2">
-            {#each members as member, idx (member.profile_id)}
-              <GatewayMemberCard
-                {member}
-                position={idx + 1}
-                dragOver={dragOver === idx}
-                isFirst={idx === 0}
-                isLast={idx === members.length - 1}
-                editing={editingId === member.profile_id}
-                editDraft={edits[member.profile_id] ?? null}
-                {busy}
-                onDragStart={() => (dragFrom = idx)}
-                onDragEnd={clearDrag}
-                onDragOver={() => (dragOver = idx)}
-                onDrop={() => {
-                  if (dragFrom !== null) reorder(dragFrom, idx);
-                  clearDrag();
-                }}
-                onRemove={() => removeAt(idx)}
-                onMoveUp={() => step(idx, -1)}
-                onMoveDown={() => step(idx, 1)}
-                onToggleEdit={() => toggleEdit(member)}
-                onEditDraft={(next) => applyEdit(member.profile_id, next)}
-              />
-            {/each}
-          </div>
-
-          {#if error !== null}
-            <p class="text-sm" role="alert">{error}</p>
-          {/if}
-
-          <div class="flex gap-2">
-            <button
-              type="button"
-              class="btn flex-1 preset-outlined-surface-500 hover:preset-filled-surface-500"
-              disabled={busy}
-              onclick={onCancel}
-            >
-              {common_cancel()}
-            </button>
-            <button
-              type="submit"
-              class="btn flex-1 preset-filled-primary-500 text-on-primary-500 transition hover:brightness-110"
-              disabled={!canSubmit}
-            >
-              {common_save()}
-            </button>
-          </div>
-        </form>
-      </Dialog.Content>
-    </Dialog.Positioner>
-  </Portal>
-</Dialog>
+  <div role="list" class="flex flex-col gap-2">
+    {#each members as member, idx (member.profile_id)}
+      <GatewayMemberCard
+        {member}
+        position={idx + 1}
+        dragOver={dragOver === idx}
+        isFirst={idx === 0}
+        isLast={idx === members.length - 1}
+        editing={editingId === member.profile_id}
+        editDraft={edits[member.profile_id] ?? null}
+        {busy}
+        onDragStart={() => (dragFrom = idx)}
+        onDragEnd={clearDrag}
+        onDragOver={() => (dragOver = idx)}
+        onDrop={() => {
+          if (dragFrom !== null) reorder(dragFrom, idx);
+          clearDrag();
+        }}
+        onRemove={() => removeAt(idx)}
+        onMoveUp={() => step(idx, -1)}
+        onMoveDown={() => step(idx, 1)}
+        onToggleEdit={() => toggleEdit(member)}
+        onEditDraft={(next) => applyEdit(member.profile_id, next)}
+      />
+    {/each}
+  </div>
+</FormDialog>

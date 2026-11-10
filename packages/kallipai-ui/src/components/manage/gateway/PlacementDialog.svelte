@@ -6,7 +6,8 @@
   // with a hint instead of a dead submit. An unassigned profile belongs
   // to one collection, so a drop that names its own collection pins the
   // first pick: the server would refuse a membership across collections.
-  import { Dialog, Portal } from "@skeletonlabs/skeleton-svelte";
+  import { Dialog } from "@skeletonlabs/skeleton-svelte";
+  import FormDialog from "../../FormDialog.svelte";
   import ReqMark from "../../ReqMark.svelte";
   import type {
     AdminCollectionRow,
@@ -14,8 +15,6 @@
   } from "../../../lib/manage/gateway/client.ts";
   import { memberSetsOf } from "../../../lib/gateway/collections.ts";
   import {
-    common_cancel,
-    common_save,
     manage_gateway_placement_collection_label,
     manage_gateway_placement_empty,
     manage_gateway_placement_profile_label,
@@ -54,14 +53,11 @@
 
   let collectionDraft = $state("");
   let setNameDraft = $state("");
-  let lastOpen = false;
-  $effect(() => {
-    if (open && !lastOpen) {
-      collectionDraft = sourceCollection ?? collections[0]?.name ?? "";
-      setNameDraft = "";
-    }
-    lastOpen = open;
-  });
+
+  function reseed(): void {
+    collectionDraft = sourceCollection ?? collections[0]?.name ?? "";
+    setNameDraft = "";
+  }
 
   // One collection's sets can take this profile; the others would be
   // refused, so the pick offers only them when the drop named one.
@@ -83,104 +79,68 @@
     collectionDraft !== "" && setNameDraft !== "" && memberSets.length > 0,
   );
 
-  function onOpenChange(e: { open: boolean }): void {
-    if (!e.open && !busy) onCancel();
-  }
-
   function submit(): void {
-    if (!canSubmit || busy) return;
     onConfirm(setNameDraft);
   }
 </script>
 
-<Dialog {open} {onOpenChange}>
-  <Portal>
-    <Dialog.Backdrop class="fixed inset-0 bg-surface-50-950/60 z-50" />
-    <Dialog.Positioner class="fixed inset-0 z-50 grid place-items-center p-4">
-      <Dialog.Content
-        class="card preset-tonal-surface w-full max-w-md p-6 flex flex-col gap-4"
-      >
-        <Dialog.Title class="text-lg font-semibold">
-          {manage_gateway_placement_title()}
-        </Dialog.Title>
-        {#if profileId !== null}
-          <Dialog.Description class="text-sm opacity-70 font-mono">
-            {manage_gateway_placement_profile_label({ name: profileId })}
-          </Dialog.Description>
-        {/if}
+<FormDialog
+  {open}
+  title={manage_gateway_placement_title()}
+  size="md"
+  {busy}
+  {error}
+  {canSubmit}
+  onOpen={reseed}
+  onSubmit={submit}
+  {onCancel}
+>
+  {#if profileId !== null}
+    <Dialog.Description class="text-sm opacity-70 font-mono">
+      {manage_gateway_placement_profile_label({ name: profileId })}
+    </Dialog.Description>
+  {/if}
 
-        <form
-          class="flex flex-col gap-3"
-          onsubmit={(e) => {
-            e.preventDefault();
-            submit();
-          }}
-        >
-          <label class="flex flex-col gap-1">
-            <span class="text-xs font-medium">
-              {manage_gateway_placement_collection_label()}
-              <ReqMark />
-            </span>
-            <select
-              class="input text-sm font-mono"
-              bind:value={collectionDraft}
-              onchange={() => (setNameDraft = "")}
-              disabled={busy || sourceCollection !== undefined}
-              aria-required="true"
-            >
-              {#each pickedCollections as collection (collection.name)}
-                <option value={collection.name}>{collection.name}</option>
-              {/each}
-            </select>
-          </label>
+  <label class="flex flex-col gap-1">
+    <span class="text-xs font-medium">
+      {manage_gateway_placement_collection_label()}
+      <ReqMark />
+    </span>
+    <select
+      class="input text-sm font-mono"
+      bind:value={collectionDraft}
+      onchange={() => (setNameDraft = "")}
+      disabled={busy || sourceCollection !== undefined}
+      aria-required="true"
+    >
+      {#each pickedCollections as collection (collection.name)}
+        <option value={collection.name}>{collection.name}</option>
+      {/each}
+    </select>
+  </label>
 
-          <label class="flex flex-col gap-1">
-            <span class="text-xs font-medium">
-              {manage_gateway_placement_set_label()}
-              <ReqMark />
-            </span>
-            <select
-              class="input text-sm font-mono"
-              bind:value={setNameDraft}
-              disabled={busy || memberSets.length === 0}
-              aria-required="true"
-            >
-              {#if setNameDraft === ""}
-                <option value="" disabled></option>
-              {/if}
-              {#each memberSets as set (set.name)}
-                <option value={set.name}>{set.name}</option>
-              {/each}
-            </select>
-          </label>
-          {#if memberSets.length === 0}
-            <p class="text-xs opacity-60">
-              {manage_gateway_placement_empty()}
-            </p>
-          {/if}
-
-          {#if error}
-            <p class="text-sm text-error-500" role="alert">{error}</p>
-          {/if}
-
-          <div class="flex gap-2">
-            <button
-              type="button"
-              class="btn flex-1 preset-outlined-surface-500 hover:preset-filled-surface-500"
-              onclick={onCancel}
-            >
-              {common_cancel()}
-            </button>
-            <button
-              type="submit"
-              class="btn flex-1 preset-filled-primary-500 text-on-primary-500 transition hover:brightness-110"
-              disabled={!canSubmit || busy}
-            >
-              {common_save()}
-            </button>
-          </div>
-        </form>
-      </Dialog.Content>
-    </Dialog.Positioner>
-  </Portal>
-</Dialog>
+  <label class="flex flex-col gap-1">
+    <span class="text-xs font-medium">
+      {manage_gateway_placement_set_label()}
+      <ReqMark />
+    </span>
+    <select
+      class="input text-sm font-mono"
+      bind:value={setNameDraft}
+      disabled={busy || memberSets.length === 0}
+      aria-required="true"
+    >
+      {#if setNameDraft === ""}
+        <option value="" disabled></option>
+      {/if}
+      {#each memberSets as set (set.name)}
+        <option value={set.name}>{set.name}</option>
+      {/each}
+    </select>
+  </label>
+  {#if memberSets.length === 0}
+    <p class="text-xs opacity-60">
+      {manage_gateway_placement_empty()}
+    </p>
+  {/if}
+</FormDialog>

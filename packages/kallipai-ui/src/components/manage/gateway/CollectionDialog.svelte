@@ -14,11 +14,9 @@
 </script>
 
 <script lang="ts">
-  import { Dialog, Portal } from "@skeletonlabs/skeleton-svelte";
+  import FormDialog from "../../FormDialog.svelte";
   import ReqMark from "../../ReqMark.svelte";
   import {
-    common_cancel,
-    common_save,
     manage_gateway_collection_dialog_create_title,
     manage_gateway_collection_dialog_edit_title,
     manage_profiles_set_dialog_description_label,
@@ -47,17 +45,14 @@
     onCancel: () => void;
   } = $props();
 
-  // The local draft, reset on each open transition (plain latch).
+  // The local draft, reseeded by the shell on each open transition.
   let nameDraft = $state("");
   let descriptionDraft = $state("");
-  let lastOpen = false;
-  $effect(() => {
-    if (open && !lastOpen) {
-      nameDraft = collection?.name ?? "";
-      descriptionDraft = collection?.description ?? "";
-    }
-    lastOpen = open;
-  });
+
+  function reseed(): void {
+    nameDraft = collection?.name ?? "";
+    descriptionDraft = collection?.description ?? "";
+  }
 
   // Narrower than the server's rule (the gateway refuses empty names,
   // '/' and ':'); a duplicate name is refused server-side. Only the
@@ -73,86 +68,54 @@
   );
   const canSubmit = $derived(nameError === null && !busy);
 
-  function onOpenChange(e: { open: boolean }): void {
-    if (!e.open && !busy) onCancel();
-  }
-
   function submit(): void {
-    if (!canSubmit) return;
     onSave({ name: nameDraft.trim(), description: descriptionDraft });
   }
 </script>
 
-<Dialog {open} {onOpenChange}>
-  <Portal>
-    <Dialog.Backdrop class="fixed inset-0 bg-surface-50-950/60 z-50" />
-    <Dialog.Positioner class="fixed inset-0 z-50 grid place-items-center p-4">
-      <Dialog.Content
-        class="card preset-tonal-surface w-full max-w-xl p-6 flex flex-col gap-4 max-h-[85vh] overflow-y-auto"
-      >
-        <Dialog.Title class="text-lg font-semibold">
-          {collection === null
-            ? manage_gateway_collection_dialog_create_title()
-            : manage_gateway_collection_dialog_edit_title()}
-          {#if collection !== null}
-            <span class="font-mono opacity-80">{collection.name}</span>
-          {/if}
-        </Dialog.Title>
+{#snippet titleExtra()}
+  {#if collection !== null}
+    <span class="font-mono opacity-80">{collection.name}</span>
+  {/if}
+{/snippet}
 
-        {#if error}
-          <p class="text-sm text-error-500 dark:text-error-400">{error}</p>
-        {/if}
+<FormDialog
+  {open}
+  title={collection === null
+    ? manage_gateway_collection_dialog_create_title()
+    : manage_gateway_collection_dialog_edit_title()}
+  {titleExtra}
+  size="xl"
+  tall
+  {busy}
+  {error}
+  {canSubmit}
+  onOpen={reseed}
+  onSubmit={submit}
+  {onCancel}
+>
+  <label class="flex flex-col gap-1">
+    <span class="text-xs font-medium">
+      {manage_profiles_set_dialog_name_label()}
+      <ReqMark />
+    </span>
+    <input
+      class="input text-sm font-mono"
+      bind:value={nameDraft}
+      disabled={collection !== null}
+      aria-required="true"
+    />
+    {#if nameError}
+      <span class="text-xs text-error-500 dark:text-error-400">
+        {nameError}
+      </span>
+    {/if}
+  </label>
 
-        <form
-          class="flex flex-col gap-4"
-          onsubmit={(e) => {
-            e.preventDefault();
-            submit();
-          }}
-        >
-          <label class="flex flex-col gap-1">
-            <span class="text-xs font-medium">
-              {manage_profiles_set_dialog_name_label()}
-              <ReqMark />
-            </span>
-            <input
-              class="input text-sm font-mono"
-              bind:value={nameDraft}
-              disabled={collection !== null}
-              aria-required="true"
-            />
-            {#if nameError}
-              <span class="text-xs text-error-500 dark:text-error-400">
-                {nameError}
-              </span>
-            {/if}
-          </label>
-
-          <label class="flex flex-col gap-1">
-            <span class="text-xs font-medium">
-              {manage_profiles_set_dialog_description_label()}
-            </span>
-            <input class="input text-sm" bind:value={descriptionDraft} />
-          </label>
-
-          <div class="flex gap-2">
-            <button
-              type="button"
-              class="btn flex-1 preset-outlined-surface-500 hover:preset-filled-surface-500"
-              onclick={onCancel}
-            >
-              {common_cancel()}
-            </button>
-            <button
-              type="submit"
-              class="btn flex-1 preset-filled-primary-500 text-on-primary-500 transition hover:brightness-110"
-              disabled={!canSubmit}
-            >
-              {common_save()}
-            </button>
-          </div>
-        </form>
-      </Dialog.Content>
-    </Dialog.Positioner>
-  </Portal>
-</Dialog>
+  <label class="flex flex-col gap-1">
+    <span class="text-xs font-medium">
+      {manage_profiles_set_dialog_description_label()}
+    </span>
+    <input class="input text-sm" bind:value={descriptionDraft} />
+  </label>
+</FormDialog>

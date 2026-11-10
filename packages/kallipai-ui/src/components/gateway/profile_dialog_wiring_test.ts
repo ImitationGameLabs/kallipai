@@ -1,4 +1,5 @@
 import { assert, assertEquals, assertFalse } from "@std/assert";
+import { codeLines } from "../../lib/testing/source_pins.ts";
 
 // Source-read pins for the two gateway profile dialogs. The dialogs
 // share one contract: an empty or text-only modality selection must
@@ -16,67 +17,6 @@ const MANAGE_DIALOG = new URL(
   import.meta.url,
 );
 const COMPUTE_LIB = new URL("../../lib/manage/compute.ts", import.meta.url);
-
-function source(url: URL): string {
-  return new TextDecoder().decode(Deno.readFileSync(url));
-}
-
-/** The file's code lines: a line whose first non-blank characters open a
- * comment (`//`, `/*`, `*`, `<!--`) drops out -- the shape of an edit made
- * while debugging and left behind. Three limits, all deliberate: a
- * trailing comment is not stripped, so a pinned shape copied to the end of
- * another line still matches; the inner lines of a block or markup comment
- * are kept unless they lead with `*`, so a block that was commented out
- * still reads as code unless its lines open with a marker; and a code line
- * that begins with `*` drops out too (a wrapped multiplication, a `*`
- * selector in `<style>`), which costs a red pin and never a green one.
- * Nothing here tracks string or regex state, so neither an apostrophe in
- * the markup nor a `/[//]/` literal can switch the filter off. */
-function codeLinesOf(text: string): string {
-  return text
-    .split("\n")
-    .filter((line) => {
-      const rest = line.trimStart();
-      return !(
-        rest.startsWith("//") ||
-        rest.startsWith("/*") ||
-        rest.startsWith("*") ||
-        rest.startsWith("<!--")
-      );
-    })
-    .join("\n");
-}
-
-function codeLines(url: URL): string {
-  return codeLinesOf(source(url));
-}
-
-Deno.test("a pin reads code lines, never a commented-out copy", () => {
-  const dialog = [
-    "<p>Don't edit this row.</p>",
-    "<script>",
-    "  if (!canSubmit) return; // kept, a trailing comment stays",
-    "  // if (!canSubmit) return;",
-    "  /* const x = parseProfileLimit(raw); */",
-    "</script>",
-  ].join("\n");
-  const code = codeLinesOf(dialog);
-  assert(code.includes("if (!canSubmit) return; // kept"));
-  assertFalse(code.includes("// if (!canSubmit) return;"));
-  assertFalse(code.includes("const x = parseProfileLimit(raw);"));
-  // The documented limit: a trailing comment is not stripped, so a shape
-  // copied into one still matches. A whole-line comment-out does not.
-  assert(
-    codeLinesOf("a(); // if (!canSubmit) return;").includes(
-      "if (!canSubmit) return;",
-    ),
-  );
-  // The other two: a block or markup comment keeps its inner lines, and a
-  // code line that leads with `*` drops out with the comment lines.
-  assert(codeLinesOf("/*\nx\n*/").includes("x"));
-  assert(codeLinesOf("<!--\nx\n-->").includes("x"));
-  assertFalse(codeLinesOf("  * 100;").includes("100;"));
-});
 
 const NULLING_CHAIN = "normalizeModalities(modalityDraft)?.slice() ?? null";
 const KEPT_PROVIDER =
@@ -247,10 +187,15 @@ Deno.test(
           "the payload must carry the parsed field, not a re-parse",
         );
       }
-      assert(
-        src.includes("if (!canSubmit || busy) return;"),
-        "submit must stay gated before the payload",
-      );
+      // The manage dialog hands its frame to the shell, which gates the
+      // submit path for every caller (form_dialog_pins_test.ts pins that
+      // line); the user dialog keeps its own gate because it owns its frame.
+      if (url === USER_DIALOG) {
+        assert(
+          src.includes("if (!canSubmit || busy) return;"),
+          "submit must stay gated before the payload",
+        );
+      }
       assert(
         src.includes("contextLimit === undefined ||"),
         "the guard must tell unreadable text from a blank field",

@@ -9,7 +9,7 @@
 </script>
 
 <script lang="ts">
-  import { Dialog, Portal } from "@skeletonlabs/skeleton-svelte";
+  import FormDialog from "../../FormDialog.svelte";
   import ModalityTags from "../../ModalityTags.svelte";
   import ReqMark from "../../ReqMark.svelte";
   import {
@@ -21,8 +21,6 @@
   import type { AdminProfileRow } from "../../../lib/manage/gateway/client.ts";
   import type { Modality, ReasoningEffort } from "@kallipai/kallipai-client";
   import {
-    common_cancel,
-    common_save,
     manage_gateway_placement_collection_label,
     manage_gateway_provider_family,
     manage_gateway_provider_label,
@@ -104,28 +102,25 @@
   let budgetDraft = $state("");
   let tpmDraft = $state("");
   let rpmDraft = $state("");
-  let lastOpen = false;
-  $effect(() => {
-    if (open && !lastOpen) {
-      idDraft = row?.profile_id ?? "";
-      // Three sources, in order: the row under edit, the collection a
-      // pinned create belongs to, else blank. The catalog's first name
-      // must never stand in for the user's pick.
-      collectionDraft = row?.collection_name ?? pinnedCollection ?? "";
-      providerDraft = row?.provider_id ?? "";
-      modelDraft = row?.model ?? "";
-      effortDraft = row?.effort ?? "";
-      // A stored row can carry non-wire modality spellings; the tag
-      // group shows the intersection (a save writes the visible
-      // selection back).
-      modalityDraft = normalizeModalitiesInit(row?.modalities ?? null);
-      contextDraft = row?.max_context_window?.toString() ?? "";
-      budgetDraft = row?.max_budget?.toString() ?? "";
-      tpmDraft = row?.tpm_limit?.toString() ?? "";
-      rpmDraft = row?.rpm_limit?.toString() ?? "";
-    }
-    lastOpen = open;
-  });
+
+  function reseed(): void {
+    idDraft = row?.profile_id ?? "";
+    // Three sources, in order: the row under edit, the collection a
+    // pinned create belongs to, else blank. The catalog's first name
+    // must never stand in for the user's pick.
+    collectionDraft = row?.collection_name ?? pinnedCollection ?? "";
+    providerDraft = row?.provider_id ?? "";
+    modelDraft = row?.model ?? "";
+    effortDraft = row?.effort ?? "";
+    // A stored row can carry non-wire modality spellings; the tag
+    // group shows the intersection (a save writes the visible
+    // selection back).
+    modalityDraft = normalizeModalitiesInit(row?.modalities ?? null);
+    contextDraft = row?.max_context_window?.toString() ?? "";
+    budgetDraft = row?.max_budget?.toString() ?? "";
+    tpmDraft = row?.tpm_limit?.toString() ?? "";
+    rpmDraft = row?.rpm_limit?.toString() ?? "";
+  }
 
   const creating = $derived(row === null);
   const canSubmit = $derived(
@@ -167,12 +162,11 @@
       rpmLimit !== undefined,
   );
 
-  function onOpenChange(e: { open: boolean }): void {
-    if (!e.open && !busy) onCancel();
-  }
-
   function submit(): void {
-    if (!canSubmit || busy) return;
+    // Unreachable at runtime (canSubmit folds in numbersValid) and kept for
+    // the type: parseProfileLimit answers number | null | undefined, the
+    // payload wants number | null, and TypeScript cannot tell a boolean
+    // derived from the four checks apart.
     if (
       contextLimit === undefined ||
       budgetLimit === undefined ||
@@ -198,191 +192,152 @@
   }
 </script>
 
-<Dialog {open} {onOpenChange}>
-  <Portal>
-    <Dialog.Backdrop class="fixed inset-0 bg-surface-50-950/60 z-50" />
-    <Dialog.Positioner class="fixed inset-0 z-50 grid place-items-center p-4">
-      <Dialog.Content
-        class="card preset-tonal-surface w-full max-w-md p-6 flex flex-col gap-3 max-h-[85vh] overflow-y-auto"
-      >
-        <Dialog.Title class="text-lg font-semibold">
-          {creating
-            ? manage_gateway_unassigned_dialog_new_title()
-            : manage_gateway_unassigned_dialog_edit_title()}
-        </Dialog.Title>
-
-        <form
-          class="flex flex-col gap-3"
-          onsubmit={(e) => {
-            e.preventDefault();
-            submit();
-          }}
-        >
-          <label class="flex flex-col gap-1">
-            <span class="text-xs font-medium">
-              {user_gateway_profile_id()}
-              <ReqMark />
-            </span>
-            <input
-              class="input text-sm font-mono"
-              bind:value={idDraft}
-              disabled={!creating}
-              aria-required="true"
-            />
-          </label>
-          <label class="flex flex-col gap-1">
-            <span class="text-xs font-medium">
-              {manage_gateway_placement_collection_label()}
-              <ReqMark />
-            </span>
-            <select
-              class="select text-sm font-mono"
-              bind:value={collectionDraft}
-              disabled={!creating || pinnedCollection !== null}
-              aria-required="true"
-            >
-              {#if creating && collectionDraft === ""}
-                <option value="" disabled></option>
-              {/if}
-              {#each collections as c (c.name)}
-                <option value={c.name}>{c.name}</option>
-              {/each}
-            </select>
-          </label>
-          <label class="flex flex-col gap-1">
-            <span class="text-xs font-medium">
-              {manage_gateway_provider_label()}
-              <ReqMark />
-            </span>
-            <select
-              class="select text-sm font-mono"
-              bind:value={providerDraft}
-              disabled={!creating}
-              aria-required="true"
-            >
-              {#if providerDraft !== "" && !providers.some((p) => p.provider_id === providerDraft)}
-                <!-- A stored row can reference a since-removed provider:
+<FormDialog
+  {open}
+  title={creating
+    ? manage_gateway_unassigned_dialog_new_title()
+    : manage_gateway_unassigned_dialog_edit_title()}
+  size="md"
+  tall
+  {busy}
+  {error}
+  canSubmit={canSubmit && numbersValid}
+  onOpen={reseed}
+  onSubmit={submit}
+  {onCancel}
+>
+  <label class="flex flex-col gap-1">
+    <span class="text-xs font-medium">
+      {user_gateway_profile_id()}
+      <ReqMark />
+    </span>
+    <input
+      class="input text-sm font-mono"
+      bind:value={idDraft}
+      disabled={!creating}
+      aria-required="true"
+    />
+  </label>
+  <label class="flex flex-col gap-1">
+    <span class="text-xs font-medium">
+      {manage_gateway_placement_collection_label()}
+      <ReqMark />
+    </span>
+    <select
+      class="select text-sm font-mono"
+      bind:value={collectionDraft}
+      disabled={!creating || pinnedCollection !== null}
+      aria-required="true"
+    >
+      {#if creating && collectionDraft === ""}
+        <option value="" disabled></option>
+      {/if}
+      {#each collections as c (c.name)}
+        <option value={c.name}>{c.name}</option>
+      {/each}
+    </select>
+  </label>
+  <label class="flex flex-col gap-1">
+    <span class="text-xs font-medium">
+      {manage_gateway_provider_label()}
+      <ReqMark />
+    </span>
+    <select
+      class="select text-sm font-mono"
+      bind:value={providerDraft}
+      disabled={!creating}
+      aria-required="true"
+    >
+      {#if providerDraft !== "" && !providers.some((p) => p.provider_id === providerDraft)}
+        <!-- A stored row can reference a since-removed provider:
                 keep it selectable so an edit never silently rewrites it. -->
-                <option value={providerDraft}>{providerDraft}</option>
-              {/if}
-              {#each providers as p (p.provider_id)}
-                <option value={p.provider_id}>{p.provider_id}</option>
-              {/each}
-            </select>
-            {#if creating && providers.length === 0}
-              <span class="text-xs opacity-60">
-                {manage_gateway_provider_pool_empty()}
-              </span>
-            {/if}
-            {#if familyShown !== ""}
-              <span class="text-xs opacity-60">
-                {manage_gateway_provider_family()}: {familyShown}
-              </span>
-            {/if}
-          </label>
-          <label class="flex flex-col gap-1">
-            <span class="text-xs font-medium">
-              {user_gateway_profile_model()}
-              <ReqMark />
-            </span>
-            <input
-              class="input text-sm font-mono"
-              bind:value={modelDraft}
-              aria-required="true"
-            />
-          </label>
-          <label class="flex flex-col gap-1">
-            <span class="text-xs font-medium">
-              {user_gateway_profile_effort()}
-            </span>
-            <select class="select text-sm" bind:value={effortDraft}>
-              {#if effortDraft !== "" && !EFFORT_OPTIONS.includes(effortDraft as ReasoningEffort)}
-                <!-- A stored row can carry an effort outside the enum: keep
+        <option value={providerDraft}>{providerDraft}</option>
+      {/if}
+      {#each providers as p (p.provider_id)}
+        <option value={p.provider_id}>{p.provider_id}</option>
+      {/each}
+    </select>
+    {#if creating && providers.length === 0}
+      <span class="text-xs opacity-60">
+        {manage_gateway_provider_pool_empty()}
+      </span>
+    {/if}
+    {#if familyShown !== ""}
+      <span class="text-xs opacity-60">
+        {manage_gateway_provider_family()}: {familyShown}
+      </span>
+    {/if}
+  </label>
+  <label class="flex flex-col gap-1">
+    <span class="text-xs font-medium">
+      {user_gateway_profile_model()}
+      <ReqMark />
+    </span>
+    <input
+      class="input text-sm font-mono"
+      bind:value={modelDraft}
+      aria-required="true"
+    />
+  </label>
+  <label class="flex flex-col gap-1">
+    <span class="text-xs font-medium">
+      {user_gateway_profile_effort()}
+    </span>
+    <select class="select text-sm" bind:value={effortDraft}>
+      {#if effortDraft !== "" && !EFFORT_OPTIONS.includes(effortDraft as ReasoningEffort)}
+        <!-- A stored row can carry an effort outside the enum: keep
                 it selectable so an edit never silently rewrites it. -->
-                <option value={effortDraft}>{effortDraft}</option>
-              {/if}
-              <option value="">
-                {user_gateway_profile_effort_unset()}
-              </option>
-              {#each EFFORT_OPTIONS as e (e)}
-                <option value={e}>{e}</option>
-              {/each}
-            </select>
-          </label>
-          <ModalityTags
-            label={user_gateway_profile_modalities()}
-            selected={modalityDraft}
-            onChange={(next) => (modalityDraft = [...next])}
-          />
+        <option value={effortDraft}>{effortDraft}</option>
+      {/if}
+      <option value="">
+        {user_gateway_profile_effort_unset()}
+      </option>
+      {#each EFFORT_OPTIONS as e (e)}
+        <option value={e}>{e}</option>
+      {/each}
+    </select>
+  </label>
+  <ModalityTags
+    label={user_gateway_profile_modalities()}
+    selected={modalityDraft}
+    onChange={(next) => (modalityDraft = [...next])}
+  />
 
-          <p class="text-xs font-medium uppercase opacity-60 tracking-wide">
-            {user_gateway_profile_limits()}
-          </p>
-          <div class="grid grid-cols-2 gap-3">
-            <label class="flex flex-col gap-1">
-              <span class="text-xs font-medium">
-                {user_gateway_profile_context()}
-              </span>
-              <input
-                class="input text-sm"
-                inputmode="numeric"
-                bind:value={contextDraft}
-              />
-            </label>
-            <label class="flex flex-col gap-1">
-              <span class="text-xs font-medium">
-                {user_gateway_profile_budget()}
-              </span>
-              <input
-                class="input text-sm"
-                inputmode="numeric"
-                bind:value={budgetDraft}
-              />
-            </label>
-            <label class="flex flex-col gap-1">
-              <span class="text-xs font-medium">
-                {user_gateway_profile_tpm()}
-              </span>
-              <input
-                class="input text-sm"
-                inputmode="numeric"
-                bind:value={tpmDraft}
-              />
-            </label>
-            <label class="flex flex-col gap-1">
-              <span class="text-xs font-medium">
-                {user_gateway_profile_rpm()}
-              </span>
-              <input
-                class="input text-sm"
-                inputmode="numeric"
-                bind:value={rpmDraft}
-              />
-            </label>
-          </div>
-
-          {#if error}
-            <p class="text-sm text-error-500" role="alert">{error}</p>
-          {/if}
-
-          <div class="flex gap-2">
-            <button
-              type="button"
-              class="btn flex-1 preset-outlined-surface-500 hover:preset-filled-surface-500"
-              onclick={onCancel}
-            >
-              {common_cancel()}
-            </button>
-            <button
-              type="submit"
-              class="btn flex-1 preset-filled-primary-500 text-on-primary-500 transition hover:brightness-110"
-              disabled={!canSubmit || !numbersValid || busy}
-            >
-              {common_save()}
-            </button>
-          </div>
-        </form>
-      </Dialog.Content>
-    </Dialog.Positioner>
-  </Portal>
-</Dialog>
+  <p class="text-xs font-medium uppercase opacity-60 tracking-wide">
+    {user_gateway_profile_limits()}
+  </p>
+  <div class="grid grid-cols-2 gap-3">
+    <label class="flex flex-col gap-1">
+      <span class="text-xs font-medium">
+        {user_gateway_profile_context()}
+      </span>
+      <input
+        class="input text-sm"
+        inputmode="numeric"
+        bind:value={contextDraft}
+      />
+    </label>
+    <label class="flex flex-col gap-1">
+      <span class="text-xs font-medium">
+        {user_gateway_profile_budget()}
+      </span>
+      <input
+        class="input text-sm"
+        inputmode="numeric"
+        bind:value={budgetDraft}
+      />
+    </label>
+    <label class="flex flex-col gap-1">
+      <span class="text-xs font-medium">
+        {user_gateway_profile_tpm()}
+      </span>
+      <input class="input text-sm" inputmode="numeric" bind:value={tpmDraft} />
+    </label>
+    <label class="flex flex-col gap-1">
+      <span class="text-xs font-medium">
+        {user_gateway_profile_rpm()}
+      </span>
+      <input class="input text-sm" inputmode="numeric" bind:value={rpmDraft} />
+    </label>
+  </div>
+</FormDialog>
