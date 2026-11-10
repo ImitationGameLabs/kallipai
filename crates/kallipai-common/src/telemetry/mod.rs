@@ -16,6 +16,11 @@
 //! client) enables `propagation` and keeps an [`HttpClient`] in the field it
 //! sends its requests from.
 //!
+//! [`metrics`] is the other half of the same pipeline: the meter provider
+//! that pushes what the process records to the same endpoint, on the same
+//! resource and with the same credential. It is compiled with `export` and
+//! publishes nothing when the endpoint is unset.
+//!
 //! A span records a piece of work rather than a call, so the two sides of a
 //! call are not the only places for one. A detached task (`tokio::spawn`)
 //! inherits no scope: work that has to stay in the trace opens its span inside
@@ -45,6 +50,8 @@
 
 #[cfg(feature = "telemetry")]
 pub mod export;
+#[cfg(feature = "telemetry")]
+pub mod metrics;
 #[cfg(feature = "axum")]
 pub mod server;
 pub mod spans;
@@ -56,6 +63,8 @@ pub use export::{
     SamplerSpec, config_from_env, config_from_lookup, export_layer, export_layer_authorized,
     export_stats, init_service_telemetry,
 };
+#[cfg(feature = "telemetry")]
+pub use metrics::{METRICS_INTERVAL, MetricsGuard, metrics_provider};
 #[cfg(feature = "axum")]
 pub use server::{server_span, with_server_span, with_server_span_except};
 pub use spans::{

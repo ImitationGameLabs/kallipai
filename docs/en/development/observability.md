@@ -280,25 +280,41 @@ span, and the chat span's duration splits there: the gateway span is its own
 work plus the wait on the model, the rest is this process's connection and
 queueing.
 
-## The scrape face: `/metrics` and `/health`
+## The metrics face: an OTLP push and `/health`
 
-A trace answers "why was this request slow"; the scrape face answers "how many,
-how often, how long, and is a loop still ticking". Both endpoints ride the API
-listener (no second port), both are unauthenticated by design and therefore
-**loopback only**: a peer that is not `127.0.0.1`/`::1`, or a caller whose peer
-address cannot be established, gets 403. `--metrics=false` and `--health=false`
-(the same switches read `KALLIPAI_TAGMA_METRICS` and `KALLIPAI_TAGMA_HEALTH`)
-leave the route unmounted, which reads as 404.
+A trace answers "why was this request slow"; the metrics answer "how many,
+how often, how long, and is a loop still ticking". They leave the process
+instead of being read from it: with `OTEL_EXPORTER_OTLP_ENDPOINT` set, the
+process posts to `<base>/v1/metrics` once a minute, onto the resource the spans
+carry and with the same bearer token; with the variable unset it records into
+the SDK's no-op meter, so nothing leaves. There is no metrics route: the
+numbers reach a store through the collector, and they arrive carrying the
+resource attributes that name the instance, so a store labels them without a
+scrape config of its own.
 
-The gate is a peer-address test, and that shapes two deployments. A scrape
+The reader is periodic, so no observation sits in a request path: a value
+lands in an aggregator the SDK owns and leaves on the next cycle, and the
+guard's shutdown flushes what is queued. Temporality is spelled out as
+cumulative, which is what a Prometheus store expects. A push to a collector
+that is down, or that refuses the token, costs one cycle and one log line
+(once per reason) and never latency, and the failure reaches the next
+successful push as `telemetry_export_failed_total{reason}`.
+
+`/health` does sit on the API listener (no second port), unauthenticated by
+design and therefore **loopback only**: a peer that is not `127.0.0.1`/`::1`,
+or a caller whose peer address cannot be established, gets 403.
+`--health=false` (the same switch reads `KALLIPAI_TAGMA_HEALTH`) leaves the
+route unmounted, which reads as 404.
+
+The gate is a peer-address test, and that shapes two deployments. A probe
 from another container or namespace arrives with that container's address,
-so it is refused: scrape from the same network namespace, or run the
-collector's agent inside it. A reverse proxy on the same machine connects
-from `127.0.0.1`, so what it forwards reaches both endpoints; putting a
-proxy in front of the API widens who can read them to everyone the proxy
+so it is refused: probe from the same network namespace, or run the checker
+inside it. A reverse proxy on the same machine connects
+from `127.0.0.1`, so what it forwards reaches the endpoint; putting a
+proxy in front of the API widens who can read it to everyone the proxy
 admits.
 
-`/metrics` renders the Prometheus text format from three groups of families:
+The instruments fall in three groups:
 
 - **This crate's own counters.** `kallipai_tagma_http_requests_total{route,
   method,status_class}` and `..._http_request_duration_seconds{route}`: the
@@ -319,21 +335,24 @@ admits.
   `build_info{version,tagma_registration}`
   carries the enrolled registration id (`none` before enrollment, so enrolling
   changes a label value and never the series shape). It sits under a label of
-  its own because `tagma_id` in both stores means the door's slug: one name
-  with two value spaces arrives as a single joined `a;b` value. Both observability
-  `http_requests_total` and the request histogram: a scrape measures the
-  process, and counting scrapes would let a scraper's cadence dominate. The
-  exemption is by path rather than by peer, so a scrape refused at the loopback
-  gate leaves no series either; its only trace is a debug log line. Neither
-  endpoint opens a span either: the two paths are answered outside the server
-  span, so a scrape is not an entry in the traces it sits beside.
+  its own because `tagma_id` names the sending process: one label carrying two
+  value spaces would arrive as a single joined `a;b` value.
+  `/health` is exempt from `http_requests_total` and the request histogram: a
+  probe measures the process, and counting probes would let the prober's
+  cadence dominate. The exemption is by path rather than by peer, so a probe
+  refused at the loopback gate leaves no series either; its only trace is a
+  debug log line. The endpoint opens no span either: it is answered outside
+  the server span, so a probe is not an entry in the traces it sits beside.
+  The push itself is not counted: it rides the exporter's own client rather
+  than `telemetry::http_client`, so no `outbound_requests_total` leg answers
+  for it.
   `relay_dropped_total{reason}` counts inbound frames on the 1:1 op path that
   the tagma discarded because the two ends disagree: `decrypt`, `decode` or
   `unknown_op`. The
   family is absent until a drop happens, and healthy traffic never creates
   it, because a replay or an envelope arriving before the key exchange is
   not a disagreement.
-- **Tallies another owner keeps**, encoded on each gather by a collector
+- **Tallies another owner keeps**, read at collection time by an observable callback
   instead of mirrored into a gauge: the agent loop's wakes, one count per
   finished wake, from its entry to the point where it hands control back, and
   its model requests, first-token wait, tokens by kind, tool calls and requests
@@ -364,32 +383,47 @@ admits.
   moment it dies. A loop whose last pass failed is a separate fact, reported in
   `/health` rather than guessed from the age.
 
-The families the collector encodes, with the label names the code uses:
+The families, named as a store shows them, with the label names the code uses:
 
-| Family | Type | Labels | What it measures |
-| --- | --- | --- | --- |
-| `kallipai_tagma_agents` | gauge | `state`: `live`, `faulted`, `off_duty` | roster entries by registry state, plus how many of them are off duty; the off-duty count cuts the same set, so the three do not add up |
-| `kallipai_tagma_agent_wakes_total` | counter | `outcome` | finished wakes |
-| `kallipai_tagma_agent_wake_duration_seconds` | histogram | `outcome` | how long a wake ran |
-| `kallipai_tagma_model_requests_total` | counter | `outcome` | send attempts |
-| `kallipai_tagma_model_request_duration_seconds` | histogram | none | one attempt, from its send to its end |
-| `kallipai_tagma_model_first_token_seconds` | histogram | none | send to the first streamed delta |
-| `kallipai_tagma_model_tokens_total` | counter | `kind` | tokens as the provider reported them |
-| `kallipai_tagma_model_in_flight` | gauge | none | requests in flight right now |
-| `kallipai_tagma_tool_calls_total` | counter | `outcome` | tool calls |
-| `kallipai_tagma_tool_call_duration_seconds` | histogram | `outcome` | how long a tool call ran |
-| `kallipai_tagma_bus_events_total` | counter | `topic` | events published per topic |
-| `kallipai_tagma_bus_lagged_total` | counter | `topic` | events a subscriber missed |
-| `kallipai_tagma_telemetry_export_enabled` | gauge | none | 1 when an export layer is installed |
-| `kallipai_tagma_telemetry_exported_total` | counter | none | spans the collector accepted |
-| `kallipai_tagma_telemetry_export_failed_total` | counter | `reason`: `timeout`, `unavailable`, `unauthorized`, `other` | failed batches; `unauthorized` means the intake answered 401 or 403, so the token this process sends is not the one the intake accepts |
-| `kallipai_tagma_telemetry_last_export_timestamp` | gauge | none | Unix seconds of the last accepted export, 0 while none has landed |
-| `kallipai_tagma_background_task_age_seconds` | gauge | `task`: `history_gc`, `engine` | seconds since each loop last started a pass; `engine` is the loop `/health` reports as `work_schedule_engine` |
+| Family | Type | Labels | Reported by | What it measures |
+| --- | --- | --- | --- | --- |
+| `kallipai_tagma_http_requests_total` | counter | `route`, `method`, `status_class` | request path | one count per response |
+| `kallipai_tagma_http_request_duration_seconds` | histogram | `route` | request path | received to response finished |
+| `kallipai_tagma_relay_reconnects_total` | counter | none | relay tunnel | sessions that ended and were reopened |
+| `kallipai_tagma_relay_dropped_total` | counter | `reason` | relay tunnel | inbound frames the tagma discarded, by cause; drops that are normal protocol behaviour are not counted |
+| `kallipai_tagma_relays_configured` | gauge | none | relay tunnel | relay entries the operator configured; 0 is a local-only tagma |
+| `kallipai_tagma_relays_connected` | gauge | none | relay tunnel | entries whose tunnel is open right now |
+| `kallipai_tagma_outbound_requests_total` | counter | `leg`, `outcome` | outbound calls | one count per platform call; a stream that stays open is not a call |
+| `kallipai_tagma_outbound_request_duration_seconds` | histogram | `leg` | outbound calls | platform call duration |
+| `kallipai_tagma_agents` | gauge | `state`: `live`, `faulted`, `off_duty` | roster | roster entries by registry state, plus how many of them are off duty; the off-duty count cuts the same set, so the three do not add up |
+| `kallipai_tagma_build_info` | gauge | `version`, `registration` | boot | always 1; the labels name the build and the stored registration, the second absent until an enrollment writes one |
+| `kallipai_tagma_background_task_age_seconds` | gauge | `task`: `history_gc`, `engine` | background loops | seconds since each loop last started a pass; `engine` is the loop `/health` reports as `work_schedule_engine` |
+| `kallipai_tagma_telemetry_export_enabled` | gauge | none | export | 1 when an export layer is installed |
+| `kallipai_tagma_telemetry_exported_total` | counter | none | export | spans the collector accepted |
+| `kallipai_tagma_telemetry_export_failed_total` | counter | `reason`: `timeout`, `unavailable`, `unauthorized`, `other` | export | failed batches; `unauthorized` means the intake answered 401 or 403, so the token this process sends is not the one the intake accepts |
+| `kallipai_tagma_telemetry_last_export_timestamp` | gauge | none | export | Unix seconds of the last accepted export, 0 while none has landed |
+| `kallipai_tagma_bus_events_total` | counter | `topic` | bus | events published per topic |
+| `kallipai_tagma_bus_lagged_total` | counter | `topic` | bus | events a subscriber missed |
+| `kallipai_tagma_agent_wakes_total` | counter | `outcome` | adk sink | finished wakes |
+| `kallipai_tagma_agent_wake_duration_seconds` | histogram | `outcome` | adk sink | how long a wake ran |
+| `kallipai_tagma_model_requests_total` | counter | `outcome` | adk sink | send attempts |
+| `kallipai_tagma_model_request_duration_seconds` | histogram | none | adk sink | one attempt, from its send to its end, every outcome together |
+| `kallipai_tagma_model_first_token_seconds` | histogram | none | adk sink | send to the first streamed delta |
+| `kallipai_tagma_model_tokens_total` | counter | `kind` | adk sink | tokens as the provider reported them |
+| `kallipai_tagma_model_in_flight` | gauge | none | adk sink | requests in flight right now |
+| `kallipai_tagma_tool_calls_total` | counter | `outcome` | adk sink | tool calls |
+| `kallipai_tagma_tool_call_duration_seconds` | histogram | `outcome` | adk sink | how long a tool call ran |
 
-The same measurements appear in traces under different names: a scrape family
-is `kallipai_tagma_*`, a span attribute is dotted (`gateway.outcome`). Session,
-room and message totals stay the platform's to count, so this face never
-disagrees with the lesche about them.
+Every family the process records is in this table: 26 instruments, and a
+series the process reports that is absent here is a gap in the table. The
+`Reported by` column names where the value is recorded or owned, so a family that
+reads wrong can be traced to the code path that records it.
+
+The process names a family in dots (`kallipai_tagma.http_requests`), and the
+remote write renders that name with underscores on the way into a store, so
+the table's spellings are the store's. Session, room and message totals stay
+the platform's to count, so this face never disagrees with the lesche about
+them.
 
 `/health` answers `ok`, `degraded` or `not_ready`, with one entry per check.
 Only `not_ready` (503) means "take this instance out of service", and it is
@@ -410,8 +444,8 @@ away keeps reading ready until the first query that needs it fails.
 
 | Variable | Effect |
 | --- | --- |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | the collector's OTLP base URL; a base URL gains `/v1/traces`. Unset or blank installs no exporter at all: tracing stays local and no span leaves the process |
-| `OTEL_EXPORTER_OTLP_HEADERS` | the generic header list the OTLP exporter reads on its own, for a service that has no credential of ours. `authorization` set here replaces the token a service passes to the exporter, so a deployment sets one or the other, never both. The per-signal `OTEL_EXPORTER_OTLP_TRACES_HEADERS` takes precedence over this one |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | the collector's OTLP base URL; a base URL gains `/v1/traces` or `/v1/metrics`. Unset or blank installs neither pipeline: tracing stays local, every instrument records into the no-op meter, and nothing leaves the process |
+| `OTEL_EXPORTER_OTLP_HEADERS` | the generic header list both OTLP exporters read, for a service that has no credential of ours or whose credential the intake does not accept. `authorization` set here replaces the token a service passes, so a deployment sets one or the other, never both. The per-signal `OTEL_EXPORTER_OTLP_TRACES_HEADERS` takes precedence over this one |
 | `OTEL_TRACES_SAMPLER` | `parentbased_always_on` (the default), `parentbased_always_off`, `parentbased_traceidratio`, `always_on`, `always_off`, `traceidratio` |
 | `OTEL_TRACES_SAMPLER_ARG` | the ratio for the two `traceidratio` families; an unparseable or out-of-range value keeps the default |
 | `RUST_LOG` | the log filter: what is printed, and, with no exporter installed, which span callsites are interested. Default `info`; the store spans need `trace`. Once an exporter is configured the export layer carries its own filter and records every span on the `kallipai.spans` target at `info`, so a quiet `RUST_LOG` no longer drops spans or the `traceparent` they inject; no log event reaches the trace at any level, and the prose stays in the log line. The split is by target, so `RUST_LOG=kallipai_common=info` no longer selects those spans by module path |
@@ -432,97 +466,72 @@ its retries, and the exporter stops itself 250 ms earlier, where the tally
 also stops, so a collector that stops answering is counted and logged
 instead of being cancelled unread. Shutdown flushes what is queued.
 
-The spend is per request and per call it makes — one forwarded request is a
-handful of spans — so the sampler is the knob for cost, not the batch sizes.
+The span spend is per request and per call it makes — one forwarded request is
+a handful of spans — so the sampler is the knob for span cost, not the batch
+sizes. The metric spend is one push a minute per process whatever the traffic,
+so its interval is the knob there.
 
-## The intake: one door per instance
+On the stack side, `KALLIPAI_TELEMETRY_INTAKE_TOKEN_FILE` names the token file
+mounted into the collector, and the compose files refuse to start without it.
 
-Every instance gets its own OTLP receiver, its own bearer token and a
-transform that writes `tagma.id` over whatever the client claimed: the tenant
-is the door, not a header the sender chose. The shared `4318` receiver stays
-for everything on the compose network and claims no tenant, so it deletes the
-`tagma.id` a client declares rather than forwarding a name it cannot check.
-Acceptance proves it on the wire: a token for one door that claims another
-instance's `tagma.id` in its resource attributes lands under the door's slug,
-and the claimed instance's trace count does not move.
+## The intake: one door
 
-The doors come from `compose/telemetry-instances.json`, which is deployment
-configuration and stays out of the repository (placeholder paths are in
-`compose/telemetry-instances.example.json`). Each row is a slug, the intake
-port, the management port the host agent scrapes, the data root and the token
-file. Two readers take this one table: the stack build, which renders the
-texts, and `scripts/render-intake.py`, which writes the token files before the
-collector starts; `scripts/compose-up.sh` calls it with the table, the
-telemetry base, and the directory the stack build wrote.
-The build reads the file with `--impure`, the only read that leaves the store:
-with the variable unset it falls back to `compose/telemetry-instances.json`
-inside the source copy, which is not tracked, so a stack built without the
-export renders the shared intake alone. The check reads the rendered texts,
-not that fallback.
+One OTLP receiver serves the whole stack, on `4318` (HTTP) and `4317` (gRPC)
+inside the network, behind a bearer-token authenticator: a push without the
+token, or with another one, is refused at the receiver and never reaches a
+backend. The token is a file, named by
+`KALLIPAI_TELEMETRY_INTAKE_TOKEN_FILE` and mounted read-only at
+`/etc/kallipai/intake-token`; the collector reads it when it starts, so
+rotating it means restarting the collector. There is one door for the stack
+rather than one per instance: the credential is the tenant, and the resource
+attributes a sender contributes name the rest.
 
-Both compose overrides publish `127.0.0.1:12000-12019`, and evaluation refuses
-an instance whose port falls outside that span. The span is one line in the
-compose files whatever the number of instances, so adding a twentieth instance
-edits no compose file and a twenty-first is a refusal rather than a silent
-port clash.
+Two pipelines leave the receiver. Traces go to tempo over OTLP. Metrics go to
+Prometheus over the remote-write protocol with
+`resource_to_telemetry_conversion`, which turns `tagma.id` and
+`service.instance.id` into labels; without it they would live on `target_info`
+alone and every instance's numbers would arrive looking alike. Prometheus
+publishes no host port in any compose file: its receiver takes writes without
+a credential, so it stays on the compose network and Grafana is the way in.
+Tempo publishes `3200` in the dev override and nothing in production.
 
-`scripts/render-intake.py`, called by `scripts/compose-up.sh` before the
-collector starts, writes the token files: it trims each credential, refuses
-an empty one, a control character or a path outside the mounted directory,
-and writes what survives as `0600`. A trailing newline from `$(cat)`
-otherwise makes every push a `401` the collector neither counts nor logs.
-
-The credential comes from `<dataRoot>/credentials/<entry>/tagma.token`,
-the path tagma resolves its own relay entry by. Fewer or more than one entry
-is a refusal rather than a guess: `has 0 credentials` means the instance never
-registered, or still carries the flat `credentials/tagma.token` that predates
-the layout. One boot moves that pair into `credentials/<entry>/` while exactly
-one relay entry is configured; with several entries the migration refuses
-instead, because the flat pair cannot be attributed to one of them, so the
-credential has to be placed there by hand. `has 2 credentials` counts the
-entries that carry a `tagma.token`; a directory without one adds nothing, and
-the render step stops instead of choosing between them.
-
-The token is the relay registration credential itself, so rotating it means
-rerunning `scripts/compose-up.sh`: nothing else rewrites the file.
-
-The agent is a container on the host network, not a compose service: it
-scrapes each instance's management face over loopback every 15 seconds and
-pushes to that instance's door with `Bearer` from the token file. The script
-starts it after the stack is up, restarts it rather than adding a second
-scraper, replaces it when the telemetry root moved, stops it on `stop` and
-removes it on `down`.
-An exporter is built once, at process start: a process that booted before its
-registration sends no `authorization` header for its whole life (the resource
-attribute still says `none`, which is a placeholder and not a credential) and
-shows up as `unauthorized` until it restarts. The agent's container name is
-fixed, so a second checkout on the same host takes this one over rather than
-adding a second scraper; what it reads is loopback, which is already per host.
-
-Metrics take a different road: the collector writes them into Prometheus over
-the remote-write protocol. That receiver has no credential of its own, so
-Prometheus publishes no host port in any of the three compose files; Grafana
-reaches it by service name, and the remote write converts resource attributes
-to labels, or `tagma_id` would live on `target_info` alone and every
-instance's numbers would arrive looking alike.
+The credential a process pushes with is the one it stores, and the tagma's is
+the relay registration token at
+`<dataRoot>/credentials/<entry>/tagma.token`. One intake token means the file
+holds the token of the processes that push: where a service carries a
+different credential, or none, `OTEL_EXPORTER_OTLP_HEADERS=authorization=Bearer
+<token>` names the one the intake accepts. An exporter is built once, at
+process start: a process that booted before its registration sends no
+`authorization` header for its whole life (the resource attribute still says
+`none`, which is a placeholder and not a credential) and shows up as
+`unauthorized` until it restarts.
 
 A refused credential is counted where the sender sees it:
-`kallipai_tagma_telemetry_export_failed_total{reason="unauthorized"}`.
-The collector neither counts an auth refusal (it is rejected before intake)
-nor exports metrics of its own here, which is why the reason lives on
-the sender's side.
+`kallipai_tagma_telemetry_export_failed_total{reason="unauthorized"}`. The
+collector neither counts an auth refusal (it is rejected before intake) nor
+exports metrics of its own here, which is why the reason lives on the sender's
+side.
 
-Two boundaries the intake does not cross. The NixOS form has no
-authentication: tempo listens on `127.0.0.1` and the network is the boundary.
-And the container runs collector `0.164`, while nixpkgs still ships `0.155`;
+A tagma that runs under the platform polis has no telemetry egress: the
+endpoint tagma answers its agents and the platform, and every span and metric
+it records stays in the process, so an investigation there reads the log and
+`kallipctl` rather than a dashboard. Pointing `OTEL_EXPORTER_OTLP_ENDPOINT` at
+a stack of your own turns the export on. Doing without it is a trade-off this
+deployment shape pays for.
+
+The NixOS form has no collector and no authentication: the services push
+straight to tempo on `127.0.0.1`, and the network is the boundary. The
+container form runs collector `0.164`, while nixpkgs still ships `0.155`;
 `scripts/obs-acceptance.sh` validates every rendered text with the pinned
-image before it starts anything, so a text that only parses on one of them
-fails there rather than at boot.
-
-`scripts/obs-acceptance.sh` is the end-to-end face: two `kallipai-tagma`
-processes with their own data roots and credentials, the real rendered texts,
-and six checks that each read a store. `--only 3` runs one of them; `--keep`
-leaves the scratch root and its logs in place.
+image before it starts anything, so a text that parses on one of them and not
+the other fails there rather than at boot. That script is also the standing
+proof of the path: it starts two tagma processes against a real collector,
+tempo and Prometheus, and checks that a foreign or empty token is refused,
+that one push carrying `tagma.id` lands in both stores, that counting the
+instances by `tagma_id` and by `tagma_id` together with
+`service_instance_id` answers the same number, that the request counter
+grows across two export cycles, and that each instance's traces carry both
+identity keys.
 
 ## Retention
 
@@ -532,6 +541,11 @@ reports every skip. Its budgets are 5 GiB and 72 hours, overridable with
 
 ## Known gaps
 
+- A NixOS host wires no metrics store for its services: the endpoint names
+  tempo's OTLP receiver, which keeps traces, and the host Prometheus scrapes
+  rather than receives. A tagma's minute push therefore has nowhere to land
+  there, and its numbers stay in the process. The container form is the one
+  with a collector standing in front of both stores.
 - The model request now carries this process's trace context: the backend is
   wrapped so its send injects the span the request runs under, and the
   gateway's request span hangs under the chat span. On the leg the gateway
@@ -555,8 +569,9 @@ reports every skip. Its budgets are 5 GiB and 72 hours, overridable with
   the status, but neither `gateway.outcome` nor an `upstream.*` attribute.
 - The parent/child relation across faces is covered by tests (a caller's
   `traceparent` is adopted, and a rejected request's archeion checks hang under
-  its request span); there is no automated assertion against a running
-  collector.
+  its request span). The metric half has an assertion against real stores:
+  `scripts/obs-acceptance.sh` runs two tagma processes into a collector, tempo
+  and Prometheus.
 - Propagation lives only in a process that assembled the exporter: the global
   propagator is published with it, so a process that never sets
   `OTEL_EXPORTER_OTLP_ENDPOINT`, or never runs the bootstrap at all, injects

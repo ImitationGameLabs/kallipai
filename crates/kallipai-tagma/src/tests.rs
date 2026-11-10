@@ -696,18 +696,22 @@ fn the_stored_id_follows_the_first_entry_that_has_credentials() {
 }
 
 /// An instance with no credentials still names itself in the trace resource,
-/// with the same stand-in the scrape face reports: enrollment later changes a
+/// with the same stand-in `build_info` reports: enrollment later changes a
 /// value, not the shape of what a collector receives.
 #[test]
 fn the_trace_resource_names_an_unenrolled_instance() {
+    let unenrolled = telemetry_attrs(None);
+    assert_eq!(unenrolled[0], ("tagma.id", UNENROLLED_TAGMA_ID));
+    assert_eq!(unenrolled[1], ("service.instance.id", UNENROLLED_TAGMA_ID));
     assert_eq!(
-        telemetry_attrs(None),
-        vec![("tagma.id", UNENROLLED_TAGMA_ID)]
+        unenrolled[2],
+        ("service.version", env!("CARGO_PKG_VERSION"))
     );
-    assert_eq!(
-        telemetry_attrs(Some("tagma-b")),
-        vec![("tagma.id", "tagma-b")]
-    );
+
+    let enrolled = telemetry_attrs(Some("tagma-b"));
+    assert_eq!(enrolled[0], ("tagma.id", "tagma-b"));
+    assert_eq!(enrolled[1], ("service.instance.id", "tagma-b"));
+    assert_eq!(enrolled[2], ("service.version", env!("CARGO_PKG_VERSION")));
 }
 
 /// A collector on loopback that accepts whatever an export sends.

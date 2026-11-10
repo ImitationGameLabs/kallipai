@@ -98,21 +98,23 @@ single operator comparison additionally uses a constant-time compare.
 | `GET`    | `/tasks`                                              | One page of task rows (filter and paging query params)                                                          | any                          |
 | `GET`    | `/tasks/{id}`                                         | One task with its full event trail                                                                              | any                          |
 | `POST`   | `/tasks`, `/tasks/{id}/…`                             | Write verbs: `create` plus start, confirm, review, pause, resume, note, close, reopen, archive; see Task Ledger | any                          |
-| `GET`    | `/metrics`                                            | Prometheus text exposition of the counters this process keeps                                                   | loopback peer only           |
 | `GET`    | `/health`                                             | Readiness and degradation report (JSON)                                                                         | loopback peer only           |
 
 The `kallip policy` CLI wraps the exec-policy reads and writes
 (`kallip policy show` / `exec-get` / `exec-set`).
 
-These two answer on the same listener and take no token: they are
+`/health` answers on the same listener and takes no token: it is
 unauthenticated by design, and a peer that is not loopback (or whose address
-cannot be established) is refused with 403. `--metrics=false` /
-`--health=false` (or `KALLIPAI_TAGMA_METRICS` / `KALLIPAI_TAGMA_HEALTH` set to
-`false`) leave the route unmounted, which a client reads as a missing route.
+cannot be established) is refused with 403. `--health=false` (or
+`KALLIPAI_TAGMA_HEALTH` set to `false`) leaves the route unmounted, which a
+client reads as a missing route.
 `/health` reports `ok`, `degraded` or `not_ready`, where only `not_ready` (503)
 means the instance cannot serve; [observability](../development/observability.md)
-describes the families `/metrics` carries and which condition lands in which
-state.
+describes which condition lands in which state.
+
+Metrics do not answer on this listener: the process pushes them over OTLP to
+the collector named by `OTEL_EXPORTER_OTLP_ENDPOINT`, and a process with no
+endpoint exports nothing.
 
 The body names every check it made, so a degraded report says which one:
 

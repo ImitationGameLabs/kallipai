@@ -3,8 +3,8 @@
 //!
 //! The endpoint is deliberately not a second metrics face: booleans, one
 //! three-valued relay state, and the names of the checks that are late. No
-//! counters, no durations -- a monitor scraping for counters wants `/metrics`,
-//! and a load balancer wants this.
+//! counters, no durations -- a monitor that wants counters reads the metrics
+//! a collector stores, and a load balancer wants this.
 //!
 //! **Readiness vs degradation.** Readiness is what the process cannot serve
 //! without: the chat-history store and a usable profile bundle. Missing either
@@ -122,8 +122,8 @@ struct RelayCheck {
 #[derive(Debug, Serialize)]
 struct BackgroundCheck {
     ok: bool,
-    /// The loops that are late, by their `/metrics` label value; empty when
-    /// none is.
+    /// The loops that are late, by their `background_task_age` label value;
+    /// empty when none is.
     stale: Vec<&'static str>,
     /// The loops whose last pass failed; empty when none did. A loop here is on
     /// time and not working, which freshness alone cannot show.
@@ -431,9 +431,9 @@ mod tests {
 
     #[test]
     fn the_report_serialises_the_documented_shape() {
-        // A monitor scraping for numbers wants `/metrics`; this face is
-        // booleans and one three-valued state, so its JSON stays small enough
-        // to read in a log line.
+        // A monitor that wants numbers reads the metrics a collector stores;
+        // this face is booleans and one three-valued state, so its JSON stays
+        // small enough to read in a log line.
         let report = HealthReport {
             status: HealthStatus::Degraded,
             checks: Checks {

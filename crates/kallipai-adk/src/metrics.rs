@@ -1,18 +1,23 @@
-//! Wake, model and tool counters as plain atomics.
+//! Wake, model and tool counters, and the duration histograms beside them.
 //!
-//! A library does not choose a reporting format. These values are a snapshot
-//! the owner encodes into whatever exporter it runs -- Prometheus text today,
-//! an OTLP meter if the uphill path moves there -- so nothing here depends on
-//! an exporter crate, and a swap touches only the owner.
+//! The record happens deep inside the acquisition loop, so the tallies are
+//! plain atomic adds: no lock, no channel, no await. A set built for export
+//! hands in an [`AdkSink`], and the sink sees each observation at the call
+//! site; a set with a sink keeps no tallies of its own, because a histogram
+//! cannot be rebuilt from a read-out total. The atomics are the path every
+//! set without a sink takes: the tests here, and a consumer that builds a set
+//! with no tagma around it, which is why the library keeps that construction
+//! open. Every production set in this workspace is built with a sink.
 //!
 //! Scope is process lifetime, like [`crate::usage_stats`]: counters start at
-//! zero at boot and never reset. Clones share one `Arc`, and recording is a
-//! relaxed atomic add, so any task on the hot path may record without a lock.
+//! zero at boot and never reset. Clones share one `Arc`, so any task on the hot
+//! path may record without coordination.
 //!
 //! Durations are held as nanoseconds in an `AtomicU64` (saturating) and
 //! exposed in seconds. A histogram keeps one counter per bucket plus sum and
 //! count; [`AdkSnapshot`] folds the per-bucket counts into the cumulative form
-//! an exporter expects.
+//! an encoder expects. The bucket edges are public so an exporter can declare
+//! the same edges on its own view.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
@@ -185,28 +190,29 @@ impl ToolOutcome {
 /// Bucket edges for agent wakes: seconds from wake start to wake end. A
 /// short wake is one or two tool calls; the tail is a long shell command or a
 /// reasoning model thinking.
-const WAKE_BUCKETS: &[f64] = &[1.0, 5.0, 15.0, 30.0, 60.0, 120.0, 300.0, 600.0, 1800.0];
+pub const WAKE_BUCKETS: &[f64] = &[1.0, 5.0, 15.0, 30.0, 60.0, 120.0, 300.0, 600.0, 1800.0];
 
 /// Bucket edges for one model attempt: from its send to its end. A local
 /// model opens a stream under a second and then streams; a reasoning model
 /// thinks for minutes, and a send that fails before it opens sits at the
 /// short end.
-const MODEL_BUCKETS: &[f64] = &[
+pub const MODEL_BUCKETS: &[f64] = &[
     0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0,
 ];
 
 /// Bucket edges for the wait to the first streamed delta: what the user
 /// actually feels. Below the first edge is instant; past the last is a
 /// long-thinking model.
-const FIRST_TOKEN_BUCKETS: &[f64] = &[0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0, 120.0];
+pub const FIRST_TOKEN_BUCKETS: &[f64] =
+    &[0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0, 120.0];
 
 /// Bucket edges for one tool call: a builtin read is milliseconds, a shell
 /// command or a code edit is minutes.
-const TOOL_BUCKETS: &[f64] = &[0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 15.0, 60.0, 300.0, 600.0];
+pub const TOOL_BUCKETS: &[f64] = &[0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 15.0, 60.0, 300.0, 600.0];
 
 /// One histogram over a fixed edge list: per-bucket counts, a saturating
 /// nanosecond sum, and the sample count. Every bucket exists from
-/// construction, so a snapshot has a stable shape from the first scrape.
+/// construction, so a snapshot has a stable shape from the first read.
 struct DurationHistogram {
     edges: &'static [f64],
     /// One counter per bucket; the last one collects everything above the
@@ -283,17 +289,76 @@ impl HistogramSnapshot {
 ///
 /// One value is shared by the tagma state and every
 /// [`crate::agent_task::AgentContext`]; a context built outside a running
-/// tagma (tests, tools) keeps its own and simply never reaches a scrape.
+/// tagma (tests, tools) keeps its own and simply never reaches an exporter.
 ///
 /// Why one process-lifetime value rather than a field on the shared state:
 /// the counters are recorded deep inside the acquisition loop, below the
 /// layers that hold that state. A recorder threaded down would be skipped on
 /// every early exit and would force each intermediate type to carry it. The
-/// exporter reads the same value at scrape time, so both ends meet without a
-/// channel between them.
+/// exporter reads the same value at collection time, so both ends meet without
+/// a channel between them.
+///
+/// A default set keeps the records in local atomics and is read out by
+/// [`Self::snapshot`]. [`Self::with_sink`] hands the same records to an owner
+/// that exports as they arrive; that set keeps no tallies of its own.
 #[derive(Clone)]
 pub struct AdkMetrics {
-    inner: Arc<AdkMetricsInner>,
+    writer: Writer,
+}
+
+/// Where one set's records go.
+#[derive(Clone)]
+enum Writer {
+    /// This process's own tallies, read out on demand.
+    Atomics(Arc<AdkMetricsInner>),
+    /// The owner's sink, which sees each record at the call site.
+    Sink(Arc<dyn AdkSink>),
+}
+
+/// Where the wake, model and tool records go.
+///
+/// An exporter that builds histograms cannot rebuild one from a total: the
+/// instrument has to see each observation as it happens. A sink receives each
+/// record at the call site instead of a set of atomics being read afterwards.
+pub trait AdkSink: Send + Sync {
+    /// Record one finished wake: its outcome and how long it took.
+    fn record_wake(&self, outcome: WakeOutcome, duration: Duration);
+
+    /// Mark one model request in flight; the guard gives the gauge back on
+    /// drop, so a cancelled or panicking path cannot leave it stuck.
+    fn model_in_flight(&self) -> InFlight;
+
+    /// Record one model attempt: its outcome, and the time from the send that
+    /// started it to the attempt's end. A backoff before a later attempt is
+    /// the retry policy's time and is never part of `duration`.
+    fn record_model_call(&self, outcome: ModelOutcome, duration: Duration);
+
+    /// Record the wait from the request being sent to the first delta of the
+    /// stream that was finally adopted. A stream abandoned mid-way never
+    /// reaches here: a retry's first delta is the one the user saw.
+    fn record_first_token(&self, duration: Duration);
+
+    /// Record one usage report's token count of one kind.
+    fn record_tokens(&self, kind: TokenKind, tokens: u64);
+
+    /// Record one usage report across the token kinds.
+    ///
+    /// A counter the provider did not report is not recorded at all: "no
+    /// cache was used" and "the provider said nothing about cache" are
+    /// different facts, and the span's usage attributes draw the same line.
+    fn record_usage(&self, usage: &just_llm_client::types::generation::Usage) {
+        self.record_tokens(TokenKind::Input, u64::from(usage.prompt_tokens));
+        self.record_tokens(TokenKind::Output, u64::from(usage.completion_tokens));
+        if let Some(tokens) = usage.cache_read_tokens {
+            self.record_tokens(TokenKind::CacheRead, u64::from(tokens));
+        }
+        if let Some(tokens) = usage.cache_write_tokens {
+            self.record_tokens(TokenKind::CacheWrite, u64::from(tokens));
+        }
+    }
+
+    /// Record one finished tool call.
+    fn record_tool_call(&self, outcome: ToolOutcome, duration: Duration);
 }
 
 impl Default for AdkMetrics {
@@ -314,37 +379,62 @@ struct AdkMetricsInner {
     tool_duration: [DurationHistogram; 6],
 }
 
+impl AdkMetricsInner {
+    fn new() -> Self {
+        Self {
+            wakes: std::array::from_fn(|_| AtomicU64::new(0)),
+            wake_duration: std::array::from_fn(|_| DurationHistogram::new(WAKE_BUCKETS)),
+            model_requests: std::array::from_fn(|_| AtomicU64::new(0)),
+            model_duration: DurationHistogram::new(MODEL_BUCKETS),
+            first_token: DurationHistogram::new(FIRST_TOKEN_BUCKETS),
+            tokens: std::array::from_fn(|_| AtomicU64::new(0)),
+            model_in_flight: AtomicI64::new(0),
+            tool_calls: std::array::from_fn(|_| AtomicU64::new(0)),
+            tool_duration: std::array::from_fn(|_| DurationHistogram::new(TOOL_BUCKETS)),
+        }
+    }
+}
+
 impl AdkMetrics {
-    /// An empty set. Every bucket exists, so a scrape before the first wake
-    /// still sees the full shape.
+    /// An empty set of local tallies. Every bucket exists, so a read before
+    /// the first wake still sees the full shape.
     pub fn new() -> Self {
         Self {
-            inner: Arc::new(AdkMetricsInner {
-                wakes: std::array::from_fn(|_| AtomicU64::new(0)),
-                wake_duration: std::array::from_fn(|_| DurationHistogram::new(WAKE_BUCKETS)),
-                model_requests: std::array::from_fn(|_| AtomicU64::new(0)),
-                model_duration: DurationHistogram::new(MODEL_BUCKETS),
-                first_token: DurationHistogram::new(FIRST_TOKEN_BUCKETS),
-                tokens: std::array::from_fn(|_| AtomicU64::new(0)),
-                model_in_flight: AtomicI64::new(0),
-                tool_calls: std::array::from_fn(|_| AtomicU64::new(0)),
-                tool_duration: std::array::from_fn(|_| DurationHistogram::new(TOOL_BUCKETS)),
-            }),
+            writer: Writer::Atomics(Arc::new(AdkMetricsInner::new())),
+        }
+    }
+
+    /// A set whose records go to `sink`. The set keeps no local tallies, so
+    /// [`Self::snapshot`] reads nothing from it.
+    pub fn with_sink(sink: Arc<dyn AdkSink>) -> Self {
+        Self {
+            writer: Writer::Sink(sink),
         }
     }
 
     /// Record one finished wake: its outcome and how long it took.
     pub fn record_wake(&self, outcome: WakeOutcome, duration: Duration) {
-        self.inner.wakes[outcome.index()].fetch_add(1, Ordering::Relaxed);
-        self.inner.wake_duration[outcome.index()].observe(duration);
+        match &self.writer {
+            Writer::Atomics(inner) => {
+                inner.wakes[outcome.index()].fetch_add(1, Ordering::Relaxed);
+                inner.wake_duration[outcome.index()].observe(duration);
+            }
+            Writer::Sink(sink) => sink.record_wake(outcome, duration),
+        }
     }
 
-    /// Mark one model request in flight. The returned guard decrements on
-    /// drop, so a cancelled or panicking path cannot leave the gauge stuck.
-    pub fn model_in_flight(&self) -> InFlight<'_> {
-        self.inner.model_in_flight.fetch_add(1, Ordering::Relaxed);
-        InFlight {
-            counter: &self.inner.model_in_flight,
+    /// Mark one model request in flight. The returned guard gives the gauge
+    /// back on drop, so a cancelled or panicking path cannot leave it stuck.
+    pub fn model_in_flight(&self) -> InFlight {
+        match &self.writer {
+            Writer::Atomics(inner) => {
+                inner.model_in_flight.fetch_add(1, Ordering::Relaxed);
+                let tallies = Arc::clone(inner);
+                InFlight::on_drop(move || {
+                    tallies.model_in_flight.fetch_sub(1, Ordering::Relaxed);
+                })
+            }
+            Writer::Sink(sink) => sink.model_in_flight(),
         }
     }
 
@@ -352,20 +442,33 @@ impl AdkMetrics {
     /// started it to the attempt's end. A backoff before a later attempt is the
     /// retry policy's time and is never part of `duration`.
     pub fn record_model_call(&self, outcome: ModelOutcome, duration: Duration) {
-        self.inner.model_requests[outcome.index()].fetch_add(1, Ordering::Relaxed);
-        self.inner.model_duration.observe(duration);
+        match &self.writer {
+            Writer::Atomics(inner) => {
+                inner.model_requests[outcome.index()].fetch_add(1, Ordering::Relaxed);
+                inner.model_duration.observe(duration);
+            }
+            Writer::Sink(sink) => sink.record_model_call(outcome, duration),
+        }
     }
 
     /// Record the wait from the request being sent to the first delta of the
     /// stream that was finally adopted. A stream abandoned mid-way never
     /// reaches here: a retry's first delta is the one the user saw.
     pub fn record_first_token(&self, duration: Duration) {
-        self.inner.first_token.observe(duration);
+        match &self.writer {
+            Writer::Atomics(inner) => inner.first_token.observe(duration),
+            Writer::Sink(sink) => sink.record_first_token(duration),
+        }
     }
 
     /// Record one usage report's token counts.
     pub fn record_tokens(&self, kind: TokenKind, tokens: u64) {
-        self.inner.tokens[kind.index()].fetch_add(tokens, Ordering::Relaxed);
+        match &self.writer {
+            Writer::Atomics(inner) => {
+                inner.tokens[kind.index()].fetch_add(tokens, Ordering::Relaxed);
+            }
+            Writer::Sink(sink) => sink.record_tokens(kind, tokens),
+        }
     }
 
     /// Record one usage report across the token kinds.
@@ -386,45 +489,54 @@ impl AdkMetrics {
 
     /// Record one finished tool call.
     pub fn record_tool_call(&self, outcome: ToolOutcome, duration: Duration) {
-        self.inner.tool_calls[outcome.index()].fetch_add(1, Ordering::Relaxed);
-        self.inner.tool_duration[outcome.index()].observe(duration);
+        match &self.writer {
+            Writer::Atomics(inner) => {
+                inner.tool_calls[outcome.index()].fetch_add(1, Ordering::Relaxed);
+                inner.tool_duration[outcome.index()].observe(duration);
+            }
+            Writer::Sink(sink) => sink.record_tool_call(outcome, duration),
+        }
     }
 
-    /// Read every counter out, in label order.
-    pub fn snapshot(&self) -> AdkSnapshot {
-        AdkSnapshot {
-            wakes_total: label_values(WakeOutcome::ALL.map(WakeOutcome::as_str), &self.inner.wakes),
+    /// Read every counter out, in label order. `None` when a sink owns the
+    /// records: that set keeps nothing to read.
+    pub fn snapshot(&self) -> Option<AdkSnapshot> {
+        let Writer::Atomics(inner) = &self.writer else {
+            return None;
+        };
+        Some(AdkSnapshot {
+            wakes_total: label_values(WakeOutcome::ALL.map(WakeOutcome::as_str), &inner.wakes),
             wake_duration: WakeOutcome::ALL
                 .iter()
                 .map(|outcome| {
                     (
                         outcome.as_str(),
-                        self.inner.wake_duration[outcome.index()].snapshot(),
+                        inner.wake_duration[outcome.index()].snapshot(),
                     )
                 })
                 .collect(),
             model_requests_total: label_values(
                 ModelOutcome::ALL.map(ModelOutcome::as_str),
-                &self.inner.model_requests,
+                &inner.model_requests,
             ),
-            model_duration: self.inner.model_duration.snapshot(),
-            first_token: self.inner.first_token.snapshot(),
-            tokens_total: label_values(TokenKind::ALL.map(TokenKind::as_str), &self.inner.tokens),
-            model_in_flight: self.inner.model_in_flight.load(Ordering::Relaxed),
+            model_duration: inner.model_duration.snapshot(),
+            first_token: inner.first_token.snapshot(),
+            tokens_total: label_values(TokenKind::ALL.map(TokenKind::as_str), &inner.tokens),
+            model_in_flight: inner.model_in_flight.load(Ordering::Relaxed),
             tool_calls_total: label_values(
                 ToolOutcome::ALL.map(ToolOutcome::as_str),
-                &self.inner.tool_calls,
+                &inner.tool_calls,
             ),
             tool_duration: ToolOutcome::ALL
                 .iter()
                 .map(|outcome| {
                     (
                         outcome.as_str(),
-                        self.inner.tool_duration[outcome.index()].snapshot(),
+                        inner.tool_duration[outcome.index()].snapshot(),
                     )
                 })
                 .collect(),
-        }
+        })
     }
 }
 
@@ -439,21 +551,31 @@ fn label_values<const N: usize>(
         .collect()
 }
 
-/// One model request in flight, as a drop guard.
-pub struct InFlight<'a> {
-    counter: &'a AtomicI64,
+/// One model request in flight, as a drop guard: whichever way the request
+/// ends, the gauge is given back.
+pub struct InFlight {
+    release: Option<Box<dyn FnOnce() + Send + Sync>>,
 }
 
-impl InFlight<'_> {
+impl InFlight {
+    /// A guard that runs `release` when the request ends.
+    pub fn on_drop(release: impl FnOnce() + Send + Sync + 'static) -> Self {
+        Self {
+            release: Some(Box::new(release)),
+        }
+    }
+
     /// Record the request's outcome and duration, and end the in-flight span.
     pub fn finish(self, metrics: &AdkMetrics, outcome: ModelOutcome, started: std::time::Instant) {
         metrics.record_model_call(outcome, started.elapsed());
     }
 }
 
-impl Drop for InFlight<'_> {
+impl Drop for InFlight {
     fn drop(&mut self) {
-        self.counter.fetch_sub(1, Ordering::Relaxed);
+        if let Some(release) = self.release.take() {
+            release();
+        }
     }
 }
 
@@ -484,6 +606,7 @@ pub struct AdkSnapshot {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
     use std::time::{Duration, Instant};
 
     use super::*;
@@ -512,7 +635,7 @@ mod tests {
 
     #[test]
     fn snapshot_starts_empty_with_a_full_shape() {
-        let snapshot = AdkMetrics::new().snapshot();
+        let snapshot = AdkMetrics::new().snapshot().expect("local tallies");
         assert_eq!(snapshot.wakes_total.len(), WakeOutcome::ALL.len());
         assert!(snapshot.wakes_total.iter().all(|(_, value)| *value == 0));
         assert_eq!(snapshot.wake_duration.len(), WakeOutcome::ALL.len());
@@ -522,7 +645,7 @@ mod tests {
         assert_eq!(snapshot.tool_duration.len(), ToolOutcome::ALL.len());
         assert_eq!(snapshot.model_in_flight, 0);
         // Every histogram carries its edges and one more cumulative slot than
-        // edges, all zero, so a scrape before the first wake is well formed.
+        // edges, all zero, so a snapshot before the first wake is well formed.
         assert_eq!(
             snapshot.first_token.edges.len() + 1,
             snapshot.first_token.cumulative.len()
@@ -537,7 +660,7 @@ mod tests {
         metrics.record_wake(WakeOutcome::Completed, Duration::from_millis(500));
         metrics.record_wake(WakeOutcome::Completed, Duration::from_secs(90));
         metrics.record_wake(WakeOutcome::Failed, Duration::from_secs(2));
-        let snapshot = metrics.snapshot();
+        let snapshot = metrics.snapshot().expect("local tallies");
         assert_eq!(count(&snapshot, Families::Wakes, "completed"), 2);
         assert_eq!(count(&snapshot, Families::Wakes, "failed"), 1);
         assert_eq!(count(&snapshot, Families::Wakes, "cancelled"), 0);
@@ -560,7 +683,7 @@ mod tests {
     fn durations_above_the_last_edge_land_in_the_overflow_bucket() {
         let metrics = AdkMetrics::new();
         metrics.record_first_token(Duration::from_secs(200));
-        let snapshot = metrics.snapshot();
+        let snapshot = metrics.snapshot().expect("local tallies");
         let histogram = &snapshot.first_token;
         assert_eq!(histogram.count, 1);
         // Only the +Inf slot holds the sample.
@@ -573,7 +696,7 @@ mod tests {
         let metrics = AdkMetrics::new();
         metrics.record_first_token(Duration::from_millis(50));
         metrics.record_first_token(Duration::from_millis(51));
-        let histogram = metrics.snapshot().first_token;
+        let histogram = metrics.snapshot().expect("local tallies").first_token;
         assert_eq!(histogram.cumulative[0], 1);
         assert_eq!(histogram.cumulative[1], 2);
         assert_eq!(histogram.count, 2);
@@ -585,9 +708,15 @@ mod tests {
         {
             let _first = metrics.model_in_flight();
             let _second = metrics.model_in_flight();
-            assert_eq!(metrics.snapshot().model_in_flight, 2);
+            assert_eq!(
+                metrics.snapshot().expect("local tallies").model_in_flight,
+                2
+            );
         }
-        assert_eq!(metrics.snapshot().model_in_flight, 0);
+        assert_eq!(
+            metrics.snapshot().expect("local tallies").model_in_flight,
+            0
+        );
     }
 
     #[test]
@@ -596,7 +725,7 @@ mod tests {
         let started = Instant::now();
         let guard = metrics.model_in_flight();
         guard.finish(&metrics, ModelOutcome::Ok, started);
-        let snapshot = metrics.snapshot();
+        let snapshot = metrics.snapshot().expect("local tallies");
         assert_eq!(snapshot.model_in_flight, 0);
         assert_eq!(count(&snapshot, Families::Model, "ok"), 1);
         assert_eq!(snapshot.model_duration.count, 1);
@@ -608,7 +737,7 @@ mod tests {
         for outcome in ToolOutcome::ALL {
             metrics.record_tool_call(outcome, Duration::from_millis(10));
         }
-        let snapshot = metrics.snapshot();
+        let snapshot = metrics.snapshot().expect("local tallies");
         for outcome in ToolOutcome::ALL {
             assert_eq!(count(&snapshot, Families::Tools, outcome.as_str()), 1);
         }
@@ -626,7 +755,7 @@ mod tests {
         metrics.record_tokens(TokenKind::Input, 100);
         metrics.record_tokens(TokenKind::Input, 50);
         metrics.record_tokens(TokenKind::Output, 7);
-        let snapshot = metrics.snapshot();
+        let snapshot = metrics.snapshot().expect("local tallies");
         assert_eq!(count(&snapshot, Families::Tokens, "input"), 150);
         assert_eq!(count(&snapshot, Families::Tokens, "output"), 7);
         assert_eq!(count(&snapshot, Families::Tokens, "cache_read"), 0);
@@ -637,7 +766,14 @@ mod tests {
         let metrics = AdkMetrics::new();
         let clone = metrics.clone();
         clone.record_wake(WakeOutcome::Completed, Duration::from_millis(1));
-        assert_eq!(count(&metrics.snapshot(), Families::Wakes, "completed"), 1);
+        assert_eq!(
+            count(
+                &metrics.snapshot().expect("local tallies"),
+                Families::Wakes,
+                "completed"
+            ),
+            1
+        );
     }
 
     #[test]
@@ -667,5 +803,111 @@ mod tests {
                 "skipped"
             ]
         );
+    }
+
+    /// A sink that keeps what it was handed, so a test can read the records
+    /// back without an exporter.
+    #[derive(Default)]
+    struct RecordingSink {
+        wakes: Mutex<Vec<(WakeOutcome, Duration)>>,
+        model_calls: Mutex<Vec<(ModelOutcome, Duration)>>,
+        first_token: Mutex<Vec<Duration>>,
+        tokens: Mutex<Vec<(TokenKind, u64)>>,
+        tool_calls: Mutex<Vec<(ToolOutcome, Duration)>>,
+        in_flight: Arc<AtomicI64>,
+    }
+
+    impl AdkSink for RecordingSink {
+        fn record_wake(&self, outcome: WakeOutcome, duration: Duration) {
+            self.wakes
+                .lock()
+                .expect("the sink lock")
+                .push((outcome, duration));
+        }
+
+        fn model_in_flight(&self) -> InFlight {
+            self.in_flight.fetch_add(1, Ordering::Relaxed);
+            let counter = Arc::clone(&self.in_flight);
+            InFlight::on_drop(move || {
+                counter.fetch_sub(1, Ordering::Relaxed);
+            })
+        }
+
+        fn record_model_call(&self, outcome: ModelOutcome, duration: Duration) {
+            self.model_calls
+                .lock()
+                .expect("the sink lock")
+                .push((outcome, duration));
+        }
+
+        fn record_first_token(&self, duration: Duration) {
+            self.first_token
+                .lock()
+                .expect("the sink lock")
+                .push(duration);
+        }
+
+        fn record_tokens(&self, kind: TokenKind, tokens: u64) {
+            self.tokens
+                .lock()
+                .expect("the sink lock")
+                .push((kind, tokens));
+        }
+
+        fn record_tool_call(&self, outcome: ToolOutcome, duration: Duration) {
+            self.tool_calls
+                .lock()
+                .expect("the sink lock")
+                .push((outcome, duration));
+        }
+    }
+
+    #[test]
+    fn every_record_reaches_the_sink() {
+        let sink = Arc::new(RecordingSink::default());
+        let metrics = AdkMetrics::with_sink(sink.clone());
+
+        metrics.record_wake(WakeOutcome::Failed, Duration::from_secs(3));
+        let started = Instant::now();
+        metrics
+            .model_in_flight()
+            .finish(&metrics, ModelOutcome::Ok, started);
+        metrics.record_first_token(Duration::from_millis(40));
+        metrics.record_tokens(TokenKind::CacheRead, 12);
+        metrics.record_tool_call(ToolOutcome::Deferred, Duration::from_millis(2));
+
+        let wakes = sink.wakes.lock().expect("the sink lock").clone();
+        assert_eq!(wakes, [(WakeOutcome::Failed, Duration::from_secs(3))]);
+        let calls = sink.model_calls.lock().expect("the sink lock").clone();
+        assert_eq!(calls.len(), 1, "the finished request is one attempt");
+        assert_eq!(calls[0].0, ModelOutcome::Ok);
+        assert_eq!(
+            sink.first_token.lock().expect("the sink lock").len(),
+            1,
+            "the first-delta wait arrives as its own record"
+        );
+        assert_eq!(
+            *sink.tokens.lock().expect("the sink lock"),
+            [(TokenKind::CacheRead, 12)]
+        );
+        let tools = sink.tool_calls.lock().expect("the sink lock").clone();
+        assert_eq!(tools, [(ToolOutcome::Deferred, Duration::from_millis(2))]);
+        assert_eq!(sink.in_flight.load(Ordering::Relaxed), 0);
+        assert!(
+            metrics.snapshot().is_none(),
+            "a set with a sink keeps no local tallies"
+        );
+    }
+
+    #[test]
+    fn a_sink_set_reports_the_gauge_back_on_drop() {
+        let sink = Arc::new(RecordingSink::default());
+        let metrics = AdkMetrics::with_sink(sink.clone());
+        {
+            let _first = metrics.model_in_flight();
+            let _second = metrics.model_in_flight();
+            assert_eq!(sink.in_flight.load(Ordering::Relaxed), 2);
+        }
+        assert_eq!(sink.in_flight.load(Ordering::Relaxed), 0);
     }
 }

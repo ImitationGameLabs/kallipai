@@ -30,6 +30,10 @@ def post(url, body, token, timeout=10):
             return r.status
     except urllib.error.HTTPError as e:
         return e.code
+    except OSError:
+        # A door that takes the connection and closes it has no answer to
+        # give; report that instead of a traceback.
+        return "closed"
 
 
 def span(trace_id, claim):

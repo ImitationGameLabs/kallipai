@@ -74,17 +74,8 @@ pub struct Args {
     #[arg(long, env = "KALLIPAI_TAGMA_SQL_SLOW_MS", default_value_t = 100)]
     pub sql_slow_ms: u64,
 
-    /// Serve `/metrics` on the API listener. Reachable from loopback peers
-    /// only; `--metrics=false` leaves the route unmounted (404).
-    #[arg(
-        long,
-        env = "KALLIPAI_TAGMA_METRICS",
-        default_value_t = true,
-        action = clap::ArgAction::Set
-    )]
-    pub metrics: bool,
-    /// Serve `/health` on the API listener. Same reachability rule as
-    /// `--metrics`; `--health=false` leaves the route unmounted (404).
+    /// Serve `/health` on the API listener. Reachable from loopback peers
+    /// through the peer gate; `--health=false` leaves the route unmounted (404).
     #[arg(
         long,
         env = "KALLIPAI_TAGMA_HEALTH",

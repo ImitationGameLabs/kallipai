@@ -180,12 +180,13 @@ the edge serves.
 
 Directories the host provides:
 
-| Variable                        | Mounted at | Contents                                            |
-| ------------------------------- | ---------- | --------------------------------------------------- |
-| `KALLIPAI_TLS_DIR`              | `/certs`   | `fullchain.pem`, `privkey.pem`                      |
-| `KALLIPAI_INSTANCES_STATE_DIR`  | `/state`   | the directory holding the daemon's control socket   |
-| `TELEMETRY_BASE`                | tempo, grafana | their data, written by the containers           |
-| `KALLIPAI_STACK_DIR`            | config files | the observability configs, produced by the script |
+| Variable                               | Mounted at                   | Contents                                                    |
+| -------------------------------------- | ---------------------------- | ----------------------------------------------------------- |
+| `KALLIPAI_TLS_DIR`                     | `/certs`                     | `fullchain.pem`, `privkey.pem`                              |
+| `KALLIPAI_INSTANCES_STATE_DIR`         | `/state`                     | the directory holding the daemon's control socket           |
+| `TELEMETRY_BASE`                       | tempo, grafana               | their data, written by the containers                       |
+| `KALLIPAI_TELEMETRY_INTAKE_TOKEN_FILE` | `/etc/kallipai/intake-token` | the bearer token every OTLP push carries, mounted read-only |
+| `KALLIPAI_STACK_DIR`                   | config files                 | the observability configs, produced by the script           |
 
 `KALLIPAI_INSTANCES_STATE_DIR` is the daemon's runtime directory, not a
 directory the stack creates: point it at the directory the daemon listens in
@@ -763,5 +764,8 @@ middle word (`archeion`, `lesche`, `keryx`, `files`, `model-gateway`,
 `instances`, `caddy-web`, `tagma`); `--help` prints the same list. The
 observability services are not built here: the collector, tempo, Grafana and
 Prometheus come from upstream registries, pinned by digest in the two
-override files. The edge image is the one the production stack serves the
+override files. The collector is the stack's only OTLP door, on `4318` behind a
+bearer token read from `KALLIPAI_TELEMETRY_INTAKE_TOKEN_FILE`; it forwards
+traces to tempo and metrics to Prometheus over the remote-write protocol. The
+edge image is the one the production stack serves the
 browser from: it carries the site, so the two move together.

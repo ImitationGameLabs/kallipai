@@ -16,30 +16,9 @@ let
   obs = import ../obs-stack.nix { inherit lib; };
   shared = import ../platform-texts.nix { inherit lib; };
 
-  # The deployment's instance table: this renderer and scripts/compose-up.sh
-  # read one list, so an intake port or a token path is configured once and
-  # spelled nowhere else. An absent file means no instance has its own intake,
-  # which is the stack every deployment starts with.
-  #
-  # The table is configuration, not source: it names host paths that differ per
-  # deployment, so it is not tracked, and a flake's source copy cannot carry it.
-  # The script exports where it is and builds with --impure, the one read that
-  # leaves the store behind; the variable name is shared with the script, and
-  # the check reads it back from both.
-  instancesFile =
-    let
-      fromEnvironment = builtins.getEnv "KALLIPAI_TELEMETRY_INSTANCES_FILE";
-    in
-    if fromEnvironment != "" then fromEnvironment else toString ../../compose/telemetry-instances.json;
-  instances =
-    if builtins.pathExists instancesFile then
-      builtins.fromJSON (builtins.readFile instancesFile)
-    else
-      [ ];
-
-  # Only the texts are wanted here: they are plain strings, so no host ports
-  # and no data root are involved.
-  stack = obs.mkStack { inherit instances; };
+  # The texts are plain strings and carry no host port or data root, so nothing
+  # here has to be read from a deployment's files.
+  stack = obs.mkStack { };
 
   texts = {
     "otelcol.yaml" = pkgs.writeText "otelcol.yaml" stack.texts.otelcol;
@@ -47,13 +26,6 @@ let
     "grafana.ini" = pkgs.writeText "grafana.ini" stack.texts.grafana;
     "grafana-datasources.yaml" = pkgs.writeText "grafana-datasources.yaml" stack.texts.datasource;
     "prometheus.yaml" = pkgs.writeText "prometheus.yaml" shared.prometheus;
-  }
-  # The agent runs beside the host's network namespace rather than on the
-  # compose network: no compose service mounts it, and the check keeps it out of
-  # the set compose must mount. scripts/compose-up.sh starts the container that
-  # reads it, from this build, so its ports come from the same table.
-  // lib.optionalAttrs (stack.texts.agent != null) {
-    "agent.yaml" = pkgs.writeText "agent.yaml" stack.texts.agent;
   };
 in
 # The names travel with the output so the eval check can compare them with
@@ -62,9 +34,6 @@ pkgs.runCommand "kallipai-stack"
   {
     passthru = {
       textNames = builtins.attrNames texts;
-      # What is written for a host process rather than a container: compose must
-      # not mount these, and the check names them apart from the mounted set.
-      hostOnlyTextNames = lib.optional (stack.texts.agent != null) "agent.yaml";
     };
   }
   (

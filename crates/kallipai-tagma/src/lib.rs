@@ -465,17 +465,17 @@ pub async fn run(args: Args, operator_pin: Option<String>) -> Result<()> {
         }
     }
 
-    // Observability, installed before the first request: a scrape in the
-    // first second already sees the build identity and the configured relay
-    // count (which is what tells "configured but down" from local-only).
+    // Observability, installed before the first request: the first collection
+    // already carries the build identity and the configured relay count (which
+    // is what tells "configured but down" from local-only).
     let observability = metrics();
     observability.attach_state(&state);
     observability.set_build_info(env!("CARGO_PKG_VERSION"), stored_tagma_id(&args).as_deref());
     observability.set_relays_configured(relay_count as i64);
 
     let mut app = routes::router();
-    if args.metrics || args.health {
-        app = app.merge(crate::metrics::routes::router(args.metrics, args.health));
+    if args.health {
+        app = app.merge(crate::metrics::routes::router(args.health));
     }
     let app = app.with_state(state.clone());
 
@@ -758,7 +758,7 @@ fn logs_target() -> Result<std::path::PathBuf> {
 /// `instance`, the role name the daemon's instance log listing keys on.
 ///
 /// `attrs` become resource attributes on every exported span. The daemon
-/// passes [`telemetry_attrs`] here: `tagma.id` labels the whole process
+/// passes [`telemetry_attrs`] here: the instance identity labels the whole
 /// rather than one span, and it is known before the runtime exists.
 ///
 /// `intake_token` is the enrollment credential the collector's intake
@@ -1265,19 +1265,44 @@ pub fn stored_tagma_token(args: &args::Args) -> Option<String> {
 }
 
 /// The `tagma.id` value that stands in for an instance with no stored
-/// enrollment. The trace resource and the scrape face's `build_info` both
-/// report it, so a later enrollment changes a value and never the shape of
-/// what a collector has already been receiving.
+/// enrollment. The trace resource and `build_info` both report it, so a
+/// later enrollment changes a value and never the shape of what a collector
+/// has already been receiving.
 pub const UNENROLLED_TAGMA_ID: &str = "none";
 
-/// The exporter's resource attributes for a boot: `tagma.id` is always among
-/// them, carrying [`UNENROLLED_TAGMA_ID`] until an enrollment stores an id.
+/// The exporter's resource attributes for a boot: the service name comes from
+/// the exporter call itself, and these name the instance -- `tagma.id` and
+/// `service.instance.id`, both the enrolled id or [`UNENROLLED_TAGMA_ID`]
+/// until an enrollment stores one -- plus the version this build reports.
 ///
-/// One spelling of "no id yet" serves both faces. A trace taken before
-/// enrollment and a scrape of the same instance carry the same key with the
-/// same stand-in, so the two stay comparable across the enrollment.
+/// One spelling of "no id yet" serves both keys. A trace taken before
+/// enrollment and a metric of the same instance carry the same value with
+/// the same stand-in, so the two stay comparable across the enrollment.
 pub fn telemetry_attrs(tagma_id: Option<&str>) -> Vec<(&'static str, &str)> {
-    vec![("tagma.id", tagma_id.unwrap_or(UNENROLLED_TAGMA_ID))]
+    let id = tagma_id.unwrap_or(UNENROLLED_TAGMA_ID);
+    vec![
+        ("tagma.id", id),
+        ("service.instance.id", id),
+        ("service.version", env!("CARGO_PKG_VERSION")),
+    ]
+}
+/// Publish the metric pipeline for a boot on the same terms as the trace one:
+/// the collector endpoint and credential the trace half reads, the resource
+/// attributes the boot passes, and the span resource's service name.
+///
+/// The guard flushes what the reader aggregated on the way out. A boot with
+/// no endpoint gets an inert guard and records into the SDK's no-op meter.
+pub fn init_metrics(
+    attrs: &[(&str, &str)],
+    intake_token: Option<&str>,
+) -> kallipai_common::telemetry::MetricsGuard {
+    let config = kallipai_common::telemetry::config_from_env();
+    // The provider handle is dropped here on purpose: the global meter
+    // already holds a clone and the guard holds the original, so the reader
+    // this process records into outlives the local binding.
+    let (_provider, guard) =
+        kallipai_common::telemetry::metrics_provider(config.as_ref(), "tagma", attrs, intake_token);
+    guard
 }
 
 /// The identity rule on its own, with the environment taken out: the first

@@ -1,9 +1,8 @@
-//! The tagma's own metrics: the families this process records directly, the
-//! heartbeat table `/health` reads, and the registry `/metrics` renders.
+//! The tagma's own metrics: what this process records, the heartbeat table
+//! `/health` reads, and the callbacks that report what another owner holds.
 //!
-//! Source names follow OTel semantics as `kallipai_tagma.<domain>.<name>`; the
-//! form a scrape sees is `kallipai_tagma_<domain>_<name>`. Only the scrape form
-//! appears in code, because that is the name an operator greps for.
+//! A family is recorded, never scraped: recording goes through the meter the
+//! boot installed, and the periodic reader carries every series out.
 //!
 //! **Label discipline.** A label may carry a closed vocabulary defined in this
 //! crate (`route`, `method`, `status_class`, `leg`, `outcome`, `task`,
@@ -11,57 +10,55 @@
 //! the one-off identity labels of `build_info`. Everything else is out: an
 //! agent id, a profile or set name, a model name, a provider id, a tool name,
 //! a path, a query string, or any message text. Each of those is either
-//! unbounded (one series per value) or an identity, and either way it makes a
-//! scrape unusable. The vocabulary lives in the enums below, so adding a value
-//! is a code change and never a data-driven one.
+//! unbounded (one series per value) or an identity, and either way it makes
+//! the series unusable. The vocabulary lives in the enums below, so adding a
+//! value is a code change and never a data-driven one.
 //!
-//! **Who encodes what.** Families this module owns are recorded through
-//! `prometheus` collectors registered here. Families whose data belongs to
-//! another owner -- the adk's wake/model/tool tallies, the event bus's
-//! per-topic counters, the agent roster, the export pipeline's tally -- are
-//! encoded by `snapshot::SnapshotCollector` on each gather. That is what keeps
-//! a monotonic value a real counter: `rate()` works on it, and nothing has to
-//! be mirrored into a gauge.
+//! **One recording path.** The request path and the adk record into the OTel
+//! instruments here; an agent context carries a handle to that sink, so a
+//! wake anywhere in the process lands in the one meter. What leaves is the
+//! periodic reader's export, and every observation carries the resource the
+//! boot published.
 //!
+//! **A value another owner holds is read, not copied.** The relay gauges, the
+//! build identity, the heartbeat ages, the export tally, the bus counters and
+//! the roster reach the meter as callbacks, each reading the owner attached at
+//! that moment: a monotonic tally stays a counter, so a reader can rate it, and
+//! nothing is mirrored between collections.
 //!
 //! **Model tallies count attempts.** A model counter moves once per send, and
 //! the attempt's duration runs from that send to the attempt's end, so a
 //! backoff between attempts never lands in it. The wake's own outcome is a
 //! separate family.
 //!
-//! **The scrape face is not counted.** `http_timing` exempts `/metrics` and
-//! `/health` by path: a scrape measures the process, so counting scrapes would
-//! let a scraper's own cadence dominate `http_requests_total`. The exemption is
-//! by path and not by peer, so a refused non-loopback scrape leaves no series
-//! either; a refusal's only trace is the debug line in `routes::peer_gate`.
-//!
-//! Neither path enters a trace either: the router is mounted with
-//! `with_server_span_except`, so a scrape is not an entry in the traces it
-//! sits beside, and its latency is not read as server work.
+//! **`/health` is not measured.** `http_timing` exempts it by path: a monitor's
+//! cadence says nothing about the process's work, and counting it would let
+//! the probe become the load. The router is mounted with
+//! `with_server_span_except`, so a health check is not an entry in the traces
+//! it sits beside either.
 //!
 //! `build_info` always carries both labels: an instance with no stored
-//! registration reports `tagma_registration="none"`, so enrolling it later
-//! changes a value, never the shape.
-//! Recording never allocates beyond a fixed label vector and never awaits: the
-//! request path pays a handful of atomic adds. A broken metrics family must not
-//! break serving, so nothing here returns an error to a caller.
+//! registration reports the unenrolled id, so enrolling it later changes a
+//! value, never the shape.
+//!
+//! Recording never awaits: the request path pays a handful of atomic adds and
+//! one small attribute vector per observation. A broken metrics family must
+//! not break serving, so nothing here returns an error to a caller.
 
 use std::future::Future;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use prometheus::{
-    HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts, Registry,
-    TextEncoder,
-};
+use opentelemetry::KeyValue;
+use opentelemetry::metrics::{Counter, Histogram, Meter};
 
-use crate::UNENROLLED_TAGMA_ID;
 use crate::state::SharedState;
 
+mod adk_sink;
 pub mod health;
+mod observable;
 pub mod routes;
-mod snapshot;
 
 pub use health::{HealthReport, HealthStatus, RelayState};
 
@@ -76,6 +73,10 @@ const HTTP_BUCKETS: &[f64] = &[
 /// so nothing below ten milliseconds is worth resolving; a slow leg is a slow
 /// platform, which is the thing worth seeing.
 const OUTBOUND_BUCKETS: &[f64] = &[0.01, 0.05, 0.1, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0];
+
+/// The meter every instrument here is created from: one scope name for the
+/// whole crate, which a collector reports as the instrumentation scope.
+pub(crate) const METER_NAME: &str = "kallipai-tagma";
 
 /// The `route` label of a request that matched no route template. Same
 /// convention as the request span (`kallipai_common::telemetry::server`): the
@@ -148,7 +149,7 @@ pub enum Leg {
     Profiles,
     /// A lesche client call: a listing, a frame post, or opening a stream. A
     /// tunnel that then stays open is not a call -- `relays_connected` and
-    /// `relay_reconnects_total` describe it, and a duration for its lifetime
+    /// `relay_reconnects` describe it, and a duration for its lifetime
     /// would measure uptime rather than an answer.
     ///
     /// One observed call is one caller-level attempt: a client's own retry
@@ -258,147 +259,105 @@ impl BeatTable {
     }
 }
 
-/// The process's metrics: the registry, the collectors this crate records
-/// directly, the heartbeat table, and the adk handle every agent context
-/// carries.
+/// The process's metrics: the instruments this crate records into, the
+/// callbacks that report what another owner holds, the heartbeat table, and
+/// the adk handle every agent context carries.
 pub struct Metrics {
-    registry: Registry,
-    http_requests: IntCounterVec,
-    http_duration: HistogramVec,
-    relays_configured: IntGauge,
-    relays_connected: IntGauge,
-    relay_reconnects: IntCounter,
-    relay_dropped: IntCounterVec,
-    outbound_requests: IntCounterVec,
-    outbound_duration: HistogramVec,
-    build_info: IntGaugeVec,
+    http_requests: Counter<u64>,
+    http_duration: Histogram<f64>,
+    relays_configured: AtomicI64,
+    relays_connected: AtomicI64,
+    relay_reconnects: Counter<u64>,
+    relay_dropped: Counter<u64>,
+    outbound_requests: Counter<u64>,
+    outbound_duration: Histogram<f64>,
+    build_info: Mutex<Option<observable::BuildInfo>>,
     beats: BeatTable,
-    adk: kallipai_adk::metrics::AdkMetrics,
-    collector: snapshot::SnapshotCollector,
+    adk: Arc<adk_sink::OtelAdkSink>,
+    observable: observable::Observable,
 }
 
 impl Metrics {
-    /// Build the metric set on a private registry and register every collector
-    /// into it: the ones recorded here, and the snapshot collector that encodes
-    /// the data other modules own.
-    ///
-    /// A name collision is a programming error (two collectors claiming one
-    /// family), so it panics at construction, exactly as the gateway's
-    /// `.expect("a statically named counter")` does.
+    /// Build the metric set: the instruments the request path records into,
+    /// and the callbacks for the families another owner holds.
+    /// The instruments come from the process meter, which the boot's provider
+    /// publishes; a process with no provider keeps the SDK's no-op meter and
+    /// records into nothing.
     pub fn new() -> Arc<Self> {
-        let registry = Registry::new();
-        let http_requests = IntCounterVec::new(
-            Opts::new(
-                "kallipai_tagma_http_requests_total",
+        #[cfg(test)]
+        test_meter::installed();
+        Self::with_meter(&opentelemetry::global::meter(METER_NAME))
+    }
+
+    /// [`Metrics::new`] over a meter of the caller's own, so a test can read
+    /// what it recorded without touching the process meter.
+    pub fn with_meter(meter: &Meter) -> Arc<Self> {
+        let http_requests = meter
+            .u64_counter("kallipai_tagma.http_requests")
+            .with_description(
                 "API requests by route template, method and status class; one count per response.",
-            ),
-            &["route", "method", "status_class"],
-        )
-        .expect("a statically named counter");
-        let http_duration = HistogramVec::new(
-            HistogramOpts::new(
-                "kallipai_tagma_http_request_duration_seconds",
+            )
+            .build();
+        let http_duration = meter
+            .f64_histogram("kallipai_tagma.http_request_duration")
+            .with_unit("s")
+            .with_description(
                 "API request duration (received to response finished) by route template.",
             )
-            .buckets(HTTP_BUCKETS.to_vec()),
-            &["route"],
-        )
-        .expect("a statically named histogram");
-        let relays_configured = IntGauge::new(
-            "kallipai_tagma_relays_configured",
-            "Relay entries the operator configured; 0 is a local-only tagma.",
-        )
-        .expect("a statically named gauge");
-        let relays_connected = IntGauge::new(
-            "kallipai_tagma_relays_connected",
-            "Relay entries whose tunnel is open right now.",
-        )
-        .expect("a statically named gauge");
-        let relay_reconnects = IntCounter::new(
-            "kallipai_tagma_relay_reconnects_total",
-            "Relay tunnel sessions that ended and were reopened.",
-        )
-        .expect("a statically named counter");
-        let relay_dropped = IntCounterVec::new(
-            Opts::new(
-                "kallipai_tagma_relay_dropped_total",
+            .with_boundaries(HTTP_BUCKETS.to_vec())
+            .build();
+        let relay_reconnects = meter
+            .u64_counter("kallipai_tagma.relay_reconnects")
+            .with_description("Relay tunnel sessions that ended and were reopened.")
+            .build();
+        let relay_dropped = meter
+            .u64_counter("kallipai_tagma.relay_dropped")
+            .with_description(
                 "Inbound 1:1 relay frames the tagma received and discarded, by cause. A count here means the two ends disagree; drops that are normal protocol behaviour are not counted.",
-            ),
-            &["reason"],
-        )
-        .expect("a statically named counter");
-        let outbound_requests = IntCounterVec::new(
-            Opts::new(
-                "kallipai_tagma_outbound_requests_total",
-                "Outbound platform calls by leg and outcome; one count per call. A stream that stays open is not a call: relays_connected and relay_reconnects_total carry the tunnel.",
-            ),
-            &["leg", "outcome"],
-        )
-        .expect("a statically named counter");
-        let outbound_duration = HistogramVec::new(
-            HistogramOpts::new(
-                "kallipai_tagma_outbound_request_duration_seconds",
-                "Outbound platform call duration by leg.",
             )
-            .buckets(OUTBOUND_BUCKETS.to_vec()),
-            &["leg"],
-        )
-        .expect("a statically named histogram");
-        let build_info = IntGaugeVec::new(
-            Opts::new(
-                "kallipai_tagma_build_info",
-                "Build metadata; the value is always 1, the labels carry the version and the registration id."
-            ),
-            &["version", "tagma_registration"],
-        )
-        .expect("a statically named gauge");
-        let collector = snapshot::SnapshotCollector::new();
-        for collected in [
-            Box::new(http_requests.clone()) as Box<dyn prometheus::core::Collector>,
-            Box::new(http_duration.clone()),
-            Box::new(relays_configured.clone()),
-            Box::new(relays_connected.clone()),
-            Box::new(relay_reconnects.clone()),
-            Box::new(relay_dropped.clone()),
-            Box::new(outbound_requests.clone()),
-            Box::new(outbound_duration.clone()),
-            Box::new(build_info.clone()),
-            Box::new(collector.clone()),
-        ] {
-            registry
-                .register(collected)
-                .expect("registering a statically named collector");
-        }
+            .build();
+        let outbound_requests = meter
+            .u64_counter("kallipai_tagma.outbound_requests")
+            .with_description(
+                "Outbound platform calls by leg and outcome; one count per call. A stream that stays open is not a call: relays_connected and relay_reconnects carry the tunnel.",
+            )
+            .build();
+        let outbound_duration = meter
+            .f64_histogram("kallipai_tagma.outbound_request_duration")
+            .with_unit("s")
+            .with_description("Outbound platform call duration by leg.")
+            .with_boundaries(OUTBOUND_BUCKETS.to_vec())
+            .build();
+        let observable = observable::Observable::register(meter);
         let metrics = Arc::new(Self {
-            registry,
             http_requests,
             http_duration,
-            relays_configured,
-            relays_connected,
+            relays_configured: AtomicI64::new(0),
+            relays_connected: AtomicI64::new(0),
             relay_reconnects,
             relay_dropped,
             outbound_requests,
             outbound_duration,
-            build_info,
+            build_info: Mutex::new(None),
             beats: BeatTable::new(),
-            adk: kallipai_adk::metrics::AdkMetrics::default(),
-            collector,
+            adk: adk_sink::OtelAdkSink::new(meter),
+            observable,
         });
-        metrics.collector.attach(&metrics);
+        metrics.observable.attach(&metrics);
         metrics
     }
 
-    /// The adk handle for one agent context: the same counters every agent in
-    /// this process records into.
+    /// The adk handle for one agent context: the same sink every agent in this
+    /// process records into, so a wake anywhere reaches the one meter.
     pub fn adk(&self) -> kallipai_adk::metrics::AdkMetrics {
-        self.adk.clone()
+        kallipai_adk::metrics::AdkMetrics::with_sink(self.adk.clone())
     }
 
-    /// Point the snapshot collector at the running tagma, for the families it
+    /// Point the callbacks at the running tagma, for the families they read
     /// reads out of live state (the roster, the bus). Called once, after the
     /// state exists; before that those families report nothing.
     pub fn attach_state(&self, state: &SharedState) {
-        self.collector.attach_state(state);
+        self.observable.attach_state(state);
     }
 
     /// One finished API request. `route` is the matched template or
@@ -411,12 +370,18 @@ impl Metrics {
             500..=599 => "5xx",
             _ => "other",
         };
-        self.http_requests
-            .with_label_values(&[route, method, status_class])
-            .inc();
-        self.http_duration
-            .with_label_values(&[route])
-            .observe(duration.as_secs_f64());
+        self.http_requests.add(
+            1,
+            &[
+                KeyValue::new("route", route.to_string()),
+                KeyValue::new("method", method.to_string()),
+                KeyValue::new("status_class", status_class),
+            ],
+        );
+        self.http_duration.record(
+            duration.as_secs_f64(),
+            &[KeyValue::new("route", route.to_string())],
+        );
     }
 
     /// One pass of a periodic loop, with how it ended: a pass that then takes
@@ -451,54 +416,67 @@ impl Metrics {
 
     /// How many relay entries the operator configured: 0 is a local-only tagma.
     pub fn relays_configured(&self) -> i64 {
-        self.relays_configured.get()
+        self.relays_configured.load(Ordering::Relaxed)
     }
 
     /// How many relay tunnels are open right now.
     pub fn relays_connected(&self) -> i64 {
-        self.relays_connected.get()
+        self.relays_connected.load(Ordering::Relaxed)
     }
 
     /// The operator's relay entries, counted once at boot.
     pub fn set_relays_configured(&self, configured: i64) {
-        self.relays_configured.set(configured);
+        self.relays_configured.store(configured, Ordering::Relaxed);
     }
 
     /// A tunnel session ended and the reconnect loop is opening the next one.
     /// A counter, not the connected gauge: a flapping tunnel reads as a growing
     /// rate, which is what it is.
     pub fn relay_reconnected(&self) {
-        self.relay_reconnects.inc();
+        self.relay_reconnects.add(1, &[]);
     }
 
     /// A tunnel came up.
     pub fn relay_up(&self) {
-        self.relays_connected.inc();
+        self.relays_connected.fetch_add(1, Ordering::Relaxed);
     }
 
     /// A tunnel went down: stream ended, error, or shutdown.
     pub fn relay_down(&self) {
-        self.relays_connected.dec();
+        self.relays_connected.fetch_sub(1, Ordering::Relaxed);
     }
 
     /// Count an inbound frame this tagma discarded, by cause. See [`DropReason`]
     /// for the closed set and for which drops stay uncounted.
     pub fn relay_dropped(&self, reason: DropReason) {
         self.relay_dropped
-            .with_label_values(&[reason.as_str()])
-            .inc();
+            .add(1, &[KeyValue::new("reason", reason.as_str())]);
     }
 
-    /// The one-off identity series: which build, which registration. Called once at
-    /// boot. The registration id gets a label of its own because `tagma_id` in the
-    /// stores carries the door's slug; two meanings under one name merge into a
-    /// single joined value the moment an instance's slug and its registration differ.
-    /// `registration` is `None` on a local-only tagma, and the label says so
-    /// rather than pretending an identity.
+    /// The one-off identity: which build, which registration. Called once at
+    /// boot, and a later call replaces it, one process having one identity.
+    /// The registration id gets a label of its own because `tagma_id` in the
+    /// stores carries the door's slug; two meanings under one name merge into
+    /// a single joined value the moment an instance's slug and its
+    /// registration differ. `registration` is `None` on a local-only tagma,
+    /// and the label says so rather than pretending an identity.
     pub fn set_build_info(&self, version: &str, registration: Option<&str>) {
+        let info = observable::BuildInfo {
+            version: version.to_owned(),
+            registration: registration.map(str::to_owned),
+        };
+        *self
+            .build_info
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(info);
+    }
+
+    /// The identity `build_info` reports, or `None` before the boot names it.
+    pub(in crate::metrics) fn build_info(&self) -> Option<observable::BuildInfo> {
         self.build_info
-            .with_label_values(&[version, registration.unwrap_or(UNENROLLED_TAGMA_ID)])
-            .set(1);
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 
     /// Time one outbound platform call and count its outcome, returning the
@@ -522,24 +500,18 @@ impl Metrics {
             Err(error) if looks_like_timeout(error) => LegOutcome::Timeout,
             Err(_) => LegOutcome::Error,
         };
-        self.outbound_requests
-            .with_label_values(&[leg.as_str(), outcome.as_str()])
-            .inc();
-        self.outbound_duration
-            .with_label_values(&[leg.as_str()])
-            .observe(started.elapsed().as_secs_f64());
+        self.outbound_requests.add(
+            1,
+            &[
+                KeyValue::new("leg", leg.as_str()),
+                KeyValue::new("outcome", outcome.as_str()),
+            ],
+        );
+        self.outbound_duration.record(
+            started.elapsed().as_secs_f64(),
+            &[KeyValue::new("leg", leg.as_str())],
+        );
         result
-    }
-
-    /// The Prometheus text of every family gathered right now. The one failure
-    /// mode is the encoder's (a family that could not be rendered), reported to
-    /// the caller rather than swallowed: a scrape that cannot render should
-    /// answer 5xx, not an empty 200.
-    pub fn render(&self) -> Result<String, String> {
-        let families = self.registry.gather();
-        TextEncoder::new()
-            .encode_to_string(&families)
-            .map_err(|error| error.to_string())
     }
 }
 
@@ -553,170 +525,387 @@ fn looks_like_timeout(error: &impl std::fmt::Display) -> bool {
         .any(|needle| message.contains(needle))
 }
 
-/// One rendered counter's value from the process metrics. Tests that assert
-/// an increment at a call site (rather than inside [`Metrics::observe_outbound`])
-/// read the scrape text, the way an operator would.
+/// One counter's value as the exporter last saw it. Tests that assert an
+/// increment at a call site (rather than inside [`Metrics::observe_outbound`])
+/// read what a collector would receive.
 #[cfg(test)]
-pub(crate) fn counter_value(name: &str, labels: &str) -> u64 {
-    let text = metrics().render().expect("metrics render");
-    let needle = format!("{name}{{{labels}}} ");
-    text.lines()
-        .find_map(|line| line.strip_prefix(&needle)?.trim().parse().ok())
-        .unwrap_or(0)
+pub(crate) fn counter_value(name: &str, attributes: &[(&str, &str)]) -> u64 {
+    test_meter::counter_value(name, attributes)
 }
 
 /// The process's metrics.
 ///
-/// One set per process, like the export pipeline: it is published on the single
-/// listener and describes the single `app`. A test that wants isolation builds
-/// [`Metrics::new`] directly and asserts against that instance; a test that just
-/// serves the router takes the shared one, which starts empty.
+/// One set per process, like the export pipeline: it describes the single
+/// `app`. A test that wants isolation builds [`Metrics::new`] over a meter of
+/// its own; a test that just serves the router takes the shared one, whose
+/// meter is the process-wide test capture.
 pub fn metrics() -> &'static Metrics {
     static GLOBAL: OnceLock<Arc<Metrics>> = OnceLock::new();
     GLOBAL.get_or_init(Metrics::new)
 }
 
+/// Records what the OTel instruments report, for tests.
+///
+/// A reader hands every collection to a capture, so an assertion reads the
+/// series an exporter sees rather than a rendering of them. The shared
+/// [`metrics`] instance takes the process-wide capture; a test that wants
+/// isolation builds its own.
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use prometheus::proto::{MetricFamily, MetricType};
+pub(crate) mod test_meter {
+    use std::sync::{Arc, Mutex, OnceLock};
+    use std::time::Duration;
 
-    fn family<'a>(families: &'a [MetricFamily], name: &str) -> &'a MetricFamily {
-        families
-            .iter()
-            .find(|family| family.name() == name)
-            .unwrap_or_else(|| {
-                let gathered: Vec<&str> = families.iter().map(|family| family.name()).collect();
-                panic!("{name} is gathered; got {gathered:?}")
-            })
+    use opentelemetry::KeyValue;
+    use opentelemetry_sdk::error::OTelSdkResult;
+    use opentelemetry_sdk::metrics::data::{AggregatedMetrics, MetricData, ResourceMetrics};
+    use opentelemetry_sdk::metrics::exporter::PushMetricExporter;
+    use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider, Temporality};
+
+    /// One series as a collection left it.
+    #[derive(Debug, Clone, PartialEq)]
+    pub(crate) enum Recorded {
+        Counter {
+            name: String,
+            attributes: Vec<(String, String)>,
+            value: u64,
+        },
+        Histogram {
+            name: String,
+            attributes: Vec<(String, String)>,
+            count: u64,
+            bounds: Vec<f64>,
+        },
+        /// A signed sum or a gauge: an up-down counter exports as a gauge, and
+        /// a callback-registered gauge arrives the same way.
+        Gauge {
+            name: String,
+            attributes: Vec<(String, String)>,
+            value: f64,
+        },
     }
 
-    /// The sample carrying exactly these labels, if there is one.
-    fn sample(family: &MetricFamily, labels: &[(&str, &str)]) -> Option<f64> {
-        family.get_metric().iter().find_map(|metric| {
-            let pairs = metric.get_label();
-            let exact = pairs.len() == labels.len()
-                && labels.iter().all(|(name, value)| {
-                    pairs
-                        .iter()
-                        .any(|pair| pair.name() == *name && pair.value() == *value)
-                });
-            exact.then(|| match family.get_field_type() {
-                MetricType::COUNTER => metric
-                    .get_counter()
-                    .as_ref()
-                    .map_or(f64::NAN, |counter| counter.value()),
-                _ => metric
-                    .get_gauge()
-                    .as_ref()
-                    .map_or(f64::NAN, |gauge| gauge.value()),
-            })
+    /// The last collection, flattened to the series a test asserts on.
+    #[derive(Debug, Clone, Default)]
+    pub(crate) struct Capture(Arc<Mutex<Vec<Recorded>>>);
+
+    impl Capture {
+        pub(crate) fn snapshot(&self) -> Vec<Recorded> {
+            self.0.lock().expect("the capture is not poisoned").clone()
+        }
+
+        fn store(&self, batch: &ResourceMetrics) {
+            let mut seen = self.0.lock().expect("the capture is not poisoned");
+            seen.clear();
+            for scope in batch.scope_metrics() {
+                for metric in scope.metrics() {
+                    let name = metric.name().to_string();
+                    match metric.data() {
+                        AggregatedMetrics::U64(MetricData::Sum(sum)) => {
+                            for point in sum.data_points() {
+                                seen.push(Recorded::Counter {
+                                    name: name.clone(),
+                                    attributes: pairs(point.attributes()),
+                                    value: point.value(),
+                                });
+                            }
+                        }
+                        AggregatedMetrics::F64(MetricData::Histogram(histogram)) => {
+                            for point in histogram.data_points() {
+                                seen.push(Recorded::Histogram {
+                                    name: name.clone(),
+                                    attributes: pairs(point.attributes()),
+                                    count: point.count(),
+                                    bounds: point.bounds().collect(),
+                                });
+                            }
+                        }
+                        AggregatedMetrics::I64(MetricData::Sum(sum)) => {
+                            for point in sum.data_points() {
+                                seen.push(Recorded::Gauge {
+                                    name: name.clone(),
+                                    attributes: pairs(point.attributes()),
+                                    value: point.value() as f64,
+                                });
+                            }
+                        }
+                        AggregatedMetrics::U64(MetricData::Gauge(gauge)) => {
+                            for point in gauge.data_points() {
+                                seen.push(Recorded::Gauge {
+                                    name: name.clone(),
+                                    attributes: pairs(point.attributes()),
+                                    value: point.value() as f64,
+                                });
+                            }
+                        }
+                        AggregatedMetrics::I64(MetricData::Gauge(gauge)) => {
+                            for point in gauge.data_points() {
+                                seen.push(Recorded::Gauge {
+                                    name: name.clone(),
+                                    attributes: pairs(point.attributes()),
+                                    value: point.value() as f64,
+                                });
+                            }
+                        }
+                        AggregatedMetrics::F64(MetricData::Gauge(gauge)) => {
+                            for point in gauge.data_points() {
+                                seen.push(Recorded::Gauge {
+                                    name: name.clone(),
+                                    attributes: pairs(point.attributes()),
+                                    value: point.value(),
+                                });
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+
+    fn pairs<'a>(attributes: impl Iterator<Item = &'a KeyValue>) -> Vec<(String, String)> {
+        attributes
+            .map(|pair| (pair.key.to_string(), pair.value.to_string()))
+            .collect()
+    }
+
+    impl PushMetricExporter for Capture {
+        async fn export(&self, batch: &ResourceMetrics) -> OTelSdkResult {
+            self.store(batch);
+            Ok(())
+        }
+
+        fn force_flush(&self) -> OTelSdkResult {
+            Ok(())
+        }
+
+        fn shutdown_with_timeout(&self, _timeout: Duration) -> OTelSdkResult {
+            Ok(())
+        }
+
+        fn temporality(&self) -> Temporality {
+            Temporality::Cumulative
+        }
+    }
+
+    static INSTALLED: OnceLock<(Capture, SdkMeterProvider)> = OnceLock::new();
+
+    /// The process-wide capture, installed as the meter provider the first
+    /// time a test needs one. Tests that assert on what the shared
+    /// [`super::metrics`] instance recorded read from here.
+    pub(crate) fn installed() -> &'static (Capture, SdkMeterProvider) {
+        INSTALLED.get_or_init(|| {
+            let capture = Capture::default();
+            let reader = PeriodicReader::builder(capture.clone())
+                .with_interval(Duration::from_secs(3600))
+                .build();
+            let provider = SdkMeterProvider::builder().with_reader(reader).build();
+            opentelemetry::global::set_meter_provider(provider.clone());
+            (capture, provider)
         })
     }
 
-    #[test]
-    fn every_family_reports_the_type_its_data_is() {
-        let metrics = Metrics::new();
-        // A vector family gathers nothing until it has a child, so each one
-        // gets a sample before its type can be read.
-        metrics.record_http("/tasks", "GET", 200, Duration::from_millis(1));
-        metrics.set_build_info("1.2.3", None);
-        let families = metrics.registry.gather();
-        assert_eq!(
-            family(&families, "kallipai_tagma_http_requests_total").get_field_type(),
-            MetricType::COUNTER
-        );
-        assert_eq!(
-            family(&families, "kallipai_tagma_http_request_duration_seconds").get_field_type(),
-            MetricType::HISTOGRAM
-        );
-        assert_eq!(
-            family(&families, "kallipai_tagma_relays_configured").get_field_type(),
-            MetricType::GAUGE
-        );
-        assert_eq!(
-            family(&families, "kallipai_tagma_build_info").get_field_type(),
-            MetricType::GAUGE
-        );
+    pub(crate) fn counter_value(name: &str, attributes: &[(&str, &str)]) -> u64 {
+        let (capture, provider) = installed();
+        provider.force_flush().expect("the test reader flushes");
+        counter(&capture.snapshot(), name, attributes)
     }
 
+    /// The counter series carrying exactly these attributes, if it exists.
+    pub(crate) fn counter_series(
+        samples: &[Recorded],
+        name: &str,
+        attributes: &[(&str, &str)],
+    ) -> Option<u64> {
+        samples.iter().find_map(|sample| match sample {
+            Recorded::Counter {
+                name: series,
+                attributes: seen,
+                value,
+            } if series == name && carries(seen, attributes) => Some(*value),
+            _ => None,
+        })
+    }
+
+    /// The value of the counter series carrying exactly these attributes.
+    pub(crate) fn counter(samples: &[Recorded], name: &str, attributes: &[(&str, &str)]) -> u64 {
+        counter_series(samples, name, attributes).unwrap_or(0)
+    }
+
+    /// The value of every counter series carrying this one attribute, summed.
+    pub(crate) fn counter_matching(name: &str, attribute: (&str, &str)) -> u64 {
+        let (capture, provider) = installed();
+        provider.force_flush().expect("the test reader flushes");
+        capture
+            .snapshot()
+            .iter()
+            .filter_map(|sample| match sample {
+                Recorded::Counter {
+                    name: series,
+                    attributes,
+                    value,
+                } if series == name
+                    && attributes
+                        .iter()
+                        .any(|(k, v)| k == attribute.0 && v == attribute.1) =>
+                {
+                    Some(*value)
+                }
+                _ => None,
+            })
+            .sum()
+    }
+
+    /// The gauge series carrying exactly these attributes, if it exists.
+    pub(crate) fn gauge_series(
+        samples: &[Recorded],
+        name: &str,
+        attributes: &[(&str, &str)],
+    ) -> Option<f64> {
+        samples.iter().find_map(|sample| match sample {
+            Recorded::Gauge {
+                name: series,
+                attributes: seen,
+                value,
+            } if series == name && carries(seen, attributes) => Some(*value),
+            _ => None,
+        })
+    }
+
+    /// The value of the gauge series carrying exactly these attributes.
+    pub(crate) fn gauge(samples: &[Recorded], name: &str, attributes: &[(&str, &str)]) -> f64 {
+        gauge_series(samples, name, attributes).unwrap_or(0.0)
+    }
+
+    /// A metric set over a reader of its own, with the capture that receives
+    /// what it records: a test reads its own series without touching the
+    /// process-wide ones.
+    pub(crate) fn local() -> (Arc<super::Metrics>, Capture, SdkMeterProvider) {
+        use opentelemetry::metrics::MeterProvider as _;
+
+        let capture = Capture::default();
+        let reader = PeriodicReader::builder(capture.clone())
+            .with_interval(Duration::from_secs(3600))
+            .build();
+        let provider = SdkMeterProvider::builder().with_reader(reader).build();
+        let metrics = super::Metrics::with_meter(&provider.meter(super::METER_NAME));
+        (metrics, capture, provider)
+    }
+
+    /// How many observations the histogram series carries.
+    pub(crate) fn histogram_count(samples: &[Recorded], name: &str) -> u64 {
+        samples
+            .iter()
+            .filter_map(|sample| match sample {
+                Recorded::Histogram {
+                    name: series,
+                    count,
+                    ..
+                } if series == name => Some(*count),
+                _ => None,
+            })
+            .sum()
+    }
+
+    /// The bucket boundaries the histogram series travels with.
+    pub(crate) fn histogram_bounds(samples: &[Recorded], name: &str) -> Option<Vec<f64>> {
+        samples.iter().find_map(|sample| match sample {
+            Recorded::Histogram {
+                name: series,
+                bounds,
+                ..
+            } if series == name => Some(bounds.clone()),
+            _ => None,
+        })
+    }
+
+    fn carries(seen: &[(String, String)], wanted: &[(&str, &str)]) -> bool {
+        seen.len() == wanted.len()
+            && wanted
+                .iter()
+                .all(|(key, value)| seen.iter().any(|(k, v)| k == key && v == value))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use opentelemetry::metrics::MeterProvider as _;
+    use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider};
+
+    use super::test_meter::{Capture, Recorded, counter, histogram_bounds, histogram_count};
+    use super::*;
+
+    /// A meter whose reader keeps what was recorded: a flush hands the
+    /// aggregated data to the capture, and the assertions read it the way a
+    /// collector would.
+    fn test_metrics() -> (Arc<Metrics>, Capture, SdkMeterProvider) {
+        let capture = Capture::default();
+        let reader = PeriodicReader::builder(capture.clone())
+            .with_interval(Duration::from_secs(3600))
+            .build();
+        let provider = SdkMeterProvider::builder().with_reader(reader).build();
+        let metrics = Metrics::with_meter(&provider.meter(METER_NAME));
+        (metrics, capture, provider)
+    }
+
+    /// What the instruments recorded, after a forced flush.
+    fn recorded(capture: &Capture, provider: &SdkMeterProvider) -> Vec<Recorded> {
+        provider.force_flush().expect("the reader flushes");
+        capture.snapshot()
+    }
+
+    /// A request reaches the counter with its status class, and the histogram
+    /// carries the buckets this crate declares.
     #[test]
     fn a_request_lands_in_the_counter_with_its_status_class() {
-        let metrics = Metrics::new();
+        let (metrics, capture, provider) = test_metrics();
         metrics.record_http("/tasks", "POST", 503, Duration::from_millis(20));
-        let families = metrics.registry.gather();
-        let requests = family(&families, "kallipai_tagma_http_requests_total");
+        let samples = recorded(&capture, &provider);
         assert_eq!(
-            sample(
-                requests,
+            counter(
+                &samples,
+                "kallipai_tagma.http_requests",
                 &[
                     ("route", "/tasks"),
                     ("method", "POST"),
                     ("status_class", "5xx")
                 ]
             ),
-            Some(1.0)
-        );
-        let duration = family(&families, "kallipai_tagma_http_request_duration_seconds");
-        assert_eq!(
-            duration.get_metric().len(),
-            1,
-            "one series per route, however many requests it served"
-        );
-        assert_eq!(
-            duration.get_metric()[0].get_histogram().get_sample_count(),
             1
+        );
+        assert_eq!(
+            histogram_count(&samples, "kallipai_tagma.http_request_duration"),
+            1,
+            "one observation per request"
+        );
+        assert_eq!(
+            histogram_bounds(&samples, "kallipai_tagma.http_request_duration").as_deref(),
+            Some(HTTP_BUCKETS),
+            "the declared buckets travel with the instrument"
         );
     }
 
     #[test]
     fn a_request_that_matched_no_route_is_its_own_series() {
-        let metrics = Metrics::new();
+        let (metrics, capture, provider) = test_metrics();
         metrics.record_http(UNMATCHED_ROUTE, "GET", 404, Duration::from_millis(1));
-        let families = metrics.registry.gather();
-        let requests = family(&families, "kallipai_tagma_http_requests_total");
+        let samples = recorded(&capture, &provider);
         assert_eq!(
-            sample(
-                requests,
+            counter(
+                &samples,
+                "kallipai_tagma.http_requests",
                 &[
                     ("route", UNMATCHED_ROUTE),
                     ("method", "GET"),
                     ("status_class", "4xx")
                 ]
             ),
-            Some(1.0)
-        );
-    }
-
-    #[test]
-    fn build_info_names_the_version_and_only_a_known_identity() {
-        let metrics = Metrics::new();
-        metrics.set_build_info("1.2.3", None);
-        metrics.set_build_info("1.2.3", Some("t-9"));
-        let families = metrics.registry.gather();
-        let build = family(&families, "kallipai_tagma_build_info");
-        assert_eq!(
-            sample(
-                build,
-                &[
-                    ("version", "1.2.3"),
-                    ("tagma_registration", UNENROLLED_TAGMA_ID)
-                ]
-            ),
-            Some(1.0)
-        );
-        assert_eq!(
-            sample(
-                build,
-                &[("version", "1.2.3"), ("tagma_registration", "t-9")]
-            ),
-            Some(1.0)
+            1
         );
     }
 
     #[tokio::test]
     async fn each_outbound_outcome_is_counted_under_its_leg() {
-        let metrics = Metrics::new();
+        let (metrics, capture, provider) = test_metrics();
         let _ = metrics
             .observe_outbound(Leg::Files, async { Err::<(), &'static str>("boom") })
             .await;
@@ -728,25 +917,41 @@ mod tests {
                 Err::<(), &'static str>("read timed out")
             })
             .await;
-        let families = metrics.registry.gather();
-        let outbound = family(&families, "kallipai_tagma_outbound_requests_total");
+        let samples = recorded(&capture, &provider);
         assert_eq!(
-            sample(outbound, &[("leg", "files"), ("outcome", "error")]),
-            Some(1.0)
+            counter(
+                &samples,
+                "kallipai_tagma.outbound_requests",
+                &[("leg", "files"), ("outcome", "error")]
+            ),
+            1
         );
         assert_eq!(
-            sample(outbound, &[("leg", "lesche"), ("outcome", "ok")]),
-            Some(1.0)
+            counter(
+                &samples,
+                "kallipai_tagma.outbound_requests",
+                &[("leg", "lesche"), ("outcome", "ok")]
+            ),
+            1
         );
         assert_eq!(
-            sample(outbound, &[("leg", "archeion"), ("outcome", "timeout")]),
-            Some(1.0)
+            counter(
+                &samples,
+                "kallipai_tagma.outbound_requests",
+                &[("leg", "archeion"), ("outcome", "timeout")]
+            ),
+            1
+        );
+        assert_eq!(
+            histogram_count(&samples, "kallipai_tagma.outbound_request_duration"),
+            3,
+            "one duration per observed call"
         );
     }
 
     #[test]
     fn a_beat_makes_its_loop_fresh_and_an_unbeaten_one_reports_the_process_age() {
-        let metrics = Metrics::new();
+        let (metrics, _capture, _provider) = test_metrics();
         metrics.beat(Beat::Engine, PassOutcome::Completed);
         assert!(metrics.beat_fresh(Beat::Engine));
         assert!(metrics.beat_age(Beat::Engine) < Beat::Engine.max_age());
@@ -760,7 +965,7 @@ mod tests {
     /// alone, so a ticking but failing loop still reports the failure.
     #[test]
     fn a_tick_refreshes_freshness_and_keeps_the_failed_verdict() {
-        let metrics = Metrics::new();
+        let (metrics, _capture, _provider) = test_metrics();
         metrics.beat(Beat::HistoryGc, PassOutcome::Failed);
         assert!(metrics.beat_failed(Beat::HistoryGc));
 
@@ -784,22 +989,5 @@ mod tests {
         }
         assert!(!looks_like_timeout(&"connection reset by peer"));
         assert!(!looks_like_timeout(&"400 Bad Request: model not found"));
-    }
-
-    #[test]
-    fn the_encoder_adds_the_infinite_bucket_exactly_once() {
-        let metrics = Metrics::new();
-        metrics.record_http("/tasks", "GET", 200, Duration::from_millis(2));
-        let text = metrics.render().expect("the snapshot renders");
-        assert!(text.contains("kallipai_tagma_http_requests_total{"));
-        assert_eq!(
-            text.lines()
-                .filter(|line| line
-                    .starts_with("kallipai_tagma_http_request_duration_seconds_bucket")
-                    && line.contains("le=\"+Inf\""))
-                .count(),
-            1,
-            "the observed route gets exactly one +Inf bucket: {text}"
-        );
     }
 }

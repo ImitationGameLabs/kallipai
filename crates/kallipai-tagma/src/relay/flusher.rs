@@ -495,9 +495,9 @@ mod tests {
         let url = spawn_failing_upstream_keryx(attempts.clone()).await;
         let (handle, state) = setup_against(&url).await;
         handle.inner.flusher_retry_ms.store(1, Ordering::Relaxed);
-        let name = "kallipai_tagma_outbound_requests_total";
-        let labels = "leg=\"lesche\",outcome=\"error\"";
-        let errors = crate::metrics::counter_value(name, labels);
+        let name = "kallipai_tagma.outbound_requests";
+        let attributes = [("leg", "lesche"), ("outcome", "error")];
+        let errors = crate::metrics::counter_value(name, &attributes);
         handle.start_upstream_flusher().await;
         tokio::time::sleep(Duration::from_millis(100)).await;
         state
@@ -513,7 +513,7 @@ mod tests {
             "the tick doubles off the base: {tried} attempts in 80 ms"
         );
         assert!(
-            crate::metrics::counter_value(name, labels) > errors,
+            crate::metrics::counter_value(name, &attributes) > errors,
             "a failed upstream POST counts on the lesche leg"
         );
     }

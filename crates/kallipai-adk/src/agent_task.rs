@@ -213,7 +213,7 @@ pub struct AgentContext {
     /// Taken from the process's own set, not from the tagma state: recording
     /// happens deep in the acquisition loop, below the layers that hold that
     /// state. A context built outside a running tagma (tests, tools) keeps its
-    /// own set, which no scrape reads.
+    /// own set, which nothing exports.
     pub metrics: crate::metrics::AdkMetrics,
     /// Tagma-wide upstream-fact table, shared by every agent. Cloned from
     /// `AppState`; `None` in contexts with no tagma behind them (unit
@@ -3328,7 +3328,7 @@ mod tests {
         );
         // The wake boundary is where the count lands. A refusal is a failed
         // wake, so the park above and this count tell one story.
-        let snapshot = ctx.metrics.snapshot();
+        let snapshot = ctx.metrics.snapshot().expect("local tallies");
         assert_eq!(
             snapshot
                 .wakes_total

@@ -36,7 +36,7 @@ use crate::logging;
 /// The collector's OTLP/HTTP base URL; the traces path is appended.
 pub const ENDPOINT_VAR: &str = "OTEL_EXPORTER_OTLP_ENDPOINT";
 /// The header an intake reads a bearer token from.
-const AUTHORIZATION_HEADER: &str = "authorization";
+pub(super) const AUTHORIZATION_HEADER: &str = "authorization";
 /// The sampler override; absent means parent-based always-on.
 pub const SAMPLER_VAR: &str = "OTEL_TRACES_SAMPLER";
 /// The argument the ratio samplers read.
@@ -72,7 +72,7 @@ pub(crate) const EXPORT_DEADLINE: Duration = Duration::from_millis(2750);
 /// and then waits for one more export, so the real bound is about twice
 /// `EXPORT_BUDGET` -- six seconds, inside the ten a default container stop
 /// before the process is killed.
-const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(6);
+pub(super) const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(6);
 
 /// The resource namespace every service reports, so one deployment's traces
 /// share a namespace whatever their service names. A deployment that runs
@@ -208,12 +208,25 @@ pub(crate) fn traces_endpoint(base: &str) -> String {
 }
 
 /// The path an endpoint names, or `""` when it names none.
-fn path_of(endpoint: &str) -> &str {
+pub(super) fn path_of(endpoint: &str) -> &str {
     let authority = match endpoint.find("://") {
         Some(sep) => &endpoint[sep + 3..],
         None => endpoint,
     };
     authority.find('/').map_or("", |at| &authority[at..])
+}
+/// The resource both signals report: the service, the namespace every
+/// kallipai service shares, and the caller's own attributes.
+pub(super) fn resource(service: &str, attrs: &[(&str, &str)]) -> Resource {
+    Resource::builder()
+        .with_service_name(service.to_string())
+        .with_attribute(KeyValue::new("service.namespace", RESOURCE_NAMESPACE))
+        .with_attributes(
+            attrs
+                .iter()
+                .map(|(key, value)| KeyValue::new((*key).to_string(), (*value).to_string())),
+        )
+        .build()
 }
 
 /// Holds the tracer provider for the life of the process and flushes the
@@ -449,20 +462,11 @@ where
     )
     .with_batch_config(batch)
     .build();
-    let provider =
-        SdkTracerProvider::builder()
-            .with_sampler(config.sampler().sampler())
-            .with_resource(
-                Resource::builder()
-                    .with_service_name(service.to_string())
-                    .with_attribute(KeyValue::new("service.namespace", RESOURCE_NAMESPACE))
-                    .with_attributes(attrs.iter().map(|(key, value)| {
-                        KeyValue::new((*key).to_string(), (*value).to_string())
-                    }))
-                    .build(),
-            )
-            .with_span_processor(processor)
-            .build();
+    let provider = SdkTracerProvider::builder()
+        .with_sampler(config.sampler().sampler())
+        .with_resource(resource(service, attrs))
+        .with_span_processor(processor)
+        .build();
     let tracer = provider.tracer(service.to_string());
     let layer = tracing_opentelemetry::layer()
         .with_tracer(tracer)
@@ -645,7 +649,7 @@ pub fn export_stats() -> &'static ExportStats {
 
 /// Why an export failed, as far as the tally can tell.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ExportFailure {
+pub(super) enum ExportFailure {
     Timeout,
     Unavailable,
     Unauthorized,
@@ -653,8 +657,8 @@ enum ExportFailure {
 }
 
 impl ExportFailure {
-    /// Its slot in [`HintOnceExporter::hinted`], one flag per reason.
-    const fn index(self) -> usize {
+    /// Its slot in the hint-once exporters' flags, one flag per reason.
+    pub(super) const fn index(self) -> usize {
         match self {
             ExportFailure::Timeout => 0,
             ExportFailure::Unavailable => 1,
@@ -677,7 +681,7 @@ impl ExportFailure {
 /// `HTTP export failed with status code: <code>`. Its status is checked first:
 /// a rejected credential is a different fact from an unreachable collector, and
 /// a rejection body may well contain a word from the unreachable list.
-fn failure_reason(error: &OTelSdkError) -> ExportFailure {
+pub(super) fn failure_reason(error: &OTelSdkError) -> ExportFailure {
     match error {
         OTelSdkError::Timeout(_) => ExportFailure::Timeout,
         OTelSdkError::InternalFailure(message) => {

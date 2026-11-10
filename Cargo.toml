@@ -180,16 +180,20 @@ tracing-appender = "0.2"
 # the exporter speaks HTTP/protobuf, so nothing here needs a gRPC port.
 opentelemetry = { version = "0.33.1", default-features = false, features = [
   "trace",
+  "metrics",
 ] }
 opentelemetry_sdk = { version = "0.33.1", default-features = false, features = [
   "trace",
+  "metrics",
   "rt-tokio-current-thread",
   "experimental_trace_batch_span_processor_with_async_runtime",
 ] }
 opentelemetry-otlp = { version = "0.33.1", default-features = false, features = [
   "trace",
+  "metrics",
   "http-proto",
   "reqwest-client",
+  "reqwest-blocking-client",
 ] }
 tracing-opentelemetry = { version = "0.34.0", default-features = false }
 rable = "0.2.0"

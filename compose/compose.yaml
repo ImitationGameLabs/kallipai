@@ -203,11 +203,12 @@ services:
   otelcol:
     # The upstream Cmd already names this path; the mount below matches it.
     depends_on: ["tempo"]
-    # The per-instance tokens sit under the telemetry root, mounted at the same path so a rendered text names one string for the host agent and the collector. Root reads them: the render step writes them 0600, and only root can.
+    # The one platform credential sits here, mounted where the collector text
+    # names it. Root reads it: the deployment writes it 0600, and only root can.
     user: "0:0"
     volumes:
       - ${KALLIPAI_STACK_DIR:?run scripts/compose-up.sh}/otelcol.yaml:/etc/otelcol-contrib/config.yaml:ro
-      - ${TELEMETRY_BASE:?set TELEMETRY_BASE}/gateway:${TELEMETRY_BASE:?set TELEMETRY_BASE}/gateway:ro
+      - ${KALLIPAI_TELEMETRY_INTAKE_TOKEN_FILE:?set KALLIPAI_TELEMETRY_INTAKE_TOKEN_FILE}:/etc/kallipai/intake-token:ro
     logging: *logging
     restart: unless-stopped
 

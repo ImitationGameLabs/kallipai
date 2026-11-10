@@ -1289,7 +1289,7 @@ mod tests {
         // booked by whoever owns the stream, so only the failure is visible
         // here. What this test pins is the clock: 120ms of backoff passed
         // between the two sends and none of it is in the attempt's duration.
-        let snapshot = metrics.snapshot();
+        let snapshot = metrics.snapshot().expect("local tallies");
         let failed = snapshot
             .model_requests_total
             .iter()

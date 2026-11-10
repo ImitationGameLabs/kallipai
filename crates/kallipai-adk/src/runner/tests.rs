@@ -1485,7 +1485,7 @@ async fn bare_assistant_heartbeats_then_force_idles_at_cap() {
 
     // Three rounds ran inside one wake. The count belongs to the wake
     // boundary, so it is one; a count kept per round would read three.
-    let wakes = ctx.metrics.snapshot().wakes_total;
+    let wakes = ctx.metrics.snapshot().expect("local tallies").wakes_total;
     let total: u64 = wakes.iter().map(|(_, count)| *count).sum();
     assert_eq!(
         wakes
@@ -1507,7 +1507,7 @@ async fn bare_assistant_heartbeats_then_force_idles_at_cap() {
         );
     }
     // The duration is booked at the same boundary: one sample, not three.
-    let durations = ctx.metrics.snapshot().wake_duration;
+    let durations = ctx.metrics.snapshot().expect("local tallies").wake_duration;
     assert_eq!(
         durations
             .iter()
@@ -1595,7 +1595,7 @@ async fn mid_stream_drop_retries_and_emits_stream_reset() {
 
     // The whole path books both sends into the context's counters: the one
     // that dropped mid-stream and the one that finished.
-    let snapshot = ctx.metrics.snapshot();
+    let snapshot = ctx.metrics.snapshot().expect("local tallies");
     let attempts = |label: &str| {
         snapshot
             .model_requests_total

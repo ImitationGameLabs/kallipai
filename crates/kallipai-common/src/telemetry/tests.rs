@@ -702,7 +702,7 @@ async fn a_background_span_starts_its_own_trace_and_carries_its_verdict() {
     assert_eq!(attribute(span, "error.type").as_deref(), Some("retrying"));
 }
 
-/// The exemption is a promise on the wire: the scrape leaves no span, while
+/// The exemption is a promise on the wire: the exempt path leaves no span,
 /// the path beside it still opens one, so a trace of the process does not
 /// carry the requests that measure it.
 #[cfg(feature = "axum")]
@@ -711,14 +711,14 @@ async fn an_exempt_path_opens_no_server_span_and_its_neighbour_still_does() {
     use tower::ServiceExt as _;
 
     let app = axum::Router::new()
-        .route("/metrics", axum::routing::get(|| async { "scrape" }))
+        .route("/health", axum::routing::get(|| async { "ok" }))
         .route("/other", axum::routing::get(|| async { "work" }));
-    let app = with_server_span_except(app, &["/metrics"]);
+    let app = with_server_span_except(app, &["/health"]);
 
     let (subscriber, mut guard, recording) = recording_with(test_filter());
     {
         let _subscribed = tracing::subscriber::set_default(subscriber);
-        for path in ["/metrics", "/other"] {
+        for path in ["/health", "/other"] {
             let response = app
                 .clone()
                 .oneshot(request_for(path, &[]))

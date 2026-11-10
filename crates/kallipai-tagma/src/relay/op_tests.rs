@@ -481,11 +481,7 @@ async fn garbage_ciphertext_does_not_advance_replay_window() {
 
 /// One drop-cause counter out of the process metrics.
 fn dropped(reason: &str) -> u64 {
-    let text = crate::metrics::metrics().render().expect("metrics render");
-    let needle = format!("kallipai_tagma_relay_dropped_total{{reason=\"{reason}\"}} ");
-    text.lines()
-        .find_map(|line| line.strip_prefix(&needle)?.trim().parse().ok())
-        .unwrap_or(0)
+    crate::metrics::counter_value("kallipai_tagma.relay_dropped", &[("reason", reason)])
 }
 
 /// An envelope the session key cannot authenticate is counted as `decrypt`:
@@ -551,9 +547,9 @@ async fn skewed_payloads_are_counted_by_cause() {
 #[tokio::test]
 async fn a_delivered_reply_counts_on_the_lesche_leg() {
     let (handle, _key, capture, _prompt_rx, _root_id, _state) = setup(1).await;
-    let name = "kallipai_tagma_outbound_requests_total";
-    let labels = "leg=\"lesche\",outcome=\"ok\"";
-    let delivered = crate::metrics::counter_value(name, labels);
+    let name = "kallipai_tagma.outbound_requests";
+    let attributes = [("leg", "lesche"), ("outcome", "ok")];
+    let delivered = crate::metrics::counter_value(name, &attributes);
     handle
         .emit(
             &TraceId::from("t".to_string()),
@@ -565,7 +561,7 @@ async fn a_delivered_reply_counts_on_the_lesche_leg() {
         .expect("the mock keryx accepts the reply");
     assert_eq!(capture.lock().await.len(), 1, "the reply reached the wire");
     assert!(
-        crate::metrics::counter_value(name, labels) > delivered,
+        crate::metrics::counter_value(name, &attributes) > delivered,
         "a delivered reply counts on the lesche leg"
     );
 }

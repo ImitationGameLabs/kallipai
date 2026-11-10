@@ -8,11 +8,12 @@
 //! - `SCRUB_SECRETS`: secrets the tagma consumes once at boot (or never
 //!   consumes at all) and then drops from the environment. Adding an
 //!   exclusion is one line in that table.
-//! - the retired relay pair ([`ensure_no_retired_env`]): variables from a
-//!   released shape that no longer exists. A deployment (or a persisted
-//!   instance record replayed on restart) that still carries one is a
+//! - the retired table ([`ensure_no_retired_env`]): variables from a
+//!   released shape that no longer exists, each with the line a deployment
+//!   reads when it is still set. A deployment (or a persisted instance
+//!   record replayed on restart) that still carries one is a
 //!   configuration error and fails the boot, exactly like a misspelled
-//!   name — never a silent local-only boot with the relay dropped.
+//!   name -- never a silent boot with the setting dropped.
 //!
 //! Everything here runs on the single main thread before the async
 //! runtime is built (see `main`): edition 2024 marks `remove_var` unsafe
@@ -44,9 +45,26 @@ const SCRUB_SECRETS: &[&str] = &[
 
 /// Retired relay variables: the per-service relay env from a released
 /// shape, replaced by the single `KALLIPAI_POLIS_URL` origin.
-const RETIRED_RELAY: &[&str] = &[
-    "KALLIPAI_TAGMA_RELAY_ARCHEION_URL",
-    "KALLIPAI_TAGMA_RELAY_LESCHE_URL",
+const RETIRED_RELAY_HINT: &str = concat!(
+    "the per-service relay env was replaced by the single KALLIPAI_POLIS_URL ",
+    "origin -- remove the retired variable and re-enroll the relay against ",
+    "KALLIPAI_POLIS_URL",
+);
+
+/// Retired metrics switch: the process exports whenever
+/// `OTEL_EXPORTER_OTLP_ENDPOINT` names a collector, so a switch that asked
+/// for a scrape face has nothing left to turn on.
+const RETIRED_METRICS_HINT: &str = concat!(
+    "metrics leave the process over OTLP to whatever OTEL_EXPORTER_OTLP_ENDPOINT ",
+    "names, and a process without it reports nothing -- remove the switch",
+);
+
+/// Retired variables, each paired with the line a deployment reads when one
+/// is still set.
+const RETIRED: &[(&str, &str)] = &[
+    ("KALLIPAI_TAGMA_RELAY_ARCHEION_URL", RETIRED_RELAY_HINT),
+    ("KALLIPAI_TAGMA_RELAY_LESCHE_URL", RETIRED_RELAY_HINT),
+    ("KALLIPAI_TAGMA_METRICS", RETIRED_METRICS_HINT),
 ];
 
 /// Capture the operator token pin before [`scrub_boot_secrets`] removes
@@ -72,25 +90,29 @@ pub fn scrub_boot_secrets() -> Vec<&'static str> {
         .collect()
 }
 
-/// Fail the boot when a retired relay variable is set: the old values
-/// were per-service URLs and do not mechanically derive the new origin,
-/// so the recoverable move is a fresh enroll against the configured
-/// `KALLIPAI_POLIS_URL`, and this fails loudly pointing there.
+/// Fail the boot when a retired variable is set: a released shape's values
+/// do not mechanically derive what replaced them, so the recoverable move
+/// is a fresh enroll against the configured `KALLIPAI_POLIS_URL` (for the
+/// relay) or dropping the switch (for metrics), and this fails loudly
+/// pointing there.
 pub fn ensure_no_retired_env() -> Result<()> {
-    let found: Vec<&str> = RETIRED_RELAY
+    let found: Vec<(&str, &str)> = RETIRED
         .iter()
         .copied()
-        .filter(|key| std::env::var_os(key).is_some())
+        .filter(|(key, _)| std::env::var_os(key).is_some())
         .collect();
+    let names: Vec<&str> = found.iter().map(|(key, _)| *key).collect();
+    let mut hints: Vec<&str> = Vec::new();
+    for (_, hint) in &found {
+        if !hints.contains(hint) {
+            hints.push(hint);
+        }
+    }
     anyhow::ensure!(
-        found.is_empty(),
-        concat!(
-            "retired relay environment variable(s) {} present; the per-service",
-            " relay env was replaced by the single KALLIPAI_POLIS_URL origin --",
-            " remove the retired variables and re-enroll the relay against",
-            " KALLIPAI_POLIS_URL"
-        ),
-        found.join(", ")
+        names.is_empty(),
+        "retired environment variable(s) {} present; {}",
+        names.join(", "),
+        hints.join("; ")
     );
     Ok(())
 }
@@ -168,11 +190,41 @@ mod tests {
     }
 
     #[test]
+    fn a_retired_metrics_switch_fails_the_boot_with_its_own_line() {
+        kallipai_testkit::with_env(&[("KALLIPAI_TAGMA_METRICS", Some("false"))], || {
+            let err = ensure_no_retired_env().unwrap_err();
+            let text = format!("{err:#}");
+            assert!(text.contains("KALLIPAI_TAGMA_METRICS"), "{text}");
+            assert!(text.contains("OTEL_EXPORTER_OTLP_ENDPOINT"), "{text}");
+            assert!(!text.contains("KALLIPAI_POLIS_URL"), "{text}");
+        });
+    }
+
+    #[test]
+    fn retired_relay_and_metrics_advice_do_not_borrow_each_other() {
+        kallipai_testkit::with_env(
+            &[
+                ("KALLIPAI_TAGMA_RELAY_LESCHE_URL", Some("https://l")),
+                ("KALLIPAI_TAGMA_METRICS", Some("true")),
+            ],
+            || {
+                let err = ensure_no_retired_env().unwrap_err();
+                let text = format!("{err:#}");
+                assert!(text.contains("KALLIPAI_TAGMA_RELAY_LESCHE_URL"), "{text}");
+                assert!(text.contains("KALLIPAI_TAGMA_METRICS"), "{text}");
+                assert_eq!(text.matches("KALLIPAI_POLIS_URL").count(), 2, "{text}");
+                assert!(text.contains("OTEL_EXPORTER_OTLP_ENDPOINT"), "{text}");
+            },
+        );
+    }
+
+    #[test]
     fn no_retired_variable_set_is_clean() {
         kallipai_testkit::with_env(
             &[
                 ("KALLIPAI_TAGMA_RELAY_ARCHEION_URL", None),
                 ("KALLIPAI_TAGMA_RELAY_LESCHE_URL", None),
+                ("KALLIPAI_TAGMA_METRICS", None),
             ],
             || {
                 assert!(ensure_no_retired_env().is_ok());
