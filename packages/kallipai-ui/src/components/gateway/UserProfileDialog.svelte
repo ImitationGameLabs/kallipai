@@ -16,6 +16,7 @@
     EFFORT_OPTIONS,
     normalizeModalities,
   } from "../../lib/manage/compute.ts";
+  import { parseProfileLimit } from "../../lib/manage/gateway/profileLimits.ts";
   import type { Modality, ReasoningEffort } from "@kallipai/kallipai-client";
   import {
     common_cancel,
@@ -122,25 +123,16 @@
       modelDraft.trim() !== "",
   );
 
-  /** Blank = no limit; a non-numeric value keeps the save disabled
-   * (the server would refuse it anyway). */
-  function numberOrNull(raw: string): number | null {
-    const trimmed = raw.trim();
-    if (trimmed === "") return null;
-    const n = Number(trimmed);
-    return Number.isFinite(n) ? n : null;
-  }
-
-  function numeric(raw: string): boolean {
-    const trimmed = raw.trim();
-    return trimmed === "" || Number.isFinite(Number(trimmed));
-  }
+  const contextLimit = $derived(parseProfileLimit(contextDraft));
+  const budgetLimit = $derived(parseProfileLimit(budgetDraft));
+  const tpmLimit = $derived(parseProfileLimit(tpmDraft));
+  const rpmLimit = $derived(parseProfileLimit(rpmDraft));
 
   const numbersValid = $derived(
-    numeric(contextDraft) &&
-      numeric(budgetDraft) &&
-      numeric(tpmDraft) &&
-      numeric(rpmDraft),
+    contextLimit !== undefined &&
+      budgetLimit !== undefined &&
+      tpmLimit !== undefined &&
+      rpmLimit !== undefined,
   );
 
   function onOpenChange(e: { open: boolean }): void {
@@ -157,20 +149,28 @@
   }
 
   function submit(): void {
-    if (!canSubmit || !numbersValid || busy) return;
+    if (!canSubmit || busy) return;
+    if (
+      contextLimit === undefined ||
+      budgetLimit === undefined ||
+      tpmLimit === undefined ||
+      rpmLimit === undefined
+    ) {
+      return;
+    }
     onSave({
       collection: collectionDraft.trim(),
       profile_id: idDraft.trim(),
       provider_id: providerDraft.trim(),
       model: modelDraft.trim(),
-      max_context_window: numberOrNull(contextDraft),
+      max_context_window: contextLimit,
       effort: effortDraft.trim() === "" ? null : effortDraft.trim(),
       // text-only rides as null (the server default), the selection
       // as declared -- a save writes what the tags show.
       modalities: normalizeModalities(modalityDraft)?.slice() ?? null,
-      max_budget: numberOrNull(budgetDraft),
-      tpm_limit: numberOrNull(tpmDraft),
-      rpm_limit: numberOrNull(rpmDraft),
+      max_budget: budgetLimit,
+      tpm_limit: tpmLimit,
+      rpm_limit: rpmLimit,
     });
   }
 </script>
