@@ -6,12 +6,10 @@
 </script>
 
 <script lang="ts">
-  import { Dialog, Portal } from "@skeletonlabs/skeleton-svelte";
+  import FormDialog from "../FormDialog.svelte";
   import SecretInput from "../SecretInput.svelte";
   import ReqMark from "../ReqMark.svelte";
   import {
-    common_cancel,
-    common_save,
     user_gateway_provider_add,
     user_gateway_provider_base,
     user_gateway_provider_edit_title,
@@ -55,16 +53,12 @@
   let familyDraft = $state("");
   let baseUrlDraft = $state("");
   let apiKeyDraft = $state("");
-  let lastOpen = false;
-  $effect(() => {
-    if (open && !lastOpen) {
-      idDraft = row?.provider_id ?? "";
-      familyDraft = row?.family ?? FAMILIES[0]!;
-      baseUrlDraft = row?.base_url ?? "";
-      apiKeyDraft = "";
-    }
-    lastOpen = open;
-  });
+  function reseed(): void {
+    idDraft = row?.provider_id ?? "";
+    familyDraft = row?.family ?? FAMILIES[0]!;
+    baseUrlDraft = row?.base_url ?? "";
+    apiKeyDraft = "";
+  }
 
   const creating = $derived(row === null);
   const canSubmit = $derived(
@@ -78,12 +72,7 @@
       !(FAMILIES as readonly string[]).includes(familyDraft),
   );
 
-  function onOpenChange(e: { open: boolean }): void {
-    if (!e.open && !busy) onCancel();
-  }
-
   function submit(): void {
-    if (!canSubmit || busy) return;
     onSave({
       provider_id: idDraft.trim(),
       family: familyDraft.trim(),
@@ -93,93 +82,60 @@
   }
 </script>
 
-<Dialog {open} {onOpenChange}>
-  <Portal>
-    <Dialog.Backdrop class="fixed inset-0 bg-surface-50-950/60 z-50" />
-    <Dialog.Positioner class="fixed inset-0 z-50 grid place-items-center p-4">
-      <Dialog.Content
-        class="card preset-tonal-surface w-full max-w-md p-6 flex flex-col gap-4"
-      >
-        <Dialog.Title class="text-lg font-semibold">
-          {creating
-            ? user_gateway_provider_add()
-            : user_gateway_provider_edit_title()}
-        </Dialog.Title>
-
-        <form
-          class="flex flex-col gap-3"
-          onsubmit={(e) => {
-            e.preventDefault();
-            submit();
-          }}
-        >
-          <label class="flex flex-col gap-1">
-            <span class="text-xs font-medium">
-              {user_gateway_provider_id()}
-              <ReqMark />
-            </span>
-            <input
-              class="input text-sm font-mono"
-              bind:value={idDraft}
-              disabled={!creating}
-              aria-required="true"
-            />
-          </label>
-          <label class="flex flex-col gap-1">
-            <span class="text-xs font-medium">
-              {user_gateway_provider_family()}
-              <ReqMark />
-            </span>
-            <select
-              class="select text-sm"
-              bind:value={familyDraft}
-              aria-required="true"
-            >
-              {#if familyKept}
-                <option value={familyDraft}>{familyDraft}</option>
-              {/if}
-              {#each FAMILIES as f (f)}
-                <option value={f}>{f}</option>
-              {/each}
-            </select>
-          </label>
-          <label class="flex flex-col gap-1">
-            <span class="text-xs font-medium">
-              {user_gateway_provider_base()}
-            </span>
-            <input class="input text-sm" bind:value={baseUrlDraft} />
-          </label>
-          {#if creating}
-            <label class="flex flex-col gap-1">
-              <span class="text-xs font-medium">
-                {user_gateway_provider_key()}
-              </span>
-              <SecretInput bind:value={apiKeyDraft} />
-            </label>
-          {/if}
-
-          {#if error}
-            <p class="text-sm text-error-500" role="alert">{error}</p>
-          {/if}
-
-          <div class="flex gap-2">
-            <button
-              type="button"
-              class="btn flex-1 preset-outlined-surface-500 hover:preset-filled-surface-500"
-              onclick={onCancel}
-            >
-              {common_cancel()}
-            </button>
-            <button
-              type="submit"
-              class="btn flex-1 preset-filled-primary-500 text-on-primary-500 transition hover:brightness-110"
-              disabled={!canSubmit || busy}
-            >
-              {common_save()}
-            </button>
-          </div>
-        </form>
-      </Dialog.Content>
-    </Dialog.Positioner>
-  </Portal>
-</Dialog>
+<FormDialog
+  {open}
+  title={creating
+    ? user_gateway_provider_add()
+    : user_gateway_provider_edit_title()}
+  {busy}
+  {error}
+  {canSubmit}
+  onOpen={reseed}
+  onSubmit={submit}
+  {onCancel}
+>
+  <label class="flex flex-col gap-1">
+    <span class="text-xs font-medium">
+      {user_gateway_provider_id()}
+      <ReqMark />
+    </span>
+    <input
+      class="input text-sm font-mono"
+      bind:value={idDraft}
+      disabled={!creating}
+      aria-required="true"
+    />
+  </label>
+  <label class="flex flex-col gap-1">
+    <span class="text-xs font-medium">
+      {user_gateway_provider_family()}
+      <ReqMark />
+    </span>
+    <select
+      class="select text-sm"
+      bind:value={familyDraft}
+      aria-required="true"
+    >
+      {#if familyKept}
+        <option value={familyDraft}>{familyDraft}</option>
+      {/if}
+      {#each FAMILIES as f (f)}
+        <option value={f}>{f}</option>
+      {/each}
+    </select>
+  </label>
+  <label class="flex flex-col gap-1">
+    <span class="text-xs font-medium">
+      {user_gateway_provider_base()}
+    </span>
+    <input class="input text-sm" bind:value={baseUrlDraft} />
+  </label>
+  {#if creating}
+    <label class="flex flex-col gap-1">
+      <span class="text-xs font-medium">
+        {user_gateway_provider_key()}
+      </span>
+      <SecretInput bind:value={apiKeyDraft} />
+    </label>
+  {/if}
+</FormDialog>

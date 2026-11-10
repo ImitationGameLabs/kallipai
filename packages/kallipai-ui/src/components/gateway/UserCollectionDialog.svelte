@@ -2,6 +2,16 @@
   // Collection edit dialog: the description plus the set membership
   // (unordered; each member set keeps its own failover order). The
   // name is the registry key: no rename.
+  //
+  // This is the one gateway edit dialog outside `FormDialog`, and it stays
+  // out because it has no gate and no error line to hand over: every field
+  // is optional and an empty membership is a legal value, so it has no
+  // `canSubmit`; it also has no `busy` and no `error` prop. The shell would
+  // take `canSubmit={true}` and `error={null}` for it and render nothing,
+  // which are exactly the two shapes `form_dialog_callers_test.ts` rejects
+  // ("a constant handed to the gate passes every signature and guards
+  // nothing", "a constant error passes every signature and shows nothing").
+  // The modal frame here is the price of not writing a prop that lies.
 </script>
 
 <script lang="ts">

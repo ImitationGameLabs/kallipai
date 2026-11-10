@@ -5,8 +5,8 @@
   // appear) vs an identity alone ("self-run": no process rows or actions;
   // revoke is the one real management move). A process-only card renders the
   // hosted shape minus the identity rows. Rename stays an inline edit; Revoke
-  // keeps its confirmation dialog (one-click irreversible, cuts the device
-  // off on its next request).
+  // keeps its confirmation (one-click irreversible, cuts the device off on its
+  // next request), drawn by the shared confirm shell.
   import { Menu } from "@skeletonlabs/skeleton-svelte";
   import ActionMenu from "../ActionMenu.svelte";
   import { timezoneSetting } from "../../lib/time/stamp.svelte.ts";
@@ -29,7 +29,7 @@
     TONAL_ICON_PRIM,
     TONAL_ICON_SURF,
   } from "../../lib/classes.ts";
-  import RevokeTagmaDialog from "./RevokeTagmaDialog.svelte";
+  import ConfirmDialog from "../ConfirmDialog.svelte";
   import {
     common_rename,
     tagma_profile_unnamed,
@@ -50,6 +50,10 @@
     tagmata_badge_hosted_title,
     tagmata_identity_pending,
     tagma_revoke,
+    tagma_revoke_title,
+    tagma_revoke_body_named,
+    tagma_revoke_body_unnamed,
+    tagma_revoke_failed,
     tagma_enrolled_at,
     tagma_rename_failed,
     auth_couldnt_reach,
@@ -110,12 +114,16 @@
   let suppressBlur = false;
 
   // Revoke confirmation. The irreversible, immediately-effective action gets a
-  // second-chance dialog the pending-code revoke does not. The dialog stays open
+  // second-chance confirmation the pending-code revoke does not. It stays open
   // (with a busy + error line) through the awaited revoke, closing only on
   // success so a failure is surfaced, not dropped.
   let confirmingRevoke = $state(false);
   let revoking = $state(false);
   let revokeError = $state<string | null>(null);
+  // Names the attempt rather than the window: a cancel bumps it, so a reply
+  // that comes back for an attempt nobody is waiting on any more can be told
+  // apart from the one the open window belongs to.
+  let revokeSeq = 0;
 
   /** Typed archeion failures keep their server copy; transport failures are
    * qualitative, details to the console. */
@@ -132,12 +140,26 @@
 
   async function confirmRevoke() {
     if (revoking || !onRevoke || !tagma) return;
+    const mine = ++revokeSeq;
     revoking = true;
     revokeError = null;
     try {
       await onRevoke(tagma.tagmaId);
+      // A cancelled attempt must not close a window opened after it.
+      if (mine !== revokeSeq) return;
       confirmingRevoke = false;
     } catch (e) {
+      // Two guards, two jobs: `mine` says whether this attempt still speaks
+      // for the window (a cancel bumps `revokeSeq`), `confirmingRevoke`
+      // whether a window is left to render a line in at all. Either failing
+      // means the reason has no reader, so it goes to the console.
+      if (mine !== revokeSeq || !confirmingRevoke) {
+        console.error(
+          "[tagmata] revoke failed after its attempt was abandoned:",
+          e,
+        );
+        return;
+      }
       revokeError = msgOf(e);
     } finally {
       revoking = false;
@@ -403,13 +425,19 @@
   {/if}
 </div>
 
-<RevokeTagmaDialog
+<ConfirmDialog
   open={confirmingRevoke}
-  tagmaLabel={tagma?.label ?? null}
+  title={tagma_revoke_title()}
+  description={tagma?.label
+    ? tagma_revoke_body_named({ name: tagma.label })
+    : tagma_revoke_body_unnamed()}
+  confirmLabel={tagma_revoke()}
+  tone="danger"
   busy={revoking}
-  error={revokeError}
+  error={revokeError ? tagma_revoke_failed({ error: revokeError }) : null}
   onConfirm={confirmRevoke}
   onCancel={() => {
+    revokeSeq += 1;
     confirmingRevoke = false;
     revokeError = null;
   }}

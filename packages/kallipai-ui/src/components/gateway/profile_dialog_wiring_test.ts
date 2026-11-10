@@ -187,15 +187,21 @@ Deno.test(
           "the payload must carry the parsed field, not a re-parse",
         );
       }
-      // The manage dialog hands its frame to the shell, which gates the
-      // submit path for every caller (form_dialog_pins_test.ts pins that
-      // line); the user dialog keeps its own gate because it owns its frame.
-      if (url === USER_DIALOG) {
-        assert(
-          src.includes("if (!canSubmit || busy) return;"),
-          "submit must stay gated before the payload",
-        );
-      }
+      // Both dialogs hand the frame to the shell, which gates the submit
+      // path for every caller (form_dialog_pins_test.ts pins that line), so
+      // neither keeps a gate of its own.
+      assert(
+        src.includes("<FormDialog"),
+        "the dialog hands its frame to the shell",
+      );
+      assert(
+        src.includes("canSubmit={canSubmit && numbersValid}"),
+        "an unreadable limit keeps the save key disabled, at the gate too",
+      );
+      assertFalse(
+        src.includes("if (!canSubmit || busy) return;"),
+        "the gate lives in the shell, not in the caller",
+      );
       assert(
         src.includes("contextLimit === undefined ||"),
         "the guard must tell unreadable text from a blank field",

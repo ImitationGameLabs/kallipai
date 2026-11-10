@@ -131,15 +131,3 @@ Deno.test(
     );
   },
 );
-
-Deno.test(
-  "the dialog closes on a drop the user did not confirm",
-  { permissions: { read: [DIALOG] } },
-  () => {
-    const src = source(DIALOG);
-    assert(
-      src.includes("if (!e.open && !busy) onCancel();"),
-      "a backdrop click while a save runs is ignored",
-    );
-  },
-);

@@ -1,4 +1,4 @@
-import { assert, assertFalse } from "@std/assert";
+import { assert, assertEquals, assertFalse } from "@std/assert";
 import { codeLines } from "../lib/testing/source_pins.ts";
 
 // What each dialog owes the shell. The shell cannot enforce either half from
@@ -30,6 +30,15 @@ const DIALOGS = {
   ),
   set: new URL("./manage/gateway/SetDialog.svelte", import.meta.url),
   createRoom: new URL("./rooms/CreateRoomDialog.svelte", import.meta.url),
+  userCredential: new URL(
+    "./gateway/UserCredentialDialog.svelte",
+    import.meta.url,
+  ),
+  userGroup: new URL("./gateway/UserGroupDialog.svelte", import.meta.url),
+  userProfile: new URL("./gateway/UserProfileDialog.svelte", import.meta.url),
+  userProvider: new URL("./gateway/UserProviderDialog.svelte", import.meta.url),
+  userPublish: new URL("./gateway/UserPublishDialog.svelte", import.meta.url),
+  userSet: new URL("./gateway/UserSetDialog.svelte", import.meta.url),
 };
 
 // The dialogs that offer a destructive action beside save. The list is the
@@ -37,7 +46,7 @@ const DIALOGS = {
 // the busy state, and a submit key drawn there also submits the same form,
 // which the per-file pin below rejects. A destructive action belongs in the
 // slot, where the shell owns its place, its error preset and its busy state.
-const DESTRUCTIVE = new Set(["providerCredential"]);
+const DESTRUCTIVE = new Set(["providerCredential", "userCredential"]);
 
 for (const [name, url] of Object.entries(DIALOGS)) {
   Deno.test(`the ${name} dialog hands its state to the shell`, () => {
@@ -76,13 +85,27 @@ for (const [name, url] of Object.entries(DIALOGS)) {
         ? "this dialog offers its destructive action through the shell"
         : "a second footer action goes through the shell, not around it",
     );
-    const replays = name !== "set";
+    // The two set dialogs seed from a state machine that keys on `open` and
+    // on the row the page hands back, so a re-read after a failed save keeps
+    // the drafts that never landed: an `onOpen` replay would overwrite them.
+    const replays = name !== "set" && name !== "userSet";
     assert(
       block.includes("onOpen={reseed}") === replays &&
         !/onOpen=\{(undefined|null)\}/.test(block),
-      "every dialog but `set` replays its drafts on open, and `set` re-seeds in" +
-        " a `$effect` that clears `seeded` and `seededKey` while closed",
+      "every dialog but the set ones replays its drafts on open, and a set" +
+        " dialog re-seeds from its own `$effect`",
     );
+    if (!replays) {
+      // The exception is only an exception because the `$effect` both clears
+      // the seed while closed and takes the row again on open; without the
+      // clearing, a reopen would keep the last visit's draft.
+      assert(
+        src.includes("if (!open) {") &&
+          src.includes("seeded = null;") &&
+          src.includes("seededKey = null;"),
+        "a set dialog clears its seed while closed and seeds again on open",
+      );
+    }
     assertFalse(
       src.includes('type="submit"'),
       "the save key belongs to the shell; a second submit key submits the same form",
@@ -125,6 +148,15 @@ Deno.test(
     );
   },
 );
+
+Deno.test("the credential dialog sets its hint from typing", () => {
+  const src = codeLines(DIALOGS.userCredential);
+  assertEquals(
+    src.split("oninput={() => (touched = true)}").length - 1,
+    2,
+    "both fields mark the reveal, since the shell's gate never presses it",
+  );
+});
 
 Deno.test("the profile dialog's save key carries its number check", () => {
   const src = codeLines(DIALOGS.profile);

@@ -5,7 +5,7 @@
   // mode adds the name field and starts with an empty list, which the server
   // takes as a legal membership. The draft rules live in the shared set-draft
   // lib; this component owns the state and the layout.
-  import { Dialog, Portal } from "@skeletonlabs/skeleton-svelte";
+  import FormDialog from "../FormDialog.svelte";
   import ReqMark from "../ReqMark.svelte";
   import GatewayMemberCard from "./GatewayMemberCard.svelte";
   import {
@@ -27,8 +27,6 @@
   import type { UserProfileRow } from "../../lib/gateway/client.ts";
   import {
     common_add,
-    common_cancel,
-    common_save,
     manage_gateway_set_members_order_hint,
     user_gateway_set_add,
     user_gateway_set_add_member,
@@ -249,15 +247,10 @@
     edits = { ...edits, [id]: next };
   }
 
-  function onOpenChange(e: { open: boolean }): void {
-    if (!e.open && !busy) onCancel();
-  }
-
   // A drafted field the server would refuse stops the save instead of riding
   // along or being dropped with its form: the first offending row opens, so
   // the problem shows under the field that holds it.
   function submit(): void {
-    if (!canSubmit) return;
     const offending = firstOffending(members, edits);
     if (offending !== undefined) {
       editingId = offending.profile_id;
@@ -277,143 +270,114 @@
   }
 </script>
 
-<Dialog {open} {onOpenChange}>
-  <Portal>
-    <Dialog.Backdrop class="fixed inset-0 bg-surface-50-950/60 z-50" />
-    <Dialog.Positioner class="fixed inset-0 z-50 grid place-items-center p-4">
-      <Dialog.Content
-        class="card preset-tonal-surface w-full max-w-xl p-6 flex flex-col gap-4 max-h-[85vh] overflow-y-auto"
-      >
-        <Dialog.Title class="text-lg font-semibold">
-          {set ? user_gateway_set_edit_title() : user_gateway_set_add()}
-          {#if set}
-            <span class="font-mono opacity-80">{set.name}</span>
-          {/if}
-        </Dialog.Title>
+{#snippet titleExtra()}
+  {#if set}
+    <span class="font-mono opacity-80">{set.name}</span>
+  {/if}
+{/snippet}
 
-        <form
-          class="flex flex-col gap-4"
-          onsubmit={(e) => {
-            e.preventDefault();
-            submit();
-          }}
+<FormDialog
+  {open}
+  title={set ? user_gateway_set_edit_title() : user_gateway_set_add()}
+  {titleExtra}
+  size="xl"
+  tall
+  {busy}
+  {error}
+  {canSubmit}
+  onSubmit={submit}
+  {onCancel}
+>
+  {#if set === null}
+    <p class="text-xs opacity-60">
+      {user_gateway_set_dialog_collection_label()}:
+      <span class="font-mono">{collection}</span>
+    </p>
+    <label class="flex flex-col gap-1">
+      <span class="text-xs font-medium">
+        {user_gateway_set_name()}
+        <ReqMark />
+      </span>
+      <input
+        class="input text-sm font-mono"
+        bind:value={nameDraft}
+        aria-required="true"
+      />
+    </label>
+  {/if}
+  <label class="flex flex-col gap-1">
+    <span class="text-xs font-medium">
+      {user_gateway_set_description()}
+    </span>
+    <input class="input text-sm" bind:value={descriptionDraft} />
+  </label>
+
+  <p class="text-xs opacity-70">
+    {manage_gateway_set_members_order_hint()}
+  </p>
+
+  <div role="list" class="flex flex-col gap-2">
+    {#each members as member, idx (member.profile_id)}
+      <GatewayMemberCard
+        {member}
+        position={idx + 1}
+        dragOver={dragOver === idx}
+        isFirst={idx === 0}
+        isLast={idx === members.length - 1}
+        editing={editingId === member.profile_id}
+        editDraft={edits[member.profile_id] ?? null}
+        {busy}
+        onDragStart={() => (dragFrom = idx)}
+        onDragEnd={clearDrag}
+        onDragOver={() => (dragOver = idx)}
+        onDrop={() => {
+          if (dragFrom !== null) reorder(dragFrom, idx);
+          clearDrag();
+        }}
+        onRemove={() => removeAt(idx)}
+        onMoveUp={() => step(idx, -1)}
+        onMoveDown={() => step(idx, 1)}
+        editable={set !== null}
+        onToggleEdit={() => toggleEdit(member)}
+        onEditDraft={(next) => applyEdit(member.profile_id, next)}
+      />
+    {/each}
+  </div>
+
+  <div class="flex flex-col gap-2">
+    <span class="text-xs font-medium">
+      {user_gateway_set_add_member()}
+    </span>
+    {#if profiles !== null && pool.length === 0}
+      <p class="text-xs opacity-70">
+        {user_gateway_set_add_member_empty()}
+      </p>
+    {:else}
+      <div class="flex gap-2">
+        <select
+          class="select text-sm font-mono flex-1"
+          bind:value={pickedId}
+          aria-label={user_gateway_set_add_member()}
         >
-          {#if set === null}
-            <p class="text-xs opacity-60">
-              {user_gateway_set_dialog_collection_label()}:
-              <span class="font-mono">{collection}</span>
-            </p>
-            <label class="flex flex-col gap-1">
-              <span class="text-xs font-medium">
-                {user_gateway_set_name()}
-                <ReqMark />
-              </span>
-              <input
-                class="input text-sm font-mono"
-                bind:value={nameDraft}
-                aria-required="true"
-              />
-            </label>
-          {/if}
-          <label class="flex flex-col gap-1">
-            <span class="text-xs font-medium">
-              {user_gateway_set_description()}
-            </span>
-            <input class="input text-sm" bind:value={descriptionDraft} />
-          </label>
-
-          <p class="text-xs opacity-70">
-            {manage_gateway_set_members_order_hint()}
-          </p>
-
-          <div role="list" class="flex flex-col gap-2">
-            {#each members as member, idx (member.profile_id)}
-              <GatewayMemberCard
-                {member}
-                position={idx + 1}
-                dragOver={dragOver === idx}
-                isFirst={idx === 0}
-                isLast={idx === members.length - 1}
-                editing={editingId === member.profile_id}
-                editDraft={edits[member.profile_id] ?? null}
-                {busy}
-                onDragStart={() => (dragFrom = idx)}
-                onDragEnd={clearDrag}
-                onDragOver={() => (dragOver = idx)}
-                onDrop={() => {
-                  if (dragFrom !== null) reorder(dragFrom, idx);
-                  clearDrag();
-                }}
-                onRemove={() => removeAt(idx)}
-                onMoveUp={() => step(idx, -1)}
-                onMoveDown={() => step(idx, 1)}
-                editable={set !== null}
-                onToggleEdit={() => toggleEdit(member)}
-                onEditDraft={(next) => applyEdit(member.profile_id, next)}
-              />
-            {/each}
-          </div>
-
-          <div class="flex flex-col gap-2">
-            <span class="text-xs font-medium">
-              {user_gateway_set_add_member()}
-            </span>
-            {#if profiles !== null && pool.length === 0}
-              <p class="text-xs opacity-70">
-                {user_gateway_set_add_member_empty()}
-              </p>
-            {:else}
-              <div class="flex gap-2">
-                <select
-                  class="select text-sm font-mono flex-1"
-                  bind:value={pickedId}
-                  aria-label={user_gateway_set_add_member()}
-                >
-                  <option value="">…</option>
-                  {#each pool as row (row.profile_id)}
-                    <option value={row.profile_id}>{optionText(row)}</option>
-                  {/each}
-                </select>
-                <button
-                  type="button"
-                  class="btn preset-outlined-surface-500 hover:preset-filled-surface-500"
-                  disabled={busy || pickedId === ""}
-                  onclick={addMember}
-                >
-                  {common_add()}
-                </button>
-              </div>
-              {#if pickedRow !== null && pickedRow.set !== null}
-                <p class="text-xs opacity-70">
-                  {user_gateway_set_add_member_moves({ set: pickedRow.set })}
-                </p>
-              {/if}
-            {/if}
-          </div>
-
-          {#if error !== null}
-            <p class="text-sm" role="alert">{error}</p>
-          {/if}
-
-          <div class="flex gap-2">
-            <button
-              type="button"
-              class="btn flex-1 preset-outlined-surface-500 hover:preset-filled-surface-500"
-              disabled={busy}
-              onclick={onCancel}
-            >
-              {common_cancel()}
-            </button>
-            <button
-              type="submit"
-              class="btn flex-1 preset-filled-primary-500 text-on-primary-500 transition hover:brightness-110"
-              disabled={!canSubmit}
-            >
-              {common_save()}
-            </button>
-          </div>
-        </form>
-      </Dialog.Content>
-    </Dialog.Positioner>
-  </Portal>
-</Dialog>
+          <option value="">…</option>
+          {#each pool as row (row.profile_id)}
+            <option value={row.profile_id}>{optionText(row)}</option>
+          {/each}
+        </select>
+        <button
+          type="button"
+          class="btn preset-outlined-surface-500 hover:preset-filled-surface-500"
+          disabled={busy || pickedId === ""}
+          onclick={addMember}
+        >
+          {common_add()}
+        </button>
+      </div>
+      {#if pickedRow !== null && pickedRow.set !== null}
+        <p class="text-xs opacity-70">
+          {user_gateway_set_add_member_moves({ set: pickedRow.set })}
+        </p>
+      {/if}
+    {/if}
+  </div>
+</FormDialog>

@@ -11,7 +11,6 @@
   "tagma_menu_manage": "Manage",
   "tagma_menu_manage_rooms": "Manage rooms",
   "tagma_revoke": "Revoke",
-  "tagma_revoking": "Revoking…",
   "tagma_revoke_title": "Revoke tagma?",
   "tagma_revoke_body_named": "\"{name}\" will lose access immediately. The device is disconnected on its next attempt to reach the server, and the tagma disappears from this list.",
   "tagma_revoke_body_unnamed": "This tagma will lose access immediately. The device is disconnected on its next attempt to reach the server, and the tagma disappears from this list.",

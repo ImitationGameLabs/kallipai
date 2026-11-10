@@ -11,7 +11,6 @@
   "tagma_menu_manage": "管理",
   "tagma_menu_manage_rooms": "管理群聊",
   "tagma_revoke": "吊销",
-  "tagma_revoking": "吊销中…",
   "tagma_revoke_title": "吊销该智能体编队？",
   "tagma_revoke_body_named": "“{name}”将立即失去访问权限。设备下次连接服务器时会被切断，该智能体编队也会从此列表消失。",
   "tagma_revoke_body_unnamed": "该智能体编队将立即失去访问权限。设备下次连接服务器时会被切断，该智能体编队也会从此列表消失。",
