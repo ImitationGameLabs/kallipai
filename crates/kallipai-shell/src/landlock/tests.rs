@@ -1,4 +1,5 @@
 use super::*;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 
 /// landlock may be unavailable (old kernel, CI without it, boot-disabled); a
@@ -58,7 +59,7 @@ async fn write_outside_writable_is_denied() {
     cmd.arg("-c")
         .arg(format!("echo x > '{}'", target.display()))
         .kill_on_drop(true);
-    apply(
+    let _trace = apply(
         &mut cmd,
         &AccessDecision {
             read: ReadPolicy::Broad,
@@ -116,7 +117,7 @@ async fn baseline_paths_writable_under_landlock() {
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
-    apply(
+    let _trace = apply(
         &mut cmd,
         &AccessDecision {
             read: ReadPolicy::Broad,
@@ -172,7 +173,7 @@ async fn write_inside_writable_succeeds() {
     cmd.arg("-c")
         .arg(format!("echo x > '{}'", target.display()))
         .kill_on_drop(true);
-    apply(
+    let _trace = apply(
         &mut cmd,
         &AccessDecision {
             read: ReadPolicy::Broad,
@@ -229,7 +230,7 @@ async fn readonly_hole_blocks_write_under_writable_ancestor() {
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
-    apply(&mut cmd, &decision).expect("apply should succeed");
+    let _trace = apply(&mut cmd, &decision).expect("apply should succeed");
     let output = cmd
         .spawn()
         .expect("spawn should succeed")
@@ -303,7 +304,7 @@ async fn nested_readonly_holes_both_block_under_writable_ancestor() {
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
-    apply(&mut cmd, &decision).expect("apply should succeed");
+    let _trace = apply(&mut cmd, &decision).expect("apply should succeed");
     let output = cmd
         .spawn()
         .expect("spawn should succeed")
@@ -367,7 +368,7 @@ async fn narrow_read_denies_paths_outside_allowlist() {
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
-    apply(&mut cmd, &decision).expect("apply should succeed");
+    let _trace = apply(&mut cmd, &decision).expect("apply should succeed");
     let output = cmd
         .spawn()
         .expect("spawn should succeed")
@@ -428,7 +429,7 @@ async fn broad_read_with_hide_hole_hides_secret() {
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
-    apply(&mut cmd, &decision).expect("apply should succeed");
+    let _trace = apply(&mut cmd, &decision).expect("apply should succeed");
     let output = cmd
         .spawn()
         .expect("spawn should succeed")
@@ -495,7 +496,7 @@ async fn combo_disjoint_readonly_and_hide_both_effective() {
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
-    apply(&mut cmd, &decision).expect("apply should succeed");
+    let _trace = apply(&mut cmd, &decision).expect("apply should succeed");
     let output = cmd
         .spawn()
         .expect("spawn should succeed")
@@ -566,7 +567,7 @@ async fn combo_hide_ancestor_shadows_readonly_hole() {
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
-    apply(&mut cmd, &decision).expect("apply should succeed");
+    let _trace = apply(&mut cmd, &decision).expect("apply should succeed");
     let output = cmd
         .spawn()
         .expect("spawn should succeed")
@@ -642,7 +643,7 @@ async fn combo_bind_ancestor_and_hide_descendant_both_effective() {
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
-    apply(&mut cmd, &decision).expect("apply should succeed");
+    let _trace = apply(&mut cmd, &decision).expect("apply should succeed");
     let output = cmd
         .spawn()
         .expect("spawn should succeed")
@@ -732,7 +733,7 @@ async fn writable_child_under_readonly_ancestor_succeeds() {
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
-    apply(&mut cmd, &decision).expect("apply should succeed");
+    let _trace = apply(&mut cmd, &decision).expect("apply should succeed");
     let output = cmd
         .spawn()
         .expect("spawn should succeed")
@@ -767,4 +768,171 @@ async fn writable_child_under_readonly_ancestor_succeeds() {
         "write under the readonly-hole ancestor unexpectedly succeeded; \
          stdout={stdout}, stderr={stderr}"
     );
+}
+
+/// The channel carries step code, path index and detail text, it does not
+/// carry the `io::Error`: a step recorded by the child must arrive whole.
+#[test]
+fn a_refusal_written_in_the_child_reaches_the_parent() {
+    let refused = PathBuf::from("/work/team/researcher");
+    let (trace, channel) =
+        SpawnTrace::new(vec![(SpawnStage::Bind, refused.clone())]).expect("channel");
+    let mut cmd = std::process::Command::new("/bin/true");
+    // SAFETY: the closure runs between fork and exec; it writes one small
+    // frame and returns an errno.
+    unsafe {
+        cmd.pre_exec(move || {
+            Err(refuse(
+                &channel,
+                Some(SpawnStage::Bind),
+                Some(1),
+                "permission denied",
+            ))
+        });
+    }
+    cmd.status().expect_err("the closure refuses before exec");
+    let (stage, path, detail) = trace.refused().expect("a refusal crossed the fork");
+    assert_eq!(stage, Some(SpawnStage::Bind));
+    assert_eq!(path.as_deref(), Some(refused.as_path()));
+    assert_eq!(detail, "permission denied");
+}
+
+/// A frame that names one step and an index recorded for another step yields
+/// the step and no path: a wrong path in an error message is worse than none.
+#[test]
+fn an_index_recorded_for_another_step_names_no_path() {
+    let (trace, channel) =
+        SpawnTrace::new(vec![(SpawnStage::Bind, PathBuf::from("/work/bind"))]).expect("channel");
+    let mut cmd = std::process::Command::new("/bin/true");
+    // SAFETY: as above.
+    unsafe {
+        cmd.pre_exec(move || Err(refuse(&channel, Some(SpawnStage::Tmpfs), Some(1), "denied")));
+    }
+    cmd.status().expect_err("the closure refuses before exec");
+    let (stage, path, detail) = trace.refused().expect("a refusal crossed the fork");
+    assert_eq!(stage, Some(SpawnStage::Tmpfs));
+    assert_eq!(path, None, "an entry for another step must not stand in");
+    assert_eq!(detail, "denied");
+}
+
+/// An index past the table is the same degradation, and an unknown step code
+/// names no step at all rather than a neighbour.
+#[test]
+fn an_index_past_the_table_and_an_unknown_code_degrade() {
+    let (trace, channel) = SpawnTrace::new(Vec::new()).expect("channel");
+    let mut cmd = std::process::Command::new("/bin/true");
+    // SAFETY: as above.
+    unsafe {
+        cmd.pre_exec(move || {
+            let mut frame = [0u8; FRAME_HEADER + 3];
+            frame[0] = 200;
+            frame[1..3].copy_from_slice(&9u16.to_le_bytes());
+            frame[3..5].copy_from_slice(&3u16.to_le_bytes());
+            frame[FRAME_HEADER..].copy_from_slice(b"bad");
+            let _ = nix::sys::socket::send(
+                channel.as_raw_fd(),
+                &frame,
+                nix::sys::socket::MsgFlags::MSG_NOSIGNAL,
+            );
+            Err(std::io::Error::from_raw_os_error(libc::EINVAL))
+        });
+    }
+    cmd.status().expect_err("the closure refuses before exec");
+    let (stage, path, detail) = trace.refused().expect("the frame arrived");
+    assert_eq!(stage, None, "an unknown code names no step");
+    assert_eq!(path, None);
+    assert_eq!(detail, "bad");
+}
+
+/// A spawn that fails after the closure ran (the program does not exist) leaves
+/// no frame: the caller must fall back to what it can verify by itself.
+#[test]
+fn a_spawn_that_fails_after_the_closure_leaves_no_record() {
+    let (trace, channel) = SpawnTrace::new(Vec::new()).expect("channel");
+    let mut cmd = std::process::Command::new("/no/such/kallipai-program");
+    // SAFETY: as above; this closure records nothing on purpose.
+    unsafe {
+        cmd.pre_exec(move || {
+            let _ = &channel;
+            Ok(())
+        });
+    }
+    cmd.status().expect_err("the program does not exist");
+    assert!(
+        trace.refused().is_none(),
+        "an empty channel is not a refusal"
+    );
+}
+
+/// A long detail is cut on a character boundary, never mid-character.
+#[test]
+fn a_long_detail_is_cut_on_a_character_boundary() {
+    let (trace, channel) = SpawnTrace::new(Vec::new()).expect("channel");
+    let detail = "拒".repeat(80);
+    let mut cmd = std::process::Command::new("/bin/true");
+    // SAFETY: as above.
+    unsafe {
+        cmd.pre_exec(move || Err(refuse(&channel, Some(SpawnStage::Bind), None, &detail)));
+    }
+    cmd.status().expect_err("the closure refuses before exec");
+    let (_, path, detail) = trace.refused().expect("a refusal crossed the fork");
+    assert_eq!(path, None);
+    assert!(detail.len() <= DETAIL_LIMIT, "detail ran past the cap");
+    assert!(!detail.is_empty());
+    assert!(!detail.contains('\u{FFFD}'), "the cut split a character");
+}
+
+/// The descriptor flags of `fd`, or `None` when it is not open.
+fn descriptor_flags(fd: std::os::fd::RawFd) -> Option<i32> {
+    // SAFETY: F_GETFD takes no argument and only reads the descriptor table.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    (flags >= 0).then_some(flags)
+}
+
+/// Both ends carry `CLOEXEC`: the child can write between fork and exec, and no
+/// executed program inherits the channel.
+///
+/// This is the descriptor-count assertion in a form that a parallel test binary
+/// cannot disturb: `/proc/self/fd` is process-wide, so counting entries in a
+/// test that runs beside other spawning tests measures their children as well,
+/// whether or not anything leaked. The flags and the child's own listing are
+/// per-descriptor facts.
+#[test]
+fn both_channel_ends_close_on_exec() {
+    let (trace, channel) = SpawnTrace::new(Vec::new()).expect("channel");
+    for (label, fd) in [
+        ("read", trace.receiver.as_raw_fd()),
+        ("write", channel.as_raw_fd()),
+    ] {
+        let flags = descriptor_flags(fd).expect("the channel end is open");
+        assert!(
+            flags & libc::FD_CLOEXEC != 0,
+            "the {label} end lacks CLOEXEC"
+        );
+    }
+}
+
+/// The executed program must not see the channel descriptor: a sandboxed
+/// `bash` holding a writable descriptor into the executor's error path would be
+/// a hole in its own right.
+#[test]
+fn the_executed_program_does_not_see_the_channel() {
+    let (trace, channel) = SpawnTrace::new(Vec::new()).expect("channel");
+    let fd = channel.as_raw_fd();
+    let mut cmd = std::process::Command::new("/bin/sh");
+    cmd.args(["-c", "ls /proc/self/fd"]);
+    // SAFETY: as above; this closure records nothing.
+    unsafe {
+        cmd.pre_exec(move || {
+            let _ = &channel;
+            Ok(())
+        });
+    }
+    let output = cmd.output().expect("the listing program runs");
+    let listing = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !listing.lines().any(|line| line.trim() == fd.to_string()),
+        "descriptor {fd} reached the program: {listing}"
+    );
+    drop(trace);
 }

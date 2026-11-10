@@ -81,7 +81,7 @@ pub async fn sandbox_runnable() -> Result<(), String> {
         readonly_holes: vec![],
         hide_holes: vec![hole],
     };
-    kallipai_shell::landlock::apply(&mut cmd, &decision)
+    let _trace = kallipai_shell::landlock::apply(&mut cmd, &decision)
         .map_err(|e| format!("sandbox apply failed: {e}"))?;
     let out = cmd
         .output()

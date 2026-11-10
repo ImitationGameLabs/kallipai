@@ -65,7 +65,7 @@ async fn apply_installs_seccomp_filter() {
     cmd.arg("-c")
         .arg("grep 'Seccomp:' /proc/self/status")
         .kill_on_drop(true);
-    crate::landlock::apply(&mut cmd, &decision).unwrap();
+    let _trace = crate::landlock::apply(&mut cmd, &decision).unwrap();
     let out = cmd.spawn().unwrap().wait_with_output().await.unwrap();
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
@@ -105,7 +105,7 @@ async fn mount_syscall_is_denied() {
             mnt.display()
         ))
         .kill_on_drop(true);
-    crate::landlock::apply(&mut cmd, &decision).unwrap();
+    let _trace = crate::landlock::apply(&mut cmd, &decision).unwrap();
     let out = cmd.spawn().unwrap().wait_with_output().await.unwrap();
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
@@ -135,7 +135,7 @@ async fn trivial_command_runs_under_filter() {
     };
     let mut cmd = tokio::process::Command::new("bash");
     cmd.arg("-c").arg("echo ok").kill_on_drop(true);
-    crate::landlock::apply(&mut cmd, &decision).unwrap();
+    let _trace = crate::landlock::apply(&mut cmd, &decision).unwrap();
     let out = cmd.spawn().unwrap().wait_with_output().await.unwrap();
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(

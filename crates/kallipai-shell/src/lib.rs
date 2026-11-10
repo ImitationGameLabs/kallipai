@@ -65,7 +65,7 @@ use tokio::sync::Mutex;
 
 pub use backend::{CaptureMode, ProcessBackend, ShellBackend};
 pub use builder::ShellBuilder;
-pub use error::ShellError;
+pub use error::{ShellError, SpawnStage};
 pub use gate::{ExecGate, ExecGateFailure, ExecReadGuard, ExecWriteGuard};
 pub use tools::{BashExec, BashExecOutput, BgKill, BgRead};
 

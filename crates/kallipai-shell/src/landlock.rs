@@ -39,8 +39,9 @@
 //!    aborting the spawn before it starts.
 //! 2. the `pre_exec` closure runs `install_user_mount_ns` → `install_bind` (×N)
 //!    → `install_tmpfs` (×N) → `install_landlock` (→ seccomp when the `seccomp`
-//!    feature is on) in the child; any step returning `Err` aborts the exec and
-//!    fails the spawn.
+//!    feature is on) in the child; any step returning `Err` aborts the exec,
+//!    records the step and the path it refused in the `SpawnTrace` channel, and
+//!    fails the spawn with that record attached.
 //!
 //! A full "write-outside-is-denied" assertion is covered by the test suite
 //! rather than a runtime self-test (a robust runtime probe needs a path
@@ -49,6 +50,11 @@
 #![cfg(all(target_os = "linux", feature = "landlock"))]
 
 use std::io;
+use std::os::fd::AsRawFd;
+use std::os::unix::net::UnixStream;
+use std::path::PathBuf;
+
+use crate::error::{ShellError, SpawnStage};
 use std::sync::OnceLock;
 
 mod decision;
@@ -82,9 +88,141 @@ fn map_read_policy(policy: &ReadPolicy) -> libsandbox::ReadPolicy {
     }
 }
 
-/// Flatten a libsandbox error into a plain `io::Error` (carries its `Display`).
-fn ioify(e: libsandbox::SandboxError) -> io::Error {
-    io::Error::other(e.to_string())
+/// The most detail bytes one frame carries, so one frame stays one small write.
+///
+/// A stream socket grants no message boundaries; what keeps the frame whole is
+/// one writer, one frame and an empty socket at the write, plus the reader
+/// clamping the declared length to the bytes it received. A short write (the
+/// send buffer is fresh and never full here, so it would take an extraordinary
+/// failure) shortens the frame from the tail: the header and the path index
+/// arrive first, the detail is cut, and a frame shorter than the header is no
+/// frame at all — the reader falls back instead of misreading.
+const DETAIL_LIMIT: usize = 120;
+
+/// Bytes before the detail: step code (1), path index (2, little endian),
+/// detail length (2, little endian).
+const FRAME_HEADER: usize = 5;
+
+/// The out-of-band channel a sandboxed child records its refusal in.
+///
+/// # Why a channel and not the error value
+///
+/// Only one `i32` errno crosses `fork`: an `io::Error` a `pre_exec` closure
+/// returns arrives in the parent as `Invalid argument (os error 22)` with its
+/// payload gone, and the child's heap is a copy-on-write view of the parent's,
+/// so a store through a shared `Arc` is invisible to the parent as well.
+/// Kernel-mediated state is what survives: the child
+/// therefore writes its refusal into a socketpair created before the fork, and
+/// the parent reads that socket after `spawn` fails.
+///
+/// # What crosses
+///
+/// One frame, one `send`: step code, path index, detail length, detail bytes.
+/// Exactly the five child-side install steps use it — user-mount-ns, bind,
+/// tmpfs, landlock, seccomp — and nothing else does. Mount-ns and seccomp name
+/// no path (`index = 0`); the landlock step sends stage code 0 and still sends
+/// its detail, so the parent reports it as [`ShellError::Landlock`]: a ruleset
+/// that could not be installed filtered nothing, which is not a spawn step that
+/// refused.
+///
+/// # Bounds
+///
+/// Path index: `1..=u16::MAX`, an index that does not fit degrades to "step
+/// named, no path". Detail: truncated to 120 bytes on a character
+/// boundary. A truncated index, a length past the frame, an unknown step code
+/// or an entry recorded for another step all degrade the same way — never a
+/// neighbour's path, because a wrong path in an error message is worse than no
+/// path at all.
+///
+/// Callers outside this crate hold it as an opaque token: hand it back after
+/// `spawn` returns and let it drop. Reading the record is crate-internal,
+/// because every spawn point that can produce one lives in this crate.
+#[must_use = "hold the trace until `spawn` returns, then drop it"]
+pub struct SpawnTrace {
+    receiver: UnixStream,
+    paths: Vec<(SpawnStage, PathBuf)>,
+}
+
+impl SpawnTrace {
+    /// Creates the channel and the empty table: the returned trace stays with
+    /// the caller, the sender goes into the `pre_exec` closure.
+    ///
+    /// Both ends carry `SOCK_CLOEXEC`, so a sandboxed process never inherits
+    /// the channel: the child writes before its `exec`, the descriptor closes
+    /// at `exec`, and the parent drops its read end together with the trace.
+    fn new(paths: Vec<(SpawnStage, PathBuf)>) -> io::Result<(Self, UnixStream)> {
+        let (receiver, sender) = UnixStream::pair()?;
+        Ok((Self { receiver, paths }, sender))
+    }
+
+    /// The refusal the child recorded, or `None` when it recorded nothing.
+    ///
+    /// One non-blocking `recv`, only ever on the failure path: by the time
+    /// `spawn` returns an error the child has written its frame (or died
+    /// without reaching the closure, e.g. `ENOENT`), so an empty read means
+    /// "no record" and the caller falls back to what the parent can verify by
+    /// itself.
+    ///
+    /// The frame comes from our own child and is still parsed defensively: see
+    /// the type-level notes on bounds. Nothing here panics, and no entry is
+    /// ever substituted for another.
+    pub(crate) fn refused(&self) -> Option<crate::error::RecordedRefusal> {
+        let mut frame = [0u8; FRAME_HEADER + DETAIL_LIMIT];
+        let received = nix::sys::socket::recv(
+            self.receiver.as_raw_fd(),
+            &mut frame,
+            nix::sys::socket::MsgFlags::MSG_DONTWAIT,
+        )
+        .ok()?;
+        if received < FRAME_HEADER {
+            return None;
+        }
+        let stage = SpawnStage::from_code(frame[0]);
+        let index = u16::from_le_bytes([frame[1], frame[2]]);
+        let declared = usize::from(u16::from_le_bytes([frame[3], frame[4]]));
+        let length = declared.min(received - FRAME_HEADER);
+        let detail =
+            String::from_utf8_lossy(&frame[FRAME_HEADER..FRAME_HEADER + length]).into_owned();
+        let path = usize::from(index)
+            .checked_sub(1)
+            .and_then(|position| self.paths.get(position))
+            .filter(|(entry_stage, _)| Some(*entry_stage) == stage)
+            .map(|(_, path)| path.clone());
+        Some((stage, path, detail))
+    }
+}
+
+/// Records the refusal in `channel` and returns the errno the `pre_exec`
+/// closure must fail with.
+///
+/// Allocation-free by design: after `fork` the child shares the parent's
+/// allocator state, so it formats nothing. It copies the step code, an index
+/// and at most [`DETAIL_LIMIT`] bytes of the already-formatted context into one
+/// stack frame and issues a single `send`. The returned errno is a formality —
+/// `libsandbox::SandboxError` keeps no errno, and `fork` carries nothing else —
+/// so it stays `EINVAL`, the value `std` substitutes when a child error has no
+/// errno of its own; the parent reads the frame instead.
+fn refuse(
+    channel: &UnixStream,
+    stage: Option<SpawnStage>,
+    path: Option<u16>,
+    detail: &str,
+) -> io::Error {
+    let mut frame = [0u8; FRAME_HEADER + DETAIL_LIMIT];
+    frame[0] = stage.and_then(SpawnStage::code).unwrap_or(0);
+    frame[1..3].copy_from_slice(&path.unwrap_or(0).to_le_bytes());
+    let mut length = detail.len().min(DETAIL_LIMIT);
+    while !detail.is_char_boundary(length) {
+        length -= 1;
+    }
+    frame[3..5].copy_from_slice(&u16::try_from(length).unwrap_or(0).to_le_bytes());
+    frame[FRAME_HEADER..FRAME_HEADER + length].copy_from_slice(&detail.as_bytes()[..length]);
+    let _ = nix::sys::socket::send(
+        channel.as_raw_fd(),
+        &frame[..FRAME_HEADER + length],
+        nix::sys::socket::MsgFlags::MSG_NOSIGNAL,
+    );
+    io::Error::from_raw_os_error(libc::EINVAL)
 }
 
 /// Apply a landlock domain (+ mount-ns readonly/hide holes) to `cmd` per the
@@ -111,7 +249,15 @@ fn ioify(e: libsandbox::SandboxError) -> io::Error {
 /// `pre_exec` closure, which `cmd` owns until `spawn()` consumes it — so the
 /// ruleset fd / mount data survive across the fork and are read in the child.
 /// No guard needs to be held by the caller.
-pub fn apply(cmd: &mut tokio::process::Command, decision: &AccessDecision) -> io::Result<()> {
+///
+/// Parent-side preparation fails here, before any fork, and returns the
+/// structured error directly. Child-side installation cannot: the child can
+/// only send an errno back, so each step records itself in the returned
+/// [`SpawnTrace`] instead, and the caller hands that trace to the spawn error.
+pub fn apply(
+    cmd: &mut tokio::process::Command,
+    decision: &AccessDecision,
+) -> Result<SpawnTrace, ShellError> {
     // Parent-side prepare (allocates CStrings / builds the ruleset fd).
 
     // Enter a fresh user + mount namespace iff there is any mount-layer work.
@@ -172,30 +318,46 @@ pub fn apply(cmd: &mut tokio::process::Command, decision: &AccessDecision) -> io
                 .cmp(&a.components().count())
                 .then_with(|| a.cmp(b))
         });
+        // Paired plans: each prepared value travels with the path it came from,
+        // so the install loop below cannot slide against its names.
         let binds = bind_specs
             .into_iter()
-            .map(|(p, perm)| {
-                libsandbox::prepare_bind(&p, perm, libsandbox::RemountRecursion::NonRecursive)
+            .map(|(path, permission)| {
+                libsandbox::prepare_bind(
+                    &path,
+                    permission,
+                    libsandbox::RemountRecursion::NonRecursive,
+                )
+                .map(|prepared| (prepared, path.clone()))
+                .map_err(|error| ShellError::SpawnFailed {
+                    stage: SpawnStage::Bind,
+                    path: Some(path),
+                    detail: error.to_string(),
+                })
             })
-            .collect::<libsandbox::Result<Vec<_>>>()
-            .map_err(ioify)?;
+            .collect::<Result<Vec<_>, ShellError>>()?;
         // Secret dirs → empty read-only tmpfs overlay (hide contents; size is
         // irrelevant for a read-only mount). ro + nodev + nosuid + noexec.
         let hides = decision
             .hide_holes
             .iter()
-            .map(|p| {
+            .map(|path| {
                 libsandbox::prepare_tmpfs(
-                    p,
+                    path,
                     0,
                     libsandbox::MountFlags::READ_ONLY
                         | libsandbox::MountFlags::NO_EXEC
                         | libsandbox::MountFlags::NO_SUID
                         | libsandbox::MountFlags::NO_DEV,
                 )
+                .map(|prepared| (prepared, path.clone()))
+                .map_err(|error| ShellError::SpawnFailed {
+                    stage: SpawnStage::Tmpfs,
+                    path: Some(path.clone()),
+                    detail: error.to_string(),
+                })
             })
-            .collect::<libsandbox::Result<Vec<_>>>()
-            .map_err(ioify)?;
+            .collect::<Result<Vec<_>, ShellError>>()?;
         Some((ns, binds, hides))
     };
 
@@ -210,7 +372,12 @@ pub fn apply(cmd: &mut tokio::process::Command, decision: &AccessDecision) -> io
         read: map_read_policy(&decision.read),
         writable,
     };
-    let prepared_ll = libsandbox::prepare_landlock(&ll_decision).map_err(ioify)?;
+    // The ruleset itself is missing here, before any fork: no spawn step ran,
+    // so this is `Landlock` and not a `SpawnFailed`.
+    let prepared_ll =
+        libsandbox::prepare_landlock(&ll_decision).map_err(|error| ShellError::Landlock {
+            detail: error.to_string(),
+        })?;
 
     // seccomp denylist (defense-in-depth): the cached libsandbox filter, installed
     // LAST — after the mount/landlock setup, so the filter cannot block the setup
@@ -220,29 +387,78 @@ pub fn apply(cmd: &mut tokio::process::Command, decision: &AccessDecision) -> io
     #[cfg(feature = "seccomp")]
     let seccomp_filter = crate::seccomp::filter();
 
+    // The channel's path table, in the order the loops below install: bind
+    // entries first, then tmpfs entries. A frame carries an index into this
+    // very vector, so the table and the indexes come from one place.
+    let mut paths = Vec::new();
+    if let Some((_, binds, hides)) = &prepared_ns {
+        paths.extend(
+            binds
+                .iter()
+                .map(|(_, path)| (SpawnStage::Bind, path.clone())),
+        );
+        paths.extend(
+            hides
+                .iter()
+                .map(|(_, path)| (SpawnStage::Tmpfs, path.clone())),
+        );
+    }
+    let (trace, channel) = SpawnTrace::new(paths)?;
+    let bind_count = prepared_ns.as_ref().map_or(0, |(_, binds, _)| binds.len());
+
     // SAFETY: the closure runs post-fork / pre-exec. On the success path it calls
-    // only libsandbox's async-signal-safe install_* (raw syscalls, no allocation).
-    // On an Err path the `.map_err(ioify)?` formatting allocates before the exec
-    // is aborted — acceptable because the child is failing anyway. Order is
+    // only libsandbox's async-signal-safe install_* (raw syscalls; they allocate
+    // only on their own failure path).
+    // On an Err path this side formats nothing and allocates nothing: it copies
+    // the step code, an index and the error's already-built context into a
+    // pre-sized stack frame, issues one `send`, and returns a bare errno.
+    // libsandbox's own failure path is what builds that context, inside the
+    // child, with a `format!` its source marks as failure-path-only. Order is
     // user-mount-ns → bind → tmpfs → landlock → seccomp; see above.
     unsafe {
         cmd.pre_exec(move || {
             if let Some((ns, binds, hides)) = &prepared_ns {
-                libsandbox::install_user_mount_ns(ns).map_err(ioify)?;
-                for b in binds {
-                    libsandbox::install_bind(b).map_err(ioify)?;
+                libsandbox::install_user_mount_ns(ns).map_err(|error| {
+                    refuse(
+                        &channel,
+                        Some(SpawnStage::MountNamespace),
+                        None,
+                        error.context(),
+                    )
+                })?;
+                for (position, (bind, _)) in binds.iter().enumerate() {
+                    libsandbox::install_bind(bind).map_err(|error| {
+                        refuse(
+                            &channel,
+                            Some(SpawnStage::Bind),
+                            u16::try_from(position + 1).ok(),
+                            error.context(),
+                        )
+                    })?;
                 }
-                for h in hides {
-                    libsandbox::install_tmpfs(h).map_err(ioify)?;
+                for (position, (hide, _)) in hides.iter().enumerate() {
+                    libsandbox::install_tmpfs(hide).map_err(|error| {
+                        refuse(
+                            &channel,
+                            Some(SpawnStage::Tmpfs),
+                            u16::try_from(bind_count + position + 1).ok(),
+                            error.context(),
+                        )
+                    })?;
                 }
             }
-            libsandbox::install_landlock(&prepared_ll).map_err(ioify)?;
+            // No step code: a ruleset that never took effect is its own error,
+            // not a spawn step that refused.
+            libsandbox::install_landlock(&prepared_ll)
+                .map_err(|error| refuse(&channel, None, None, error.context()))?;
             #[cfg(feature = "seccomp")]
-            seccomp_filter.install().map_err(ioify)?;
+            seccomp_filter.install().map_err(|error| {
+                refuse(&channel, Some(SpawnStage::Seccomp), None, error.context())
+            })?;
             Ok(())
         });
     }
-    Ok(())
+    Ok(trace)
 }
 
 /// Component-wise strict descendant test: `child != ancestor` and `child` starts

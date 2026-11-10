@@ -251,15 +251,32 @@ impl BackgroundRegistry {
         // pure mechanism — it moves the prepared landlock/mount-hole state into
         // the `pre_exec` closure held by `cmd` until `spawn()` consumes it.
         #[cfg(all(target_os = "linux", feature = "landlock"))]
-        if let Some(source) = &self.access_source {
-            crate::landlock::apply(&mut cmd, &source.access_with_scratch(&task_dir)?)?;
-        }
+        let sandbox_trace = match &self.access_source {
+            Some(source) => Some(crate::landlock::apply(
+                &mut cmd,
+                &source.access_with_scratch(&task_dir)?,
+            )?),
+            None => None,
+        };
         #[cfg(unix)]
         // Restore the child tree's default SIGPIPE disposition: when the
         // capture pump closes the pipes at the disk cap, the writer dies at
         // its next write instead of spinning on EPIPE.
         crate::pgroup::reset_sigpipe(&mut cmd);
-        let mut child = cmd.spawn()?;
+        // Same bare-errno problem as the foreground path: use the sandbox's own
+        // record when the child left one, name only what this side can verify
+        // otherwise, and keep `Io` when neither names a step. The record is read
+        // only after `spawn` fails: before that the channel is empty.
+        let mut child = cmd.spawn().map_err(|error| {
+            #[cfg(all(target_os = "linux", feature = "landlock"))]
+            let refused = sandbox_trace.as_ref().and_then(|trace| trace.refused());
+            #[cfg(not(all(target_os = "linux", feature = "landlock")))]
+            let refused = None;
+            crate::error::explain_spawn(error, &cwd, &self.shell, refused)
+        })?;
+        // The command still owns the write end; the read end dies here.
+        #[cfg(all(target_os = "linux", feature = "landlock"))]
+        drop(sandbox_trace);
         let pid = child.id();
         // Capped-sink pump: both streams are pipes now. One task serializes
         // them into out.log and enforces the task-wide disk cap with a

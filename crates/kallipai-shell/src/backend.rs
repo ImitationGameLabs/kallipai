@@ -275,9 +275,10 @@ impl ShellBackend for ProcessBackend {
         // fd is inherited independently (CLOEXEC cleared) and is not a filesystem
         // object, so landlock/seccomp do not restrict it.
         #[cfg(all(target_os = "linux", feature = "landlock"))]
-        if let Some(source) = &self.config.access_source {
-            crate::landlock::apply(&mut cmd, &source.access()?)?;
-        }
+        let sandbox_trace = match &self.config.access_source {
+            Some(source) => Some(crate::landlock::apply(&mut cmd, &source.access()?)?),
+            None => None,
+        };
 
         #[cfg(unix)]
         // Restore the child tree's default SIGPIPE disposition (the host's
@@ -285,7 +286,21 @@ impl ShellBackend for ProcessBackend {
         // writer dies at its next write instead of spinning on EPIPE.
         crate::pgroup::reset_sigpipe(&mut cmd);
 
-        let mut child = cmd.spawn()?;
+        // A bare errno cannot say which step refused. `explain_spawn` uses the
+        // sandbox's own record when the child left one, and otherwise names only
+        // the step this side can verify by itself.
+        let mut child = cmd.spawn().map_err(|error| {
+            // Read the child's record only now: before `spawn` returns an
+            // error there is nothing on the channel to read.
+            #[cfg(all(target_os = "linux", feature = "landlock"))]
+            let refused = sandbox_trace.as_ref().and_then(|trace| trace.refused());
+            #[cfg(not(all(target_os = "linux", feature = "landlock")))]
+            let refused = None;
+            crate::error::explain_spawn(error, &spawn_cwd, &self.config.shell, refused)
+        })?;
+        // The command still owns the write end; the read end dies here.
+        #[cfg(all(target_os = "linux", feature = "landlock"))]
+        drop(sandbox_trace);
         // Epoch at fork (still under the READ permit): the conversion path
         // compares this against the gate's current carve epoch under a
         // fresh READ, to refuse adoption if a carve landed in between.

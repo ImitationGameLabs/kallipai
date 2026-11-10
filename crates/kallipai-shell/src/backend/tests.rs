@@ -1683,3 +1683,154 @@ async fn running_set_is_readable_while_a_foreground_command_holds_the_lock() {
         .unwrap();
     foreground.await.unwrap().unwrap();
 }
+
+/// A working directory that no longer exists is the failure the diagnosis can
+/// prove without guessing, so the error names the step and the path it refused.
+#[tokio::test]
+async fn an_unreachable_working_directory_names_the_step_and_the_path() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let missing = tmp.path().join("gone");
+    let mut backend = ShellBuilder::new()
+        .initial_cwd(missing.clone())
+        .fallback_cwd(missing.clone())
+        .build()
+        .await
+        .unwrap();
+    let error = backend
+        .exec("true", Duration::from_secs(10), CaptureMode::Merged)
+        .await
+        .unwrap_err();
+    match error {
+        crate::ShellError::SpawnFailed {
+            stage,
+            path,
+            detail,
+        } => {
+            assert_eq!(stage, crate::SpawnStage::WorkingDirectory);
+            assert_eq!(path.as_deref(), Some(missing.as_path()));
+            assert!(
+                detail.contains("No such file or directory"),
+                "detail: {detail}"
+            );
+        }
+        other => panic!("expected a spawn failure, got {other:?}"),
+    }
+}
+
+/// The same step for a path that exists and is searchable: a 0755 regular file
+/// passes the search-permission probe, so only the kind of path separates it
+/// from a working directory the child could enter.
+#[tokio::test]
+async fn a_working_directory_that_is_a_regular_file_names_the_step() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let file = tmp.path().join("not-a-dir");
+    std::fs::write(&file, b"").unwrap();
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut backend = ShellBuilder::new()
+        .initial_cwd(file.clone())
+        .fallback_cwd(file.clone())
+        .build()
+        .await
+        .unwrap();
+    let error = backend
+        .exec("true", Duration::from_secs(10), CaptureMode::Merged)
+        .await
+        .unwrap_err();
+    match error {
+        crate::ShellError::SpawnFailed { stage, path, .. } => {
+            assert_eq!(stage, crate::SpawnStage::WorkingDirectory);
+            assert_eq!(path.as_deref(), Some(file.as_path()));
+        }
+        other => panic!("expected a spawn failure, got {other:?}"),
+    }
+}
+
+/// A program that cannot be executed is a different step, and the error says which.
+#[tokio::test]
+async fn an_unreachable_program_names_the_exec_step() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let shell = tmp.path().join("missing-shell");
+    let mut backend = ShellBuilder::new()
+        .shell(shell.clone())
+        .build()
+        .await
+        .unwrap();
+    let error = backend
+        .exec("true", Duration::from_secs(10), CaptureMode::Merged)
+        .await
+        .unwrap_err();
+    match error {
+        crate::ShellError::SpawnFailed { stage, path, .. } => {
+            assert_eq!(stage, crate::SpawnStage::Exec);
+            assert_eq!(path.as_deref(), Some(shell.as_path()));
+        }
+        other => panic!("expected a spawn failure, got {other:?}"),
+    }
+}
+
+/// `bash` is a relative name in the default configuration, so the exec step has
+/// to be reachable without an absolute path: an unresolvable relative program
+/// names the exec step and the program itself.
+#[tokio::test]
+async fn a_relative_shell_missing_from_the_path_names_the_exec_step() {
+    let mut backend = ShellBuilder::new()
+        .shell("kallipai-no-such-shell")
+        .build()
+        .await
+        .unwrap();
+    let error = backend
+        .exec("true", Duration::from_secs(10), CaptureMode::Merged)
+        .await
+        .unwrap_err();
+    match error {
+        crate::ShellError::SpawnFailed { stage, path, .. } => {
+            assert_eq!(stage, crate::SpawnStage::Exec);
+            assert_eq!(
+                path.as_deref(),
+                Some(std::path::Path::new("kallipai-no-such-shell"))
+            );
+        }
+        other => panic!("expected a spawn failure, got {other:?}"),
+    }
+}
+
+/// A directory with no permission bits is the case this probe covers: the child
+/// cannot enter it, and the error names the step and the refused path.
+#[tokio::test]
+async fn a_working_directory_without_permission_bits_reports_permission_denied() {
+    use std::os::unix::fs::PermissionsExt;
+
+    // With uid 0 and CAP_DAC_OVERRIDE the kernel ignores the mode bits, so the
+    // spawn would succeed and this probe could not fail as intended: skip there
+    // explicitly rather than assert a failure the environment cannot produce.
+    // SAFETY: geteuid takes no arguments and cannot fail.
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let tmp = tempfile::TempDir::new().unwrap();
+    let dir = tmp.path().join("no-access");
+    std::fs::create_dir(&dir).unwrap();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let mut backend = ShellBuilder::new()
+        .initial_cwd(dir.clone())
+        .fallback_cwd(dir.clone())
+        .build()
+        .await
+        .unwrap();
+    let error = backend
+        .exec("true", Duration::from_secs(10), CaptureMode::Merged)
+        .await
+        .unwrap_err();
+    // Restore the bits before asserting: a failed assertion must not leave a
+    // zero-permission directory behind for the next run to trip over.
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "spawn failed at working directory for {}: Permission denied (os error 13)",
+            dir.display()
+        )
+    );
+}
