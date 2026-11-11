@@ -17,7 +17,7 @@ import {
   managementBackend,
 } from "./client.ts";
 import { startVisibleInterval } from "../visibleInterval.ts";
-import { clampPage, filterEpoch } from "./compute.ts";
+import { clampPage, filterEpoch } from "../compute.ts";
 import { displayError } from "./errors.ts";
 import {
   manage_tasks_load_failed,

@@ -7,7 +7,7 @@ import enMessages from "../../../i18n/project.inlang/messages/en/manage_tasks.js
 // boundary lives in one place, mirroring kallipai-task gates.rs), not
 // re-implement it inline.
 const PAGE = new URL("./TasksPage.svelte", import.meta.url);
-const COMPUTE = new URL("../../lib/manage/compute.ts", import.meta.url);
+const COMPUTE = new URL("../../lib/compute.ts", import.meta.url);
 const STORE = new URL("../../lib/manage/tasks.svelte.ts", import.meta.url);
 
 function source(url: URL): string {

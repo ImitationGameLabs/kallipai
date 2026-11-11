@@ -43,7 +43,7 @@ import {
   type UserProviderRow,
   type UserSetRow,
 } from "./client.ts";
-import type { MemberWriteBody } from "../manage/gateway/setDraft.ts";
+import type { MemberWriteBody } from "./setDraft.ts";
 
 class UserGatewayStore {
   /** The baked gateway base URL (one origin for both faces). */

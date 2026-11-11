@@ -1,6 +1,6 @@
 // Pure view helpers extracted from ProfilesPage: probe-report merging into
 // keyed maps, draft-derived id lists, probe status labels/colors (i18n via
-// paraglide — same-layer precedent as compute.ts), and the parked-live
+// paraglide, as compute.ts does one layer up), and the parked-live
 // snapshot core. The page keeps the $state/$derived/store plumbing; these
 // take the maps/values as parameters so tests can drive them directly
 // (profiles-view_test.ts).

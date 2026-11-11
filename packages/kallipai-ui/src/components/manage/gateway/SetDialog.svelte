@@ -26,7 +26,7 @@
     reseed,
     type MemberEdit,
     type SetSaveDraft,
-  } from "../../../lib/manage/gateway/setDraft.ts";
+  } from "../../../lib/gateway/setDraft.ts";
 
   let {
     open,

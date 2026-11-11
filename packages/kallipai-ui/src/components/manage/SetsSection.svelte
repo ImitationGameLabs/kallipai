@@ -25,7 +25,7 @@
     formatModalities,
     setEffectiveModalities,
     setHasShadowedMembers,
-  } from "../../lib/manage/compute.ts";
+  } from "../../lib/compute.ts";
   import {
     common_edit,
     common_remove,

@@ -13,7 +13,7 @@ import {
   burnRate as computeBurnRate,
   etaMinutes as computeEta,
   type BudgetSample,
-} from "./compute.ts";
+} from "../compute.ts";
 import { type ManagementBackend, managementBackend } from "./client.ts";
 import { displayError } from "./errors.ts";
 import { startVisibleInterval } from "../visibleInterval.ts";

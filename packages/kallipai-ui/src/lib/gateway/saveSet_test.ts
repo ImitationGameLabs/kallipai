@@ -1,5 +1,5 @@
 import { assertEquals } from "@std/assert";
-import type { AdminProfileRow, AdminSetRow } from "./client.ts";
+import type { AdminProfileRow, AdminSetRow } from "../manage/gateway/client.ts";
 import {
   saveSetDraft,
   saveStoppedBanner,
@@ -24,7 +24,7 @@ import {
   manage_gateway_set_save_order,
   manage_gateway_set_save_order_only,
   manage_gateway_set_save_partial,
-} from "../../../paraglide/messages.js";
+} from "../../paraglide/messages.js";
 
 // The set dialog's save sequence, driven through fake ports: which
 // requests run, in what order, how often the set is read back, and what

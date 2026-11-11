@@ -11,7 +11,7 @@ const PROFILES_PAGE = new URL(
 );
 const PROFILE_DIALOG = new URL("./ProfileDialog.svelte", import.meta.url);
 const MODALITY_TAGS = new URL("../ModalityTags.svelte", import.meta.url);
-const COMPUTE_LIB = new URL("../../lib/manage/compute.ts", import.meta.url);
+const COMPUTE_LIB = new URL("../../lib/compute.ts", import.meta.url);
 
 function source(url: URL): string {
   return new TextDecoder().decode(Deno.readFileSync(url));

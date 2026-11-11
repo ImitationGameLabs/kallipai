@@ -1,4 +1,4 @@
-import { assert } from "@std/assert";
+import { assert, assertEquals } from "@std/assert";
 import { manage_gateway_remove_collection_body } from "../../../paraglide/messages.js";
 
 // Source pins for the gateway console: the page rides the
@@ -13,6 +13,26 @@ const STORE = new URL(
 );
 const CLIENT = new URL(
   "../../../lib/manage/gateway/client.ts",
+  import.meta.url,
+);
+const DETAIL = new URL(
+  "../../../lib/manage/gateway/catalogDetail.svelte.ts",
+  import.meta.url,
+);
+const SET_DIALOGS = new URL(
+  "../../../lib/manage/gateway/catalogSetDialogs.svelte.ts",
+  import.meta.url,
+);
+const PROVIDER_DIALOGS = new URL(
+  "../../../lib/manage/gateway/catalogProviderDialogs.svelte.ts",
+  import.meta.url,
+);
+const PROFILE_DIALOGS = new URL(
+  "../../../lib/manage/gateway/catalogProfileDialogs.svelte.ts",
+  import.meta.url,
+);
+const COLLECTION_DIALOGS = new URL(
+  "../../../lib/manage/gateway/catalogCollectionDialogs.svelte.ts",
   import.meta.url,
 );
 const UNASSIGNED_SECTION = new URL(
@@ -74,7 +94,22 @@ function reloadLines(body: string): string[] {
     .split("\n")
     .map((line) => line.trim())
     .filter((line) => line !== "" && !line.startsWith("//"))
-    .filter((line) => line.includes("reloadDetailUnassigned("));
+    .filter((line) => line.includes("reloadUnassigned("));
+}
+
+/** The names a page declares at its top level, in source order: the props,
+ * the state, the derived reads, the controllers and any helper. */
+function declaredNames(src: string): string[] {
+  const names: string[] = [];
+  for (const line of src.split("\n")) {
+    const destructured = /^ {2}let \{ (\w+)/.exec(line);
+    const handler = /^ {2}function (\w+)\(/.exec(line);
+    const bound = /^ {2}(?:let|const) (\w+)(?::| =)/.exec(line);
+    if (destructured) names.push(destructured[1]);
+    else if (handler) names.push(handler[1]);
+    else if (bound) names.push(bound[1]);
+  }
+  return names;
 }
 
 Deno.test(
@@ -139,81 +174,112 @@ Deno.test(
 );
 
 Deno.test(
-  "GatewayCatalogPage edits the catalog through the store, not the wire",
-  { permissions: { read: [PAGE] } },
+  "the console's dialogs edit the catalog through the store, not the wire",
+  {
+    permissions: {
+      read: [
+        PAGE,
+        SET_DIALOGS,
+        PROVIDER_DIALOGS,
+        PROFILE_DIALOGS,
+        COLLECTION_DIALOGS,
+      ],
+    },
+  },
   () => {
-    const src = source(PAGE);
+    const page = source(PAGE);
+    const sets = source(SET_DIALOGS);
+    const providers = source(PROVIDER_DIALOGS);
+    const profiles = source(PROFILE_DIALOGS);
+    const collections = source(COLLECTION_DIALOGS);
     assert(
-      src.includes("gatewayStore.refreshAll()"),
+      page.includes("gatewayStore.refreshAll()"),
       "the read side loads through the store",
     );
     assert(
-      src.includes("gatewayStore.updateMember(") &&
-        src.includes("gatewayStore.patchDescription(") &&
-        src.includes("gatewayStore.reorderSet(") &&
-        !src.includes("gatewayStore.saveSet("),
+      page.includes("store: gatewayStore"),
+      "every controller writes through the one store",
+    );
+    assert(
+      sets.includes("store.updateMember(") &&
+        sets.includes("store.patchDescription(") &&
+        sets.includes("store.reorderSet(") &&
+        !page.includes("gatewayStore.saveSet("),
       "members land as PUTs; description and order ride the store's writes",
     );
     assert(
-      src.includes("gatewayStore.removeSet("),
-      "the remove flow routes through the store",
+      sets.includes("store.removeSet(") &&
+        collections.includes("store.removeCollection("),
+      "the remove flows route through the store",
     );
+    for (const src of [sets, providers, profiles, collections]) {
+      assert(
+        !src.includes("adminFetch") && !src.includes("fetch("),
+        "no controller speaks the wire directly",
+      );
+    }
     assert(
-      src.includes("<ConfirmDialog"),
+      page.includes("<ConfirmDialog"),
       "the destructive remove confirms before it fires",
     );
     assert(
-      src.includes("<SetDialog") && src.includes("<SetsSection"),
+      page.includes("<SetDialog") && page.includes("<SetsSection"),
       "the sets grid and its dialog are the section components",
     );
   },
 );
 
 Deno.test(
-  "GatewayCatalogPage carries the unassigned and credential panels",
-  { permissions: { read: [PAGE] } },
+  "the console carries the unassigned and credential panels",
+  {
+    permissions: {
+      read: [PAGE, SET_DIALOGS, PROVIDER_DIALOGS, PROFILE_DIALOGS],
+    },
+  },
   () => {
-    const src = source(PAGE);
+    const page = source(PAGE);
+    const sets = source(SET_DIALOGS);
+    const providers = source(PROVIDER_DIALOGS);
+    const profiles = source(PROFILE_DIALOGS);
     // The panels are section components.
     assert(
-      src.includes("<UnassignedSection"),
+      page.includes("<UnassignedSection"),
       "the unassigned panel renders as a section component",
     );
-    assert(!src.includes("_pending()"), "no pending placeholder rows render");
+    assert(!page.includes("_pending()"), "no pending placeholder rows render");
     // The unassigned panel rides the store's unassigned wire filter; a drag
     // rides the same member write as every other placement.
     assert(
-      src.includes("gatewayStore.addUnassigned(") &&
-        src.includes("gatewayStore.addUnassignedToSet("),
+      profiles.includes("store.addUnassigned(") &&
+        profiles.includes("store.addUnassignedToSet("),
       "unassigned actions ride the store's wraps",
     );
     // Credentials: the plaintext crosses inbound only (dialog PUT plus
     // a confirmed delete), through the store wraps.
     assert(
-      src.includes("gatewayStore.saveCredential(") &&
-        src.includes("gatewayStore.removeCredential("),
+      providers.includes("store.saveCredential(") &&
+        providers.includes("store.removeCredential("),
       "credential writes ride the store's credential wraps",
     );
     assert(
-      src.includes("<ProviderCredentialDialog"),
+      page.includes("<ProviderCredentialDialog"),
       "the credential form is the dialog, not an inline form",
     );
     // The admin URL is deployment-baked: the page never edits it
     // and gates the console on its presence.
     assert(
-      !src.includes("gatewayStore.adminUrl") && src.includes("isConnected()"),
+      !page.includes("gatewayStore.adminUrl") && page.includes("isConnected()"),
       "the admin URL is baked config, never a page-editable field",
     );
     // Set creation is the dialog, landed through the store's add wrap.
     assert(
-      src.includes("gatewayStore.addSet("),
+      sets.includes("store.addSet("),
       "the create-set dialog rides the store's add wrap",
     );
     assert(
-      src.includes("<SetCreateDialog") &&
-        src.includes(
-          'names={gatewayStore.setsIn(detailRow?.name ?? "").map((s) => s.name)}',
-        ),
+      page.includes("<SetCreateDialog") &&
+        page.includes("names={setDialogs.create.names}") &&
+        sets.includes("store.setsIn("),
       "the create-set dialog is wired with the catalog's names",
     );
   },
@@ -298,6 +364,7 @@ Deno.test(
     permissions: {
       read: [
         PAGE,
+        DETAIL,
         WEB_ROUTE,
         APP_ROUTE,
         WEB_COLLECTION_ROUTE,
@@ -324,12 +391,18 @@ Deno.test(
       "the set-as-default action rides the store's transfer wrap",
     );
     assert(
-      src.includes("onDropAnywhere") && src.includes("<PlacementDialog"),
+      src.includes("placement.dropAnywhere(") &&
+        src.includes("<PlacementDialog"),
       "the list view's drop opens the placement fallback dialog",
     );
     assert(
       src.includes("navigate(adminGatewayPath())"),
       "a removed collection's detail returns to the list",
+    );
+    assert(
+      source(DETAIL).includes("readUnassigned(") &&
+        src.includes("createCatalogDetail("),
+      "the detail's narrowed read and its request token live in one module",
     );
     // Both shells bind the param to the same console component.
     for (const route of [WEB_COLLECTION_ROUTE, APP_COLLECTION_ROUTE] as const) {
@@ -350,13 +423,14 @@ Deno.test(
 
 Deno.test(
   "the remove-collection confirm carries the row's own counts",
-  { permissions: { read: [PAGE] } },
+  { permissions: { read: [PAGE, COLLECTION_DIALOGS] } },
   () => {
-    const src = source(PAGE);
+    const page = source(PAGE);
+    const dialogs = source(COLLECTION_DIALOGS);
     assert(
-      src.includes("sets: removeCollectionTarget.set_count") &&
-        src.includes("profiles: removeCollectionTarget.profile_count") &&
-        src.includes("description={removeCollectionBody}"),
+      dialogs.includes("sets: target.set_count") &&
+        dialogs.includes("profiles: target.profile_count") &&
+        page.includes("description={collectionDialogs.collection.remove.body}"),
       "the confirm hands over the server's counts",
     );
   },
@@ -407,7 +481,7 @@ Deno.test(
       page.includes("gatewayStore.unassignedIn(name)") &&
         page.includes("scope={detailRow?.name ?? null}") &&
         page.includes("unassigned={detailRow") &&
-        page.includes("(detailUnassigned ?? [])") &&
+        page.includes("(detail.rows ?? [])") &&
         page.includes("(gatewayStore.unassigned ?? [])}"),
       "the detail's unassigned panel is narrowed to its collection",
     );
@@ -421,16 +495,16 @@ Deno.test(
     // drop names the collection and the dialog cannot pick another.
     assert(
       unassigned.includes("onDragStart(p)") &&
-        page.includes("dragRow = profile;") &&
+        page.includes("placement.startDrag(profile)") &&
         page.includes(
-          "sourceCollection={placementRow?.collection_name ?? undefined}",
+          "sourceCollection={profileDialogs.placement.row?.collection_name ?? undefined}",
         ),
       "a drag carries the row's collection out to the placement",
     );
     // With two rows sharing an id, the confirm has to name the row.
     assert(
       page.includes(
-        'collection: removeUnassignedTarget?.collection_name ?? ""',
+        'collection: profileDialogs.unassigned.remove.target?.collection_name ?? ""',
       ),
       "the unassigned delete confirm names its collection",
     );
@@ -439,16 +513,17 @@ Deno.test(
 
 Deno.test(
   "an unassigned reload waits for the drop and the save it follows",
-  { permissions: { read: [PAGE] } },
+  { permissions: { read: [PROFILE_DIALOGS, SET_DIALOGS] } },
   () => {
-    const page = source(PAGE);
+    const profiles = source(PROFILE_DIALOGS);
+    const page = source(SET_DIALOGS);
     // The reload's own read nulls the store error first, so a reload fired
     // on failure wipes the banner before it paints. It also has to follow
     // the call it reports on: ahead of it, a failure left over from before
     // blocks the reload this edit needs, and a clean verdict fires the
     // reload before this edit lands. Either way the panel keeps old rows.
-    const drop = functionBody(page, "onDropToSet");
-    const call = "await gatewayStore.addUnassignedToSet(";
+    const drop = functionBody(profiles, "onDropToSet");
+    const call = "await store.addUnassignedToSet(";
     assert(drop.includes(call), `onDropToSet still calls ${call}`);
     // One reload per path is today's convention, not an invariant: a
     // second, conditional reload would be harmless, an unconditional one
@@ -458,12 +533,11 @@ Deno.test(
     // The condition is the point: a reload gated on anything but a clean
     // store verdict is the bug this pin keeps out.
     assert(
-      dropReloads[0] ===
-        "if (gatewayStore.error === null) await reloadDetailUnassigned();",
+      dropReloads[0] === "if (store.error === null) await reloadUnassigned();",
       "onDropToSet reloads only on a clean verdict",
     );
     assert(
-      drop.indexOf("await reloadDetailUnassigned();") > drop.indexOf(call),
+      drop.indexOf("await reloadUnassigned();") > drop.indexOf(call),
       "onDropToSet reloads after the drop lands",
     );
     // A set save is the other way a profile gains or loses a set: the
@@ -474,11 +548,11 @@ Deno.test(
     const saveReloads = reloadLines(save);
     assert(saveReloads.length === 1, "onSaveSet reloads once");
     assert(
-      saveReloads[0] === "await reloadDetailUnassigned();",
+      saveReloads[0] === "await reloadUnassigned();",
       "onSaveSet awaits the reload",
     );
     assert(
-      save.indexOf("await reloadDetailUnassigned();") >
+      save.indexOf("await reloadUnassigned();") >
         save.indexOf("dialogOpen = false;"),
       "onSaveSet reloads after the dialog closes",
     );
@@ -487,14 +561,14 @@ Deno.test(
 
 Deno.test(
   "a set save settles once, through the sequence's own port",
-  { permissions: { read: [PAGE] } },
+  { permissions: { read: [SET_DIALOGS] } },
   () => {
-    const page = source(PAGE);
+    const page = source(SET_DIALOGS);
     const save = functionBody(page, "onSaveSet");
     // One save spans several requests: the read side refreshes once, in the
     // sequence, before the re-read that projects what it wrote.
     assert(
-      save.includes("settle: () => gatewayStore.refreshAll(),"),
+      save.includes("settle: () => store.refreshAll(),"),
       "the sequence refreshes the read side through its settle port",
     );
     assert(
@@ -527,26 +601,124 @@ Deno.test(
 
 Deno.test(
   "the set save rides the lib's step function, not an inline sequence",
-  { permissions: { read: [PAGE] } },
+  { permissions: { read: [PAGE, SET_DIALOGS] } },
   () => {
     const page = source(PAGE);
+    const sets = source(SET_DIALOGS);
     // The PUT-then-PATCH sequence and its failure handling are tested
-    // directly in lib/manage/gateway/saveSet_test.ts; the page only wires
+    // directly in lib/gateway/saveSet_test.ts; the page only wires
     // the ports to the store, so the two cannot drift apart.
     assert(
-      page.includes("saveSetDraft(target, result, {"),
+      sets.includes("saveSetDraft(target, result, {"),
       "the save runs through the tested step function",
     );
     assert(
-      page.includes("gatewayStore.updateMember(") &&
-        page.includes("gatewayStore.patchDescription(") &&
-        page.includes("gatewayStore.reorderSet(") &&
-        !page.includes("failSetSave"),
+      sets.includes("store.updateMember(") &&
+        sets.includes("store.patchDescription(") &&
+        sets.includes("store.reorderSet(") &&
+        !sets.includes("failSetSave"),
       "each port wraps one store write, and no page-local failure path remains",
     );
     assert(
-      page.includes("landed={setDialogLanded}"),
+      page.includes("landed={setDialogs.edit.landed}"),
       "a stopped save hands the dialog the rows that landed",
     );
+  },
+);
+
+Deno.test(
+  "each dialog factory names the interface of what it returns",
+  {
+    permissions: {
+      read: [
+        SET_DIALOGS,
+        PROVIDER_DIALOGS,
+        PROFILE_DIALOGS,
+        COLLECTION_DIALOGS,
+      ],
+    },
+  },
+  () => {
+    // The page is type-checked against these interfaces, so a key set copied
+    // into this file would only repeat the compiler. What no copy catches is a
+    // factory that stops naming its type, or a controller that starts storing
+    // an object literal in $state (null, a flag, a count, a row, an array).
+    for (const url of [
+      SET_DIALOGS,
+      PROVIDER_DIALOGS,
+      PROFILE_DIALOGS,
+      COLLECTION_DIALOGS,
+    ]) {
+      const src = source(url);
+      assert(
+        /export interface \w+Dialogs \{/.test(src),
+        `${url.pathname} exports the interface it hands back`,
+      );
+      assert(
+        /\): \w+Dialogs \{/.test(src),
+        `${url.pathname} returns that interface`,
+      );
+      assert(
+        !/\$state(<[^>]*>)?\(\{/.test(src),
+        `${url.pathname} keeps no object literal in $state`,
+      );
+    }
+  },
+);
+
+Deno.test(
+  "the page declares the read, the detail and the controllers",
+  { permissions: { read: [PAGE] } },
+  () => {
+    // A field beyond this list is state no controller owns: a dialog's, or
+    // the detail read's. The list is the page's whole top level, so a new
+    // flag or a handler arrives as a diff here.
+    assertEquals(declaredNames(source(PAGE)), [
+      "collection",
+      "initialLoadDone",
+      "detailRow",
+      "detailMemberSets",
+      "detail",
+      "setDialogs",
+      "providerDialogs",
+      "profileDialogs",
+      "collectionDialogs",
+      "groupName",
+    ]);
+  },
+);
+
+Deno.test(
+  "no controller holds a form draft",
+  {
+    permissions: {
+      read: [
+        SET_DIALOGS,
+        PROVIDER_DIALOGS,
+        PROFILE_DIALOGS,
+        COLLECTION_DIALOGS,
+      ],
+    },
+  },
+  () => {
+    // The dialogs keep their drafts (SetDialog seeds its own form); a
+    // controller that stored one would be a second source of truth for
+    // what the user typed.
+    for (const url of [
+      SET_DIALOGS,
+      PROVIDER_DIALOGS,
+      PROFILE_DIALOGS,
+      COLLECTION_DIALOGS,
+    ]) {
+      const src = source(url);
+      assert(
+        !/let \w*[Dd]raft\w* = \$state/.test(src),
+        `${url.pathname} stores no draft`,
+      );
+      assert(
+        !/\$state<[^>]*Draft/.test(src),
+        `${url.pathname} holds no draft state`,
+      );
+    }
   },
 );

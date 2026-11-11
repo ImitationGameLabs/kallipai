@@ -1,10 +1,10 @@
 // The user face's projection of its own rows onto the shared set-dialog
-// arithmetic (lib/manage/gateway/setDraft.ts and saveSet.ts). Both faces
+// arithmetic (./setDraft.ts and ./saveSet.ts). Both faces
 // share the draft rules; the row type differs, and a user's row names
 // the set that carries it.
 
-import type { DraftRow } from "../manage/gateway/setDraft.ts";
-import type { DraftSet } from "../manage/gateway/saveSet.ts";
+import type { DraftRow } from "./setDraft.ts";
+import type { DraftSet } from "./saveSet.ts";
 import type { UserProfileRow, UserSetRow } from "./client.ts";
 
 /** A set on the user face with its member rows in registry order: the

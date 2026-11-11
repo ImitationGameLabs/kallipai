@@ -24,7 +24,7 @@ Deno.test("unreadable text answers undefined, never a number", () => {
 });
 
 // The reading stays `Number`'s, as both dialogs had it: anything it reads as
-// finite passes, so `1e3` and `0x10` do too. The sibling ./setDraft.ts
+// finite passes, so `1e3` and `0x10` do too. The sibling ../gateway/setDraft.ts
 // parseContextWindow is stricter about the same max_context_window field (a
 // positive whole number), so the two faces still disagree; one rule for both
 // is a separate change.

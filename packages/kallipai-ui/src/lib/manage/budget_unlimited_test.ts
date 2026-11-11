@@ -18,7 +18,7 @@ declare global {
 
 const { assertEquals, assertRejects } = await import("@std/assert");
 const { budgetStore } = await import("./budget.svelte.ts");
-const { burnRate } = await import("./compute.ts");
+const { burnRate } = await import("../compute.ts");
 type BudgetResponse = import("@kallipai/kallipai-client").BudgetResponse;
 type BudgetUpdateRequest =
   import("@kallipai/kallipai-client").BudgetUpdateRequest;

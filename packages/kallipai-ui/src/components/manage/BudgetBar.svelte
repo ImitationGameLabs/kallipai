@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { barFillPct, barColorClass } from "../../lib/manage/compute.ts";
+  import { barFillPct, barColorClass } from "../../lib/compute.ts";
   import {
     manage_budget_heading,
     manage_budget_unlimited,

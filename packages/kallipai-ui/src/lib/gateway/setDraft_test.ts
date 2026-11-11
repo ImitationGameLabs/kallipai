@@ -1,5 +1,5 @@
 import { assert, assertEquals, assertThrows } from "@std/assert";
-import type { AdminProfileRow } from "./client.ts";
+import type { AdminProfileRow } from "../manage/gateway/client.ts";
 import {
   contextProblem,
   editProblem,

@@ -8,7 +8,7 @@
     EvictResult,
   } from "../../lib/manage/toolViews.ts";
   import { evictFacts, evictTone } from "../../lib/manage/toolViews.ts";
-  import { formatTokens } from "../../lib/manage/compute.ts";
+  import { formatTokens } from "../../lib/compute.ts";
   import { getLocale } from "../../paraglide/runtime.js";
   import {
     manage_history_evict_cap_zero,

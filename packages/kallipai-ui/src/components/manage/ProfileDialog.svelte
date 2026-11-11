@@ -38,7 +38,7 @@
     EFFORT_OPTIONS,
     normalizeModalities,
     profileModalities,
-  } from "../../lib/manage/compute.ts";
+  } from "../../lib/compute.ts";
   import ModalityTags from "../ModalityTags.svelte";
   import ReqMark from "../ReqMark.svelte";
   import {

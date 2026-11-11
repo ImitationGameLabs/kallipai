@@ -2,7 +2,7 @@ import { assertEquals, assertExists } from "@std/assert";
 
 import type { UserProfileRow, UserSetRow } from "./client.ts";
 import { createSetDraft, type CreateSetPorts } from "./createSet.ts";
-import type { SetSaveDraft } from "../manage/gateway/setDraft.ts";
+import type { SetSaveDraft } from "./setDraft.ts";
 
 // The create's pre-flight, driven through fake ports: whether the row read
 // runs at all, whether a refusal stops the write, and what the draft the

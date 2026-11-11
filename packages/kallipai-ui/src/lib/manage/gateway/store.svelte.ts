@@ -46,7 +46,7 @@ import {
   type MemberContentBody,
   type MemberWriteBody,
   rowBodyOf,
-} from "./setDraft.ts";
+} from "../../gateway/setDraft.ts";
 
 class GatewayAdminStore {
   /** The catalog's sets; null until the first read lands. */

@@ -20,7 +20,7 @@ import {
   manage_schedules_warn_invalid,
   manage_schedules_warn_order,
   manage_schedules_warn_positive,
-} from "../../paraglide/messages.js";
+} from "../paraglide/messages.js";
 
 // ---------------------------------------------------------------------------
 // Budget helpers

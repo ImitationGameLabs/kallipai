@@ -14,7 +14,7 @@
     formatDuration,
     formatTokens,
     roleLabel,
-  } from "../../lib/manage/compute.ts";
+  } from "../../lib/compute.ts";
   import {
     common_loading,
     manage_tasks_title,

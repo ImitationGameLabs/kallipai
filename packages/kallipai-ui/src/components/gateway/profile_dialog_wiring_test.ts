@@ -16,7 +16,7 @@ const MANAGE_DIALOG = new URL(
   "../manage/gateway/ProfileDialog.svelte",
   import.meta.url,
 );
-const COMPUTE_LIB = new URL("../../lib/manage/compute.ts", import.meta.url);
+const COMPUTE_LIB = new URL("../../lib/compute.ts", import.meta.url);
 
 const NULLING_CHAIN = "normalizeModalities(modalityDraft)?.slice() ?? null";
 const KEPT_PROVIDER =

@@ -5,7 +5,7 @@
   // toggle) and the rest as pressed-state toggles. Controlled: the
   // caller owns the selection and applies the flipped set through
   // onChange; the label is i18n at the call site.
-  import { MODALITY_ORDER } from "../lib/manage/compute.ts";
+  import { MODALITY_ORDER } from "../lib/compute.ts";
   import type { Modality } from "@kallipai/kallipai-client";
 
   let {

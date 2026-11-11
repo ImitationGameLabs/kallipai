@@ -13,7 +13,7 @@ import {
   membershipWrites,
   type DraftRow,
   type SetSaveDraft,
-} from "../manage/gateway/setDraft.ts";
+} from "./setDraft.ts";
 
 import type { UserProfileRow, UserSetRow } from "./client.ts";
 import { pickedRows, type UserSetDetail } from "./userSetDraft.ts";

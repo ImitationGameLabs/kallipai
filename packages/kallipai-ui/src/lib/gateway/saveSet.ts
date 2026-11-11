@@ -24,7 +24,7 @@ import {
   manage_gateway_set_save_order,
   manage_gateway_set_save_order_only,
   manage_gateway_set_save_partial,
-} from "../../../paraglide/messages.js";
+} from "../../paraglide/messages.js";
 
 /** One request's verdict: whether it landed, and why not when it did not. */
 export interface StepResult {

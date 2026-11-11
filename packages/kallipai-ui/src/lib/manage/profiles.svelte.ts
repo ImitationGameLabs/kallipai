@@ -18,7 +18,7 @@ import {
   removeProvider as removeProviderFn,
   removeSet as removeSetFn,
   singleProviderProbeRequest as singleProviderProbeRequestFn,
-} from "./compute.ts";
+} from "../compute.ts";
 import { type ManagementBackend, managementBackend } from "./client.ts";
 import {
   classifySaveFailure,

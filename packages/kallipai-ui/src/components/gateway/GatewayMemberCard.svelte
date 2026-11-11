@@ -13,8 +13,8 @@
     modelProblem,
     type DraftRow,
     type MemberEdit,
-  } from "../../lib/manage/gateway/setDraft.ts";
-  import { EFFORT_OPTIONS } from "../../lib/manage/compute.ts";
+  } from "../../lib/gateway/setDraft.ts";
+  import { EFFORT_OPTIONS } from "../../lib/compute.ts";
   import type { ReasoningEffort } from "@kallipai/kallipai-client";
   import { ArrowDown, ArrowUp, Pencil, Trash } from "@lucide/svelte";
   import ModalityTags from "../ModalityTags.svelte";

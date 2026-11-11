@@ -18,7 +18,7 @@
     type DraftRow,
     type MemberEdit,
     type SetSaveDraft,
-  } from "../../lib/manage/gateway/setDraft.ts";
+  } from "../../lib/gateway/setDraft.ts";
   import {
     draftRowOf,
     poolOf,

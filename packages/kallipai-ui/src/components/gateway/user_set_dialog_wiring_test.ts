@@ -3,7 +3,7 @@ import { assert } from "@std/assert";
 // Source pins for the user face's set dialog: the member pool comes from
 // the collection, the picker names the set an add would take a row out of,
 // and the create form asks for a name an edit already has. The save sequence itself is
-// tested in lib/manage/gateway/saveSet_test.ts; what it hands over is
+// tested in lib/gateway/saveSet_test.ts; what it hands over is
 // pinned here and in lib/gateway/userSetDraft_test.ts.
 const DIALOG = new URL("./UserSetDialog.svelte", import.meta.url);
 const CARD = new URL("./GatewayMemberCard.svelte", import.meta.url);

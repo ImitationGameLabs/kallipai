@@ -16,7 +16,7 @@
     MODALITY_ORDER,
     EFFORT_OPTIONS,
     normalizeModalities,
-  } from "../../../lib/manage/compute.ts";
+  } from "../../../lib/compute.ts";
   import { parseProfileLimit } from "../../../lib/manage/gateway/profileLimits.ts";
   import type { AdminProfileRow } from "../../../lib/manage/gateway/client.ts";
   import type { Modality, ReasoningEffort } from "@kallipai/kallipai-client";

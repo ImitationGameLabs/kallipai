@@ -1,9 +1,5 @@
 import { assertEquals } from "@std/assert";
-import {
-  memberEditOf,
-  membershipWrites,
-  type MemberEdit,
-} from "../manage/gateway/setDraft.ts";
+import { memberEditOf, membershipWrites, type MemberEdit } from "./setDraft.ts";
 import type { UserProfileRow, UserSetRow } from "./client.ts";
 import {
   draftRowOf,

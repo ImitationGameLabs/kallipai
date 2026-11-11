@@ -53,7 +53,7 @@
     singleUnassignedProfileProbeRequest,
     upsertProvider,
     providerFromDialog,
-  } from "../../lib/manage/compute.ts";
+  } from "../../lib/compute.ts";
   import {
     clearProfileResult,
     mergeProfileScope,

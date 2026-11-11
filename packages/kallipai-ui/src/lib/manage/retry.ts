@@ -1,7 +1,7 @@
 // Relative-time bucketing and error normalization for the agent detail
 // page's retry card. Pure functions only: locale rendering (which message
 // key, which plural form) stays in the component, so these stay testable
-// without a rune runtime (compute.ts pattern).
+// without a rune runtime (profiles-view.ts pattern).
 
 export type RelativeKind = "just" | "min" | "hour" | "day";
 
