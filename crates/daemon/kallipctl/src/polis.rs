@@ -6,14 +6,21 @@
 //! daemon, so they work while it is down: those are the moments an operator
 //! wants to look at a platform or free a pending enrollment slot. The three
 //! instance verbs are the exception: they ask the daemon where the instance
-//! listens, which is also where its operator token lives.
+//! listens, which is what says where its operator token lives.
 //!
-//! Each verb returns the lines it would print; [`run`] is the only place
+//! Each verb returns the lines it would print; [`say`] is the only place
 //! that writes to stdout, which keeps the sentences testable without
 //! capturing a process's stdout. Two facts go to stderr instead, because
 //! they outlive the run that would have reported them, whether or not it
 //! fails: the plaintext origin notice in [`settle_origin`], and the
 //! pending tagma a minted code leaves on the platform.
+//!
+//! The answering functions take their dependency as a parameter: a name
+//! ending in `_in` (`list_platforms_in`, `set_token_in`, `entries_in`, ...)
+//! is the verb handed the register or the instance instead of loading one,
+//! so a test can drive it against a temporary file or a stub. A helper
+//! that takes the dependency as a parameter carries no suffix either: it
+//! is a piece of a verb, not another version of one.
 
 use std::path::Path;
 
@@ -23,7 +30,7 @@ use kallipai_archeion_common::tagmata::{TagmaState, TagmaSummary};
 use kallipai_daemon_client::DaemonClient;
 
 use crate::archeion::{self, Listing, Revoked};
-use crate::cli::{InstanceVerb, PolisCommand, PolisTokenCommand};
+use crate::cli::{InstanceVerb, RegisterVerb};
 use crate::instance::{self, Instance};
 use crate::origin::Origin;
 use crate::registry::{Addition, Registry};
@@ -44,9 +51,9 @@ impl Outcome {
     }
 }
 
-/// Run one `polis` verb, printing what it has to say.
-pub(crate) async fn run(command: &PolisCommand, allow_plaintext: bool) -> Result<()> {
-    say(lines(command, allow_plaintext).await?)
+/// Run one register verb, printing what it has to say.
+pub(crate) async fn run_register(verb: &RegisterVerb<'_>, allow_plaintext: bool) -> Result<()> {
+    say(register_lines(verb, allow_plaintext).await?)
 }
 
 /// Run one of the verbs that speaks to a running instance. The daemon has
@@ -71,29 +78,25 @@ fn say(outcome: Outcome) -> Result<()> {
     }
 }
 
-/// What a verb says. A failure with nothing to print comes back as `Err`.
-async fn lines(command: &PolisCommand, allow_plaintext: bool) -> Result<Outcome> {
-    Ok(match command {
-        PolisCommand::Add { name, url, replace } => {
-            Outcome::said(add(name, url, *replace, allow_plaintext)?)
+/// What a register verb says. A failure with nothing to print comes back
+/// as `Err`.
+async fn register_lines(verb: &RegisterVerb<'_>, allow_plaintext: bool) -> Result<Outcome> {
+    Ok(match verb {
+        RegisterVerb::Add { name, url, replace } => {
+            Outcome::said(add_platform(name, url, *replace, allow_plaintext)?)
         }
-        PolisCommand::Remove { name } => Outcome::said(remove(name)?),
-        PolisCommand::List => Outcome::said(list()?),
-        PolisCommand::Token { command } => match command {
-            PolisTokenCommand::Set { name, token_file } => {
-                Outcome::said(token_set(name, token_file.as_deref(), allow_plaintext).await?)
-            }
-        },
-        PolisCommand::Status { name } => status(name, allow_plaintext).await?,
-        PolisCommand::Revoke { name, tagma } => {
-            Outcome::said(revoke(name, tagma, allow_plaintext).await?)
+        RegisterVerb::Remove { name } => Outcome::said(remove_platform(name)?),
+        RegisterVerb::List => Outcome::said(list_platforms()?),
+        RegisterVerb::SetToken { name, token_file } => {
+            Outcome::said(set_token(name, *token_file, allow_plaintext).await?)
         }
-        PolisCommand::MintCode { platform } => {
+        RegisterVerb::Status { name } => platform_status(name, allow_plaintext).await?,
+        RegisterVerb::Revoke { name, tagma } => {
+            Outcome::said(revoke_tagma(name, tagma, allow_plaintext).await?)
+        }
+        RegisterVerb::MintCode { platform } => {
             Outcome::said(mint_code(platform, allow_plaintext).await?)
         }
-        // `main.rs` answers these before the register path; the arms exist
-        // because the command line is a single enum.
-        _ => unreachable!("the instance verbs answer in instance_lines"),
     })
 }
 
@@ -138,7 +141,7 @@ async fn instance_lines(
             .await?,
         ),
         InstanceVerb::RemoveEntry { name, forget, .. } => {
-            Outcome::said(remove_entry(&instance, name, *forget).await?)
+            Outcome::said(remove_entry_in(&instance, name, *forget).await?)
         }
     })
 }
@@ -261,7 +264,11 @@ async fn add_entry_in(
     let from_register = target.platform();
     let (origin, stored) = match target {
         Target::Platform(platform) => (
-            settle_origin(platform, &address(registry, platform)?, allow_plaintext)?,
+            settle_origin(
+                platform,
+                &platform_address(registry, platform)?,
+                allow_plaintext,
+            )?,
             registry.entry(platform)?.secret.clone(),
         ),
         // The judgment a recorded address gets: a long-lived token travels
@@ -340,7 +347,7 @@ fn refuse_a_hopeless_add(
     Ok(())
 }
 
-async fn remove_entry(instance: &Instance, name: &str, forget: bool) -> Result<Vec<String>> {
+async fn remove_entry_in(instance: &Instance, name: &str, forget: bool) -> Result<Vec<String>> {
     check_entry_name(name)?;
     let removed = instance.remove(name, forget).await?;
     Ok(vec![
@@ -362,8 +369,12 @@ async fn mint_code_in(
     platform: &str,
     allow_plaintext: bool,
 ) -> Result<Vec<String>> {
-    let origin = settle_origin(platform, &address(registry, platform)?, allow_plaintext)?;
-    let token = token(registry, platform)?;
+    let origin = settle_origin(
+        platform,
+        &platform_address(registry, platform)?,
+        allow_plaintext,
+    )?;
+    let token = stored_token(registry, platform)?;
     let minted = archeion::mint_enrollment(origin.as_str(), &token).await?;
     Ok(vec![
         format!("code {}  expires {}", minted.code, minted.expires_at),
@@ -393,17 +404,27 @@ fn settle_origin(name: &str, raw: &str, allow_plaintext: bool) -> Result<Origin>
     Ok(origin)
 }
 
-fn add(name: &str, url: &str, replace: bool, allow_plaintext: bool) -> Result<Vec<String>> {
+fn add_platform(
+    name: &str,
+    url: &str,
+    replace: bool,
+    allow_plaintext: bool,
+) -> Result<Vec<String>> {
     let origin = settle_origin(name, url, allow_plaintext)?;
     let mut registry = Registry::load()?;
-    let line = record(&mut registry, name, origin.as_str(), replace)?;
+    let line = add_platform_in(&mut registry, name, origin.as_str(), replace)?;
     registry.save()?;
     Ok(vec![line])
 }
 
-/// [`add`] without the file: the caller owns the register (and its path, when
+/// [`add_platform`] without the file: the caller owns the register (and its path, when
 /// a test needs one).
-fn record(registry: &mut Registry, name: &str, origin: &str, replace: bool) -> Result<String> {
+fn add_platform_in(
+    registry: &mut Registry,
+    name: &str,
+    origin: &str,
+    replace: bool,
+) -> Result<String> {
     let addition = registry.add(name, origin, replace)?;
     // The stored form, not the argument: that is what the next verb reads.
     let stored = registry.entry(name)?.url.clone();
@@ -414,19 +435,19 @@ fn record(registry: &mut Registry, name: &str, origin: &str, replace: bool) -> R
     })
 }
 
-fn remove(name: &str) -> Result<Vec<String>> {
+fn remove_platform(name: &str) -> Result<Vec<String>> {
     let mut registry = Registry::load()?;
     registry.remove(name)?;
     registry.save()?;
     Ok(vec![format!("removed {name}")])
 }
 
-fn list() -> Result<Vec<String>> {
-    list_in(&Registry::load()?)
+fn list_platforms() -> Result<Vec<String>> {
+    list_platforms_in(&Registry::load()?)
 }
 
-/// [`list`] against a register the caller already holds.
-fn list_in(registry: &Registry) -> Result<Vec<String>> {
+/// [`list_platforms`] against a register the caller already holds.
+fn list_platforms_in(registry: &Registry) -> Result<Vec<String>> {
     if registry.is_empty() {
         return Ok(vec![
             "no polis is registered yet; add one with kallipctl polis add <name> <url>".to_owned(),
@@ -444,20 +465,20 @@ fn list_in(registry: &Registry) -> Result<Vec<String>> {
     Ok(lines)
 }
 
-async fn token_set(
+async fn set_token(
     name: &str,
     token_file: Option<&str>,
     allow_plaintext: bool,
 ) -> Result<Vec<String>> {
     let mut registry = Registry::load()?;
-    token_set_in(&mut registry, name, token_file, allow_plaintext).await
+    set_token_in(&mut registry, name, token_file, allow_plaintext).await
 }
 
-/// [`token_set`] against a register the caller already holds. The record and
+/// [`set_token`] against a register the caller already holds. The record and
 /// the address are resolved before the secret is read: a name that does not
 /// exist, or an address the plaintext rule refuses, must not cost the operator
 /// a paste of the real token.
-async fn token_set_in(
+async fn set_token_in(
     registry: &mut Registry,
     name: &str,
     token_file: Option<&str>,
@@ -472,13 +493,13 @@ async fn token_set_in(
             read_token_value(&prompt).await?
         }
     };
-    store(registry, name, origin.as_str(), &token).await
+    store_token(registry, name, origin.as_str(), &token).await
 }
 
 /// Store a token only after the platform accepts it for one list call: the
 /// platform is the only judge of whether a token works, and a record that
 /// cannot talk is worse than no record.
-async fn store(
+async fn store_token(
     registry: &mut Registry,
     name: &str,
     origin: &str,
@@ -493,15 +514,19 @@ async fn store(
     Ok(vec![format!("stored token for {name}")])
 }
 
-async fn status(name: &str, allow_plaintext: bool) -> Result<Outcome> {
+async fn platform_status(name: &str, allow_plaintext: bool) -> Result<Outcome> {
     let registry = Registry::load()?;
-    report(&registry, name, allow_plaintext).await
+    platform_status_in(&registry, name, allow_plaintext).await
 }
 
-/// [`status`] against a register the caller already holds.
-async fn report(registry: &Registry, name: &str, allow_plaintext: bool) -> Result<Outcome> {
-    let origin = settle_origin(name, &address(registry, name)?, allow_plaintext)?;
-    let secret = token(registry, name)?;
+/// [`platform_status`] against a register the caller already holds.
+async fn platform_status_in(
+    registry: &Registry,
+    name: &str,
+    allow_plaintext: bool,
+) -> Result<Outcome> {
+    let origin = settle_origin(name, &platform_address(registry, name)?, allow_plaintext)?;
+    let secret = stored_token(registry, name)?;
     match archeion::list_tagmata(origin.as_str(), &secret).await {
         Listing::Rows(rows) => {
             let mut lines = vec![format!(
@@ -529,12 +554,12 @@ async fn report(registry: &Registry, name: &str, allow_plaintext: bool) -> Resul
     }
 }
 
-async fn revoke(name: &str, tagma: &str, allow_plaintext: bool) -> Result<Vec<String>> {
-    revoke_in(&Registry::load()?, name, tagma, allow_plaintext).await
+async fn revoke_tagma(name: &str, tagma: &str, allow_plaintext: bool) -> Result<Vec<String>> {
+    revoke_tagma_in(&Registry::load()?, name, tagma, allow_plaintext).await
 }
 
-/// [`revoke`] against a register the caller already holds.
-async fn revoke_in(
+/// [`revoke_tagma`] against a register the caller already holds.
+async fn revoke_tagma_in(
     registry: &Registry,
     name: &str,
     tagma: &str,
@@ -543,8 +568,8 @@ async fn revoke_in(
     if !valid_tagma_id(tagma) {
         anyhow::bail!("{tagma:?} is not a tagma id; copy one from `kallipctl polis status {name}`");
     }
-    let origin = settle_origin(name, &address(registry, name)?, allow_plaintext)?;
-    let secret = token(registry, name)?;
+    let origin = settle_origin(name, &platform_address(registry, name)?, allow_plaintext)?;
+    let secret = stored_token(registry, name)?;
     Ok(
         match archeion::revoke_tagma(origin.as_str(), &secret, tagma).await? {
             Revoked::Done => vec![format!("revoked {tagma} on {name}")],
@@ -567,15 +592,15 @@ fn valid_tagma_id(id: &str) -> bool {
 }
 
 /// The record's address, or the sentence that says how to make one.
-fn address(registry: &Registry, name: &str) -> Result<String> {
+fn platform_address(registry: &Registry, name: &str) -> Result<String> {
     Ok(registry.entry(name)?.url.clone())
 }
 
 /// The record's token, or the sentence that says how to store one. Callers
-/// read it after [`address`] has passed the plaintext rule: a token the
+/// read it after [`platform_address`] has passed the plaintext rule: a token the
 /// operator has just minted in a browser should not be thrown away over a
 /// missing flag.
-fn token(registry: &Registry, name: &str) -> Result<String> {
+fn stored_token(registry: &Registry, name: &str) -> Result<String> {
     registry.entry(name)?.secret.clone().ok_or_else(|| {
         anyhow::anyhow!(
             "no token stored for {name}; store one with `kallipctl polis token set {name}`"
@@ -693,8 +718,8 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut registry = Registry::load_from(&dir.path().join("polis-registry.toml"))
             .expect("an empty register");
-        let line =
-            record(&mut registry, "local", "HTTP://API.example:8080/", false).expect("recorded");
+        let line = add_platform_in(&mut registry, "local", "HTTP://API.example:8080/", false)
+            .expect("recorded");
         assert_eq!(line, "added local http://api.example:8080");
         registry.save().expect("save");
         let reloaded = Registry::load_from(registry.path()).expect("reloaded");
@@ -708,8 +733,8 @@ mod tests {
     fn an_unchanged_pair_says_so() {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut registry = register(&dir, "local", "http://127.0.0.1:8080", None);
-        let line =
-            record(&mut registry, "local", "http://127.0.0.1:8080", false).expect("unchanged");
+        let line = add_platform_in(&mut registry, "local", "http://127.0.0.1:8080", false)
+            .expect("unchanged");
         assert_eq!(line, "local is already at http://127.0.0.1:8080");
     }
 
@@ -717,11 +742,11 @@ mod tests {
     fn a_new_address_for_a_known_name_needs_replace() {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut registry = register(&dir, "local", "http://127.0.0.1:8080", None);
-        let error = record(&mut registry, "local", "https://api.example.com", false)
+        let error = add_platform_in(&mut registry, "local", "https://api.example.com", false)
             .expect_err("refused without the flag");
         assert!(format!("{error:#}").contains("--replace"), "{error:#}");
-        let line =
-            record(&mut registry, "local", "https://api.example.com", true).expect("replaced");
+        let line = add_platform_in(&mut registry, "local", "https://api.example.com", true)
+            .expect("replaced");
         assert_eq!(line, "replaced local: now https://api.example.com");
     }
 
@@ -750,7 +775,7 @@ mod tests {
             "http://127.0.0.1:8080",
             Some("sk-pat-abcdefghijkl"),
         );
-        let lines = list_in(&registry).expect("listed");
+        let lines = list_platforms_in(&registry).expect("listed");
         assert_eq!(lines.len(), 1, "{lines:?}");
         assert!(
             lines[0].starts_with("local  http://127.0.0.1:8080  token="),
@@ -762,7 +787,7 @@ mod tests {
         );
 
         let bare = register(&dir, "cloud", "https://api.example.com", None);
-        let lines = list_in(&bare).expect("listed");
+        let lines = list_platforms_in(&bare).expect("listed");
         assert!(
             lines
                 .iter()
@@ -775,7 +800,7 @@ mod tests {
     fn an_empty_register_says_how_to_add_one() {
         let dir = tempfile::tempdir().expect("tempdir");
         let registry = Registry::load_from(&dir.path().join("none.toml")).expect("empty");
-        let lines = list_in(&registry).expect("listed");
+        let lines = list_platforms_in(&registry).expect("listed");
         assert_eq!(lines.len(), 1);
         assert!(lines[0].contains("kallipctl polis add"), "{lines:?}");
     }
@@ -787,7 +812,9 @@ mod tests {
         );
         let dir = tempfile::tempdir().expect("tempdir");
         let registry = register(&dir, "local", &polis, Some("sk-pat-token"));
-        let outcome = report(&registry, "local", true).await.expect("status");
+        let outcome = platform_status_in(&registry, "local", true)
+            .await
+            .expect("status");
         assert!(
             outcome.error.is_none(),
             "the rows came back, so nothing failed"
@@ -820,7 +847,9 @@ mod tests {
         let (polis, request) = serve_once(401, r#"{"error":{"message":"the token was revoked"}}"#);
         let dir = tempfile::tempdir().expect("tempdir");
         let registry = register(&dir, "local", &polis, Some("sk-pat-token"));
-        let outcome = report(&registry, "local", true).await.expect("status");
+        let outcome = platform_status_in(&registry, "local", true)
+            .await
+            .expect("status");
         assert_eq!(
             outcome.lines[0],
             format!("local  {polis}  reachable  token=rejected")
@@ -837,7 +866,7 @@ mod tests {
     async fn status_without_a_token_names_the_verb_that_stores_one() {
         let dir = tempfile::tempdir().expect("tempdir");
         let registry = register(&dir, "local", "http://127.0.0.1:9", None);
-        let error = report(&registry, "local", false)
+        let error = platform_status_in(&registry, "local", false)
             .await
             .expect_err("no token");
         assert!(
@@ -852,7 +881,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut registry = register(&dir, "local", &polis, None);
         let before = std::fs::read_to_string(registry.path()).expect("read");
-        let error = store(&mut registry, "local", &polis, "sk-pat-bad")
+        let error = store_token(&mut registry, "local", &polis, "sk-pat-bad")
             .await
             .expect_err("refused");
         assert!(
@@ -870,7 +899,7 @@ mod tests {
         let (polis, request) = serve_once(200, "[]");
         let dir = tempfile::tempdir().expect("tempdir");
         let mut registry = register(&dir, "local", &polis, None);
-        let lines = store(&mut registry, "local", &polis, "sk-pat-good")
+        let lines = store_token(&mut registry, "local", &polis, "sk-pat-good")
             .await
             .expect("stored");
         assert_eq!(lines, vec!["stored token for local".to_owned()]);
@@ -887,7 +916,7 @@ mod tests {
         let (polis, request) = serve_once(404, r#"{"error":{"message":"unknown tagma"}}"#);
         let dir = tempfile::tempdir().expect("tempdir");
         let registry = register(&dir, "local", &polis, Some("sk-pat-token"));
-        let lines = revoke_in(&registry, "local", "tagma-9", true)
+        let lines = revoke_tagma_in(&registry, "local", "tagma-9", true)
             .await
             .expect("an unknown id is not a failure");
         assert_eq!(lines, vec!["tagma-9 is not registered on local".to_owned()]);
@@ -899,7 +928,9 @@ mod tests {
         let (polis, request) = serve_once(200, "[]");
         let dir = tempfile::tempdir().expect("tempdir");
         let registry = register(&dir, "local", &polis, Some("sk-pat-token"));
-        let outcome = report(&registry, "local", true).await.expect("status");
+        let outcome = platform_status_in(&registry, "local", true)
+            .await
+            .expect("status");
         assert!(outcome.error.is_none(), "an empty list is not a failure");
         assert_eq!(outcome.lines.len(), 2, "{:?}", outcome.lines);
         assert_eq!(outcome.lines[1], "no tagma is registered for this token");
@@ -911,7 +942,7 @@ mod tests {
         let (polis, request) = serve_once(204, "");
         let dir = tempfile::tempdir().expect("tempdir");
         let registry = register(&dir, "local", &polis, Some("sk-pat-token"));
-        let lines = revoke_in(&registry, "local", "tagma-7", true)
+        let lines = revoke_tagma_in(&registry, "local", "tagma-7", true)
             .await
             .expect("revoked");
         assert_eq!(lines, vec!["revoked tagma-7 on local".to_owned()]);
@@ -930,7 +961,9 @@ mod tests {
         );
         let dir = tempfile::tempdir().expect("tempdir");
         let registry = register(&dir, "local", &polis, Some("sk-pat-token"));
-        let outcome = report(&registry, "local", true).await.expect("status");
+        let outcome = platform_status_in(&registry, "local", true)
+            .await
+            .expect("status");
         assert!(
             outcome.error.is_none(),
             "one unknown word is not a decode failure"
@@ -947,7 +980,7 @@ mod tests {
         let missing = "/nonexistent/kallipctl-token";
         let dir = tempfile::tempdir().expect("tempdir");
         let mut registry = register(&dir, "cloud", "https://api.example.com", None);
-        let error = token_set_in(&mut registry, "ghost", Some(missing), false)
+        let error = set_token_in(&mut registry, "ghost", Some(missing), false)
             .await
             .expect_err("an unknown name");
         assert!(
@@ -956,7 +989,7 @@ mod tests {
         );
 
         let mut registry = register(&dir, "plain", "http://api.example.com", None);
-        let error = token_set_in(&mut registry, "plain", Some(missing), false)
+        let error = set_token_in(&mut registry, "plain", Some(missing), false)
             .await
             .expect_err("a plaintext origin off loopback");
         assert!(
@@ -969,7 +1002,7 @@ mod tests {
     async fn a_tagma_id_that_could_move_the_request_path_is_refused() {
         let dir = tempfile::tempdir().expect("tempdir");
         let registry = register(&dir, "local", "http://127.0.0.1:9", Some("sk-pat-token"));
-        let error = revoke_in(&registry, "local", "x/../users", true)
+        let error = revoke_tagma_in(&registry, "local", "x/../users", true)
             .await
             .expect_err("a path, not an id");
         assert!(
@@ -982,7 +1015,7 @@ mod tests {
     async fn the_address_rule_speaks_before_a_missing_token_does() {
         let dir = tempfile::tempdir().expect("tempdir");
         let registry = register(&dir, "plain", "http://api.example.com", None);
-        let error = report(&registry, "plain", false)
+        let error = platform_status_in(&registry, "plain", false)
             .await
             .expect_err("a plaintext origin and no token");
         assert!(
@@ -990,7 +1023,7 @@ mod tests {
             "{error:#}"
         );
 
-        let error = revoke_in(&registry, "plain", "tagma-1", false)
+        let error = revoke_tagma_in(&registry, "plain", "tagma-1", false)
             .await
             .expect_err("a plaintext origin and no token");
         assert!(
@@ -1381,7 +1414,7 @@ mod tests {
     #[tokio::test]
     async fn remove_entry_refuses_a_name_that_is_not_a_slug() {
         let (instance, _handle) = instance_at("alpha", 200, "{}");
-        let error = remove_entry(&instance, "../agents/x", false)
+        let error = remove_entry_in(&instance, "../agents/x", false)
             .await
             .expect_err("not a slug");
         assert!(format!("{error:#}").contains("does not match"), "{error:#}");
@@ -1409,7 +1442,7 @@ mod tests {
     async fn remove_entry_reports_the_relay_and_the_credentials() {
         let body = r#"{"name":"local","removed":true,"relay":"stopped","credentials":"kept","note":"the platform registration stays"}"#;
         let (instance, handle) = instance_at("alpha", 200, body);
-        let lines = remove_entry(&instance, "local", false)
+        let lines = remove_entry_in(&instance, "local", false)
             .await
             .expect("removed");
         assert_eq!(lines[0], "local removed");

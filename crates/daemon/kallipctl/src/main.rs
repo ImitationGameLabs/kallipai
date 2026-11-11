@@ -22,7 +22,7 @@ mod tests;
 mod token;
 
 use crate::blobs::{RewriteInvocation, run_blobs_rewrite};
-use crate::cli::{BlobsCommand, Cli, Command, ConfigCommand, EnvCommand};
+use crate::cli::{BlobsCommand, Cli, Command, ConfigCommand, EnvCommand, PolisVerb};
 use crate::logs::run_logs;
 use crate::print::print;
 use crate::restart::run_restart;
@@ -69,11 +69,11 @@ async fn run() -> Result<()> {
         // The register verbs reach the register with the daemon stopped,
         // which is half of why the register exists; the instance verbs need
         // the daemon to say where that instance listens.
-        return match command.instance() {
-            Some(verb) => {
+        return match command.split() {
+            PolisVerb::Instance(verb) => {
                 polis::run_instance(&verb, cli.allow_plaintext, &daemon_client(&cli)?).await
             }
-            None => polis::run(command, cli.allow_plaintext).await,
+            PolisVerb::Register(verb) => polis::run_register(&verb, cli.allow_plaintext).await,
         };
     }
     let client = daemon_client(&cli)?;
@@ -123,11 +123,6 @@ async fn run() -> Result<()> {
     let mut pending_mint: Option<archeion::MintedCode> = None;
     let allow_plaintext = cli.allow_plaintext;
     let body = match cli.command {
-        Command::Polis { .. } => {
-            // Answered above: the register verbs before the socket is
-            // resolved, the instance verbs right after it.
-            unreachable!("polis verbs answer before a request body is chosen")
-        }
         Command::Spawn {
             slug,
             workspace,
@@ -230,9 +225,18 @@ async fn run() -> Result<()> {
             EnvCommand::Set { slug, pairs } => RequestBody::EnvSet { slug, env: pairs },
             EnvCommand::Unset { slug, keys } => RequestBody::EnvUnset { slug, keys },
         },
-        // Unreachable: Generate early-returns before the connection is
-        // set up; the arm only keeps this match exhaustive.
-        Command::Generate { .. } => unreachable!("handled in main"),
+        // Neither family reaches a request body: `generate` writes completions
+        // straight to stdout, and `polis` verbs go to `polis::run_register`,
+        // or to `polis::run_instance` once the daemon has said where the
+        // instance listens. The arm keeps the match exhaustive; reaching it
+        // means the dispatch above stopped answering them, so it names where
+        // each family belongs instead of panicking.
+        Command::Generate { .. } | Command::Polis { .. } => anyhow::bail!(
+            "dispatch order broke: `generate` and `polis` are answered before a request \
+             body is chosen. `generate` writes completions to stdout; `polis` verbs \
+             go to `polis::run_register`, or to `polis::run_instance` once the \
+             daemon says where the instance listens. Neither builds a body here."
+        ),
     };
     let response = match client.call(body).await {
         Ok(response) => response,

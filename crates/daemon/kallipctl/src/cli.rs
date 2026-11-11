@@ -407,13 +407,34 @@ pub(crate) enum PolisCommand {
 }
 
 impl PolisCommand {
-    /// The verb as an instance verb, or `None` for the register verbs,
-    /// which read and write this host's register with the daemon stopped.
-    /// The dispatch and the answering code both ask this, so which verbs
-    /// speak to an instance is stated once.
-    pub(crate) fn instance(&self) -> Option<InstanceVerb<'_>> {
+    /// Which side answers this verb: the register, which reads and writes
+    /// this host's file with the daemon stopped, or a running instance,
+    /// which the daemon has to locate first. Every variant lands on exactly
+    /// one arm, so a verb added to the command line fails to compile until
+    /// it has been classified.
+    pub(crate) fn split(&self) -> PolisVerb<'_> {
         match self {
-            Self::Entries { slug } => Some(InstanceVerb::Entries { slug }),
+            Self::Add { name, url, replace } => PolisVerb::Register(RegisterVerb::Add {
+                name,
+                url,
+                replace: *replace,
+            }),
+            Self::Remove { name } => PolisVerb::Register(RegisterVerb::Remove { name }),
+            Self::List => PolisVerb::Register(RegisterVerb::List),
+            Self::Token { command } => match command {
+                PolisTokenCommand::Set { name, token_file } => {
+                    PolisVerb::Register(RegisterVerb::SetToken {
+                        name,
+                        token_file: token_file.as_deref(),
+                    })
+                }
+            },
+            Self::Status { name } => PolisVerb::Register(RegisterVerb::Status { name }),
+            Self::Revoke { name, tagma } => {
+                PolisVerb::Register(RegisterVerb::Revoke { name, tagma })
+            }
+            Self::MintCode { platform } => PolisVerb::Register(RegisterVerb::MintCode { platform }),
+            Self::Entries { slug } => PolisVerb::Instance(InstanceVerb::Entries { slug }),
             Self::AddEntry {
                 slug,
                 name,
@@ -421,7 +442,7 @@ impl PolisCommand {
                 url,
                 code,
                 token_file,
-            } => Some(InstanceVerb::AddEntry {
+            } => PolisVerb::Instance(InstanceVerb::AddEntry {
                 slug,
                 name,
                 polis: polis.as_deref(),
@@ -429,26 +450,55 @@ impl PolisCommand {
                 code: code.as_deref(),
                 token_file: token_file.as_deref(),
             }),
-            Self::RemoveEntry { slug, name, forget } => Some(InstanceVerb::RemoveEntry {
-                slug,
-                name,
-                forget: *forget,
-            }),
-            Self::Add { .. }
-            | Self::Remove { .. }
-            | Self::List
-            | Self::Token { .. }
-            | Self::Status { .. }
-            | Self::Revoke { .. }
-            | Self::MintCode { .. } => None,
+            Self::RemoveEntry { slug, name, forget } => {
+                PolisVerb::Instance(InstanceVerb::RemoveEntry {
+                    slug,
+                    name,
+                    forget: *forget,
+                })
+            }
         }
     }
 }
 
-/// One of the verbs that speaks to a running instance, borrowed from the
-/// command line: the dispatch and the answering code both work on this
-/// shape, so a verb cannot be one thing in one place and another in the
-/// next.
+/// One `polis` verb, split by which side answers it. The dispatch and the
+/// answering code both work on this shape, so a verb cannot be one thing in
+/// one place and another in the next.
+pub(crate) enum PolisVerb<'a> {
+    Register(RegisterVerb<'a>),
+    Instance(InstanceVerb<'a>),
+}
+
+/// A verb the register answers: it reads or writes this host's platform
+/// file, and reaches a platform only when the verb names one.
+pub(crate) enum RegisterVerb<'a> {
+    Add {
+        name: &'a str,
+        url: &'a str,
+        replace: bool,
+    },
+    Remove {
+        name: &'a str,
+    },
+    List,
+    SetToken {
+        name: &'a str,
+        token_file: Option<&'a str>,
+    },
+    Status {
+        name: &'a str,
+    },
+    Revoke {
+        name: &'a str,
+        tagma: &'a str,
+    },
+    MintCode {
+        platform: &'a str,
+    },
+}
+
+/// A verb answered by a running instance, which the daemon has to locate
+/// first.
 pub(crate) enum InstanceVerb<'a> {
     Entries {
         slug: &'a str,
@@ -498,7 +548,7 @@ pub(crate) enum PolisTokenCommand {
 mod tests {
     use clap::Parser as _;
 
-    use super::{Cli, Command, PolisCommand, PolisTokenCommand};
+    use super::{Cli, Command, PolisCommand, PolisTokenCommand, PolisVerb};
 
     /// Parse `kallipctl polis <args>` and hand back the subcommand.
     fn polis(args: &[&str]) -> PolisCommand {
@@ -681,17 +731,22 @@ mod tests {
         }
     }
 
+    fn needs_the_daemon(command: &PolisCommand) -> Option<String> {
+        match command.split() {
+            PolisVerb::Instance(verb) => Some(verb.slug().to_owned()),
+            PolisVerb::Register(_) => None,
+        }
+    }
+
     #[test]
     fn only_the_instance_verbs_need_the_daemon() {
-        assert!(polis(&["entries", "alpha"]).instance().is_some());
-        assert!(
-            polis(&["remove-entry", "alpha", "local"])
-                .instance()
-                .is_some()
+        assert!(needs_the_daemon(&polis(&["entries", "alpha"])).is_some());
+        assert!(needs_the_daemon(&polis(&["remove-entry", "alpha", "local"])).is_some());
+        assert!(needs_the_daemon(&polis(&["list"])).is_none());
+        assert!(needs_the_daemon(&polis(&["mint-code", "edge"])).is_none());
+        assert_eq!(
+            needs_the_daemon(&polis(&["remove-entry", "alpha", "local"])),
+            Some("alpha".to_owned())
         );
-        assert!(polis(&["list"]).instance().is_none());
-        assert!(polis(&["mint-code", "edge"]).instance().is_none());
-        let command = polis(&["remove-entry", "alpha", "local"]);
-        assert_eq!(command.instance().map(|verb| verb.slug()), Some("alpha"));
     }
 }
