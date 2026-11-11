@@ -3496,6 +3496,7 @@ dependencies = [
  "clap_complete",
  "dirs",
  "kallipai-archeion-client",
+ "kallipai-archeion-common",
  "kallipai-blob-store",
  "kallipai-common",
  "kallipai-daemon-client",
@@ -3503,9 +3504,11 @@ dependencies = [
  "libc",
  "reqwest",
  "reqwest-middleware",
+ "serde",
  "tempfile",
  "time",
  "tokio",
+ "toml",
  "url",
 ]
 

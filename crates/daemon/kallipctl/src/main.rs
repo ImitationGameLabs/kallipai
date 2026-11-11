@@ -10,7 +10,10 @@ mod blobs;
 mod cli;
 mod completion;
 mod logs;
+mod origin;
+mod polis;
 mod print;
+mod registry;
 mod restart;
 mod spawn_env;
 #[cfg(test)]
@@ -46,6 +49,11 @@ async fn run() -> Result<()> {
         let mut cmd = Cli::command();
         clap_complete::generate(shell, &mut cmd, "kallipctl", &mut std::io::stdout());
         return Ok(());
+    }
+    if let Command::Polis { command } = &cli.command {
+        // Host-level: the register and the platform are both reachable with
+        // the daemon stopped, which is half of why the register exists.
+        return polis::run(command, cli.allow_plaintext).await;
     }
     // The shared chain, probed in order - the first socket that answers
     // is wherever the daemon actually bound (identical ordering on both
@@ -103,6 +111,10 @@ async fn run() -> Result<()> {
     let mut pending_mint: Option<archeion::MintedCode> = None;
     let allow_plaintext = cli.allow_plaintext;
     let body = match cli.command {
+        Command::Polis { .. } => {
+            // Answered above, before the daemon socket is resolved.
+            unreachable!("polis verbs return before the daemon is contacted")
+        }
         Command::Spawn {
             slug,
             workspace,

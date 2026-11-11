@@ -35,3 +35,4 @@ pub mod participant;
 pub mod perm;
 pub mod principal;
 pub mod proof;
+pub mod tagmata;

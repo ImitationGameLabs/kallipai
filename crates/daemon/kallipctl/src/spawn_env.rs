@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use anyhow::{Context as _, Result};
 
 use crate::archeion;
+use crate::origin::Origin;
 
 /// The env to launch with, plus the code minted for it (if any) so a failed
 /// daemon call can still name the pending tagma it left behind.
@@ -38,42 +39,20 @@ pub(crate) async fn prepare(
             "pass either --polis or -e KALLIPAI_POLIS_URL / -e KALLIPAI_TAGMA_RELAY_ENROLLMENT_CODE, not both"
         );
     }
-    let origin = url::Url::parse(&polis)
-        .with_context(|| format!("--polis {polis:?} is not an absolute URL"))?;
-    // The mint speaks HTTP; any other scheme parses as a URL and then
-    // fails as a transport error, pointing the diagnosis at the network.
-    if !matches!(origin.scheme(), "http" | "https") {
-        anyhow::bail!("--polis must be an http or https URL");
-    }
-    // The value is an origin: every base join assumes no query, fragment,
-    // userinfo, or path, and any of them would be carried into the instance's
-    // env and joined again by its own consumers.
-    if !matches!(origin.path(), "" | "/") {
-        anyhow::bail!("--polis must be an origin, without a path");
-    }
-    if origin.query().is_some() || origin.fragment().is_some() {
-        anyhow::bail!("--polis must be an origin, without a query or fragment");
-    }
-    if !origin.username().is_empty() || origin.password().is_some() {
-        anyhow::bail!("--polis must not carry a user name or password");
-    }
+    let origin = Origin::parse("--polis", &polis)?;
     // The mint spends a long-lived access token and the instance keeps the
     // code it mints; over plain HTTP either one crosses the network in the
     // clear, so a non-loopback origin needs the operator's say-so.
-    let plaintext = origin.scheme() == "http" && !is_loopback(&origin);
-    // The string the instance receives is the trimmed one, so the messages
-    // below print that instead of the Url, which keeps a trailing slash.
-    let origin = origin.as_str().trim_end_matches('/').to_owned();
-    if plaintext {
-        if !allow_plaintext {
-            anyhow::bail!(
-                "--polis {origin} is not loopback and not https; the access token would cross the network in the clear; pass --allow-plaintext on a network you trust"
-            );
-        }
+    origin.check_plaintext("--polis", allow_plaintext)?;
+    if origin.is_plaintext() {
         eprintln!(
-            "plaintext origin {origin}: the access token and the enrollment code cross the network in the clear"
+            "plaintext origin {}: the access token and the enrollment code cross the network in the clear",
+            origin.as_str()
         );
     }
+    // The instance keeps this string for the rest of its life, so it gets the
+    // normalized origin rather than what was typed.
+    let origin = origin.as_str().to_owned();
     let path = match token_file {
         Some(path) => PathBuf::from(path),
         None => default_token_path()?,
@@ -87,23 +66,6 @@ pub(crate) async fn prepare(
         minted.code
     ));
     Ok((env, Some(minted)))
-}
-
-/// Whether the origin names this host, and so whether the traffic stays on it.
-/// The addresses answer that themselves. For names the rule is the RFC 6761
-/// convention rather than the kernel's: `localhost` and every name under it are
-/// left to resolve to loopback, which is what resolvers do with them and not
-/// something this check can observe.
-fn is_loopback(origin: &url::Url) -> bool {
-    match origin.host() {
-        Some(url::Host::Ipv4(addr)) => addr.is_loopback(),
-        Some(url::Host::Ipv6(addr)) => addr.is_loopback(),
-        Some(url::Host::Domain(name)) => {
-            let name = name.strip_suffix('.').unwrap_or(name).to_ascii_lowercase();
-            name == "localhost" || name.ends_with(".localhost")
-        }
-        None => false,
-    }
 }
 
 /// `$XDG_CONFIG_HOME/kallipai/access-token`, the platform's per-user config

@@ -24,6 +24,7 @@ use kallipai_archeion_common::control::{EnrollRequest, EnrollResponse};
 use kallipai_archeion_common::ids::TagmaId;
 use kallipai_archeion_common::mint::MintEnrollmentCodeResponse;
 use kallipai_archeion_common::proof::enroll_transcript;
+use kallipai_archeion_common::tagmata::TagmaSummary;
 use kallipai_common::protocol::ApiError;
 use kallipai_common::telemetry::HttpClient;
 use kallipai_e2ee::DeviceKey;
@@ -238,6 +239,36 @@ impl ArcheionClient {
         .await
     }
 
+    /// The token owner's tagmata: `GET /tagmata` with the personal access
+    /// token. Pending and enrolled rows, newest first; revoked ones are not
+    /// listed at all.
+    pub async fn list_tagmata(&self) -> Result<Vec<TagmaSummary>> {
+        self.require_access_token()?;
+        self.handle_response(
+            self.with_access_auth(self.inner.http.get(self.url("/tagmata")))
+                .send()
+                .await
+                .context("tagma list failed")?,
+            "decode tagma list",
+        )
+        .await
+    }
+
+    /// Revoke one of the token owner's tagmata: `DELETE /tagmata/{id}`.
+    ///
+    /// The platform answers 204 whether the row was live or already revoked,
+    /// so a retry after a timeout is safe.
+    pub async fn revoke_tagma(&self, id: &TagmaId) -> Result<()> {
+        self.require_access_token()?;
+        self.ensure_empty(
+            self.with_access_auth(self.inner.http.delete(self.url(&format!("/tagmata/{id}"))))
+                .send()
+                .await
+                .context("tagma revoke failed")?,
+        )
+        .await
+    }
+
     // -- admin surface (sk-admin- bearer) -------------------------------------
 
     /// Mint an enrollment code on a user's behalf. Returns the `sk-enroll-...`
@@ -448,6 +479,7 @@ mod tests {
 
     use super::*;
     use kallipai_archeion_common::admin::CreateEnrollmentCodeRequest;
+    use kallipai_archeion_common::tagmata::TagmaState;
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -457,6 +489,15 @@ mod tests {
             b = b.admin_token("sk-admin-test");
         }
         b.build().unwrap()
+    }
+
+    /// A client holding the personal access token, which is what the
+    /// user-facing calls (mint, list, revoke) authenticate with.
+    fn user_client(server: &MockServer) -> ArcheionClient {
+        ArcheionClient::builder(&server.uri())
+            .access_token("sk-user-test")
+            .build()
+            .unwrap()
     }
 
     #[tokio::test]
@@ -609,6 +650,92 @@ mod tests {
             format!("{err:#}").contains("access token required"),
             "expected token-required error, got: {err:#}"
         );
+    }
+
+    #[tokio::test]
+    async fn list_tagmata_decodes_pending_and_enrolled_rows() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/tagmata"))
+            .and(header("authorization", "Bearer sk-user-test"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {
+                    "tagma_id": "tagma-2",
+                    "label": null,
+                    "state": "pending",
+                    "created_at": "2026-01-02T00:00:00Z",
+                    "code_masked": "sk-enroll-abc***xyz",
+                    "expires_at": "2026-01-02T01:00:00Z"
+                },
+                {
+                    "tagma_id": "tagma-1",
+                    "label": "laptop",
+                    "state": "enrolled",
+                    "created_at": "2026-01-01T00:00:00Z"
+                }
+            ])))
+            .mount(&server)
+            .await;
+        let rows = user_client(&server).list_tagmata().await.expect("ok");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].tagma_id.as_ref(), "tagma-2");
+        assert_eq!(rows[0].state, TagmaState::Pending);
+        assert!(rows[0].code_masked.is_some());
+        assert!(rows[0].expires_at.is_some());
+        assert_eq!(rows[1].state, TagmaState::Enrolled);
+        assert!(rows[1].code_masked.is_none());
+        assert!(rows[1].expires_at.is_none());
+        assert_eq!(rows[1].label.as_deref(), Some("laptop"));
+    }
+
+    #[tokio::test]
+    async fn list_tagmata_without_a_personal_token_errors() {
+        let server = MockServer::start().await;
+        let err = client(&server, true)
+            .list_tagmata()
+            .await
+            .expect_err("no access token");
+        assert!(
+            format!("{err:#}").contains("access token required"),
+            "expected token-required error, got: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn revoke_tagma_accepts_a_204() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/tagmata/tagma-1"))
+            .and(header("authorization", "Bearer sk-user-test"))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+        user_client(&server)
+            .revoke_tagma(&TagmaId::from("tagma-1".to_owned()))
+            .await
+            .expect("revoked");
+    }
+
+    #[tokio::test]
+    async fn a_revoke_error_keeps_the_platform_code() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/tagmata/tagma-1"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
+                "error": {
+                    "message": "missing permission: archeion:tagma:write",
+                    "code": "perm_missing"
+                }
+            })))
+            .mount(&server)
+            .await;
+        let err = user_client(&server)
+            .revoke_tagma(&TagmaId::from("tagma-1".to_owned()))
+            .await
+            .expect_err("403");
+        let api = err.downcast_ref::<ApiError>().expect("ApiError");
+        assert_eq!(api.status, 403);
+        assert_eq!(api.code.as_deref(), Some("perm_missing"));
     }
 
     #[tokio::test]

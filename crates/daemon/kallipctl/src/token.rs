@@ -133,10 +133,10 @@ fn restore_echo_and_exit(status: i32) -> ! {
 /// terminal (the operator types it; echo stays off), a plain line when
 /// piped or redirected (automation). Empty or whitespace-only input is
 /// refused before anything is written.
-async fn read_token_value() -> Result<String> {
+pub(crate) async fn read_token_value(prompt: &str) -> Result<String> {
     let hidden = unsafe { libc::isatty(0) } == 1;
     let guard = if hidden {
-        eprint!("Enter operator token (input hidden): ");
+        eprint!("{prompt}");
         use std::io::Write;
         std::io::stderr().flush()?;
         Some(EchoOff::new()?)
@@ -206,7 +206,7 @@ pub(crate) async fn run_operator_token(
             println!("{}", read_operator_token_file(&path)?);
         }
         OperatorTokenCommand::Set { slug } => {
-            let value = read_token_value().await?;
+            let value = read_token_value("Enter operator token (input hidden): ").await?;
             write_for_slug(client, &slug, &value).await?;
             eprintln!(
                 "operator token written; it takes effect on next start (kallipctl restart {slug})"

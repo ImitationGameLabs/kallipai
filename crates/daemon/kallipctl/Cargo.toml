@@ -11,6 +11,7 @@ kallipai-blob-store = { workspace = true }
 kallipai-daemon-common = { workspace = true }
 kallipai-common = { workspace = true, features = ["propagation"] }
 kallipai-archeion-client = { workspace = true }
+kallipai-archeion-common = { workspace = true }
 dirs = { workspace = true }
 libc = { workspace = true }
 anyhow = { workspace = true }
@@ -20,7 +21,9 @@ tokio = { workspace = true, features = ["rt", "macros", "time", "signal"] }
 reqwest = { workspace = true }
 reqwest-middleware = { workspace = true }
 time = { workspace = true }
+serde = { workspace = true }
 url = { workspace = true }
+toml = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

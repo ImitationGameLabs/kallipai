@@ -29,6 +29,7 @@ use kallipai_archeion_common::ids::{TagmaId, UserId};
 use kallipai_archeion_common::mint::MintEnrollmentCodeResponse;
 use kallipai_archeion_common::perm::{ARCHEION_TAGMA_READ, ARCHEION_TAGMA_WRITE};
 use kallipai_archeion_common::proof::{ProofError, verify_enroll_proof};
+use kallipai_archeion_common::tagmata::{TagmaState, TagmaSummary};
 use kallipai_common::authtoken::{MintedToken, TokenHash, mask_token};
 use kallipai_common::protocol::ApiError;
 use sea_orm::{
@@ -337,44 +338,12 @@ async fn mint(
 // list
 // ---------------------------------------------------------------------------
 
-/// One row of the owner's tagma list. Liveness ("is a tagma tunnel currently
-/// open for this tagma") is NOT part of the registry's view: it is a data-plane
-/// concern, delivered to the app by the keryx on its `GET /me/events` stream as
-/// `TagmaOnline`/`TagmaOffline`. Note `tagmata.last_tunnel_proof_ts` is a replay
-/// guard, not a liveness signal, and is intentionally not surfaced.
-#[derive(Debug, Serialize)]
-struct TagmaView {
-    tagma_id: String,
-    label: Option<String>,
-    state: TagmaState,
-    #[serde(with = "time::serde::rfc3339")]
-    created_at: OffsetDateTime,
-    /// Pending-phase display mask (`sk-enroll-abc***xyz`). Present only while
-    /// pending; omitted for enrolled rows.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    code_masked: Option<String>,
-    /// Pending-phase code expiry. Present only while pending; omitted for
-    /// enrolled rows.
-    #[serde(
-        with = "time::serde::rfc3339::option",
-        skip_serializing_if = "Option::is_none"
-    )]
-    expires_at: Option<OffsetDateTime>,
-}
-
-#[derive(Debug, Serialize, Clone, Copy)]
-#[serde(rename_all = "snake_case")]
-enum TagmaState {
-    Pending,
-    Enrolled,
-}
-
 /// List the caller's tagmata (pending + enrolled, not revoked), newest first.
 /// Liveness is not included; the app learns it from the keryx `/me/events` stream.
 async fn list_tagmata(
     State(state): State<SharedState>,
     auth: AuthPrincipal,
-) -> Result<Json<Vec<TagmaView>>, ApiError> {
+) -> Result<Json<Vec<TagmaSummary>>, ApiError> {
     require_perm(&auth, ARCHEION_TAGMA_READ)?;
     let user_id = require_user(&auth.principal)?;
     let rows = tagmata::Entity::find()
@@ -400,8 +369,8 @@ async fn list_tagmata(
             } else {
                 (r.enrollment_code_masked, r.expires_at)
             };
-            TagmaView {
-                tagma_id: id.to_string(),
+            TagmaSummary {
+                tagma_id: id,
                 label: r.label,
                 state,
                 created_at: r.created_at,
@@ -576,14 +545,15 @@ mod tests {
     use axum::http::StatusCode;
 
     use super::{
-        MAX_LIVE_PENDING_TAGMAS, MAX_TAGMA_LABEL_LEN, MintAudit, RenameTagmaRequest, TagmaState,
-        get_tagma, list_tagmata, mint, mint_pending_tagma, rename_tagma, revoke_tagma,
+        MAX_LIVE_PENDING_TAGMAS, MAX_TAGMA_LABEL_LEN, MintAudit, RenameTagmaRequest, get_tagma,
+        list_tagmata, mint, mint_pending_tagma, rename_tagma, revoke_tagma,
     };
     use crate::auth::{AuthPrincipal, Principal};
     use crate::db::entity::tagmata;
     use crate::test_helpers::{make_state, seed_tagma, seed_user};
     use kallipai_archeion_common::bytes::Ed25519PublicKey;
     use kallipai_archeion_common::mint::MintEnrollmentCodeResponse as MintResponse;
+    use kallipai_archeion_common::tagmata::TagmaState;
     use sea_orm::{ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, QueryFilter};
     use time::OffsetDateTime;
 
@@ -644,7 +614,7 @@ mod tests {
             .expect("list");
         assert_eq!(got.len(), 1);
         let row = &got[0];
-        assert_eq!(row.tagma_id, tagma.as_ref());
+        assert_eq!(row.tagma_id, tagma);
         assert!(matches!(row.state, TagmaState::Enrolled));
         assert!(row.code_masked.is_none());
         assert!(row.expires_at.is_none());
@@ -677,7 +647,7 @@ mod tests {
 
         let Json(listed) = list_tagmata(State(state), principal).await.expect("list");
         assert_eq!(listed.len(), 1);
-        assert_eq!(listed[0].tagma_id, id);
+        assert_eq!(listed[0].tagma_id.as_ref(), id.as_str());
         assert!(matches!(listed[0].state, TagmaState::Pending));
         assert_eq!(
             listed[0].code_masked.as_deref(),

@@ -13,6 +13,9 @@ use std::path::Path;
 use anyhow::{Context as _, Result};
 
 use kallipai_archeion_client::ArcheionClient;
+use kallipai_archeion_common::ids::TagmaId;
+use kallipai_archeion_common::perm::{ARCHEION_TAGMA_READ, ARCHEION_TAGMA_WRITE};
+use kallipai_archeion_common::tagmata::TagmaSummary;
 use kallipai_common::protocol::ApiError;
 use kallipai_common::protocol::error::{FORBIDDEN_PERM_MISSING, FORBIDDEN_USER_REQUIRED};
 
@@ -42,7 +45,7 @@ impl std::fmt::Debug for MintedCode {
 pub(crate) fn read_token(path: &Path) -> Result<String> {
     if !path.is_file() {
         anyhow::bail!(
-            "no access token at {}; create one in the web UI with archeion:tagma:write, then write it to that file (chmod 600)",
+            "no access token at {}; create one in the web UI with archeion:tagma:read (and archeion:tagma:write if you plan to revoke), then write it to that file (chmod 600)",
             path.display()
         );
     }
@@ -91,25 +94,11 @@ pub(crate) async fn mint_enrollment(polis: &str, token: &str) -> Result<MintedCo
 /// The mint with an explicit deadline, so the timeout arm is testable
 /// without waiting half a minute.
 async fn mint_within(timeout: std::time::Duration, polis: &str, token: &str) -> Result<MintedCode> {
-    let base = kallipai_common::polis::service_base(polis, "archeion");
-    // A terminal command must end. The client's own default carries a
-    // deadline, but passing one keeps the failure text below tied to the
-    // number it names; redirects are off because a bearer-bearing POST has no
-    // business following one.
-    let http = kallipai_common::telemetry::http_client(
-        reqwest::Client::builder()
-            .timeout(timeout)
-            .redirect(reqwest::redirect::Policy::none()),
-    )
-    .context("building the HTTP client")?;
-    let client = ArcheionClient::builder(&base)
-        .access_token(token)
-        .http_client(http)
-        .build()?;
+    let client = client_for(polis, token, timeout)?;
     let minted = client
         .mint_enrollment_code()
         .await
-        .map_err(|err| describe(err, polis, timeout))?;
+        .map_err(|err| describe(err, polis, timeout, MINT))?;
     if minted.code.trim().is_empty() {
         anyhow::bail!("archeion answered without an enrollment code");
     }
@@ -123,17 +112,135 @@ async fn mint_within(timeout: std::time::Duration, polis: &str, token: &str) -> 
     })
 }
 
+/// What the platform said when asked for its tagmas.
+pub(crate) enum Listing {
+    /// The rows it holds for this token's owner.
+    Rows(Vec<TagmaSummary>),
+    /// It answered and refused the token: a 401, so the platform is
+    /// reachable and the token is the thing to fix.
+    TokenRejected(anyhow::Error),
+    /// No answer, or an answer this CLI cannot read.
+    Failed(anyhow::Error),
+}
+
+/// `GET {polis}/v1/archeion/tagmata`: every registration this token owns,
+/// pending and enrolled alike. Rows are the platform's answer, never a cache.
+pub(crate) async fn list_tagmata(polis: &str, token: &str) -> Listing {
+    let client = match client_for(polis, token, MINT_TIMEOUT) {
+        Ok(client) => client,
+        Err(err) => return Listing::Failed(err),
+    };
+    match client.list_tagmata().await {
+        Ok(rows) => Listing::Rows(rows),
+        Err(err) => {
+            let rejected = err
+                .downcast_ref::<ApiError>()
+                .is_some_and(|api| api.status == 401);
+            let described = describe(err, polis, MINT_TIMEOUT, LIST);
+            if rejected {
+                Listing::TokenRejected(described)
+            } else {
+                Listing::Failed(described)
+            }
+        }
+    }
+}
+
+/// What the platform had to say about a revoke.
+pub(crate) enum Revoked {
+    /// The row is revoked now: it was live when asked, or revoked earlier.
+    Done,
+    /// The platform has no such row for this owner.
+    Absent,
+}
+
+/// `DELETE {polis}/v1/archeion/tagmata/{id}`: one row stops working. The
+/// platform answers 204 for a row that is or was the owner's, and 404 for an
+/// unknown one, so the caller can tell "already gone" from "never there".
+pub(crate) async fn revoke_tagma(polis: &str, token: &str, id: &str) -> Result<Revoked> {
+    let client = client_for(polis, token, MINT_TIMEOUT)?;
+    match client.revoke_tagma(&TagmaId::from(id.to_owned())).await {
+        Ok(()) => Ok(Revoked::Done),
+        Err(err) => {
+            if err
+                .downcast_ref::<ApiError>()
+                .is_some_and(|api| api.status == 404)
+            {
+                return Ok(Revoked::Absent);
+            }
+            Err(describe(err, polis, MINT_TIMEOUT, REVOKE))
+        }
+    }
+}
+
+/// The client every platform call here shares: the edge base, the bearer,
+/// and a deadline of its own. A terminal command must end. The client's own
+/// default carries a deadline, but passing one keeps the failure text tied to
+/// the number it names. Redirects are off: a bearer-bearing request has no
+/// business following one.
+fn client_for(polis: &str, token: &str, timeout: std::time::Duration) -> Result<ArcheionClient> {
+    let base = kallipai_common::polis::service_base(polis, "archeion");
+    let http = kallipai_common::telemetry::http_client(
+        reqwest::Client::builder()
+            .timeout(timeout)
+            .redirect(reqwest::redirect::Policy::none()),
+    )
+    .context("building the HTTP client")?;
+    ArcheionClient::builder(&base)
+        .access_token(token)
+        .http_client(http)
+        .build()
+}
+
+/// What a call was trying to do, so every refusal names the right recovery:
+/// the permission string the endpoint checks, and the phrase a failure starts
+/// with.
+#[derive(Clone, Copy)]
+struct Wanted {
+    /// Verb phrase for a failure whose cause is not the platform's answer,
+    /// as in "minting an enrollment code: " followed by the cause.
+    doing: &'static str,
+    /// The same phrase in the form `archeion refused …`.
+    refused: &'static str,
+    /// The permission string the endpoint checks.
+    perm: &'static str,
+}
+
+const MINT: Wanted = Wanted {
+    doing: "minting an enrollment code",
+    refused: "to mint an enrollment code",
+    perm: ARCHEION_TAGMA_WRITE,
+};
+
+const LIST: Wanted = Wanted {
+    doing: "listing the tagmas",
+    refused: "to list the tagmas",
+    perm: ARCHEION_TAGMA_READ,
+};
+
+const REVOKE: Wanted = Wanted {
+    doing: "revoking a tagma",
+    refused: "to revoke a tagma",
+    perm: ARCHEION_TAGMA_WRITE,
+};
+
 /// One failure per recovery. The server tags the two 403s with a code, which
 /// is the only way to tell "add the string" from "this token is not a user":
 /// both read as `403` on the status line.
-fn describe(err: anyhow::Error, polis: &str, timeout: std::time::Duration) -> anyhow::Error {
+fn describe(
+    err: anyhow::Error,
+    polis: &str,
+    timeout: std::time::Duration,
+    wanted: Wanted,
+) -> anyhow::Error {
     if let Some(api) = err.downcast_ref::<ApiError>() {
         return match (api.status, api.code.as_deref()) {
             (401, _) => {
                 anyhow::anyhow!("archeion rejected the access token (invalid, expired, or revoked)")
             }
             (403, Some(FORBIDDEN_PERM_MISSING)) => anyhow::anyhow!(
-                "the access token lacks archeion:tagma:write; add the string to the token ({})",
+                "the access token lacks {}; add the string to the token ({})",
+                wanted.perm,
                 api.message
             ),
             (403, Some(FORBIDDEN_USER_REQUIRED)) => anyhow::anyhow!(
@@ -143,12 +250,14 @@ fn describe(err: anyhow::Error, polis: &str, timeout: std::time::Duration) -> an
             ),
             (403, _) => anyhow::anyhow!("archeion refused the request: 403 {}", api.message),
             (429, _) => anyhow::anyhow!(
+                // The pending-code cap is the only quota on this surface.
                 "too many live pending enrollment codes; revoke the ones you no longer \
                  need in the web UI, then retry ({})",
                 api.message
             ),
             _ => anyhow::anyhow!(
-                "archeion refused to mint an enrollment code: {} {}",
+                "archeion refused {}: {} {}",
+                wanted.refused,
                 api.status,
                 api.message
             ),
@@ -167,10 +276,10 @@ fn describe(err: anyhow::Error, polis: &str, timeout: std::time::Duration) -> an
         if http.is_connect() || http.is_request() {
             return anyhow::anyhow!("cannot reach archeion at {polis}: {err:#}");
         }
-        return anyhow::anyhow!("minting an enrollment code: {err:#}");
+        return anyhow::anyhow!("{}: {err:#}", wanted.doing);
     }
     // Anything else reached the far end and came back unreadable.
-    anyhow::anyhow!("minting an enrollment code: {err:#}")
+    anyhow::anyhow!("{}: {err:#}", wanted.doing)
 }
 
 /// The transport failure an error carries, wherever it sits: the mint goes
@@ -191,7 +300,7 @@ mod tests {
     use std::io::{Read as _, Write as _};
     use std::path::PathBuf;
 
-    use super::{mint_enrollment, mint_within, read_token};
+    use super::{Listing, list_tagmata, mint_enrollment, mint_within, read_token, revoke_tagma};
 
     /// One-shot HTTP server answering a fixed status and body, and handing back
     /// the request it read. No HTTP test dependency: the client only needs a
@@ -409,6 +518,52 @@ mod tests {
             "{err:#}"
         );
         request.join().expect("server thread");
+    }
+
+    #[tokio::test]
+    async fn a_list_that_lacks_the_read_string_names_the_read_string() {
+        let (polis, request) = serve_once(
+            403,
+            r#"{"error":{"message":"no read string on this token","code":"perm_missing"}}"#,
+        );
+        let Listing::Failed(err) = list_tagmata(&polis, "sk-pat-token").await else {
+            panic!("a 403 is an answer, so rows are not the outcome");
+        };
+        let text = format!("{err:#}");
+        assert!(text.contains("lacks archeion:tagma:read"), "{text}");
+        assert!(!text.contains("archeion:tagma:write"), "{text}");
+        request.join().expect("server thread");
+    }
+
+    #[tokio::test]
+    async fn a_revoke_that_lacks_the_write_string_names_the_write_string() {
+        let (polis, request) = serve_once(
+            403,
+            r#"{"error":{"message":"no write string on this token","code":"perm_missing"}}"#,
+        );
+        let err = match revoke_tagma(&polis, "sk-pat-token", "tagma-1").await {
+            Ok(_) => panic!("a missing write string is not a success"),
+            Err(err) => err,
+        };
+        let text = format!("{err:#}");
+        assert!(text.contains("lacks archeion:tagma:write"), "{text}");
+        request.join().expect("server thread");
+    }
+
+    #[tokio::test]
+    async fn a_closed_port_reads_as_a_failed_list() {
+        let addr = std::net::TcpListener::bind("127.0.0.1:0")
+            .expect("bind")
+            .local_addr()
+            .expect("addr");
+        let Listing::Failed(err) = list_tagmata(&format!("http://{addr}"), "sk-pat-token").await
+        else {
+            panic!("nothing listens, so rows are not the outcome");
+        };
+        assert!(
+            format!("{err:#}").contains("cannot reach archeion"),
+            "{err:#}"
+        );
     }
 
     fn token_file(dir: &tempfile::TempDir, contents: &str) -> PathBuf {

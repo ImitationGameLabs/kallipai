@@ -1,6 +1,6 @@
 //! Command-line surface: the clap parser tree and its subcommand enums.
 
-use crate::completion::complete_slug;
+use crate::completion::{complete_polis_name, complete_slug};
 use clap::{Parser, Subcommand};
 use clap_complete::Shell;
 use clap_complete::engine::ArgValueCompleter;
@@ -24,13 +24,13 @@ pub(crate) struct Cli {
     #[arg(long, global = true)]
     pub(crate) bin: Option<String>,
 
-    /// Allow a plaintext http platform origin that is not loopback. Only
-    /// spawn reads it, where the access token and the enrollment code would
-    /// otherwise cross the network in the clear; elsewhere, and with no --polis,
-    /// it means nothing. It sits at top level because a wrapper can only put a
-    /// flag between the program name and the subcommand, and clap reads a global
-    /// option there. A NixOS deployment whose daemon.polisUrl is plaintext puts
-    /// it on PATH already, so there is nothing to type.
+    /// Allow a plaintext http platform origin that is not loopback: the
+    /// access token (and, for spawn, the enrollment code) would otherwise
+    /// cross the network in the clear. `spawn --polis` and every `polis` verb
+    /// that spends a token read it; a record or a request to a loopback or
+    /// https origin never needs it. It sits at top level because a wrapper can
+    /// only put a flag between the program name and the subcommand, and clap
+    /// reads a global option there.
     #[arg(long, global = true)]
     pub(crate) allow_plaintext: bool,
     #[command(subcommand)]
@@ -171,6 +171,13 @@ pub(crate) enum Command {
         #[command(subcommand)]
         command: OperatorTokenCommand,
     },
+    /// The platforms this host knows: one name per platform, with the
+    /// address and the personal access token that talk to it. Host-level,
+    /// so these verbs work while the daemon is down.
+    Polis {
+        #[command(subcommand)]
+        command: PolisCommand,
+    },
     /// Emit a shell completion script for this CLI to stdout. Hidden:
     /// an installer concern (nix postInstall, user dotfiles), not a
     /// daily verb.
@@ -300,4 +307,143 @@ pub(crate) enum OperatorTokenCommand {
         #[arg(add = ArgValueCompleter::new(complete_slug))]
         slug: String,
     },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum PolisCommand {
+    /// Record a platform under a name. The address is normalized to an
+    /// origin, one name per platform and one platform per name.
+    Add {
+        /// Platform name: lowercase letters, digits and '-'; the name
+        /// instances and spawn flags will use for it.
+        #[arg(add = ArgValueCompleter::new(complete_polis_name))]
+        name: String,
+        /// The platform origin: http or https, with no path.
+        url: String,
+        /// Point a known name at a new address. Without it a different
+        /// address for a known name is refused.
+        #[arg(long)]
+        replace: bool,
+    },
+    /// Drop a platform record and nothing else.
+    Remove {
+        /// Platform name.
+        #[arg(add = ArgValueCompleter::new(complete_polis_name))]
+        name: String,
+    },
+    /// Print the recorded platforms with their addresses and whether a
+    /// token is stored. Reads the file; never the network.
+    List,
+    /// Manage a platform's access token.
+    Token {
+        #[command(subcommand)]
+        command: PolisTokenCommand,
+    },
+    /// Ask the platform what it holds: whether it answers, whether the
+    /// token is accepted, and the tagmas registered for its owner.
+    Status {
+        /// Platform name.
+        #[arg(add = ArgValueCompleter::new(complete_polis_name))]
+        name: String,
+    },
+    /// Revoke one tagma registration on the platform: the way out of a
+    /// pending row or a tagma that will not come back.
+    Revoke {
+        /// Platform name.
+        #[arg(add = ArgValueCompleter::new(complete_polis_name))]
+        name: String,
+        /// Tagma id, as `polis status` prints it.
+        tagma: String,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum PolisTokenCommand {
+    /// Store the platform's personal access token, after the platform
+    /// accepts it. The value is read from --token-file, or stdin (a
+    /// hidden prompt on a terminal), and never printed back.
+    Set {
+        /// Platform name.
+        #[arg(add = ArgValueCompleter::new(complete_polis_name))]
+        name: String,
+        /// File holding the token; 0600 or stricter, like spawn's.
+        #[arg(long)]
+        token_file: Option<String>,
+    },
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser as _;
+
+    use super::{Cli, Command, PolisCommand, PolisTokenCommand};
+
+    /// Parse `kallipctl polis <args>` and hand back the subcommand.
+    fn polis(args: &[&str]) -> PolisCommand {
+        let mut argv = vec!["kallipctl", "polis"];
+        argv.extend_from_slice(args);
+        match Cli::try_parse_from(argv).expect("a polis command").command {
+            Command::Polis { command } => command,
+            _ => panic!("not a polis command"),
+        }
+    }
+
+    #[test]
+    fn the_six_verbs_parse_into_their_own_shapes() {
+        assert!(matches!(polis(&["list"]), PolisCommand::List));
+
+        match polis(&["add", "local", "http://127.0.0.1:8080", "--replace"]) {
+            PolisCommand::Add { name, url, replace } => {
+                assert_eq!(name, "local");
+                assert_eq!(url, "http://127.0.0.1:8080");
+                assert!(replace, "the flag reaches the field");
+            }
+            _ => panic!("add must parse into Add"),
+        }
+
+        match polis(&["remove", "local"]) {
+            PolisCommand::Remove { name } => assert_eq!(name, "local"),
+            _ => panic!("remove must parse into Remove"),
+        }
+
+        match polis(&["token", "set", "local", "--token-file", "/tmp/token"]) {
+            PolisCommand::Token { command } => match command {
+                PolisTokenCommand::Set { name, token_file } => {
+                    assert_eq!(name, "local");
+                    assert_eq!(token_file.as_deref(), Some("/tmp/token"));
+                }
+            },
+            _ => panic!("token set must parse into Token"),
+        }
+
+        match polis(&["status", "local"]) {
+            PolisCommand::Status { name } => assert_eq!(name, "local"),
+            _ => panic!("status must parse into Status"),
+        }
+
+        match polis(&["revoke", "local", "tagma-1"]) {
+            PolisCommand::Revoke { name, tagma } => {
+                assert_eq!(name, "local");
+                assert_eq!(tagma, "tagma-1");
+            }
+            _ => panic!("revoke must parse into Revoke"),
+        }
+    }
+
+    #[test]
+    fn a_missing_argument_is_a_parse_error() {
+        for argv in [
+            vec!["kallipctl", "polis", "add"],
+            vec!["kallipctl", "polis", "add", "local"],
+            vec!["kallipctl", "polis", "remove"],
+            vec!["kallipctl", "polis", "token", "set"],
+            vec!["kallipctl", "polis", "status"],
+            vec!["kallipctl", "polis", "revoke", "local"],
+        ] {
+            assert!(
+                Cli::try_parse_from(argv.clone()).is_err(),
+                "{argv:?} parsed"
+            );
+        }
+    }
 }

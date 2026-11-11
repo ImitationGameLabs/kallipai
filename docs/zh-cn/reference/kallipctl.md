@@ -5,7 +5,8 @@ order: 75
 ---
 
 `kallipctl` 通过守护进程的控制套接字管理本地 kallip 实例：spawn、adopt、
-start/stop/restart、持久化 env、日志与 blob 存储维护。守护进程部署见
+start/stop/restart、持久化 env、日志与 blob 存储维护；另有本机的平台登记表
+（`kallipctl polis`，不依赖守护进程）。守护进程部署见
 [部署文档](../deployment/nixos/minimal.md)；套接字的 `0600` 权限即认证。
 
 ## 用个人访问令牌 spawn
@@ -32,8 +33,9 @@ chmod 600 ~/.config/kallipai/access-token
 http 或 https URL，不带查询串、片段、用户名和密码；明文 http 只对回环
 地址（回环 IP、`localhost`、`*.localhost` 之下的名字）免开关，因为访问令牌
 和换取到的注册码都会以明文过网；其它主机上的明文源要加 `--allow-plaintext`，
-它是顶层参数，写在子命令之前，只有 spawn 会读它；不带 `--polis` 时它不起作用。
-放行时会先在 stderr 上写明风险。
+它是顶层参数，写在子命令之前。`spawn` 带 `--polis` 时、`polis add`、以及每个
+会花令牌的 `polis` 子命令都会读它，因为地址规则在碰令牌之前就跑了；不带
+`--polis` 的 spawn 用不到它。放行明文源时，命令会先在 stderr 上写明风险。
 
 可信内网里的明文边缘要在子命令前加开关：
 
@@ -69,10 +71,51 @@ kallipctl --allow-plaintext spawn dev /srv/kallipai/dev --polis http://kallipai.
 | --polis must not carry a user name or password | 去掉地址里的用户名和密码 |
 | --polis URL is not loopback and not https | 令牌会以明文过网；确认网络可信时加 --allow-plaintext |
 
+## 平台登记表
+
+`kallipctl polis` 记录本机要对话的平台，一个平台一个名字，并向平台查询它名下
+登记了哪些 tagma。登记表是你自己的文件
+`$XDG_CONFIG_HOME/kallipai/polis-registry.toml`，权限 `0600`；这里的动词都不经过
+守护进程，所以守护进程停着也能用。
+
+| 动词 | 作用 |
+| --- | --- |
+| `polis add NAME URL [--replace]` | 按 origin 规范化后记下地址 |
+| `polis remove NAME` | 只删这条记录，不动别的 |
+| `polis list` | 名字、地址、是否存了令牌；只读文件 |
+| `polis token set NAME [--token-file PATH]` | 存下该平台的访问令牌 |
+| `polis status NAME` | 平台的判定，以及它名下登记的 tagma |
+| `polis revoke NAME TAGMA-ID` | 在平台上吊销一条登记 |
+
+名字沿用实例 slug 的语法：小写字母、数字和 `-`。一个平台一个名字、一个名字一个
+平台：给已登记的地址再起一个名字会被拒，把名字改指新地址要加 `--replace`。
+
+地址必须是 origin，规则与 `--polis` 相同（http 或 https，不带 path、query、
+fragment 和用户名密码）；非本机回环的明文地址在这里同样要加
+`--allow-plaintext`。`list` 只打印掩码后的令牌，密钥本身不会打印。
+`token set` 给了 `--token-file` 就读文件，否则读 stdin（终端下隐藏回显），
+写入之前先打一次列表请求：平台不认的令牌不会存。
+
+令牌至少要 `archeion:tagma:read`。吊销登记和换注册码（`spawn --polis`）还要
+`archeion:tagma:write`，因为新铸的令牌默认只读。`add`、`remove`、`list` 只读写
+登记表，不联网。
+
+`status` 每行一条记录，tagma id 在最前，可以直接复制进 `revoke`：
+
+```text
+local  http://api.example.com  reachable  token=accepted
+tagma-1  enrolled  created=2026-11-01T09:12:00Z
+tagma-2  pending  created=2026-11-11T17:40:00Z  expires=2026-11-11T18:10:00Z
+```
+
+平台拒收令牌时仍打印 `reachable`，下一行是平台的说明。对一个平台不持有的 id
+执行 `revoke` 会打印 `TAGMA is not registered on NAME` 并以 0 退出，因为这正是
+它被要求达到的结果。
+
 ## Shell 补全
 
-补全是动态的：钩子随输入实时向守护进程查询（实例 slug）；
-守护进程不可达时自动退化为空候选，不会阻塞输入：
+补全是动态的，分两种：实例 slug 随输入实时向守护进程查询；平台名读的是 polis
+登记表，不需要守护进程。两者的来源不可用时都退化为空候选，不会阻塞输入：
 
 ```bash
 echo "source <(COMPLETE=bash kallipctl)" >> ~/.bashrc
