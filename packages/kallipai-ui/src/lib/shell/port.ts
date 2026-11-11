@@ -46,3 +46,26 @@ export function isOfflineOnlyShell(): boolean {
 export function shellMode(): "online" | "offline" {
   return offlineOnlyShell ? "offline" : "online";
 }
+
+// Deployment identity the shared pages cannot read for themselves: the web
+// host takes the offline-login flag from /config.js at runtime, the app host
+// from a build-time environment variable, so each host injects its own
+// channel once at bootstrap and pages read the resolved value here.
+export interface ShellIdentity {
+  /** Offer the operator-key (offline) branch on the login page. */
+  offlineLogin: boolean;
+}
+
+// A host that never injects keeps the web deployment's own fallback
+// (`config.offlineLogin ?? true` in the web host's layout bootstrap); the
+// app host always injects an explicit value, so this is not its default.
+let shellIdentityValue: ShellIdentity = { offlineLogin: true };
+
+/** Inject the host's deployment identity. Called once at bootstrap. */
+export function initShellIdentity(identity: ShellIdentity): void {
+  shellIdentityValue = identity;
+}
+
+export function shellIdentity(): ShellIdentity {
+  return shellIdentityValue;
+}

@@ -42,15 +42,6 @@ const CREDENTIAL = new URL(
   "../../components/gateway/UserCredentialDialog.svelte",
   import.meta.url,
 );
-const WEB_ROUTE = new URL(
-  "../../../../kallipai-web/src/routes/gateway/+page.svelte",
-  import.meta.url,
-);
-const APP_ROUTE = new URL(
-  "../../../../kallipai-app/src/routes/gateway/+page.svelte",
-  import.meta.url,
-);
-
 function source(url: URL): string {
   return new TextDecoder().decode(Deno.readFileSync(url));
 }
@@ -204,21 +195,8 @@ Deno.test(
 );
 
 Deno.test(
-  "both shells serve the user space at /gateway",
-  { permissions: { read: [WEB_ROUTE, APP_ROUTE] } },
-  () => {
-    for (const route of [WEB_ROUTE, APP_ROUTE]) {
-      assert(
-        source(route).includes("GatewayMinePage"),
-        "the /gateway route renders the user space",
-      );
-    }
-  },
-);
-
-Deno.test(
   "the user space carries no key face or connect deep link",
-  { permissions: { read: [PAGE, STORE, WEB_ROUTE, APP_ROUTE] } },
+  { permissions: { read: [PAGE, STORE] } },
   () => {
     const src = source(PAGE);
     assert(
@@ -230,12 +208,6 @@ Deno.test(
       "the connect entry no longer exists",
     );
     assert(!source(STORE).includes("listKeys"), "the store reads no key list");
-    for (const route of [WEB_ROUTE, APP_ROUTE]) {
-      assert(
-        !source(route).includes("connectTagma"),
-        "the shells forward no deep link",
-      );
-    }
   },
 );
 Deno.test(

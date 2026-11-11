@@ -7,7 +7,7 @@ import { assert, assertEquals, assertMatch } from "@std/assert";
 // to probing a service it may not serve, silently, with every package
 // still green; the two d.ts files are mirrors of one runtime payload and
 // diverge the moment one side gains a key the other lacks. Source pins are
-// how this repo holds host adapters and twins together (twinRoutes, the
+// how this repo holds host adapters and twins together (hostRouteTree, the
 // gateway console pins).
 const WEB_LAYOUT = new URL(
   "../../../../kallipai-web/src/routes/+layout.svelte",

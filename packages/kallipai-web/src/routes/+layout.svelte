@@ -8,6 +8,7 @@
   import {
     RootLayout,
     initShell,
+    initShellIdentity,
     initArcheion,
     initConfigStorage,
     initFiles,
@@ -45,6 +46,11 @@
   // protocol and port: a page on a non-default port (the dev edge on
   // :8080) reaches its siblings on that port too.
   const config = window.KALLIPAI_CONFIG ?? {};
+  // The offline-login flag rides the same runtime config: the factory file
+  // ships it as true (the self-hosted posture) and a cloud-facing deployment
+  // sets it false, so the shared login page shows the operator-key branch
+  // only where the deployment allows it.
+  initShellIdentity({ offlineLogin: config.offlineLogin ?? true });
   initArcheion(serviceUrl("archeion", config, location));
   initRelays(
     serviceUrl("lesche", config, location),

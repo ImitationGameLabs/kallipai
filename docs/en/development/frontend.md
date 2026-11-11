@@ -140,15 +140,47 @@ Port `5175` is reserved for this shell so it can run next to a `kallipai-web`
 dev server (5173). First use: open `/connect`, enter the tagma URL and the
 operator token; the session is stored locally and reconnected on boot.
 
-Route guards that need kit's `$app/navigation` belong in the host app's
-`+page.svelte` wrappers (`kallipai-direct`, `kallipai-web`), never inside
-`kallipai-ui` components - the UI package stays a pure-UI library with zero
-`$app` imports. Shared dirty-state lives in the store, which both layers
-import (`profilesStore` is the precedent).
-Shell navigation from any layer goes through ShellPort (`navigate`),
-the single navigation primitive this repo consumes: components call it
-after the host's bootstrap `initShell(goto)` injection, and host
-wrappers use it too so route changes flow through one choke point.
+### Routes (one list for both shells)
+
+`kallipai-web` and `kallipai-app` each carry one rest route,
+`src/routes/[...path]/`, plus the root layout pair; there are no per-page route
+files. Every route is a row in `routeTable.ts` (`kallipai-ui/src/lib/shell/`):
+the path pattern, the component, where its props come from (`params`, the query
+string, or a literal), whether the page sits behind the `/admin` gate, and any
+redirect. Adding a page is three edits in code: the component in `kallipai-ui`,
+one row in the table, and one entry in `routePatterns.ts`. That entry is a
+deliberate second place: the list is the URL set both hosts promise, written
+out as literals, and a type-level check in the table keeps the two equal. A
+rename therefore fails to compile until both places say the new name. The
+list's length is asserted in `routePatterns_test.ts` (32 today), so adding or
+deleting a page updates that count too.
+
+The rest route's `+page.ts` resolves the pathname before anything mounts:
+a redirect row sends the visitor on (301 for a canonical hub, 307 for the
+view-dependent panorama), and a path no row covers answers 404. Its
+`+page.svelte` renders `<RouteView>`, which matches again to pick the
+component and wraps rows marked `area: "admin"` in `<AdminArea>`. A row
+with a component renders even when its redirect condition would now hold
+(the panorama moves itself after a breakpoint change); a redirect-only row
+renders nothing, because its load has already sent the browser away. The
+matcher (`routeMatch.ts`) follows kit's own URL rules: the pathname
+decodes through `split("%25").map(decodeURI).join("%25")`, each param
+then decodes once with `decodeURIComponent`, one trailing slash is
+tolerated (kit normalises the pathname only after load), and matching is
+case-sensitive. `routePatterns.ts` also feeds
+`routeBuilderBindings_test.ts`, which checks that each path builder in
+`routes.ts` lands on the row it names.
+
+### Ports: kit features the shared package cannot import
+
+`kallipai-ui` never imports `$app/*`. The host injects what a shared
+component needs: `initShell(goto)` for navigation,
+`initShellIdentity({ offlineLogin })` for the deployment flag the login
+page offers, and the `beforeNavigate` hook as a component prop
+(`<LeaveGuard>` takes it, so the unsaved-changes dialog lives in
+`kallipai-ui` and each host mounts it next to the page). Shared dirty
+state lives in the store both layers import (`profilesStore` is the
+precedent), and route changes still flow through ShellPort `navigate`.
 
 ### Update Notice and Bundle Caching
 

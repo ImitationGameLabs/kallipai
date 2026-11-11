@@ -48,140 +48,10 @@ Deno.test(
   },
 );
 
-/** The shells that serve the manage page, and where each one's route tree
- * keeps the turn history. The path builder names the last segment; a rename
- * there is only real when every host's tree carries the same one, which is
- * what a page that 404s while every type still checks looks like. */
-const HISTORY_ROUTES = [
-  {
-    path: agentHistoryPath("/tagma/abc/details", "a1"),
-    pages: [
-      new URL(
-        "../../../../kallipai-web/src/routes/tagma/[id]/details/agents/[agentId]/history/+page.svelte",
-        import.meta.url,
-      ),
-      new URL(
-        "../../../../kallipai-app/src/routes/tagma/[id]/details/agents/[agentId]/history/+page.svelte",
-        import.meta.url,
-      ),
-    ],
-  },
-  {
-    path: agentHistoryPath("/local/manage", "a1"),
-    pages: [
-      new URL(
-        "../../../../kallipai-direct/src/routes/local/manage/agents/[id]/history/+page.svelte",
-        import.meta.url,
-      ),
-    ],
-  },
-];
-
-Deno.test(
-  "every shell serves the turn history page the builder names",
-  // Scoped read grant, same rationale as the details pages below: the two
-  // sides are written apart and can disagree while both still pass their
-  // own test, so read the trees and compare them with the built path.
-  { permissions: { read: HISTORY_ROUTES.flatMap(({ pages }) => [...pages]) } },
-  () => {
-    for (const { path, pages } of HISTORY_ROUTES) {
-      const segment = path.split("/").pop();
-      assert(segment, `${path} must name a page`);
-      for (const page of pages) {
-        const dir = new URL(".", page).pathname;
-        assert(
-          dir.endsWith(`/${segment}/`),
-          `${dir} must be the route the builder names (${segment})`,
-        );
-        const src = new TextDecoder().decode(Deno.readFileSync(page));
-        assert(
-          src.includes("AgentHistoryPage"),
-          `${page.pathname} must render the turn history page`,
-        );
-      }
-    }
-  },
-);
-
-const DETAILS_PAGES = [
-  "overview",
-  "budget",
-  "agents",
-  "profiles",
-  "schedules",
-].map((section) => ({
-  section,
-  pages: [
-    new URL(
-      `../../../../kallipai-web/src/routes/tagma/[id]/details/${section}/+page.svelte`,
-      import.meta.url,
-    ),
-    new URL(
-      `../../../../kallipai-app/src/routes/tagma/[id]/details/${section}/+page.svelte`,
-      import.meta.url,
-    ),
-  ],
-}));
-
-Deno.test(
-  "the details section pages render their own section",
-  // Same rot-risk one tree over: a thin section page could copy-paste a
-  // neighbor's page constant and still typecheck. Read all ten shells and
-  // assert the section each one renders. Scoped read grant, same rationale.
-  {
-    permissions: {
-      read: DETAILS_PAGES.flatMap(({ pages }) => [...pages]),
-    },
-  },
-  () => {
-    for (const { section, pages } of DETAILS_PAGES) {
-      for (const page of pages) {
-        const src = new TextDecoder().decode(Deno.readFileSync(page));
-        assert(
-          src.includes(`page="${section}"`),
-          "section page must render its own section",
-        );
-        assert(
-          src.includes("page.params.id"),
-          "section page must forward the route param, not a literal",
-        );
-      }
-    }
-  },
-);
-
-const DETAILS_HUBS = [
-  new URL(
-    "../../../../kallipai-web/src/routes/tagma/[id]/details/+page.ts",
-    import.meta.url,
-  ),
-  new URL(
-    "../../../../kallipai-app/src/routes/tagma/[id]/details/+page.ts",
-    import.meta.url,
-  ),
-];
-
-Deno.test(
-  "the details hub stays wired to the path builder",
-  // The hub 301s to overview through the builder; pin the wiring so a
-  // downgrade to 302 or a re-derived literal cannot slip in. Scoped read
-  // grant, same rationale.
-  { permissions: { read: DETAILS_HUBS } },
-  () => {
-    for (const hub of DETAILS_HUBS) {
-      const src = new TextDecoder().decode(Deno.readFileSync(hub));
-      assert(src.includes("redirect(301"), "hub must issue a permanent 301");
-      assert(
-        src.includes("tagmaDetailsSectionPath(params.id"),
-        "hub must forward via the path builder, not a re-derived literal",
-      );
-      assert(
-        src.includes('"overview"'),
-        "hub must land on the overview section",
-      );
-    }
-  },
-);
+// The route list (and with it which page each path renders, its section,
+// and the hub redirects) lives in routeTable.ts, one row per route, with
+// the section rows built from one typed list. The path-builder tests below
+// pin the URLs the table's redirects and props are built from.
 
 Deno.test("filesPath builds the global files route", () => {
   assertEquals(filesPath(), "/files");
@@ -230,59 +100,29 @@ Deno.test(
   },
 );
 
-const FILES_SHELLS = [
-  new URL(
-    "../../../../kallipai-app/src/routes/files/+page.svelte",
-    import.meta.url,
-  ),
-  new URL(
-    "../../../../kallipai-web/src/routes/files/+page.svelte",
-    import.meta.url,
-  ),
-];
-
-Deno.test(
-  "the /files shells stay thin and render the shared FilesPage",
-  // Same rot-risk one tree over: a shell could re-derive the page inline
-  // or drift between hosts. Scoped read grant, same rationale.
-  { permissions: { read: FILES_SHELLS } },
-  () => {
-    for (const shell of FILES_SHELLS) {
-      const src = new TextDecoder().decode(Deno.readFileSync(shell));
-      assert(src.includes("FilesPage"), "shell must render FilesPage");
-      assert(
-        src.includes("@kallipai/kallipai-ui"),
-        "shell must import the shared package, not a local copy",
-      );
-    }
-  },
+/** The direct shell still serves the turn history page its path builder
+ * names. The online trees are served by the route table now, so this is the
+ * only check that the builder's last segment exists in a real route tree: a
+ * page that 404s while every type still checks looks exactly like this. */
+const DIRECT_HISTORY_PAGE = new URL(
+  "../../../../kallipai-direct/src/routes/local/manage/agents/[id]/history/+page.svelte",
+  import.meta.url,
 );
 
-const ADMIN_HUBS = [
-  new URL(
-    "../../../../kallipai-web/src/routes/admin/+page.ts",
-    import.meta.url,
-  ),
-  new URL(
-    "../../../../kallipai-app/src/routes/admin/+page.ts",
-    import.meta.url,
-  ),
-];
-
 Deno.test(
-  "the admin hub stays wired to the path builder",
-  // The hub 301s to the gateway console through the builder; pin the
-  // wiring so a downgrade to 302 or a re-derived literal cannot slip
-  // in. Scoped read grant, same rationale as the details hubs.
-  { permissions: { read: ADMIN_HUBS } },
+  "the direct shell serves the turn history page the builder names",
+  { permissions: { read: [DIRECT_HISTORY_PAGE] } },
   () => {
-    for (const hub of ADMIN_HUBS) {
-      const src = new TextDecoder().decode(Deno.readFileSync(hub));
-      assert(src.includes("redirect(301"), "hub must issue a permanent 301");
-      assert(
-        src.includes("adminGatewayPath()"),
-        "hub must forward via the path builder, not a re-derived literal",
-      );
-    }
+    const segment = agentHistoryPath("/local/manage", "a1").split("/").pop();
+    assert(segment, "the builder must name a page");
+    const dir = new URL(".", DIRECT_HISTORY_PAGE).pathname;
+    assert(
+      dir.endsWith(`/${segment}/`),
+      `${dir} must be the route the builder names (${segment})`,
+    );
+    const src = new TextDecoder().decode(
+      Deno.readFileSync(DIRECT_HISTORY_PAGE),
+    );
+    assert(src.includes("AgentHistoryPage"), "renders the shared page");
   },
 );

@@ -30,10 +30,28 @@ export {
   type Goto,
   type GotoOptions,
   initShell,
-  navigate,
+  initShellIdentity,
   setOfflineOnlyShell,
-  shellMode,
+  shellIdentity,
+  type ShellIdentity,
 } from "./lib/shell/port.ts";
+
+// The shell's route table: a host rest route resolves a pathname there (page,
+// redirect, or miss) before mounting, and <RouteView> resolves again to pick
+// the component. The table stays internal: add a row there, not an export.
+export {
+  type PageRow,
+  type RouteResolution,
+  resolveRoute,
+} from "./lib/shell/routeTable.ts";
+export type { Params } from "./lib/shell/routeMatch.ts";
+export { default as RouteView } from "./lib/shell/RouteView.svelte";
+export { default as LeaveGuard } from "./lib/manage/LeaveGuard.svelte";
+export type {
+  BeforeNavigateHook,
+  NavigationAttempt,
+  NavigationTarget,
+} from "./lib/shell/navigate.ts";
 export {
   initArcheion,
   initFiles,

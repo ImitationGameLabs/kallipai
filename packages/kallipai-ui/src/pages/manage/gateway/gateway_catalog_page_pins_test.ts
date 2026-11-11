@@ -43,35 +43,6 @@ const USER_PROFILES_SECTION = new URL(
   "../../../components/gateway/UserProfilesSection.svelte",
   import.meta.url,
 );
-const WEB_ROUTE = new URL(
-  "../../../../../kallipai-web/src/routes/admin/gateway/+page.svelte",
-  import.meta.url,
-);
-const APP_ROUTE = new URL(
-  "../../../../../kallipai-app/src/routes/admin/gateway/+page.svelte",
-  import.meta.url,
-);
-const WEB_COLLECTION_ROUTE = new URL(
-  "../../../../../kallipai-web/src/routes/admin/gateway/collections/[name]/+page.svelte",
-  import.meta.url,
-);
-const APP_COLLECTION_ROUTE = new URL(
-  "../../../../../kallipai-app/src/routes/admin/gateway/collections/[name]/+page.svelte",
-  import.meta.url,
-);
-const ADMIN_AREA = new URL(
-  "../../../components/AdminArea.svelte",
-  import.meta.url,
-);
-const WEB_ADMIN_LAYOUT = new URL(
-  "../../../../../kallipai-web/src/routes/admin/+layout.svelte",
-  import.meta.url,
-);
-const APP_ADMIN_LAYOUT = new URL(
-  "../../../../../kallipai-app/src/routes/admin/+layout.svelte",
-  import.meta.url,
-);
-
 function source(url: URL): string {
   return new TextDecoder().decode(Deno.readFileSync(url));
 }
@@ -146,30 +117,6 @@ Deno.test(
       !src.includes("localStorage") && !src.includes("sessionStorage"),
       "nothing persists beyond the session",
     );
-  },
-);
-
-Deno.test(
-  "the /admin layouts gate their subtree on AdminArea",
-  { permissions: { read: [ADMIN_AREA, WEB_ADMIN_LAYOUT, APP_ADMIN_LAYOUT] } },
-  () => {
-    const area = source(ADMIN_AREA);
-    assert(
-      area.includes('shellMode() === "online"') &&
-        area.includes("user?.local_admin === true"),
-      "AdminArea keeps the panorama card's gatewayVisible predicate",
-    );
-    assert(
-      area.includes("admin_area_forbidden()"),
-      "the refused posture carries the 403 note",
-    );
-    for (const layout of [WEB_ADMIN_LAYOUT, APP_ADMIN_LAYOUT]) {
-      const src = source(layout);
-      assert(
-        src.includes("<AdminArea") && src.includes("{@render children()}"),
-        "the /admin layout wraps its subtree in AdminArea",
-      );
-    }
   },
 );
 
@@ -347,29 +294,10 @@ Deno.test(
 );
 
 Deno.test(
-  "both shells serve the console at /admin/gateway",
-  { permissions: { read: [WEB_ROUTE, APP_ROUTE] } },
-  () => {
-    for (const route of [WEB_ROUTE, APP_ROUTE] as const) {
-      assert(
-        source(route).includes("GatewayCatalogPage"),
-        "the /admin/gateway route renders the console",
-      );
-    }
-  },
-);
-Deno.test(
   "the console serves the collection detail as a deep-linked subface",
   {
     permissions: {
-      read: [
-        PAGE,
-        DETAIL,
-        WEB_ROUTE,
-        APP_ROUTE,
-        WEB_COLLECTION_ROUTE,
-        APP_COLLECTION_ROUTE,
-      ],
+      read: [PAGE, DETAIL],
     },
   },
   () => {
@@ -404,14 +332,6 @@ Deno.test(
         src.includes("createCatalogDetail("),
       "the detail's narrowed read and its request token live in one module",
     );
-    // Both shells bind the param to the same console component.
-    for (const route of [WEB_COLLECTION_ROUTE, APP_COLLECTION_ROUTE] as const) {
-      const rs = source(route);
-      assert(
-        rs.includes("GatewayCatalogPage") && rs.includes("page.params.name"),
-        "the collections route passes the param to the console",
-      );
-    }
     // The list entry path: the nav cards anchor into the detail.
     assert(
       src.includes("<CollectionsSection") &&

@@ -5,6 +5,7 @@
   import {
     RootLayout,
     initShell,
+    initShellIdentity,
     initArcheion,
     initConfigStorage,
     initFiles,
@@ -51,6 +52,12 @@
   initFiles(`${polis}/v1/files`);
   initConfigStorage(localStorageConfigStorage);
   initNotificationBackend(tauriNotificationBackend);
+  // Build-time deployment flag (same injection channel as the domain): a
+  // local-platform build shows the operator-key branch, a cloud build never
+  // renders it (two-way information hiding).
+  initShellIdentity({
+    offlineLogin: import.meta.env.KALLIPAI_OFFLINE_LOGIN === "1",
+  });
   initInstances(`${polis}/v1/instances`);
 
   const icons: NavIcons = {
