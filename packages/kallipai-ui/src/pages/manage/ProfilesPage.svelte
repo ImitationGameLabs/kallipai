@@ -6,10 +6,13 @@
   // profile cards drag between sets and the unassigned area (HTML5 DnD
   // updating the draft).
   //
-  // Probe results route inline to the card that triggered them: the page
-  // accumulates providerReports/profileReports maps keyed by id, because a
-  // probe reply is a return value the call site owns, not shared state.
+  // Probe results, dialog latches and the drag lifecycle live in the page's
+  // controllers (profilesProbes, profilesDialogs, profilesDrag): the page
+  // keeps the layout, the commit path and the derived posture.
   import { profilesStore } from "../../lib/manage/profiles.svelte.ts";
+  import { createProfilesDrag } from "../../lib/manage/profilesDrag.svelte.ts";
+  import { createProfilesDialogs } from "../../lib/manage/profilesDialogs.svelte.ts";
+  import { createProfilesProbes } from "../../lib/manage/profilesProbes.svelte.ts";
   import { managementBackend } from "../../lib/manage/client.ts";
   import {
     derivedPullKey,
@@ -19,8 +22,6 @@
   } from "../../lib/manage/profilesGatewayTab.ts";
   import type { PullRow } from "../../lib/manage/profilesGatewayTab.ts";
   import { refreshUnassignedLive as fetchUnassignedLive } from "../../lib/manage/unassignedLive.ts";
-  import { displayError } from "../../lib/manage/errors.ts";
-  import { KallipaiError } from "@kallipai/kallipai-common";
   import { adminGatewayPath, gatewayPath } from "../../lib/shell/routes.ts";
   import { shellMode } from "../../lib/shell/port.ts";
   import {
@@ -29,7 +30,6 @@
   } from "../../lib/session/archeion.svelte.ts";
   import { userGatewayStore } from "../../lib/gateway/store.svelte.ts";
   import GatewayCollectionsPreview from "../../components/gateway/GatewayCollectionsPreview.svelte";
-  import { SvelteMap } from "svelte/reactivity";
   import { Tabs } from "@skeletonlabs/skeleton-svelte";
   import ProfilesToolbar from "../../components/manage/ProfilesToolbar.svelte";
   import ProvidersSection from "../../components/manage/ProvidersSection.svelte";
@@ -40,38 +40,14 @@
   import SetDialog from "../../components/manage/SetDialog.svelte";
   import ProfileDialog from "../../components/manage/ProfileDialog.svelte";
   import {
-    moveProfile,
-    moveFromUnassigned,
-    moveToUnassigned,
-    replaceSetProfiles,
-    replaceSetProfile,
-    renameSet,
     setDefaultSet,
-    updateSetDescription,
     replaceUnassignedProfiles,
-    singleProfileProbeRequest,
-    singleUnassignedProfileProbeRequest,
-    upsertProvider,
-    providerFromDialog,
   } from "../../lib/compute.ts";
   import {
-    clearProfileResult,
-    mergeProfileScope,
-    mergeProfileScopeAll,
-    mergeProviderScope,
     occupiedIdsOf,
     providerIdsOf,
-    reportAfterProbe,
   } from "../../lib/manage/profiles-view.ts";
-  import type { InlineProbeReport } from "../../lib/manage/profiles-view.ts";
-  import type {
-    ProfileProvider,
-    Modality,
-    ProfileProviderProbeReport,
-    ProfileModelProbeReport,
-    ProfileSet,
-    ReasoningEffort,
-  } from "@kallipai/kallipai-client";
+  import type { ProfileSet } from "@kallipai/kallipai-client";
   import {
     common_remove,
     common_save,
@@ -105,7 +81,6 @@
     manage_profiles_remove_set_confirm_desc,
     manage_profiles_remove_set_confirm_title,
     manage_profiles_remove_set_confirm_users_desc,
-    manage_profiles_remove_set_failed,
     manage_profiles_title,
     manage_profiles_tab_gateway,
     manage_profiles_tab_local,
@@ -168,14 +143,12 @@
     } else {
       await profilesStore.save().catch(() => {});
     }
-    providerReports.clear();
-    profileReports.clear();
+    probes.clearAll();
   }
 
   async function onConfirmDanglingSave() {
     await profilesStore.save(true).catch(() => {});
-    providerReports.clear();
-    profileReports.clear();
+    probes.clearAll();
   }
 
   // The confirm re-send routes by the kind the store recorded on
@@ -196,113 +169,23 @@
 
   // --- inline probe results, routed by call-site scope ---
 
-  const providerReports = new SvelteMap<string, ProfileProviderProbeReport>();
-  const profileReports = new SvelteMap<string, ProfileModelProbeReport>();
+  const probes = createProfilesProbes({ store: profilesStore });
+  const providerReports = probes.providerReports;
+  const profileReports = probes.profileReports;
 
-  async function onTestProvider(id: string) {
-    const outcome = await profilesStore.probeProvider(id);
-    if (outcome.status === "landed") {
-      mergeProviderScope(providerReports, outcome.response);
-    }
-  }
-
-  async function onTestSet(setName: string) {
-    const outcome = await profilesStore.probeSet(setName);
-    if (outcome.status === "landed") {
-      mergeProfileScope(setName, profileReports, outcome.response);
-    }
-  }
-
-  async function onTestProfile(setName: string, profileIdx: number) {
-    const draft = profilesStore.draft;
-    if (!draft) return;
-    const body = singleProfileProbeRequest(
-      profilesStore.config,
-      draft,
-      setName,
-      profileIdx,
-    );
-    if (!body) return;
-    const outcome = await profilesStore.probeRaw(body);
-    if (outcome.status !== "landed") return;
-    mergeProviderScope(providerReports, outcome.response);
-    mergeProfileScope(setName, profileReports, outcome.response);
-  }
-
-  async function onTestAll() {
-    const outcome = await profilesStore.probeAll();
-    if (outcome.status !== "landed") return;
-    mergeProviderScope(providerReports, outcome.response);
-    mergeProfileScopeAll(profileReports, outcome.response);
-  }
+  // Card-level probes read the committed draft; the controller owns the maps.
+  const onTestProvider = (id: string) => void probes.cardTestProvider(id);
+  const onTestSet = (setName: string) => void probes.cardTestSet(setName);
+  const onTestProfile = (setName: string, profileIdx: number) =>
+    void probes.cardTestProfile(setName, profileIdx);
+  const onTestAll = () => void probes.cardTestAll();
+  const onTestUnassigned = (idx: number) => void probes.cardTestUnassigned(idx);
 
   function onDiscard() {
     profilesStore.reset();
     selection = null;
-    providerReports.clear();
-    profileReports.clear();
+    probes.clearAll();
     unassignedLive = null;
-  }
-
-  // --- drag & drop (profile cards between sets and the unassigned area) ---
-
-  interface DragPayload {
-    area: "set" | "unassigned";
-    fromSet: string | null;
-    fromIdx: number;
-  }
-
-  let drag = $state<DragPayload | null>(null);
-  let dragOverSet = $state<string | null>(null);
-  let dragOverUnassigned = $state(false);
-
-  // Shared drag-end reset for both drop targets (card sections own the
-  // markup, the page owns the drag state).
-  function clearDrag(): void {
-    drag = null;
-    dragOverSet = null;
-    dragOverUnassigned = false;
-  }
-
-  function onDropSet(toSet: string): void {
-    const d = drag;
-    drag = null;
-    dragOverSet = null;
-    dragOverUnassigned = false;
-    const draft = profilesStore.draft;
-    if (!d || !draft) return;
-    if (d.area === "unassigned") {
-      // unassigned → set: the p:-keyed report is area-scoped, clear it.
-      const id = draft.parking?.[d.fromIdx]?.id;
-      if (id) profileReports.delete(`p:${id}`);
-      profilesStore.draft = moveFromUnassigned(draft, d.fromIdx, toSet);
-      void refreshUnassignedLive();
-      return;
-    }
-    if (d.fromSet !== null && d.fromSet !== toSet) {
-      // Cross-set: the key is set-scoped, so clear the stale source entry
-      // (same-set keeps its key — the report survives the reorder).
-      const id = draft.sets[d.fromSet]?.profiles[d.fromIdx]?.id;
-      if (id) clearProfileResult(profileReports, d.fromSet, id);
-    }
-    if (d.fromSet !== null) {
-      profilesStore.draft = moveProfile(draft, d.fromSet, d.fromIdx, toSet);
-    }
-  }
-
-  function onDropUnassigned(): void {
-    const d = drag;
-    drag = null;
-    dragOverSet = null;
-    dragOverUnassigned = false;
-    const draft = profilesStore.draft;
-    if (!d || !draft || d.area !== "set" || d.fromSet === null) return;
-    // set → unassigned: clear the set-scoped source entry; the card will
-    // re-key its report as p:<id> on the next unassigned Test.
-    const id = draft.sets[d.fromSet]?.profiles[d.fromIdx]?.id;
-    if (id) clearProfileResult(profileReports, d.fromSet, id);
-    profilesStore.draft = moveToUnassigned(draft, d.fromSet, d.fromIdx);
-    void refreshUnassignedLive();
   }
 
   // --- unassigned-live warn snapshot (event-driven, advisory) ---
@@ -329,248 +212,24 @@
     if (res.refreshed) unassignedLive = res.snapshot;
   }
 
-  // --- dialogs ---
+  // --- drag & drop (profile cards between sets and the unassigned area) ---
 
-  let providerDialog = $state<{
-    open: boolean;
-    mode: "new" | "edit";
-    provider: ProfileProvider | null;
-  }>({ open: false, mode: "new", provider: null });
-
-  function openProviderNew() {
-    providerDialog = { open: true, mode: "new", provider: null };
-  }
-
-  function openProviderEdit(ep: ProfileProvider) {
-    providerDialog = { open: true, mode: "edit", provider: ep };
-  }
-
-  function onProviderSave(result: {
-    id: string;
-    family: string;
-    baseUrl: string;
-    modelListBaseUrl: string;
-    apiKey: string | null;
-  }) {
-    const draft = profilesStore.draft;
-    if (!draft) return;
-    profilesStore.draft = upsertProvider(
-      draft,
-      providerFromDialog(result, draft.endpoints[result.id]),
-    );
-    providerDialog.open = false;
-  }
-
-  let removeProviderTarget = $state<ProfileProvider | null>(null);
-
-  function onProviderRemove(provider: ProfileProvider) {
-    // The menu only arms the confirm; the removal itself happens on
-    // confirm (draft-level, reversible by discarding the draft).
-    removeProviderTarget = provider;
-  }
-
-  function onProviderRemoveConfirmed() {
-    if (removeProviderTarget === null) return;
-    profilesStore.removeProvider(removeProviderTarget.id);
-    providerReports.delete(removeProviderTarget.id);
-    removeProviderTarget = null;
-  }
-
-  // Set removal confirm: a set with bound users cannot be dropped by the
-  // draft alone. Opening the confirm lists the users (from the live
-  // registry); confirming deletes the set server-side with force (the
-  // users are interrupted and keep a dangling binding until rebound). A
-  // set with no users stays a pure draft edit.
-  let removeSetName = $state<string | null>(null);
-  let removeSetUsers = $state<string[]>([]);
-  let removeSetError = $state<string | null>(null);
-
-  async function onSetRemoveRequested(name: string) {
-    removeSetName = name;
-    removeSetUsers = [];
-    removeSetError = null;
-    try {
-      const { agents } = await managementBackend().listAgents();
-      removeSetUsers = agents
-        .filter((a) => a.profile_set === name)
-        .map((a) => a.role || a.id);
-    } catch {
-      // The user list is advisory; the delete itself surfaces failures.
-    }
-  }
-
-  async function onSetRemoveConfirmed() {
-    const name = removeSetName;
-    if (name === null) return;
-    removeSetError = null;
-    if (removeSetUsers.length > 0) {
-      try {
-        await managementBackend().deleteProfileSet(name, true);
-      } catch (e) {
-        // 404 = the set is already gone server-side (dangling users);
-        // the local removal is still right. Everything else surfaces.
-        if (!(e instanceof KallipaiError && e.api.status === 404)) {
-          removeSetError = displayError(
-            "profiles",
-            e,
-            manage_profiles_remove_set_failed(),
-          );
-          return;
-        }
-      }
-    }
-    profilesStore.removeSet(name);
-    profileReports.clear();
-    removeSetName = null;
-    removeSetUsers = [];
-  }
-  let setDialog = $state<{ open: boolean; name: string }>({
-    open: false,
-    name: "",
+  const drag = createProfilesDrag({
+    store: profilesStore,
+    probes,
+    refreshUnassignedLive,
   });
 
-  function onSetSave(result: {
-    name: string;
-    description: string | null;
-    rows: {
-      id: string;
-      endpoint: string;
-      model: string;
-      max_context_window: number;
-      store?: boolean;
-      effort?: ReasoningEffort;
-    }[];
-  }) {
-    const draft = profilesStore.draft;
-    if (!draft) return;
-    // Rename first (it re-keys), then description, then the profile list
-    // — each helper addresses the set by its name at that step.
-    const renamed = renameSet(draft, setDialog.name, result.name);
-    const described = updateSetDescription(
-      renamed,
-      result.name,
-      result.description,
-    );
-    profilesStore.draft = replaceSetProfiles(
-      described,
-      result.name,
-      result.rows,
-    );
-    if (result.name !== setDialog.name) profileReports.clear();
-    setDialog.open = false;
-  }
+  // --- dialogs ---
 
-  // Set-member profile dialog: single-profile form (see ProfileDialog),
-  // positioned at (setName, idx) in the draft's set.
-  let profileDialog = $state<{
-    open: boolean;
-    setName: string;
-    idx: number;
-  }>({ open: false, setName: "", idx: 0 });
-  let profileProbeReport = $state<InlineProbeReport | null>(null);
-
-  function openProfileEdit(setName: string, idx: number) {
-    profileProbeReport = null;
-    profilesStore.resetProbe();
-    profileDialog = { open: true, setName, idx };
-  }
-
-  function onProfileSave(values: {
-    id: string;
-    endpoint: string;
-    model: string;
-    max_context_window: number;
-    store?: boolean;
-    effort?: ReasoningEffort;
-    modalities?: readonly Modality[];
-  }) {
-    const draft = profilesStore.draft;
-    if (!draft) return;
-    profilesStore.draft = replaceSetProfile(
-      draft,
-      profileDialog.setName,
-      profileDialog.idx,
-      values,
-    );
-    profileDialog.open = false;
-  }
-
-  /** Probe the dialog's current form values without touching the draft:
-   * stage them into a throwaway copy and reuse the set-profile request
-   * builder (committed config passed for the masked-key rule). */
-  async function onProfileTest(values: {
-    id: string;
-    endpoint: string;
-    model: string;
-    max_context_window: number;
-    store?: boolean;
-    effort?: ReasoningEffort;
-    modalities?: readonly Modality[];
-  }) {
-    const draft = profilesStore.draft;
-    if (!draft) return;
-    const staged = replaceSetProfile(
-      draft,
-      profileDialog.setName,
-      profileDialog.idx,
-      values,
-    );
-    const body = singleProfileProbeRequest(
-      profilesStore.config,
-      staged,
-      profileDialog.setName,
-      profileDialog.idx,
-    );
-    if (!body) return;
-    const outcome = await profilesStore.probeRaw(body);
-    if (outcome.status === "landed") {
-      mergeProviderScope(providerReports, outcome.response);
-    }
-    // Only a failure clears the report: an abandoned call belongs to a
-    // dialog a newer probe already owns.
-    profileProbeReport = reportAfterProbe(outcome, profileProbeReport);
-  }
-
-  // Unassigned dialog: single-profile form (see ProfileDialog). idx indexes
-  // the draft's unassigned list in edit mode.
-  let unassignedDialog = $state<{
-    open: boolean;
-    mode: "new" | "edit";
-    idx: number;
-  }>({ open: false, mode: "new", idx: 0 });
-  // Latest in-form probe result, rendered inside the dialog.
-  let unassignedProbeReport = $state<InlineProbeReport | null>(null);
-
-  function openUnassignedNew() {
-    unassignedProbeReport = null;
-    profilesStore.resetProbe();
-    unassignedDialog = { open: true, mode: "new", idx: 0 };
-  }
-
-  function openUnassignedEdit(idx: number) {
-    unassignedProbeReport = null;
-    profilesStore.resetProbe();
-    unassignedDialog = { open: true, mode: "edit", idx };
-  }
-
-  function onUnassignedSave(values: {
-    id: string;
-    endpoint: string;
-    model: string;
-    max_context_window: number;
-    store?: boolean;
-    effort?: ReasoningEffort;
-    modalities?: readonly Modality[];
-  }) {
-    const draft = profilesStore.draft;
-    if (!draft) return;
-    const list = [...(draft.parking ?? [])];
-    if (unassignedDialog.mode === "new") list.push(values);
-    else list[unassignedDialog.idx] = values;
-    profilesStore.draft = replaceUnassignedProfiles(draft, list);
-    unassignedDialog.open = false;
-    void refreshUnassignedLive();
-  }
+  // One controller owns the dialog latches; the page keeps the commit path
+  // (apply and the dangling confirm), because those call its own sends.
+  const dialogs = createProfilesDialogs({
+    store: profilesStore,
+    backend: managementBackend,
+    probes,
+    refreshUnassignedLive,
+  });
 
   function onRemoveSetProfile(
     setName: string,
@@ -578,7 +237,7 @@
     profileId: string,
   ) {
     profilesStore.removeProfile(setName, profileIdx);
-    clearProfileResult(profileReports, setName, profileId);
+    probes.clearSetProfile(setName, profileId);
   }
 
   function onRemoveUnassigned(idx: number, profileId: string) {
@@ -588,75 +247,8 @@
       draft,
       (draft.parking ?? []).filter((_, i) => i !== idx),
     );
-    profileReports.delete(`p:${profileId}`);
+    probes.clearUnassignedProfile(profileId);
     void refreshUnassignedLive();
-  }
-
-  function onUnassignedRemove() {
-    const draft = profilesStore.draft;
-    if (draft && unassignedDialog.mode === "edit") {
-      const id = draft.parking?.[unassignedDialog.idx]?.id;
-      profilesStore.draft = replaceUnassignedProfiles(
-        draft,
-        (draft.parking ?? []).filter((_, i) => i !== unassignedDialog.idx),
-      );
-      if (id) profileReports.delete(`p:${id}`);
-    }
-    void refreshUnassignedLive();
-    unassignedDialog.open = false;
-  }
-
-  /** Probe the dialog's current form values without touching the draft:
-   * stage them into a throwaway copy and reuse the unassigned-profile request
-   * builder (committed config passed for the masked-key rule). */
-  async function onUnassignedTest(values: {
-    id: string;
-    endpoint: string;
-    model: string;
-    max_context_window: number;
-    store?: boolean;
-    effort?: ReasoningEffort;
-  }) {
-    const draft = profilesStore.draft;
-    if (!draft) return;
-    const staged = replaceUnassignedProfiles(draft, [
-      ...(draft.parking ?? []),
-      values,
-    ]);
-    const body = singleUnassignedProfileProbeRequest(
-      profilesStore.config,
-      staged,
-      (staged.parking?.length ?? 1) - 1,
-    );
-    if (!body) return;
-    const outcome = await profilesStore.probeRaw(body);
-    if (outcome.status === "landed") {
-      mergeProviderScope(providerReports, outcome.response);
-    }
-    // Only a failure clears the report: an abandoned call belongs to a
-    // dialog a newer probe already owns.
-    unassignedProbeReport = reportAfterProbe(outcome, unassignedProbeReport);
-  }
-
-  /** Kebab Test on an unassigned card: same request shape, from the draft. */
-  async function onTestUnassigned(idx: number) {
-    const draft = profilesStore.draft;
-    if (!draft) return;
-    const body = singleUnassignedProfileProbeRequest(
-      profilesStore.config,
-      draft,
-      idx,
-    );
-    if (!body) return;
-    const outcome = await profilesStore.probeRaw(body);
-    if (outcome.status !== "landed") return;
-    const resp = outcome.response;
-    mergeProviderScope(providerReports, resp);
-    const p = resp.sets[0]?.profiles[0];
-    if (p) {
-      const id = draft.parking?.[idx]?.id ?? p.profile_id;
-      profileReports.set(`p:${id}`, p);
-    }
   }
 
   const providerIds = $derived(providerIdsOf(profilesStore.draft));
@@ -1182,9 +774,9 @@
               reports={providerReports}
               isProbing={profilesStore.isProbing}
               onTest={onTestProvider}
-              onEdit={openProviderEdit}
-              onAdd={openProviderNew}
-              onRemove={onProviderRemove}
+              onEdit={(provider) => dialogs.provider.show(provider)}
+              onAdd={() => dialogs.provider.create()}
+              onRemove={(provider) => dialogs.providerRemove.ask(provider)}
               {readOnly}
             />
 
@@ -1193,20 +785,19 @@
               defaultName={profilesStore.draft.default}
               reports={profileReports}
               isProbing={profilesStore.isProbing}
-              {dragOverSet}
+              dragOverSet={drag.overSet}
               onCardDragStart={(fromSet, fromIdx) =>
-                (drag = { area: "set", fromSet, fromIdx })}
-              onCardDragEnd={clearDrag}
-              onSetDragOver={(setName) => (dragOverSet = setName)}
-              onSetDragLeave={(setName) =>
-                (dragOverSet = setName === dragOverSet ? null : dragOverSet)}
-              onSetDrop={onDropSet}
+                drag.start({ area: "set", fromSet, fromIdx })}
+              onCardDragEnd={() => drag.clear()}
+              onSetDragOver={(setName) => drag.enterSet(setName)}
+              onSetDragLeave={(setName) => drag.leaveSet(setName)}
+              onSetDrop={(toSet) => drag.dropToSet(toSet)}
               {onTestSet}
               {onTestProfile}
-              onEditSet={(setName) =>
-                (setDialog = { open: true, name: setName })}
-              onEditProfile={openProfileEdit}
-              onRemoveSet={(setName) => onSetRemoveRequested(setName)}
+              onEditSet={(setName) => dialogs.set.show(setName)}
+              onEditProfile={(setName, idx) =>
+                dialogs.profile.member.show(setName, idx)}
+              onRemoveSet={(setName) => void dialogs.setRemove.ask(setName)}
               onSetDefault={(setName) => {
                 const draft = profilesStore.draft;
                 if (draft) profilesStore.draft = setDefaultSet(draft, setName);
@@ -1220,16 +811,16 @@
               unassigned={profilesStore.draft.parking ?? []}
               reports={profileReports}
               isProbing={profilesStore.isProbing}
-              {dragOverUnassigned}
+              dragOverUnassigned={drag.overUnassigned}
               onCardDragStart={(fromIdx) =>
-                (drag = { area: "unassigned", fromSet: null, fromIdx })}
-              onCardDragEnd={clearDrag}
-              onUnassignedDragOver={() => (dragOverUnassigned = true)}
-              onUnassignedDragLeave={() => (dragOverUnassigned = false)}
-              onUnassignedDrop={onDropUnassigned}
+                drag.start({ area: "unassigned", fromSet: null, fromIdx })}
+              onCardDragEnd={() => drag.clear()}
+              onUnassignedDragOver={() => drag.enterUnassigned()}
+              onUnassignedDragLeave={() => drag.leaveUnassigned()}
+              onUnassignedDrop={() => drag.dropToUnassigned()}
               onTest={onTestUnassigned}
-              onEdit={openUnassignedEdit}
-              onAdd={openUnassignedNew}
+              onEdit={(idx) => dialogs.profile.unassigned.show(idx)}
+              onAdd={() => dialogs.profile.unassigned.create()}
               onRemove={onRemoveUnassigned}
               {readOnly}
             />
@@ -1256,77 +847,76 @@
 />
 
 <ConfirmDialog
-  open={removeSetName !== null}
+  open={dialogs.setRemove.name !== null}
   title={manage_profiles_remove_set_confirm_title()}
-  description={removeSetError
-    ? removeSetError
-    : removeSetUsers.length > 0
+  description={dialogs.setRemove.error
+    ? dialogs.setRemove.error
+    : dialogs.setRemove.users.length > 0
       ? manage_profiles_remove_set_confirm_users_desc({
-          users: removeSetUsers.join(", "),
+          users: dialogs.setRemove.users.join(", "),
         })
       : manage_profiles_remove_set_confirm_desc()}
   confirmLabel={common_remove()}
   tone="danger"
-  onConfirm={onSetRemoveConfirmed}
-  onCancel={() => {
-    removeSetName = null;
-    removeSetUsers = [];
-    removeSetError = null;
-  }}
+  onConfirm={() => void dialogs.setRemove.confirm()}
+  onCancel={() => dialogs.setRemove.cancel()}
 />
 
 <ProviderDialog
-  open={providerDialog.open}
-  mode={providerDialog.mode}
-  provider={providerDialog.provider}
+  open={dialogs.provider.open}
+  mode={dialogs.provider.mode}
+  provider={dialogs.provider.provider}
   existingIds={providerIds}
-  onSave={onProviderSave}
-  onCancel={() => (providerDialog.open = false)}
+  onSave={(result) => dialogs.provider.save(result)}
+  onCancel={() => dialogs.provider.close()}
 />
 
 <SetDialog
-  open={setDialog.open}
-  name={setDialog.name}
-  description={profilesStore.draft?.sets[setDialog.name]?.description ?? null}
+  open={dialogs.set.open}
+  name={dialogs.set.name}
+  description={profilesStore.draft?.sets[dialogs.set.name]?.description ?? null}
   allNames={setNames}
-  profiles={profilesStore.draft?.sets[setDialog.name]?.profiles ?? []}
+  profiles={profilesStore.draft?.sets[dialogs.set.name]?.profiles ?? []}
   {providerIds}
-  onSave={onSetSave}
-  onCancel={() => (setDialog.open = false)}
+  onSave={(result) => dialogs.set.save(result)}
+  onCancel={() => dialogs.set.close()}
 />
 
 <ProfileDialog
-  open={unassignedDialog.open}
-  mode={unassignedDialog.mode}
+  open={dialogs.profile.unassigned.open}
+  mode={dialogs.profile.unassigned.mode}
   description={manage_profiles_unassigned_dialog_desc()}
-  title={unassignedDialog.mode === "new"
+  title={dialogs.profile.unassigned.mode === "new"
     ? manage_profiles_unassigned_dialog_new_title()
     : manage_profiles_unassigned_dialog_edit_title()}
-  profile={profilesStore.draft?.parking?.[unassignedDialog.idx] ?? null}
+  profile={profilesStore.draft?.parking?.[dialogs.profile.unassigned.idx] ??
+    null}
   {providerIds}
   {occupiedIds}
-  probeReport={unassignedProbeReport}
+  probeReport={dialogs.profile.unassigned.report}
   probeError={profilesStore.probeError}
-  onSave={onUnassignedSave}
-  onCancel={() => (unassignedDialog.open = false)}
-  onTest={onUnassignedTest}
-  onRemove={unassignedDialog.mode === "edit" ? onUnassignedRemove : null}
+  onSave={(values) => dialogs.profile.unassigned.save(values)}
+  onCancel={() => dialogs.profile.unassigned.close()}
+  onTest={(values) => void dialogs.profile.unassigned.test(values)}
+  onRemove={dialogs.profile.unassigned.mode === "edit"
+    ? () => dialogs.profile.unassigned.remove()
+    : null}
 />
 <ProfileDialog
-  open={profileDialog.open}
+  open={dialogs.profile.member.open}
   mode="edit"
   title={manage_profiles_profile_dialog_edit_title()}
   description={manage_profiles_profile_dialog_desc()}
-  profile={profilesStore.draft?.sets[profileDialog.setName]?.profiles[
-    profileDialog.idx
+  profile={profilesStore.draft?.sets[dialogs.profile.member.setName]?.profiles[
+    dialogs.profile.member.idx
   ] ?? null}
   {providerIds}
   {occupiedIds}
-  probeReport={profileProbeReport}
+  probeReport={dialogs.profile.member.report}
   probeError={profilesStore.probeError}
-  onSave={onProfileSave}
-  onCancel={() => (profileDialog.open = false)}
-  onTest={onProfileTest}
+  onSave={(values) => dialogs.profile.member.save(values)}
+  onCancel={() => dialogs.profile.member.close()}
+  onTest={(values) => void dialogs.profile.member.test(values)}
   onRemove={null}
 />
 
@@ -1346,13 +936,13 @@
 />
 
 <ConfirmDialog
-  open={removeProviderTarget !== null}
+  open={dialogs.providerRemove.target !== null}
   title={manage_profiles_remove_provider()}
   description={manage_profiles_remove_provider_desc()}
   confirmLabel={common_remove()}
   tone="danger"
-  onConfirm={onProviderRemoveConfirmed}
-  onCancel={() => (removeProviderTarget = null)}
+  onConfirm={() => dialogs.providerRemove.confirm()}
+  onCancel={() => dialogs.providerRemove.cancel()}
 />
 
 <ConfirmDialog
