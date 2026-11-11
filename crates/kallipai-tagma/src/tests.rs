@@ -2,19 +2,6 @@ use super::*;
 use serial_test::serial;
 
 #[test]
-fn polis_toml_rejects_the_relay_table_name() {
-    // Rename guard: a file kept from the old relays.toml shape
-    // must fail loudly naming the rename point, not parse as an
-    // empty config (deny_unknown_fields at both levels).
-    let err = toml::from_str::<PolisFile>(
-        "[[relay]]\nname = \"main\"\nurl = \"https://api.example.com\"\n",
-    )
-    .err()
-    .expect("the old table name must be rejected");
-    assert!(format!("{err}").contains("unknown field `relay`"), "{err}");
-}
-
-#[test]
 fn files_access_lists_enrolled_faces_in_config_order() {
     let mut inner = match std::sync::Arc::try_unwrap(crate::test_helpers::make_state()) {
         Ok(inner) => inner,

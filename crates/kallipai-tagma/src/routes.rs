@@ -11,6 +11,7 @@ mod inbox;
 pub(crate) mod ingest;
 pub(crate) mod lesche;
 pub(crate) mod message;
+pub(crate) mod polis;
 pub(crate) mod profile_probe;
 pub(crate) mod profiles;
 pub(crate) mod settings;
@@ -209,6 +210,11 @@ pub fn router() -> Router<SharedState> {
             "/settings/timezone",
             axum::routing::get(settings::get_timezone).put(settings::put_timezone),
         )
+        .route(
+            "/polis",
+            axum::routing::get(polis::list_polis).post(polis::add_polis),
+        )
+        .route("/polis/{name}", axum::routing::delete(polis::remove_polis))
         .route(
             "/work-schedule",
             axum::routing::get(crate::work_schedule::get_work_schedule)

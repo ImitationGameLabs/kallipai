@@ -500,6 +500,20 @@ pub async fn install_inbox_store(state: &SharedState) {
         .ok();
 }
 
+/// Install a relay slot for a route test: the connector under `name`, a run
+/// task that ends immediately, and the token that would stop it.
+pub fn install_relay(state: &SharedState, name: &str, handle: crate::relay::RelayHandle) {
+    let displaced = state.claim_relay_slot(
+        name,
+        crate::state::ActiveRelay {
+            handle,
+            join: tokio::spawn(async {}),
+            cancel: CancellationToken::new(),
+        },
+    );
+    assert!(displaced.is_none(), "a test slot is claimed once");
+}
+
 /// Install an external projector with a real (tempdir) history store and
 /// subscribe to its frames. Returns the db handle, the frame receiver, and the
 /// tempdir (keep it alive for the test's duration).

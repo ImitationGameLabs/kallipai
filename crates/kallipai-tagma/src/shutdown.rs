@@ -25,8 +25,8 @@ pub(crate) async fn drain_relays(state: &SharedState) {
     }
     tracing::info!(count = entries.len(), "waiting for relays to shut down");
     let bound = Duration::from_secs(GRACEFUL_SHUTDOWN_TIMEOUT_SECS);
-    join_all(entries.into_iter().map(|(name, _handle, join)| async move {
-        if tokio::time::timeout(bound, join).await.is_err() {
+    join_all(entries.into_iter().map(|(name, relay)| async move {
+        if tokio::time::timeout(bound, relay.join).await.is_err() {
             tracing::warn!(
                 relay = %name,
                 "relay did not shut down in time; task will be aborted on exit"

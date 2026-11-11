@@ -356,8 +356,21 @@ pub struct AppState {
     /// bridge/agent tasks already hold `Arc<AppState>` clones by the time the
     /// relays are installed. Read under the mutex (e.g. by the lesche message
     /// routes); guards never span an await.
-    pub relays:
-        std::sync::Mutex<HashMap<String, (crate::relay::RelayHandle, tokio::task::JoinHandle<()>)>>,
+    pub relays: std::sync::Mutex<HashMap<String, ActiveRelay>>,
+    /// Whether this boot took its relay configuration from the sugar
+    /// (`KALLIPAI_POLIS_URL` / `KALLIPAI_TAGMA_RELAY_ENROLLMENT_CODE`)
+    /// rather than `polis.toml`. Such a boot must not write the file: a file
+    /// beside those variables is the boot's own fail-fast conflict, so a
+    /// write here would make the next start refuse to come up.
+    pub polis_sugar: bool,
+    /// One writer at a time across the whole `/polis` surface: the file and
+    /// the relay map are two halves of one state, so a POST and a DELETE must
+    /// not interleave (a POST that installs a relay just before a DELETE
+    /// removes the entry would otherwise end with an entry and no relay). Held
+    /// across the whole call, enrollment round trip included. A DELETE's
+    /// bounded wait for its relay's task runs under this lock too, so one
+    /// DELETE can hold a POST off for up to that bound.
+    pub polis_writes: tokio::sync::Mutex<()>,
     /// The in-process typed topic bus (see [`crate::bus`]): the fixed registry
     /// of chat topics every pump and serving path publishes/subscribes
     /// through. Built once here at construction — the single registration
@@ -945,6 +958,7 @@ impl AppState {
             gateway_params,
             platforms: std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(platforms)),
             gateway_signals,
+            polis_sugar: false,
             // Bounded so a wedged files connection cannot hang a media
             // fetch, the ingest route being this client's only user.
             files_http: kallipai_common::telemetry::http_client(
@@ -955,6 +969,7 @@ impl AppState {
             .expect("files HTTP client constructs without network"),
             lock_manager: Arc::new(kallipai_adk::dirlock::DirLockManager::new()),
             relays: std::sync::Mutex::new(HashMap::new()),
+            polis_writes: tokio::sync::Mutex::new(()),
             bus: crate::bus::tagma_bus().expect("static topic registry is conflict-free"),
             external: std::sync::OnceLock::new(),
             joined_rooms: Arc::new(JoinedRooms::new()),
@@ -996,6 +1011,21 @@ impl AppState {
         })
     }
 }
+/// One installed relay connector and the lever that stops it alone.
+///
+/// `cancel` is a child of the tagma-wide `shutdown` token, so a process
+/// shutdown still stops every relay, while `DELETE /polis/{name}` cancels
+/// exactly one and awaits its `join` under the same bound the shutdown drain
+/// uses.
+pub struct ActiveRelay {
+    /// The connector the lesche routes clone (rooms, direct sessions, send).
+    pub handle: crate::relay::RelayHandle,
+    /// The tunnel task: cancelled by `cancel`, awaited by whoever takes this
+    /// entry out of the map.
+    pub join: tokio::task::JoinHandle<()>,
+    /// Stops this relay alone (the tunnel task and the agent SSE carrier).
+    pub cancel: tokio_util::sync::CancellationToken,
+}
 
 impl AppState {
     /// Bump the invalidation generation: every subscribed snapshot pump wakes
@@ -1013,18 +1043,18 @@ impl AppState {
         self.invalidations.subscribe()
     }
 
-    /// Install the named relay connector + its run-task handle, at startup.
-    /// Called from `main` after `ensure_root_agent` (once per successfully
-    /// activated entry). Must not use `Arc::get_mut` — the root agent already
-    /// holds `Arc<AppState>` clones by this point.
-    pub fn set_relay(
-        &self,
-        name: &str,
-        handle: crate::relay::RelayHandle,
-        join: tokio::task::JoinHandle<()>,
-    ) {
+    /// Install the named relay connector and report what it displaced: its
+    /// handle, the tunnel task's join handle, and the token that stops it
+    /// alone. The check and the insert share one lock, so two activations of
+    /// one name can never both believe the slot was free; the caller owns the
+    /// returned relay and must stop it. Called at startup per activated entry
+    /// and by `POST /polis`. Must not use `Arc::get_mut` — the root agent
+    /// already holds `Arc<AppState>` clones by this point.
+    pub fn claim_relay_slot(&self, name: &str, relay: ActiveRelay) -> Option<ActiveRelay> {
         let mut slots = self.relays.lock().unwrap_or_else(|e| e.into_inner());
-        slots.insert(name.to_owned(), (handle, join));
+        let displaced = slots.insert(name.to_owned(), relay);
+        crate::metrics().set_relays_configured(slots.len() as i64);
+        displaced
     }
 
     /// The platforms this tagma can fetch stored records from: every
@@ -1075,11 +1105,32 @@ impl AppState {
             .and_then(|face| face.credential.clone())
     }
 
+    /// The platform faces this boot resolved, in configuration order: name
+    /// and origin. This is the gateway's target list, and it does not change
+    /// while the process runs; `GET /polis` reads an entry the file does not
+    /// hold (a sugar boot's one entry) from here.
+    pub fn gateway_faces(&self) -> Vec<(String, String)> {
+        self.platforms
+            .load()
+            .iter()
+            .map(|face| (face.name.clone(), face.origin.clone()))
+            .collect()
+    }
+
+    /// Whether the boot resolved this name as a platform face, i.e. whether
+    /// the gateway would reach it on this boot.
+    pub fn is_gateway_face(&self, entry_name: &str) -> bool {
+        self.platforms
+            .load()
+            .iter()
+            .any(|face| face.name == entry_name)
+    }
+
     /// Clone the named relay connector out for a route (guard dropped before
     /// the caller awaits). `None` when that entry is not online.
     pub fn relay(&self, name: &str) -> Option<crate::relay::RelayHandle> {
         let slots = self.relays.lock().unwrap_or_else(|e| e.into_inner());
-        slots.get(name).map(|(handle, _)| handle.clone())
+        slots.get(name).map(|relay| relay.handle.clone())
     }
 
     /// Clone every installed relay connector out (order: map iteration --
@@ -1088,24 +1139,26 @@ impl AppState {
     /// before the caller awaits.
     pub fn relay_handles(&self) -> Vec<crate::relay::RelayHandle> {
         let slots = self.relays.lock().unwrap_or_else(|e| e.into_inner());
-        slots.values().map(|(handle, _)| handle.clone()).collect()
+        slots.values().map(|relay| relay.handle.clone()).collect()
     }
 
-    /// Take every relay connector + run-task handle out so graceful shutdown
-    /// can drain them all. The map is left empty; the lesche message routes
-    /// are not served during the shutdown drain.
-    pub fn take_relays(
-        &self,
-    ) -> Vec<(
-        String,
-        crate::relay::RelayHandle,
-        tokio::task::JoinHandle<()>,
-    )> {
+    /// Take every relay out so graceful shutdown can drain them all: the name
+    /// beside the `ActiveRelay` whose `join` it awaits. The map is left empty;
+    /// the lesche message routes are not served during the drain.
+    pub fn take_relays(&self) -> Vec<(String, ActiveRelay)> {
         let mut slots = self.relays.lock().unwrap_or_else(|e| e.into_inner());
-        slots
-            .drain()
-            .map(|(name, (handle, join))| (name, handle, join))
-            .collect()
+        let drained = slots.drain().collect();
+        crate::metrics().set_relays_configured(0);
+        drained
+    }
+
+    /// Take one relay out by name, if it is installed: `DELETE /polis/{name}`
+    /// needs both halves — the token to cancel it and the task to await.
+    pub fn take_relay(&self, name: &str) -> Option<ActiveRelay> {
+        let mut slots = self.relays.lock().unwrap_or_else(|e| e.into_inner());
+        let taken = slots.remove(name);
+        crate::metrics().set_relays_configured(slots.len() as i64);
+        taken
     }
 }
 

@@ -1024,7 +1024,7 @@ async fn setup_lesche_send(
         id.clone(),
         std::sync::Arc::downgrade(&state),
     );
-    state.set_relay("test", handle, tokio::spawn(async {}));
+    crate::test_helpers::install_relay(&state, "test", handle);
     (state, id, mock)
 }
 
@@ -1545,7 +1545,7 @@ async fn read_one_room_row(text: &str, quote: Option<i64>, mentions: Vec<MemberI
         id.clone(),
         std::sync::Arc::downgrade(&state),
     );
-    state.set_relay("test", handle, tokio::spawn(async {}));
+    crate::test_helpers::install_relay(&state, "test", handle);
     state
         .joined_rooms
         .mark_rooms_rosterless("test", [RoomId::from("room-1".to_string())])
@@ -1666,7 +1666,7 @@ async fn read_room_forwards_the_backward_cursor() {
         id.clone(),
         std::sync::Arc::downgrade(&state),
     );
-    state.set_relay("test", handle, tokio::spawn(async {}));
+    crate::test_helpers::install_relay(&state, "test", handle);
     state
         .joined_rooms
         .mark_rooms_rosterless("test", [RoomId::from("room-1".to_string())])

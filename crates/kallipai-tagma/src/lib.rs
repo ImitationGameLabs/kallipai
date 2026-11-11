@@ -22,6 +22,7 @@ pub mod inbox;
 pub mod lifecycle;
 pub mod messaging;
 pub mod metrics;
+pub(crate) mod polis_config;
 pub mod probe;
 pub mod profile_pacing;
 pub mod profile_source;
@@ -201,7 +202,7 @@ pub async fn run(args: Args, operator_pin: Option<String>) -> Result<()> {
         profile_source::spawn_gateway_signal_task(profile_slot.clone(), rx);
         Some(tx)
     };
-    let state = Arc::new(AppState::with_limits(
+    let mut state = AppState::with_limits(
         operator.hash().clone(),
         args.max_agents,
         args.max_subagents,
@@ -214,7 +215,11 @@ pub async fn run(args: Args, operator_pin: Option<String>) -> Result<()> {
         std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(gateway_params)),
         platforms,
         gateway_signals,
-    ));
+    );
+    // The sugar boot names its one entry in the environment; the /polis
+    // write faces refuse to add a file beside it (see `polis_sugar`).
+    state.polis_sugar = uses_sugar(&args);
+    let state = Arc::new(state);
     // The degraded-boot repull task: while the live source is the model
     // gateway and its boot fetch failed, retry in the background and, on
     // the first success, rebuild the bundle and broadcast the reset
@@ -457,7 +462,8 @@ pub async fn run(args: Args, operator_pin: Option<String>) -> Result<()> {
     // (logged, skipped); configuration errors already aborted boot above.
     let relay_count = relay_plan.len();
     for (entry, boot) in relay_plan {
-        if let Err(e) = activate_relay(&state, &entry, boot).await {
+        let cancel = state.shutdown.child_token();
+        if let Err(e) = activate_relay(&state, &entry, boot, cancel).await {
             tracing::error!(
                 relay = %entry.name,
                 "relay activation failed, entry degraded to local-only: {e:#}"
@@ -1102,35 +1108,18 @@ pub(crate) fn gateway_params_from(
 /// URL change never moves the identity directory). `polis_url` is the
 /// platform edge origin the entry enrolls against.
 #[derive(Debug, Clone, PartialEq)]
-struct RelayEntry {
-    name: String,
-    polis_url: String,
-    enrollment_code: Option<String>,
+pub(crate) struct RelayEntry {
+    pub(crate) name: String,
+    pub(crate) polis_url: String,
+    pub(crate) enrollment_code: Option<String>,
 }
 
-/// The `[[polis]]` array of `polis.toml`.
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PolisFile {
-    #[serde(default)]
-    polis: Vec<PolisTomlEntry>,
-}
-
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PolisTomlEntry {
-    name: String,
-    url: String,
-    enrollment_code: Option<String>,
-}
-
-/// A relay name must be a DNS-label-like slug (`[a-z0-9][a-z0-9-]*`): it is a
-/// path component (`credentials/<name>/`) and a log key, so it stays flat,
-/// lowercase, and unambiguous.
-fn valid_entry_name(name: &str) -> bool {
-    let mut chars = name.chars();
-    matches!(chars.next(), Some(c) if c.is_ascii_lowercase() || c.is_ascii_digit())
-        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+/// Whether this boot took its polis configuration from the environment
+/// instead of the file. One predicate for both readers: the boot's conflict
+/// rule and the write faces' refusal must agree on what "from the
+/// environment" means, or a new variable could pass one and fail the other.
+pub(crate) fn uses_sugar(args: &args::Args) -> bool {
+    args.polis_url.is_some() || args.relay_enrollment_code.is_some()
 }
 
 /// Resolve the configured relay entries: `<data_root>/polis.toml` when
@@ -1143,8 +1132,8 @@ fn valid_entry_name(name: &str) -> bool {
 /// - the file exists but declares zero `[[polis]]` entries;
 /// - a name fails the slug grammar or repeats.
 fn resolve_relay_entries(args: &args::Args) -> Result<Vec<RelayEntry>> {
-    let toml_path = data_root()?.join("polis.toml");
-    let sugar_set = args.polis_url.is_some() || args.relay_enrollment_code.is_some();
+    let toml_path = polis_config::polis_path()?;
+    let sugar_set = uses_sugar(args);
     if toml_path.exists() {
         anyhow::ensure!(
             !sugar_set,
@@ -1155,37 +1144,12 @@ fn resolve_relay_entries(args: &args::Args) -> Result<Vec<RelayEntry>> {
             ),
             toml_path.display()
         );
-        let raw = std::fs::read_to_string(&toml_path)
-            .with_context(|| format!("read {}", toml_path.display()))?;
-        let file: PolisFile =
-            toml::from_str(&raw).with_context(|| format!("parse {}", toml_path.display()))?;
+        let entries = polis_config::read_entries_at(&toml_path)?;
         anyhow::ensure!(
-            !file.polis.is_empty(),
+            !entries.is_empty(),
             "{} declares no [[polis]] entries; add one or delete the file",
             toml_path.display()
         );
-        let mut seen = std::collections::HashSet::new();
-        let mut entries = Vec::with_capacity(file.polis.len());
-        for e in file.polis {
-            anyhow::ensure!(
-                valid_entry_name(&e.name),
-                concat!(
-                    "relay name {:?} is not a slug matching [a-z0-9][a-z0-9-]*",
-                    " (it is a credentials/<name>/ path component)"
-                ),
-                e.name
-            );
-            anyhow::ensure!(
-                seen.insert(e.name.clone()),
-                "relay name {:?} repeats",
-                e.name
-            );
-            entries.push(RelayEntry {
-                name: e.name,
-                polis_url: kallipai_common::polis::polis_origin(Some(e.url))?,
-                enrollment_code: e.enrollment_code,
-            });
-        }
         Ok(entries)
     } else if sugar_set {
         // Single-entry sugar: one platform identity, as one entry named
@@ -1349,7 +1313,7 @@ pub(crate) fn data_root() -> Result<std::path::PathBuf> {
     kallipai_adk::persistence::data_dir_root()
 }
 
-fn credentials_dir() -> Result<std::path::PathBuf> {
+pub(crate) fn credentials_dir() -> Result<std::path::PathBuf> {
     data_root().map(|d| kallipai_daemon_common::credentials::credentials_root(&d))
 }
 
@@ -1386,7 +1350,7 @@ async fn init_direct(state: &Arc<AppState>) -> Result<()> {
 
 /// How the relay connector enters the archeion at boot.
 #[derive(Debug, PartialEq)]
-enum EnrollEntry {
+pub(crate) enum EnrollEntry {
     /// Reuse the credentials persisted by a prior enrollment.
     Stored,
     /// Stored credentials plus an enrollment code at the same archeion (or
@@ -1423,7 +1387,7 @@ enum EnrollEntry {
 /// origin unrecorded — credentials that predate origin recording) is the
 /// stale false-alarm shape: the code is ignored with a loud warning
 /// (see `ignored_code_warning`), not an error.
-fn resolve_enroll_entry(
+pub(crate) fn resolve_enroll_entry(
     stored: Option<&credentials::StoredTagma>,
     configured_archeion_url: &str,
     code: Option<&str>,
@@ -1491,21 +1455,65 @@ fn ignored_code_warning(credentials_dir: &std::path::Path, address_recorded: boo
     )
 }
 
+/// Why [`activate_relay`] failed, in the terms the caller reports it: who
+/// carries the fault, and what the platform already knows.
+#[derive(Debug)]
+pub(crate) enum ActivationFailure {
+    /// Nothing reached the platform: directories, permissions, the stored
+    /// record, or the client. No code was spent and nothing exists to clean
+    /// up on the platform.
+    Local(anyhow::Error),
+    /// The platform answered and refused the code. The code stays the
+    /// caller's to fix or replace.
+    Refused(anyhow::Error),
+    /// The platform gave no answer this tagma can read: a transport failure,
+    /// or a reply whose body would not decode. Whether a registration exists
+    /// is unknown, so the caller is told to look before minting another code.
+    Unconfirmed(anyhow::Error),
+    /// The platform redeemed the code and issued an identity, but the
+    /// credentials could not be written. The registration exists there and
+    /// the code is spent; only a revoke or a retry settles it.
+    CredentialsNotStored {
+        tagma_id: String,
+        error: anyhow::Error,
+    },
+    /// The credentials are in place; the connector itself did not start.
+    Connector(anyhow::Error),
+}
+
+impl std::fmt::Display for ActivationFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Local(error)
+            | Self::Refused(error)
+            | Self::Unconfirmed(error)
+            | Self::Connector(error) => write!(f, "{error:#}"),
+            Self::CredentialsNotStored { tagma_id, error } => write!(
+                f,
+                "the platform enrolled {tagma_id}, but its credentials could not be stored: {error:#}"
+            ),
+        }
+    }
+}
+
 /// Build and install one relay connector. `entry` is the config entry (name,
 /// archeion/lesche URLs, first-run code) and `boot` the fail-fast decision from
 /// `resolve_relay_plan` (reuse stored credentials, or first-run enrollment
 /// with a code); runtime failures propagate to `main`'s per-entry degrade.
 /// The relay forwards the projector's bus (it does not own a history
 /// store); GC runs unconditionally from `main`.
-async fn activate_relay(
+pub(crate) async fn activate_relay(
     state: &Arc<AppState>,
     entry: &RelayEntry,
     boot: EnrollEntry,
-) -> Result<()> {
-    let root = credentials_dir()?;
+    cancel: tokio_util::sync::CancellationToken,
+) -> Result<(), ActivationFailure> {
+    let root = credentials_dir().map_err(ActivationFailure::Local)?;
     let entry_dir = root.join(&entry.name);
-    std::fs::create_dir_all(&entry_dir).context("create entry credentials dir")?;
-    credentials::set_owner_only(&entry_dir)?;
+    std::fs::create_dir_all(&entry_dir)
+        .context("create entry credentials dir")
+        .map_err(ActivationFailure::Local)?;
+    credentials::set_owner_only(&entry_dir).map_err(ActivationFailure::Local)?;
     // The stale-code verdict lands here rather than in the resolver so it
     // is emitted after logging is up and next to the entry that hit it.
     if let EnrollEntry::StoredIgnoringCode { address_recorded } = boot {
@@ -1528,7 +1536,7 @@ async fn activate_relay(
     // archeions (it proves "same physical tagma"), so it lives at the
     // credentials root, while each archeion's (tagma.id, tagma.token) pair
     // lives in the entry's subdirectory.
-    let device = credentials::load_or_create_device(&root)?;
+    let device = credentials::load_or_create_device(&root).map_err(ActivationFailure::Local)?;
 
     // The boot decision (reuse stored credentials vs first-run enroll) was
     // made by the caller via `resolve_enroll_entry`; this only executes it.
@@ -1537,7 +1545,8 @@ async fn activate_relay(
         | EnrollEntry::StoredIgnoringCode { .. }
         | EnrollEntry::StoredReorigin { .. } => {
             let stored = credentials::load_tagma(&entry_dir)
-                .context("stored credentials missing at relay activation (deleted after boot?)")?;
+                .context("stored credentials missing at relay activation (deleted after boot?)")
+                .map_err(ActivationFailure::Local)?;
             // Every stored arm converges here, so the origin rebind runs on
             // every stored-credential boot: a record that predates origin
             // recording gets the configured origin written, and a record
@@ -1557,11 +1566,27 @@ async fn activate_relay(
                 "{}/v1/archeion",
                 entry.polis_url
             ))
-            .build()?;
+            .build()
+            .map_err(ActivationFailure::Local)?;
             let (tagma_id, token) = metrics()
                 .observe_outbound(crate::metrics::Leg::Archeion, client.enroll(&code, &device))
-                .await?;
-            credentials::save_tagma(&entry_dir, tagma_id.as_ref(), &token, &entry.polis_url)?;
+                .await
+                .map_err(|error| {
+                    match error.downcast_ref::<kallipai_common::protocol::ApiError>() {
+                        // The platform answered with a status it means: a refusal.
+                        Some(_) => ActivationFailure::Refused(error),
+                        // No usable answer: the request may or may not have
+                        // reached it (a 2xx with an undecodable body leaves a
+                        // registration behind), so this is neither a refusal nor a
+                        // local failure.
+                        None => ActivationFailure::Unconfirmed(error),
+                    }
+                })?;
+            credentials::save_tagma(&entry_dir, tagma_id.as_ref(), &token, &entry.polis_url)
+                .map_err(|error| ActivationFailure::CredentialsNotStored {
+                    tagma_id: tagma_id.to_string(),
+                    error,
+                })?;
             info!(relay = %entry.name, tagma = %tagma_id, "relay: enrolled with archeion");
             // First-run enroll boot: the projector's write-once ids are
             // claimed by the first successful enrollee — the primary-archeion
@@ -1594,7 +1619,8 @@ async fn activate_relay(
         let registry = state.registry.read().await;
         let (id, _entry) = registry
             .root_agent()
-            .context("root agent missing at relay activation")?;
+            .context("root agent missing at relay activation")
+            .map_err(ActivationFailure::Connector)?;
         id.clone()
     };
 
@@ -1611,7 +1637,8 @@ async fn activate_relay(
         &entry.polis_url,
         "keryx",
     ))
-    .build()?;
+    .build()
+    .map_err(ActivationFailure::Connector)?;
 
     let handle = relay::RelayHandle::new(
         lesche.clone(),
@@ -1631,13 +1658,36 @@ async fn activate_relay(
         "relay connector active"
     );
 
-    let join = tokio::spawn(handle.clone().run(state.shutdown.clone()));
-    state.set_relay(&entry.name, handle.clone(), join);
+    let join = tokio::spawn(handle.clone().run(cancel.clone()));
+    let displaced = state.claim_relay_slot(
+        &entry.name,
+        state::ActiveRelay {
+            handle: handle.clone(),
+            join,
+            cancel: cancel.clone(),
+        },
+    );
+    if let Some(previous) = displaced {
+        // One name, one connector: a second activation of the same entry
+        // would put two live connections under one platform identity and
+        // two writers on the same per-name state. The slot is exclusive, so
+        // the displaced connector is stopped and awaited here rather than
+        // left running with nobody holding its token.
+        previous.cancel.cancel();
+        let bound = std::time::Duration::from_secs(shutdown::GRACEFUL_SHUTDOWN_TIMEOUT_SECS);
+        if tokio::time::timeout(bound, previous.join).await.is_err() {
+            warn!(
+                relay = %entry.name,
+                "the displaced relay connector did not drain within {}s; it will end with the process",
+                bound.as_secs()
+            );
+        }
+    }
     // The agent SSE carrier: the delivery feed for room and direct-session
     // envelopes, held beside the device-proof tunnel (which keeps the
     // control frames). Unconditional -- the two carriers are complementary
     // feeds, not alternatives.
-    tokio::spawn(relay::agent_sse::run(handle, state.shutdown.clone()));
+    tokio::spawn(relay::agent_sse::run(handle, cancel));
     Ok(())
 }
 

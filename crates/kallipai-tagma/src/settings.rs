@@ -179,40 +179,70 @@ fn write_preserving(key_path: &[&str], value: Option<&toml::Value>) -> anyhow::R
         }
     }
     let body = toml::to_string_pretty(&doc)?;
-    let staged = path
+    write_verified(&path, &body, |written| verify_key(written, key_path, value))
+}
+
+/// Write `body` to `path` through the one commit discipline the tagma uses for
+/// its own configuration documents: a same-directory temp file, fsynced, read
+/// back and handed to `verify`, then renamed over `path`, with the directory
+/// entry synced and the file left owner-only.
+///
+/// `verify` is the round-trip proof and the caller's guard: it returns an
+/// error unless the staged bytes carry exactly what was meant to be written.
+/// Nothing is committed then and the temp file is removed, so the previous
+/// document survives a failure at any point.
+pub(crate) fn write_verified(
+    path: &std::path::Path,
+    body: &str,
+    verify: impl FnOnce(&str) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    let parent = path
         .parent()
-        .expect("settings_path always has a parent")
-        .join(format!("{}.tmp{}", SETTINGS_FILE, std::process::id()));
-    if let Err(error) = stage_and_verify(&staged, &body, key_path, value) {
+        .ok_or_else(|| anyhow::anyhow!("{} has no parent directory", path.display()))?;
+    std::fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+    let staged = parent.join(format!(
+        "{}.tmp{}",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("config"),
+        std::process::id()
+    ));
+    let stage = || -> anyhow::Result<()> {
+        std::fs::write(&staged, body).with_context(|| format!("staging {}", staged.display()))?;
+        std::fs::File::open(&staged)
+            .and_then(|file| file.sync_all())
+            .with_context(|| format!("fsyncing {}", staged.display()))?;
+        let written = std::fs::read_to_string(&staged)
+            .with_context(|| format!("re-reading {}", staged.display()))?;
+        verify(&written)
+    };
+    if let Err(error) = stage() {
         let _ = std::fs::remove_file(&staged);
         return Err(error);
     }
-    std::fs::rename(&staged, &path).with_context(|| format!("committing {}", path.display()))?;
-    // The rename's directory entry is what a power loss could steal;
-    // syncing the directory makes the commit durable (rewrite.rs).
-    if let Some(dir) = path.parent().and_then(|p| std::fs::File::open(p).ok()) {
-        let _ = dir.sync_all();
-    }
-    crate::credentials::set_owner_only(&path)?;
+    std::fs::rename(&staged, path).with_context(|| format!("committing {}", path.display()))?;
+    // The rename's directory entry is what a power loss could steal; syncing
+    // the directory makes the commit durable (rewrite.rs).
+    sync_parent_dir(path);
+    crate::credentials::set_owner_only(path)?;
     Ok(())
 }
-/// Write the staged bytes, fsync them, and re-parse them as the
-/// round-trip proof: what lands on disk must be valid TOML carrying
-/// exactly the intended key before the commit rename (the rewrite.rs
-/// discipline applied to a settings document).
-fn stage_and_verify(
-    staged: &std::path::Path,
-    body: &str,
-    key_path: &[&str],
-    value: Option<&toml::Value>,
-) -> anyhow::Result<()> {
-    std::fs::write(staged, body).with_context(|| format!("staging {}", staged.display()))?;
-    std::fs::File::open(staged)
-        .and_then(|f| f.sync_all())
-        .with_context(|| format!("fsyncing {}", staged.display()))?;
-    let written = std::fs::read_to_string(staged)?;
-    let reparsed: toml::Value = toml::from_str(&written)
-        .with_context(|| format!("re-parsing staged {} failed", staged.display()))?;
+
+/// Sync the directory holding `path`, so a rename or an unlink in it is
+/// durable (a power loss could otherwise keep the old directory entry).
+pub(crate) fn sync_parent_dir(path: &std::path::Path) {
+    if let Some(parent) = path.parent()
+        && let Ok(directory) = std::fs::File::open(parent)
+    {
+        let _ = directory.sync_all();
+    }
+}
+
+/// The settings round-trip proof: the staged bytes must parse as TOML and
+/// carry exactly the intended key (or its absence) before the commit rename.
+fn verify_key(written: &str, key_path: &[&str], value: Option<&toml::Value>) -> anyhow::Result<()> {
+    let reparsed: toml::Value = toml::from_str(written)
+        .with_context(|| "re-parsing the staged settings document failed")?;
     let (last, parents) = key_path
         .split_last()
         .expect("a settings key path is never empty");

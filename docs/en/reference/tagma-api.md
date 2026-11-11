@@ -98,6 +98,9 @@ single operator comparison additionally uses a constant-time compare.
 | `GET`    | `/tasks`                                              | One page of task rows (filter and paging query params)                                                          | any                          |
 | `GET`    | `/tasks/{id}`                                         | One task with its full event trail                                                                              | any                          |
 | `POST`   | `/tasks`, `/tasks/{id}/…`                             | Write verbs: `create` plus start, confirm, review, pause, resume, note, close, reopen, archive; see Task Ledger | any                          |
+| `GET`    | `/polis`                                              | List the relay entries with their enrollment, relay and gateway state                                            | operator                     |
+| `POST`   | `/polis`                                              | Add one entry: enroll (or reuse), start its relay, write `polis.toml`                                            | operator                     |
+| `DELETE` | `/polis/{name}`                                       | Remove one entry and stop its relay (`?forget=true` drops its credentials)                                        | operator                     |
 | `GET`    | `/health`                                             | Readiness and degradation report (JSON)                                                                         | loopback peer only           |
 
 The `kallip policy` CLI wraps the exec-policy reads and writes
@@ -1607,6 +1610,68 @@ negative deltas are clamped to zero.
 The total covers the windows, not the task alone: work the same agent did
 elsewhere while a window was open lands in these numbers too. A task whose
 trail holds no snapshot at all omits the field rather than reporting zero.
+
+### Polis Entries
+
+`/polis` reads and writes the instance's own `polis.toml`: one entry per
+platform this tagma is enrolled with. All three faces are operator-only,
+because an entry names a platform origin and the enrolled identity stored
+under `credentials/<name>/`.
+
+`GET /polis` answers `{entries, sugar}`. A row exists for every entry the
+file declares, in file order, plus the sugar boot's one environment entry;
+a name deleted from the file is gone from this list. Each row carries
+`name`, `url`, `enrolled` (a stored id and token for that name), `tagma_id`,
+`relay` (`true` while the connector runs in this process) and `gateway`
+(`true` when the boot resolved this name as one of the gateway's targets,
+so a `true` there with a `false` relay says the next start still knows the
+name). `sugar` is true when the configuration came from
+`KALLIPAI_POLIS_URL` or `KALLIPAI_TAGMA_RELAY_ENROLLMENT_CODE` instead of the
+file; such an instance lists its one entry and refuses both write faces
+with 409, because a file beside those variables is the conflict the next
+start refuses on.
+
+`POST /polis` takes `{name, url, code}` and runs in this order: validate,
+activate (reuse stored credentials, or spend `code` on a first enrollment,
+then start the relay), write the file. The tagma stores no owner access
+token: the platform mints the code (30 minutes by default) and this call
+spends it. An unparsable file, a refused code or a failed commit leaves the
+previous state: same bytes, no relay, and no credentials directory the call
+did not find. A code sent for an already-enrolled entry is refused (409)
+without reaching the platform; the same call without a code reuses the
+stored credentials and returns `already attached`, and its note says which
+half of that answer holds: a relay was already running and stayed as it was,
+or none was running and one is started by this call. The row in a write
+response is read back from the file, not assembled for the reply. A file the
+tagma cannot parse answers 500 `polis_file_unreadable` with the cause and the
+instruction to fix the file, so an operator editing it by hand is not told a
+server is broken.
+
+A failure says which half it came from. 400 means the request or the
+platform said no and nothing was spent: a bad name or origin, no code, or
+an enrollment code the platform answered a refusal to. 500
+`polis_activation_failed` means the relay could not be prepared here
+before anything reached the platform. 500 `polis_enrollment_not_stored`
+means the platform enrolled the tagma and the credentials could not be
+written; its message names the new id and the revoke command. 502 covers
+the two answers that leave the outcome open or unfinished: the platform
+gave no usable answer, so a registration may or may not exist and the
+message points at `kallipctl polis status` before another code is minted;
+or the credentials are stored and the connector did not start, so a retry
+reuses them without enrolling again. A `polis.toml` that would not be
+removed answers 500 `polis_file_not_removed` and says the entry and its
+relay are still in place.
+
+`DELETE /polis/{name}` removes the entry, stops that relay alone and, with
+`?forget=true`, deletes `credentials/<name>/`. Removing the last entry
+deletes `polis.toml` itself, because a document with no `[[polis]]` entry
+is a configuration error at the next start while a missing file means
+local-only. The entry the model profile source is pinned to is refused
+with 409: switch or clear `[profiles.source] polis` first.
+
+Both write responses say the boundary in words: the relay connects (or
+stops) now, while the gateway's target list stays the one resolved at
+startup, so a change there takes effect on the next start.
 
 ### SSE Event Types
 
