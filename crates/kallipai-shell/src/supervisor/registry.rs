@@ -266,8 +266,17 @@ impl BackgroundRegistry {
         // Same bare-errno problem as the foreground path: use the sandbox's own
         // record when the child left one, name only what this side can verify
         // otherwise, and keep `Io` when neither names a step. The record is read
-        // only after `spawn` fails: before that the channel is empty.
-        let mut child = cmd.spawn().map_err(|error| {
+        // only after `spawn` fails: before that the channel is empty. The
+        // test-only fault arm sits exactly where `spawn` would run, so a
+        // refused `chdir` reaches this path's error shaping unchanged.
+        #[cfg(test)]
+        let spawned = match crate::backend::take_spawn_fault(&cwd) {
+            Some(error) => Err(error),
+            None => cmd.spawn(),
+        };
+        #[cfg(not(test))]
+        let spawned = cmd.spawn();
+        let mut child = spawned.map_err(|error| {
             #[cfg(all(target_os = "linux", feature = "landlock"))]
             let refused = sandbox_trace.as_ref().and_then(|trace| trace.refused());
             #[cfg(not(all(target_os = "linux", feature = "landlock")))]

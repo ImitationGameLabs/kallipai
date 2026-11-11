@@ -1558,7 +1558,8 @@ async fn background_tasks_start_in_the_agent_working_directory() {
     let id = backend
         .spawn_background("touch bg-relative.txt; pwd -P > started-in.txt; sleep 30")
         .await
-        .unwrap();
+        .unwrap()
+        .task_id;
     assert_eq!(
         recorded_cwd(&backend, &id),
         agent_dir,
@@ -1649,7 +1650,8 @@ async fn running_set_is_readable_while_a_foreground_command_holds_the_lock() {
         .await
         .spawn_background("sleep 30")
         .await
-        .unwrap();
+        .unwrap()
+        .task_id;
 
     let (held_tx, held_rx) = tokio::sync::oneshot::channel();
     let foreground = {
@@ -1796,41 +1798,368 @@ async fn a_relative_shell_missing_from_the_path_names_the_exec_step() {
     }
 }
 
-/// A directory with no permission bits is the case this probe covers: the child
-/// cannot enter it, and the error names the step and the refused path.
+/// A directory without search bits is refused before the fork: the command
+/// runs in the fallback and the result says why. The probe reads the mode as
+/// well as `access(X_OK)`, so this holds for a privileged caller too.
 #[tokio::test]
-async fn a_working_directory_without_permission_bits_reports_permission_denied() {
+async fn a_working_directory_without_search_bits_falls_back_and_still_runs() {
     use std::os::unix::fs::PermissionsExt;
 
-    // With uid 0 and CAP_DAC_OVERRIDE the kernel ignores the mode bits, so the
-    // spawn would succeed and this probe could not fail as intended: skip there
-    // explicitly rather than assert a failure the environment cannot produce.
-    // SAFETY: geteuid takes no arguments and cannot fail.
-    if unsafe { libc::geteuid() } == 0 {
-        return;
-    }
     let tmp = tempfile::TempDir::new().unwrap();
     let dir = tmp.path().join("no-access");
     std::fs::create_dir(&dir).unwrap();
-    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o644)).unwrap();
     let mut backend = ShellBuilder::new()
         .initial_cwd(dir.clone())
-        .fallback_cwd(dir.clone())
+        .fallback_cwd(tmp.path().to_path_buf())
         .build()
         .await
         .unwrap();
-    let error = backend
-        .exec("true", Duration::from_secs(10), CaptureMode::Merged)
-        .await
-        .unwrap_err();
+    let ran = backend
+        .exec("pwd", Duration::from_secs(10), CaptureMode::Merged)
+        .await;
     // Restore the bits before asserting: a failed assertion must not leave a
-    // zero-permission directory behind for the next run to trip over.
+    // hard-to-enter directory behind for the next run to trip over.
     std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let output = ran.expect("a refused directory does not fail the command");
     assert_eq!(
-        error.to_string(),
-        format!(
-            "spawn failed at working directory for {}: Permission denied (os error 13)",
-            dir.display()
+        output.cwd_fallback.as_deref(),
+        Some(
+            format!(
+                "cwd fallback: {} (EACCES) -> started in {}",
+                dir.display(),
+                tmp.path().display()
+            )
+            .as_str()
         )
     );
+    assert_eq!(output.exit_code, Some(0));
+    let expected = std::fs::canonicalize(tmp.path()).unwrap();
+    assert_eq!(output.cwd, expected.to_string_lossy());
+    assert_eq!(backend.cwd(), expected, "the record follows the command");
+}
+
+/// The counterexample that locked a whole session: a command leaves the shell
+/// in a directory no process can enter, and the next call had nowhere to
+/// start. The directory is refused as a record, so the call after it runs.
+#[tokio::test]
+async fn a_command_that_leaves_an_unenterable_cwd_does_not_poison_the_next_call() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let work = std::fs::canonicalize(tmp.path()).unwrap();
+    let mut backend = ShellBuilder::new()
+        .initial_cwd(work.clone())
+        .fallback_cwd(tmp.path().to_path_buf())
+        .build()
+        .await
+        .unwrap();
+    let stripped = backend
+        .exec("chmod 644 .", Duration::from_secs(10), CaptureMode::Merged)
+        .await;
+    // The record is what matters here; restore the mode immediately after so
+    // TempDir can clean up even if an assertion below fires.
+    std::fs::set_permissions(&work, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let stripped = stripped.unwrap();
+    assert_eq!(
+        stripped.cwd_fallback.as_deref(),
+        Some(
+            format!(
+                "cwd fallback: {} (EACCES) -> record now at {}",
+                work.display(),
+                tmp.path().display()
+            )
+            .as_str()
+        ),
+        "the command says why the record did not move"
+    );
+    assert_eq!(
+        backend.cwd(),
+        tmp.path(),
+        "an unenterable directory never becomes the record"
+    );
+    let next = backend
+        .exec("pwd", Duration::from_secs(10), CaptureMode::Merged)
+        .await
+        .expect("the next call runs");
+    assert_eq!(next.exit_code, Some(0));
+}
+
+/// The other counterexample: a `cd` that fails is the shell's own failure. It
+/// does not move the record and does not affect the call after it.
+#[tokio::test]
+async fn a_failed_cd_reports_through_the_shell_and_leaves_the_record_alone() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let work = std::fs::canonicalize(tmp.path()).unwrap();
+    let mut backend = ShellBuilder::new()
+        .initial_cwd(work.clone())
+        .build()
+        .await
+        .unwrap();
+    let failed = backend
+        .exec(
+            "cd /kallipai-no-such-directory && pwd",
+            Duration::from_secs(10),
+            CaptureMode::Merged,
+        )
+        .await
+        .expect("the shell ran and reported the failure itself");
+    assert_ne!(failed.exit_code, Some(0));
+    assert!(
+        failed
+            .output
+            .as_deref()
+            .unwrap_or_default()
+            .contains("No such file or directory"),
+        "the shell's own message is what the caller sees: {:?}",
+        failed.output
+    );
+    assert!(failed.cwd_fallback.is_none(), "no directory was refused");
+    assert_eq!(backend.cwd(), work, "a failed command does not move it");
+    let next = backend
+        .exec("pwd", Duration::from_secs(10), CaptureMode::Merged)
+        .await
+        .expect("the next call runs");
+    assert_eq!(next.exit_code, Some(0));
+}
+
+/// A background task starts where a foreground command would: when the record
+/// is unenterable, the task starts in the fallback and says so.
+#[tokio::test]
+async fn a_background_task_reports_the_fallback_it_started_in() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let dir = tmp.path().join("no-access");
+    std::fs::create_dir(&dir).unwrap();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let mut backend = ShellBuilder::new()
+        .initial_cwd(dir.clone())
+        .fallback_cwd(tmp.path().to_path_buf())
+        .build()
+        .await
+        .unwrap();
+    let spawned = backend.spawn_background("true").await;
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let spawned = spawned.expect("the task starts in the fallback");
+    assert_eq!(
+        spawned.cwd_fallback.as_deref(),
+        Some(
+            format!(
+                "cwd fallback: {} (EACCES) -> started in {}",
+                dir.display(),
+                tmp.path().display()
+            )
+            .as_str()
+        )
+    );
+    assert_eq!(backend.cwd(), tmp.path(), "the record follows the fallback");
+    let _ = backend.kill_background(&spawned.task_id).await;
+}
+
+/// The background retry: the registry's failure carries the errno in its
+/// rendered detail, the retry starts the task in the fallback, and the record
+/// follows it there.
+#[tokio::test]
+async fn a_background_spawn_refused_on_its_directory_is_retried() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let work = std::fs::canonicalize(tmp.path()).unwrap();
+    let fallback_dir = tempfile::TempDir::new().unwrap();
+    let fallback = std::fs::canonicalize(fallback_dir.path()).unwrap();
+    let mut backend = ShellBuilder::new()
+        .initial_cwd(work.clone())
+        .fallback_cwd(fallback.clone())
+        .build()
+        .await
+        .unwrap();
+    super::fail_next_spawn_in(&work, nix::errno::Errno::EACCES as i32);
+    let spawned = backend
+        .spawn_background("true")
+        .await
+        .expect("the retry starts the task");
+    assert_eq!(
+        spawned.cwd_fallback.as_deref(),
+        Some(
+            format!(
+                "cwd fallback: {} (EACCES) -> started in {}",
+                work.display(),
+                fallback.display()
+            )
+            .as_str()
+        )
+    );
+    assert_eq!(
+        backend.cwd(),
+        fallback,
+        "the record stops being the bad directory"
+    );
+    let _ = backend.kill_background(&spawned.task_id).await;
+}
+
+/// What the registry hands the background path is a rendered detail, so the
+/// errno has to survive in it or the retry decision has nothing to read. A
+/// fallback equal to the directory leaves nowhere to retry.
+#[tokio::test]
+async fn a_background_spawn_failure_names_the_errno_in_its_detail() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let work = std::fs::canonicalize(tmp.path()).unwrap();
+    let mut backend = ShellBuilder::new()
+        .initial_cwd(work.clone())
+        .fallback_cwd(work.clone())
+        .build()
+        .await
+        .unwrap();
+    super::fail_next_spawn_in(&work, nix::errno::Errno::EACCES as i32);
+    let error = backend
+        .spawn_background("true")
+        .await
+        .expect_err("nowhere to retry");
+    let detail = match &error {
+        ShellError::SpawnFailed { detail, .. } | ShellError::Io(detail) => detail,
+        other => panic!("a spawn refusal keeps a detail: {other:?}"),
+    };
+    assert!(
+        detail.contains("(os error 13)"),
+        "the errno survives in the rendered detail: {detail}"
+    );
+}
+
+/// The wire shape: a normal result carries no fallback key, so a caller that
+/// never hit a refusal sees exactly the fields it always saw.
+#[tokio::test]
+async fn the_normal_result_carries_no_fallback_line_on_the_wire() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let work = std::fs::canonicalize(tmp.path()).unwrap();
+    let mut backend = ShellBuilder::new().initial_cwd(work).build().await.unwrap();
+    let output = backend
+        .exec("true", Duration::from_secs(10), CaptureMode::Merged)
+        .await
+        .expect("the command runs");
+    let value = serde_json::to_value(&output).expect("the result serializes");
+    assert!(
+        value.get("cwd_fallback").is_none(),
+        "absent on the normal path: {value}"
+    );
+}
+
+/// The retry: this side's check passes, the child's own `chdir` is refused
+/// (injected, since the two run at different moments), and the command still
+/// runs in the fallback.
+#[tokio::test]
+async fn a_spawn_refused_by_the_child_is_retried_in_the_fallback() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let work = std::fs::canonicalize(tmp.path()).unwrap();
+    let fallback_dir = tempfile::TempDir::new().unwrap();
+    let fallback = std::fs::canonicalize(fallback_dir.path()).unwrap();
+
+    let mut backend = ShellBuilder::new()
+        .initial_cwd(work.clone())
+        .fallback_cwd(fallback.clone())
+        .build()
+        .await
+        .unwrap();
+    super::fail_next_spawn_in(&work, nix::errno::Errno::EACCES as i32);
+    let output = backend
+        .exec("pwd", Duration::from_secs(10), CaptureMode::Merged)
+        .await
+        .expect("the retry runs the command");
+    assert_eq!(
+        output.cwd_fallback.as_deref(),
+        Some(
+            format!(
+                "cwd fallback: {} (EACCES) -> started in {}",
+                work.display(),
+                fallback.display()
+            )
+            .as_str()
+        )
+    );
+    assert_eq!(output.exit_code, Some(0));
+    assert_eq!(output.cwd, fallback.to_string_lossy());
+    // Only this directory's arm matters: another test may have its own armed
+    // in the same process.
+    assert!(
+        !super::SPAWN_FAULT
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(path, _)| *path == work),
+        "the armed fault is one-shot"
+    );
+}
+
+/// The refused attempt owns its landlock ruleset fd, so the retry cannot leave
+/// the first attempt's domain file open: twenty refused attempts do not pile
+/// up ruleset descriptors. Landlock-only, because the fd is what landlock
+/// contributes to an attempt.
+#[cfg(all(target_os = "linux", feature = "landlock"))]
+#[tokio::test]
+async fn a_refused_attempt_leaves_no_ruleset_fd_behind() {
+    use crate::landlock;
+
+    if landlock::ensure_supported().is_err() {
+        eprintln!("skipped: landlock unavailable in this environment");
+        return;
+    }
+    let tmp = tempfile::TempDir::new().unwrap();
+    let work = std::fs::canonicalize(tmp.path()).unwrap();
+    let fallback_dir = tempfile::TempDir::new().unwrap();
+    let fallback = std::fs::canonicalize(fallback_dir.path()).unwrap();
+    let before = stable_ruleset_fds();
+    for _ in 0..20 {
+        let mut backend = ShellBuilder::new()
+            .initial_cwd(work.clone())
+            .fallback_cwd(fallback.clone())
+            .access_source(|| {
+                Ok(landlock::AccessDecision {
+                    read: landlock::ReadPolicy::Broad,
+                    writable: Vec::new(),
+                    readonly_holes: Vec::new(),
+                    hide_holes: Vec::new(),
+                })
+            })
+            .build()
+            .await
+            .unwrap();
+        super::fail_next_spawn_in(&work, nix::errno::Errno::EACCES as i32);
+        let output = backend
+            .exec("true", Duration::from_secs(10), CaptureMode::Merged)
+            .await
+            .expect("the retry runs the command");
+        assert_eq!(output.exit_code, Some(0));
+    }
+    let after = stable_ruleset_fds();
+    let leaked: Vec<i32> = after.difference(&before).copied().collect();
+    assert!(
+        leaked.is_empty(),
+        "twenty refused attempts leave no ruleset descriptor open: {leaked:?}"
+    );
+}
+
+/// This process's open landlock ruleset descriptors that survive two samples
+/// 25 ms apart. A neighbour test's ruleset lives only across its own fork and
+/// drops out; one a refused attempt kept stays put and is counted.
+#[cfg(all(target_os = "linux", feature = "landlock"))]
+fn stable_ruleset_fds() -> std::collections::BTreeSet<i32> {
+    let first = ruleset_fds();
+    std::thread::sleep(std::time::Duration::from_millis(25));
+    let second = ruleset_fds();
+    first.intersection(&second).copied().collect()
+}
+
+/// This process's open landlock ruleset descriptors, by the name the kernel
+/// gives them.
+#[cfg(all(target_os = "linux", feature = "landlock"))]
+fn ruleset_fds() -> std::collections::BTreeSet<i32> {
+    std::fs::read_dir("/proc/self/fd")
+        .expect("procfs")
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let target = std::fs::read_link(entry.path()).ok()?;
+            if !target.to_string_lossy().contains("landlock") {
+                return None;
+            }
+            entry.file_name().to_str()?.parse().ok()
+        })
+        .collect()
 }

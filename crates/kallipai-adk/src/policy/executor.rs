@@ -410,6 +410,7 @@ mod tests {
         // exit_code null): a success — the task_id carve-out must keep
         // classifying it as non-failure despite the null exit code.
         let out = BashExecOutput {
+            cwd_fallback: None,
             output: Some("partial".into()),
             stdout: None,
             stderr: None,
@@ -430,6 +431,7 @@ mod tests {
         // NO task_id and a null exit code — the successor of the old
         // exit-124-is-failed pin.
         let out = BashExecOutput {
+            cwd_fallback: None,
             output: Some("[timed out; killed ...]".into()),
             stdout: None,
             stderr: None,

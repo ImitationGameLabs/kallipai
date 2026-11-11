@@ -33,6 +33,14 @@
 //! not killed -- that is an intentional non-goal (use `spawn_background`
 //! for durable background work); only the cancel path force-kills the
 //! group.
+//!
+//! The recorded working directory is a place the next spawn can enter, or the
+//! configured fallback: a directory without a search bit is refused before the
+//! fork and reported in `cwd_fallback`, a spawn the child refuses on the
+//! directory is retried once in the fallback, and a command that ends in a
+//! directory nothing can enter leaves the record where it was. So one refused
+//! directory costs its command a different starting directory, never the
+//! session.
 
 use std::fs::File;
 use std::io::Read;
@@ -109,6 +117,15 @@ pub enum CaptureMode {
 /// stripped.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct BashExecOutput {
+    /// The reason the recorded working directory could not be used, when it
+    /// could not: one line naming the refused directory, the errno, and whether
+    /// the command started elsewhere (`started in <dir>`) or the record points
+    /// elsewhere (`record now at <dir>`). Absent on the normal path. Same line
+    /// shape for the pre-spawn check, the retried spawn, and a command that
+    /// ended in a directory nothing can enter, with the arrow phrase naming
+    /// the event.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd_fallback: Option<String>,
     /// Merged stdout+stderr. Holds the full output when it fit, or a head +
     /// "[... N bytes omitted ...]" + tail view (banner-prefixed) when it was
     /// clipped. Present under `capture: "merged"`.
@@ -163,8 +180,9 @@ pub trait ShellBackend: Send + Sync {
     ) -> Result<BashExecOutput, ShellError>;
     /// The current (sticky) working directory.
     fn cwd(&self) -> &Path;
-    /// Spawn `command` as a background task; returns its id.
-    async fn spawn_background(&mut self, command: &str) -> Result<String, ShellError>;
+    /// Spawn `command` as a background task; returns its id and the fallback
+    /// line when the task could not start in the recorded cwd.
+    async fn spawn_background(&mut self, command: &str) -> Result<SpawnOutcome, ShellError>;
     /// Read accumulated output and status of a background task.
     async fn read_background(
         &self,
@@ -182,6 +200,70 @@ pub struct ProcessBackend {
     pub(super) background: supervisor::BackgroundRegistry,
 }
 
+impl ProcessBackend {
+    /// Build the child for `dir` and start it: one spawn attempt.
+    ///
+    /// Everything a [`Command`] owns belongs to this attempt and is dropped
+    /// with it, which is what makes a retry clean: on the failure path the
+    /// landlock ruleset fd, the `pre_exec` closure, and the environment are all
+    /// gone before the caller builds the next attempt, so two attempts never
+    /// overlap.
+    ///
+    /// The landlock domain is baked in here, under the caller's exec-gate READ:
+    /// it restricts this bash to the agent's current access decision (Linux +
+    /// landlock) and moves the prepared ruleset/mount-hole state into the
+    /// `pre_exec` closure, which `cmd` owns until `spawn()` consumes it — so
+    /// the ruleset fd survives the fork and is read in the child. The cwd
+    /// marker fd is inherited independently (CLOEXEC cleared) and is not a
+    /// filesystem object, so landlock/seccomp do not restrict it.
+    fn spawn_once(&self, script: &str, dir: &Path) -> Result<Child, SpawnRefusal> {
+        let mut cmd = Command::new(&self.config.shell);
+        cmd.arg("-c")
+            .arg(script)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .process_group(0)
+            .kill_on_drop(true)
+            .current_dir(dir);
+        for (key, value) in &self.config.env {
+            cmd.env(key, value);
+        }
+        // Color suppression (parity with the background spawn path).
+        for (key, value) in COLOR_VARS {
+            cmd.env(key, value);
+        }
+        #[cfg(all(target_os = "linux", feature = "landlock"))]
+        let sandbox_trace = match &self.config.access_source {
+            Some(source) => Some(crate::landlock::apply(&mut cmd, &source.access()?)?),
+            None => None,
+        };
+        #[cfg(unix)]
+        // Restore the child tree's default SIGPIPE disposition (the host's
+        // std SIG_IGN would otherwise be inherited): a capped stream's
+        // writer dies at its next write instead of spinning on EPIPE.
+        crate::pgroup::reset_sigpipe(&mut cmd);
+
+        #[cfg(test)]
+        if let Some(error) = take_spawn_fault(dir) {
+            return Err(SpawnRefusal::Spawn {
+                error,
+                refused: None,
+            });
+        }
+        let spawned = cmd.spawn();
+        // Read the child's record only now: before `spawn` returns an error
+        // there is nothing on the channel to read.
+        #[cfg(all(target_os = "linux", feature = "landlock"))]
+        let refused = sandbox_trace.as_ref().and_then(|trace| trace.refused());
+        #[cfg(not(all(target_os = "linux", feature = "landlock")))]
+        let refused = None;
+        #[cfg(all(target_os = "linux", feature = "landlock"))]
+        drop(sandbox_trace);
+        spawned.map_err(|error| SpawnRefusal::Spawn { error, refused })
+    }
+}
+
 #[async_trait]
 impl ShellBackend for ProcessBackend {
     fn cwd(&self) -> &Path {
@@ -194,8 +276,11 @@ impl ShellBackend for ProcessBackend {
         timeout_dur: Duration,
         capture: CaptureMode,
     ) -> Result<BashExecOutput, ShellError> {
-        // Resolve an existing spawn cwd; fall back if the cached one was deleted.
-        let spawn_cwd = cwd::spawn_dir(&self.cwd, &self.config.fallback_cwd);
+        // Resolve a spawn cwd a process can actually enter: a cached directory
+        // without a search bit is refused exactly like a deleted one, and the
+        // reason rides to the result. `spawn_cwd` is the directory the child
+        // really started in, which the adoption record reports below.
+        let (mut spawn_cwd, mut refused_cwd) = cwd::spawn_dir(&self.cwd, &self.config.fallback_cwd);
 
         // The cwd marker rides a private fd channel (see `CwdProbe`), not the
         // output stream. Set it up before building the script; on failure
@@ -216,22 +301,6 @@ impl ShellBackend for ProcessBackend {
             return Err(ShellError::command_too_large(MAX_SCRIPT_BYTES));
         }
 
-        let mut cmd = Command::new(&self.config.shell);
-        cmd.arg("-c")
-            .arg(&script)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .process_group(0)
-            .kill_on_drop(true)
-            .current_dir(&spawn_cwd);
-        for (key, value) in &self.config.env {
-            cmd.env(key, value);
-        }
-        // Color suppression (parity with the background spawn path).
-        for (key, value) in COLOR_VARS {
-            cmd.env(key, value);
-        }
         // Merged mode is realized at the script level (`exec 2>&1` prepended by
         // [`build_exec_script`]): the shell itself points fd 2 at the stdout
         // pipe, so a single stdout pump captures the interleaved stream with
@@ -264,43 +333,45 @@ impl ShellBackend for ProcessBackend {
         // `disown`) leaves it on the pre-carve (broader) domain for its
         // whole life — documented at module top.
         let _exec_gate = crate::gate::ExecGate::read(&self.config.exec_gate).await;
-        // Landlock-restrict this bash to the agent's current access decision
-        // (Linux + landlock). The foreground path needs no scratch beyond
-        // `baseline_writable` (`/tmp`, `/dev/null`, ...) already folded in by
-        // `apply`; the spill file (only on overflow) lands in `spill_dir`, which
-        // is `temp_dir()` and thus already in the writable set. `apply` is pure
-        // mechanism: it moves the prepared landlock/mount-hole state into the
-        // `pre_exec` closure, which `cmd` owns until `spawn()` consumes it, so
-        // the ruleset fd survives the fork and is read in the child. The marker
-        // fd is inherited independently (CLOEXEC cleared) and is not a filesystem
-        // object, so landlock/seccomp do not restrict it.
-        #[cfg(all(target_os = "linux", feature = "landlock"))]
-        let sandbox_trace = match &self.config.access_source {
-            Some(source) => Some(crate::landlock::apply(&mut cmd, &source.access()?)?),
-            None => None,
+        // One attempt, then at most one retry. `spawn_once` owns everything an
+        // attempt builds — the environment, the landlock ruleset fd moved into
+        // `pre_exec`, the closure itself — so a refused first attempt drops all
+        // of it before the second starts; nothing of the first is left open.
+        // The retry covers the gap the check cannot close: the check and the
+        // child's `chdir` are separate moments, and the child enters with
+        // credentials of its own.
+        let mut attempt = self.spawn_once(&script, &spawn_cwd);
+        let retry = match &attempt {
+            // Only the errnos `chdir` returns about a directory justify a
+            // retry, and only when the fallback is a different, usable place.
+            Err(SpawnRefusal::Spawn { error, .. }) => {
+                cwd::retry_target(&spawn_cwd, &self.config.fallback_cwd).zip(cwd::errno_name(error))
+            }
+            _ => None,
         };
-
-        #[cfg(unix)]
-        // Restore the child tree's default SIGPIPE disposition (the host's
-        // std SIG_IGN would otherwise be inherited): a capped stream's
-        // writer dies at its next write instead of spinning on EPIPE.
-        crate::pgroup::reset_sigpipe(&mut cmd);
-
+        if let Some((dir, errno)) = retry {
+            refused_cwd = Some(cwd::CwdReject {
+                path: spawn_cwd.clone(),
+                errno,
+            });
+            spawn_cwd = dir;
+            attempt = self.spawn_once(&script, &spawn_cwd);
+        }
         // A bare errno cannot say which step refused. `explain_spawn` uses the
-        // sandbox's own record when the child left one, and otherwise names only
-        // the step this side can verify by itself.
-        let mut child = cmd.spawn().map_err(|error| {
-            // Read the child's record only now: before `spawn` returns an
-            // error there is nothing on the channel to read.
-            #[cfg(all(target_os = "linux", feature = "landlock"))]
-            let refused = sandbox_trace.as_ref().and_then(|trace| trace.refused());
-            #[cfg(not(all(target_os = "linux", feature = "landlock")))]
-            let refused = None;
-            crate::error::explain_spawn(error, &spawn_cwd, &self.config.shell, refused)
+        // sandbox's own record when the child left one, and otherwise names
+        // only the step this side can verify by itself — against the directory
+        // the attempt actually used.
+        let mut child = attempt.map_err(|refusal| match refusal {
+            SpawnRefusal::Build(error) => error,
+            SpawnRefusal::Spawn { error, refused } => {
+                crate::error::explain_spawn(error, &spawn_cwd, &self.config.shell, refused)
+            }
         })?;
-        // The command still owns the write end; the read end dies here.
-        #[cfg(all(target_os = "linux", feature = "landlock"))]
-        drop(sandbox_trace);
+        // One line for the result: the pre-check's refusal or the retry's
+        // (later and more specific), never both.
+        let mut cwd_fallback = refused_cwd
+            .as_ref()
+            .map(|reject| cwd::note(reject, &spawn_cwd, cwd::NoteTarget::Started));
         // Epoch at fork (still under the READ permit): the conversion path
         // compares this against the gate's current carve epoch under a
         // fresh READ, to refuse adoption if a carve landed in between.
@@ -396,11 +467,19 @@ impl ShellBackend for ProcessBackend {
                 // or the probe never came up) falls back -- always an
                 // existing dir, never a stale path.
                 let pwd = cwd_probe.and_then(CwdProbe::read_cwd);
-                let new_cwd = match pwd {
+                let ended_in = match pwd {
                     Some(p) => cwd::resolve_str(&p, &self.config.fallback_cwd),
                     None => self.config.fallback_cwd.clone(),
                 };
+                // Recording a directory nothing can enter would poison the
+                // next call, so the record only moves to one that can be
+                // entered; the refused candidate is reported instead.
+                let (new_cwd, held) =
+                    cwd::remembered(ended_in, &self.cwd, &self.config.fallback_cwd);
                 self.cwd = new_cwd.clone();
+                if let Some(reject) = &held {
+                    cwd_fallback = Some(cwd::note(reject, &new_cwd, cwd::NoteTarget::Recorded));
+                }
 
                 let exit_code = exit_status.and_then(|s| s.code());
 
@@ -414,6 +493,7 @@ impl ShellBackend for ProcessBackend {
                 let (output, stdout, stderr, truncated) =
                     stream_fields(capture, &out_cap, &err_cap);
                 Ok(BashExecOutput {
+                    cwd_fallback: cwd_fallback.clone(),
                     output,
                     stdout,
                     stderr,
@@ -477,6 +557,7 @@ impl ShellBackend for ProcessBackend {
                         let (output, stdout, stderr, truncated) =
                             stream_fields(capture, &out_peek, &err_peek);
                         Ok(BashExecOutput {
+                            cwd_fallback: cwd_fallback.clone(),
                             output,
                             stdout,
                             stderr,
@@ -514,11 +595,17 @@ impl ShellBackend for ProcessBackend {
                         // (if bash honored SIGTERM), so the cwd may be
                         // recoverable — same as the exited path.
                         let pwd = cwd_probe.and_then(CwdProbe::read_cwd);
-                        let new_cwd = match pwd {
+                        let ended_in = match pwd {
                             Some(p) => cwd::resolve_str(&p, &self.config.fallback_cwd),
                             None => self.config.fallback_cwd.clone(),
                         };
+                        let (new_cwd, held) =
+                            cwd::remembered(ended_in, &self.cwd, &self.config.fallback_cwd);
                         self.cwd = new_cwd.clone();
+                        if let Some(reject) = &held {
+                            cwd_fallback =
+                                Some(cwd::note(reject, &new_cwd, cwd::NoteTarget::Recorded));
+                        }
                         kill_guard.disarm();
                         let note = "[timed out; killed — the command could not be \
                                     converted to a background task because a workspace \
@@ -526,6 +613,7 @@ impl ShellBackend for ProcessBackend {
                         let (merged, stdout, stderr, truncated) =
                             stream_fields(capture, &out_cap, &err_cap);
                         Ok(BashExecOutput {
+                            cwd_fallback: cwd_fallback.clone(),
                             output: merged.map(|m| format!("{note}{m}")),
                             stdout: stdout.map(|s| format!("{note}{s}")),
                             stderr: stderr.map(|s| format!("{note}{s}")),
@@ -541,12 +629,54 @@ impl ShellBackend for ProcessBackend {
         }
     }
 
-    async fn spawn_background(&mut self, command: &str) -> Result<String, ShellError> {
+    async fn spawn_background(&mut self, command: &str) -> Result<SpawnOutcome, ShellError> {
         // A background task starts where a foreground command would: the same
-        // resolution, the same directory. Recording that directory is then
-        // honest — the status view reports where the task really runs.
-        let spawn_cwd = cwd::spawn_dir(&self.cwd, &self.config.fallback_cwd);
-        self.background.spawn(command, spawn_cwd).await
+        // resolution, the same directory. Recording where it started keeps the
+        // status view honest — and a refused directory stops being the record,
+        // so the next call does not report the same fallback again.
+        let (spawn_cwd, refused_cwd) = cwd::spawn_dir(&self.cwd, &self.config.fallback_cwd);
+        let refused = refused_cwd
+            .as_ref()
+            .map(|reject| cwd::note(reject, &spawn_cwd, cwd::NoteTarget::Started));
+        match self.background.spawn(command, spawn_cwd.clone()).await {
+            Ok(task_id) => {
+                if refused_cwd.is_some() {
+                    self.cwd = spawn_cwd;
+                }
+                Ok(SpawnOutcome {
+                    task_id,
+                    cwd_fallback: refused,
+                })
+            }
+            Err(error) => {
+                // Same retry as the foreground path, for the same reason: the
+                // child enters the directory on its own, at its own moment. The
+                // registry hands back a rendered failure, so the errno in its
+                // detail decides whether the directory is the plausible culprit.
+                let errno = match &error {
+                    ShellError::SpawnFailed { detail, .. } | ShellError::Io(detail) => {
+                        cwd::errno_name_in(detail)
+                    }
+                    _ => None,
+                };
+                let Some(errno) = errno else {
+                    return Err(error);
+                };
+                let Some(dir) = cwd::retry_target(&spawn_cwd, &self.config.fallback_cwd) else {
+                    return Err(error);
+                };
+                let reject = cwd::CwdReject {
+                    path: spawn_cwd,
+                    errno,
+                };
+                let task_id = self.background.spawn(command, dir.clone()).await?;
+                self.cwd = dir.clone();
+                Ok(SpawnOutcome {
+                    task_id,
+                    cwd_fallback: Some(cwd::note(&reject, &dir, cwd::NoteTarget::Started)),
+                })
+            }
+        }
     }
 
     async fn read_background(
@@ -560,6 +690,74 @@ impl ShellBackend for ProcessBackend {
     async fn kill_background(&mut self, id: &str) -> Result<(), ShellError> {
         self.background.kill(id).await
     }
+}
+
+/// Test-only: the next spawn attempt in this directory fails with this errno.
+///
+/// One case cannot be built from the outside — the parent's check passing
+/// while the child's own `chdir` is refused — so the retry path is exercised
+/// by injecting exactly that failure, once, for one directory. Both spawn
+/// paths read it; test builds only, production has no such switch.
+#[cfg(test)]
+static SPAWN_FAULT: Mutex<Vec<(PathBuf, i32)>> = Mutex::new(Vec::new());
+
+/// Arms [`SPAWN_FAULT`] for `dir`; the next attempt there reports `errno`.
+///
+/// Keyed by directory, so a test that arms it is not disturbed by a parallel
+/// test that spawns elsewhere (or arms its own directory).
+#[cfg(test)]
+pub(super) fn fail_next_spawn_in(dir: &Path, errno: i32) {
+    SPAWN_FAULT.lock().unwrap().push((dir.to_path_buf(), errno));
+}
+
+/// Consumes an armed [`SPAWN_FAULT`] that names `dir`.
+#[cfg(test)]
+pub(super) fn take_spawn_fault(dir: &Path) -> Option<std::io::Error> {
+    let mut fault = SPAWN_FAULT.lock().unwrap();
+    let position = fault.iter().position(|(path, _)| path == dir)?;
+    let (_, errno) = fault.remove(position);
+    Some(std::io::Error::from_raw_os_error(errno))
+}
+
+/// Why a spawn attempt produced no child.
+enum SpawnRefusal {
+    /// The child process never started: the errno, plus whatever the child
+    /// recorded about the step it refused.
+    Spawn {
+        /// The failure `spawn` returned.
+        error: std::io::Error,
+        /// The sandbox's own record, when the child left one.
+        refused: Option<crate::error::RecordedRefusal>,
+    },
+    /// A step this side owns refused before `spawn` was reached; retrying in
+    /// another directory cannot help.
+    Build(ShellError),
+}
+
+impl From<ShellError> for SpawnRefusal {
+    fn from(error: ShellError) -> Self {
+        Self::Build(error)
+    }
+}
+
+impl From<std::io::Error> for SpawnRefusal {
+    /// A step before `spawn` (an access snapshot) failed on its own: nothing
+    /// was forked, so the directory is not what refused, and a retry in
+    /// another one would fail the same way.
+    fn from(error: std::io::Error) -> Self {
+        Self::Build(ShellError::from(error))
+    }
+}
+
+/// What a background spawn produced: the task id, plus the fallback line when
+/// the task had to start somewhere other than the recorded cwd.
+#[derive(Debug, Clone)]
+pub struct SpawnOutcome {
+    /// Id to poll with `bash_background_read` / kill with
+    /// `bash_background_kill`.
+    pub task_id: String,
+    /// See [`BashExecOutput::cwd_fallback`].
+    pub cwd_fallback: Option<String>,
 }
 
 /// Force-SIGKILL the child's process group on drop, unless disarmed.

@@ -246,7 +246,7 @@ pub(crate) fn explain_spawn(
 /// Search permission alone does not make a path usable: a regular file passes
 /// `X_OK` when its mode allows. Callers pair this with `is_dir`/`is_file` for
 /// the kind of path they need.
-fn is_searchable(path: &Path) -> bool {
+pub(crate) fn is_searchable(path: &Path) -> bool {
     nix::unistd::access(path, nix::unistd::AccessFlags::X_OK).is_ok()
 }
 

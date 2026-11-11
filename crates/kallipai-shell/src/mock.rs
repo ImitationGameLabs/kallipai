@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 
-use crate::backend::{BashExecOutput, CaptureMode, ShellBackend};
+use crate::backend::{BashExecOutput, CaptureMode, ShellBackend, SpawnOutcome};
 use crate::error::ShellError;
 use crate::supervisor::{BgReadOutput, TaskState};
 
@@ -126,10 +126,14 @@ impl ShellBackend for MockShellBackend {
         &self.cwd
     }
 
-    async fn spawn_background(&mut self, command: &str) -> Result<String, ShellError> {
+    async fn spawn_background(&mut self, command: &str) -> Result<SpawnOutcome, ShellError> {
         let id = self.next_bg.fetch_add(1, Ordering::Relaxed).to_string();
         self.background.insert(id.clone(), command.to_owned());
-        Ok(id)
+        // The mock never resolves a working directory, so it never falls back.
+        Ok(SpawnOutcome {
+            task_id: id,
+            cwd_fallback: None,
+        })
     }
 
     async fn read_background(
@@ -195,7 +199,7 @@ mod tests {
     #[tokio::test]
     async fn background_round_trip() {
         let mut backend = MockShellBackend::new();
-        let id = backend.spawn_background("build").await.unwrap();
+        let id = backend.spawn_background("build").await.unwrap().task_id;
         let read = backend.read_background(&id, 1024).await.unwrap();
         assert_eq!(read.state, TaskState::Running);
         backend.kill_background(&id).await.unwrap();

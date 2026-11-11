@@ -67,7 +67,11 @@ impl<B: ShellBackend + Send + Sync + 'static> LlmTool for BashExec<B> {
          discarding it): it usually carries the reason a command failed, so you normally \
          want to see it. Also returns the exit code and the working directory after \
          the command. The working directory persists across calls; the returned `cwd` \
-         is authoritative: it is where the next command will run. Supports a timeout \
+         is authoritative: it is where the next command will run. A directory that \
+         cannot be entered is never recorded and never starts a command: the command \
+         runs in the fallback directory instead, and `cwd_fallback` names the refused \
+         directory, the errno, and where the command started (or where the record \
+         now points). Supports a timeout \
          (default 120s) and optional background mode. On timeout the command is \
          converted to a background task and is still running — do not start it \
          again; poll bash_background_read for progress and kill it via \
@@ -123,8 +127,9 @@ impl<B: ShellBackend + Send + Sync + 'static> LlmTool for BashExec<B> {
 
         let mut backend = self.backend.lock().await;
         let output = if args.background {
-            let task_id = backend.spawn_background(&args.command).await?;
+            let spawned = backend.spawn_background(&args.command).await?;
             BashExecOutput {
+                cwd_fallback: spawned.cwd_fallback,
                 output: None,
                 stdout: None,
                 stderr: None,
@@ -132,7 +137,7 @@ impl<B: ShellBackend + Send + Sync + 'static> LlmTool for BashExec<B> {
                 timed_out: false,
                 truncated: false,
                 cwd: backend.cwd().to_string_lossy().into_owned(),
-                task_id: Some(task_id),
+                task_id: Some(spawned.task_id),
             }
         } else {
             backend.exec(&args.command, timeout, args.capture).await?

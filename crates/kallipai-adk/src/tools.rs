@@ -64,8 +64,10 @@ pub struct ToolDispatchInputs<'a> {
 /// Builds the tool registry exposed by `kallip`.
 ///
 /// Spawns a fresh isolated `bash` per command via [`ShellBuilder`] (the one-shot
-/// backend). The working directory is read fresh from `pwd` after each command and
-/// reported in the tool result — it does not persist implicitly across calls. A background task
+/// backend). The working directory persists across calls while it stays
+/// enterable, is read fresh from `pwd` after each command, and is reported in
+/// the tool result; a directory that cannot be entered is refused and the call
+/// runs in the fallback instead. A background task
 /// that finishes delivers a completion notice through `notice_sink` (the tagma wires it to the agent's
 /// prompt channel, so the LLM learns without polling `bash_background_read`).
 ///
