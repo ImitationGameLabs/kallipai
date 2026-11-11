@@ -355,6 +355,128 @@ pub(crate) enum PolisCommand {
         /// Tagma id, as `polis status` prints it.
         tagma: String,
     },
+    /// Print the entries inside a running instance: its own entries, not
+    /// this host's platform register. Needs the daemon, to learn where the
+    /// instance listens.
+    Entries {
+        /// Instance slug.
+        #[arg(add = ArgValueCompleter::new(complete_slug))]
+        slug: String,
+    },
+    /// Add an entry inside a running instance: enroll it (with a code
+    /// minted here unless --code brings one) and start its relay.
+    AddEntry {
+        /// Instance slug.
+        #[arg(add = ArgValueCompleter::new(complete_slug))]
+        slug: String,
+        /// Name for the entry inside the instance.
+        name: String,
+        /// A platform from the register: its address, and its token when
+        /// a code has to be minted.
+        #[arg(long, conflicts_with = "url", add = ArgValueCompleter::new(complete_polis_name))]
+        polis: Option<String>,
+        /// The platform origin, for a platform that is not in the register.
+        #[arg(long)]
+        url: Option<String>,
+        /// An enrollment code to redeem instead of minting one.
+        #[arg(long, conflicts_with = "token_file")]
+        code: Option<String>,
+        /// File holding the access token to mint with; 0600 or stricter.
+        #[arg(long)]
+        token_file: Option<String>,
+    },
+    /// Drop an entry from a running instance and stop its relay.
+    RemoveEntry {
+        /// Instance slug.
+        #[arg(add = ArgValueCompleter::new(complete_slug))]
+        slug: String,
+        /// Entry name, as `polis entries` prints it.
+        name: String,
+        /// Also delete the entry's credentials directory.
+        #[arg(long)]
+        forget: bool,
+    },
+    /// Mint an enrollment code here, print it with its expiry and the pending
+    /// tagma it created, and leave the redeeming to you: the hand-carried
+    /// path, for an instance this CLI cannot reach.
+    MintCode {
+        /// Platform name.
+        #[arg(add = ArgValueCompleter::new(complete_polis_name))]
+        platform: String,
+    },
+}
+
+impl PolisCommand {
+    /// The verb as an instance verb, or `None` for the register verbs,
+    /// which read and write this host's register with the daemon stopped.
+    /// The dispatch and the answering code both ask this, so which verbs
+    /// speak to an instance is stated once.
+    pub(crate) fn instance(&self) -> Option<InstanceVerb<'_>> {
+        match self {
+            Self::Entries { slug } => Some(InstanceVerb::Entries { slug }),
+            Self::AddEntry {
+                slug,
+                name,
+                polis,
+                url,
+                code,
+                token_file,
+            } => Some(InstanceVerb::AddEntry {
+                slug,
+                name,
+                polis: polis.as_deref(),
+                url: url.as_deref(),
+                code: code.as_deref(),
+                token_file: token_file.as_deref(),
+            }),
+            Self::RemoveEntry { slug, name, forget } => Some(InstanceVerb::RemoveEntry {
+                slug,
+                name,
+                forget: *forget,
+            }),
+            Self::Add { .. }
+            | Self::Remove { .. }
+            | Self::List
+            | Self::Token { .. }
+            | Self::Status { .. }
+            | Self::Revoke { .. }
+            | Self::MintCode { .. } => None,
+        }
+    }
+}
+
+/// One of the verbs that speaks to a running instance, borrowed from the
+/// command line: the dispatch and the answering code both work on this
+/// shape, so a verb cannot be one thing in one place and another in the
+/// next.
+pub(crate) enum InstanceVerb<'a> {
+    Entries {
+        slug: &'a str,
+    },
+    AddEntry {
+        slug: &'a str,
+        name: &'a str,
+        polis: Option<&'a str>,
+        url: Option<&'a str>,
+        code: Option<&'a str>,
+        token_file: Option<&'a str>,
+    },
+    RemoveEntry {
+        slug: &'a str,
+        name: &'a str,
+        forget: bool,
+    },
+}
+
+impl<'a> InstanceVerb<'a> {
+    /// The instance this verb speaks to.
+    pub(crate) fn slug(&self) -> &'a str {
+        match self {
+            Self::Entries { slug }
+            | Self::AddEntry { slug, .. }
+            | Self::RemoveEntry { slug, .. } => slug,
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -445,5 +567,131 @@ mod tests {
                 "{argv:?} parsed"
             );
         }
+    }
+
+    #[test]
+    fn the_instance_verbs_parse_into_their_own_shapes() {
+        assert!(matches!(
+            polis(&["entries", "alpha"]),
+            PolisCommand::Entries { slug } if slug == "alpha"
+        ));
+
+        match polis(&[
+            "add-entry",
+            "alpha",
+            "local",
+            "--polis",
+            "edge",
+            "--code",
+            "abc",
+        ]) {
+            PolisCommand::AddEntry {
+                slug,
+                name,
+                polis,
+                url,
+                code,
+                token_file,
+            } => {
+                assert_eq!(slug, "alpha");
+                assert_eq!(name, "local");
+                assert_eq!(polis.as_deref(), Some("edge"));
+                assert!(url.is_none());
+                assert_eq!(code.as_deref(), Some("abc"));
+                assert!(token_file.is_none());
+            }
+            _ => panic!("add-entry must parse into AddEntry"),
+        }
+
+        match polis(&[
+            "add-entry",
+            "alpha",
+            "local",
+            "--polis",
+            "edge",
+            "--token-file",
+            "/tmp/token",
+        ]) {
+            PolisCommand::AddEntry { token_file, .. } => {
+                assert_eq!(token_file.as_deref(), Some("/tmp/token"));
+            }
+            _ => panic!("add-entry must parse into AddEntry"),
+        }
+
+        assert!(
+            Cli::try_parse_from([
+                "kallipctl",
+                "polis",
+                "add-entry",
+                "alpha",
+                "local",
+                "--polis",
+                "edge",
+                "--code",
+                "abc",
+                "--token-file",
+                "/tmp/token",
+            ])
+            .is_err(),
+            "a code and the token to mint with cannot both be given"
+        );
+
+        match polis(&[
+            "add-entry",
+            "alpha",
+            "local",
+            "--url",
+            "https://edge.example.com",
+        ]) {
+            PolisCommand::AddEntry { polis, url, .. } => {
+                assert!(polis.is_none());
+                assert_eq!(url.as_deref(), Some("https://edge.example.com"));
+            }
+            _ => panic!("add-entry must parse into AddEntry"),
+        }
+
+        assert!(
+            Cli::try_parse_from([
+                "kallipctl",
+                "polis",
+                "add-entry",
+                "alpha",
+                "local",
+                "--polis",
+                "edge",
+                "--url",
+                "https://edge.example.com",
+            ])
+            .is_err(),
+            "one platform, named once: the two flags cannot meet"
+        );
+
+        match polis(&["remove-entry", "alpha", "local", "--forget"]) {
+            PolisCommand::RemoveEntry { slug, name, forget } => {
+                assert_eq!(slug, "alpha");
+                assert_eq!(name, "local");
+                assert!(forget);
+            }
+            _ => panic!("remove-entry must parse into RemoveEntry"),
+        }
+
+        match polis(&["mint-code", "edge"]) {
+            PolisCommand::MintCode { platform } => assert_eq!(platform, "edge"),
+            _ => panic!("mint-code must parse into MintCode"),
+        }
+    }
+
+    #[test]
+    fn only_the_instance_verbs_need_the_daemon() {
+        assert!(polis(&["entries", "alpha"]).instance().is_some());
+        assert!(
+            polis(&["remove-entry", "alpha", "local"])
+                .instance()
+                .is_some()
+        );
+        assert!(polis(&["list"]).instance().is_none());
+        assert!(polis(&["mint-code", "edge"]).instance().is_none());
+        let command = polis(&["remove-entry", "alpha", "local"]);
+        assert_eq!(command.instance().map(|verb| verb.slug()), Some("alpha"));
     }
 }

@@ -112,6 +112,67 @@ tagma-2  pending  created=2026-11-11T17:40:00Z  expires=2026-11-11T18:10:00Z
 执行 `revoke` 会打印 `TAGMA is not registered on NAME` 并以 0 退出，因为这正是
 它被要求达到的结果。
 
+## 运行中实例里的条目
+
+`polis add` 记的是本机认识的平台；`polis add-entry` 写的是某一台实例自己的
+`polis.toml`：加一条、换注册码、把它的 relay 起起来。这一组动词要守护进程告诉它
+实例监听在哪，实例本身也必须正在运行。
+
+| 动词 | 作用 |
+| --- | --- |
+| `polis entries SLUG` | 该实例里的条目；若条目来自实例环境，也会说明 |
+| `polis add-entry SLUG NAME (--polis NAME \| --url ORIGIN) [--code CODE] [--token-file PATH]` | 加一条条目；没有现成注册码就地铸一枚，然后把 relay 起起来 |
+| `polis remove-entry SLUG NAME [--forget]` | 删一条条目并停掉它的 relay；`--forget` 连凭据目录一起删 |
+| `polis mint-code NAME` | 在本机铸一枚注册码，连有效期和它新建的待定 tagma 一起打印 |
+
+`mint-code` 是这一组里的例外：它不问实例，所以既不需要守护进程，也不需要实例在跑，
+只碰登记表与平台。
+
+`add-entry` 默认自己铸码、在同一次调用里兑换，所以码不会进 shell 历史，那三十分钟
+的窗口也不用你盯着：
+
+```bash
+kallipctl polis add-entry alpha local --polis edge
+```
+
+铸码之前，它先问实例手里已经有什么：名字已带凭据、或实例的条目来自环境，都在不花
+任何注册码的情况下拒掉（没有凭据的那条正是注册码要修的）；`--url` 与登记过的地址
+同一套判据，明文地址照样要 `--allow-plaintext`。
+
+给了 `--polis`，地址和铸造用的令牌都取登记表里的；还没登记的平台用 `--url` 给
+地址，同时用 `--code` 或 `--token-file` 交代码从哪来。已经用 `polis mint-code`
+铸好的码，用 `--code` 交进去。
+
+`add-entry` 先报条目头，再报实例自己的说明：
+
+```text
+local  https://edge.example.com  enrolled=on  tagma=t-9f2
+relay connected; the gateway's target list is still the one from startup, so this entry joins it on the next start
+```
+
+铸了码的那一趟，会先把待定 tagma 和有效期打到 stderr，所以之后再出错，`polis revoke
+NAME TAGMA` 要用的把手仍在。
+
+`polis entries` 一条条目一行，两个运行状态用词写出来：
+
+```text
+local  https://edge.example.com  enrolled=on  tagma=t-9f2  relay=on  gateway=on
+```
+
+`gateway=off` 说明网关比这条条目起得早，这条条目要到实例下一次启动才并进来。
+
+请求打的是实例自己的回环端口，带的是 `kallipctl operator-token show SLUG` 指向的
+运维令牌：启动时设了 `KALLIPAI_OPERATOR_TOKEN` 的实例以那个环境值为准、不读文件，
+这里同样以环境值为准。实例没在跑就直接拒掉，并给出该执行的
+`kallipctl start`：这里不替人启动任何东西。
+
+一次写入可能要等一会儿：排在前面的写者、平台的登记、被顶替的旧 relay 各有自己的
+上限，所以每次实例调用等 120 秒（会铸码的 `add-entry` 先后读一次、写一次）。真等到
+超时、或读不到答复，它会说实例可能仍在完成，让你先看 `polis entries SLUG` 再决定
+是否重试；不要先再铸一枚码，正在走的那枚可能已经花掉了。
+
+条目来自实例环境（spawn 时带了 `--polis`）的实例只列不写：两种写操作都会被实例拒。
+
 ## Shell 补全
 
 补全是动态的，分两种：实例 slug 随输入实时向守护进程查询；平台名读的是 polis

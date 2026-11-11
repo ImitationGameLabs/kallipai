@@ -11,7 +11,10 @@ use kallipai_daemon_common::wire::{OkPayload, RequestBody, ResponseBody};
 /// dir the daemon computed at launch (in-place and drop-to launches
 /// differ, so a local guess would miss drop-to instances). Only the
 /// path crosses the wire; the secret is read and written locally.
-async fn operator_token_path(client: &DaemonClient, slug: &str) -> Result<std::path::PathBuf> {
+pub(crate) async fn operator_token_path(
+    client: &DaemonClient,
+    slug: &str,
+) -> Result<std::path::PathBuf> {
     let response = client
         .call(RequestBody::Record {
             slug: slug.to_owned(),

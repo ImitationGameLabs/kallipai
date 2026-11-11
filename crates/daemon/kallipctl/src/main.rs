@@ -9,6 +9,7 @@ mod archeion;
 mod blobs;
 mod cli;
 mod completion;
+mod instance;
 mod logs;
 mod origin;
 mod polis;
@@ -43,6 +44,20 @@ fn main() -> Result<()> {
     rt.block_on(run())
 }
 
+/// The daemon's socket: the pinned `--socket` or the shared candidate
+/// chain, probed in order - the first socket that answers is wherever the
+/// daemon actually bound (identical ordering on both sides is what keeps
+/// client and daemon converged).
+fn daemon_client(cli: &Cli) -> Result<DaemonClient> {
+    let candidates = kallipai_daemon_common::socket::candidates_from_env(
+        cli.socket.as_deref().map(std::path::Path::new),
+    );
+    let socket = kallipai_daemon_common::socket::probe(&candidates).map_err(|err| {
+        anyhow::anyhow!(kallipai_daemon_common::socket::describe_probe_failure(&err))
+    })?;
+    Ok(DaemonClient::new(socket))
+}
+
 async fn run() -> Result<()> {
     let cli = Cli::parse();
     if let Command::Generate { shell } = cli.command {
@@ -51,20 +66,17 @@ async fn run() -> Result<()> {
         return Ok(());
     }
     if let Command::Polis { command } = &cli.command {
-        // Host-level: the register and the platform are both reachable with
-        // the daemon stopped, which is half of why the register exists.
-        return polis::run(command, cli.allow_plaintext).await;
+        // The register verbs reach the register with the daemon stopped,
+        // which is half of why the register exists; the instance verbs need
+        // the daemon to say where that instance listens.
+        return match command.instance() {
+            Some(verb) => {
+                polis::run_instance(&verb, cli.allow_plaintext, &daemon_client(&cli)?).await
+            }
+            None => polis::run(command, cli.allow_plaintext).await,
+        };
     }
-    // The shared chain, probed in order - the first socket that answers
-    // is wherever the daemon actually bound (identical ordering on both
-    // sides is what keeps client and daemon converged).
-    let candidates = kallipai_daemon_common::socket::candidates_from_env(
-        cli.socket.as_deref().map(std::path::Path::new),
-    );
-    let socket = kallipai_daemon_common::socket::probe(&candidates).map_err(|err| {
-        anyhow::anyhow!(kallipai_daemon_common::socket::describe_probe_failure(&err))
-    })?;
-    let client = DaemonClient::new(socket);
+    let client = daemon_client(&cli)?;
 
     let started = matches!(cli.command, Command::Start { .. });
     // Cheap client-side slug check: the same grammar the daemon
@@ -112,8 +124,9 @@ async fn run() -> Result<()> {
     let allow_plaintext = cli.allow_plaintext;
     let body = match cli.command {
         Command::Polis { .. } => {
-            // Answered above, before the daemon socket is resolved.
-            unreachable!("polis verbs return before the daemon is contacted")
+            // Answered above: the register verbs before the socket is
+            // resolved, the instance verbs right after it.
+            unreachable!("polis verbs answer before a request body is chosen")
         }
         Command::Spawn {
             slug,

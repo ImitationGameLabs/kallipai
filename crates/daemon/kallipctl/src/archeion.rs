@@ -82,23 +82,27 @@ pub(crate) fn read_token(path: &Path) -> Result<String> {
 /// connection (which fails in milliseconds).
 const MINT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// `POST {polis}/v1/archeion/tagmata`, the access token as the bearer.
+/// `POST {origin}/v1/archeion/tagmata`, the access token as the bearer.
 ///
-/// `polis` is the platform edge origin -- the same string the instance gets
+/// `origin` is the platform edge origin -- the same string the instance gets
 /// as `KALLIPAI_POLIS_URL` -- so both sides derive their service base from
 /// one value: the instance `{origin}/v1/lesche`, this mint `{origin}/v1/archeion`.
-pub(crate) async fn mint_enrollment(polis: &str, token: &str) -> Result<MintedCode> {
-    mint_within(MINT_TIMEOUT, polis, token).await
+pub(crate) async fn mint_enrollment(origin: &str, token: &str) -> Result<MintedCode> {
+    mint_within(MINT_TIMEOUT, origin, token).await
 }
 
 /// The mint with an explicit deadline, so the timeout arm is testable
 /// without waiting half a minute.
-async fn mint_within(timeout: std::time::Duration, polis: &str, token: &str) -> Result<MintedCode> {
-    let client = client_for(polis, token, timeout)?;
+async fn mint_within(
+    timeout: std::time::Duration,
+    origin: &str,
+    token: &str,
+) -> Result<MintedCode> {
+    let client = client_for(origin, token, timeout)?;
     let minted = client
         .mint_enrollment_code()
         .await
-        .map_err(|err| describe(err, polis, timeout, MINT))?;
+        .map_err(|err| describe(err, origin, timeout, MINT))?;
     if minted.code.trim().is_empty() {
         anyhow::bail!("archeion answered without an enrollment code");
     }
