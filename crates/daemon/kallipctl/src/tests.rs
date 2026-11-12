@@ -147,4 +147,37 @@ mod shape_tests {
         assert!(text.contains("is not an existing directory"), "{text}");
         assert!(text.contains(&dir.path().display().to_string()), "{text}");
     }
+
+    #[test]
+    fn restart_hands_the_explicit_bin_to_the_start_request() {
+        // The flag exists for the dev loop that restarts onto a fresh
+        // build: the path must travel verbatim in the start body.
+        match crate::restart::restart_start_body("inst", Some("/opt/dev/kallip")) {
+            kallipai_daemon_common::wire::RequestBody::Start { slug, env, exe } => {
+                assert_eq!(slug, "inst");
+                assert!(env.is_empty(), "restart replays the record's own env");
+                assert_eq!(exe.as_deref(), Some("/opt/dev/kallip"));
+            }
+            other => panic!("restart starts the instance, got {other:?}"),
+        }
+        // Without the flag the daemon's resolved binary stays in charge.
+        match crate::restart::restart_start_body("inst", None) {
+            kallipai_daemon_common::wire::RequestBody::Start { exe, .. } => {
+                assert_eq!(exe, None, "no flag, no override");
+            }
+            other => panic!("restart starts the instance, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn restart_reaches_the_bin_flag_it_was_given() {
+        // It catches the flag leaving restart's usable surface (the
+        // non-global move this flag is queued for); it cannot catch
+        // run_restart being handed None.
+        let cli = Cli::try_parse_from(["kallipctl", "restart", "inst", "--bin", "/x/kallip"])
+            .expect("restart accepts --bin");
+        assert_eq!(cli.bin.as_deref(), Some("/x/kallip"));
+        let cli = Cli::try_parse_from(["kallipctl", "restart", "inst"]).expect("no flag");
+        assert_eq!(cli.bin, None);
+    }
 }

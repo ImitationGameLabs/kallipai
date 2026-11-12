@@ -185,7 +185,7 @@ async fn run() -> Result<()> {
             return run_logs(&client, &slug, lines, file.as_deref(), follow).await;
         }
         Command::Restart { slug } => {
-            return run_restart(&client, &slug).await;
+            return run_restart(&client, &slug, cli.bin.as_deref()).await;
         }
         Command::OperatorToken { command } => {
             // One daemon query resolves the instance's real data dir; the

@@ -134,7 +134,8 @@ pub(crate) enum Command {
     /// Stop the instance if it is running, then start it under the
     /// record's latest env: an already-stopped instance simply starts.
     /// The systemd restart shape — the end state is one process running
-    /// the newest recorded configuration.
+    /// the newest recorded configuration, except that a `--bin` picks the
+    /// binary of that launch.
     Restart {
         #[arg(add = ArgValueCompleter::new(complete_slug))]
         slug: String,
