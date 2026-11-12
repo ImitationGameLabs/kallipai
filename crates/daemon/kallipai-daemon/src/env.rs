@@ -206,6 +206,8 @@ mod tests {
             env: vec!["KALLIPAI_EXISTING=1".into(), "RUST_LOG=info".into()],
             identity: None,
             data_dir: data_dir.to_path_buf(),
+            config_dir: Some(Path::new("/cfg/team").to_path_buf()),
+            state_dir: Some(Path::new("/state").to_path_buf()),
         }
     }
 

@@ -54,7 +54,6 @@ futures-util = { workspace = true }
 url = { workspace = true }
 percent-encoding = { workspace = true }
 unicode-segmentation = { workspace = true }
-dirs = { workspace = true }
 arc-swap = { workspace = true }
 libc = { workspace = true }
 tempfile = { workspace = true, optional = true }

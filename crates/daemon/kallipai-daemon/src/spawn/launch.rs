@@ -3,42 +3,93 @@
 
 use super::authorize::authorized;
 use super::env::{
-    TracingSource, compose_launch_env, daemon_env_value, ensure_addr_parses, fill_relay_defaults,
-    fill_tracing_env, validate_user_env,
+    LaunchEnv, TracingSource, compose_launch, daemon_env_value, deployment_root_vars,
+    ensure_addr_parses, fill_relay_defaults, fill_tracing_env, validate_user_env,
 };
 use super::error::{OverlapInput, SpawnError};
-use super::harvest::harvest_base_env;
+use super::harvest::{Harvest, harvest_env};
 use super::identity::{
     LaunchIdentity, OwnerInference, infer_owner_decision, path_owner_uid, require_resolved_binary,
     resolve_launch_identity,
 };
 use crate::{bins, records, scan};
 use anyhow::Context as _;
+use kallipai_daemon_common::roots;
 use kallipai_daemon_common::wire::valid_slug;
 use std::ffi::CString;
 use std::os::unix::ffi::OsStrExt as _;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-/// The instance's data directory: `<data home>/kallipai/tagmata/<slug>`.
-/// In-place launches derive it from the daemon's XDG data home; drop-to
-/// launches from the target user's passwd home. The exact path is
-/// handed to the tagma at launch (`KALLIPAI_TAGMA_DATA_DIR`), replacing
-/// the old shared-root assumption with an explicit contract.
-pub(crate) fn instance_data_dir(
-    identity: &LaunchIdentity,
-    slug: &str,
-) -> Result<PathBuf, SpawnError> {
-    let home = match identity {
-        LaunchIdentity::InPlace { .. } => {
-            dirs::data_dir().context("could not determine platform data directory")?
-        }
-        LaunchIdentity::DropTo(user) => user.home.join(".local").join("share"),
-    };
-    Ok(home.join("kallipai").join("tagmata").join(slug))
+/// The harvest layers one launch composes over, with the fallback PATH
+/// anchored at the tagma binary this daemon would launch (its directory is
+/// where the helper binaries resolve from).
+pub(crate) fn launch_harvest(identity: &LaunchIdentity) -> Harvest {
+    let bin = bins::resolve("kallipai-tagma");
+    harvest_env(bin.parent(), identity)
 }
 
-// --- login-environment harvest -------------------------------------------
+/// Compose one launch's env and resolve the three roots from exactly
+/// that pair list: the daemon creates, records and polls the roots the
+/// instance resolves, because both sides run the same resolver over the
+/// same pairs. Spawn, start, adopt and the record migration all pass
+/// through here; only the request pairs differ (a fresh request, a
+/// replayed one, an adopted tree's, a stored one).
+pub(crate) fn prepare_launch(
+    slug: &str,
+    workspace_canon: &Path,
+    request: &[String],
+    identity: &LaunchIdentity,
+) -> Result<(Vec<String>, roots::Roots), SpawnError> {
+    let harvest = launch_harvest(identity);
+    prepare_launch_with(
+        slug,
+        workspace_canon,
+        request,
+        &harvest,
+        &deployment_root_vars(),
+        identity,
+    )
+}
+
+/// The same composition with the harvested layer handed in: the record
+/// migration resolves a stored record's roots from the environment it
+/// replays, and the tests pin the resolution without a login shell
+/// behind it.
+pub(crate) fn prepare_launch_with(
+    slug: &str,
+    workspace_canon: &Path,
+    request: &[String],
+    harvest: &Harvest,
+    deployment: &[(String, String)],
+    identity: &LaunchIdentity,
+) -> Result<(Vec<String>, roots::Roots), SpawnError> {
+    let env = compose_launch(LaunchEnv {
+        slug,
+        workspace_canon,
+        request,
+        deployment,
+        seed: &harvest.seed,
+        harvest: &harvest.pairs,
+        target: identity.target(),
+    });
+    let resolved =
+        roots::resolve_pairs(slug, &env).map_err(|error| SpawnError::Invalid(error.to_string()))?;
+    Ok((env, resolved))
+}
+
+/// Name the three roots one launch resolved. The record keeps the same
+/// values, so this line is the comparison a restart is judged by: the
+/// roots an instance reads are otherwise invisible.
+pub(crate) fn note_roots(slug: &str, roots: &roots::Roots) {
+    tracing::info!(
+        slug = %slug,
+        data = %roots.data.display(),
+        config = %roots.config.display(),
+        state = %roots.state.display(),
+        "instance roots resolved"
+    );
+}
 
 /// Register and launch one instance. Blocking — the server runs it on
 /// the connection task. The record area is `record_root`; the requesting
@@ -96,7 +147,6 @@ pub fn spawn(
             target_uid,
         });
     }
-    let data_dir = instance_data_dir(&identity, slug)?;
     // Early occupancy probe: the common sequential-reuse case fails
     // here, before input validation, preserving the reviewed error
     // precedence. Advisory only — the exclusive publication in
@@ -134,15 +184,27 @@ pub fn spawn(
         }
     }
 
+    validate_user_env(&user_env)?;
+
+    // --- compose + resolve ------------------------------------------------
+    let (env, resolved) = prepare_launch(slug, &workspace_canon, &user_env, &identity)?;
+    note_roots(slug, &resolved);
+    let data_dir = resolved.data;
+
     // Workspace disjointness: against every registered instance's
     // workspace and against the data tree itself (an agent whose
     // workspace is the tree could write another instance's data).
-    let data_root = data_dir.parent().context("data directory has no parent")?;
+    let data_root = data_dir.parent().with_context(|| {
+        format!(
+            "the resolved data root {} has no parent directory: it names a filesystem root; set {} or {} to a directory under it",
+            data_dir.display(),
+            roots::RootKind::Data.own_key(),
+            roots::RootKind::Data.xdg_var(),
+        )
+    })?;
     // Canonical where the tree exists; a fresh host has no tree yet, and
     // the verbatim path is then the honest comparison input.
-    let data_root_canon = data_root
-        .canonicalize()
-        .unwrap_or_else(|_| data_root.to_path_buf());
+    let data_root_canon = canonical(data_root);
     if overlaps(&workspace_canon, &data_root_canon) {
         return Err(SpawnError::overlaps_instance_tree(
             OverlapInput::Workspace,
@@ -173,9 +235,19 @@ pub fn spawn(
                 &instance.data_dir,
             ));
         }
+        // One data root per instance: two records sharing one root
+        // would clear each other's runtime.json on launch and anchor
+        // each other's pid (a deployment that hands every in-place
+        // instance the same root lands here).
+        if overlaps(&canonical(&data_dir), &canonical(&instance.data_dir)) {
+            return Err(SpawnError::overlaps_instance_data_dir(
+                OverlapInput::DataDir,
+                &data_dir,
+                &instance.slug,
+                &instance.data_dir,
+            ));
+        }
     }
-
-    validate_user_env(&user_env)?;
 
     // --- register ---------------------------------------------------------
     let record = records::InstanceRecord {
@@ -187,6 +259,8 @@ pub fn spawn(
         env: user_env.to_vec(),
         identity: None,
         data_dir: data_dir.clone(),
+        config_dir: Some(resolved.config),
+        state_dir: Some(resolved.state),
     };
     // Authoritative collision gate: create_record publishes
     // exclusively, so a spawn racing a same-slug peer loses here with
@@ -198,32 +272,23 @@ pub fn spawn(
     })?;
 
     // --- detach-exec + anchor ----------------------------------------------
-    let started = launch(
-        record_root,
-        &data_dir,
-        slug,
-        &workspace_canon,
-        &user_env,
-        exe,
-        timeout,
-        &identity,
-    )
-    .inspect_err(|_| {
-        // Rollback: the fresh registration goes away on any failure —
-        // kill whatever the helper left first (a failed exec leaves
-        // nothing; a half-boot leaves a running tagma). The data
-        // directory is the tagma's; only the record is ours to remove,
-        // and its absence is what unblocks a same-slug retry. start()
-        // shares launch but keeps its existing record, so identity and
-        // credentials survive a failed relaunch.
-        if let Some(pid) = scan::read_runtime(&data_dir).map(|r| r.pid) {
-            tracing::warn!(pid, "spawn rollback: killing half-booted instance");
-            unsafe { libc::kill(pid as i32, libc::SIGKILL) };
-        }
-        if let Err(error) = records::delete_record(record_root, slug) {
-            tracing::warn!(%error, "spawn rollback: removing instance record failed");
-        }
-    });
+    let started =
+        launch(record_root, &data_dir, slug, &env, exe, timeout, &identity).inspect_err(|_| {
+            // Rollback: the fresh registration goes away on any failure —
+            // kill whatever the helper left first (a failed exec leaves
+            // nothing; a half-boot leaves a running tagma). The data
+            // directory is the tagma's; only the record is ours to remove,
+            // and its absence is what unblocks a same-slug retry. start()
+            // shares launch but keeps its existing record, so identity and
+            // credentials survive a failed relaunch.
+            if let Some(pid) = scan::read_runtime(&data_dir).map(|r| r.pid) {
+                tracing::warn!(pid, "spawn rollback: killing half-booted instance");
+                unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+            }
+            if let Err(error) = records::delete_record(record_root, slug) {
+                tracing::warn!(%error, "spawn rollback: removing instance record failed");
+            }
+        });
     if let Ok((pid, port)) = started {
         tracing::info!(slug = %slug, pid, port, "instance spawned and anchored");
         return Ok((pid, port));
@@ -233,6 +298,26 @@ pub fn spawn(
 
 pub(crate) fn overlaps(a: &Path, b: &Path) -> bool {
     a.starts_with(b) || b.starts_with(a)
+}
+
+/// A path as compared: components folded, so two spellings of one
+/// location (`/srv//xdg`, `/srv/./xdg`) compare equal without the
+/// location having to exist yet.
+pub(crate) fn normalized(path: &Path) -> PathBuf {
+    path.components().collect()
+}
+
+/// A path as the daemon records it: canonical where the tree exists, the
+/// folded verbatim path otherwise (a fresh host has no tree to resolve yet).
+pub(crate) fn canonical(path: &Path) -> PathBuf {
+    normalized(&path.canonicalize().unwrap_or_else(|_| path.to_path_buf()))
+}
+
+/// Two spellings of one tree. The comparison canonicalizes, so a home that
+/// arrives through a symlink (`/home` -> `/var/home`, a linked
+/// `/srv/xdg`) is one location, not a move.
+pub(crate) fn same_tree(a: &Path, b: &Path) -> bool {
+    canonical(a) == canonical(b)
 }
 
 /// A dev-only explicit exe must be an existing file with the exec bit
@@ -257,15 +342,17 @@ pub(crate) fn exe_runnable(exe: &str) -> bool {
 /// record is the caller's policy (spawn deregisters, start keeps) —
 /// but a half-booted leftover is SIGKILLed here either way so no
 /// orphan outlives the timeout.
-/// The shared tail of spawn and start: eight honest inputs, no
-/// bundling — grouping them would rename, not reduce.
+/// The composed env arrives as the helper will receive it, except for the
+/// trace configuration: that is composed last, at the exec boundary, so
+/// the daemon's own OTEL values replace any a harvested login carried.
+/// Composition and root resolution happen in the callers (`prepare_launch`),
+/// so one function decides what an instance sees.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn launch(
     record_root: &Path,
     data_dir: &Path,
     slug: &str,
-    workspace_canon: &Path,
-    user_env: &[String],
+    env: &[String],
     exe: Option<&str>,
     timeout: Duration,
     identity: &LaunchIdentity,
@@ -319,24 +406,10 @@ pub(crate) fn launch(
         "kallipai-tagma",
         "set KALLIPAI_BIN_DIR to the bin directory of the installed kallipai package, or pass --bin with an explicit path",
     )?;
-    let base = harvest_base_env(tagma.parent(), identity);
-    let (state_home, target_user) = match identity {
-        LaunchIdentity::InPlace { .. } => (dirs::state_dir(), None),
-        LaunchIdentity::DropTo(user) => (None, Some(user)),
-    };
-    let env = compose_launch_env(
-        &base,
-        user_env,
-        slug,
-        workspace_canon,
-        data_dir,
-        state_home.as_deref(),
-        target_user,
-    );
     // The trace configuration the daemon was given rides to the instance:
     // the NixOS module sets the endpoint on the daemon unit, and a request
     // cannot name these keys (the allowlist refuses OTEL_*).
-    let env = fill_tracing_env(&env, &TracingSource::from_daemon_env(), slug);
+    let env = fill_tracing_env(env, &TracingSource::from_daemon_env(), slug);
     // Guard every channel at the composed boundary: request pairs were
     // validated, but a harvested base value slips past that check.
     ensure_addr_parses(&env)?;
@@ -348,7 +421,7 @@ pub(crate) fn launch(
     // drop-to form (checked at resolution), so the helper needs no
     // setuid bit.
     let mut helper_command = std::process::Command::new(&helper);
-    if let Some(user) = target_user {
+    if let LaunchIdentity::DropTo(user) = identity {
         helper_command
             .arg("--user")
             .arg(&user.username)

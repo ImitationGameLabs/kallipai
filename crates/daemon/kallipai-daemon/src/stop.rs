@@ -175,6 +175,8 @@ mod tests {
                 env: vec![],
                 identity: None,
                 data_dir: root.path().join("data").join("i1"),
+                config_dir: Some(root.path().join("config")),
+                state_dir: Some(root.path().join("state").join("kallipai")),
             },
         )
         .expect("write record");
@@ -211,6 +213,8 @@ mod tests {
                 env: vec![],
                 identity: None,
                 data_dir: root.path().join("data").join("i1"),
+                config_dir: Some(root.path().join("config")),
+                state_dir: Some(root.path().join("state").join("kallipai")),
             },
         )
         .expect("write record");

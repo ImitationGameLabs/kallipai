@@ -93,6 +93,8 @@ mod tests {
             env: Vec::new(),
             identity: None,
             data_dir: data_dir.to_path_buf(),
+            config_dir: Some(data_dir.join("config")),
+            state_dir: Some(data_dir.join("state")),
         }
     }
 

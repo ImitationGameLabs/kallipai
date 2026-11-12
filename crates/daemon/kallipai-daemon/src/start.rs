@@ -1,18 +1,28 @@
 //! Start semantics: relaunch a registered instance that is stopped or
 //! dead. This is relaunch, not allocation — nothing is created or
-//! removed: the record carries the workspace and user env captured at
-//! spawn time, credentials/ survive untouched for the fresh process to
-//! pick up, and a stale runtime.json is removed before the relaunch so
-//! the launch poll only ever sees the new incarnation's self-report.
+//! removed: the record carries the workspace and the request env captured
+//! at spawn time, credentials/ survive untouched for the fresh process to
+//! pick up, and a stale runtime.json is removed before the relaunch so the
+//! launch poll only ever sees the new incarnation's self-report. The rest
+//! of the environment — identity seed, harvest, deployment roots — is
+//! recomposed here, so a restart follows the host as it is now.
+//! The record also carries the three roots its spawn resolved; a relaunch
+//! refuses a data root the environment no longer resolves, and records the
+//! config and state roots the launch handed over, so the log pointer names
+//! the tree the instance writes.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use kallipai_daemon_common::roots;
 use kallipai_daemon_common::wire::ErrorCode;
 
 use crate::records::{self, InstanceRecord};
 use crate::scan;
-use crate::spawn::{SpawnError, deny_guidance, identity_from_record, launch, validate_user_env};
+use crate::spawn::{
+    SpawnError, deny_guidance, identity_from_record, launch, note_roots, prepare_launch, same_tree,
+    validate_user_env,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum StartError {
@@ -25,10 +35,16 @@ pub enum StartError {
     #[error("instance {0} is already running")]
     AlreadyRunning(String),
     #[error(
-        "instance did not publish pid/port within {timeout_secs}s; see the \
-         instance log files under <state-home>/kallipai/tagmata/<slug>/logs/ and system OOM records"
+        "instance did not publish pid/port within {timeout_secs}s; see the instance log files \
+         under {logs} and system OOM records"
     )]
-    Timeout { timeout_secs: u64 },
+    Timeout {
+        timeout_secs: u64,
+        /// The log tree this launch resolved: the recorded state root
+        /// plus the log leaf, so the message names the tree the instance
+        /// writes rather than a shape assembled here.
+        logs: PathBuf,
+    },
     #[error(transparent)]
     Internal(#[from] anyhow::Error),
 }
@@ -56,7 +72,9 @@ impl From<SpawnError> for StartError {
             // spawn-only variants cannot occur through start's path but
             // stay total.
             SpawnError::Invalid(m) => StartError::Invalid(m),
-            SpawnError::Timeout { timeout_secs } => StartError::Timeout { timeout_secs },
+            SpawnError::Timeout { timeout_secs } => {
+                StartError::Internal(anyhow::anyhow!("launch timed out after {timeout_secs}s"))
+            }
             SpawnError::Internal(e) => StartError::Internal(e),
             other => StartError::Internal(anyhow::anyhow!("{other}")),
         }
@@ -199,41 +217,129 @@ pub fn start(
         );
         return Err(StartError::AlreadyRunning(slug.to_string()));
     }
-    // The persisted copy is re-validated so hand-edited records cannot
-    // smuggle daemon-owned keys into a launch; the replay env then drops
+    // The persisted request pairs are re-validated so hand-edited records
+    // cannot smuggle daemon-owned keys into a launch; the replay env then
+    // drops material that is provably spent (see replay_env), and the whole
+    // set stays re-validated before it reaches the composition.
     validate_user_env(&record.env)?;
-    // material that is provably spent (see replay_env).
     let replay = replay_env(record_root, slug, &record);
-    // One-shot overlay: appended after the replay so compose_launch_env's
-    // map composition lets the later pair win. Not written back — the
-    // persisted snapshot stays the spawn-time truth.
+    // One-shot overlay: appended after the replay so the later pair wins in
+    // the composition. Not written back — the persisted request pairs stay
+    // the spawn-time truth; the rest of the environment is recomposed below.
     let mut launch_env = replay;
     launch_env.extend(env_overrides.iter().cloned());
-    match launch(
-        record_root,
-        &data_dir,
-        slug,
-        Path::new(&workspace),
-        &launch_env,
-        exe,
-        timeout,
-        &identity,
-    ) {
+    // Compose the layers spawn shares and resolve the roots from exactly
+    // that pair list; the record's roots are what this launch must land on.
+    let (env, resolved) = prepare_launch(slug, Path::new(workspace), &launch_env, &identity)?;
+    note_roots(slug, &resolved);
+    require_recorded_data_root(&record, slug, &resolved.data)?;
+    // A record whose startup migration could not persist the roots it
+    // resolved names no config or state root. This relaunch resolves both from
+    // the same environment and completes the record once the instance is up
+    // (see `record_moved_roots`), so one failed write does not lock the
+    // instance out for good.
+    if let Err(error) = record.recorded_roots(slug) {
+        tracing::warn!(
+            slug = %slug,
+            cause = %error,
+            "instance record names no config or state root yet; this relaunch completes it"
+        );
+    }
+    match launch(record_root, &data_dir, slug, &env, exe, timeout, &identity) {
         Ok((pid, port)) => {
+            // Only a launch that landed may teach the record its roots: a
+            // failed one hands the instance nothing, and a record claiming
+            // trees this run never used would send the log pointer to a tree
+            // with no log in it.
+            record_moved_roots(record_root, slug, &record, &resolved);
             tracing::info!(slug = %slug, pid, port, "instance started (relaunch)");
             Ok((pid, port))
         }
-        Err(SpawnError::Timeout { timeout_secs }) => Err(StartError::Timeout { timeout_secs }),
+        Err(SpawnError::Timeout { timeout_secs }) => Err(StartError::Timeout {
+            timeout_secs,
+            logs: roots::log_tree(&resolved.state, slug),
+        }),
         Err(SpawnError::Internal(e)) => Err(StartError::Internal(e)),
         // Unreachable via launch today; kept total so a future variant
         // surfaces as an internal error instead of failing to map.
         Err(other) => Err(StartError::Internal(anyhow::anyhow!("{other}"))),
     }
 }
+/// Refuse a relaunch whose env resolves a data root other than the recorded
+/// one: the instance reads its trees from this env, so a mismatch would boot
+/// it into a tree the daemon does not record, scan or kill under. Both sides
+/// are canonicalized (`same_tree`, the spelling adopt records), so a difference
+/// is a real move and not a second spelling or a symlinked path to one
+/// location.
+fn require_recorded_data_root(
+    record: &InstanceRecord,
+    slug: &str,
+    resolved: &Path,
+) -> Result<(), StartError> {
+    if same_tree(&record.data_dir, resolved) {
+        return Ok(());
+    }
+    Err(StartError::Invalid(format!(
+        "instance {slug} was recorded with data root {} but this launch resolves {}; the \
+         root keys ({} or {}) are read from the daemon's own environment, so set them on \
+         the daemon's unit and restart the daemon; a record written while a login \
+         profile's root key was honored names a tree this launch no longer resolves; \
+         restore whatever moved it, or adopt the resolved tree so the record points at \
+         it (a fresh spawn of the same slug hits the existing record)",
+        record.data_dir.display(),
+        resolved.display(),
+        roots::RootKind::Data.own_key(),
+        roots::RootKind::Data.xdg_var(),
+    )))
+}
+
+/// A relaunch recomposes the environment, so a moved deployment can hand
+/// the instance a different config or state root. The record follows the
+/// launch here: those two roots are writable state, and the log pointer
+/// has to name the tree the instance actually writes. The data root is
+/// the hard case above; these two only report.
+fn record_moved_roots(
+    record_root: &Path,
+    slug: &str,
+    record: &InstanceRecord,
+    resolved: &roots::Roots,
+) {
+    let moved = [
+        ("config", record.config_dir.as_deref(), &resolved.config),
+        ("state", record.state_dir.as_deref(), &resolved.state),
+    ];
+    let differs =
+        |recorded: Option<&Path>, now: &Path| recorded.is_none_or(|path| !same_tree(path, now));
+    if !moved
+        .iter()
+        .any(|(_, recorded, now)| differs(*recorded, now))
+    {
+        return;
+    }
+    let mut updated = record.clone();
+    updated.config_dir = Some(resolved.config.clone());
+    updated.state_dir = Some(resolved.state.clone());
+    for (root, recorded, now) in moved {
+        if !differs(recorded, now) {
+            continue;
+        }
+        tracing::warn!(
+            slug = %slug,
+            root,
+            recorded = %recorded.map(|path| path.display().to_string()).unwrap_or_default(),
+            resolved = %now.display(),
+            "the instance root moved since the record was written; recording the new one"
+        );
+    }
+    if let Err(error) = records::write_record(record_root, slug, &updated) {
+        tracing::warn!(slug = %slug, error = %error, "recording the moved roots failed");
+    }
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::spawn::{Harvest, LaunchIdentity, prepare_launch_with};
     #[test]
     fn start_denial_guidance_names_root_for_a_root_owned_record() {
         let error = StartError::Denied {
@@ -256,6 +362,8 @@ mod tests {
             env: env.iter().map(|pair| pair.to_string()).collect(),
             identity: None,
             data_dir: data_dir.to_path_buf(),
+            config_dir: None,
+            state_dir: None,
         }
     }
 
@@ -515,6 +623,199 @@ mod tests {
                 .iter()
                 .any(|pair| pair == "KALLIPAI_TAGMA_ADDR=127.0.0.1:4711"),
             "the pinned listen address survives the start replay"
+        );
+    }
+
+    fn harvest_with_home(home: &str) -> Harvest {
+        Harvest {
+            seed: vec![("HOME".to_string(), home.to_string())],
+            pairs: vec![("PATH".to_string(), "/usr/bin:/bin".to_string())],
+        }
+    }
+
+    fn in_place_identity() -> LaunchIdentity {
+        LaunchIdentity::InPlace {
+            uid: 1000,
+            username: Some("alice".to_string()),
+        }
+    }
+
+    /// The composition as spawn and start build it: the caller's request
+    /// pairs over one harvested layer and one deployment layer. The tests
+    /// below pin the restart's read of it; `prepare_launch` adds only the
+    /// harvest that needs a real login shell.
+    fn composed(
+        request: &[String],
+        harvest: &Harvest,
+        deployment: &[(String, String)],
+    ) -> (Vec<String>, roots::Roots) {
+        prepare_launch_with(
+            "instance-1",
+            Path::new("/ws"),
+            request,
+            harvest,
+            deployment,
+            &in_place_identity(),
+        )
+        .expect("the composition resolves")
+    }
+
+    /// A record written before the daemon captured env pairs holds none;
+    /// with only HOME in the seed the composition resolves the root spawn
+    /// recorded, so such a record restarts unchanged.
+    #[test]
+    fn a_record_without_env_resolves_the_root_spawn_recorded() {
+        let recorded = Path::new("/home/alice/.local/share/kallipai/tagmata/instance-1");
+        let (env, resolved) = composed(&[], &harvest_with_home("/home/alice"), &[]);
+        assert_eq!(resolved.data, recorded);
+        assert!(
+            require_recorded_data_root(&record(&[], recorded), "instance-1", &resolved.data)
+                .is_ok(),
+            "the recorded root is the resolved root"
+        );
+        assert!(
+            env.iter().any(|pair| pair == "HOME=/home/alice"),
+            "the seed HOME reaches the instance"
+        );
+    }
+
+    /// One deployment XDG root: the spawn composition (request carrying the
+    /// profile pairs) and the restart composition (request replaying an empty
+    /// record) resolve the same root, so a restart never moves the instance.
+    #[test]
+    fn spawn_and_restart_resolve_one_root_under_a_deployment_xdg_root() {
+        let deployment = vec![("XDG_DATA_HOME".to_string(), "/srv/xdg".to_string())];
+        let profile = vec!["HOME=/home/alice".to_string(), "LANG=C".to_string()];
+        let (_, spawned) = composed(&profile, &harvest_with_home("/home/alice"), &deployment);
+        let (_, restarted) = composed(&[], &harvest_with_home("/tmp/elsewhere"), &deployment);
+        assert_eq!(
+            spawned.data, restarted.data,
+            "an XDG root fixed by the deployment follows neither the profile nor the seed"
+        );
+    }
+
+    /// A record whose root this launch does not resolve is refused, naming
+    /// both paths and the exit: the instance would otherwise boot into a tree
+    /// the daemon does not record, scan and kill under.
+    #[test]
+    fn a_restart_refuses_a_resolved_root_other_than_the_recorded_one() {
+        let recorded = Path::new("/srv/old/kallipai/tagmata/instance-1");
+        let deployment = vec![("XDG_DATA_HOME".to_string(), "/srv/new".to_string())];
+        let (_, resolved) = composed(&[], &harvest_with_home("/home/alice"), &deployment);
+        let error =
+            require_recorded_data_root(&record(&[], recorded), "instance-1", &resolved.data)
+                .expect_err("a moved root is refused");
+        let StartError::Invalid(message) = &error else {
+            panic!("a moved root is an invalid request, got {error}");
+        };
+        assert!(
+            message.contains("/srv/old/kallipai/tagmata/instance-1"),
+            "the refusal names the recorded root: {message}"
+        );
+        assert!(
+            message.contains("/srv/new/kallipai/tagmata/instance-1"),
+            "the refusal names the resolved root: {message}"
+        );
+        assert!(
+            message.contains("KALLIPAI_TAGMA_DATA_DIR"),
+            "the refusal names the exit: {message}"
+        );
+    }
+
+    /// A second spelling of one location is not a move: the comparison
+    /// folds redundant components before it decides.
+    #[test]
+    fn a_second_spelling_of_the_recorded_root_is_not_a_move() {
+        let recorded = Path::new("/srv/x/kallipai/tagmata/instance-1");
+        let spelled = Path::new("/srv//x/./kallipai/tagmata/instance-1");
+        assert!(
+            require_recorded_data_root(&record(&[], recorded), "instance-1", spelled).is_ok(),
+            "one location, two spellings"
+        );
+    }
+
+    /// The config and state roots follow the launch: a moved one is written
+    /// back, so the log pointer names the tree the instance writes. The data
+    /// root stays exactly as recorded.
+    #[test]
+    fn a_moved_state_root_is_recorded_and_the_data_root_is_kept() {
+        let root = tempfile::tempdir().expect("record root");
+        let mut value = record(&[], Path::new("/srv/data/kallipai/tagmata/instance-1"));
+        value.config_dir = Some(Path::new("/old/config/kallipai/tagmata/instance-1").to_path_buf());
+        value.state_dir = Some(Path::new("/old/state/kallipai").to_path_buf());
+        write_record_at(root.path(), &value);
+        let resolved = roots::Roots {
+            data: value.data_dir.clone(),
+            config: Path::new("/new/config/kallipai/tagmata/instance-1").to_path_buf(),
+            state: Path::new("/new/state/kallipai").to_path_buf(),
+        };
+        record_moved_roots(root.path(), "instance-1", &value, &resolved);
+        let stored = records::read_record(root.path(), "instance-1").expect("record persists");
+        assert_eq!(stored.config_dir, Some(resolved.config.clone()));
+        assert_eq!(stored.state_dir, Some(resolved.state.clone()));
+        assert_eq!(
+            stored.data_dir, value.data_dir,
+            "the data root is not rewritten"
+        );
+    }
+
+    /// A record the startup migration could not complete names no config
+    /// or state root: its own reader answers with the keys that supply
+    /// one, so the caller learns which keys restore the trees.
+    #[test]
+    fn a_record_without_roots_answers_with_the_keys_that_supply_one() {
+        let error = record(&[], Path::new("/srv/data/kallipai/tagmata/instance-1"))
+            .recorded_roots("instance-1")
+            .expect_err("an old record has no roots to answer for");
+        let message = error.to_string();
+        assert!(
+            message.contains("instance-1"),
+            "the error names the record: {message}"
+        );
+        for key in roots::RootKind::Config.remedies() {
+            assert!(
+                message.contains(key),
+                "{key} missing from the message: {message:?}"
+            );
+        }
+    }
+
+    /// A relaunch completes a record whose roots the startup migration could
+    /// not persist: the write-back fills both missing roots from the trees
+    /// this launch resolved, so the record answers for itself afterwards.
+    #[test]
+    fn a_relaunch_completes_a_record_without_the_recorded_roots() {
+        let root = tempfile::tempdir().expect("record root");
+        let value = record(&[], Path::new("/srv/data/kallipai/tagmata/instance-1"));
+        write_record_at(root.path(), &value);
+        let resolved = roots::Roots {
+            data: value.data_dir.clone(),
+            config: Path::new("/srv/config/kallipai/tagmata/instance-1").to_path_buf(),
+            state: Path::new("/srv/state/kallipai").to_path_buf(),
+        };
+        record_moved_roots(root.path(), "instance-1", &value, &resolved);
+        let stored = records::read_record(root.path(), "instance-1").expect("record persists");
+        assert_eq!(stored.config_dir, Some(resolved.config.clone()));
+        assert_eq!(stored.state_dir, Some(resolved.state.clone()));
+        assert!(
+            stored.recorded_roots("instance-1").is_ok(),
+            "the record answers for its three roots after the completion"
+        );
+    }
+
+    /// A home that arrives through a symlink is one tree, not a move: the
+    /// comparison canonicalizes, the spelling adopt records.
+    #[test]
+    fn a_symlinked_spelling_of_the_recorded_root_is_not_a_move() {
+        let base = tempfile::tempdir().expect("base");
+        let real = base.path().join("real").join("kallipai/tagmata/instance-1");
+        std::fs::create_dir_all(&real).expect("real tree");
+        let home = base.path().join("home");
+        std::os::unix::fs::symlink(base.path().join("real"), &home).expect("symlink");
+        let spelled = home.join("kallipai/tagmata/instance-1");
+        assert!(
+            require_recorded_data_root(&record(&[], &real), "instance-1", &spelled).is_ok(),
+            "one tree through a symlink is not a move"
         );
     }
 }

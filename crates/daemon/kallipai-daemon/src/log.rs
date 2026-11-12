@@ -4,13 +4,12 @@
 //! directory, not the log tree. A stopped instance reads exactly like
 //! a running one: the logs are output residue on disk.
 //!
-//! Log placement is owner-aware: the tree lives in the instance's
-//! TARGET USER's state home (`<home>/.local/state/kallipai/tagmata/<slug>/logs`),
-//! resolved from the record's `target_uid` through the passwd database
-//! (`reconcile::instance_logs_dir`) — the daemon may run as root while
-//! instances run as their own users, so the daemon's own state home
-//! would name the wrong tree. The shape is mirrored by the tagma's
-//! `logs_target` in kallipai-tagma; the shapes move together by hand.
+//! Log placement comes from the record: the state root the launch
+//! resolved, plus the `tagmata/<slug>/logs` leaf
+//! (`records::InstanceRecord::logs_dir`). One implementation serves the
+//! logs verb and the reconcile sweep, so a state root moved by the
+//! deployment or by a profile names the tree the instance writes. The
+//! tagma side places the same leaf under its own state root.
 //! The files are
 //! tracing-appender daily rolls (`instance.<date>.log`, seven
 //! retained), so the file name sorts in date order and the merged
@@ -63,21 +62,21 @@ pub struct LogOutcome {
 pub enum LogError {
     #[error("no instance named {0}")]
     NotFound(String),
-    /// The record names a target uid the passwd database does not
-    /// know, so the log directory cannot be placed. A hard error,
-    /// not a fallback: the daemon's own state home would read
-    /// another user's tree.
-    #[error("uid {0} has no passwd entry; cannot place the log directory")]
-    LogsHome(u32),
+    /// The record predates the recorded roots and the boot migration
+    /// could not fill them, so the log tree cannot be placed. A hard
+    /// error, not a fallback: guessing the shape is what the record
+    /// replaced.
+    #[error(transparent)]
+    Roots(#[from] crate::records::RootsNotRecorded),
 }
 
 impl From<&LogError> for ErrorCode {
     fn from(error: &LogError) -> Self {
         match error {
             LogError::NotFound(_) => ErrorCode::NotFound,
-            // Not a client mistake and not recoverable here: the
-            // system's passwd database lacks the record's target uid.
-            LogError::LogsHome(_) => ErrorCode::Internal,
+            // Not a client mistake and not recoverable here: the record
+            // cannot name the tree.
+            LogError::Roots(_) => ErrorCode::Internal,
         }
     }
 }
@@ -548,12 +547,24 @@ mod tests {
             env: Vec::new(),
             identity: None,
             data_dir: root.join("data"),
+            config_dir: Some(root.join("config")),
+            state_dir: Some(root.join("state").join("kallipai")),
         };
         crate::records::create_record(root, slug, &record).expect("record");
     }
 
+    /// The log tree of the one slug these tests register: the recorded
+    /// state root plus the log leaf (`roots::log_tree`).
+    fn log_tree(root: &Path) -> std::path::PathBuf {
+        root.join("state")
+            .join("kallipai")
+            .join("tagmata")
+            .join("team-a")
+            .join("logs")
+    }
+
     fn roll(root: &Path, name: &str, text: &str) {
-        write(&root.join("logs").join(name), text);
+        write(&log_tree(root).join(name), text);
     }
 
     fn peek(out: &LogOutcome) -> (&str, Option<(&str, u64)>) {
@@ -569,7 +580,7 @@ mod tests {
         put_record(root.path(), "team-a", 1000);
         let out = tail(
             root.path(),
-            &root.path().join("logs"),
+            &log_tree(root.path()),
             "team-a",
             None,
             None,
@@ -580,7 +591,7 @@ mod tests {
         assert_eq!(out.text, "");
         tail(
             root.path(),
-            &root.path().join("logs"),
+            &log_tree(root.path()),
             "team-a",
             None,
             None,
@@ -590,7 +601,7 @@ mod tests {
         .expect("root reads");
         let error = tail(
             root.path(),
-            &root.path().join("logs"),
+            &log_tree(root.path()),
             "team-a",
             None,
             None,
@@ -606,7 +617,7 @@ mod tests {
         let root = tempdir();
         let error = tail(
             root.path(),
-            &root.path().join("logs"),
+            &log_tree(root.path()),
             "../escape",
             None,
             None,
@@ -623,7 +634,7 @@ mod tests {
         put_record(root.path(), "team-a", 1000);
         let out = tail(
             root.path(),
-            &root.path().join("logs"),
+            &log_tree(root.path()),
             "team-a",
             None,
             None,
@@ -642,7 +653,7 @@ mod tests {
         roll(root.path(), "instance.2026-09-09.log", "d9-a\nd9-b\n");
         let out = tail(
             root.path(),
-            &root.path().join("logs"),
+            &log_tree(root.path()),
             "team-a",
             Some(100),
             None,
@@ -667,7 +678,7 @@ mod tests {
         roll(root.path(), "instance.2026-09-09.log", "d9-a\nd9-b\n");
         let out = tail(
             root.path(),
-            &root.path().join("logs"),
+            &log_tree(root.path()),
             "team-a",
             Some(2),
             None,
@@ -689,7 +700,7 @@ mod tests {
         roll(root.path(), "instance.2026-09-09.log", &body);
         let out = tail(
             root.path(),
-            &root.path().join("logs"),
+            &log_tree(root.path()),
             "team-a",
             None,
             None,
@@ -710,7 +721,7 @@ mod tests {
         roll(root.path(), "instance.2026-09-09.log", &body);
         let out = tail(
             root.path(),
-            &root.path().join("logs"),
+            &log_tree(root.path()),
             "team-a",
             Some(5000),
             None,
@@ -734,7 +745,7 @@ mod tests {
         roll(root.path(), "instance.2026-09-09.log", &body);
         let out = tail(
             root.path(),
-            &root.path().join("logs"),
+            &log_tree(root.path()),
             "team-a",
             Some(1000),
             None,
@@ -759,7 +770,7 @@ mod tests {
         roll(root.path(), "instance.2026-09-09.log", &giant);
         let out = tail(
             root.path(),
-            &root.path().join("logs"),
+            &log_tree(root.path()),
             "team-a",
             Some(100),
             None,
@@ -790,7 +801,7 @@ mod tests {
         roll(root.path(), "instance.2026-09-09.log", &body);
         let out = tail(
             root.path(),
-            &root.path().join("logs"),
+            &log_tree(root.path()),
             "team-a",
             Some(1000),
             None,
@@ -837,7 +848,7 @@ mod tests {
         roll(root.path(), "instance.2026-09-09.log", "l1\nl2\n");
         let first = tail(
             root.path(),
-            &root.path().join("logs"),
+            &log_tree(root.path()),
             "team-a",
             Some(100),
             None,
@@ -852,13 +863,13 @@ mod tests {
         // The writer appends; the follow poll must see exactly the new
         // line and nothing replayed.
         write(
-            &root.path().join("logs").join("instance.2026-09-09.log"),
+            &log_tree(root.path()).join("instance.2026-09-09.log"),
             "l1\nl2\nl3\n",
         );
         let cursor = first.next_cursor.expect("cursor");
         let next = tail(
             root.path(),
-            &root.path().join("logs"),
+            &log_tree(root.path()),
             "team-a",
             Some(100),
             None,
@@ -883,7 +894,7 @@ mod tests {
         };
         let out = tail(
             root.path(),
-            &root.path().join("logs"),
+            &log_tree(root.path()),
             "team-a",
             Some(100),
             None,
@@ -909,7 +920,7 @@ mod tests {
         };
         let out = tail(
             root.path(),
-            &root.path().join("logs"),
+            &log_tree(root.path()),
             "team-a",
             Some(100),
             None,
@@ -928,7 +939,7 @@ mod tests {
         roll(root.path(), "instance.2026-09-09.log", "d9-a\n");
         let out = tail(
             root.path(),
-            &root.path().join("logs"),
+            &log_tree(root.path()),
             "team-a",
             Some(100),
             Some("instance.2026-09-08.log"),
@@ -943,7 +954,7 @@ mod tests {
         // A name that is not there: empty, nothing to follow.
         let missing = tail(
             root.path(),
-            &root.path().join("logs"),
+            &log_tree(root.path()),
             "team-a",
             Some(100),
             Some("instance.2026-09-01.log"),
@@ -956,7 +967,7 @@ mod tests {
         // the flag must not become a path escape.
         let escape = tail(
             root.path(),
-            &root.path().join("logs"),
+            &log_tree(root.path()),
             "team-a",
             Some(100),
             Some("../secrets"),
@@ -976,7 +987,7 @@ mod tests {
         // the follow picks up only what comes next.
         let first = tail(
             root.path(),
-            &root.path().join("logs"),
+            &log_tree(root.path()),
             "team-a",
             Some(2),
             None,
@@ -986,13 +997,13 @@ mod tests {
         .expect("first screen");
         assert_eq!(peek(&first), ("c\nd", Some(("instance.2026-09-09.log", 8))));
         write(
-            &root.path().join("logs").join("instance.2026-09-09.log"),
+            &log_tree(root.path()).join("instance.2026-09-09.log"),
             "a\nb\nc\nd\ne\n",
         );
         let cursor = first.next_cursor.expect("cursor");
         let next = tail(
             root.path(),
-            &root.path().join("logs"),
+            &log_tree(root.path()),
             "team-a",
             Some(2),
             None,
@@ -1010,7 +1021,7 @@ mod tests {
         roll(root.path(), "instance.2026-09-09.log", "whole\npartia");
         let first = tail(
             root.path(),
-            &root.path().join("logs"),
+            &log_tree(root.path()),
             "team-a",
             Some(100),
             None,

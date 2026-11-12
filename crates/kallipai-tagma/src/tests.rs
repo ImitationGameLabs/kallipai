@@ -140,16 +140,61 @@ fn boot_refuses_an_invalid_slug() {
 
 #[test]
 #[serial]
-fn boot_derives_the_instance_roots_from_the_slug() {
+fn boot_derives_the_roots_from_home_alone() {
     let tmp = tempfile::tempdir().unwrap();
     let home = tmp.path().to_str().unwrap().to_owned();
     temp_env::with_vars(
         [
             ("KALLIPAI_TAGMA_SLUG", Some("e2e")),
             ("KALLIPAI_TAGMA_DATA_DIR", None),
-            ("XDG_DATA_HOME", Some(home.as_str())),
-            ("XDG_CONFIG_HOME", Some(home.as_str())),
-            ("XDG_STATE_HOME", Some(home.as_str())),
+            ("KALLIPAI_TAGMA_CONFIG_DIR", None),
+            ("KALLIPAI_TAGMA_STATE_DIR", None),
+            ("XDG_DATA_HOME", None),
+            ("XDG_CONFIG_HOME", None),
+            ("XDG_STATE_HOME", None),
+            ("HOME", Some(home.as_str())),
+        ],
+        || {
+            let roots = instance_roots_from_env().unwrap();
+            assert_eq!(
+                roots.data,
+                tmp.path()
+                    .join(".local/share")
+                    .join("kallipai")
+                    .join("tagmata")
+                    .join("e2e")
+            );
+            assert_eq!(
+                roots.config,
+                tmp.path()
+                    .join(".config")
+                    .join("kallipai")
+                    .join("tagmata")
+                    .join("e2e")
+            );
+            assert_eq!(
+                roots.state,
+                tmp.path().join(".local/state").join("kallipai")
+            );
+        },
+    );
+}
+
+#[test]
+#[serial]
+fn boot_derives_the_roots_from_xdg_alone() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base = tmp.path().to_str().unwrap().to_owned();
+    temp_env::with_vars(
+        [
+            ("KALLIPAI_TAGMA_SLUG", Some("e2e")),
+            ("KALLIPAI_TAGMA_DATA_DIR", None),
+            ("KALLIPAI_TAGMA_CONFIG_DIR", None),
+            ("KALLIPAI_TAGMA_STATE_DIR", None),
+            ("XDG_DATA_HOME", Some(base.as_str())),
+            ("XDG_CONFIG_HOME", Some(base.as_str())),
+            ("XDG_STATE_HOME", Some(base.as_str())),
+            ("HOME", None),
         ],
         || {
             let roots = instance_roots_from_env().unwrap();
@@ -163,20 +208,69 @@ fn boot_derives_the_instance_roots_from_the_slug() {
 
 #[test]
 #[serial]
-fn boot_honors_the_data_dir_override() {
+fn boot_lets_an_own_key_win_over_the_standard_variables() {
     let tmp = tempfile::tempdir().unwrap();
-    let override_dir = tmp.path().join("override");
+    let base = tmp.path().to_str().unwrap().to_owned();
+    let data = tmp.path().join("own-data");
+    let config = tmp.path().join("own-config");
+    let state = tmp.path().join("own-state");
     temp_env::with_vars(
         [
             ("KALLIPAI_TAGMA_SLUG", Some("e2e")),
-            (
-                "KALLIPAI_TAGMA_DATA_DIR",
-                Some(override_dir.to_str().unwrap()),
-            ),
+            ("KALLIPAI_TAGMA_DATA_DIR", Some(data.to_str().unwrap())),
+            ("KALLIPAI_TAGMA_CONFIG_DIR", Some(config.to_str().unwrap())),
+            ("KALLIPAI_TAGMA_STATE_DIR", Some(state.to_str().unwrap())),
+            ("XDG_DATA_HOME", Some(base.as_str())),
+            ("XDG_CONFIG_HOME", Some(base.as_str())),
+            ("XDG_STATE_HOME", Some(base.as_str())),
+            ("HOME", Some(base.as_str())),
         ],
         || {
             let roots = instance_roots_from_env().unwrap();
-            assert_eq!(roots.data, override_dir);
+            assert_eq!(roots.data, data);
+            assert_eq!(roots.config, config);
+            assert_eq!(roots.state, state);
+        },
+    );
+}
+
+#[test]
+#[serial]
+fn boot_treats_an_empty_own_key_as_absent() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base = tmp.path().to_str().unwrap().to_owned();
+    temp_env::with_vars(
+        [
+            ("KALLIPAI_TAGMA_SLUG", Some("e2e")),
+            ("KALLIPAI_TAGMA_CONFIG_DIR", Some("")),
+            ("XDG_CONFIG_HOME", Some(base.as_str())),
+        ],
+        || {
+            let roots = instance_roots_from_env().unwrap();
+            assert_eq!(
+                roots.config,
+                tmp.path().join("kallipai").join("tagmata").join("e2e")
+            );
+        },
+    );
+}
+
+#[test]
+#[serial]
+fn boot_fails_fast_when_no_level_names_a_root() {
+    temp_env::with_vars(
+        [
+            ("KALLIPAI_TAGMA_SLUG", Some("e2e")),
+            ("KALLIPAI_TAGMA_DATA_DIR", None),
+            ("XDG_DATA_HOME", None),
+            ("HOME", None),
+        ],
+        || {
+            let err = instance_roots_from_env().unwrap_err();
+            let text = format!("{err:#}");
+            for key in ["KALLIPAI_TAGMA_DATA_DIR", "XDG_DATA_HOME", "HOME"] {
+                assert!(text.contains(key), "{key} missing from {text}");
+            }
         },
     );
 }

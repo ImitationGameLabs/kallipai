@@ -27,7 +27,7 @@ order: 21
 
 ### 文件位置
 
-profiles 配置文件位于实例配置根的 `profiles.toml`：`<config home>/kallipai/tagmata/<slug>/`。配置根推导不出（无 `KALLIPAI_TAGMA_SLUG`、无 config home）时 tagma 不加载任何 profile：读取记警告并以无 profile 状态启动；无配置根的写入则报错。没有配置文件时同样以无 profile 状态启动：在模型配置页面（或手写文件）加入首个 profile 之前不配置任何模型。
+profiles 配置文件位于实例配置根的 `profiles.toml`：`<config home>/kallipai/tagmata/<slug>/`。配置根按 `KALLIPAI_TAGMA_CONFIG_DIR`（绝对路径时逐字采用）、`XDG_CONFIG_HOME`、`HOME` 的顺序解析；受管启动把同一套规则交给实例（就地传下部署的根变量，落下式由身份定值把根落在目标用户的 `.config`），解析结果变化时新旧两棵树之间不做迁移。没有任何规则给出配置根时 tagma 拒绝启动，报错指名可补上该根的键或变量。配置根存在而没有配置文件时，tagma 以无 profile 状态服务：在模型配置页面（或手写文件）加入首个 profile 之前不配置任何模型。
 
 有配置文件时，tagma 加载多个 provider/model 组合，每个 profile 自行声明 `max_context_window`。每个 profile 还可声明 `modalities`；省略默认纯文本，set 的生效模态是其成员的交集。
 

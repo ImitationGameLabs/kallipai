@@ -324,20 +324,31 @@ pub(super) fn fallback_path(bin_dir: Option<&Path>) -> String {
     }
 }
 
-/// The launch env base: the harvested login environment, or — on any
+/// The two harvest layers of one launch environment: the identity seed
+/// pairs (always inserted) and the harvested login pairs, or — on any
 /// harvest failure — the identity pairs the daemon already holds plus the
-/// fallback PATH. Always a usable base: harvesting is a best-effort
-/// upgrade of the exports and never a launch gate; a failure keeps the
-/// identity the daemon holds and takes the fallback PATH.
-pub(super) fn harvest_base_env(
-    fallback_bin_dir: Option<&Path>,
-    identity: &LaunchIdentity,
-) -> Vec<(String, String)> {
+/// fallback PATH. Always a usable answer: harvesting is a best-effort
+/// upgrade of the exports and never a launch gate.
+pub(crate) struct Harvest {
+    /// The identity seed pairs: HOME, USER, LOGNAME, XDG_RUNTIME_DIR.
+    pub(crate) seed: Vec<(String, String)>,
+    /// The harvested login pairs, or the degraded fallback.
+    pub(crate) pairs: Vec<(String, String)>,
+}
+
+/// Harvest the login environment for `identity`, seeded with what the
+/// daemon already holds and degrading to the fallback on any failure.
+pub(super) fn harvest_env(fallback_bin_dir: Option<&Path>, identity: &LaunchIdentity) -> Harvest {
     let (seed, run_as) = match identity {
         LaunchIdentity::InPlace { .. } => (HarvestSeed::for_current_process(), None),
         LaunchIdentity::DropTo(user) => (HarvestSeed::for_target(user), Some((user.uid, user.gid))),
     };
-    match harvest_login_env(&harvest_bash(), &seed, HARVEST_TIMEOUT, run_as) {
+    let seed_pairs = seed
+        .identity_pairs()
+        .into_iter()
+        .map(|(key, value)| (key.to_owned(), value.to_string_lossy().into_owned()))
+        .collect();
+    let pairs = match harvest_login_env(&harvest_bash(), &seed, HARVEST_TIMEOUT, run_as) {
         Ok(pairs) => pairs,
         Err(error) => {
             tracing::warn!(
@@ -346,6 +357,10 @@ pub(super) fn harvest_base_env(
             );
             degrade_to_fallback(&seed, fallback_bin_dir)
         }
+    };
+    Harvest {
+        seed: seed_pairs,
+        pairs,
     }
 }
 
@@ -354,7 +369,7 @@ pub(super) fn harvest_base_env(
 /// lost — dropping the identity would move where the instance resolves its
 /// config and state, and a home it cannot read would cost it the boot
 /// entirely. Extracted so the Err→fallback→compose chain carries a direct
-/// test (the surrounding harvest_base_env shells out and cannot).
+/// test (the surrounding harvest_env shells out and cannot).
 pub(super) fn degrade_to_fallback(
     seed: &HarvestSeed,
     fallback_bin_dir: Option<&Path>,

@@ -675,37 +675,19 @@ fn boot_slug() -> Result<String> {
     Ok(slug)
 }
 
-/// Derive this instance's three directory roots from the process
-/// identity: the data root honors `KALLIPAI_TAGMA_DATA_DIR` (the daemon
-/// hands managed instances their data directory at spawn), else it is
-/// the slug-namespaced tree under the platform data home; the config
-/// root is the sibling tree under the platform config home; the state
-/// root is the platform state home's `kallipai` namespace (per-instance
-/// log leaves are appended by `logs_target`). `install_instance_roots`
-/// runs this derivation before logging: log placement itself hangs off
-/// the state root.
+/// Derive this instance's three directory roots from the process identity:
+/// the same resolver the daemon runs over the launch environment
+/// (`kallipai_daemon_common::roots`), applied to this process's own
+/// environment, so the tagma and the instance agree on every root by
+/// construction. `install_instance_roots` runs this derivation before
+/// logging: log placement itself hangs off the state root.
 fn instance_roots_from_env() -> Result<kallipai_adk::persistence::InstanceRoots> {
     let slug = boot_slug()?;
-    let data = match std::env::var_os("KALLIPAI_TAGMA_DATA_DIR").filter(|d| !d.is_empty()) {
-        Some(dir) => std::path::PathBuf::from(dir),
-        None => dirs::data_dir()
-            .context("could not determine platform data directory")?
-            .join("kallipai")
-            .join("tagmata")
-            .join(&slug),
-    };
-    let config = dirs::config_dir()
-        .context("could not determine platform config directory")?
-        .join("kallipai")
-        .join("tagmata")
-        .join(&slug);
-    let state = dirs::state_dir()
-        .context("could not determine platform state directory")?
-        .join("kallipai");
+    let roots = kallipai_daemon_common::roots::resolve_process_env(&slug)?;
     Ok(kallipai_adk::persistence::InstanceRoots {
-        data,
-        config,
-        state,
+        data: roots.data,
+        config: roots.config,
+        state: roots.state,
     })
 }
 
@@ -724,21 +706,22 @@ fn boot_identity() -> Result<std::path::PathBuf> {
     kallipai_adk::persistence::data_dir_root()
 }
 
-/// Where this tagma's log files live: always the state tree —
-/// `<state_root>/tagmata/<slug>/logs`, mirroring how the daemon names the
-/// tree. Logs are pure output residue, so they sit outside the instance
-/// data tree; the slug is the process identity, so there is exactly one
-/// placement. `Err` means the directory cannot be placed (state home
-/// undetermined) and callers degrade to stderr-only.
+/// Where this tagma's log files live: always the state tree. The leaf is
+/// named once, by `roots::log_tree` in the shared crate the daemon and this
+/// binary both read, so the placement cannot drift between them. Logs are
+/// pure output residue, so they sit outside the instance data tree; the slug
+/// is the process identity, so there is exactly one placement. `Err` means
+/// the directory cannot be placed (state home undetermined) and callers
+/// degrade to stderr-only.
 fn logs_target() -> Result<std::path::PathBuf> {
     let slug = std::env::var("KALLIPAI_TAGMA_SLUG")
         .ok()
         .filter(|s| !s.is_empty())
         .context("cannot place logs: KALLIPAI_TAGMA_SLUG is not set")?;
-    Ok(kallipai_adk::persistence::state_dir_root()?
-        .join("tagmata")
-        .join(slug)
-        .join("logs"))
+    Ok(kallipai_daemon_common::roots::log_tree(
+        &kallipai_adk::persistence::state_dir_root()?,
+        &slug,
+    ))
 }
 
 /// Logging shape: events land under the resolved log directory

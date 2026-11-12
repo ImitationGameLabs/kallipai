@@ -7,10 +7,12 @@ use super::error::SpawnError;
 /// (`KALLIPAI_TAGMA_ADDR` is deliberately absent — it is the one user-set
 /// listen knob: the daemon defaults it, a request pair wins, and the
 /// value is shape-checked at validation.)
-pub(super) const RESERVED_KEYS: [&str; 3] = [
+pub(super) const RESERVED_KEYS: [&str; 5] = [
     "KALLIPAI_TAGMA_SLUG",
     "KALLIPAI_WORKSPACE_ROOT",
     "KALLIPAI_TAGMA_DATA_DIR",
+    "KALLIPAI_TAGMA_CONFIG_DIR",
+    "KALLIPAI_TAGMA_STATE_DIR",
 ];
 
 /// The launch authorization (platform-hosting access rule): an

@@ -21,6 +21,8 @@ use std::time::Duration;
 use kallipai_daemon_client::DaemonClient;
 use kallipai_daemon_common::wire::{OkPayload, RequestBody, ResponseBody};
 
+mod common;
+
 // Same resolution chain as the lifecycle tests: KALLIPAI_BIN_DIR →
 // CARGO_BIN_EXE_* → target-dir parent → PATH. A package-scoped build
 // does not produce the workspace binaries; build the workspace first.
@@ -62,21 +64,38 @@ fn workspace_bins_available() -> bool {
 struct DaemonProc {
     socket: PathBuf,
     child: std::process::Child,
-    _data_dir: tempfile::TempDir,
+    /// The daemon's record area inside the fixture home.
     records: PathBuf,
-    _state: tempfile::TempDir,
 }
 
 /// Boot a daemon whose harvest seed HOME is the fixture home: its login
 /// shell therefore reads the fixture .profile.
 fn start_daemon_with_home(home: &Path) -> DaemonProc {
-    let data_dir = tempfile::tempdir().expect("data tempdir");
-    let state_dir = tempfile::tempdir().expect("state tempdir");
-    let socket = state_dir.path().join("control.sock");
-    let records = state_dir.path().join("records");
+    // One sandbox: the fixture home holds every root the child can resolve,
+    // so a case that forgets a pin fails in the guard below instead of
+    // writing into a real home.
+    let data_dir = home.join("xdg-data");
+    let config_dir = home.join("xdg-config");
+    let state_dir = home.join("xdg-state");
+    let cache_dir = home.join("xdg-cache");
+    for dir in [&data_dir, &config_dir, &state_dir, &cache_dir] {
+        std::fs::create_dir_all(dir).expect("sandbox dir");
+    }
+    let socket = state_dir.join("control.sock");
+    let records = state_dir.join("records");
     let bin = resolve_bin("kallipai-daemon");
     let mut child = std::process::Command::new(&bin)
-        .env("XDG_DATA_HOME", data_dir.path())
+        // This harness stands in for a deployment that names every home:
+        // the caller's root keys are dropped (one would ride the deployment
+        // layer into every in-place launch), and all four homes point into
+        // the fixture home the guard checks.
+        .env_remove("KALLIPAI_TAGMA_DATA_DIR")
+        .env_remove("KALLIPAI_TAGMA_CONFIG_DIR")
+        .env_remove("KALLIPAI_TAGMA_STATE_DIR")
+        .env("XDG_DATA_HOME", &data_dir)
+        .env("XDG_CONFIG_HOME", &config_dir)
+        .env("XDG_STATE_HOME", &state_dir)
+        .env("XDG_CACHE_HOME", &cache_dir)
         .env(
             "KALLIPAI_BIN_DIR",
             resolve_bin("kallipai-tagma")
@@ -85,17 +104,10 @@ fn start_daemon_with_home(home: &Path) -> DaemonProc {
                 // PATH lookup.
                 .unwrap_or(Path::new("")),
         )
-        // Pin the record area in the state tempdir: the default
-        // derivation would follow the fixture HOME (isolated, but the
-        // explicit override keeps where records land obvious).
-        .env(
-            "KALLIPAI_DAEMON_RECORD_DIR",
-            state_dir.path().join("records"),
-        )
-        .env(
-            "KALLIPAI_DAEMON_SOCKET",
-            state_dir.path().join("control.sock"),
-        )
+        // Pin the record area explicit: the default derivation would land
+        // in the same sandbox, and the override keeps the path obvious.
+        .env("KALLIPAI_DAEMON_RECORD_DIR", &records)
+        .env("KALLIPAI_DAEMON_SOCKET", &socket)
         .env("HOME", home)
         .env("KALLIPAI_DAEMON_CONTEXT_MARKER", "root-side-only")
         .stdout(std::process::Stdio::null())
@@ -104,12 +116,11 @@ fn start_daemon_with_home(home: &Path) -> DaemonProc {
         .expect("spawn daemon");
     for _ in 0..100 {
         if socket.exists() {
+            common::assert_sandboxed(child.id(), home);
             return DaemonProc {
                 socket,
                 child,
-                _data_dir: data_dir,
                 records,
-                _state: state_dir,
             };
         }
         std::thread::sleep(Duration::from_millis(100));

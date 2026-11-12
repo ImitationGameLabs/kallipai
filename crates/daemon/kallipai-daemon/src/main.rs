@@ -17,6 +17,7 @@ mod bins;
 mod delegates;
 mod env;
 mod log;
+mod migrate;
 mod reconcile;
 mod records;
 mod remove;
@@ -41,6 +42,19 @@ fn main() -> Result<()> {
         .map_err(|e| anyhow::anyhow!("parse KALLIPAI_DAEMON_DELEGATES: {e}"))?;
 
     let record_root = records::record_root()?;
+    // A record written before the daemon captured the config and state
+    // roots is completed here, once, before anything reads a record: the
+    // log pointer and the relaunch both read one stored answer, and a
+    // record the migration cannot complete stays as it was for the verbs
+    // that refuse it to report.
+    let completed = migrate::migrate_records(&record_root);
+    if completed > 0 {
+        tracing::info!(
+            records = completed,
+            record_root = %record_root.display(),
+            "completed instance records with the roots they were missing"
+        );
+    }
     // The record area is the only tree this daemon owns. It is created
     // lazily by the first registration; the socket parent below is the
     // only boot-time creation.

@@ -427,8 +427,10 @@ launch anchor, and the pointer at the data directory
 `runtime.json` (pid + port + starttime) into the data directory on
 every boot. Env
 pairs must start with `KALLIPAI_` or be `RUST_LOG` or `PATH`; the reserved
-keys (`KALLIPAI_TAGMA_SLUG`,
-`KALLIPAI_WORKSPACE_ROOT`, `KALLIPAI_TAGMA_DATA_DIR`) are daemon-owned.
+keys (`KALLIPAI_TAGMA_SLUG`, `KALLIPAI_WORKSPACE_ROOT`,
+`KALLIPAI_TAGMA_DATA_DIR`, `KALLIPAI_TAGMA_CONFIG_DIR`,
+`KALLIPAI_TAGMA_STATE_DIR`) are daemon-owned; a request pair naming
+one is refused.
 `KALLIPAI_TAGMA_ADDR` is the one user-set listen knob: the daemon injects
 `127.0.0.1:0` unless any channel carries the key: a request pair,
 the harvested base, or the persisted record replayed on start; every
@@ -442,9 +444,11 @@ replayed env once the instance holds stored relay credentials
 the code is single-use, and replaying it after a completed enrollment trips
 tagma's conflicting-relay-configuration fail-fast. An instance whose
 enrollment never completed still replays the code, so a restart can retry.
-A daemon-managed tagma instance logs into the state tree:
-`~/.local/state/kallipai/tagmata/<slug>/logs/` (created 0700): daily-rolling
-files, the last 7 kept. Set `KALLIPAI_TAGMA_LOG_TO_STDERR=1`
+A daemon-managed tagma instance logs into the state tree: the recorded state
+root plus `tagmata/<slug>/logs/`, created 0700. The state root follows the
+host (`XDG_STATE_HOME`, `KALLIPAI_TAGMA_STATE_DIR`), so on a default host the
+tree is `~/.local/state/kallipai/tagmata/<slug>/logs/`; daily-rolling files,
+the last 7 kept. Set `KALLIPAI_TAGMA_LOG_TO_STDERR=1`
 (or `true`) to log to the terminal's stderr instead — handy when manually
 debugging a managed data dir; any other value keeps the file default, and
 a log directory that cannot be resolved or created falls back to stderr.

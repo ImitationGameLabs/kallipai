@@ -21,14 +21,18 @@ use kallipai_daemon_common::wire::{
     ErrorCode, InstanceState, OkPayload, RequestBody, ResponseBody,
 };
 
+mod common;
+
 // The daemon crate is a binary; integration tests cannot import it. The
 // lifecycle surface under test is the four verbs over the wire, so the
 // tests boot the real daemon binary as a subprocess.
 struct DaemonProc {
     socket: PathBuf,
     child: std::process::Child,
-    _state: tempfile::TempDir,
-    data_dir: tempfile::TempDir,
+    /// Every root the child could resolve lives under this one directory.
+    _sandbox: tempfile::TempDir,
+    /// `<sandbox>/data`: the instance trees the tests read back.
+    data_home: PathBuf,
     records: PathBuf,
     log_path: PathBuf,
 }
@@ -69,17 +73,33 @@ fn workspace_bins_available() -> bool {
 }
 
 fn start_daemon() -> DaemonProc {
-    let data_dir = tempfile::tempdir().expect("data tempdir");
-    let state_dir = tempfile::tempdir().expect("state tempdir");
-    let socket = state_dir.path().join("control.sock");
-    let records = state_dir.path().join("kallipai/daemon/instances");
+    let sandbox = tempfile::tempdir().expect("sandbox tempdir");
+    let home = sandbox.path().join("home");
+    let data_dir = sandbox.path().join("data");
+    let config_dir = sandbox.path().join("config");
+    let state_dir = sandbox.path().join("state");
+    let cache_dir = sandbox.path().join("cache");
+    for dir in [&home, &data_dir, &config_dir, &state_dir, &cache_dir] {
+        std::fs::create_dir_all(dir).expect("sandbox dir");
+    }
+    let socket = state_dir.join("control.sock");
+    let records = state_dir.join("kallipai/daemon/instances");
     let bin = resolve_bin("kallipai-daemon");
     // stdout+stderr land in a file (not null) so tests can assert on
     // the daemon's own log — the quiet-Dead guarantee is a log claim.
-    let log_path = state_dir.path().join("daemon.log");
+    let log_path = state_dir.join("daemon.log");
     let log = std::fs::File::create(&log_path).expect("create daemon log");
     let mut child = std::process::Command::new(&bin)
-        .env("XDG_DATA_HOME", data_dir.path())
+        // The caller's root keys are dropped: one would ride the deployment
+        // layer into every instance launch. Every home is pinned inside the
+        // sandbox, so no root can resolve outside it.
+        .env_remove("KALLIPAI_TAGMA_DATA_DIR")
+        .env_remove("KALLIPAI_TAGMA_CONFIG_DIR")
+        .env_remove("KALLIPAI_TAGMA_STATE_DIR")
+        .env("HOME", &home)
+        .env("XDG_DATA_HOME", &data_dir)
+        .env("XDG_CONFIG_HOME", &config_dir)
+        .env("XDG_CACHE_HOME", &cache_dir)
         .env(
             "KALLIPAI_BIN_DIR",
             resolve_bin("kallipai-tagma")
@@ -90,11 +110,8 @@ fn start_daemon() -> DaemonProc {
         )
         // The record root rides the default derivation from the state
         // home, exercising the production resolution path end to end.
-        .env("XDG_STATE_HOME", state_dir.path())
-        .env(
-            "KALLIPAI_DAEMON_SOCKET",
-            state_dir.path().join("control.sock"),
-        )
+        .env("XDG_STATE_HOME", &state_dir)
+        .env("KALLIPAI_DAEMON_SOCKET", &socket)
         .stdout(log.try_clone().expect("clone log handle"))
         .stderr(log)
         .spawn()
@@ -102,11 +119,12 @@ fn start_daemon() -> DaemonProc {
     // Wait for the socket to appear.
     for _ in 0..100 {
         if socket.exists() {
+            common::assert_sandboxed(child.id(), sandbox.path());
             return DaemonProc {
                 socket,
                 child,
-                _state: state_dir,
-                data_dir,
+                _sandbox: sandbox,
+                data_home: data_dir,
                 records,
                 log_path,
             };
@@ -202,7 +220,7 @@ fn spawn_health_stop_round_trip() {
     assert_eq!(report.state, InstanceState::Running);
 
     // The record area carries the registration the scan enumerates.
-    let instance_dir = daemon.data_dir.path().join("kallipai/tagmata/e2e");
+    let instance_dir = daemon.data_home.join("kallipai/tagmata/e2e");
     assert!(daemon.records.join("e2e.json").exists());
     for stray in ["instance.id", "owner", "pid", "port", "workspace"] {
         assert!(
@@ -417,7 +435,7 @@ fn start_filters_consumed_enrollment_code() {
     // and the entry merely degrades to local-only; replaying the code
     // instead makes tagma fail fast on stored-credentials-plus-code and
     // Start times out.
-    let instance_dir = daemon.data_dir.path().join("kallipai/tagmata/stale-code");
+    let instance_dir = daemon.data_home.join("kallipai/tagmata/stale-code");
     let record_path = daemon.records.join("stale-code.json");
     let mut record: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&record_path).expect("record"))
@@ -584,10 +602,7 @@ fn start_recovers_from_stale_runtime_json() {
         std::thread::sleep(Duration::from_millis(100));
     }
     let stale = serde_json::json!({ "pid": pid, "port": 1, "starttime": 1 });
-    let instance_dir = daemon
-        .data_dir
-        .path()
-        .join("kallipai/tagmata/stale-runtime");
+    let instance_dir = daemon.data_home.join("kallipai/tagmata/stale-runtime");
     std::fs::write(
         instance_dir.join("runtime.json"),
         serde_json::to_vec(&stale).expect("serialize stale runtime"),
@@ -672,7 +687,7 @@ fn start_rejects_when_stale_runtime_names_a_live_pid() {
     // point. Refusing costs one retry; matching or killing an unrelated
     // process costs the process.
     let stale = serde_json::json!({ "pid": std::process::id(), "port": 1, "starttime": 1 });
-    let instance_dir = daemon.data_dir.path().join("kallipai/tagmata/live-stale");
+    let instance_dir = daemon.data_home.join("kallipai/tagmata/live-stale");
     std::fs::write(
         instance_dir.join("runtime.json"),
         serde_json::to_vec(&stale).expect("serialize stale runtime"),
@@ -702,18 +717,26 @@ fn manual_boot_with_slug_publishes_runtime_json() {
         eprintln!("skip: workspace binaries not built — build the workspace first");
         return;
     }
-    let data_home = tempfile::tempdir().expect("data home tempdir");
+    let sandbox = tempfile::tempdir().expect("sandbox tempdir");
+    let home = sandbox.path().join("home");
+    let data_home = sandbox.path().join("data");
+    let config_home = sandbox.path().join("config");
+    let state_home = sandbox.path().join("state");
+    let cache_home = sandbox.path().join("cache");
+    for dir in [&home, &data_home, &config_home, &state_home, &cache_home] {
+        std::fs::create_dir_all(dir).expect("sandbox dir");
+    }
     let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("probe bind");
     let port = probe.local_addr().expect("probe addr").port();
     drop(probe);
-    let instance_dir = data_home
-        .path()
-        .join("kallipai")
-        .join("tagmata")
-        .join("manual");
+    let instance_dir = data_home.join("kallipai").join("tagmata").join("manual");
     let mut tagma = std::process::Command::new(resolve_bin("kallipai-tagma"))
         .env("KALLIPAI_TAGMA_SLUG", "manual")
-        .env("XDG_DATA_HOME", data_home.path())
+        .env("HOME", &home)
+        .env("XDG_DATA_HOME", &data_home)
+        .env("XDG_CONFIG_HOME", &config_home)
+        .env("XDG_STATE_HOME", &state_home)
+        .env("XDG_CACHE_HOME", &cache_home)
         .env("KALLIPAI_TAGMA_ADDR", format!("127.0.0.1:{port}"))
         .env("KALLIPAI_OPERATOR_TOKEN", "test-op-token")
         .env("KALLIPAI_TEST_LLM_PROVIDER", "deepseek")
@@ -737,6 +760,11 @@ fn manual_boot_with_slug_publishes_runtime_json() {
             break;
         }
         std::thread::sleep(Duration::from_millis(100));
+    }
+    // The sandbox check reads a live child: one that never listened has
+    // already exited and owns no environment to check.
+    if connected {
+        common::assert_sandboxed(tagma.id(), sandbox.path());
     }
     // A listening socket means the boot got past identity resolution;
     // the instance record is written after the listener is up, and the
@@ -790,7 +818,7 @@ fn stop_refuses_tampered_runtime_pid_then_allows_restored() {
     let OkPayload::Spawn { pid, port, .. } = expect_ok(spawn) else {
         panic!("expected spawn payload");
     };
-    let instance_dir = daemon.data_dir.path().join("kallipai/tagmata/tamper");
+    let instance_dir = daemon.data_home.join("kallipai/tagmata/tamper");
     let runtime_path = instance_dir.join("runtime.json");
     let original = std::fs::read_to_string(&runtime_path).expect("read runtime.json");
 

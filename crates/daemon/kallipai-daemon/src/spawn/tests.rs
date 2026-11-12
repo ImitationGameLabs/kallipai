@@ -519,16 +519,22 @@ fn resolve_with_the_daemon_user_collapses_to_in_place() {
     assert!(matches!(identity, LaunchIdentity::InPlace { .. }));
 }
 
-#[test]
-fn dedicated_env_pins_the_target_home_daemon_owned() {
-    let target = ResolvedUser {
+/// The drop-to target every pin test shares.
+fn drop_to_target(shell: &str) -> ResolvedUser {
+    ResolvedUser {
         uid: 4242,
         gid: 4242,
         username: "kallipai-team".into(),
         home: PathBuf::from("/home/kallipai-team"),
-        shell: "/bin/bash".into(),
-    };
-    let env = compose_launch_env(
+        shell: shell.into(),
+    }
+}
+
+#[test]
+fn compose_pins_the_drop_to_identity_last() {
+    let target = drop_to_target("/bin/bash");
+    let env = compose(
+        &seed_env(),
         &base_env(),
         &[
             "HOME=/polluted".to_owned(),
@@ -536,19 +542,17 @@ fn dedicated_env_pins_the_target_home_daemon_owned() {
             "XDG_CACHE_HOME=/polluted/cache".to_owned(),
             "SHELL=/polluted/shell".to_owned(),
         ],
-        "i1",
-        Path::new("/ws"),
-        Path::new("/data/i1"),
-        None,
+        &[],
         Some(&target),
     );
     assert_eq!(
         get(&env, "HOME"),
         Some("/home/kallipai-team"),
-        "daemon-owned wins"
+        "the pin wins"
     );
     assert_eq!(get(&env, "USER"), Some("kallipai-team"));
     assert_eq!(get(&env, "LOGNAME"), Some("kallipai-team"));
+    assert_eq!(get(&env, "SHELL"), Some("/bin/bash"));
     assert_eq!(
         get(&env, "XDG_CONFIG_HOME"),
         Some("/home/kallipai-team/.config")
@@ -565,7 +569,6 @@ fn dedicated_env_pins_the_target_home_daemon_owned() {
         get(&env, "XDG_CACHE_HOME"),
         Some("/home/kallipai-team/.cache")
     );
-    assert_eq!(get(&env, "SHELL"), Some("/bin/bash"));
     // The runtime dir appears only when the host actually has it
     // (linger supplies it in the system form); either way the
     // instance never sees a polluted value.
@@ -573,50 +576,16 @@ fn dedicated_env_pins_the_target_home_daemon_owned() {
         assert_eq!(runtime, "/run/user/4242");
     }
 }
+
 #[test]
-fn dedicated_env_pins_no_shell_when_the_passwd_shell_is_empty() {
+fn compose_pins_no_shell_when_the_passwd_shell_is_empty() {
     // An empty passwd shell pins nothing: SHELL stays absent rather
     // than degrading to a guess; the rest of the identity set is
     // unaffected.
-    let target = ResolvedUser {
-        uid: 4242,
-        gid: 4242,
-        username: "kallipai-team".into(),
-        home: PathBuf::from("/home/kallipai-team"),
-        shell: String::new(),
-    };
-    let env = compose_launch_env(
-        &base_env(),
-        &[],
-        "i1",
-        Path::new("/ws"),
-        Path::new("/data/i1"),
-        None,
-        Some(&target),
-    );
+    let target = drop_to_target("");
+    let env = compose(&seed_env(), &base_env(), &[], &[], Some(&target));
     assert_eq!(get(&env, "SHELL"), None);
     assert_eq!(get(&env, "HOME"), Some("/home/kallipai-team"));
-}
-#[test]
-fn in_place_env_gains_no_identity_keys() {
-    // The same-uid form is pinned: the pre-dedicated env shape —
-    // no HOME/XDG/USER injection — stays byte-identical.
-    let env = compose_launch_env(
-        &base_env(),
-        &[],
-        "i1",
-        Path::new("/ws"),
-        Path::new("/data/i1"),
-        Some(Path::new("/state")),
-        None,
-    );
-    // HOME may ride through from the harvest base (a profile export,
-    // not a daemon injection); the identity keys must not appear.
-    assert_eq!(get(&env, "USER"), None);
-    assert_eq!(get(&env, "LOGNAME"), None);
-    assert_eq!(get(&env, "XDG_CONFIG_HOME"), None);
-    assert_eq!(get(&env, "SHELL"), None);
-    assert_eq!(get(&env, "XDG_CACHE_HOME"), None);
 }
 
 #[test]
@@ -745,6 +714,8 @@ fn spawn_refuses_a_slug_already_in_the_record_area() {
         env: Vec::new(),
         identity: None,
         data_dir: data.path().to_path_buf(),
+        config_dir: Some(data.path().join("config")),
+        state_dir: Some(data.path().join("state")),
     };
     records::write_record(root.path(), "taken", &record).expect("write record");
     // An explicit user skips the root-daemon inference guard — this
@@ -793,6 +764,8 @@ fn spawn_refuses_a_workspace_overlapping_a_registered_data_dir() {
         env: Vec::new(),
         identity: None,
         data_dir: data.path().to_path_buf(),
+        config_dir: Some(data.path().join("config")),
+        state_dir: Some(data.path().join("state")),
     };
     records::write_record(root.path(), "settled", &record).expect("write record");
     let user = cached_passwd_identity()
@@ -816,6 +789,70 @@ fn spawn_refuses_a_workspace_overlapping_a_registered_data_dir() {
             data.path().canonicalize().unwrap().display(),
             data.path().display(),
         )
+    );
+}
+
+/// A recorded root that contains the new launch's data dir is the same
+/// collision seen from the parent side: sharing or nesting, the second
+/// launch would clear the first instance's `runtime.json` and anchor its
+/// pid. The deployment-level root key makes that reachable, and the two
+/// paths in the refusal stay distinct, so containment is pinned.
+#[test]
+fn spawn_refuses_a_data_dir_overlapping_a_registered_instance() {
+    let data_home = tempdir();
+    // The caller's own root keys name a real instance's tree: dropped, the way
+    // a deployment unit drops them, so the launch resolves under the fixture.
+    kallipai_testkit::with_env(
+        &[
+            (
+                "XDG_DATA_HOME",
+                Some(data_home.path().to_str().expect("utf-8 tempdir path")),
+            ),
+            ("KALLIPAI_TAGMA_DATA_DIR", None),
+            ("KALLIPAI_TAGMA_CONFIG_DIR", None),
+            ("KALLIPAI_TAGMA_STATE_DIR", None),
+        ],
+        || {
+            let root = tempdir();
+            let parent = data_home.path().join("kallipai/tagmata");
+            let resolved = parent.join("fresh");
+            let record = records::InstanceRecord {
+                instance_id: "instance-1".into(),
+                owner_uid: unsafe { libc::getuid() },
+                target_uid: unsafe { libc::getuid() },
+                target_username: None,
+                workspace: None,
+                env: Vec::new(),
+                identity: None,
+                data_dir: parent.clone(),
+                config_dir: Some(parent.join("config")),
+                state_dir: Some(parent.join("state")),
+            };
+            records::write_record(root.path(), "settled", &record).expect("write record");
+            let workspace = tempdir();
+            let user = cached_passwd_identity()
+                .map(|(name, _)| name.to_string_lossy().into_owned())
+                .expect("test host has a passwd entry");
+            let error = spawn(
+                root.path(),
+                "fresh",
+                workspace.path().to_str().expect("utf8 workspace"),
+                &[],
+                Some("/bin/sh"),
+                Duration::from_secs(1),
+                unsafe { libc::getuid() },
+                Some(&user),
+            )
+            .unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                format!(
+                    "the launch's data dir {} overlaps instance settled's data dir at {}",
+                    resolved.display(),
+                    parent.display(),
+                )
+            );
+        },
     );
 }
 
@@ -862,15 +899,75 @@ fn get<'a>(env: &'a [String], key: &str) -> Option<&'a str> {
         .find_map(|pair| pair.strip_prefix(&format!("{key}=")))
 }
 
+/// The identity seed a launch always carries, reduced to one key so a test
+/// can tell the seed and harvest layers apart.
+fn seed_env() -> Vec<(String, String)> {
+    vec![("HOME".to_owned(), "/home/seed".to_owned())]
+}
+
+/// Compose one launch env the way spawn, start and adopt do.
+fn compose(
+    seed: &[(String, String)],
+    harvest: &[(String, String)],
+    request: &[String],
+    deployment: &[(String, String)],
+    target: Option<&ResolvedUser>,
+) -> Vec<String> {
+    compose_launch(LaunchEnv {
+        slug: "i1",
+        workspace_canon: Path::new("/ws"),
+        request,
+        deployment,
+        seed,
+        harvest,
+        target,
+    })
+}
+
+/// A harvested root key never reaches the composition: the profile file
+/// belongs to the instance's user, and the resolver would otherwise read
+/// that value verbatim as where the instance lands (the daemon would
+/// create the tree from a file it does not own).
+#[test]
+fn a_profile_exported_root_key_never_reaches_the_composition() {
+    let harvest = vec![
+        (
+            "KALLIPAI_TAGMA_DATA_DIR".to_string(),
+            "/evil/data".to_string(),
+        ),
+        ("XDG_DATA_HOME".to_string(), "/evil/xdg".to_string()),
+        ("PATH".to_string(), "/usr/bin:/bin".to_string()),
+    ];
+    let env = compose(&seed_env(), &harvest, &[], &[], None);
+    assert_eq!(
+        get(&env, "KALLIPAI_TAGMA_DATA_DIR"),
+        None,
+        "the own key is dropped: {env:?}"
+    );
+    assert_eq!(
+        get(&env, "XDG_DATA_HOME"),
+        None,
+        "the XDG name is dropped: {env:?}"
+    );
+    assert_eq!(
+        get(&env, "PATH"),
+        Some("/usr/bin:/bin"),
+        "the rest of the profile is kept"
+    );
+    assert_eq!(
+        get(&env, "HOME"),
+        Some("/home/seed"),
+        "the seed HOME is what the root falls back to"
+    );
+}
+
 #[test]
 fn compose_explicit_pairs_win_per_key() {
-    let env = compose_launch_env(
+    let env = compose(
+        &seed_env(),
         &base_env(),
         &["PATH=/explicit".into(), "KALLIPAI_X=1".into()],
-        "i1",
-        Path::new("/ws"),
-        Path::new("/data/i1"),
-        Some(Path::new("/state")),
+        &[],
         None,
     );
     assert_eq!(get(&env, "PATH"), Some("/explicit"));
@@ -880,129 +977,178 @@ fn compose_explicit_pairs_win_per_key() {
 }
 
 #[test]
-fn compose_daemon_keys_win_over_a_polluted_base() {
-    let env = compose_launch_env(
-        &base_env(),
-        &[],
-        "i1",
-        Path::new("/ws"),
-        Path::new("/data/i1"),
-        Some(Path::new("/state")),
-        None,
+fn compose_the_harvest_wins_over_the_seed() {
+    let seed = [
+        ("HOME".to_owned(), "/home/seed".to_owned()),
+        ("USER".to_owned(), "seeded".to_owned()),
+    ];
+    let env = compose(&seed, &base_env(), &[], &[], None);
+    assert_eq!(get(&env, "HOME"), Some("/home/harvest"));
+    assert_eq!(
+        get(&env, "USER"),
+        Some("seeded"),
+        "a key the harvest lacks keeps the seed value"
     );
+}
+
+#[test]
+fn compose_inserts_no_root_key_of_its_own() {
+    // The roots are the deployment's and the identity's business: a composed
+    // env with neither names none of them, so the resolver's answer comes
+    // from the keys the deployment actually set.
+    let env = compose(&seed_env(), &base_env(), &[], &[], None);
+    for key in [
+        "KALLIPAI_TAGMA_DATA_DIR",
+        "KALLIPAI_TAGMA_CONFIG_DIR",
+        "KALLIPAI_TAGMA_STATE_DIR",
+        "XDG_DATA_HOME",
+        "XDG_CONFIG_HOME",
+        "XDG_STATE_HOME",
+    ] {
+        assert_eq!(
+            get(&env, key),
+            None,
+            "{key} appeared without the deployment"
+        );
+    }
+}
+
+#[test]
+fn compose_owns_the_slug_and_workspace() {
+    let mut harvest = base_env();
+    harvest.push(("KALLIPAI_TAGMA_SLUG".into(), "/polluted".into()));
+    harvest.push(("KALLIPAI_WORKSPACE_ROOT".into(), "/polluted".into()));
+    let env = compose(&seed_env(), &harvest, &[], &[], None);
     assert_eq!(get(&env, "KALLIPAI_TAGMA_SLUG"), Some("i1"));
     assert_eq!(get(&env, "KALLIPAI_WORKSPACE_ROOT"), Some("/ws"));
-    assert_eq!(get(&env, "KALLIPAI_TAGMA_DATA_DIR"), Some("/data/i1"));
+}
+
+#[test]
+fn compose_passes_an_in_place_deployment_own_key_through() {
+    let deployment = [
+        ("KALLIPAI_TAGMA_DATA_DIR".to_owned(), "/srv/data".to_owned()),
+        (
+            "KALLIPAI_TAGMA_CONFIG_DIR".to_owned(),
+            "/srv/conf".to_owned(),
+        ),
+        (
+            "KALLIPAI_TAGMA_STATE_DIR".to_owned(),
+            "/srv/state".to_owned(),
+        ),
+    ];
+    let env = compose(&seed_env(), &base_env(), &[], &deployment, None);
+    assert_eq!(get(&env, "KALLIPAI_TAGMA_DATA_DIR"), Some("/srv/data"));
+    assert_eq!(get(&env, "KALLIPAI_TAGMA_CONFIG_DIR"), Some("/srv/conf"));
+    assert_eq!(get(&env, "KALLIPAI_TAGMA_STATE_DIR"), Some("/srv/state"));
+}
+
+#[test]
+fn compose_withholds_the_deployment_own_keys_from_a_drop_to_launch() {
+    // A unit-level own key must not become every drop-to user's root: the
+    // drop-to form takes its roots from the identity and the resolver.
+    let target = drop_to_target("/bin/bash");
+    let deployment = [
+        ("KALLIPAI_TAGMA_DATA_DIR".to_owned(), "/srv/data".to_owned()),
+        (
+            "KALLIPAI_TAGMA_CONFIG_DIR".to_owned(),
+            "/srv/conf".to_owned(),
+        ),
+        (
+            "KALLIPAI_TAGMA_STATE_DIR".to_owned(),
+            "/srv/state".to_owned(),
+        ),
+        ("XDG_DATA_HOME".to_owned(), "/srv/data-home".to_owned()),
+    ];
+    let env = compose(&seed_env(), &base_env(), &[], &deployment, Some(&target));
+    assert_eq!(get(&env, "KALLIPAI_TAGMA_DATA_DIR"), None);
+    assert_eq!(get(&env, "KALLIPAI_TAGMA_CONFIG_DIR"), None);
+    assert_eq!(get(&env, "KALLIPAI_TAGMA_STATE_DIR"), None);
+    assert_eq!(
+        get(&env, "XDG_DATA_HOME"),
+        Some("/home/kallipai-team/.local/share"),
+        "the pin beats the deployment's XDG value"
+    );
+}
+
+#[test]
+fn compose_passes_a_deployment_xdg_home_through_in_place() {
+    let deployment = [("XDG_DATA_HOME".to_owned(), "/srv/data-home".to_owned())];
+    let env = compose(&seed_env(), &base_env(), &[], &deployment, None);
+    assert_eq!(get(&env, "XDG_DATA_HOME"), Some("/srv/data-home"));
 }
 
 #[test]
 fn compose_addr_key_is_first_writer() {
-    let explicit = compose_launch_env(
+    let explicit = compose(
+        &seed_env(),
         &base_env(),
         &["KALLIPAI_TAGMA_ADDR=127.0.0.1:7".into()],
-        "d",
-        Path::new("/w"),
-        Path::new("/data/d"),
-        None,
+        &[],
         None,
     );
     assert_eq!(get(&explicit, "KALLIPAI_TAGMA_ADDR"), Some("127.0.0.1:7"));
-    let default = compose_launch_env(
-        &base_env(),
-        &[],
-        "d",
-        Path::new("/w"),
-        Path::new("/data/d"),
-        None,
-        None,
-    );
+    let default = compose(&seed_env(), &base_env(), &[], &[], None);
     assert_eq!(get(&default, "KALLIPAI_TAGMA_ADDR"), Some("127.0.0.1:0"));
-    let from_base = compose_launch_env(
-        &[("KALLIPAI_TAGMA_ADDR".into(), "127.0.0.1:9".into())],
+    let from_harvest = compose(
+        &seed_env(),
+        &[("KALLIPAI_TAGMA_ADDR".to_owned(), "127.0.0.1:9".to_owned())],
         &[],
-        "d",
-        Path::new("/w"),
-        Path::new("/data/d"),
-        None,
+        &[],
         None,
     );
     assert_eq!(
-        get(&from_base, "KALLIPAI_TAGMA_ADDR"),
+        get(&from_harvest, "KALLIPAI_TAGMA_ADDR"),
         Some("127.0.0.1:9"),
-        "first writer wins: a base-resident addr beats the daemon default"
+        "first writer wins: a harvest-resident addr beats the daemon default"
     );
 }
 
 #[test]
-fn addr_guard_rejects_a_malformed_base_value() {
-    let env = compose_launch_env(
-        &[("KALLIPAI_TAGMA_ADDR".into(), "not-an-addr".into())],
+fn addr_guard_rejects_a_malformed_harvest_value() {
+    let env = compose(
+        &seed_env(),
+        &[("KALLIPAI_TAGMA_ADDR".to_owned(), "not-an-addr".to_owned())],
         &[],
-        "d",
-        Path::new("/w"),
-        Path::new("/data/d"),
-        None,
+        &[],
         None,
     );
     let error =
         ensure_addr_parses(&env).expect_err("a malformed pin from any channel dies at the guard");
     assert!(error.to_string().contains("SocketAddr"), "{error}");
-    let good = compose_launch_env(
-        &[("KALLIPAI_TAGMA_ADDR".into(), "127.0.0.1:9".into())],
+    let good = compose(
+        &seed_env(),
+        &[("KALLIPAI_TAGMA_ADDR".to_owned(), "127.0.0.1:9".to_owned())],
         &[],
-        "d",
-        Path::new("/w"),
-        Path::new("/data/d"),
-        None,
+        &[],
         None,
     );
-    ensure_addr_parses(&good).expect("a well-formed base pin passes");
+    ensure_addr_parses(&good).expect("a well-formed harvest pin passes");
 }
 
 #[test]
 fn compose_rust_log_default_appears_only_when_absent() {
-    let explicit = compose_launch_env(
+    let explicit = compose(
+        &seed_env(),
         &base_env(),
         &["RUST_LOG=debug".into()],
-        "d",
-        Path::new("/w"),
-        Path::new("/data/d"),
-        None,
+        &[],
         None,
     );
     assert!(explicit.contains(&"RUST_LOG=debug".to_owned()));
-    let harvested = compose_launch_env(
-        &base_env(),
-        &[],
-        "d",
-        Path::new("/w"),
-        Path::new("/data/d"),
-        None,
-        None,
-    );
+    let harvested = compose(&seed_env(), &base_env(), &[], &[], None);
     assert!(harvested.contains(&"RUST_LOG=harvest-level".to_owned()));
-    let base: Vec<(String, String)> = vec![("PATH".into(), "/p".into())];
-    let neither = compose_launch_env(
-        &base,
-        &[],
-        "d",
-        Path::new("/w"),
-        Path::new("/data/d"),
-        None,
-        None,
-    );
+    let bare: Vec<(String, String)> = vec![("PATH".to_owned(), "/p".to_owned())];
+    let neither = compose(&seed_env(), &bare, &[], &[], None);
     assert!(neither.contains(&"RUST_LOG=info".to_owned()));
 }
 
 #[test]
 fn compose_emits_each_key_exactly_once() {
-    let env = compose_launch_env(
+    let env = compose(
+        &seed_env(),
         &base_env(),
         &["PATH=/explicit".into(), "RUST_LOG=debug".into()],
-        "d",
-        Path::new("/w"),
-        Path::new("/data/d"),
-        Some(Path::new("/state")),
+        &[("XDG_STATE_HOME".to_owned(), "/srv/state-home".to_owned())],
         None,
     );
     let mut keys: Vec<&str> = env
@@ -1016,54 +1162,33 @@ fn compose_emits_each_key_exactly_once() {
 }
 
 #[test]
-fn compose_hands_the_data_dir_and_state_anchor_daemon_owned() {
-    // The handoff pair is daemon-owned: neither a polluted profile
-    // nor an explicit request pair may move the instance's data root
-    // or its logs. No XDG_DATA_HOME anchor exists at all — the
-    // explicit handoff replaced the shared-root assumption.
-    let base = vec![
-        ("PATH".to_owned(), "/p".to_owned()),
-        (
-            "KALLIPAI_TAGMA_DATA_DIR".to_owned(),
-            "/polluted/data".to_owned(),
-        ),
-        ("XDG_DATA_HOME".to_owned(), "/polluted/data-home".to_owned()),
+fn the_composed_pairs_resolve_the_roots_the_deployment_named() {
+    let deployment = [
+        ("XDG_DATA_HOME".to_owned(), "/srv/data-home".to_owned()),
+        ("XDG_CONFIG_HOME".to_owned(), "/srv/conf-home".to_owned()),
+        ("XDG_STATE_HOME".to_owned(), "/srv/state-home".to_owned()),
     ];
-    let env = compose_launch_env(
-        &base,
-        &["XDG_STATE_HOME=/polluted/state".to_owned()],
-        "i1",
-        Path::new("/ws"),
-        Path::new("/daemon/data/i1"),
-        Some(Path::new("/daemon/state")),
-        None,
-    );
+    let env = compose(&seed_env(), &base_env(), &[], &deployment, None);
+    let roots = kallipai_daemon_common::roots::resolve_pairs("i1", &env).expect("resolves");
+    assert_eq!(roots.data, Path::new("/srv/data-home/kallipai/tagmata/i1"));
     assert_eq!(
-        get(&env, "KALLIPAI_TAGMA_DATA_DIR"),
-        Some("/daemon/data/i1")
+        roots.config,
+        Path::new("/srv/conf-home/kallipai/tagmata/i1")
     );
-    assert_eq!(get(&env, "XDG_STATE_HOME"), Some("/daemon/state"));
-    assert_eq!(
-        get(&env, "XDG_DATA_HOME"),
-        Some("/polluted/data-home"),
-        "not daemon-owned, rides through"
-    );
+    assert_eq!(roots.state, Path::new("/srv/state-home/kallipai"));
 }
 
 #[test]
-fn compose_without_a_state_home_carries_no_state_anchor() {
-    let base = vec![("PATH".to_owned(), "/p".to_owned())];
-    let env = compose_launch_env(
-        &base,
-        &[],
-        "i1",
-        Path::new("/ws"),
-        Path::new("/data/i1"),
-        None,
-        None,
-    );
-    assert_eq!(get(&env, "XDG_STATE_HOME"), None);
-    assert_eq!(get(&env, "KALLIPAI_TAGMA_DATA_DIR"), Some("/data/i1"));
+fn validate_refuses_every_own_root_key_from_a_request() {
+    for key in [
+        "KALLIPAI_TAGMA_DATA_DIR",
+        "KALLIPAI_TAGMA_CONFIG_DIR",
+        "KALLIPAI_TAGMA_STATE_DIR",
+    ] {
+        let pairs = [format!("{key}=/srv/mine")];
+        let error = validate_user_env(&pairs).expect_err("own keys are daemon-owned");
+        assert!(error.to_string().contains(key), "{error}");
+    }
 }
 
 #[test]
@@ -1081,7 +1206,7 @@ fn fallback_path_anchors_at_the_binary_directory() {
 
 #[test]
 fn a_failed_harvest_degrades_to_a_usable_base() {
-    // The Err branch of harvest_base_env, tested directly: the
+    // The Err branch of harvest_env, tested directly: the
     // degraded base flows through compose into a launchable env —
     // if the Err branch ever returned an empty base, nothing else
     // would catch it (the shell-out wrapper cannot be unit-tested).
@@ -1095,15 +1220,7 @@ fn a_failed_harvest_degrades_to_a_usable_base() {
         runtime_dir: Some(OsString::from("/run/user/1000")),
     };
     let base = degrade_to_fallback(&seed, Some(Path::new("/opt/kallipai/bin")));
-    let env = compose_launch_env(
-        &base,
-        &[],
-        "i1",
-        Path::new("/ws"),
-        Path::new("/data/i1"),
-        None,
-        None,
-    );
+    let env = compose(&[], &base, &[], &[], None);
     assert!(
         env.contains(&"PATH=/opt/kallipai/bin:/usr/local/bin:/usr/bin:/bin".to_owned()),
         "fallback PATH rides through composition: {env:?}"
@@ -1166,6 +1283,10 @@ fn validate_accepts_an_explicit_path_key() {
         "the data-dir handoff is daemon-owned"
     );
     assert!(
+        validate_user_env(&["KALLIPAI_TAGMA_CONFIG_DIR=/x".into()]).is_err(),
+        "the config-root handoff is daemon-owned"
+    );
+    assert!(
         validate_user_env(&["KALLIPAI_WORKSPACE_ROOT=/x".into()]).is_err(),
         "the workspace handoff is daemon-owned"
     );
@@ -1198,15 +1319,7 @@ fn the_tagma_real_root_escape_rides_the_request_env_pairs() {
     // dropped here would quietly disarm tagma's own unlock.
     let pair = "KALLIPAI_TAGMA_ACCEPT_UNSAFE_RUN_AS_ROOT=1";
     validate_user_env(&[pair.to_string()]).expect("KALLIPAI_* allowlist");
-    let env = compose_launch_env(
-        &[],
-        &[pair.to_string()],
-        "team-a",
-        Path::new("/ws"),
-        Path::new("/dd"),
-        None,
-        None,
-    );
+    let env = compose(&[], &[], &[pair.to_string()], &[], None);
     assert!(env.iter().any(|entry| entry == pair), "{env:?}");
 }
 

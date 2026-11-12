@@ -3,10 +3,11 @@
 //! database (`tasks.sqlite`, sibling of the other tagma stores).
 //!
 //! Layering: this crate owns the data plane only. Storage roots and blob
-//! backends are handed in by the caller (the CLI resolves
-//! `KALLIPAI_TAGMA_DATA_DIR`), so tests can point everything at a scratch
-//! directory. Gates are enforced inside the transition transaction, not at
-//! the CLI surface — the CLI is an entry point, the store is the law.
+//! backends are handed in by the caller (the tagma resolves the instance
+//! roots and passes them down; no task CLI resolves a root itself), so
+//! tests can point everything at a scratch directory. Gates are enforced
+//! inside the transition transaction, not at the CLI surface — the CLI is an
+//! entry point, the store is the law.
 
 pub mod entities;
 pub mod gates;

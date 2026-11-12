@@ -47,6 +47,14 @@ impl LaunchIdentity {
             LaunchIdentity::DropTo(user) => Some(user.username.clone()),
         }
     }
+
+    /// The drop-to target, when this identity drops privilege.
+    pub(crate) fn target(&self) -> Option<&ResolvedUser> {
+        match self {
+            LaunchIdentity::InPlace { .. } => None,
+            LaunchIdentity::DropTo(user) => Some(user),
+        }
+    }
 }
 
 /// Resolve the launch identity for a spawn request. `request_user`

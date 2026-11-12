@@ -4,61 +4,107 @@
 use super::authorize::RESERVED_KEYS;
 use super::error::SpawnError;
 use super::identity::ResolvedUser;
+use kallipai_daemon_common::roots::RootKind;
 use std::collections::BTreeMap;
 use std::path::Path;
 
-/// Compose the instance env from a map, one value per key:
+/// The layers one launch environment is composed from. Every caller
+/// (spawn, start, adopt) supplies the same inputs; only the request
+/// pairs differ — replayed and overridden on a restart.
+pub(crate) struct LaunchEnv<'a> {
+    /// The instance slug, inserted as KALLIPAI_TAGMA_SLUG.
+    pub(crate) slug: &'a str,
+    /// The canonical workspace, inserted as KALLIPAI_WORKSPACE_ROOT.
+    pub(crate) workspace_canon: &'a Path,
+    /// The caller's request pairs: spawn's validated request, start's
+    /// replay plus overrides, adopt's request.
+    pub(crate) request: &'a [String],
+    /// The root keys this deployment set on the daemon's own environment.
+    pub(crate) deployment: &'a [(String, String)],
+    /// The identity seed pairs, always inserted.
+    pub(crate) seed: &'a [(String, String)],
+    /// The harvested login pairs, or the degraded fallback.
+    pub(crate) harvest: &'a [(String, String)],
+    /// The drop-to target; None launches as the daemon's own user.
+    pub(crate) target: Option<&'a ResolvedUser>,
+}
+
+/// Compose one launch environment from its layers, in this order:
 ///
-/// * the base carries the harvest's keys; a degraded one keeps the seed's
-///   identity and supplies the fallback PATH only;
-/// * explicit request pairs win per key over the base;
-/// * the daemon-owned keys win over everything — a polluted profile
-///   cannot smuggle them in;
-/// * `RUST_LOG=info` appears only when neither base nor explicit pair
-///   supplied one (map composition ends duplicate-key shadowing);
-/// * `KALLIPAI_TAGMA_ADDR` defaults to `127.0.0.1:0` when neither base nor
-///   explicit pair supplies one — the one user-set listen knob;
-/// * the data-dir handoff and the state anchor land last — daemon-owned
-///   like the slug, they pin where the instance's data root and logs
-///   resolve. The dedicated form additionally pins the standard identity
-///   set (HOME, USER, LOGNAME, SHELL from the passwd entry, and the XDG
-///   config/data/state/cache tree, plus the runtime dir when it exists)
-///   to the target user: daemon-owned like the rest, so neither a
-///   polluted profile nor a request pair can describe a foreign home
-///   into the instance.
-pub(super) fn compose_launch_env(
-    base: &[(String, String)],
-    user_env: &[String],
-    slug: &str,
-    workspace_canon: &Path,
-    data_dir: &Path,
-    state_home: Option<&Path>,
-    target: Option<&ResolvedUser>,
-) -> Vec<String> {
+/// 1. the identity seed pairs (HOME, USER, LOGNAME, XDG_RUNTIME_DIR) —
+///    always present, so no launch depends on the harvest having run;
+/// 2. the harvested login pairs, or the degraded fallback (root keys are
+///    dropped: a profile file the target user controls must not name
+///    where an instance lands);
+/// 3. the caller's request pairs, which win per key;
+/// 4. the deployment's root variables, verbatim: the three own keys only
+///    for an in-place launch (a unit-level own key must not become every
+///    drop-to user's root) and the three XDG names for both forms (the
+///    identity pin overrides them on a drop-to launch);
+/// 5. the daemon-owned keys: slug, workspace, and the 127.0.0.1:0
+///    address default;
+/// 6. the drop-to identity pin (HOME, USER, LOGNAME, SHELL and the XDG
+///    tree from the passwd entry), last, so no earlier layer can describe
+///    a foreign home.
+///
+/// RUST_LOG and KALLIPAI_TAGMA_ADDR default only when no earlier layer
+/// supplied them; KALLIPAI_TAGMA_ADDR stays the one user-set listen knob.
+/// The resolver reads these same pairs, so the roots this env names are the
+/// roots the daemon creates, records and polls.
+pub(crate) fn compose_launch(input: LaunchEnv<'_>) -> Vec<String> {
     let mut env: BTreeMap<&str, String> = BTreeMap::new();
-    for (key, value) in base {
-        env.insert(key, value.clone());
+    for (key, value) in input.seed {
+        env.insert(key.as_str(), value.clone());
     }
-    for pair in user_env {
+    // A profile file the target user controls must not decide where
+    // an instance lands: with the own keys skipped in the deployment
+    // layer for a drop-to launch and absent from the identity pin, a
+    // harvested root key would resolve verbatim, and the daemon would
+    // create that tree (as root) from the target user's own file.
+    let harvested = input
+        .harvest
+        .iter()
+        .filter(|(key, _)| !RootKind::names_root(key));
+    for (key, value) in harvested {
+        env.insert(key.as_str(), value.clone());
+    }
+    for pair in input.request {
         // Shape, emptiness and key ownership are validated before launch
         // (spawn validates the request; start re-validates the persisted
-        // copy) — a pair without `=` here would be a bug elsewhere.
+        // copy) — a pair without an equals sign would be a bug elsewhere.
         if let Some((key, value)) = pair.split_once('=') {
             env.insert(key, value.to_owned());
         }
     }
-    env.insert("KALLIPAI_TAGMA_SLUG", slug.to_owned());
+    for kind in RootKind::all() {
+        // The own keys are the in-place escape hatch: a drop-to launch
+        // takes only the XDG names from the deployment, because a root
+        // the unit names is the daemon's own while the identity pin
+        // below names the target user's tree.
+        if input.target.is_none()
+            && let Some((_, value)) = input
+                .deployment
+                .iter()
+                .find(|(name, _)| name == kind.own_key())
+        {
+            env.insert(kind.own_key(), value.clone());
+        }
+        if let Some((_, value)) = input
+            .deployment
+            .iter()
+            .find(|(name, _)| name == kind.xdg_var())
+        {
+            env.insert(kind.xdg_var(), value.clone());
+        }
+    }
+    env.insert("KALLIPAI_TAGMA_SLUG", input.slug.to_owned());
     env.insert(
         "KALLIPAI_WORKSPACE_ROOT",
-        workspace_canon.display().to_string(),
+        input.workspace_canon.display().to_string(),
     );
     env.entry("KALLIPAI_TAGMA_ADDR")
         .or_insert_with(|| "127.0.0.1:0".to_owned());
-    env.insert("KALLIPAI_TAGMA_DATA_DIR", data_dir.display().to_string());
-    if let Some(state) = state_home {
-        env.insert("XDG_STATE_HOME", state.display().to_string());
-    }
-    if let Some(user) = target {
+    if let Some(user) = input.target {
         env.insert("HOME", user.home.display().to_string());
         env.insert("USER", user.username.clone());
         env.insert("LOGNAME", user.username.clone());
@@ -91,6 +137,22 @@ pub(super) fn compose_launch_env(
     }
     env.entry("RUST_LOG").or_insert_with(|| "info".to_owned());
     env.into_iter().map(|(k, v)| format!("{k}={v}")).collect()
+}
+
+/// The root keys this deployment set on the daemon's own environment,
+/// verbatim and non-empty: the three own keys and the three XDG names.
+/// They form layer 4 of the composition, so the resolver answers exactly
+/// what the instance will answer from the same pairs.
+pub(crate) fn deployment_root_vars() -> Vec<(String, String)> {
+    let mut vars = Vec::new();
+    for kind in RootKind::all() {
+        for key in kind.keys() {
+            if let Some(value) = daemon_env_value(key) {
+                vars.push((key.to_owned(), value));
+            }
+        }
+    }
+    vars
 }
 
 /// The addr key is user-set, and the base (harvest) channel can carry it

@@ -45,13 +45,17 @@ Two subcommands cover inspection and rebinding:
 ### File Location
 
 The profiles config file lives at the instance config root's
-`profiles.toml`: `<config home>/kallipai/tagmata/<slug>/`.
-A config root that cannot be derived (no `KALLIPAI_TAGMA_SLUG`, no config
-home) leaves the tagma with no profiles: the read warns and boots
-profile-less, and a write with no config root errors out. No config file
-means the same profile-less boot: the tagma serves with no model
-configured until the Profiles page (or a hand-written file) adds the first
-profile.
+`profiles.toml`: `<config home>/kallipai/tagmata/<slug>/`. The root
+resolves from `KALLIPAI_TAGMA_CONFIG_DIR` (taken verbatim when
+absolute), then `XDG_CONFIG_HOME`, then `HOME`. A managed launch hands
+the instance those same rules: in place it passes down the deployment's
+root variables, and on a drop-to launch the identity pins put the root
+in the target user's `.config`. A changed answer migrates nothing
+between the old and the new tree. A boot that finds no rule naming the
+root refuses, and the refusal names the key or variable that supplies
+one. With a root and no config file the tagma serves profile-less: no
+model configured until the Profiles page (or a hand-written file) adds
+the first profile.
 
 With a config file, the tagma loads multiple provider/model combinations, each
 profile declaring its own `max_context_window`.

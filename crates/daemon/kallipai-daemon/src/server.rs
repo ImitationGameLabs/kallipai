@@ -352,29 +352,19 @@ impl Daemon {
                 file,
                 cursor,
             } => {
-                // Read-only, but still file I/O plus the passwd
-                // lookup behind the owner-aware log placement: the
-                // same blocking profile as the other verbs.
+                // Read-only, but still file I/O: the same blocking
+                // profile as the other verbs.
                 match tokio::task::spawn_blocking({
                     let record_root = self.record_root.clone();
                     move || {
-                        // Placement follows the RECORD's target user:
-                        // the daemon may run as root while the instance
-                        // runs as someone else, so the daemon's own
-                        // state home would read the wrong tree. A
-                        // missing record stays NotFound before any
-                        // passwd work; an unresolvable uid is an
-                        // explicit error, never a fallback.
+                        // Placement comes from the record: the state
+                        // root the launch resolved, plus the log leaf.
+                        // A record the boot migration could not fill
+                        // is an explicit error, never a fallback.
                         let logs_dir = crate::records::read_record(&record_root, &slug)
-                            .ok_or_else(|| crate::log::LogError::NotFound(slug.clone()))
-                            .and_then(|record| {
-                                crate::reconcile::instance_logs_dir(
-                                    record.target_uid,
-                                    &slug,
-                                    crate::reconcile::passwd_home,
-                                )
-                                .map_err(|error| crate::log::LogError::LogsHome(error.uid))
-                            })?;
+                            .ok_or_else(|| crate::log::LogError::NotFound(slug.clone()))?
+                            .logs_dir(&slug)
+                            .map_err(crate::log::LogError::from)?;
                         crate::log::tail(
                             &record_root,
                             &logs_dir,
@@ -487,6 +477,8 @@ mod tests {
                 env: Vec::new(),
                 identity: None,
                 data_dir: data.path().to_path_buf(),
+                config_dir: Some(data.path().join("config")),
+                state_dir: Some(data.path().join("state")),
             },
         )
         .expect("write record");
@@ -629,6 +621,8 @@ mod tests {
                 env: vec!["KALLIPAI_SEED=1".into()],
                 identity: None,
                 data_dir: data.path().to_path_buf(),
+                config_dir: Some(data.path().join("config")),
+                state_dir: Some(data.path().join("state")),
             },
         )
         .expect("write record");

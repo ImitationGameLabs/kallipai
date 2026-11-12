@@ -11,8 +11,8 @@ use crate::records::{self, InstanceRecord};
 use crate::scan::{self, ScannedInstance};
 use crate::spawn::{
     LaunchIdentity, OverlapInput, OwnerInference, SpawnError, authorized, cached_passwd_identity,
-    ensure_not_root_inplace, infer_owner_decision, instance_data_dir, now_unix, overlaps,
-    passwd_by_uid, path_owner_uid, require_root_for_drop, resolve_launch_identity,
+    ensure_not_root_inplace, infer_owner_decision, note_roots, now_unix, overlaps, passwd_by_uid,
+    path_owner_uid, prepare_launch, require_root_for_drop, resolve_launch_identity,
     validate_user_env,
 };
 use anyhow::Context as _;
@@ -175,8 +175,17 @@ pub fn adopt(
     }
 
     // Disjointness: adopt introduces a second external path, so every
-    // direction is checked (see `check_overlaps`).
-    let data_root = instance_data_dir(&identity, slug)?
+    // direction is checked (see `check_overlaps`). The expected roots come
+    // from the same composition spawn uses, so the tree root and the in-tree
+    // position compared below are the launch path's own resolution of this
+    // identity and env — no second path computation.
+    // Env first, the composition second — spawn's order: what could not be
+    // sent to spawn must not reach a login shell here either.
+    validate_user_env(user_env)?;
+    let (_, launch_roots) = prepare_launch(slug, &workspace_canon, user_env, &identity)?;
+    note_roots(slug, &launch_roots);
+    let resolved = launch_roots.data;
+    let data_root = resolved
         .parent()
         .context("instance data tree has no parent")?
         .to_path_buf();
@@ -190,8 +199,8 @@ pub fn adopt(
     // in-tree location a data dir may occupy (each slug answers to
     // its own place). Canonical like the comparisons above;
     // verbatim when the tree does not exist yet.
-    let canonical_data = instance_data_dir(&identity, slug)?;
-    let canonical_data = canonical_data.canonicalize().unwrap_or(canonical_data);
+    let canonical_data = resolved.canonicalize().unwrap_or(resolved);
+
     let registered = scan::scan_instances(record_root);
 
     // A re-adopt replaces its own record, so the slug is not its own
@@ -208,10 +217,6 @@ pub fn adopt(
         &canonical_data,
         &others,
     )?;
-
-    // Env: allowlist, daemon-owned keys, addr shape — the same
-    // validation spawn applies, verbatim.
-    validate_user_env(user_env)?;
 
     // The relay probe (adopt's one relay touchpoint): an enrolled
     // instance that relied on env-sugar relays, adopted without any
@@ -304,6 +309,8 @@ pub fn adopt(
         env: user_env.to_vec(),
         identity: anchor,
         data_dir: data_dir_canon,
+        config_dir: Some(launch_roots.config),
+        state_dir: Some(launch_roots.state),
     };
     let published = match &existing {
         Some(previous) => {
@@ -476,6 +483,8 @@ mod tests {
             env: Vec::new(),
             identity: None,
             data_dir: data_dir.to_path_buf(),
+            config_dir: Some(data_dir.join("config")),
+            state_dir: Some(data_dir.join("state")),
         }
     }
 
@@ -851,7 +860,7 @@ mod tests {
         match error {
             SpawnError::Overlap { input, .. } => match input {
                 OverlapInput::Workspace => "workspace",
-                OverlapInput::DataDir => "data dir",
+                OverlapInput::DataDir => "the launch's data dir",
             },
             other => panic!("expected Overlap, got {other}"),
         }
@@ -900,7 +909,7 @@ mod tests {
             &instances,
         )
         .unwrap_err();
-        assert_eq!(overlap_input(&error), "data dir");
+        assert_eq!(overlap_input(&error), "the launch's data dir");
         assert_eq!(overlap_rival_slug(&error), "(requested workspace)");
         let error = check_overlaps(
             &dd.join("as-workspace"),
@@ -910,7 +919,7 @@ mod tests {
             &instances,
         )
         .unwrap_err();
-        assert_eq!(overlap_input(&error), "data dir");
+        assert_eq!(overlap_input(&error), "the launch's data dir");
         assert_eq!(overlap_rival_slug(&error), "(requested workspace)");
 
         // data dir vs the shared tree: two instances never share a tree.
@@ -922,12 +931,12 @@ mod tests {
             &instances,
         )
         .unwrap_err();
-        assert_eq!(overlap_input(&error), "data dir");
+        assert_eq!(overlap_input(&error), "the launch's data dir");
         assert_eq!(overlap_rival_slug(&error), "(instance tree)");
         assert_eq!(
             error.to_string(),
             format!(
-                "data dir {} overlaps the instance tree rooted at {}",
+                "the launch's data dir {} overlaps the instance tree rooted at {}",
                 tree.join("nested").display(),
                 tree.display()
             )
@@ -953,7 +962,7 @@ mod tests {
             &instances,
         )
         .unwrap_err();
-        assert_eq!(overlap_input(&error), "data dir");
+        assert_eq!(overlap_input(&error), "the launch's data dir");
         assert_eq!(overlap_rival_slug(&error), "other");
 
         // data dir vs a registered data dir (the double-adoption shape).
@@ -965,7 +974,7 @@ mod tests {
             &instances,
         )
         .unwrap_err();
-        assert_eq!(overlap_input(&error), "data dir");
+        assert_eq!(overlap_input(&error), "the launch's data dir");
         assert_eq!(overlap_rival_slug(&error), "other");
 
         // workspace vs a registered data dir (both nestings): an
@@ -1006,7 +1015,7 @@ mod tests {
         let outside = tempdir();
         let error =
             check_overlaps(outside.path(), root.path(), &tree, &canonical, &[]).unwrap_err();
-        assert_eq!(overlap_input(&error), "data dir");
+        assert_eq!(overlap_input(&error), "the launch's data dir");
         assert_eq!(overlap_rival_slug(&error), "(instance tree)");
 
         // The exception lives inside the direction-3 predicate only.
@@ -1014,7 +1023,7 @@ mod tests {
         // still caught, by direction 7 — the shortcut is not a pass.
         let squat = vec![reg("squat", None, &canonical)];
         let error = check_overlaps(&ws, &canonical, &tree, &canonical, &squat).unwrap_err();
-        assert_eq!(overlap_input(&error), "data dir");
+        assert_eq!(overlap_input(&error), "the launch's data dir");
         assert_eq!(overlap_rival_slug(&error), "squat");
     }
 
@@ -1038,21 +1047,31 @@ mod tests {
 
     #[test]
     fn the_drop_to_identity_gets_its_own_canonical_position() {
-        // The canonical position is identity-relative: the same slug
-        // under a drop-to launch resolves inside that user's home.
+        // The canonical position is identity-relative: the same slug under a
+        // drop-to launch resolves inside that user's home, because the
+        // composition reads the identity pin's HOME. Built through
+        // `prepare_launch_with` — the composition adopt itself runs — so a
+        // regression in adopt's own path reds this test.
         let root = tempdir();
         let tree = root.path().join("tree");
         fs::create_dir_all(&tree).expect("tree");
         let home = tempdir();
-        let identity = LaunchIdentity::DropTo(crate::spawn::ResolvedUser {
-            uid: 4242,
-            gid: 4242,
-            username: "dedicated".to_string(),
+        let identity = crate::spawn::LaunchIdentity::DropTo(crate::spawn::ResolvedUser {
+            uid: 65534,
+            gid: 65534,
+            username: "nobody".to_string(),
             home: home.path().to_path_buf(),
-            shell: String::new(),
+            shell: "/bin/sh".to_string(),
         });
+        let harvest = crate::spawn::Harvest {
+            seed: vec![("HOME".to_string(), home.path().display().to_string())],
+            pairs: vec![("PATH".to_string(), "/usr/bin:/bin".to_string())],
+        };
         let ws = tempdir();
-        let canonical = instance_data_dir(&identity, "team-a").unwrap();
+        let (_, resolved) =
+            crate::spawn::prepare_launch_with("team-a", ws.path(), &[], &harvest, &[], &identity)
+                .expect("the drop-to identity resolves");
+        let canonical = resolved.data;
         assert!(canonical.starts_with(home.path()));
         check_overlaps(ws.path(), &canonical, &tree, &canonical, &[])
             .expect("the drop-to canonical position is admitted too");

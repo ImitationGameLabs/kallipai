@@ -83,7 +83,9 @@ pub fn data_dir_root() -> Result<PathBuf> {
 ///
 /// Declared configuration (`profiles.toml`, `exec_hooks.toml`) is
 /// operator intent rather than runtime data, so it lives under the
-/// config home rather than the data home.
+/// config home rather than the data home. The host pins the root when
+/// the requester supplies one; derivation from the platform config
+/// home is the fallback for a host that does not.
 pub fn config_dir_root() -> Result<PathBuf> {
     Ok(roots()?.config)
 }

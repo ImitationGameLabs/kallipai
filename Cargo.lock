@@ -3393,7 +3393,6 @@ dependencies = [
  "chacha20poly1305",
  "clap",
  "ctor",
- "dirs",
  "futures-core",
  "futures-util",
  "getrandom 0.4.2",

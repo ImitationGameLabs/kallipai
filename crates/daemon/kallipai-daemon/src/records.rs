@@ -10,23 +10,28 @@
 //! exactly one place to look — the record area, never the data trees.
 //!
 //! A record carries the instance's identity, spawn-time env, and anchored
-//! incarnation, plus what the split layouts need: the pointer
-//! to the instance's data directory (owned by the tagma, written only
-//! by the tagma) and the target user the instance runs as.
+//! incarnation, plus what the split layouts need: the three resolved
+//! roots the instance lives in (data, configuration, state), the target
+//! user the instance runs as, and the log placement derived from the
+//! recorded state root.
 
 use anyhow::Context as _;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use kallipai_daemon_common::roots;
+
 use crate::scan::Identity;
 
 /// The daemon's per-instance record. `data_dir` points at the tagma-owned
 /// data directory (the instance's runtime.json, credentials and agents
-/// live there); the daemon never writes inside it. `target_uid` /
-/// `target_username` name the user the instance runs as — today always
-/// the daemon's own user; the fields exist so the multi-user launch can
-/// persist the target without a format change.
+/// live there, and the daemon never writes inside it); `config_dir` and
+/// `state_dir` are the other two roots the launch resolved, so every
+/// reader that needs a tree reads it here instead of rebuilding it.
+/// `target_uid` / `target_username` name the user the instance runs as
+/// — today always the daemon's own user; the fields exist so the
+/// multi-user launch can persist the target without a format change.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct InstanceRecord {
     pub instance_id: String,
@@ -52,6 +57,78 @@ pub struct InstanceRecord {
     pub identity: Option<Identity>,
     /// Absolute path of the tagma-owned data directory.
     pub data_dir: PathBuf,
+    /// The resolved configuration root (`profiles.toml`, `exec_hooks.toml`).
+    /// `None` only in a record written before the roots were recorded; the
+    /// boot migration fills it, and a reader that needs the tree refuses a
+    /// record still in that state instead of guessing a path.
+    #[serde(default)]
+    pub config_dir: Option<PathBuf>,
+    /// The resolved state root (every instance's log leaves live under it).
+    /// `None` on the same terms as `config_dir`.
+    #[serde(default)]
+    pub state_dir: Option<PathBuf>,
+}
+
+/// Why a record cannot name one of the instance's trees: the record
+/// predates the field, and the startup migration could not resolve that
+/// root for it (the daemon log carries that record's cause). A reader
+/// that needs the tree refuses with the levels the resolver reads,
+/// rather than guess a path.
+#[derive(Debug)]
+pub struct RootsNotRecorded {
+    /// The record's slug.
+    pub slug: String,
+    /// Which root is missing; the message names it and its remedies.
+    pub kind: roots::RootKind,
+}
+
+impl std::fmt::Display for RootsNotRecorded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let [own, xdg, home] = self.kind.remedies();
+        write!(
+            f,
+            "instance record {} has no recorded {} root: the record predates the \
+             field and the startup migration could not resolve one; name the root \
+             with {own}, {xdg} or {home} and restart the daemon",
+            self.slug,
+            self.kind.noun()
+        )
+    }
+}
+
+impl std::error::Error for RootsNotRecorded {}
+
+impl InstanceRecord {
+    /// The recorded configuration root (`profiles.toml`, `exec_hooks.toml`).
+    pub fn config_root(&self, slug: &str) -> Result<&Path, RootsNotRecorded> {
+        self.config_dir.as_deref().ok_or_else(|| RootsNotRecorded {
+            slug: slug.to_owned(),
+            kind: roots::RootKind::Config,
+        })
+    }
+
+    /// Both roots a reader other than the log pointer needs, refused as
+    /// one check: a relaunch that cannot name them would leave the record
+    /// unable to answer for the trees the launch just used.
+    pub fn recorded_roots(&self, slug: &str) -> Result<(), RootsNotRecorded> {
+        self.config_root(slug)?;
+        self.state_root(slug).map(|_| ())
+    }
+
+    /// The recorded state root (instance logs live under it).
+    pub fn state_root(&self, slug: &str) -> Result<&Path, RootsNotRecorded> {
+        self.state_dir.as_deref().ok_or_else(|| RootsNotRecorded {
+            slug: slug.to_owned(),
+            kind: roots::RootKind::State,
+        })
+    }
+
+    /// Where this instance's log files live: the recorded state root plus
+    /// the `tagmata/<slug>/logs` leaf (one spelling, `roots::log_tree`) —
+    /// the daemon never assembles a log path from a home directory.
+    pub fn logs_dir(&self, slug: &str) -> Result<PathBuf, RootsNotRecorded> {
+        Ok(roots::log_tree(self.state_root(slug)?, slug))
+    }
 }
 
 /// Record root: an explicit override wins verbatim, else the platform
@@ -77,6 +154,29 @@ pub fn record_root() -> anyhow::Result<PathBuf> {
             dirs::state_dir().context("could not determine platform state directory")?,
         )),
     }
+}
+
+/// The slugs the record area holds: one per `<slug>.json` file. A
+/// staging sibling never ends in `.json`, so a write in flight stays
+/// invisible here.
+pub fn record_slugs(root: &Path) -> std::io::Result<Vec<String>> {
+    let entries = match std::fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e),
+    };
+    let mut slugs = Vec::new();
+    for entry in entries {
+        let name = entry?.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if let Some(slug) = name.strip_suffix(".json") {
+            slugs.push(slug.to_owned());
+        }
+    }
+    slugs.sort();
+    Ok(slugs)
 }
 
 /// Read one record; `None` when the file is absent. A record that is
@@ -200,6 +300,8 @@ mod tests {
             env: vec!["K=V".into()],
             identity: None,
             data_dir: data_dir.to_path_buf(),
+            config_dir: Some(data_dir.join("config")),
+            state_dir: Some(data_dir.join("state")),
         }
     }
 

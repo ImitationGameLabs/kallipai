@@ -8,7 +8,8 @@ use std::path::Path;
 pub enum OverlapInput {
     /// The request's workspace path.
     Workspace,
-    /// The request's data dir path.
+    /// The data dir the launch resolved. Not a request input: the request
+    /// names a workspace, and the tree follows from the deployment's roots.
     DataDir,
 }
 
@@ -16,7 +17,7 @@ impl std::fmt::Display for OverlapInput {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             OverlapInput::Workspace => f.write_str("workspace"),
-            OverlapInput::DataDir => f.write_str("data dir"),
+            OverlapInput::DataDir => f.write_str("the launch's data dir"),
         }
     }
 }
