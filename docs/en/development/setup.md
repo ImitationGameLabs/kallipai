@@ -424,13 +424,12 @@ Model configuration lives in the instance's own
 The record carries the instance id, owning uid, workspace, user env,
 launch anchor, and the pointer at the data directory
 (`~/.local/share/kallipai/tagmata/<slug>`); the tagma publishes
-`runtime.json` (pid + port + starttime) into the data directory on
-every boot. Env
-pairs must start with `KALLIPAI_` or be `RUST_LOG` or `PATH`; the reserved
-keys (`KALLIPAI_TAGMA_SLUG`, `KALLIPAI_WORKSPACE_ROOT`,
-`KALLIPAI_TAGMA_DATA_DIR`, `KALLIPAI_TAGMA_CONFIG_DIR`,
-`KALLIPAI_TAGMA_STATE_DIR`) are daemon-owned; a request pair naming
-one is refused.
+`runtime.json` (pid + port + starttime + session id) into the data
+directory on every boot. Env pairs must start with `KALLIPAI_` or be
+`RUST_LOG` or `PATH`; the reserved keys (`KALLIPAI_TAGMA_SLUG`,
+`KALLIPAI_WORKSPACE_ROOT`, `KALLIPAI_TAGMA_DATA_DIR`,
+`KALLIPAI_TAGMA_CONFIG_DIR`, `KALLIPAI_TAGMA_STATE_DIR`) are
+daemon-owned; a request pair naming one is refused.
 `KALLIPAI_TAGMA_ADDR` is the one user-set listen knob: the daemon injects
 `127.0.0.1:0` unless any channel carries the key: a request pair,
 the harvested base, or the persisted record replayed on start; every

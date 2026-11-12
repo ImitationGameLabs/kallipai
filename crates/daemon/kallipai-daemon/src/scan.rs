@@ -2,8 +2,10 @@
 //! per-slug records, never the data tree.
 //!
 //! Every record points at the instance's tagma-owned data directory; the
-//! volatile runtime facts (`runtime.json`: pid, port, starttime) are read
-//! through that pointer. `list`/`health` re-read everything fresh on every
+//! volatile runtime facts in `runtime.json` are read through that
+//! pointer; the daemon takes three of the four keys (pid, port,
+//! starttime), and the session id beside them is for the gate's leak
+//! check. `list`/`health` re-read everything fresh on every
 //! call, so a daemon restart rebuilds the full view from the record area.
 //!
 //! Liveness verification has one root: the launch anchor the daemon's
@@ -23,10 +25,12 @@ pub struct ScannedInstance {
     pub slug: String,
     pub instance_id: String,
     pub workspace: Option<String>,
-    /// The instance's `runtime.json`: the tagma's own pid, listen port and
-    /// incarnation start time, kept as the file it is. The port matters only
-    /// while the incarnation it came from is the live one, and the start time
-    /// is the fallback pin for a record that carries none.
+    /// The instance's `runtime.json`: the tagma's own pid, listen port,
+    /// incarnation start time and the session id of the launch's setsid,
+    /// kept as the file it is. The port matters only while the incarnation
+    /// it came from is the live one, and the start time is the fallback pin
+    /// for a record that carries none. The session id is for the gate's
+    /// leak check; the daemon itself does not read it.
     pub runtime: Option<RuntimeFile>,
     /// The spawn-time uid of the requesting peer, from the record.
     pub owner: Option<u32>,
@@ -570,13 +574,20 @@ impl std::fmt::Display for SignalError {
 }
 
 /// `runtime.json`: the instance's runtime identity, written by the
-/// tagma itself. The key set (`pid`, `port`, `starttime`) is a
+/// tagma itself. The key set (`pid`, `port`, `starttime`, `sid`) is a
 /// cross-crate contract — kallipai-tagma serializes its own mirror of
 /// these keys and does not depend on the daemon crates, so the two
-/// definitions stay in lockstep by hand. The daemon reads all three:
+/// definitions stay in lockstep by hand. The daemon reads three of them:
 /// `starttime` is the incarnation this instance published for itself, the
 /// fallback pin when the record carries no launch anchor, and it is
 /// compared against the daemon's own `/proc` read, never trusted as text.
+/// `sid` is the kernel session id the instance runs in; the gate's leak
+/// check reads it, not this daemon. A key the daemon does not know must
+/// keep parsing: `RuntimeFile` has no `deny_unknown_fields` on purpose, so
+/// a tagma that publishes one more runtime fact does not need a daemon
+/// change to reach an instance that is already launched. Turning that
+/// attribute on would make the spawn pipeline fail on files the tagma
+/// writes.
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct RuntimeFile {
     pub pid: u32,

@@ -5,11 +5,16 @@
 //!
 //! Skip signature: a host without mount-ns capacity skips every scenario
 //! within ~0.01s total — a green lane that fast means "all skipped", not
-//! "all ran". A healthy run takes seconds per scenario. Lane
-//! declarations must report ran/skipped counts, never the bare summary.
+//! "all ran". A healthy run takes seconds per scenario. So the guard counts
+//! what it turned away and what it let through, and the binary prints
+//! `sandbox: summary ran=<R> skipped=<S> total=<T> expected=<E>` when it exits,
+//! `E` being [`SCENARIOS`]: a scenario that never asked the guard shows up as a
+//! short count against it. Lane
+//! declarations quote that line; they never count log text or the bare summary.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use serde::Deserialize;
@@ -67,6 +72,55 @@ fn userns_disabled() -> bool {
 /// decision that forces mount-ns work (one hide hole => tmpfs overlay),
 /// and require a clean, speaking exit. `Err` carries the skip reason.
 pub async fn sandbox_runnable() -> Result<(), String> {
+    register_summary();
+    let outcome = probe().await;
+    match &outcome {
+        Ok(()) => RAN.fetch_add(1, Ordering::SeqCst),
+        Err(_) => SKIPPED.fetch_add(1, Ordering::SeqCst),
+    };
+    outcome
+}
+
+/// How many scenarios ask the guard whether they may run. A scenario added
+/// without a `sandbox_runnable` call would otherwise leave the counts short
+/// and the summary still self-consistent, so the number is also the check:
+/// the summary line carries it as `expected`, and a lane that reads the line
+/// fails when `ran + skipped` is not it.
+pub const SCENARIOS: usize = 5;
+
+/// Scenarios the guard let through, and scenarios it turned away. One call per
+/// scenario means `ran + skipped` counts scenarios, not every test in the
+/// binary: the helper test below needs no privileges and never calls the guard.
+static RAN: AtomicUsize = AtomicUsize::new(0);
+static SKIPPED: AtomicUsize = AtomicUsize::new(0);
+static SUMMARY_REGISTERED: AtomicBool = AtomicBool::new(false);
+
+/// Register the exit-time summary once. The counters live in this process, so
+/// this process is the only thing that can report them; a lane that reads the
+/// line is reading the guard's own count, not a message it prayed would appear.
+fn register_summary() {
+    if SUMMARY_REGISTERED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    extern "C" fn summarize() {
+        let ran = RAN.load(Ordering::SeqCst);
+        let skipped = SKIPPED.load(Ordering::SeqCst);
+        eprintln!(
+            "sandbox: summary ran={ran} skipped={skipped} total={} expected={SCENARIOS}",
+            ran + skipped
+        );
+    }
+    // The handler runs once, at process exit, and does real work: `eprintln!`
+    // formats and takes the stderr lock, so it can allocate and can block. That
+    // is safe here because the test threads are done; if it ever hung, the
+    // summary would be missing and the gate that reads it fails, which is the
+    // failure this line exists to make loud.
+    unsafe { libc::atexit(summarize) };
+}
+
+/// The probe itself: static host checks, then one real child through the
+/// sandbox path.
+async fn probe() -> Result<(), String> {
     if unsupported() {
         return Err("landlock/userns statically unsupported".to_string());
     }

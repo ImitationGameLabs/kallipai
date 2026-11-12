@@ -109,7 +109,13 @@ fn stop_instances(socket: &Path, records: &Path) -> Vec<u32> {
     survivors
 }
 
-/// The pid the launch pinned: the leader of the group the instance runs in.
+/// The pid the launch pinned: the instance's own process, a member of the
+/// session the spawn created (the spawn's `setsid` runs in an intermediate
+/// child, so the instance is not the session leader). Cleanup works in
+/// groups, not sessions, because one signal has to reach the few processes
+/// that belong together (`kill -- -<pgid>`); naming a leak across a larger
+/// session is `scripts/leakcheck.sh`'s job, and the two report different
+/// words on purpose.
 fn anchor_pid(record_path: &Path) -> Option<i32> {
     let identity = record_json(record_path)?;
     i32::try_from(identity.get("identity")?.get("pid")?.as_u64()?).ok()
@@ -320,16 +326,51 @@ pub fn tear_down(
     survivors
 }
 
-/// Fail a fixture that left an instance running: a panic names the pids, and a
-/// fixture already unwinding only logs them so the original panic survives.
+/// The process group a live pid belongs to; `None` when the lookup failed, which
+/// the report says out loud rather than guessing a group.
+fn process_group_of(pid: u32) -> Option<i32> {
+    let group = unsafe { libc::getpgid(pid as i32) };
+    (group > 0).then_some(group)
+}
+
+/// Fail a fixture that left an instance running: a panic names the pids and the
+/// process groups they belong to (a survivor's group is what a reader needs to
+/// clear the rest of it), and a fixture already unwinding only logs them so the
+/// original panic survives.
 pub fn blame_survivors(survivors: &[u32]) {
     if survivors.is_empty() {
         return;
     }
-    let report = format!("fixture left instances running: pids {survivors:?}");
+    let named: Vec<String> = survivors
+        .iter()
+        .map(|pid| match process_group_of(*pid) {
+            Some(group) => format!("{pid} (group {group})"),
+            None => format!("{pid} (group unknown)"),
+        })
+        .collect();
+    let report = format!("fixture left instances running: pids {}", named.join(", "));
     if std::thread::panicking() {
         eprintln!("{report}");
     } else {
         panic!("{report}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn process_group_of_names_the_group_a_pid_is_in() {
+        let pid = std::process::id();
+        assert_eq!(
+            process_group_of(pid),
+            Some(unsafe { libc::getpgid(pid as i32) })
+        );
+    }
+
+    #[test]
+    fn process_group_of_declines_a_pid_that_cannot_exist() {
+        assert_eq!(process_group_of(4_000_000_000), None);
     }
 }

@@ -711,8 +711,8 @@ fn credential_origin_roundtrip_and_backfill() {
 }
 
 /// write_instance_state contract: handed a state dir, it writes
-/// exactly one owner-only `runtime.json` carrying the process pid
-/// and the actually bound (`:0`) port.
+/// exactly one owner-only `runtime.json` carrying the process pid,
+/// the actually bound (`:0`) port and the session the spawn put it in.
 #[tokio::test]
 async fn instance_state_dir_gets_runtime_json_owner_only() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -726,6 +726,11 @@ async fn instance_state_dir_gets_runtime_json_owner_only() {
     let text = std::fs::read_to_string(dir.path().join("runtime.json")).expect("runtime.json");
     let parsed: serde_json::Value = serde_json::from_str(&text).expect("parse runtime.json");
     assert_eq!(parsed["pid"], serde_json::json!(std::process::id()));
+    // The spawn makes the session leader an intermediate child, so the session
+    // id is not this process's pid -- assert it against the kernel, not against
+    // `pid`, or the test would bless exactly the mistake the leak check made.
+    let sid = unsafe { libc::getsid(0) };
+    assert_eq!(parsed["sid"], serde_json::json!(sid));
     assert_eq!(parsed["port"], serde_json::json!(port));
 
     use std::os::unix::fs::PermissionsExt as _;

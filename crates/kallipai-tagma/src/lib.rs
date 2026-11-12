@@ -888,12 +888,17 @@ fn forward_panic_to_tracing(info: &std::panic::PanicHookInfo) {
 /// must stay in lockstep. `starttime` is the kernel start time of this
 /// process: the self-reported incarnation, kept verbatim in the
 /// contract while the daemon verifies liveness against its own `/proc`
-/// read. `0` means not captured.
+/// read. `0` means not captured. `sid` is the kernel session id of this
+/// process (`getsid(0)`): the spawn double-forks and the session leader is
+/// the intermediate child, which exits before anyone can record it, so the
+/// instance is only a *member* of the session it runs in -- that number is
+/// the one to scan, not the instance's own pid.
 #[derive(serde::Serialize)]
 struct InstanceRuntime {
     pid: u32,
     port: u16,
     starttime: u64,
+    sid: u32,
 }
 /// The kernel start time of this process (`/proc/self/stat` field 22,
 /// clock ticks since boot) — the same incarnation discriminator the
@@ -905,6 +910,15 @@ fn proc_starttime() -> Option<u64> {
     let stat = std::fs::read_to_string("/proc/self/stat").ok()?;
     let after_comm = stat.rfind(')')? + 1;
     stat[after_comm..].split_whitespace().nth(19)?.parse().ok()
+}
+/// The kernel session id of this process (`/proc/self/stat` field 6,
+/// parsed the same way as the start time). `None` off Linux or on a read
+/// or parse failure; the runtime file then carries `0`, which readers treat
+/// as "no session recorded" rather than as session 0.
+fn proc_session() -> Option<u32> {
+    let stat = std::fs::read_to_string("/proc/self/stat").ok()?;
+    let after_comm = stat.rfind(')')? + 1;
+    stat[after_comm..].split_whitespace().nth(3)?.parse().ok()
 }
 /// Build the advertise URL for an unset `--advertise-url` from the bound
 /// socket: scheme http, the listen address's host (an unspecified host
@@ -931,7 +945,7 @@ fn derive_advertise_url(listen_addr: &str, port: u16) -> Result<String> {
 }
 
 /// Publish the runtime identity of this instance (pid, actually bound
-/// port, kernel start time) into `dir` as a single `runtime.json`, for
+/// port, kernel start time, session id) into `dir` as a single `runtime.json`, for
 /// the local instance daemon's spawn pipeline. The key set is a
 /// cross-crate contract with the daemon's reader, kept in lockstep by
 /// hand — tagma does not depend on the daemon crates. Owner-only via
@@ -946,6 +960,7 @@ fn write_instance_state(dir: &std::path::Path, listener: &tokio::net::TcpListene
         pid: std::process::id(),
         port,
         starttime: proc_starttime().unwrap_or(0),
+        sid: proc_session().unwrap_or(0),
     };
     write_owner_only(&dir.join("runtime.json"), &serde_json::to_string(&runtime)?)
         .context("writing the instance runtime file")?;
