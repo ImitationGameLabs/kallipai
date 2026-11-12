@@ -55,6 +55,7 @@ async fn shared_pg_port() -> u16 {
                 match request().start().await {
                     Ok(container) => {
                         let port = container.get_host_port_ipv4(5432).await.expect("host port");
+                        sweep_dead_test_dbs(port).await;
                         // Leaked on purpose: the container outlives every
                         // test in this binary.
                         std::mem::forget(container);
@@ -72,6 +73,97 @@ async fn shared_pg_port() -> u16 {
             unreachable!("the retry loop returns or panics")
         })
         .await
+}
+
+/// A test database is owned by the process whose pid is encoded in its name
+/// (`gateway_e2e_{pid}_{n}`). The zero-connection SQL prefilter cannot tell
+/// "dead" from "just created, not yet connected", so a candidate is dropped
+/// only when its owner process no longer exists (`/proc/{pid}`).
+/// Unparseable names are never dropped.
+fn owner_dead(db_name: &str) -> bool {
+    let Some(pid) = db_name
+        .strip_prefix(DB_PREFIX)
+        .and_then(|rest| rest.split_once('_'))
+        .and_then(|(pid, _)| pid.parse::<u32>().ok())
+    else {
+        return false;
+    };
+    !std::path::Path::new(&format!("/proc/{pid}")).exists()
+}
+
+/// A wrong answer here drops a database another process is using, so each
+/// shape the name can arrive in gets its own case: this process is alive, a pid
+/// past any live one is not, a name without the counter cannot be judged, and a
+/// sibling prefix belongs to a different harness.
+#[test]
+fn only_a_dead_owner_marks_a_database_as_reapable() {
+    let mine = format!("{DB_PREFIX}{}_0", std::process::id());
+    assert!(!owner_dead(&mine), "the running process owns its databases");
+    assert!(owner_dead(&format!("{DB_PREFIX}4000000000_0")));
+    assert!(!owner_dead(&format!("{DB_PREFIX}4000000000")));
+    assert!(!owner_dead("gateway_test_4000000000_0"));
+}
+
+// This sweep and the conditions it keeps are repeated across the suites, one
+// copy per harness (the in-process suite's lives in `src/test_support.rs`); a
+// change belongs in every copy.
+/// Best-effort cleanup, once per process, of test databases left dead by
+/// earlier runs (the reusable container never drops them). Hygiene, not a
+/// correctness path: on any failure the dead databases just accumulate.
+/// DROP DATABASE cannot run inside a transaction block, so candidates are
+/// selected first, then one autocommit DROP per database, each failure
+/// swallowed.
+async fn sweep_dead_test_dbs(port: u16) {
+    let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+    // The same bounded connection `fresh_db_url` takes: the sweep is one more
+    // client of a shared container, not its administrator.
+    let mut options = kallipai_db_helper::connect_options(&url, Duration::from_secs(1));
+    options
+        .max_connections(1)
+        .min_connections(1)
+        .acquire_timeout(Duration::from_secs(9))
+        .connect_timeout(Duration::from_secs(5));
+    let root = match Database::connect(options).await {
+        Ok(root) => root,
+        Err(e) => {
+            eprintln!("dead-db sweep: connect failed: {e}");
+            return;
+        }
+    };
+    let candidates = match root
+        .query_all(Statement::from_string(
+            DatabaseBackend::Postgres,
+            format!(
+                "SELECT datname FROM pg_database d \
+                 WHERE d.datname ~ '^{DB_PREFIX}' \
+                 AND NOT EXISTS \
+                 (SELECT 1 FROM pg_stat_activity a WHERE a.datname = d.datname)"
+            ),
+        ))
+        .await
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            eprintln!("dead-db sweep: list failed: {e}");
+            return;
+        }
+    };
+    for name in candidates
+        .iter()
+        .filter_map(|row| row.try_get::<String>("", "datname").ok())
+    {
+        if !owner_dead(&name) {
+            continue;
+        }
+        let quoted = format!("\"{}\"", name.replace('"', "\"\""));
+        let drop = format!("DROP DATABASE IF EXISTS {quoted}");
+        if let Err(e) = root
+            .execute(Statement::from_string(DatabaseBackend::Postgres, drop))
+            .await
+        {
+            eprintln!("dead-db sweep: drop {name} failed: {e}");
+        }
+    }
 }
 
 /// One isolated database inside the shared container; the child

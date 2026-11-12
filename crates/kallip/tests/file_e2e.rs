@@ -6,9 +6,9 @@
 
 mod common;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -21,6 +21,7 @@ use kallipai_archeion_common::internal_api::{
     WirePrincipal,
 };
 use kallipai_archeion_common::perm::PermSet;
+use kallipai_common::telemetry::test_observability::{ObservedSpan, Recorder};
 use kallipai_files::LocalBackend;
 use kallipai_files::auth::FilesControlPlane;
 use kallipai_files::gc::GcConfig;
@@ -354,22 +355,89 @@ async fn put_ls_get_roundtrips_through_the_real_service() {
     assert_eq!(downloaded, content);
 }
 
-/// Wait until the recorder holds a span with this name and kind, then hand
-/// back everything it has: a service's span ends on its own task, after
-/// the call returns, so counting spans would race the export.
-async fn spans_once(
-    recorder: &kallipai_common::telemetry::test_observability::Recorder,
-    name: &str,
-    kind: &str,
-) -> Vec<kallipai_common::telemetry::test_observability::ObservedSpan> {
+/// The process's one recorder.
+///
+/// Read from the helper: `recorder` publishes the process-wide W3C propagator
+/// and the tracer provider, and those are last-writer-wins, so two recorders
+/// built inside one run take each other's handles. One recorder for the binary
+/// keeps them in place, and installing its subscriber globally, once, covers
+/// every thread instead of one.
+///
+/// Measured here, two counts from two shapes. Built per test with a thread-local
+/// subscriber, this binary failed two of forty runs. With one recorder shared and
+/// its subscriber still thread-local, a targeted repeat failed three runs in
+/// three, spans a test had made missing from its exporter. With the one recorder
+/// installed globally, forty of forty passed. Why the thread-local shapes lose
+/// spans is not established, so this file rests on the measured shape rather than
+/// on an account of it.
+///
+/// Two premises the compiler does not enforce. The service's span is created on
+/// the test's own thread -- `#[tokio::test]` runs a current-thread runtime, so
+/// the task serving the upload is polled there -- and that is what lets a test
+/// claim the traces that started on its thread; a multi-thread runtime would
+/// take the claim away silently. And the recorder holds every test's spans, so
+/// an assertion reads its own trace and never claims that some span is absent.
+fn trace_recorder() -> &'static Recorder {
+    use kallipai_common::telemetry::test_observability::recorder;
+
+    static SHARED: OnceLock<Recorder> = OnceLock::new();
+    SHARED.get_or_init(|| {
+        let (recorder, subscriber) = recorder("kallip");
+        tracing::subscriber::set_global_default(subscriber)
+            .expect("the process-wide subscriber is installed once");
+        recorder
+    })
+}
+
+/// The running test's thread name: the tag that tells its spans from a
+/// sibling test's in the shared recorder.
+fn test_thread_name() -> String {
+    std::thread::current()
+        .name()
+        .expect("a test is polled on a named thread")
+        .to_owned()
+}
+
+/// What the running test exported so far.
+///
+/// A span created on the test's thread pins the trace. One trace's spans are not
+/// promised to be created on one thread, so the trace, not the creating thread,
+/// is what carries a test's spans together. A sibling test's traces never enter
+/// this set.
+fn own_spans(recorder: &Recorder, test: &str) -> Vec<ObservedSpan> {
+    let all = recorder.observed();
+    let mine: HashSet<String> = all
+        .iter()
+        .filter(|span| span.attribute("thread.name") == Some(test))
+        .map(|span| span.trace_id.clone())
+        .collect();
+    all.into_iter()
+        .filter(|span| mine.contains(&span.trace_id))
+        .collect()
+}
+
+/// Wait until the recorder holds one of this test's spans with this name and
+/// kind, then hand back everything the test exported: a service's span ends on
+/// its own task, after the call returns, so counting spans would race the
+/// export.
+async fn spans_once(name: &str, kind: &str) -> Vec<ObservedSpan> {
     use kallipai_common::telemetry::test_observability::spans_when;
 
-    spans_when(recorder, &format!("a {kind} span named {name}"), |spans| {
-        spans
-            .iter()
-            .any(|span| span.name == name && span.kind == kind)
-    })
-    .await
+    let recorder = trace_recorder();
+    let test = test_thread_name();
+    spans_when(
+        recorder,
+        &format!("a {kind} span named {name} created on this test's thread"),
+        |spans| {
+            spans.iter().any(|span| {
+                span.name == name
+                    && span.kind == kind
+                    && span.attribute("thread.name") == Some(test.as_str())
+            })
+        },
+    )
+    .await;
+    own_spans(recorder, &test)
 }
 
 /// A put made inside a traced command keeps that command's trace: the
@@ -378,7 +446,7 @@ async fn spans_once(
 /// what this proves is the CLI's client putting the header on the wire.
 #[tokio::test]
 async fn a_put_carries_the_context_of_the_command_it_serves() {
-    use kallipai_common::telemetry::test_observability::{client_span_of, recorder, span_of};
+    use kallipai_common::telemetry::test_observability::{client_span_of, span_of};
     use tracing::Instrument as _;
 
     let world = spawn_world().await;
@@ -390,23 +458,23 @@ async fn a_put_carries_the_context_of_the_command_it_serves() {
         world.t1.as_ref()
     );
 
-    let (recorder, subscriber) = recorder("kallip");
-    {
-        let _subscribed = tracing::subscriber::set_default(subscriber);
-        let client = FilesClient::new(world.files_url.clone(), world.t1_token.clone());
-        let command = kallipai_common::telemetry::request_span(
-            "PUT",
-            "/files",
-            "/files",
-            &axum::http::HeaderMap::new(),
-        );
-        async { client.put_file(&target, &local).await }
-            .instrument(command.clone())
-            .await
-            .expect("the upload lands");
-    }
+    trace_recorder();
+    let client = FilesClient::new(world.files_url.clone(), world.t1_token.clone());
+    let command = kallipai_common::telemetry::request_span(
+        "PUT",
+        "/files",
+        "/files",
+        &axum::http::HeaderMap::new(),
+    );
+    async { client.put_file(&target, &local).await }
+        .instrument(command.clone())
+        .await
+        .expect("the upload lands");
+    // A span is exported when it is dropped, so the command span has to end
+    // for the assertions to find it.
+    drop(command);
 
-    let spans = spans_once(&recorder, "PUT /", "server").await;
+    let spans = spans_once("PUT /", "server").await;
     let asked = span_of(&spans, "PUT /files", "server");
     let call = client_span_of(&spans, "PUT", "/");
     let answered = span_of(&spans, "PUT /", "server");
@@ -435,7 +503,7 @@ async fn a_put_carries_the_context_of_the_command_it_serves() {
 /// would pass on a header read back at the caller.
 #[tokio::test]
 async fn a_put_that_carries_no_header_leaves_the_service_its_own_trace() {
-    use kallipai_common::telemetry::test_observability::{recorder, span_of};
+    use kallipai_common::telemetry::test_observability::span_of;
     use tracing::Instrument as _;
 
     let world = spawn_world().await;
@@ -448,32 +516,32 @@ async fn a_put_that_carries_no_header_leaves_the_service_its_own_trace() {
         world.t1.as_ref()
     );
 
-    let (recorder, subscriber) = recorder("kallip");
-    {
-        let _subscribed = tracing::subscriber::set_default(subscriber);
-        let command = kallipai_common::telemetry::request_span(
-            "PUT",
-            "/files",
-            "/files",
-            &axum::http::HeaderMap::new(),
-        );
-        let bare = reqwest::Client::new();
-        let response = async {
-            bare.put(&world.files_url)
-                .query(&[("path", target.as_str())])
-                .header("authorization", format!("Bearer {}", world.t1_token))
-                .header(reqwest::header::CONTENT_LENGTH, body.len())
-                .body(body)
-                .send()
-                .await
-        }
-        .instrument(command.clone())
-        .await
-        .expect("the service answers");
-        assert_eq!(response.status().as_u16(), 201);
+    trace_recorder();
+    let command = kallipai_common::telemetry::request_span(
+        "PUT",
+        "/files",
+        "/files",
+        &axum::http::HeaderMap::new(),
+    );
+    let bare = reqwest::Client::new();
+    let response = async {
+        bare.put(&world.files_url)
+            .query(&[("path", target.as_str())])
+            .header("authorization", format!("Bearer {}", world.t1_token))
+            .header(reqwest::header::CONTENT_LENGTH, body.len())
+            .body(body)
+            .send()
+            .await
     }
+    .instrument(command.clone())
+    .await
+    .expect("the service answers");
+    assert_eq!(response.status().as_u16(), 201);
+    // A span is exported when it is dropped, so the command span has to end
+    // for the assertions to find it.
+    drop(command);
 
-    let spans = spans_once(&recorder, "PUT /", "server").await;
+    let spans = spans_once("PUT /", "server").await;
     let asked = span_of(&spans, "PUT /files", "server");
     let answered = span_of(&spans, "PUT /", "server");
     assert_eq!(

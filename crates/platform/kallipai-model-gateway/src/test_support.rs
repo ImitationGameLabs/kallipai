@@ -605,6 +605,9 @@ fn owner_dead(db_name: &str) -> bool {
     !std::path::Path::new(&format!("/proc/{pid}")).exists()
 }
 
+// This sweep and the conditions it keeps are repeated across the suites, one
+// copy per harness (the e2e binary's lives in `tests/metrics_boot.rs`); a change
+// belongs in every copy.
 /// Best-effort cleanup, once per process, of test databases left dead by
 /// earlier runs (the reusable container never drops them). Hygiene, not a
 /// correctness path: on any failure the dead databases just accumulate.
