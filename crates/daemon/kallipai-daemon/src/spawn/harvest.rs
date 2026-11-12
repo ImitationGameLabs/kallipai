@@ -28,7 +28,7 @@ pub(super) fn harvest_bash_from(explicit: Option<&std::ffi::OsStr>) -> PathBuf {
 }
 
 /// Wall-clock budget one launch may spend harvesting; past it the shell is
-/// killed and the launch degrades to the fallback PATH.
+/// killed: the launch keeps the seed's identity and takes the fallback PATH.
 pub(super) const HARVEST_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Ceiling on the harvested stream: a profile spamming output fails the
@@ -45,7 +45,8 @@ const HARVEST_MAX_VALUE_BYTES: usize = 64 * 1024;
 const FALLBACK_PATH_TAIL: &str = ":/usr/local/bin:/usr/bin:/bin";
 
 /// Why a harvest failed. Every variant degrades the launch to the fallback
-/// PATH — a broken profile must not cost the instance its boot.
+/// PATH while keeping the seed's identity — a broken profile must not cost
+/// the instance its boot.
 #[derive(Debug, thiserror::Error)]
 pub(super) enum HarvestError {
     #[error("harvest shell could not run: {0}")]
@@ -64,7 +65,9 @@ pub(super) enum HarvestError {
 /// profile chain: HOME locates ~/.profile; USER/LOGNAME are what profile
 /// scripts expect to see. XDG_RUNTIME_DIR, when the user's runtime
 /// directory exists, lets session scripts that derive from it (a
-/// DOCKER_HOST socket, for one) evaluate as in a real login.
+/// DOCKER_HOST socket, for one) evaluate as in a real login. The seed is
+/// also the identity the harvest shell starts from and the base falls back
+/// on: both read it from `identity_pairs`, so a key added there reaches both.
 #[derive(Debug, Default)]
 pub(super) struct HarvestSeed {
     pub(super) home: Option<OsString>,
@@ -106,6 +109,27 @@ impl HarvestSeed {
             runtime_dir: runtime_dir_for(target.uid),
         }
     }
+
+    /// The identity pairs a launch hands on unchanged: HOME locates
+    /// ~/.profile and the instance's own config and state; USER/LOGNAME
+    /// are what profile scripts expect; XDG_RUNTIME_DIR lets session
+    /// values evaluate as in a real login. Both the harvest shell's seed
+    /// and the degraded base read them from here, so a new identity key
+    /// is added once.
+    fn identity_pairs(&self) -> Vec<(&'static str, OsString)> {
+        let mut pairs = Vec::new();
+        if let Some(home) = &self.home {
+            pairs.push(("HOME", home.clone()));
+        }
+        if let Some(user) = &self.user {
+            pairs.push(("USER", user.clone()));
+            pairs.push(("LOGNAME", user.clone()));
+        }
+        if let Some(dir) = &self.runtime_dir {
+            pairs.push(("XDG_RUNTIME_DIR", dir.clone()));
+        }
+        pairs
+    }
 }
 
 /// Run one login shell under a cleared environment (seeding only the
@@ -129,15 +153,7 @@ pub(super) fn harvest_login_env(
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null());
-    if let Some(home) = &seed.home {
-        command.env("HOME", home);
-    }
-    if let Some(user) = &seed.user {
-        command.env("USER", user).env("LOGNAME", user);
-    }
-    if let Some(dir) = &seed.runtime_dir {
-        command.env("XDG_RUNTIME_DIR", dir);
-    }
+    command.envs(seed.identity_pairs());
     if let Some((uid, gid)) = run_as {
         // The drop must include the supplementary-group wipe: a
         // profile chain is the target user's editable territory, and
@@ -309,8 +325,10 @@ pub(super) fn fallback_path(bin_dir: Option<&Path>) -> String {
 }
 
 /// The launch env base: the harvested login environment, or — on any
-/// harvest failure — the fallback PATH. Always a usable base: harvesting
-/// is a best-effort upgrade, never a launch gate.
+/// harvest failure — the identity pairs the daemon already holds plus the
+/// fallback PATH. Always a usable base: harvesting is a best-effort
+/// upgrade of the exports and never a launch gate; a failure keeps the
+/// identity the daemon holds and takes the fallback PATH.
 pub(super) fn harvest_base_env(
     fallback_bin_dir: Option<&Path>,
     identity: &LaunchIdentity,
@@ -322,15 +340,30 @@ pub(super) fn harvest_base_env(
     match harvest_login_env(&harvest_bash(), &seed, HARVEST_TIMEOUT, run_as) {
         Ok(pairs) => pairs,
         Err(error) => {
-            tracing::warn!(%error, "login environment harvest failed; using fallback PATH");
-            degrade_to_fallback(fallback_bin_dir)
+            tracing::warn!(
+                %error,
+                "login environment harvest failed; keeping the launch identity and using the fallback PATH"
+            );
+            degrade_to_fallback(&seed, fallback_bin_dir)
         }
     }
 }
 
-/// The degraded base for a failed harvest: just the fallback PATH.
-/// Extracted so the Err→fallback→compose chain carries a direct test
-/// (the surrounding harvest_base_env shells out and cannot).
-pub(super) fn degrade_to_fallback(fallback_bin_dir: Option<&Path>) -> Vec<(String, String)> {
-    vec![("PATH".to_owned(), fallback_path(fallback_bin_dir))]
+/// The degraded base for a failed harvest: the identity pairs the daemon
+/// already holds, plus the fallback PATH. Only the harvested exports are
+/// lost — dropping the identity would move where the instance resolves its
+/// config and state, and a home it cannot read would cost it the boot
+/// entirely. Extracted so the Err→fallback→compose chain carries a direct
+/// test (the surrounding harvest_base_env shells out and cannot).
+pub(super) fn degrade_to_fallback(
+    seed: &HarvestSeed,
+    fallback_bin_dir: Option<&Path>,
+) -> Vec<(String, String)> {
+    let mut env: Vec<(String, String)> = seed
+        .identity_pairs()
+        .into_iter()
+        .map(|(key, value)| (key.to_owned(), value.to_string_lossy().into_owned()))
+        .collect();
+    env.push(("PATH".to_owned(), fallback_path(fallback_bin_dir)));
+    env
 }

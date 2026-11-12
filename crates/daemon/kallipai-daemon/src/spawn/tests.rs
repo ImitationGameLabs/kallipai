@@ -1085,7 +1085,16 @@ fn a_failed_harvest_degrades_to_a_usable_base() {
     // degraded base flows through compose into a launchable env —
     // if the Err branch ever returned an empty base, nothing else
     // would catch it (the shell-out wrapper cannot be unit-tested).
-    let base = degrade_to_fallback(Some(Path::new("/opt/kallipai/bin")));
+    // The identity pairs survive the degradation: the daemon holds them
+    // already, and an instance without HOME resolves its config and state
+    // under the passwd home — a silent move at best, an unreadable one at
+    // worst, and either way not the launch the request asked for.
+    let seed = HarvestSeed {
+        home: Some(OsString::from("/home/dev")),
+        user: Some(OsString::from("dev")),
+        runtime_dir: Some(OsString::from("/run/user/1000")),
+    };
+    let base = degrade_to_fallback(&seed, Some(Path::new("/opt/kallipai/bin")));
     let env = compose_launch_env(
         &base,
         &[],
@@ -1100,10 +1109,28 @@ fn a_failed_harvest_degrades_to_a_usable_base() {
         "fallback PATH rides through composition: {env:?}"
     );
     assert!(
+        env.contains(&"HOME=/home/dev".to_owned()),
+        "the seeded home survives: {env:?}"
+    );
+    assert!(env.contains(&"USER=dev".to_owned()));
+    assert!(env.contains(&"LOGNAME=dev".to_owned()));
+    assert!(env.contains(&"XDG_RUNTIME_DIR=/run/user/1000".to_owned()));
+    assert!(
         env.contains(&"RUST_LOG=info".to_owned()),
         "default fills in"
     );
     assert!(env.contains(&"KALLIPAI_TAGMA_SLUG=i1".to_owned()));
+}
+
+#[test]
+fn a_seed_without_identity_degrades_to_path_only() {
+    // Nothing invented: a seed that carries no identity contributes no
+    // identity keys, and the fallback PATH is the whole base.
+    let base = degrade_to_fallback(&HarvestSeed::default(), None);
+    assert_eq!(
+        base,
+        vec![("PATH".to_owned(), "/usr/local/bin:/usr/bin:/bin".to_owned())]
+    );
 }
 
 #[test]

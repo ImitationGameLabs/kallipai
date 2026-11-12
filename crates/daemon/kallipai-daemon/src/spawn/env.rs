@@ -9,7 +9,8 @@ use std::path::Path;
 
 /// Compose the instance env from a map, one value per key:
 ///
-/// * the base (harvest, or fallback PATH) supplies every key it has;
+/// * the base carries the harvest's keys; a degraded one keeps the seed's
+///   identity and supplies the fallback PATH only;
 /// * explicit request pairs win per key over the base;
 /// * the daemon-owned keys win over everything — a polluted profile
 ///   cannot smuggle them in;

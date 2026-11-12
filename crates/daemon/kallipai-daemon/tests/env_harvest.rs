@@ -599,10 +599,10 @@ fn harvested_env_is_not_persisted() {
 
 /// The wedge shape, end to end: a profile background job that
 /// holds the harvest's stdout pipe must not hold the spawn RPC — the
-/// daemon kills the whole process group, degrades to the fallback PATH,
-/// and the instance still boots. (Unfixed, the RPC blocks for the
-/// job's full lifetime: the probe measured 20.1s and this bound goes
-/// red.)
+/// daemon kills the whole process group, keeps the seed's identity and
+/// takes the fallback PATH, and the instance still boots. (Unfixed, the RPC
+/// blocks for the job's full lifetime: the probe measured 20.1s and this
+/// bound goes red.)
 #[test]
 fn spawn_survives_a_background_pipe_holder() {
     if !harvest_bash_exists() {
@@ -629,12 +629,22 @@ fn spawn_survives_a_background_pipe_holder() {
         "spawn RPC stayed bounded, took {:?}",
         started.elapsed()
     );
-    // The instance booted on the fallback PATH (the wedge profile
-    // poisoned the harvest) — degraded, not wedged.
+    // The wedge profile poisoned the harvest, so the launch degraded to
+    // the fallback PATH; the identity it kept is visible in HOME.
     let env = read_environ(pid);
     assert!(
         get(&env, "PATH").is_some_and(|p| !p.is_empty()),
         "a usable PATH either way"
+    );
+    assert_eq!(
+        get(&env, "HOME"),
+        Some(home.path().to_str().expect("fixture home is utf-8")),
+        "the degraded launch kept the harvest's identity"
+    );
+    assert_eq!(
+        get(&env, "KALLIPAI_HARVEST_MARKER"),
+        None,
+        "the harvest really did fail"
     );
     stop_and_wait(&client, pid);
 }
