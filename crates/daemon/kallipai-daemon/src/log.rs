@@ -85,7 +85,7 @@ impl From<&LogError> for ErrorCode {
 /// and further reduced whenever the budget says so); `file` picks one
 /// file from the log directory instead of the merged tail; `cursor`
 /// continues a previous pull (the follow contract). Authorization is
-/// the stop verb's discipline verbatim: owner or root, and a foreign
+/// the stop verb's discipline verbatim: that uid or root, and a foreign
 /// peer gets the same NotFound as a missing slug so the verb cannot
 /// probe slug existence.
 pub fn tail(
@@ -537,11 +537,11 @@ mod tests {
         fs::write(path, text).expect("write");
     }
 
-    fn put_record(root: &Path, slug: &str, owner: u32) {
+    fn put_record(root: &Path, slug: &str, uid: u32) {
         let record = crate::records::InstanceRecord {
             instance_id: format!("inst-{slug}"),
-            owner_uid: owner,
-            target_uid: owner,
+            owner_uid: uid,
+            target_uid: uid,
             target_username: None,
             workspace: None,
             env: Vec::new(),
@@ -575,7 +575,7 @@ mod tests {
     }
 
     #[test]
-    fn authorization_is_owner_or_root_and_foreign_reads_not_found() {
+    fn authorization_is_the_uid_it_runs_as_or_root_and_foreign_reads_not_found() {
         let root = tempdir();
         put_record(root.path(), "team-a", 1000);
         let out = tail(
@@ -587,7 +587,7 @@ mod tests {
             None,
             1000,
         )
-        .expect("owner reads");
+        .expect("the user it runs as reads");
         assert_eq!(out.text, "");
         tail(
             root.path(),

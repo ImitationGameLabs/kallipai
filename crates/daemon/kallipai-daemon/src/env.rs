@@ -1,7 +1,7 @@
 //! Persisted env management for managed instances: read the record's
 //! user env pairs, merge new pairs into them, or remove keys. All three
-//! verbs share the stop verb's authorization shape (the instance owner
-//! or root; a foreign peer is refused after the record is read) and
+//! verbs share the stop verb's authorization shape (the uid the instance
+//! runs as or root; a foreign peer is refused after the record is read) and
 //! spawn's env validation for anything they write. None of them touch
 //! a running process: the record is the only thing that changes, and
 //! the new pairs take effect on the next start.
@@ -42,7 +42,7 @@ impl std::fmt::Display for EnvError {
         match self {
             EnvError::NotFound(slug) => write!(f, "no such instance: {slug}"),
             EnvError::Denied { slug, target_uid } => {
-                write!(f, "not authorized: {slug} is owned by uid {target_uid}")
+                write!(f, "not authorized: {slug} runs as uid {target_uid}")
             }
             EnvError::Invalid(message) => write!(f, "{message}"),
             EnvError::Internal { slug, message } => {
@@ -56,7 +56,7 @@ impl std::fmt::Display for EnvError {
 /// verbs. The grammar check precedes any record-area access (the slug
 /// must not become a path probe); authorization fires after the read,
 /// like stop — slug existence is already public via SlugTaken, so the
-/// refusal names the owner instead of hiding it.
+/// refusal names the uid the instance runs as instead of hiding it.
 fn authorized_record(
     record_root: &Path,
     slug: &str,
@@ -349,7 +349,7 @@ mod tests {
     }
 
     #[test]
-    fn a_foreign_peer_is_refused_and_the_owner_passes() {
+    fn a_foreign_peer_is_refused_and_the_user_it_runs_as_passes() {
         let (root, slug) = setup();
         let error = env_get(root.path(), &slug, 4242).expect_err("foreign peer");
         assert_eq!(
@@ -359,7 +359,7 @@ mod tests {
                 target_uid: 1000,
             }
         );
-        env_get(root.path(), &slug, 1000).expect("owner passes");
+        env_get(root.path(), &slug, 1000).expect("the user it runs as passes");
         env_get(root.path(), &slug, 0).expect("root passes");
     }
 

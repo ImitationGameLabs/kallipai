@@ -11,6 +11,8 @@ use kallipai_daemon_common::wire::{ErrorCode, valid_slug};
 pub enum RemoveError {
     #[error("no instance named {0}")]
     NotFound(String),
+    /// Refused on the record's `owner_uid`, the peer that requested the
+    /// instance, which is not the uid it runs as (`target_uid`).
     #[error("remove denied: slug {slug} is owned by uid {owner_uid}; {}", deny_guidance(.owner_uid))]
     Denied { slug: String, owner_uid: u32 },
     #[error("remove of {slug} failed: {message}")]
@@ -133,7 +135,7 @@ mod tests {
         let error = remove(root.path(), "team-a", 65534).unwrap_err();
         assert_eq!(
             error.to_string(),
-            "remove denied: slug team-a is owned by uid 65535; run as the owner or root"
+            "remove denied: slug team-a is owned by uid 65535; run as that user or root"
         );
         let kept = crate::records::read_record(root.path(), "team-a").expect("record survives");
         assert_eq!(kept.instance_id, seeded.instance_id);

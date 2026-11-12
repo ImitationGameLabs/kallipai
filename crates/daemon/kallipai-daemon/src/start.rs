@@ -28,17 +28,18 @@ use crate::spawn::{
 pub enum StartError {
     #[error("no instance named {0}")]
     NotFound(String),
-    #[error("start denied: slug {slug} is owned by uid {target_uid}; {}", deny_guidance(.target_uid))]
+    #[error("start denied: slug {slug} runs as uid {target_uid}; {}", deny_guidance(.target_uid))]
     Denied { slug: String, target_uid: u32 },
     #[error("{0}")]
     Invalid(String),
     #[error("instance {slug} is already running (pid {pid})")]
     AlreadyRunning { slug: String, pid: u32 },
     /// Alive, but nothing pins it: a live pid with no start time could be
-    /// this instance (older tagmas write `0` when they cannot read
-    /// `/proc/self/stat`), so a relaunch is refused rather than racing it.
+    /// this instance (a self-report from an older tagma writes `0` when it
+    /// cannot read `/proc/self/stat`, and a hand-edited record can pin `0`),
+    /// so a relaunch is refused rather than racing it.
     #[error(
-        "instance {slug} is already running (pid {pid}); its runtime.json carries no start time"
+        "instance {slug} is already running (pid {pid}); no start time pins it to this instance"
     )]
     UnpinnedRunning { slug: String, pid: u32 },
     #[error(
@@ -193,10 +194,10 @@ pub fn start(
     };
     // Authorization precedes every state change (the stale-runtime
     // removal and the relaunch both follow). The target is the
-    // recorded instance owner — the same-uid or dedicated user
+    // uid the instance runs as — the same-uid or dedicated user
     // chosen at spawn — so the access rule travels with the
     // instance. A foreign peer is refused with Denied, naming the
-    // slug and its owner: spawn's SlugTaken already makes slug
+    // slug and that uid: spawn's SlugTaken already makes slug
     // existence public, so the refusal states its terms instead.
     if !crate::spawn::authorized(peer_uid, record.target_uid) {
         tracing::warn!(
@@ -372,7 +373,7 @@ mod tests {
         };
         assert_eq!(
             error.to_string(),
-            "start denied: slug instance-1 is owned by uid 0; run as root"
+            "start denied: slug instance-1 runs as uid 0; run as root"
         );
     }
 
@@ -408,10 +409,10 @@ mod tests {
     }
 
     #[test]
-    fn start_refuses_a_peer_that_is_not_the_recorded_owner() {
+    fn start_refuses_a_peer_that_is_not_the_uid_it_runs_as() {
         // Same pure-comparison negative as stop's: a foreign peer is
         // answered before any state change (the stale-runtime cleanup
-        // included), with Denied, which names the slug and its owner
+        // included), with Denied, which names the slug and that uid
         // instead of the missing-slug shape.
         let root = tempfile::tempdir().expect("record root");
         write_record_with_target(root.path(), unsafe { libc::getuid() } + 1);
@@ -429,7 +430,7 @@ mod tests {
         assert_eq!(
             error.to_string(),
             format!(
-                "start denied: slug instance-1 is owned by uid {}; run as the owner or root",
+                "start denied: slug instance-1 runs as uid {}; run as that user or root",
                 unsafe { libc::getuid() } + 1
             )
         );
@@ -448,8 +449,8 @@ mod tests {
     }
 
     #[test]
-    fn start_hands_the_recorded_owner_the_relaunch() {
-        // The owner passes authorization (then fails later — no
+    fn start_hands_the_relaunch_to_the_uid_it_runs_as() {
+        // That uid passes authorization (then fails later — no
         // workspace on disk — proving the denial did not fire).
         let root = tempfile::tempdir().expect("record root");
         write_record_with_target(root.path(), unsafe { libc::getuid() });
@@ -535,7 +536,7 @@ mod tests {
         );
         assert_eq!(
             error.to_string(),
-            "instance instance-1 is already running (pid 7); its runtime.json carries no start time"
+            "instance instance-1 is already running (pid 7); no start time pins it to this instance"
         );
     }
 

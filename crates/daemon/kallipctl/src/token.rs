@@ -37,11 +37,11 @@ pub(crate) async fn operator_token_path(
 /// Read and parse the token file: the bare secret from the
 /// `KALLIPAI_OPERATOR_TOKEN=` line. Error messages are operator-facing
 /// (they land on the CLI's `error:` line); the ENOENT one names the
-/// pinned possibility, the EACCES one the owner-or-sudo requirement.
+/// pinned possibility, the EACCES one the run-as user or sudo.
 pub(crate) fn read_operator_token_file(path: &std::path::Path) -> Result<String> {
     let raw = std::fs::read_to_string(path).map_err(|e| match e.kind() {
         std::io::ErrorKind::NotFound => anyhow::anyhow!("no operator token file at {}; the instance may not have run yet, or the token is pinned via {OPERATOR_TOKEN_ENV_KEY}", path.display()),
-        std::io::ErrorKind::PermissionDenied => anyhow::anyhow!("permission denied reading {}; run as root (sudo) or the instance's owner user", path.display()),
+        std::io::ErrorKind::PermissionDenied => anyhow::anyhow!("permission denied reading {}; run as root (sudo) or the user the instance runs as", path.display()),
         _ => anyhow::anyhow!("reading {}: {e}", path.display()),
     })?;
     let prefix = format!("{OPERATOR_TOKEN_ENV_KEY}=");

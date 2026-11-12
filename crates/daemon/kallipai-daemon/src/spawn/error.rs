@@ -150,13 +150,13 @@ pub enum SpawnError {
     Internal(#[from] anyhow::Error),
 }
 
-/// The denial guidance tail for the three per-instance verbs: the
-/// record's owner may act on it, and root may act on anyone's — so
-/// a root-owned record needs only one name.
+/// The denial guidance tail for the per-instance verbs: the uid the
+/// sentence names may act on the record, and root may act on anyone's —
+/// so a root-owned record needs only one name.
 pub(crate) fn deny_guidance(uid: &u32) -> &'static str {
     if *uid == 0 {
         "run as root"
     } else {
-        "run as the owner or root"
+        "run as that user or root"
     }
 }

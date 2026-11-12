@@ -478,18 +478,22 @@ pub fn proc_uid(pid: u32) -> Option<u32> {
 /// Send `sig` to `pid` only when the kernel attributes it to `uid`.
 ///
 /// A signal is the one thing here that cannot be taken back, and every pid
-/// this crate signals comes from a file the instance's owner can write. So
-/// the ownership check sits next to the `kill` instead of at a distance: an
-/// entry that is gone or unreadable is a refusal too, because a pid that
-/// cannot be attributed cannot be proven ours.
+/// this crate signals comes from a file the user the instance runs as can
+/// write. So the uid check sits next to the `kill` instead of at a
+/// distance: an entry that is gone or unreadable is a refusal too, because
+/// a pid that cannot be attributed cannot be proven ours. A pid that goes
+/// away while this runs answers in one of two shapes — no readable `/proc`
+/// entry at attribution time, or `kill(2)` returning ESRCH — and both mean
+/// the same thing, so callers classify with [`SignalError::pid_gone`]
+/// instead of matching on a shape.
 pub fn signal_owned(pid: u32, uid: u32, sig: i32) -> Result<(), SignalError> {
     match proc_uid(pid) {
-        Some(owner) if owner == uid => {}
-        owner => {
+        Some(pid_uid) if pid_uid == uid => {}
+        pid_uid => {
             return Err(SignalError::Foreign {
                 pid,
                 expected: uid,
-                owner,
+                pid_uid,
             });
         }
     }
@@ -505,18 +509,21 @@ pub fn signal_owned(pid: u32, uid: u32, sig: i32) -> Result<(), SignalError> {
     }
 }
 
-/// Why a signal was not sent. Not one failure but two kinds: the kernel
-/// does not attribute the pid to the expected uid (a refusal, and the caller
-/// knows what it means), or `kill(2)` itself failed (the only internal
-/// fault).
+/// Why a signal was not sent. Two shapes, plus one that reads like the
+/// first: the kernel does not attribute the pid to the expected uid (a
+/// refusal the caller knows how to report), or `kill(2)` itself failed.
+/// A pid that exits between the attribution and the call makes `kill(2)`
+/// answer ESRCH, which says what an unreadable `/proc` entry says, so
+/// [`SignalError::pid_gone`] folds that errno in; every other errno is an
+/// internal fault.
 #[derive(Debug)]
 pub enum SignalError {
-    /// The kernel does not attribute this pid to `expected`. `owner` is
+    /// The kernel does not attribute this pid to `expected`. `pid_uid` is
     /// `None` when `/proc` holds no readable entry (the pid is gone).
     Foreign {
         pid: u32,
         expected: u32,
-        owner: Option<u32>,
+        pid_uid: Option<u32>,
     },
     /// `kill(2)` returned an error.
     Kill {
@@ -526,16 +533,28 @@ pub enum SignalError {
     },
 }
 
+impl SignalError {
+    /// The pid went away before the signal could land: no readable
+    /// `/proc` entry at attribution time, or `kill(2)` answering ESRCH.
+    /// Two shapes, one outcome, so callers report them one way.
+    pub fn pid_gone(&self) -> bool {
+        match self {
+            SignalError::Foreign { pid_uid, .. } => pid_uid.is_none(),
+            SignalError::Kill { error, .. } => error.raw_os_error() == Some(libc::ESRCH),
+        }
+    }
+}
+
 impl std::fmt::Display for SignalError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             SignalError::Foreign {
                 pid,
                 expected,
-                owner: Some(owner),
+                pid_uid: Some(pid_uid),
             } => write!(
                 f,
-                "pid {pid} belongs to uid {owner}, not uid {expected}; not signalling it"
+                "pid {pid} belongs to uid {pid_uid}, not uid {expected}; not signalling it"
             ),
             SignalError::Foreign { pid, .. } => {
                 write!(
@@ -742,18 +761,39 @@ mod tests {
             matches!(
                 foreign,
                 SignalError::Foreign {
-                    owner: Some(owner),
+                    pid_uid: Some(pid_uid),
                     expected,
                     ..
-                } if owner == uid && expected == uid.wrapping_add(1)
+                } if pid_uid == uid && expected == uid.wrapping_add(1)
             ),
             "{foreign}"
         );
         let gone = signal_owned(u32::MAX, uid, 0).unwrap_err();
         assert!(
-            matches!(gone, SignalError::Foreign { owner: None, .. }),
+            matches!(gone, SignalError::Foreign { pid_uid: None, .. }),
             "{gone}"
         );
+        // The two shapes of "the pid went away" answer as one.
+        assert!(gone.pid_gone());
+        assert!(!foreign.pid_gone());
+    }
+
+    #[test]
+    fn a_kill_that_lost_the_race_is_a_gone_pid() {
+        // ESRCH says the number named nothing by the time `kill` ran;
+        // EPERM says something answered and refused, which stays internal.
+        let lost = SignalError::Kill {
+            pid: 42,
+            sig: libc::SIGTERM,
+            error: std::io::Error::from_raw_os_error(libc::ESRCH),
+        };
+        assert!(lost.pid_gone());
+        let refused = SignalError::Kill {
+            pid: 42,
+            sig: libc::SIGTERM,
+            error: std::io::Error::from_raw_os_error(libc::EPERM),
+        };
+        assert!(!refused.pid_gone());
     }
 
     #[test]

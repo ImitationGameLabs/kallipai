@@ -105,7 +105,7 @@ pub(crate) async fn locate(client: &DaemonClient, slug: &str) -> Result<Instance
     }
     let Some(port) = info.port else {
         anyhow::bail!(
-            "the daemon reports no port for {slug}; start it with `kallipctl start {slug}` and try again"
+            "{slug} is running, but the daemon published no port for it. `kallipctl restart {slug}` relaunches it."
         );
     };
     let token = match pinned_token(client, slug).await? {

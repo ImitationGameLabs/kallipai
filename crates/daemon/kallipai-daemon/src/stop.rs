@@ -2,7 +2,7 @@
 //! is alive (the record's launch anchor first, the runtime self-report
 //! second; see `scan::resolve`), and the stop signals that pid, then polls
 //! for exit within the grace period before SIGKILL. A pid the kernel does
-//! not attribute to the instance's owner is refused, never signalled;
+//! not attribute to the user the instance runs as is refused, never signalled;
 //! runtime.json stays (a daemon restart rebuilds its view from the record
 //! area).
 use std::path::Path;
@@ -15,26 +15,26 @@ use kallipai_daemon_common::wire::{ErrorCode, valid_slug};
 pub enum StopError {
     #[error("no instance named {0}")]
     NotFound(String),
-    #[error("stop denied: slug {slug} is owned by uid {target_uid}; {}", deny_guidance(.target_uid))]
+    #[error("stop denied: slug {slug} runs as uid {target_uid}; {}", deny_guidance(.target_uid))]
     Denied { slug: String, target_uid: u32 },
     #[error("instance {0} is not running (stale or missing pid)")]
     NotRunning(String),
     #[error("{slug}: pid {pid} in runtime.json is alive and is not pinned to this instance")]
     IdentityMismatch { slug: String, pid: u32 },
-    /// The pid is alive, but it is not a process this instance's owner
-    /// could own: runtime.json is owner-writable, so naming a pid is not
-    /// enough to aim a signal at it.
+    /// The pid is alive, but it does not belong to the user this instance
+    /// runs as: runtime.json is writable by that user, so naming a pid is
+    /// not enough to aim a signal at it.
     #[error(
-        "{slug} names pid {pid}, which {}",
-        foreign_owner_note(.owned_by, .target_uid)
+        "{slug} names pid {pid}: {}",
+        foreign_uid_note(.pid_uid, .target_uid)
     )]
-    ForeignOwner {
+    ForeignUid {
         slug: String,
         pid: u32,
         target_uid: u32,
-        owned_by: Option<u32>,
+        pid_uid: Option<u32>,
     },
-    #[error("stop of {slug} failed after SIGKILL: {message}")]
+    #[error("stop of {slug} failed: {message}")]
     Internal { slug: String, message: String },
 }
 
@@ -48,7 +48,7 @@ impl From<&StopError> for ErrorCode {
             // stop refusal as "already stopped" and relaunches, and the REST
             // mapping keeps answering 409. Only the sentence differs.
             StopError::IdentityMismatch { .. } => ErrorCode::NotRunning,
-            StopError::ForeignOwner { .. } => ErrorCode::NotRunning,
+            StopError::ForeignUid { .. } => ErrorCode::NotRunning,
             StopError::Internal { .. } => ErrorCode::Internal,
         }
     }
@@ -61,8 +61,9 @@ const GRACE: Duration = Duration::from_secs(10);
 /// a recycled pid is refused. A live pid neither claim verifies is reported
 /// (`IdentityMismatch`), never signalled; an alive pid with no start time is
 /// stopped, because an older tagma cannot always publish one. Before any
-/// signal the pid has to belong to the instance's owner (`ForeignOwner`
-/// otherwise): naming a pid is not the same as proving it is ours.
+/// signal the pid has to belong to the user this instance runs as
+/// (`ForeignUid` otherwise): naming a pid is not the same as proving it is
+/// ours.
 pub fn stop(record_root: &Path, slug: &str, peer_uid: u32) -> Result<(), StopError> {
     // Same grammar gate as spawn/start: an invalid slug is not an
     // instance name, so it cannot exist — NotFound without a
@@ -74,11 +75,11 @@ pub fn stop(record_root: &Path, slug: &str, peer_uid: u32) -> Result<(), StopErr
         return Err(StopError::NotFound(slug.to_string()));
     };
     // Authorization precedes every state change. The target is the
-    // recorded instance owner (the platform-hosting access rule):
-    // the owner themselves or root may stop. A foreign peer is
-    // refused with Denied, naming the slug and its owner: spawn's
-    // SlugTaken already makes slug existence public, so the refusal
-    // states its terms instead.
+    // uid the instance runs as (the platform-hosting access rule):
+    // that user or root may stop. A foreign peer is refused with
+    // Denied, naming the slug and that uid: spawn's SlugTaken already
+    // makes slug existence public, so the refusal states its terms
+    // instead.
     if !crate::spawn::authorized(peer_uid, record.target_uid) {
         tracing::warn!(
             slug = %slug,
@@ -127,17 +128,18 @@ pub fn stop(record_root: &Path, slug: &str, peer_uid: u32) -> Result<(), StopErr
     };
     let pid = live.pid;
     // Naming a pid is not proof enough to signal it: runtime.json is
-    // writable by its owner, and a start time is a public number, so a file
-    // could aim the daemon's own privileges at any live process. The process
-    // has to be one this instance's owner could own. Both claims face this
-    // gate: the anchor is the daemon's own word, but the gate is one rule,
-    // and a record that disagrees with the kernel is worth refusing loudly.
-    let owned_by = crate::scan::proc_uid(pid);
-    if owned_by != Some(record.target_uid) {
-        if owned_by.is_none() && !crate::scan::pid_is_alive(pid) {
+    // writable by the user the instance runs as, and a start time is a
+    // public number, so a file could aim the daemon's own privileges at
+    // any live process. The process has to be one the user this instance
+    // runs as could own. Both claims face this gate: the anchor is the
+    // daemon's own word, but the gate is one rule, and a record that
+    // disagrees with the kernel is worth refusing loudly.
+    let pid_uid = crate::scan::proc_uid(pid);
+    if pid_uid != Some(record.target_uid) {
+        if pid_uid.is_none() && !crate::scan::pid_is_alive(pid) {
             // No /proc entry to attribute and nothing alive there: the pid
             // exited between the resolution and this gate. That is the
-            // answer the caller asked for, not an ownership verdict, and
+            // answer the caller asked for, not a uid verdict, and
             // it should not leave a misleading warning behind.
             tracing::info!(slug = %slug, pid, "the named pid exited before the uid gate");
             return Err(StopError::NotRunning(slug.to_string()));
@@ -146,16 +148,16 @@ pub fn stop(record_root: &Path, slug: &str, peer_uid: u32) -> Result<(), StopErr
             slug = %slug,
             pid,
             target_uid = record.target_uid,
-            pid_uid = ?owned_by,
+            pid_uid = ?pid_uid,
             source = ?live.source,
             verdict = ?live.verdict,
-            "stop refused: the named pid is not owned by this instance's owner"
+            "stop refused: the named pid belongs to another uid than the one this instance runs as"
         );
-        return Err(StopError::ForeignOwner {
+        return Err(StopError::ForeignUid {
             slug: slug.to_string(),
             pid,
             target_uid: record.target_uid,
-            owned_by,
+            pid_uid,
         });
     }
     // Name the claim this signal rests on: an operator has to be able to
@@ -192,7 +194,7 @@ pub fn stop(record_root: &Path, slug: &str, peer_uid: u32) -> Result<(), StopErr
     tracing::info!(slug = %slug, pid, "stopping instance; sent SIGTERM");
     let deadline = Instant::now() + GRACE;
     while Instant::now() < deadline {
-        if !alive(pid) {
+        if !crate::scan::pid_is_alive(pid) {
             tracing::info!(slug = %slug, pid, "instance stopped");
             recheck_after_stop(slug, pid, record.identity.as_ref(), runtime.as_ref());
             return Ok(());
@@ -219,7 +221,7 @@ pub fn stop(record_root: &Path, slug: &str, peer_uid: u32) -> Result<(), StopErr
         .map_err(|error| signal_refusal(slug, error, record.target_uid))?;
     let deadline = Instant::now() + Duration::from_secs(2);
     while Instant::now() < deadline {
-        if !alive(pid) {
+        if !crate::scan::pid_is_alive(pid) {
             tracing::info!(slug = %slug, pid, "instance stopped after SIGKILL");
             recheck_after_stop(slug, pid, record.identity.as_ref(), runtime.as_ref());
             return Ok(());
@@ -276,32 +278,40 @@ fn internal(slug: &str, message: String) -> StopError {
     }
 }
 
-/// The tail of `ForeignOwner`'s sentence: who the kernel says owns the pid,
-/// against whom the record says should. Kept apart from the variant so the
-/// two readings stay word-for-word distinct.
-fn foreign_owner_note(owned_by: &Option<u32>, target_uid: &u32) -> String {
-    match owned_by {
-        Some(uid) => format!("belongs to uid {uid}, not to this instance's owner uid {target_uid}"),
+/// The tail of `ForeignUid`'s sentence: the uid the kernel attributes the
+/// pid to, against the uid this instance runs as. Kept apart from the
+/// variant so the two readings stay word-for-word distinct.
+fn foreign_uid_note(pid_uid: &Option<u32>, target_uid: &u32) -> String {
+    match pid_uid {
+        Some(uid) => format!(
+            "the kernel attributes it to uid {uid}, and this instance runs as uid {target_uid}"
+        ),
         None => {
-            format!("has no readable owner in /proc, so it is not this instance's uid {target_uid}")
+            format!("it has no readable /proc entry, and this instance runs as uid {target_uid}")
         }
     }
 }
 
 /// The wire shape of a refused signal. A pid the kernel attributes to
-/// another uid is an ownership refusal; one whose `/proc` entry is gone
-/// stopped on its own, which is the outcome a stop promises. Only `kill(2)`
-/// failing is an internal fault.
+/// another uid is a uid refusal; one that is gone stopped on its own,
+/// which is the outcome a stop promises, whether `/proc` had no entry at
+/// attribution time or `kill(2)` lost the race with ESRCH. Any other
+/// `kill(2)` failure is an internal fault.
 fn signal_refusal(slug: &str, error: crate::scan::SignalError, target_uid: u32) -> StopError {
+    if error.pid_gone() {
+        tracing::warn!(
+            slug = %slug,
+            %error,
+            "the pid is gone or unreadable before the signal landed"
+        );
+        return StopError::NotRunning(slug.to_string());
+    }
     match error {
-        crate::scan::SignalError::Foreign { pid, owner, .. } => match owner {
-            Some(owner) => StopError::ForeignOwner {
-                slug: slug.to_string(),
-                pid,
-                target_uid,
-                owned_by: Some(owner),
-            },
-            None => StopError::NotRunning(slug.to_string()),
+        crate::scan::SignalError::Foreign { pid, pid_uid, .. } => StopError::ForeignUid {
+            slug: slug.to_string(),
+            pid,
+            target_uid,
+            pid_uid,
         },
         crate::scan::SignalError::Kill { pid, sig, error } => {
             internal(slug, format!("kill({pid}, {sig}): {error}"))
@@ -317,8 +327,8 @@ fn signal_refusal(slug: &str, error: crate::scan::SignalError, target_uid: u32) 
 /// number as someone else's process — so the caller's promise (that one
 /// instance no longer runs) already holds and the refusal is reported, not
 /// raised. `None` means the pid is still that incarnation: a pinned claim is
-/// re-judged against its start time, an unpinned one against the instance's
-/// owner uid.
+/// re-judged against its start time, an unpinned one against the uid the
+/// instance runs as.
 fn sigkill_refusal(
     live: &crate::scan::Resolution,
     uid_of: &dyn Fn(u32) -> Option<u32>,
@@ -336,15 +346,13 @@ fn sigkill_refusal(
     }
     match uid_of(live.pid) {
         Some(uid) if uid == target_uid => None,
-        other => Some(foreign_owner_note(&other, &target_uid)),
+        Some(uid) => Some(foreign_uid_note(&Some(uid), &target_uid)),
+        None => Some(format!(
+            "pid {} is no longer the incarnation this stop attributed: /proc holds no readable entry for it",
+            live.pid
+        )),
     }
 }
-/// A zombie counts as exited for our purposes: its /proc entry lingers
-/// until reaped, so existence alone would over-report liveness.
-fn alive(pid: u32) -> bool {
-    crate::scan::pid_is_alive(pid)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -388,7 +396,7 @@ mod tests {
         };
         assert_eq!(
             error.to_string(),
-            "stop denied: slug mine is owned by uid 0; run as root"
+            "stop denied: slug mine runs as uid 0; run as root"
         );
     }
 
@@ -402,12 +410,12 @@ mod tests {
     }
 
     #[test]
-    fn stop_refuses_a_peer_that_is_not_the_recorded_owner() {
+    fn stop_refuses_a_peer_that_is_not_the_uid_it_runs_as() {
         // The authorization verdict is a pure comparison against the
         // record, so the negative is exercisable without a second user:
         // record a foreign target uid, connect as the real one. The
         // refused peer is answered with Denied, which names the
-        // slug and its owner instead of the missing-slug shape.
+        // slug and that uid instead of the missing-slug shape.
         let root = tempfile::tempdir().expect("record root");
         crate::records::write_record(
             root.path(),
@@ -432,7 +440,7 @@ mod tests {
         assert_eq!(
             error.to_string(),
             format!(
-                "stop denied: slug mine is owned by uid {}; run as the owner or root",
+                "stop denied: slug mine runs as uid {}; run as that user or root",
                 unsafe { libc::getuid() } + 1
             )
         );
@@ -444,7 +452,7 @@ mod tests {
     }
 
     #[test]
-    fn stop_allows_the_recorded_owner_but_only_that_peer() {
+    fn stop_allows_the_uid_it_runs_as_but_only_that_peer() {
         let root = tempfile::tempdir().expect("record root");
         let uid = unsafe { libc::getuid() };
         crate::records::write_record(
@@ -464,7 +472,7 @@ mod tests {
             },
         )
         .expect("write record");
-        // The owner passes authorization (and then fails on the
+        // That uid passes authorization (and then fails on the
         // missing runtime.json — NotRunning). The ghost slug's
         // missing-slug no-op stays NotFound; a foreign peer on a
         // recorded slug is refused with Denied; root passes.
@@ -476,7 +484,7 @@ mod tests {
         assert_eq!(
             error.to_string(),
             format!(
-                "stop denied: slug mine is owned by uid {}; {}",
+                "stop denied: slug mine runs as uid {}; {}",
                 uid,
                 deny_guidance(&uid)
             )
@@ -531,10 +539,10 @@ mod tests {
 
     #[test]
     fn stop_signals_an_unpinned_pid_when_the_uid_gate_passes() {
-        // No start time anywhere: Unverifiable, alive, and owned by the
-        // instance's owner — so it is treated as this instance and stopped,
-        // with the missing pin recorded as a warning. The pid is a decoy
-        // child, never this test process.
+        // No start time anywhere: Unverifiable, alive, and attributed to the
+        // user the instance runs as, so it is treated as this instance
+        // and stopped, with the missing pin recorded as a warning. The pid
+        // is a decoy child, never this test process.
         let root = tempfile::tempdir().expect("record root");
         let uid = unsafe { libc::getuid() };
         let data_dir = root.path().join("data").join("i1");
@@ -570,10 +578,10 @@ mod tests {
     }
 
     #[test]
-    fn stop_refuses_a_live_pid_owned_by_another_uid() {
-        // The record names this very process but claims another owner: the
-        // pid is alive, so the refusal is about ownership, and nothing is
-        // signalled.
+    fn stop_refuses_a_live_pid_attributed_to_another_uid() {
+        // The record names this very process but claims another run-as uid:
+        // the pid is alive, so the refusal is about that uid, and nothing
+        // is signalled.
         let root = tempfile::tempdir().expect("record root");
         let uid = unsafe { libc::getuid() };
         let data_dir = root.path().join("data").join("i1");
@@ -603,11 +611,11 @@ mod tests {
         .expect("write runtime.json");
 
         let error = stop(root.path(), "mine", 0).unwrap_err();
-        assert!(matches!(error, StopError::ForeignOwner { .. }), "{error}");
+        assert!(matches!(error, StopError::ForeignUid { .. }), "{error}");
         assert_eq!(
             error.to_string(),
             format!(
-                "mine names pid {pid}, which belongs to uid {uid}, not to this instance's owner uid {}",
+                "mine names pid {pid}: the kernel attributes it to uid {uid}, and this instance runs as uid {}",
                 uid + 1
             )
         );
@@ -670,7 +678,7 @@ mod tests {
     }
 
     #[test]
-    fn the_sigkill_recheck_falls_back_to_the_owner_uid_without_a_pin() {
+    fn the_sigkill_recheck_falls_back_to_the_target_uid_without_a_pin() {
         use crate::scan::{LiveSource, Liveness, Resolution};
         let unpinned = Resolution {
             verdict: Liveness::Unverifiable,
@@ -687,20 +695,17 @@ mod tests {
     #[test]
     fn a_refused_signal_maps_to_the_answer_it_means() {
         use crate::scan::SignalError;
-        // Another uid: the ownership refusal, with the kernel's number.
+        // Another uid: the uid refusal, with the kernel's number.
         let foreign = signal_refusal(
             "mine",
             SignalError::Foreign {
                 pid: 42,
                 expected: 1000,
-                owner: Some(0),
+                pid_uid: Some(0),
             },
             1000,
         );
-        assert!(
-            matches!(foreign, StopError::ForeignOwner { .. }),
-            "{foreign}"
-        );
+        assert!(matches!(foreign, StopError::ForeignUid { .. }), "{foreign}");
         // No entry to attribute: the pid is gone, which is a stop that
         // already landed.
         let gone = signal_refusal(
@@ -708,13 +713,25 @@ mod tests {
             SignalError::Foreign {
                 pid: 42,
                 expected: 1000,
-                owner: None,
+                pid_uid: None,
             },
             1000,
         );
         assert!(matches!(gone, StopError::NotRunning(_)), "{gone}");
         assert_eq!(ErrorCode::from(&gone), ErrorCode::NotRunning);
-        // A failed kill(2) is the one internal fault.
+        // A kill(2) that lost the race with ESRCH is the same answer.
+        let raced = signal_refusal(
+            "mine",
+            SignalError::Kill {
+                pid: 42,
+                sig: libc::SIGTERM,
+                error: std::io::Error::from_raw_os_error(libc::ESRCH),
+            },
+            1000,
+        );
+        assert!(matches!(raced, StopError::NotRunning(_)), "{raced}");
+        assert_eq!(ErrorCode::from(&raced), ErrorCode::NotRunning);
+        // Any other kill(2) failure is an internal fault.
         let failed = signal_refusal(
             "mine",
             SignalError::Kill {

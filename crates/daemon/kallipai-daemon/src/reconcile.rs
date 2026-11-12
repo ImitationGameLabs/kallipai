@@ -56,7 +56,7 @@ pub async fn run(record_root: PathBuf) {
                 slug = %slug,
                 pid = ?pid,
                 log = %log_field,
-                "instance died: the incarnation it pinned is no longer live"
+                "instance died: the incarnation it named is no longer running"
             );
         }
         tokio::time::sleep(RECONCILE_INTERVAL).await;

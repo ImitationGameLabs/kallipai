@@ -339,9 +339,9 @@ pub(crate) fn exe_runnable(exe: &str) -> bool {
 /// the process publishes its own runtime.json. Shared tail of spawn
 /// (fresh registration) and start (relaunch of a registered one);
 /// callers re-validate user env before reaching here. On failure the
-/// record is the caller's policy (spawn deregisters, start keeps) —
-/// but a half-booted leftover is SIGKILLed here either way so no
-/// orphan outlives the timeout.
+/// record is the caller's policy (spawn deregisters, start keeps), but
+/// both failure branches end in `kill_leftover`, which SIGKILLs the pid
+/// only when the kernel attributes it to this launch's user.
 /// The composed env arrives as the helper will receive it, except for the
 /// trace configuration: that is composed last, at the exec boundary, so
 /// the daemon's own OTEL values replace any a harvested login carried.
@@ -486,7 +486,11 @@ pub(crate) fn launch(
 /// that very pid.
 fn kill_leftover(pid: u32, uid: u32) {
     if let Err(error) = scan::signal_owned(pid, uid, libc::SIGKILL) {
-        tracing::warn!(pid, %error, "left that pid alone: not attributed to this launch");
+        if error.pid_gone() {
+            tracing::debug!(pid, %error, "the leftover pid is gone or unreadable; nothing to clean up");
+        } else {
+            tracing::warn!(pid, %error, "left that pid alone: not attributed to this launch");
+        }
     }
 }
 
@@ -501,12 +505,12 @@ fn kill_leftover(pid: u32, uid: u32) {
 /// stale anchor from a previous incarnation is cleared, never left
 /// lying against a pid it does not name. If the record write itself
 /// fails that is beyond reach: a stale anchor may survive and
-/// classification falls to the runtime self-report — the instance runs, and
-/// stop signals that pid only once `/proc` shows it belongs to the instance's
-/// owner (fail-closed: the daemon never signals a process it cannot vouch
-/// for); the warn names the gap. Returns false only when
-/// the revalidation race says the pid died under us; the caller keeps
-/// polling rather than reporting a launch it cannot vouch for.
+/// classification falls to the runtime self-report: the instance runs,
+/// and stop signals that pid only once `/proc` shows it belongs to the
+/// user the instance runs as (fail-closed: the daemon never signals a
+/// process it cannot vouch for); the warn names the gap. Returns false
+/// only when the revalidation race says the pid died under us; the caller
+/// keeps polling rather than reporting a launch it cannot vouch for.
 fn anchor_identity(record_root: &Path, slug: &str, pid: u32) -> bool {
     let starttime = scan::proc_starttime(pid).filter(|t| *t > 0);
     let Some(mut record) = records::read_record(record_root, slug) else {
@@ -677,8 +681,8 @@ mod tests {
     }
 
     /// The rollback branch and the timeout branch both end in
-    /// `kill_leftover`. A runtime.json its owner wrote names whatever pid
-    /// that owner likes, so a pid the kernel attributes to somebody else
+    /// `kill_leftover`. A runtime.json the launch user wrote names whatever
+    /// pid that user likes, so a pid the kernel attributes to somebody else
     /// must survive.
     #[test]
     fn a_leftover_kill_leaves_a_foreign_pid_alone() {
