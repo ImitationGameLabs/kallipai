@@ -214,7 +214,7 @@ impl Daemon {
                             &env,
                             exe.as_deref(),
                             timeout,
-                            &crate::scan::pid_is_alive,
+                            &crate::scan::incarnation_liveness,
                             peer_uid,
                         )
                     }
@@ -434,12 +434,13 @@ fn log_spawn_outcome(slug: &str, error: &crate::spawn::SpawnError) {
 }
 
 /// Start's twin of [`log_spawn_outcome`]. AlreadyRunning is logged
-/// inside start (with the recorded pid and its comm) and stays silent
-/// here to keep one diagnostic line per refusal.
+/// inside start (with the pinned pid and where the pin came from) and
+/// stays silent here to keep one diagnostic line per refusal.
 fn log_start_outcome(slug: &str, error: &crate::start::StartError) {
     use crate::start::StartError;
     match error {
-        StartError::AlreadyRunning(_) => {}
+        StartError::AlreadyRunning { .. } => {}
+        StartError::UnpinnedRunning { .. } => {}
         StartError::NotFound(_) => {
             tracing::info!(slug = %slug, %error, "start refused: no such instance")
         }

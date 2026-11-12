@@ -302,10 +302,12 @@ pub struct InstanceInfo {
     /// the leaf directory is already 0o700.
     #[serde(default)]
     pub identities: Vec<InstanceIdentity>,
-    /// The instance's live listen port; None unless the instance is
-    /// currently live, Running (a surviving runtime.json from a stopped
-    /// or dead instance never surfaces its stale port). Surfaced so
-    /// clients no longer rely on session-only spawn memory.
+    /// The instance's live listen port. Present only while the resolution
+    /// names runtime.json's own pid as the live, pinned incarnation, so a
+    /// stopped, dead, outvoted or unpinned file never surfaces an endpoint:
+    /// clients reach this port with the instance's own credentials, and an
+    /// endpoint nothing pins would be aimed at whoever wrote the file.
+    /// Surfaced so clients no longer rely on session-only spawn memory.
     #[serde(default)]
     pub port: Option<u16>,
 }

@@ -661,15 +661,18 @@ fn start_recovers_from_stale_runtime_json() {
 }
 
 #[test]
-fn start_rejects_when_stale_runtime_names_a_live_pid() {
+fn start_relaunches_when_a_stale_runtime_names_a_live_pid() {
     if !workspace_bins_available() {
         eprintln!("skip: workspace binaries not built — build the workspace first");
         return;
     }
-    // Liveness alone decides AlreadyRunning: a leftover naming a live pid
-    // (here: this test process) is refused, not taken over and not killed.
-    // Under the old comm re-check this same shape wedged the poll into a
-    // 30s timeout whose kill branch SIGKILLed this very pid.
+    // A live pid the record does not pin is not this instance running. The
+    // launch anchor names the incarnation spawn claimed; the pid this test
+    // leaves in runtime.json carries a start time of its own, so the pin
+    // comparison refutes it. The relaunch proceeds and the decoy is left
+    // alone — refusing here is what wedged an instance behind a pid the
+    // kernel had recycled, a state where list and stop already agreed
+    // nothing was running.
     let daemon = start_daemon();
     let client = DaemonClient::new(&daemon.socket);
     let workspace = tempfile::tempdir().expect("workspace tempdir");
@@ -701,10 +704,10 @@ fn start_rejects_when_stale_runtime_names_a_live_pid() {
         std::thread::sleep(Duration::from_millis(100));
     }
 
-    // A live pid that is not a tagma: the conservative refusal is the
-    // point. Refusing costs one retry; matching or killing an unrelated
-    // process costs the process.
-    let stale = serde_json::json!({ "pid": std::process::id(), "port": 1, "starttime": 1 });
+    // Alive, but not the incarnation the file claims (start time 1 is no
+    // process's own), and no anchor pins it either.
+    let decoy = std::process::id();
+    let stale = serde_json::json!({ "pid": decoy, "port": 1, "starttime": 1 });
     let instance_dir = daemon.data_home.join("kallipai/tagmata/live-stale");
     std::fs::write(
         instance_dir.join("runtime.json"),
@@ -717,15 +720,36 @@ fn start_rejects_when_stale_runtime_names_a_live_pid() {
         env: Vec::new(),
         exe: None,
     }));
-    let response = started.expect("client exchange");
-    match response.body {
-        ResponseBody::Err { code, .. } => assert_eq!(code, ErrorCode::SlugTaken),
-        other => panic!("expected slug_taken refusal, got {other:?}"),
-    }
+    let OkPayload::Spawn {
+        pid: started_pid, ..
+    } = expect_ok(started)
+    else {
+        panic!("expected the relaunch to proceed");
+    };
+    assert_ne!(started_pid, decoy, "the decoy pid is not this launch");
+    // The decoy was neither signalled nor taken over: this test process is
+    // still here to say so.
+    assert!(
+        PathBuf::from(format!("/proc/{decoy}")).exists(),
+        "the decoy process is untouched"
+    );
 
-    // The decoy is this test's own pid: drop it, or the fixture's stop reads
-    // a live instance the test never launched.
-    std::fs::remove_file(instance_dir.join("runtime.json")).expect("remove decoy runtime.json");
+    // Cleanup: the relaunched tagma, not the decoy. The launch replaced
+    // runtime.json, so the decoy file is gone.
+    let stop = tokio_block_on(client.call(RequestBody::Stop {
+        slug: "live-stale".into(),
+    }));
+    expect_ok(stop);
+    for _ in 0..100 {
+        if !PathBuf::from(format!("/proc/{started_pid}")).exists() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(
+        !PathBuf::from(format!("/proc/{started_pid}")).exists(),
+        "relaunched tagma exited after stop"
+    );
 }
 
 /// A manually booted (daemon-less) tagma is legal — it just has to name
@@ -811,12 +835,14 @@ fn manual_boot_with_slug_publishes_runtime_json() {
     );
 }
 
-/// The stop guard's two legs: a runtime.json retargeted at a foreign
-/// live pid is refused even though the pid is alive (the anchor names
-/// a different incarnation), and once the tree is restored the same
-/// stop succeeds because the anchor verifies the original pid.
+/// The stop guard follows the launch anchor, not the runtime file. A
+/// runtime.json retargeted at a foreign live pid must not redirect the
+/// signal, and must not veto it either: the record still pins one
+/// incarnation, so stop lands there and the decoy is left alone. The
+/// old expectation was to refuse until the file was restored, which let
+/// a hand-edited file leave a running instance unstoppable.
 #[test]
-fn stop_refuses_tampered_runtime_pid_then_allows_restored() {
+fn stop_follows_the_anchor_over_a_tampered_runtime_pid() {
     if !workspace_bins_available() {
         eprintln!("skip: workspace binaries not built — build the workspace first");
         return;
@@ -844,29 +870,15 @@ fn stop_refuses_tampered_runtime_pid_then_allows_restored() {
     let runtime_path = instance_dir.join("runtime.json");
     let original = std::fs::read_to_string(&runtime_path).expect("read runtime.json");
 
-    // Tamper: point runtime.json at this test process — alive, but
-    // provably not the anchored incarnation.
-    let tampered = serde_json::json!({ "pid": std::process::id(), "port": port, "starttime": 1 });
+    // Tamper: point runtime.json at this test process — alive, but not the
+    // incarnation the record pins. The anchor outvotes the file.
+    let decoy = std::process::id();
+    let tampered = serde_json::json!({ "pid": decoy, "port": port, "starttime": 1 });
     std::fs::write(
         &runtime_path,
         serde_json::to_vec(&tampered).expect("serialize tampered runtime"),
     )
     .expect("write tampered runtime.json");
-    let refused = tokio_block_on(client.call(RequestBody::Stop {
-        slug: "tamper".into(),
-    }));
-    match refused.expect("refused exchange").body {
-        ResponseBody::Err { code, .. } => assert_eq!(code, ErrorCode::NotRunning),
-        other => panic!("expected not_running refusal, got {other:?}"),
-    }
-    // The refusal must not have killed the real tagma.
-    assert!(
-        PathBuf::from(format!("/proc/{pid}")).exists(),
-        "real tagma alive after refused stop"
-    );
-
-    // Restore: the anchor verifies the original pid and stop lands.
-    std::fs::write(&runtime_path, original).expect("restore runtime.json");
     let stopped = tokio_block_on(client.call(RequestBody::Stop {
         slug: "tamper".into(),
     }));
@@ -879,8 +891,16 @@ fn stop_refuses_tampered_runtime_pid_then_allows_restored() {
     }
     assert!(
         !PathBuf::from(format!("/proc/{pid}")).exists(),
-        "tagma exited after restored stop"
+        "the anchored tagma exited"
     );
+    // The tampered pid is alive and still here: it was never signalled.
+    assert!(
+        PathBuf::from(format!("/proc/{decoy}")).exists(),
+        "the tampered pid was not signalled"
+    );
+    // Restore the file so nothing this test leaves behind names a live pid
+    // its record does not pin.
+    std::fs::write(&runtime_path, original).expect("restore runtime.json");
 }
 /// Drive a tokio client call from a sync test: a minimal single-thread
 /// runtime per call. (The daemon crate is async; the tests are not.)

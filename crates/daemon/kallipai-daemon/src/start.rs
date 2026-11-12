@@ -32,8 +32,15 @@ pub enum StartError {
     Denied { slug: String, target_uid: u32 },
     #[error("{0}")]
     Invalid(String),
-    #[error("instance {0} is already running")]
-    AlreadyRunning(String),
+    #[error("instance {slug} is already running (pid {pid})")]
+    AlreadyRunning { slug: String, pid: u32 },
+    /// Alive, but nothing pins it: a live pid with no start time could be
+    /// this instance (older tagmas write `0` when they cannot read
+    /// `/proc/self/stat`), so a relaunch is refused rather than racing it.
+    #[error(
+        "instance {slug} is already running (pid {pid}); its runtime.json carries no start time"
+    )]
+    UnpinnedRunning { slug: String, pid: u32 },
     #[error(
         "instance did not publish pid/port within {timeout_secs}s; see the instance log files \
          under {logs} and system OOM records"
@@ -55,7 +62,8 @@ impl From<&StartError> for ErrorCode {
             // Existing-code reuse over a new wire code: an already-running
             // slug is the same resource-conflict family SlugTaken names for
             // spawn; the message carries the precise state.
-            StartError::AlreadyRunning(_) => ErrorCode::SlugTaken,
+            StartError::AlreadyRunning { .. } => ErrorCode::SlugTaken,
+            StartError::UnpinnedRunning { .. } => ErrorCode::SlugTaken,
             StartError::NotFound(_) => ErrorCode::NotFound,
             StartError::Denied { .. } => ErrorCode::Denied,
             StartError::Invalid(_) => ErrorCode::InvalidSpawnInput,
@@ -144,11 +152,14 @@ fn has_spent_code(record: &InstanceRecord, data_dir: &Path) -> bool {
     record.env.iter().any(|pair| pair.starts_with(&spent)) && stored_credentials_exist(data_dir)
 }
 
-/// Blocking relaunch. `pid_is_alive` is injected so tests can fake the
-/// liveness verdict without a real process. Liveness
-/// alone decides the AlreadyRunning check — the former comm re-check
-/// rejected a healthy instance under a wrapped binary name (a
-/// makeWrapper-wrapped tagma's truncated comm is not ours to judge).
+/// Blocking relaunch. `judge` is the injected three-valued liveness
+/// judgement (a pid plus the kernel start time that pins it), so tests can
+/// fake it without a real process. `scan::resolve` decides the refusal: the
+/// record's launch anchor first, the runtime self-report second — the same
+/// answer `list` and `stop` read, and a claim still alive blocks the
+/// relaunch whether or not its start time is pinned. A runtime.json naming
+/// a dead or recycled pid does not block, and a missing one does not let a
+/// second tagma start next to a live anchor.
 /// `env_overrides` is a one-shot overlay validated like spawn's request
 /// env and applied for this launch only.
 pub fn start(
@@ -157,7 +168,7 @@ pub fn start(
     env_overrides: &[String],
     exe: Option<&str>,
     timeout: Duration,
-    pid_is_alive: &dyn Fn(u32) -> bool,
+    judge: &dyn Fn(u32, u64) -> scan::Liveness,
     peer_uid: u32,
 ) -> Result<(u32, u16), StartError> {
     if !kallipai_daemon_common::wire::valid_slug(slug) {
@@ -206,16 +217,29 @@ pub fn start(
             "instance {slug} has no recorded workspace"
         )));
     };
-    if let Some(runtime) = scan::read_runtime(&data_dir)
-        && pid_is_alive(runtime.pid)
+    let runtime = scan::read_runtime(&data_dir);
+    let resolved = scan::resolve(record.identity.as_ref(), runtime.as_ref(), judge);
+    if let Some(resolution) = resolved
+        && resolution.verdict != scan::Liveness::Refuted
     {
         tracing::warn!(
             slug = %slug,
-            pid = runtime.pid,
-            comm = ?scan::pid_comm(runtime.pid),
-            "start refused: recorded pid is alive"
+            pid = resolution.pid,
+            source = ?resolution.source,
+            verdict = ?resolution.verdict,
+            comm = ?scan::pid_comm(resolution.pid),
+            "start refused: a pid this instance's claims name is alive"
         );
-        return Err(StartError::AlreadyRunning(slug.to_string()));
+        return Err(match resolution.verdict {
+            scan::Liveness::Unverifiable => StartError::UnpinnedRunning {
+                slug: slug.to_string(),
+                pid: resolution.pid,
+            },
+            _ => StartError::AlreadyRunning {
+                slug: slug.to_string(),
+                pid: resolution.pid,
+            },
+        });
     }
     // The persisted request pairs are re-validated so hand-edited records
     // cannot smuggle daemon-owned keys into a launch; the replay env then
@@ -398,7 +422,7 @@ mod tests {
             &[],
             None,
             std::time::Duration::from_secs(1),
-            &|_| false,
+            &|_, _| scan::Liveness::Refuted,
             unsafe { libc::getuid() } + 2,
         )
         .unwrap_err();
@@ -416,7 +440,7 @@ mod tests {
             &[],
             None,
             std::time::Duration::from_secs(1),
-            &|_| false,
+            &|_, _| scan::Liveness::Refuted,
             0,
         )
         .unwrap_err();
@@ -435,11 +459,151 @@ mod tests {
             &[],
             None,
             std::time::Duration::from_secs(1),
-            &|_| false,
+            &|_, _| scan::Liveness::Refuted,
             unsafe { libc::getuid() },
         )
         .unwrap_err();
         assert!(!matches!(error, StartError::NotFound(_)), "{error}");
+    }
+
+    #[test]
+    fn start_refuses_while_the_launch_anchor_is_alive() {
+        // The anchor names a live incarnation while runtime.json names
+        // another pid: the anchor is the daemon's own claim, so the instance
+        // is running and the refusal names the pid to stop.
+        let root = tempfile::tempdir().expect("record root");
+        let data = tempfile::tempdir().expect("data tempdir");
+        let mut value = record(&[], data.path());
+        value.identity = Some(scan::Identity {
+            pid: 42,
+            starttime: 99,
+            anchored_at: 7,
+        });
+        write_record_at(root.path(), &value);
+        std::fs::write(
+            data.path().join("runtime.json"),
+            r#"{"pid":7,"port":1,"starttime":5}"#,
+        )
+        .expect("write runtime.json");
+
+        let error = start(
+            root.path(),
+            "instance-1",
+            &[],
+            None,
+            Duration::from_secs(1),
+            &|pid, starttime| {
+                if pid == 42 && starttime == 99 {
+                    scan::Liveness::Live
+                } else {
+                    scan::Liveness::Refuted
+                }
+            },
+            unsafe { libc::getuid() },
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "instance instance-1 is already running (pid 42)"
+        );
+    }
+
+    #[test]
+    fn start_refuses_an_unpinned_live_pid() {
+        // The file names an alive pid and no start time: Unverifiable, and a
+        // second launch is refused rather than racing an instance it cannot
+        // rule out.
+        let root = tempfile::tempdir().expect("record root");
+        let data = tempfile::tempdir().expect("data tempdir");
+        write_record_at(root.path(), &record(&[], data.path()));
+        std::fs::write(data.path().join("runtime.json"), r#"{"pid":7,"port":1}"#)
+            .expect("write runtime.json");
+
+        let error = start(
+            root.path(),
+            "instance-1",
+            &[],
+            None,
+            Duration::from_secs(1),
+            &|_, _| scan::Liveness::Unverifiable,
+            unsafe { libc::getuid() },
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error, StartError::UnpinnedRunning { .. }),
+            "{error}"
+        );
+        assert_eq!(
+            error.to_string(),
+            "instance instance-1 is already running (pid 7); its runtime.json carries no start time"
+        );
+    }
+
+    #[test]
+    fn start_refuses_while_the_anchor_is_alive_without_a_runtime_file() {
+        // The anchor alone is enough: runtime.json is the fallback claim, not
+        // a requirement, so its absence does not make the anchor stale.
+        let root = tempfile::tempdir().expect("record root");
+        let data = tempfile::tempdir().expect("data tempdir");
+        let mut value = record(&[], data.path());
+        value.identity = Some(scan::Identity {
+            pid: 42,
+            starttime: 99,
+            anchored_at: 7,
+        });
+        write_record_at(root.path(), &value);
+
+        let error = start(
+            root.path(),
+            "instance-1",
+            &[],
+            None,
+            Duration::from_secs(1),
+            &|pid, starttime| {
+                if pid == 42 && starttime == 99 {
+                    scan::Liveness::Live
+                } else {
+                    scan::Liveness::Refuted
+                }
+            },
+            unsafe { libc::getuid() },
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "instance instance-1 is already running (pid 42)"
+        );
+    }
+
+    #[test]
+    fn start_relaunches_over_a_recycled_pid_in_runtime_json() {
+        // The record pins nothing, and the pid runtime.json names does not
+        // verify (the injected judgement says no): nothing is running, so
+        // the relaunch gets past the check and fails later, on the
+        // workspace this record does not have on disk.
+        let root = tempfile::tempdir().expect("record root");
+        let data = tempfile::tempdir().expect("data tempdir");
+        write_record_at(root.path(), &record(&[], data.path()));
+        std::fs::write(
+            data.path().join("runtime.json"),
+            r#"{"pid":7,"port":1,"starttime":5}"#,
+        )
+        .expect("write runtime.json");
+
+        let error = start(
+            root.path(),
+            "instance-1",
+            &[],
+            None,
+            Duration::from_secs(1),
+            &|_, _| scan::Liveness::Refuted,
+            unsafe { libc::getuid() },
+        )
+        .unwrap_err();
+        assert!(
+            !matches!(error, StartError::AlreadyRunning { .. }),
+            "{error}"
+        );
     }
 
     fn write_stored_credentials(data_dir: &std::path::Path) {
@@ -569,7 +733,7 @@ mod tests {
             &["SOME_OTHER_KEY=v".to_string()],
             None,
             Duration::from_secs(1),
-            &|_| false,
+            &|_, _| scan::Liveness::Refuted,
             unsafe { libc::getuid() },
         )
         .expect_err("non-allowlisted overlay key");
@@ -584,7 +748,7 @@ mod tests {
             &["KALLIPAI_TAGMA_SLUG=elsewhere".to_string()],
             None,
             Duration::from_secs(1),
-            &|_| false,
+            &|_, _| scan::Liveness::Refuted,
             unsafe { libc::getuid() },
         )
         .expect_err("reserved overlay key");
@@ -598,7 +762,7 @@ mod tests {
             &["KALLIPAI_WORKSPACE_ROOT=/elsewhere".to_string()],
             None,
             Duration::from_secs(1),
-            &|_| false,
+            &|_, _| scan::Liveness::Refuted,
             unsafe { libc::getuid() },
         )
         .expect_err("reserved overlay key");

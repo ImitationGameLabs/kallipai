@@ -1,9 +1,10 @@
-//! Stop semantics: read the pid from the data directory's runtime.json
-//! (found through the record) → verify it is this instance's own live
-//! tagma (the record's launch anchor or the name chain; the pid reuse
-//! guard) → SIGTERM → poll for exit within the grace period → SIGKILL.
-//! runtime.json stays (a daemon restart rebuilds its view from the
-//! record area).
+//! Stop semantics: one resolution names which incarnation of this instance
+//! is alive (the record's launch anchor first, the runtime self-report
+//! second; see `scan::resolve`), and the stop signals that pid, then polls
+//! for exit within the grace period before SIGKILL. A pid the kernel does
+//! not attribute to the instance's owner is refused, never signalled;
+//! runtime.json stays (a daemon restart rebuilds its view from the record
+//! area).
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -18,6 +19,21 @@ pub enum StopError {
     Denied { slug: String, target_uid: u32 },
     #[error("instance {0} is not running (stale or missing pid)")]
     NotRunning(String),
+    #[error("{slug}: pid {pid} in runtime.json is alive and is not pinned to this instance")]
+    IdentityMismatch { slug: String, pid: u32 },
+    /// The pid is alive, but it is not a process this instance's owner
+    /// could own: runtime.json is owner-writable, so naming a pid is not
+    /// enough to aim a signal at it.
+    #[error(
+        "{slug} names pid {pid}, which {}",
+        foreign_owner_note(.owned_by, .target_uid)
+    )]
+    ForeignOwner {
+        slug: String,
+        pid: u32,
+        target_uid: u32,
+        owned_by: Option<u32>,
+    },
     #[error("stop of {slug} failed after SIGKILL: {message}")]
     Internal { slug: String, message: String },
 }
@@ -28,6 +44,11 @@ impl From<&StopError> for ErrorCode {
             StopError::NotFound(_) => ErrorCode::NotFound,
             StopError::Denied { .. } => ErrorCode::Denied,
             StopError::NotRunning(_) => ErrorCode::NotRunning,
+            // Same wire code as NotRunning: the CLI's restart treats a
+            // stop refusal as "already stopped" and relaunches, and the REST
+            // mapping keeps answering 409. Only the sentence differs.
+            StopError::IdentityMismatch { .. } => ErrorCode::NotRunning,
+            StopError::ForeignOwner { .. } => ErrorCode::NotRunning,
             StopError::Internal { .. } => ErrorCode::Internal,
         }
     }
@@ -35,9 +56,13 @@ impl From<&StopError> for ErrorCode {
 
 const GRACE: Duration = Duration::from_secs(10);
 
-/// Blocking stop. Identity is judged by `scan::identity_matches` — the
-/// record's anchored pid/starttime, or the exe/comm name chain when the
-/// claim point could not pin an anchor — so a recycled pid is refused.
+/// Blocking stop. The incarnation is chosen by `scan::resolve` — the
+/// record's launch anchor first, the instance's own runtime.json second — so
+/// a recycled pid is refused. A live pid neither claim verifies is reported
+/// (`IdentityMismatch`), never signalled; an alive pid with no start time is
+/// stopped, because an older tagma cannot always publish one. Before any
+/// signal the pid has to belong to the instance's owner (`ForeignOwner`
+/// otherwise): naming a pid is not the same as proving it is ours.
 pub fn stop(record_root: &Path, slug: &str, peer_uid: u32) -> Result<(), StopError> {
     // Same grammar gate as spawn/start: an invalid slug is not an
     // instance name, so it cannot exist — NotFound without a
@@ -67,44 +92,181 @@ pub fn stop(record_root: &Path, slug: &str, peer_uid: u32) -> Result<(), StopErr
         });
     }
     let data_dir = record.data_dir.clone();
-    let pid: u32 = crate::scan::read_runtime(&data_dir)
-        .map(|runtime| runtime.pid)
-        .ok_or_else(|| StopError::NotRunning(slug.to_string()))?;
-    if crate::scan::identity_matches(&record, slug, pid) != crate::scan::Verdict::Match {
+    let runtime = crate::scan::read_runtime(&data_dir);
+    // One resolution decides: anchor first, self-report second. `Refuted`
+    // (dead, or a pin naming another incarnation) leaves nothing to stop.
+    let resolved = crate::scan::resolve(
+        record.identity.as_ref(),
+        runtime.as_ref(),
+        &crate::scan::incarnation_liveness,
+    );
+    let live = match resolved {
+        Some(resolution) if resolution.verdict != crate::scan::Liveness::Refuted => resolution,
+        _ => {
+            // Nothing this instance pins is alive. A pid the runtime file
+            // names may still be alive — a stranger, or an incarnation the
+            // record does not vouch for — and that is a different answer
+            // from "nothing is running": it names the pid to look at.
+            if let Some(runtime) = runtime
+                && crate::scan::pid_is_alive(runtime.pid)
+            {
+                tracing::warn!(
+                    slug = %slug,
+                    pid = runtime.pid,
+                    comm = ?crate::scan::pid_comm(runtime.pid),
+                    exe = ?crate::scan::pid_exe(runtime.pid),
+                    "stop refused: runtime.json names a live pid this instance does not pin"
+                );
+                return Err(StopError::IdentityMismatch {
+                    slug: slug.to_string(),
+                    pid: runtime.pid,
+                });
+            }
+            return Err(StopError::NotRunning(slug.to_string()));
+        }
+    };
+    let pid = live.pid;
+    // Naming a pid is not proof enough to signal it: runtime.json is
+    // writable by its owner, and a start time is a public number, so a file
+    // could aim the daemon's own privileges at any live process. The process
+    // has to be one this instance's owner could own. Both claims face this
+    // gate: the anchor is the daemon's own word, but the gate is one rule,
+    // and a record that disagrees with the kernel is worth refusing loudly.
+    let owned_by = crate::scan::proc_uid(pid);
+    if owned_by != Some(record.target_uid) {
+        if owned_by.is_none() && !crate::scan::pid_is_alive(pid) {
+            // No /proc entry to attribute and nothing alive there: the pid
+            // exited between the resolution and this gate. That is the
+            // answer the caller asked for, not an ownership verdict, and
+            // it should not leave a misleading warning behind.
+            tracing::info!(slug = %slug, pid, "the named pid exited before the uid gate");
+            return Err(StopError::NotRunning(slug.to_string()));
+        }
         tracing::warn!(
             slug = %slug,
             pid,
-            comm = ?crate::scan::pid_comm(pid),
-            exe = ?crate::scan::pid_exe(pid),
-            "stop refused: recorded pid does not match this instance"
+            target_uid = record.target_uid,
+            pid_uid = ?owned_by,
+            source = ?live.source,
+            verdict = ?live.verdict,
+            "stop refused: the named pid is not owned by this instance's owner"
         );
-        // Stale runtime state (crash leftover) or a recycled pid: the
-        // instance behind it is gone; report it rather than shooting an innocent process.
-        return Err(StopError::NotRunning(slug.to_string()));
+        return Err(StopError::ForeignOwner {
+            slug: slug.to_string(),
+            pid,
+            target_uid: record.target_uid,
+            owned_by,
+        });
+    }
+    // Name the claim this signal rests on: an operator has to be able to
+    // tell a hand-booted instance (self-report) from the one the daemon
+    // launched (anchor), an unpinned pid from a verified one, and which pid
+    // the other side named.
+    match (live.verdict, live.source) {
+        (crate::scan::Liveness::Unverifiable, _) => tracing::warn!(
+            slug = %slug,
+            pid,
+            source = ?live.source,
+            "stopping an alive pid with no pinned start time; the uid gate is its only attribution"
+        ),
+        (_, crate::scan::LiveSource::SelfReported) => tracing::warn!(
+            slug = %slug,
+            pid,
+            runtime_pid = runtime.as_ref().map(|runtime| runtime.pid),
+            "stopping the runtime.json self-report: the launch anchor is gone"
+        ),
+        (_, crate::scan::LiveSource::Anchored) => {
+            if runtime.as_ref().map(|runtime| runtime.pid) != Some(pid) {
+                tracing::warn!(
+                    slug = %slug,
+                    pid,
+                    runtime_pid = runtime.as_ref().map(|runtime| runtime.pid),
+                    "stopping the launch anchor; runtime.json names another pid"
+                );
+            }
+        }
     }
 
-    send(pid, libc::SIGTERM).map_err(|m| internal(slug, m))?;
+    crate::scan::signal_owned(pid, record.target_uid, libc::SIGTERM)
+        .map_err(|error| signal_refusal(slug, error, record.target_uid))?;
     tracing::info!(slug = %slug, pid, "stopping instance; sent SIGTERM");
     let deadline = Instant::now() + GRACE;
     while Instant::now() < deadline {
         if !alive(pid) {
             tracing::info!(slug = %slug, pid, "instance stopped");
+            recheck_after_stop(slug, pid, record.identity.as_ref(), runtime.as_ref());
             return Ok(());
         }
         std::thread::sleep(Duration::from_millis(100));
     }
     tracing::warn!(slug = %slug, pid, "grace period expired; escalating to SIGKILL");
-    send(pid, libc::SIGKILL).map_err(|m| internal(slug, m))?;
+    if let Some(reason) = sigkill_refusal(
+        &live,
+        &crate::scan::proc_uid,
+        &crate::scan::incarnation_liveness,
+        record.target_uid,
+    ) {
+        tracing::warn!(
+            slug = %slug,
+            pid,
+            %reason,
+            "the pid this stop attributed is gone; nothing left to kill"
+        );
+        recheck_after_stop(slug, pid, record.identity.as_ref(), runtime.as_ref());
+        return Ok(());
+    }
+    crate::scan::signal_owned(pid, record.target_uid, libc::SIGKILL)
+        .map_err(|error| signal_refusal(slug, error, record.target_uid))?;
     let deadline = Instant::now() + Duration::from_secs(2);
     while Instant::now() < deadline {
         if !alive(pid) {
             tracing::info!(slug = %slug, pid, "instance stopped after SIGKILL");
+            recheck_after_stop(slug, pid, record.identity.as_ref(), runtime.as_ref());
             return Ok(());
         }
         std::thread::sleep(Duration::from_millis(50));
     }
     tracing::error!(slug = %slug, pid, "instance survived SIGKILL");
     Err(internal(slug, format!("pid {pid} survived SIGKILL")))
+}
+
+/// A stop that landed is not always the whole instance: when both claims
+/// named a live pid, the other one is still running and `list` will keep
+/// reporting Running. Say so, with both pids and their sources, so the next
+/// listing does not read as a fresh contradiction.
+fn recheck_after_stop(
+    slug: &str,
+    pid: u32,
+    anchor: Option<&crate::scan::Identity>,
+    runtime: Option<&crate::scan::RuntimeFile>,
+) {
+    let Some(other) =
+        other_live_incarnation(anchor, runtime, pid, &crate::scan::incarnation_liveness)
+    else {
+        return;
+    };
+    tracing::warn!(
+        slug = %slug,
+        pid,
+        other_pid = other.pid,
+        other_source = ?other.source,
+        other_verdict = ?other.verdict,
+        "instance still has a live incarnation: list will report Running"
+    );
+}
+
+/// The incarnation still alive after `stopped` died, if any: the same
+/// resolution `list` reads, filtered to the claims that are not the pid just
+/// stopped. Pure so the edge is testable with a fake judgement.
+fn other_live_incarnation(
+    anchor: Option<&crate::scan::Identity>,
+    runtime: Option<&crate::scan::RuntimeFile>,
+    stopped: u32,
+    judge: &dyn Fn(u32, u64) -> crate::scan::Liveness,
+) -> Option<crate::scan::Resolution> {
+    let resolution = crate::scan::resolve(anchor, runtime, judge)?;
+    (resolution.pid != stopped && resolution.verdict != crate::scan::Liveness::Refuted)
+        .then_some(resolution)
 }
 
 fn internal(slug: &str, message: String) -> StopError {
@@ -114,15 +276,67 @@ fn internal(slug: &str, message: String) -> StopError {
     }
 }
 
-fn send(pid: u32, signal: i32) -> Result<(), String> {
-    let rc = unsafe { libc::kill(pid as i32, signal) };
-    if rc == 0 {
-        Ok(())
-    } else {
-        Err(format!(
-            "kill({pid}, {signal}): {}",
-            std::io::Error::last_os_error()
-        ))
+/// The tail of `ForeignOwner`'s sentence: who the kernel says owns the pid,
+/// against whom the record says should. Kept apart from the variant so the
+/// two readings stay word-for-word distinct.
+fn foreign_owner_note(owned_by: &Option<u32>, target_uid: &u32) -> String {
+    match owned_by {
+        Some(uid) => format!("belongs to uid {uid}, not to this instance's owner uid {target_uid}"),
+        None => {
+            format!("has no readable owner in /proc, so it is not this instance's uid {target_uid}")
+        }
+    }
+}
+
+/// The wire shape of a refused signal. A pid the kernel attributes to
+/// another uid is an ownership refusal; one whose `/proc` entry is gone
+/// stopped on its own, which is the outcome a stop promises. Only `kill(2)`
+/// failing is an internal fault.
+fn signal_refusal(slug: &str, error: crate::scan::SignalError, target_uid: u32) -> StopError {
+    match error {
+        crate::scan::SignalError::Foreign { pid, owner, .. } => match owner {
+            Some(owner) => StopError::ForeignOwner {
+                slug: slug.to_string(),
+                pid,
+                target_uid,
+                owned_by: Some(owner),
+            },
+            None => StopError::NotRunning(slug.to_string()),
+        },
+        crate::scan::SignalError::Kill { pid, sig, error } => {
+            internal(slug, format!("kill({pid}, {sig}): {error}"))
+        }
+    }
+}
+
+/// The re-ask before the one signal that cannot be taken back. The pid was
+/// attributed before the grace period, and ten seconds is long enough for it
+/// to exit and for the kernel to hand its number to another process — a
+/// recycled pid answers to the same `kill`. `Some(reason)` means the pid is
+/// no longer the incarnation this stop attributed — dead, or wearing that
+/// number as someone else's process — so the caller's promise (that one
+/// instance no longer runs) already holds and the refusal is reported, not
+/// raised. `None` means the pid is still that incarnation: a pinned claim is
+/// re-judged against its start time, an unpinned one against the instance's
+/// owner uid.
+fn sigkill_refusal(
+    live: &crate::scan::Resolution,
+    uid_of: &dyn Fn(u32) -> Option<u32>,
+    judge: &dyn Fn(u32, u64) -> crate::scan::Liveness,
+    target_uid: u32,
+) -> Option<String> {
+    if live.starttime != 0 {
+        return match judge(live.pid, live.starttime) {
+            crate::scan::Liveness::Live => None,
+            _ => Some(format!(
+                "pid {} is no longer the incarnation this stop attributed",
+                live.pid
+            )),
+        };
+    }
+    match uid_of(live.pid) {
+        Some(uid) if uid == target_uid => None,
+        other => Some(foreign_owner_note(&other, &target_uid)),
     }
 }
 /// A zombie counts as exited for our purposes: its /proc entry lingers
@@ -134,6 +348,38 @@ fn alive(pid: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A `sleep` child standing in for an instance. Drop kills and reaps it,
+    /// so no assertion failure, early return or error path leaves an orphan
+    /// behind; `wait` reads the exit status first when a test wants it.
+    struct Decoy(std::process::Child);
+
+    impl Decoy {
+        fn spawn() -> Self {
+            Self(
+                std::process::Command::new("sleep")
+                    .arg("30")
+                    .spawn()
+                    .expect("spawn a decoy"),
+            )
+        }
+
+        fn pid(&self) -> u32 {
+            self.0.id()
+        }
+
+        fn wait(&mut self) -> std::process::ExitStatus {
+            self.0.wait().expect("reap the decoy")
+        }
+    }
+
+    impl Drop for Decoy {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
     #[test]
     fn stop_denial_guidance_names_root_for_a_root_owned_record() {
         let error = StopError::Denied {
@@ -235,5 +481,250 @@ mod tests {
                 deny_guidance(&uid)
             )
         );
+    }
+
+    #[test]
+    fn stop_names_a_live_pid_the_record_does_not_pin() {
+        // The runtime file names this test process with a start time that
+        // is not its own: alive, but not the incarnation the file claims.
+        // The refusal names the pid instead of reporting a missing one, and
+        // nothing is signalled (the pid below is this very process).
+        let root = tempfile::tempdir().expect("record root");
+        let uid = unsafe { libc::getuid() };
+        let data_dir = root.path().join("data").join("i1");
+        std::fs::create_dir_all(&data_dir).expect("data dir");
+        crate::records::write_record(
+            root.path(),
+            "mine",
+            &crate::records::InstanceRecord {
+                instance_id: "instance-1".into(),
+                owner_uid: uid,
+                target_uid: uid,
+                target_username: None,
+                workspace: Some("/ws".into()),
+                env: vec![],
+                identity: None,
+                data_dir: data_dir.clone(),
+                config_dir: None,
+                state_dir: None,
+            },
+        )
+        .expect("write record");
+        let pid = std::process::id();
+        std::fs::write(
+            data_dir.join("runtime.json"),
+            format!(r#"{{"pid":{pid},"port":1,"starttime":1}}"#),
+        )
+        .expect("write runtime.json");
+
+        let error = stop(root.path(), "mine", uid).unwrap_err();
+        assert!(
+            matches!(error, StopError::IdentityMismatch { .. }),
+            "{error}"
+        );
+        assert_eq!(
+            error.to_string(),
+            format!("mine: pid {pid} in runtime.json is alive and is not pinned to this instance")
+        );
+        assert_eq!(ErrorCode::from(&error), ErrorCode::NotRunning);
+    }
+
+    #[test]
+    fn stop_signals_an_unpinned_pid_when_the_uid_gate_passes() {
+        // No start time anywhere: Unverifiable, alive, and owned by the
+        // instance's owner — so it is treated as this instance and stopped,
+        // with the missing pin recorded as a warning. The pid is a decoy
+        // child, never this test process.
+        let root = tempfile::tempdir().expect("record root");
+        let uid = unsafe { libc::getuid() };
+        let data_dir = root.path().join("data").join("i1");
+        std::fs::create_dir_all(&data_dir).expect("data dir");
+        let mut decoy = Decoy::spawn();
+        let pid = decoy.pid();
+        crate::records::write_record(
+            root.path(),
+            "mine",
+            &crate::records::InstanceRecord {
+                instance_id: "instance-1".into(),
+                owner_uid: uid,
+                target_uid: uid,
+                target_username: None,
+                workspace: Some("/ws".into()),
+                env: vec![],
+                identity: None,
+                data_dir: data_dir.clone(),
+                config_dir: None,
+                state_dir: None,
+            },
+        )
+        .expect("write record");
+        std::fs::write(
+            data_dir.join("runtime.json"),
+            format!(r#"{{"pid":{pid},"port":1}}"#),
+        )
+        .expect("write runtime.json");
+
+        stop(root.path(), "mine", uid).expect("the unpinned pid is stopped");
+        let status = decoy.wait();
+        assert!(!status.success(), "the decoy was signalled");
+    }
+
+    #[test]
+    fn stop_refuses_a_live_pid_owned_by_another_uid() {
+        // The record names this very process but claims another owner: the
+        // pid is alive, so the refusal is about ownership, and nothing is
+        // signalled.
+        let root = tempfile::tempdir().expect("record root");
+        let uid = unsafe { libc::getuid() };
+        let data_dir = root.path().join("data").join("i1");
+        std::fs::create_dir_all(&data_dir).expect("data dir");
+        let pid = std::process::id();
+        crate::records::write_record(
+            root.path(),
+            "mine",
+            &crate::records::InstanceRecord {
+                instance_id: "instance-1".into(),
+                owner_uid: uid,
+                target_uid: uid + 1,
+                target_username: None,
+                workspace: Some("/ws".into()),
+                env: vec![],
+                identity: None,
+                data_dir: data_dir.clone(),
+                config_dir: None,
+                state_dir: None,
+            },
+        )
+        .expect("write record");
+        std::fs::write(
+            data_dir.join("runtime.json"),
+            format!(r#"{{"pid":{pid},"port":1}}"#),
+        )
+        .expect("write runtime.json");
+
+        let error = stop(root.path(), "mine", 0).unwrap_err();
+        assert!(matches!(error, StopError::ForeignOwner { .. }), "{error}");
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "mine names pid {pid}, which belongs to uid {uid}, not to this instance's owner uid {}",
+                uid + 1
+            )
+        );
+        assert_eq!(ErrorCode::from(&error), ErrorCode::NotRunning);
+    }
+
+    #[test]
+    fn a_stop_that_left_another_incarnation_finds_it() {
+        use crate::scan::{Identity, LiveSource, Liveness, RuntimeFile};
+        let anchor = Identity {
+            pid: 42,
+            starttime: 1000,
+            anchored_at: 7,
+        };
+        let runtime = RuntimeFile {
+            pid: 43,
+            port: 1,
+            starttime: 2000,
+        };
+        // The pid just stopped is gone; the anchor's incarnation is not, so
+        // the next listing would still say Running.
+        let anchor_only = |pid: u32, _start: u64| {
+            if pid == 42 {
+                Liveness::Live
+            } else {
+                Liveness::Refuted
+            }
+        };
+        let other = other_live_incarnation(Some(&anchor), Some(&runtime), 43, &anchor_only)
+            .expect("the anchor is still live");
+        assert_eq!(
+            (other.pid, other.source, other.verdict),
+            (42, LiveSource::Anchored, Liveness::Live)
+        );
+        // The pid just stopped is not a second incarnation.
+        assert!(other_live_incarnation(Some(&anchor), None, 42, &anchor_only).is_none());
+        // Nothing alive: no warning to raise.
+        let nothing = |_pid: u32, _start: u64| Liveness::Refuted;
+        assert!(other_live_incarnation(Some(&anchor), Some(&runtime), 43, &nothing).is_none());
+    }
+
+    #[test]
+    fn the_sigkill_recheck_refuses_a_recycled_pid() {
+        use crate::scan::{LiveSource, Liveness, Resolution};
+        let live = Resolution {
+            verdict: Liveness::Live,
+            pid: 42,
+            starttime: 1000,
+            source: LiveSource::Anchored,
+        };
+        // The kernel hands the number to another incarnation during the
+        // grace period: the pinned start time no longer names it.
+        let recycled = |_pid: u32, _start: u64| Liveness::Refuted;
+        let refusal = sigkill_refusal(&live, &|_pid| Some(0), &recycled, 0)
+            .expect("a recycled pid is refused");
+        assert!(refusal.contains("42"), "{refusal}");
+        // Still the same incarnation: the SIGKILL goes out.
+        let same = |_pid: u32, _start: u64| Liveness::Live;
+        assert!(sigkill_refusal(&live, &|_pid| Some(0), &same, 0).is_none());
+    }
+
+    #[test]
+    fn the_sigkill_recheck_falls_back_to_the_owner_uid_without_a_pin() {
+        use crate::scan::{LiveSource, Liveness, Resolution};
+        let unpinned = Resolution {
+            verdict: Liveness::Unverifiable,
+            pid: 42,
+            starttime: 0,
+            source: LiveSource::SelfReported,
+        };
+        let judge = |_pid: u32, _start: u64| Liveness::Unverifiable;
+        assert!(sigkill_refusal(&unpinned, &|_pid| Some(1000), &judge, 1000).is_none());
+        assert!(sigkill_refusal(&unpinned, &|_pid| Some(0), &judge, 1000).is_some());
+        assert!(sigkill_refusal(&unpinned, &|_pid| None, &judge, 1000).is_some());
+    }
+
+    #[test]
+    fn a_refused_signal_maps_to_the_answer_it_means() {
+        use crate::scan::SignalError;
+        // Another uid: the ownership refusal, with the kernel's number.
+        let foreign = signal_refusal(
+            "mine",
+            SignalError::Foreign {
+                pid: 42,
+                expected: 1000,
+                owner: Some(0),
+            },
+            1000,
+        );
+        assert!(
+            matches!(foreign, StopError::ForeignOwner { .. }),
+            "{foreign}"
+        );
+        // No entry to attribute: the pid is gone, which is a stop that
+        // already landed.
+        let gone = signal_refusal(
+            "mine",
+            SignalError::Foreign {
+                pid: 42,
+                expected: 1000,
+                owner: None,
+            },
+            1000,
+        );
+        assert!(matches!(gone, StopError::NotRunning(_)), "{gone}");
+        assert_eq!(ErrorCode::from(&gone), ErrorCode::NotRunning);
+        // A failed kill(2) is the one internal fault.
+        let failed = signal_refusal(
+            "mine",
+            SignalError::Kill {
+                pid: 42,
+                sig: libc::SIGTERM,
+                error: std::io::Error::from_raw_os_error(libc::EPERM),
+            },
+            1000,
+        );
+        assert!(matches!(failed, StopError::Internal { .. }), "{failed}");
+        assert_eq!(ErrorCode::from(&failed), ErrorCode::Internal);
     }
 }

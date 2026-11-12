@@ -23,12 +23,11 @@ pub struct ScannedInstance {
     pub slug: String,
     pub instance_id: String,
     pub workspace: Option<String>,
-    /// The instance's `runtime.json` pid when present and parse-able.
-    pub pid: Option<u32>,
-    /// The instance's `runtime.json` listen port. Surfaced so panel
-    /// process actions (open) survive a page reload — the session-held
-    /// spawn memory is the fallback, not the source.
-    pub port: Option<u16>,
+    /// The instance's `runtime.json`: the tagma's own pid, listen port and
+    /// incarnation start time, kept as the file it is. The port matters only
+    /// while the incarnation it came from is the live one, and the start time
+    /// is the fallback pin for a record that carries none.
+    pub runtime: Option<RuntimeFile>,
     /// The spawn-time uid of the requesting peer, from the record.
     pub owner: Option<u32>,
     /// The enrolled identities the instance's own credentials tree carries:
@@ -38,7 +37,7 @@ pub struct ScannedInstance {
     /// The launch-time identity anchor from the record (the
     /// `identity` key): the kernel incarnation this instance was
     /// claimed as. `None` when the claim point could not pin one —
-    /// classification then falls back to the exe/comm name chain.
+    /// the runtime self-report answers for it instead.
     pub anchored: Option<Identity>,
     /// The record's data-directory pointer, surfaced verbatim so the
     /// adopt path can check tree disjointness against every
@@ -47,22 +46,37 @@ pub struct ScannedInstance {
 }
 
 impl ScannedInstance {
-    /// The daemon's classification: a pid verifiably this instance's
-    /// live tagma is Running (launch-anchor verified), a missing pid
-    /// file is a clean Stopped, and anything else (dead pid, reused
-    /// pid, unidentifiable process) is Dead. Single classification
-    /// source — info() and health() derive from it.
+    /// The daemon's classification, from the one resolution: `Live` and
+    /// `Unverifiable` both mean Running (the pid is alive either way — an
+    /// unpinned one is still someone running), `Refuted` is Dead, and no
+    /// claim at all is a clean Stopped. Single rule — info() and health()
+    /// derive from it.
     pub fn state(&self) -> InstanceState {
-        match self.pid {
+        self.state_with(self.resolved())
+    }
+
+    /// The classification for a resolution the caller already made: one
+    /// `/proc` read answers a whole `info()`.
+    fn state_with(&self, resolved: Option<Resolution>) -> InstanceState {
+        match resolved {
+            Some(resolution) if resolution.verdict == Liveness::Refuted => InstanceState::Dead,
+            Some(_) => InstanceState::Running,
             None => InstanceState::Stopped,
-            Some(pid) => match classify_with_facts(self.anchored.as_ref(), pid, &self.slug).0 {
-                Verdict::Match => InstanceState::Running,
-                _ => InstanceState::Dead,
-            },
         }
     }
+
+    /// The one resolution: anchor first, self-report second, read once so
+    /// every field derived from it describes the same frame.
+    fn resolved(&self) -> Option<Resolution> {
+        resolve(
+            self.anchored.as_ref(),
+            self.runtime.as_ref(),
+            &incarnation_liveness,
+        )
+    }
     pub fn info(&self) -> InstanceInfo {
-        let state = self.state();
+        let resolved = self.resolved();
+        let state = self.state_with(resolved);
         let live = state == InstanceState::Running;
         InstanceInfo {
             slug: self.slug.clone(),
@@ -70,24 +84,38 @@ impl ScannedInstance {
             workspace: self.workspace.clone().unwrap_or_default(),
             running: live,
             state,
-            // The runtime file survives a stop, so its port is only a
-            // live listen port while the instance is live; anything
-            // else would leak a stale, dead endpoint.
-            port: live.then_some(self.port).flatten(),
+            // The runtime file survives a stop, and callers reach the
+            // instance through the port it names: surface that port only
+            // for a claim that names this very incarnation. A stale file,
+            // one the anchor outvoted, or an unpinned pid (someone running,
+            // not provably this instance) never becomes a live endpoint.
+            port: self.live_port(resolved),
             owner: self.owner,
             identities: self.identities.clone(),
         }
     }
 
     pub fn health(&self) -> HealthReport {
-        let state = self.state();
+        let resolved = self.resolved();
+        let state = self.state_with(resolved);
         let live = state == InstanceState::Running;
-        let detail = if live {
-            None
-        } else if self.pid.is_some() {
-            Some("pid does not match a live instance (stale or reused)".to_string())
-        } else {
-            Some("no runtime.json".to_string())
+        // The detail explains what the pid alone does not: an unpinned live
+        // pid is Running but its claim is weaker, and a refuted one says
+        // whether the runtime file or the record's anchor was the stale side.
+        let detail = match resolved {
+            Some(resolution) if resolution.verdict == Liveness::Unverifiable => {
+                Some("alive, but no start time pins it".to_string())
+            }
+            Some(resolution) if resolution.verdict == Liveness::Refuted => Some(
+                if self.runtime.is_some() {
+                    "pid does not match a live instance (stale or reused)"
+                } else {
+                    "the launch anchor's pid is not live"
+                }
+                .to_string(),
+            ),
+            Some(_) => None,
+            None => Some(self.stopped_detail()),
         };
         HealthReport {
             slug: Some(self.slug.clone()),
@@ -96,16 +124,50 @@ impl ScannedInstance {
             detail,
         }
     }
+
+    /// The pid this instance's `runtime.json` names, live or not.
+    /// Diagnostic (the reconcile log names it); the verdict comes from
+    /// [`Self::state`].
+    pub fn runtime_pid(&self) -> Option<u32> {
+        self.runtime.as_ref().map(|runtime| runtime.pid)
+    }
+
+    /// The listen port to surface: the runtime file's, and only while the
+    /// resolution names that file's own pid as the live incarnation. A file
+    /// the anchor outvoted, one whose pid died, and one that carries no
+    /// start time all withhold it: an unpinned pid is someone running, not
+    /// provably this instance, and callers reach the endpoint with the
+    /// instance's own credentials.
+    fn live_port(&self, resolved: Option<Resolution>) -> Option<u16> {
+        let runtime = self.runtime.as_ref()?;
+        let resolution = resolved?;
+        (resolution.pid == runtime.pid && resolution.verdict == Liveness::Live)
+            .then_some(runtime.port)
+    }
+
+    /// The detail for an instance with no claim at all. Something at the
+    /// path that yields no claim — a half-written file, a dangling link, a
+    /// directory — is a different situation from an empty data dir: the
+    /// first is damage, and telling an operator "no runtime.json" would send
+    /// them looking for a file that is there.
+    fn stopped_detail(&self) -> String {
+        if std::fs::symlink_metadata(self.data_dir.join("runtime.json")).is_ok() {
+            "runtime.json is unreadable".to_string()
+        } else {
+            "no runtime.json".to_string()
+        }
+    }
 }
 
 /// A live /proc entry is not enough: a zombie keeps its entry (and its
 /// comm) until someone reaps it, and under a shell-PID1 init nobody
-/// does. The kernel's state field tells a corpse from a live process.
+/// does. The kernel's state field tells a corpse from a live process: `Z`
+/// is a zombie, `X` a task the kernel has already marked dead.
 pub fn pid_is_alive(pid: u32) -> bool {
     match std::fs::read_to_string(format!("/proc/{pid}/status")) {
-        Ok(status) => !status
-            .lines()
-            .any(|l| l.starts_with("State:") && l.split_whitespace().nth(1) == Some("Z")),
+        Ok(status) => !status.lines().any(|l| {
+            l.starts_with("State:") && matches!(l.split_whitespace().nth(1), Some("Z" | "X"))
+        }),
         Err(_) => false,
     }
 }
@@ -303,21 +365,206 @@ pub fn identity_matches(record: &InstanceRecord, slug: &str, pid: u32) -> Verdic
     classify_with_facts(record.identity.as_ref(), pid, slug).0
 }
 
+/// The kernel's answer to "is the process at `pid` the incarnation
+/// `starttime` names": the whole liveness judgement, and the only place a
+/// pid is compared against the kernel.
+///
+/// Three answers, because two are not enough. `Live` and `Refuted` are
+/// verdicts; `Unverifiable` is the absence of one — a live pid whose file
+/// carries no start time (older tagmas wrote `0` when `/proc/self/stat`
+/// was unreadable). Reading that cell as `Refuted` would call a running
+/// instance dead and let a second tagma start on its data tree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Liveness {
+    /// Alive, and the pin names this very process.
+    Live,
+    /// Dead, or alive under a pin that names a different incarnation.
+    Refuted,
+    /// Alive, but nothing pins it: no start time to compare.
+    Unverifiable,
+}
+
+/// Judge one claim: does `starttime` pin the process at `pid`? A zombie or
+/// a dead entry is `Refuted`; a zero pin is `Unverifiable`, because the
+/// file says "I do not know", not "not me".
+///
+/// Binary names, records and sockets are the callers' business: this reads
+/// the kernel and nothing else.
+pub fn incarnation_liveness(pid: u32, starttime: u64) -> Liveness {
+    if !pid_is_alive(pid) {
+        return Liveness::Refuted;
+    }
+    if starttime == 0 {
+        return Liveness::Unverifiable;
+    }
+    if proc_starttime(pid) == Some(starttime) {
+        Liveness::Live
+    } else {
+        Liveness::Refuted
+    }
+}
+
+/// Which claim vouched for a live incarnation: the record's launch anchor
+/// (the daemon pinned it at the launch point) or the instance's own
+/// `runtime.json` self-report (the only claim a hand-booted tagma, one
+/// started without the daemon, leaves behind).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LiveSource {
+    Anchored,
+    SelfReported,
+}
+
+/// What an instance's claims add up to: the claim that won, and the answer
+/// it carries. A `Refuted` resolution still names a claim, so a diagnostic
+/// can say which one was refuted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Resolution {
+    pub verdict: Liveness,
+    pub pid: u32,
+    pub starttime: u64,
+    pub source: LiveSource,
+}
+
+/// Resolve an instance's claims into one answer: the launch anchor first
+/// (the daemon's own claim), the runtime self-report second (a hand boot
+/// keeps the data tree running without touching the record).
+///
+/// `Live` outranks `Unverifiable` — an anchor that still verifies outvotes
+/// a file that lost its pin — and `Unverifiable` outranks `Refuted`, since
+/// "alive but unpinned" is still someone running. Anchor order decides
+/// between equals. `None` means no claim at all.
+///
+/// `judge` is the three-valued judgement, injected so tests can fake it.
+pub fn resolve(
+    anchor: Option<&Identity>,
+    runtime: Option<&RuntimeFile>,
+    judge: &dyn Fn(u32, u64) -> Liveness,
+) -> Option<Resolution> {
+    let claims: Vec<Resolution> = [
+        anchor.map(|anchor| (anchor.pid, anchor.starttime, LiveSource::Anchored)),
+        runtime.map(|runtime| (runtime.pid, runtime.starttime, LiveSource::SelfReported)),
+    ]
+    .into_iter()
+    .flatten()
+    .map(|(pid, starttime, source)| Resolution {
+        verdict: judge(pid, starttime),
+        pid,
+        starttime,
+        source,
+    })
+    .collect();
+    claims
+        .iter()
+        .find(|claim| claim.verdict == Liveness::Live)
+        .or_else(|| {
+            claims
+                .iter()
+                .find(|claim| claim.verdict == Liveness::Unverifiable)
+        })
+        .or_else(|| claims.first())
+        .copied()
+}
+
+/// The uid that owns `/proc/<pid>`: the process's own uid, as the kernel
+/// reports it for the entry. `None` when the entry is gone or unreadable —
+/// a pid that cannot be attributed is not one to signal.
+pub fn proc_uid(pid: u32) -> Option<u32> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(format!("/proc/{pid}"))
+        .ok()
+        .map(|meta| meta.uid())
+}
+
+/// Send `sig` to `pid` only when the kernel attributes it to `uid`.
+///
+/// A signal is the one thing here that cannot be taken back, and every pid
+/// this crate signals comes from a file the instance's owner can write. So
+/// the ownership check sits next to the `kill` instead of at a distance: an
+/// entry that is gone or unreadable is a refusal too, because a pid that
+/// cannot be attributed cannot be proven ours.
+pub fn signal_owned(pid: u32, uid: u32, sig: i32) -> Result<(), SignalError> {
+    match proc_uid(pid) {
+        Some(owner) if owner == uid => {}
+        owner => {
+            return Err(SignalError::Foreign {
+                pid,
+                expected: uid,
+                owner,
+            });
+        }
+    }
+    let rc = unsafe { libc::kill(pid as i32, sig) };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(SignalError::Kill {
+            pid,
+            sig,
+            error: std::io::Error::last_os_error(),
+        })
+    }
+}
+
+/// Why a signal was not sent. Not one failure but two kinds: the kernel
+/// does not attribute the pid to the expected uid (a refusal, and the caller
+/// knows what it means), or `kill(2)` itself failed (the only internal
+/// fault).
+#[derive(Debug)]
+pub enum SignalError {
+    /// The kernel does not attribute this pid to `expected`. `owner` is
+    /// `None` when `/proc` holds no readable entry (the pid is gone).
+    Foreign {
+        pid: u32,
+        expected: u32,
+        owner: Option<u32>,
+    },
+    /// `kill(2)` returned an error.
+    Kill {
+        pid: u32,
+        sig: i32,
+        error: std::io::Error,
+    },
+}
+
+impl std::fmt::Display for SignalError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SignalError::Foreign {
+                pid,
+                expected,
+                owner: Some(owner),
+            } => write!(
+                f,
+                "pid {pid} belongs to uid {owner}, not uid {expected}; not signalling it"
+            ),
+            SignalError::Foreign { pid, .. } => {
+                write!(
+                    f,
+                    "pid {pid} has no readable /proc entry; not signalling it"
+                )
+            }
+            SignalError::Kill { pid, sig, error } => {
+                write!(f, "kill({pid}, {sig}): {error}")
+            }
+        }
+    }
+}
+
 /// `runtime.json`: the instance's runtime identity, written by the
 /// tagma itself. The key set (`pid`, `port`, `starttime`) is a
 /// cross-crate contract — kallipai-tagma serializes its own mirror of
 /// these keys and does not depend on the daemon crates, so the two
-/// definitions stay in lockstep by hand. The self-report half of the
-/// contract stays: the tagma keeps self-reporting its incarnation
-/// start time even though the daemon verifies liveness against its
-/// own `/proc` read.
-#[derive(Debug, serde::Deserialize)]
+/// definitions stay in lockstep by hand. The daemon reads all three:
+/// `starttime` is the incarnation this instance published for itself, the
+/// fallback pin when the record carries no launch anchor, and it is
+/// compared against the daemon's own `/proc` read, never trusted as text.
+#[derive(Debug, Clone, serde::Deserialize)]
 pub struct RuntimeFile {
     pub pid: u32,
     pub port: u16,
-    /// Mirrored for the key-set contract; not read by the daemon.
-    /// `default` keeps pre-key contract files (older tagmas) parsing.
-    #[allow(dead_code)]
+    /// The incarnation the instance published for itself: the fallback pin
+    /// when the record carries none. `default` keeps files written before
+    /// the key existed parsing (a zero pin verifies nothing).
     #[serde(default)]
     pub starttime: u64,
 }
@@ -365,8 +612,7 @@ pub fn scan_instances(record_root: &Path) -> Vec<ScannedInstance> {
             // record) must read back as absent, not as a zero-component
             // path that would compare oddly against real workspaces.
             workspace: record.workspace.filter(|w| !w.is_empty()),
-            pid: runtime.as_ref().map(|r| r.pid),
-            port: runtime.as_ref().map(|r| r.port),
+            runtime,
             owner: Some(record.owner_uid),
             identities: kallipai_daemon_common::credentials::read_enrolled_identities(
                 &record.data_dir,
@@ -472,6 +718,45 @@ mod tests {
     }
 
     #[test]
+    fn an_unparseable_runtime_file_is_named_as_damage() {
+        // The file is there but does not parse: there are no claims to read,
+        // and "no runtime.json" would send an operator looking for a file
+        // that exists.
+        let root = tempfile_dir("broken-runtime");
+        instance(&root, "a", "id", 1000);
+        write(&root.join("data/a/runtime.json"), "{\"pid\":");
+        let health = scan_instances(&root)[0].health();
+        assert_eq!(health.state, InstanceState::Stopped);
+        assert_eq!(health.detail.as_deref(), Some("runtime.json is unreadable"));
+    }
+
+    #[test]
+    fn signal_owned_refuses_a_pid_it_cannot_attribute() {
+        // Signal 0 asks the kernel without delivering anything: the
+        // attribution is what this primitive is for.
+        let uid = unsafe { libc::getuid() };
+        let mine = signal_owned(std::process::id(), uid, 0);
+        assert!(mine.is_ok(), "{mine:?}");
+        let foreign = signal_owned(std::process::id(), uid.wrapping_add(1), 0).unwrap_err();
+        assert!(
+            matches!(
+                foreign,
+                SignalError::Foreign {
+                    owner: Some(owner),
+                    expected,
+                    ..
+                } if owner == uid && expected == uid.wrapping_add(1)
+            ),
+            "{foreign}"
+        );
+        let gone = signal_owned(u32::MAX, uid, 0).unwrap_err();
+        assert!(
+            matches!(gone, SignalError::Foreign { owner: None, .. }),
+            "{gone}"
+        );
+    }
+
+    #[test]
     fn live_foreign_process_is_not_a_match() {
         // This test binary is not kallipai-tagma, so our own pid must NOT
         // count even though it is alive: the exe/comm fallback checks
@@ -558,11 +843,15 @@ mod tests {
     }
 
     #[test]
-    fn scan_of_a_non_tagma_runtime_process_stays_dead() {
-        // The runtime.json names this very process — live, with a real
-        // starttime — but no anchor vouches for it and its exe is not a
-        // kallipai-tagma, so the name chain refuses: Dead, never Running.
-        let root = tempfile_dir("foreign-live");
+    fn a_runtime_self_report_is_the_fallback_pin() {
+        // No anchor: the record predates anchoring, or the claim write
+        // never landed. The runtime file's own start time is then the only
+        // pin, and it is checked against /proc like any other, so a
+        // hand-booted tagma keeps its instance Running without the daemon
+        // having pinned anything. The verdict does not consult the binary
+        // name: a debug build, a rename and a nix wrapper all drift, the
+        // kernel's start time does not.
+        let root = tempfile_dir("self-reported");
         instance(&root, "a", "id", 1000);
         let pid = std::process::id();
         let starttime = proc_starttime(pid).expect("own /proc stat readable");
@@ -571,8 +860,27 @@ mod tests {
             &format!(r#"{{"pid":{pid},"port":7000,"starttime":{starttime}}}"#),
         );
         let scanned = scan_instances(&root);
+        assert_eq!(scanned[0].state(), InstanceState::Running);
+        assert!(scanned[0].info().running);
+    }
+
+    #[test]
+    fn a_runtime_self_report_with_a_wrong_pin_is_dead() {
+        // The same live pid, a start time that is not its own: the pid was
+        // recycled, or the file was hand-made. A pin that does not name
+        // the live incarnation vouches for nothing.
+        let root = tempfile_dir("self-reported-stale");
+        instance(&root, "a", "id", 1000);
+        let pid = std::process::id();
+        let starttime = proc_starttime(pid).expect("own /proc stat readable") + 1;
+        write(
+            &root.join("data/a/runtime.json"),
+            &format!(r#"{{"pid":{pid},"port":7000,"starttime":{starttime}}}"#),
+        );
+        let scanned = scan_instances(&root);
         assert_eq!(scanned[0].state(), InstanceState::Dead);
-        assert!(!scanned[0].info().running);
+        assert_eq!(scanned[0].runtime_pid(), Some(pid));
+        assert_eq!(scanned[0].info().port, None);
     }
 
     #[test]
@@ -702,24 +1010,205 @@ mod tests {
     }
 
     #[test]
-    fn scan_surfaces_runtime_port() {
+    fn an_unpinned_runtime_keeps_running_but_withholds_its_port() {
         let root = tempfile_dir("runtime-port");
+        // An alive pid with no pinned start time: Unverifiable, which still
+        // counts as Running — but nothing names it as this incarnation, so
+        // the port it wrote is not published to callers.
         instance(&root, "a", "id-1", 1000);
+        let pid = std::process::id();
         write(
             &root.join("data/a/runtime.json"),
-            r#"{"pid":1,"port":7301}"#,
+            &format!(r#"{{"pid":{pid},"port":7301}}"#),
         );
+        // A pid no kernel can hand out: nothing is running, and the dead
+        // file's port never reaches the wire.
         instance(&root, "b", "id-2", 1000);
+        write(
+            &root.join("data/b/runtime.json"),
+            r#"{"pid":4294967295,"port":7302,"starttime":5}"#,
+        );
         let scanned = scan_instances(&root);
-        // The raw scan keeps the runtime file's port (pid 1 is not a
-        // live tagma, so this instance is NOT Running)...
-        assert_eq!(scanned[0].port, Some(7301));
-        assert_eq!(scanned[0].state(), InstanceState::Dead);
-        // ...but the wire only surfaces a port for a live Running instance:
-        // the dead runtime.json's stale port must never reach the wire.
-        assert_eq!(scanned[0].info().port, None);
-        // No runtime file at all: no port anywhere.
-        assert_eq!(scanned[1].port, None);
+        assert_eq!(
+            scanned[0].runtime.as_ref().map(|runtime| runtime.port),
+            Some(7301)
+        );
+        assert_eq!(scanned[0].state(), InstanceState::Running);
+        assert_eq!(
+            scanned[0].info().port,
+            None,
+            "an unpinned pid is not provably this instance"
+        );
+        // A pin the kernel confirms: the file names this very incarnation,
+        // so its port is this instance's endpoint.
+        instance(&root, "c", "id-3", 1000);
+        let starttime = proc_starttime(pid).expect("own /proc stat readable");
+        write(
+            &root.join("data/c/runtime.json"),
+            &format!(r#"{{"pid":{pid},"port":7303,"starttime":{starttime}}}"#),
+        );
+        let scanned = scan_instances(&root);
+        assert_eq!(
+            scanned[0].health().detail.as_deref(),
+            Some("alive, but no start time pins it")
+        );
+        assert_eq!(scanned[2].state(), InstanceState::Running);
+        assert_eq!(scanned[2].info().port, Some(7303));
+        assert_eq!(scanned[2].health().detail, None);
+        assert_eq!(scanned[1].state(), InstanceState::Dead);
+        assert_eq!(scanned[1].info().port, None);
+        assert_eq!(
+            scanned[1].health().detail.as_deref(),
+            Some("pid does not match a live instance (stale or reused)")
+        );
+    }
+
+    #[test]
+    fn the_anchor_outvotes_a_stale_runtime_file() {
+        // The record's anchor pins this very process (the test's own /proc
+        // entry stands in for a launch). runtime.json still names a dead pid
+        // from the previous incarnation: the instance is Running, and the
+        // stale file's port is not surfaced.
+        let root = tempfile_dir("anchor-first");
+        let data_dir = root.join("data").join("a");
+        std::fs::create_dir_all(&data_dir).expect("data dir");
+        let pid = std::process::id();
+        let starttime = proc_starttime(pid).expect("own /proc stat readable");
+        crate::records::write_record(
+            &root,
+            "a",
+            &crate::records::InstanceRecord {
+                instance_id: "id".into(),
+                owner_uid: 1000,
+                target_uid: 1000,
+                target_username: None,
+                workspace: Some("/ws".into()),
+                env: vec![],
+                identity: Some(Identity {
+                    pid,
+                    starttime,
+                    anchored_at: 7,
+                }),
+                data_dir: data_dir.clone(),
+                config_dir: None,
+                state_dir: None,
+            },
+        )
+        .expect("write record");
+        write(
+            &data_dir.join("runtime.json"),
+            r#"{"pid":7,"port":7301,"starttime":5}"#,
+        );
+
+        let scanned = scan_instances(&root);
+        assert_eq!(scanned[0].state(), InstanceState::Running);
+        assert!(scanned[0].info().running);
+        assert_eq!(
+            scanned[0].info().port,
+            None,
+            "the stale file's port is not this instance's"
+        );
+    }
+
+    #[test]
+    fn incarnation_liveness_answers_three_ways() {
+        let pid = std::process::id();
+        let starttime = proc_starttime(pid).expect("own /proc stat readable");
+        assert_eq!(incarnation_liveness(pid, starttime), Liveness::Live);
+        assert_eq!(
+            incarnation_liveness(pid, 0),
+            Liveness::Unverifiable,
+            "a zero pin says \"I do not know\", not \"not me\""
+        );
+        assert_eq!(
+            incarnation_liveness(pid, starttime + 1),
+            Liveness::Refuted,
+            "a pin from another incarnation is not this process"
+        );
+        assert_eq!(
+            incarnation_liveness(u32::MAX, 1),
+            Liveness::Refuted,
+            "no process, no verdict"
+        );
+    }
+
+    #[test]
+    fn resolve_prefers_live_then_unverifiable_and_names_the_claim() {
+        let anchor = Identity {
+            pid: 42,
+            starttime: 1000,
+            anchored_at: 7,
+        };
+        let runtime = RuntimeFile {
+            pid: 43,
+            port: 1,
+            starttime: 2000,
+        };
+        // Both claims verify: the anchor is the daemon's own word.
+        let both_live = |_pid: u32, _start: u64| Liveness::Live;
+        let resolution = resolve(Some(&anchor), Some(&runtime), &both_live).expect("a claim");
+        assert_eq!(
+            (resolution.pid, resolution.source, resolution.verdict),
+            (42, LiveSource::Anchored, Liveness::Live)
+        );
+        // The anchor's incarnation is gone: the self-report answers.
+        let only_self = |pid: u32, _start: u64| {
+            if pid == 43 {
+                Liveness::Live
+            } else {
+                Liveness::Refuted
+            }
+        };
+        let resolution = resolve(Some(&anchor), Some(&runtime), &only_self).expect("a claim");
+        assert_eq!(
+            (
+                resolution.pid,
+                resolution.starttime,
+                resolution.source,
+                resolution.verdict
+            ),
+            (43, 2000, LiveSource::SelfReported, Liveness::Live)
+        );
+        // Live is a verdict and Unverifiable the lack of one, so the live
+        // self-report outranks an unpinned anchor.
+        let unpinned_anchor = |pid: u32, _start: u64| {
+            if pid == 42 {
+                Liveness::Unverifiable
+            } else {
+                Liveness::Live
+            }
+        };
+        let resolution = resolve(Some(&anchor), Some(&runtime), &unpinned_anchor).expect("a claim");
+        assert_eq!(
+            (resolution.pid, resolution.source, resolution.verdict),
+            (43, LiveSource::SelfReported, Liveness::Live)
+        );
+        // Neither verifies, but one is alive and unpinned: still someone
+        // running, and the pid to look at.
+        let unpinned_self = |pid: u32, _start: u64| {
+            if pid == 43 {
+                Liveness::Unverifiable
+            } else {
+                Liveness::Refuted
+            }
+        };
+        let resolution = resolve(Some(&anchor), Some(&runtime), &unpinned_self).expect("a claim");
+        assert_eq!(
+            (resolution.pid, resolution.source, resolution.verdict),
+            (43, LiveSource::SelfReported, Liveness::Unverifiable)
+        );
+        // Nothing alive: the first claim is reported as refuted, so a
+        // diagnostic can name what was looked at.
+        let neither = |_pid: u32, _start: u64| Liveness::Refuted;
+        let resolution = resolve(Some(&anchor), Some(&runtime), &neither).expect("a claim");
+        assert_eq!(
+            (resolution.pid, resolution.source, resolution.verdict),
+            (42, LiveSource::Anchored, Liveness::Refuted)
+        );
+        assert!(
+            resolve(None, None, &both_live).is_none(),
+            "no claim, no answer"
+        );
     }
 
     use kallipai_testkit::DevDir;

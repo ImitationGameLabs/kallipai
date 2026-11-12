@@ -35,7 +35,7 @@ pub async fn run(record_root: PathBuf) {
         // depending on the host's pid space.
         let now: Vec<(String, InstanceState, Option<u32>)> = scan::scan_instances(&record_root)
             .into_iter()
-            .map(|i| (i.slug.clone(), i.state(), i.pid))
+            .map(|i| (i.slug.clone(), i.state(), i.runtime_pid()))
             .collect();
         for (slug, pid) in edge_reports(&mut seen, now) {
             // The log tree belongs to the instance's state root, which
@@ -56,7 +56,7 @@ pub async fn run(record_root: PathBuf) {
                 slug = %slug,
                 pid = ?pid,
                 log = %log_field,
-                "instance died: recorded pid is no longer a live kallipai-tagma"
+                "instance died: the incarnation it pinned is no longer live"
             );
         }
         tokio::time::sleep(RECONCILE_INTERVAL).await;

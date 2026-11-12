@@ -415,8 +415,8 @@ one `<slug>.json` per instance); the record and the instance's own
 kallipctl spawn <slug> <workspace> -e RUST_LOG=debug   # passthrough: KALLIPAI_*/RUST_LOG/PATH
 kallipctl spawn <slug> <workspace> --user <account>  # drop to a pre-declared user
 kallipctl list           # every record in the record area
-kallipctl health <slug>  # pid liveness via /proc/<pid>/comm
-kallipctl stop <slug>    # TERM, 10s grace, KILL
+kallipctl health <slug>  # liveness: pid + start time; no pin still counts as running (no port)
+kallipctl stop <slug>    # TERM, 10s grace, KILL; the pid must belong to the instance owner
 ```
 
 Model configuration lives in the instance's own

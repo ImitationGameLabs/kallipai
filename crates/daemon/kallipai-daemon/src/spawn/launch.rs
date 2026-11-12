@@ -283,7 +283,7 @@ pub fn spawn(
             // credentials survive a failed relaunch.
             if let Some(pid) = scan::read_runtime(&data_dir).map(|r| r.pid) {
                 tracing::warn!(pid, "spawn rollback: killing half-booted instance");
-                unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+                kill_leftover(pid, identity.uid());
             }
             if let Err(error) = records::delete_record(record_root, slug) {
                 tracing::warn!(%error, "spawn rollback: removing instance record failed");
@@ -469,13 +469,24 @@ pub(crate) fn launch(
                     comm = ?scan::pid_comm(pid),
                     "launch timed out; killing the pid that never published"
                 );
-                unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+                kill_leftover(pid, identity.uid());
             }
             return Err(SpawnError::Timeout {
                 timeout_secs: timeout.as_secs(),
             });
         }
         std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// Kill the pid a failed launch left behind — but only while the kernel
+/// attributes it to this launch's user. The pid comes from `runtime.json` in
+/// a directory that user can write, so the number alone is a name, not an
+/// identity; the timeout branch arrives here after the anchor check declined
+/// that very pid.
+fn kill_leftover(pid: u32, uid: u32) {
+    if let Err(error) = scan::signal_owned(pid, uid, libc::SIGKILL) {
+        tracing::warn!(pid, %error, "left that pid alone: not attributed to this launch");
     }
 }
 
@@ -490,10 +501,10 @@ pub(crate) fn launch(
 /// stale anchor from a previous incarnation is cleared, never left
 /// lying against a pid it does not name. If the record write itself
 /// fails that is beyond reach: a stale anchor may survive and
-/// classification falls to the name chain — the instance runs, and stop
-/// then verifies by name alone: a mismatch is refused (fail-closed, the
-/// daemon never signals a process it cannot vouch for); the warn names
-/// the gap. Returns false only when
+/// classification falls to the runtime self-report — the instance runs, and
+/// stop signals that pid only once `/proc` shows it belongs to the instance's
+/// owner (fail-closed: the daemon never signals a process it cannot vouch
+/// for); the warn names the gap. Returns false only when
 /// the revalidation race says the pid died under us; the caller keeps
 /// polling rather than reporting a launch it cannot vouch for.
 fn anchor_identity(record_root: &Path, slug: &str, pid: u32) -> bool {
@@ -516,7 +527,7 @@ fn anchor_identity(record_root: &Path, slug: &str, pid: u32) -> bool {
         None => {
             // Without a starttime there is nothing to pin; make that
             // explicit by clearing any anchor a previous incarnation
-            // left, so classification falls to the name chain.
+            // left, so classification falls to the runtime self-report.
             if record.identity.is_some() {
                 tracing::warn!(pid, "cannot read start time; clearing stale anchor");
             }
@@ -617,5 +628,78 @@ pub(super) fn clear_stale_runtime(data_dir: &Path) -> std::io::Result<()> {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A `sleep` child standing in for a half-booted instance. Drop kills
+    /// and reaps it, so a failed assertion never leaves an orphan behind.
+    struct Decoy(std::process::Child);
+
+    impl Decoy {
+        fn spawn() -> Self {
+            Self(
+                std::process::Command::new("sleep")
+                    .arg("30")
+                    .spawn()
+                    .expect("spawn a decoy"),
+            )
+        }
+
+        fn pid(&self) -> u32 {
+            self.0.id()
+        }
+
+        fn exited(&mut self) -> bool {
+            self.0.try_wait().expect("poll the decoy").is_some()
+        }
+
+        fn exited_within(&mut self, budget: Duration) -> bool {
+            let deadline = Instant::now() + budget;
+            while Instant::now() < deadline {
+                if self.exited() {
+                    return true;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            false
+        }
+    }
+
+    impl Drop for Decoy {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    /// The rollback branch and the timeout branch both end in
+    /// `kill_leftover`. A runtime.json its owner wrote names whatever pid
+    /// that owner likes, so a pid the kernel attributes to somebody else
+    /// must survive.
+    #[test]
+    fn a_leftover_kill_leaves_a_foreign_pid_alone() {
+        let mut decoy = Decoy::spawn();
+        let foreign = unsafe { libc::getuid() }.wrapping_add(1);
+        kill_leftover(decoy.pid(), foreign);
+        assert!(
+            !decoy.exited_within(Duration::from_millis(200)),
+            "a pid attributed to another uid was signalled"
+        );
+    }
+
+    /// The half-boot the rollback exists for: a pid this launch's own user
+    /// owns is still killed.
+    #[test]
+    fn a_leftover_kill_stops_the_pid_this_launch_owns() {
+        let mut decoy = Decoy::spawn();
+        kill_leftover(decoy.pid(), unsafe { libc::getuid() });
+        assert!(
+            decoy.exited_within(Duration::from_secs(2)),
+            "the pid this launch owns was not signalled"
+        );
     }
 }
