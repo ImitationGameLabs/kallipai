@@ -30,7 +30,7 @@ struct DaemonProc {
     socket: PathBuf,
     child: std::process::Child,
     /// Every root the child could resolve lives under this one directory.
-    _sandbox: tempfile::TempDir,
+    _sandbox: Option<tempfile::TempDir>,
     /// `<sandbox>/data`: the instance trees the tests read back.
     data_home: PathBuf,
     records: PathBuf,
@@ -123,7 +123,7 @@ fn start_daemon() -> DaemonProc {
             return DaemonProc {
                 socket,
                 child,
-                _sandbox: sandbox,
+                _sandbox: Some(sandbox),
                 data_home: data_dir,
                 records,
                 log_path,
@@ -139,8 +139,26 @@ fn start_daemon() -> DaemonProc {
 
 impl Drop for DaemonProc {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        // Stop the instances before the daemon dies: the launch helper
+        // double-forks and calls setsid, so an instance outlives its daemon.
+        let sandbox = self
+            ._sandbox
+            .take()
+            .expect("the sandbox outlives the daemon");
+        let survivors = kallipai_testkit::tear_down(
+            &self.socket,
+            &self.records,
+            sandbox.path(),
+            &mut self.child,
+        );
+        // Keep the sandbox on a survivor: its record and that instance's
+        // runtime.json are the evidence the gate's leak check reads.
+        if survivors.is_empty() {
+            drop(sandbox);
+        } else {
+            std::mem::forget(sandbox);
+        }
+        kallipai_testkit::blame_survivors(&survivors);
     }
 }
 
@@ -704,6 +722,10 @@ fn start_rejects_when_stale_runtime_names_a_live_pid() {
         ResponseBody::Err { code, .. } => assert_eq!(code, ErrorCode::SlugTaken),
         other => panic!("expected slug_taken refusal, got {other:?}"),
     }
+
+    // The decoy is this test's own pid: drop it, or the fixture's stop reads
+    // a live instance the test never launched.
+    std::fs::remove_file(instance_dir.join("runtime.json")).expect("remove decoy runtime.json");
 }
 
 /// A manually booted (daemon-less) tagma is legal — it just has to name

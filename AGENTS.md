@@ -85,3 +85,5 @@ After modifying Rust code:
 - `cargo test --workspace --all-targets --all-features --no-fail-fast` - Run tests
 - `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps` - Build docs
 - `cargo check`, clippy, test, and doc deny warnings via `.cargo/config.toml` (build.warnings = deny); the doc command repeats the flag on its command line. `CARGO_BUILD_WARNINGS=allow` is for local debugging only and never for a run recorded as a gate.
+- `scripts/rusttest-gate.sh` - The gate form of the line above: it runs the workspace tests inside one throwaway sandbox (HOME, the four XDG homes, TMPDIR) and then `scripts/leakcheck.sh` over that sandbox, so a fixture that leaves an instance behind fails the run instead of leaking into the next one.
+- `scripts/leakcheck-selftest.sh` - Proves the checker still accuses a live recorded pid and still stays quiet on a clean tree, an unpinned record, or a root it must refuse.

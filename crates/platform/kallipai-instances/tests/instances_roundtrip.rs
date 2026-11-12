@@ -22,10 +22,9 @@ use tower::ServiceExt;
 
 struct DaemonProc {
     socket: PathBuf,
-    _data_dir: tempfile::TempDir,
     records: PathBuf,
     child: std::process::Child,
-    _state_dir: tempfile::TempDir,
+    _sandbox: Option<tempfile::TempDir>,
 }
 
 fn resolve_bin(name: &str) -> PathBuf {
@@ -54,51 +53,67 @@ fn resolve_bin(name: &str) -> PathBuf {
 }
 
 fn start_daemon() -> DaemonProc {
-    let data_dir = tempfile::tempdir().expect("data tempdir");
-    let state_dir = tempfile::tempdir().expect("state tempdir");
-    let socket = state_dir.path().join("control.sock");
+    // One sandbox for every root an instance may read. The daemon composes an
+    // instance's roots from the environment it is handed, and an instance is a
+    // live tagma that writes its own `runtime.json` first, so a root key
+    // inherited from the caller's shell would write outside the fixture.
+    let sandbox = tempfile::tempdir().expect("sandbox");
+    let home = sandbox.path().join("home");
+    let data = sandbox.path().join("data");
+    let config = sandbox.path().join("config");
+    let state = sandbox.path().join("state");
+    for dir in [&home, &data, &config, &state] {
+        std::fs::create_dir_all(dir).expect("create sandbox root");
+    }
+    let socket = state.join("control.sock");
+    let records = state.join("records");
     let bin = resolve_bin("kallipai-daemon");
-    let mut child = std::process::Command::new(&bin)
-        // Pin the record area in the state tempdir (the default
-        // derivation would follow the host HOME); the XDG data anchor
-        // isolates the instance trees.
-        .env(
-            "KALLIPAI_DAEMON_RECORD_DIR",
-            state_dir.path().join("records"),
-        )
+    let bin_dir = resolve_bin("kallipai-tagma")
+        .parent()
+        // &Path has no Default; the empty path falls through to bare-name
+        // PATH lookup.
+        .unwrap_or(Path::new(""))
+        .to_path_buf();
+    let env = vec![
+        ("HOME".to_owned(), home.display().to_string()),
+        ("PATH".to_owned(), std::env::var("PATH").unwrap_or_default()),
+        ("XDG_DATA_HOME".to_owned(), data.display().to_string()),
+        ("XDG_CONFIG_HOME".to_owned(), config.display().to_string()),
+        ("XDG_STATE_HOME".to_owned(), state.display().to_string()),
+        (
+            "KALLIPAI_DAEMON_RECORD_DIR".to_owned(),
+            records.display().to_string(),
+        ),
+        (
+            "KALLIPAI_DAEMON_SOCKET".to_owned(),
+            socket.display().to_string(),
+        ),
         // The daemon owns the platform-origin default: the unit env carries
-        // it, so the relay-intent e2e exercises the daemon-side fill
-        // against it.
-        .env("KALLIPAI_POLIS_URL", "http://localhost:8080")
-        .env("XDG_DATA_HOME", data_dir.path())
-        .env(
-            "KALLIPAI_BIN_DIR",
-            resolve_bin("kallipai-tagma")
-                .parent()
-                // &Path has no Default; the empty path falls through to bare-name
-                // PATH lookup.
-                .unwrap_or(Path::new("")),
-        )
-        .env(
-            "KALLIPAI_DAEMON_SOCKET",
-            state_dir.path().join("control.sock"),
-        )
+        // it, so the relay-intent e2e exercises the daemon-side fill against
+        // it.
+        (
+            "KALLIPAI_POLIS_URL".to_owned(),
+            "http://localhost:8080".to_owned(),
+        ),
+        ("KALLIPAI_BIN_DIR".to_owned(), bin_dir.display().to_string()),
+    ];
+    kallipai_testkit::assert_env_roots(&env, &[sandbox.path()]);
+    let mut command = std::process::Command::new(&bin);
+    command
+        .env_clear()
+        .envs(env.iter().map(|(key, value)| (key, value)))
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .expect("spawn daemon");
+        .stderr(std::process::Stdio::null());
+    let mut child = command.spawn().expect("spawn daemon");
     for _ in 0..100 {
         if socket.exists() {
-            // The daemon owns the data dir; the tempdirs must outlive the
-            // reaped child. The guards live in DaemonProc, so both tempdirs
-            // die with it.
-            let records = state_dir.path().join("records");
+            // The sandbox outlives the reaped child: it owns every root the
+            // instance may write.
             return DaemonProc {
                 socket,
-                _data_dir: data_dir,
                 records,
                 child,
-                _state_dir: state_dir,
+                _sandbox: Some(sandbox),
             };
         }
         std::thread::sleep(Duration::from_millis(100));
@@ -110,8 +125,25 @@ fn start_daemon() -> DaemonProc {
 
 impl Drop for DaemonProc {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        let sandbox = self
+            ._sandbox
+            .take()
+            .expect("the sandbox outlives the daemon");
+        let survivors = kallipai_testkit::tear_down(
+            &self.socket,
+            &self.records,
+            sandbox.path(),
+            &mut self.child,
+        );
+        // Keep the sandbox when an instance survived: its record and that
+        // instance's runtime.json are the evidence the gate's leak check reads
+        // after the suite.
+        if survivors.is_empty() {
+            drop(sandbox);
+        } else {
+            std::mem::forget(sandbox);
+        }
+        kallipai_testkit::blame_survivors(&survivors);
     }
 }
 

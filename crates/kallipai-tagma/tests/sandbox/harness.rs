@@ -417,15 +417,47 @@ pub struct TagmaProc {
 }
 
 impl TagmaProc {
+    /// Stop the tagma and let it shut its own children down: SIGTERM first, a
+    /// forced kill only when the grace runs out. `kill_on_drop` stays as the
+    /// last resort for a guard that escapes.
     pub async fn kill(mut self) {
-        let _ = self.child.kill().await;
-        let _ = self.child.wait().await;
+        if let Some(pid) = self.child.id() {
+            unsafe { libc::kill(pid as i32, libc::SIGTERM) };
+        }
+        if tokio::time::timeout(kallipai_testkit::SHUTDOWN_GRACE, self.child.wait())
+            .await
+            .is_err()
+        {
+            let _ = self.child.kill().await;
+            let _ = self.child.wait().await;
+        }
     }
 
     pub fn diagnostics(&self) -> String {
         let stdout = String::from_utf8_lossy(&self.stdout.lock().unwrap()).into_owned();
         let stderr = String::from_utf8_lossy(&self.stderr.lock().unwrap()).into_owned();
         format!("--- tagma stdout ---\n{stdout}\n--- tagma stderr ---\n{stderr}")
+    }
+}
+
+/// A guard that escapes without `kill` still shuts down gracefully: SIGTERM
+/// here, then wait, so the tagma stops its own agents before tokio's
+/// `kill_on_drop` escalates to a kill.
+impl Drop for TagmaProc {
+    fn drop(&mut self) {
+        let Some(pid) = self.child.id() else {
+            return;
+        };
+        unsafe { libc::kill(pid as i32, libc::SIGTERM) };
+        // The guard gets the same short force-kill window every fixture uses;
+        // `kill_on_drop` is the last resort behind it.
+        let deadline = std::time::Instant::now() + kallipai_testkit::KILL_GRACE;
+        while std::time::Instant::now() < deadline {
+            if !kallipai_testkit::process_running(pid as i32) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
     }
 }
 
@@ -551,6 +583,23 @@ async fn spawn_tagma(world: &World, permission_class: Option<&str>) -> TagmaProc
     if let Some(class) = permission_class {
         env.push(("KALLIPAI_ROOT_AGENT_PERMISSION_CLASS", class.into()));
     }
+
+    // The same guard the daemon fixtures run, over the same judgement: every
+    // root this environment names has to resolve inside a fixture directory, or
+    // the tagma writes into a real tree.
+    let pairs: Vec<(String, String)> = env
+        .iter()
+        .map(|(key, value)| ((*key).to_owned(), value.clone()))
+        .collect();
+    kallipai_testkit::assert_env_roots(
+        &pairs,
+        &[
+            world.home_path(),
+            world.data.path(),
+            &world.config_dir,
+            world.workspace.path(),
+        ],
+    );
 
     let mut cmd = Command::new(resolve_bin("kallipai-tagma"));
     cmd.args([

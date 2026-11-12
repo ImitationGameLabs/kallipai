@@ -66,6 +66,9 @@ struct DaemonProc {
     child: std::process::Child,
     /// The daemon's record area inside the fixture home.
     records: PathBuf,
+    /// The fixture home this daemon's roots live under. The stop path proves the
+    /// record area is inside it before signalling anything.
+    home: PathBuf,
 }
 
 /// Boot a daemon whose harvest seed HOME is the fixture home: its login
@@ -121,6 +124,7 @@ fn start_daemon_with_home(home: &Path) -> DaemonProc {
                 socket,
                 child,
                 records,
+                home: home.to_path_buf(),
             };
         }
         std::thread::sleep(Duration::from_millis(100));
@@ -132,8 +136,11 @@ fn start_daemon_with_home(home: &Path) -> DaemonProc {
 
 impl Drop for DaemonProc {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        // Stop the instances before the daemon dies: the launch helper
+        // double-forks and calls setsid, so an instance outlives its daemon.
+        let survivors =
+            kallipai_testkit::tear_down(&self.socket, &self.records, &self.home, &mut self.child);
+        kallipai_testkit::blame_survivors(&survivors);
     }
 }
 

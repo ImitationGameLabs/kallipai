@@ -245,3 +245,9 @@ mod tests {
         assert!(!path.exists(), "the guard must delete the tree on drop");
     }
 }
+
+pub mod sandbox;
+pub mod stop;
+
+pub use sandbox::{assert_contained, assert_env_roots, assert_process_roots};
+pub use stop::{KILL_GRACE, SHUTDOWN_GRACE, blame_survivors, process_running, tear_down};

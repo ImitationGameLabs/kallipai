@@ -3173,6 +3173,7 @@ dependencies = [
  "kallipai-common",
  "kallipai-daemon-client",
  "kallipai-daemon-common",
+ "kallipai-testkit",
  "libc",
  "reqwest",
  "serde",
@@ -3482,6 +3483,10 @@ dependencies = [
 name = "kallipai-testkit"
 version = "0.1.0"
 dependencies = [
+ "kallipai-daemon-client",
+ "kallipai-daemon-common",
+ "libc",
+ "serde_json",
  "tempfile",
  "tokio",
 ]
