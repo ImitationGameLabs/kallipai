@@ -669,6 +669,30 @@ shape is documented in
 deployment on the model-gateway source takes its profiles from there
 instead.
 
+### Observability
+
+Grafana listens on `3000` inside its container. The dev stack publishes it at
+`127.0.0.1:3001` and opens as an anonymous Viewer. The prod stack publishes
+otelcol's `127.0.0.1:4318` and `127.0.0.1:13133` and nothing else for
+observability: Grafana and Prometheus get no host port, and the edge has no
+route to them. To open the prod UI, put `ports: ["127.0.0.1:3002:3000"]` on
+the `grafana` service in `compose/compose.prod.yaml` and run
+`scripts/compose-up.sh prod -- up -d grafana`, which recreates the container;
+prod also turns anonymous access off, so sign in as `admin` with the password
+Grafana was first started with (`GF_SECURITY_ADMIN_PASSWORD`).
+
+Grafana starts with two provisioned data sources, both reached by service
+name: Tempo, the default, at `http://tempo:3200`, and Prometheus at
+`http://prometheus:9090`. Prometheus publishes no host port in either stack,
+because its write receiver takes no credential; it scrapes `gateway:7500` and
+takes otelcol's remote writes, so metrics are read through Grafana rather
+than from a browser pointed at the store. The data source list and
+`grafana.ini` are both rendered from `nix/obs-stack.nix`; `prometheus.yaml`
+comes from `nix/platform-texts.nix`. `nix/packages/stack.nix` installs all
+five texts into the stack directory that `scripts/compose-up.sh` rebuilds on
+its next start. Traces, retention and the pruner are covered in
+[observability](../development/observability.md).
+
 ### Plain Docker
 
 Every image can be built and loaded by hand. The tagma runs from
