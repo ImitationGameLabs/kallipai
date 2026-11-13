@@ -1,21 +1,25 @@
 <script lang="ts">
   import { MENU_ITEM } from "../lib/classes.ts";
   import { Menu, Portal } from "@skeletonlabs/skeleton-svelte";
-  import { LogOut, Settings, User } from "@lucide/svelte";
+  import { LogOut, Settings, User, UserRound } from "@lucide/svelte";
   import { archeionSession } from "../lib/session/archeion.svelte";
   import { channelsStore } from "../lib/session/channels.svelte";
   import { configStore } from "../lib/config/config.svelte";
   import { connectionViewModel } from "../lib/connection.svelte.ts";
   import { navigate, shellMode } from "../lib/shell/port.ts";
   import { logout } from "../lib/session/account-actions.ts";
-  import { account_logout, settings_heading } from "../paraglide/messages.js";
+  import {
+    account_logout,
+    account_menu,
+    settings_heading,
+  } from "../paraglide/messages.js";
 
   // The sidebar-footer account menu: the desktop sidebar's single entry
-  // point for identity + mode actions. Small screens replace this dropdown
-  // with the /account hub page (the bottom bar's trailing cell links
-  // there), so this component renders only the footer's wide pill
-  // trigger. The action behavior lives in account-actions.ts (shared
-  // with the hub page); only the trigger and menu markup live here.
+  // point for identity + mode actions. The /account hub page is its
+  // small-screen twin (the bottom bar's trailing cell links there); the
+  // first row here opens the same page on desktop. The action behavior
+  // lives in account-actions.ts (shared with the hub page); only the
+  // trigger and menu markup live here.
 
   // Branch on mode, not on `user`: the archeion session cookie survives offline
   // mode, so `user` can hold a stale MeResponse while offline (see the invariant
@@ -30,6 +34,9 @@
 
   function onSelect(details: { value: string }) {
     switch (details.value) {
+      case "account":
+        void navigate("/account");
+        break;
       case "settings":
         void navigate("/settings");
         break;
@@ -66,6 +73,10 @@
   <Portal>
     <Menu.Positioner>
       <Menu.Content class="card preset-tonal-surface p-1 min-w-[12rem]">
+        <Menu.Item value="account" class={MENU_ITEM}>
+          <UserRound class="size-4" />
+          {account_menu()}
+        </Menu.Item>
         <Menu.Item value="settings" class={MENU_ITEM}>
           <Settings class="size-4" />
           {settings_heading()}

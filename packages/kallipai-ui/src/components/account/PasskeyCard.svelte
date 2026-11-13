@@ -9,13 +9,13 @@
     type PasskeyCardProps,
   } from "../../lib/passkeys.svelte.ts";
   import {
-    settings_unnamed_device,
-    settings_error_unknown,
-    settings_passwordless_badge_title,
-    settings_passwordless_badge,
-    settings_added_date,
-    settings_last_used,
-    settings_confirm_remove,
+    account_unnamed_device,
+    error_unknown,
+    account_passwordless_badge_title,
+    account_passwordless_badge,
+    account_added_date,
+    account_last_used,
+    account_confirm_remove,
     common_save,
     common_cancel,
     common_rename,
@@ -53,7 +53,7 @@
       // Leave the editor open so the user can retry.
       // Qualitative copy only; the raw error is console material.
       console.error("[passkey] rename failed:", e);
-      renameError = settings_error_unknown();
+      renameError = error_unknown();
     }
   }
 
@@ -67,7 +67,7 @@
       await onRevoke?.(passkey.id);
     } catch (e) {
       console.error("[passkey] revoke failed:", e);
-      revokeError = settings_error_unknown();
+      revokeError = error_unknown();
     }
   }
 </script>
@@ -102,21 +102,21 @@
       <div class="min-w-0">
         <div class="flex items-center gap-2">
           <span class="text-sm font-medium truncate">
-            {passkey.label || settings_unnamed_device()}
+            {passkey.label || account_unnamed_device()}
           </span>
           {#if passkey.discoverable}
             <span
               class="shrink-0 text-[0.65rem] px-1.5 py-0.5 rounded-full bg-primary-500/15 text-primary-600 dark:text-primary-500"
-              title={settings_passwordless_badge_title()}
-              >{settings_passwordless_badge()}</span
+              title={account_passwordless_badge_title()}
+              >{account_passwordless_badge()}</span
             >
           {/if}
         </div>
         <div class="text-xs opacity-60">
-          {settings_added_date({ date: formatPasskeyDate(passkey.createdAt) })}
+          {account_added_date({ date: formatPasskeyDate(passkey.createdAt) })}
           {#if Date.parse(passkey.lastUsedAt) > Date.parse(passkey.createdAt)}
             <span class="opacity-70"
-              >· {settings_last_used({
+              >· {account_last_used({
                 date: formatPasskeyDate(passkey.lastUsedAt),
               })}</span
             >
@@ -131,7 +131,7 @@
         {#if confirming}
           <button
             class="btn btn-sm preset-filled-error-500"
-            onclick={confirmRevoke}>{settings_confirm_remove()}</button
+            onclick={confirmRevoke}>{account_confirm_remove()}</button
           >
           <button
             class="btn btn-sm preset-outlined-surface-500 hover:preset-filled-surface-500"

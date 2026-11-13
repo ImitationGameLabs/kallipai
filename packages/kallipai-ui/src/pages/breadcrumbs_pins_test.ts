@@ -29,6 +29,7 @@ const MIGRATED_PAGES = [
   "./ChannelChatPage.svelte",
   "./SettingsPage.svelte",
   "./account/AccountHubPage.svelte",
+  "./account/AccountTokensPage.svelte",
   "./UserProfilePage.svelte",
   "./manage/OnlineAgentDetailPage.svelte",
   "./manage/OnlineAgentHistoryPage.svelte",
@@ -51,9 +52,13 @@ Deno.test(
       !src.includes("tagmaChatPath"),
       "the chat path must not appear in the table (one target per label)",
     );
+    // One entry( per row. Nineteen: tagmata, files, tagma hub/chat, details
+    // section, agent detail/history, rooms/room/room settings, relay chat,
+    // direct session, settings, account hub, account tokens, user profile,
+    // gateway console, collection detail, user gateway.
     assert(
-      src.split("entry(").length - 1 === 18,
-      "the table must cover the twelve migrated routes + the direct-session page + the files page + the three gateway pages + the agent turn history",
+      src.split("entry(").length - 1 === 19,
+      "the table must cover the nineteen rows listed in the comment above",
     );
   },
 );

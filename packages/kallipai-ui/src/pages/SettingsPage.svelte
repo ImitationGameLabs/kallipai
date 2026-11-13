@@ -1,5 +1,4 @@
 <script lang="ts">
-  import { archeionSession } from "../lib/session/archeion.svelte";
   import { channelsStore } from "../lib/session/channels.svelte";
   import { configStore } from "../lib/config/config.svelte";
   import { shellMode } from "../lib/shell/port.ts";
@@ -11,19 +10,6 @@
     saveTimezoneSetting,
     timezoneCandidates,
   } from "../lib/time/stamp.svelte.ts";
-  import type {
-    AddPasskeyResult,
-    PasskeySummary,
-  } from "@kallipai/kallipai-archeion-client";
-  import type {
-    PasskeyAddHint,
-    PasskeyCardProps,
-    PasskeyPhase,
-  } from "../lib/passkeys.svelte.ts";
-  import PasskeyManager from "../components/settings/PasskeyManager.svelte";
-  import LinkedAccounts from "../components/settings/LinkedAccounts.svelte";
-  import EmailManager from "../components/settings/EmailManager.svelte";
-  import AccessTokens from "../components/settings/AccessTokens.svelte";
   import LightSwitch from "../components/LightSwitch.svelte";
   import LanguageSwitch from "../components/LanguageSwitch.svelte";
   import { Switch } from "@skeletonlabs/skeleton-svelte";
@@ -33,7 +19,6 @@
     type PermissionState,
   } from "../lib/session/notify.ts";
   import {
-    nav_tagmata,
     settings_appearance,
     settings_dark_mode,
     settings_language,
@@ -45,29 +30,22 @@
     settings_timezone_invalid,
     settings_title,
     settings_heading,
-    settings_account,
     settings_connection,
     settings_connected,
     settings_disconnected,
     settings_disconnect,
     settings_reconnect,
-    settings_device_added,
-    settings_cancelled,
-    settings_reauth_failed,
-    settings_passkey_duplicate,
-    settings_rate_limited,
-    settings_error_unknown,
+    error_unknown,
     chat_notifications_label,
     common_save,
     chat_notifications_desc,
     chat_notifications_denied,
   } from "../paraglide/messages.js";
 
-  // Settings is now info-only: account actions (logout, mode switch) live in
-  // the sidebar AccountMenu. Online shows the account (identity lives in
-  // archeion); offline shows the tagma connection (no identity). Offline
-  // Disconnect/Reconnect stays here -- it is tagma session management, not an
-  // account/mode action.
+  // This page answers one question: how the product behaves on this machine.
+  // Identity, passkeys, linked providers and access tokens live on /account;
+  // the offline tagma connection stays here -- Disconnect/Reconnect is tagma
+  // session management, not an account action.
   const mode = $derived(shellMode());
   const offlineUrl = $derived(configStore.value?.offline?.tagmaUrl ?? "");
 
@@ -97,121 +75,6 @@
   // Offline: drop the tagma session without abandoning offline mode.
   function disconnect() {
     channelsStore.detachLocal();
-  }
-
-  // -- passkeys (online only) ----------------------------------------------
-  // Loaded once when the signed-in user resolves. The store mirrors the tagmata
-  // error discipline: a fetch failure lands in `passkeysError` without blanking
-  // `user`; rename/revoke throw and are surfaced per-card.
-  $effect(() => {
-    if (
-      mode === "online" &&
-      archeionSession.user &&
-      !archeionSession.passkeysLoaded
-    ) {
-      archeionSession.refreshPasskeys();
-    }
-  });
-
-  // Personal access tokens: one list fetch when the signed-in user resolves.
-  // The section itself re-renders from the store; the loaded flag keeps a
-  // transient failure from refetching on every render.
-  $effect(() => {
-    if (
-      mode === "online" &&
-      archeionSession.user &&
-      !archeionSession.tokensLoaded
-    ) {
-      archeionSession.refreshTokens();
-    }
-  });
-
-  // Linked OAuth identities + the configured-provider list (for the link
-  // affordance) load when the signed-in user resolves. Both guard on a loaded
-  // flag (NOT on length): a zero-provider deploy is a valid steady state, and
-  // the flag is set on both success and failure so the effect does not refetch.
-  $effect(() => {
-    if (mode === "online" && archeionSession.user) {
-      if (!archeionSession.externalIdentitiesLoaded) {
-        archeionSession.refreshExternalIdentities();
-      }
-      if (!archeionSession.oauthProvidersLoaded) {
-        archeionSession.refreshOAuthProviders();
-      }
-    }
-  });
-
-  // Project the wire types into the prop-driven components. The store owns the
-  // ceremony + mutations; this page only projects state and forwards callbacks.
-  const passkeyCards = $derived(
-    archeionSession.passkeys.map(
-      (p: PasskeySummary): PasskeyCardProps => ({
-        id: p.id,
-        label: p.label,
-        createdAt: p.created_at,
-        lastUsedAt: p.last_used_at,
-        discoverable: p.discoverable,
-      }),
-    ),
-  );
-
-  const passkeyPhase = $derived<PasskeyPhase>(
-    archeionSession.passkeysError
-      ? "error"
-      : archeionSession.passkeysLoaded
-        ? "loaded"
-        : "loading",
-  );
-
-  const passkeyAddHint = $derived(addHintFor(archeionSession.lastAddPasskey));
-
-  let adding = $state(false);
-
-  async function onAdd(
-    label: string,
-    opts: { discoverable?: boolean } = {},
-  ): Promise<boolean> {
-    adding = true;
-    try {
-      return (await archeionSession.addPasskey(label, opts)).ok;
-    } finally {
-      adding = false;
-    }
-  }
-
-  // Cross-device pairing: mint a short-lived code shown on this device for a
-  // new device to redeem. `minting` gates the button; `onClear` drops an expired
-  // code from the store (the countdown fires it).
-  let minting = $state(false);
-
-  async function onMint() {
-    if (minting) return;
-    minting = true;
-    try {
-      await archeionSession.mintPairingCode();
-    } finally {
-      minting = false;
-    }
-  }
-
-  // Project the add-device ceremony result into a renderable hint. The result
-  // type is a client type; the hint is a pure view shape, so the mapping lives
-  // here (the components stay free of the client import).
-  function addHintFor(r: AddPasskeyResult | null): PasskeyAddHint | null {
-    if (!r) return null;
-    if (r.ok) return { tone: "ok", text: settings_device_added() };
-    const map: Record<string, string> = {
-      cancelled: settings_cancelled(),
-      "reauth-required": settings_reauth_failed(),
-      "duplicate-credential": settings_passkey_duplicate(),
-      "rate-limited": settings_rate_limited(),
-      // Same wrapper family as the auth pages: the unknown arm never carries
-      // actionable server copy -- qualitative hint, raw message to console.
-      unknown:
-        (console.error("[add device] unknown failure:", r.message),
-        settings_error_unknown()),
-    };
-    return { tone: "err", text: map[r.reason] ?? settings_error_unknown() };
   }
 
   // -- timezone (offline management face) ---------------------------------
@@ -328,7 +191,7 @@
             </p>
           {:else if tzFeedback === "network"}
             <p class="text-sm preset-text-error-500">
-              {settings_error_unknown()}
+              {error_unknown()}
             </p>
           {/if}
         </div>
@@ -360,50 +223,7 @@
       </div>
     </section>
 
-    {#if mode === "online"}
-      {#if archeionSession.user}
-        {@const me = archeionSession.user}
-        <section class="space-y-3">
-          <h2 class="text-sm font-medium uppercase opacity-60 tracking-wide">
-            {settings_account()}
-          </h2>
-          <div class="card preset-tonal-surface p-4">
-            <!-- display_name is nullable; fall back to the username handle when
-                 unset (presentation policy lives here, not the data layer). -->
-            <div class="min-w-0">
-              <div class="text-sm font-medium truncate">
-                {me.display_name ?? me.username}
-              </div>
-              <div class="text-xs opacity-60 font-mono break-all">
-                @{me.username}
-              </div>
-            </div>
-          </div>
-        </section>
-
-        <EmailManager />
-
-        <LinkedAccounts />
-
-        <PasskeyManager
-          passkeys={passkeyCards}
-          phase={passkeyPhase}
-          error={archeionSession.passkeysError}
-          addHint={passkeyAddHint}
-          {adding}
-          {onAdd}
-          onRename={(id, label) => archeionSession.renamePasskey(id, label)}
-          onRevoke={(id) => archeionSession.revokePasskey(id)}
-          pairingCode={archeionSession.pairingCode}
-          pairingError={archeionSession.pairingError}
-          {minting}
-          {onMint}
-          onClear={() => (archeionSession.pairingCode = null)}
-        />
-
-        <AccessTokens />
-      {/if}
-    {:else}
+    {#if mode === "offline"}
       <section class="space-y-3">
         <h2 class="text-sm font-medium uppercase opacity-60 tracking-wide">
           {settings_connection()}

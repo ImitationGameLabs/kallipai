@@ -36,6 +36,7 @@
   import { isOfflineOnlyShell, navigate, shellMode } from "./port.ts";
   import {
     account_menu,
+    account_tokens,
     manage_agents_heading,
     manage_budget_heading,
     manage_overview_heading,
@@ -483,6 +484,7 @@
     "/files": nav_files,
     "/settings": settings_heading,
     "/account": account_menu,
+    "/account/tokens": account_tokens,
   };
   const mobileTitle = $derived(mobileTitles[pathname]?.());
   // The mobile agents drawer: opened from the chat top-row summary

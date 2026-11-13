@@ -31,7 +31,5 @@
   "shell_offline": "offline",
   "shell_error": "error",
   "shell_update_available": "A new version of this app is deployed.",
-  "shell_update_action": "Reload the app",
-  "account_logout": "Log out",
-  "account_menu": "Account"
+  "shell_update_action": "Reload the app"
 }

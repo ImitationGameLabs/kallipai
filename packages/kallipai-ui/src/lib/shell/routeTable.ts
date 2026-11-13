@@ -15,6 +15,7 @@
 import type { Component, ComponentProps } from "svelte";
 import PanoramaPage from "../../pages/PanoramaPage.svelte";
 import AccountHubPage from "../../pages/account/AccountHubPage.svelte";
+import AccountTokensPage from "../../pages/account/AccountTokensPage.svelte";
 import GatewayCatalogPage from "../../pages/manage/gateway/GatewayCatalogPage.svelte";
 import OAuthCallbackPage from "../../pages/OAuthCallbackPage.svelte";
 import OAuthSignupPage from "../../pages/OAuthSignupPage.svelte";
@@ -133,6 +134,7 @@ export const ROUTES = [
     },
   }),
   row({ pattern: "account", component: AccountHubPage }),
+  row({ pattern: "account/tokens", component: AccountTokensPage }),
   redirectRow({
     pattern: "admin",
     redirect: permanentRedirect(() => adminGatewayPath()),

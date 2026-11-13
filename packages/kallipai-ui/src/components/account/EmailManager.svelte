@@ -14,19 +14,19 @@
   } from "@kallipai/kallipai-archeion-client";
   import { isValidEmail } from "../../lib/email.ts";
   import {
-    settings_email,
-    settings_email_intro,
-    settings_email_none,
-    settings_email_primary,
-    settings_email_verified,
-    settings_email_unverified,
-    settings_email_make_primary,
-    settings_email_token_notice,
-    settings_email_verified_notice,
+    account_email,
+    account_email_intro,
+    account_email_none,
+    account_email_primary,
+    account_email_verified,
+    account_email_unverified,
+    account_email_make_primary,
+    account_email_token_notice,
+    account_email_verified_notice,
     common_add,
-    settings_email_invalid,
-    settings_email_failed,
-    settings_email_verify_token,
+    account_email_invalid,
+    account_email_failed,
+    account_email_verify_token,
     common_remove,
     common_verify,
   } from "../../paraglide/messages.js";
@@ -47,7 +47,7 @@
     // Transport/internal failure: qualitative copy for the form, details to
     // the console (raw exception text never reaches the user).
     console.error(e);
-    return settings_email_failed();
+    return account_email_failed();
   }
 
   async function refresh(): Promise<void> {
@@ -65,7 +65,7 @@
       await archeionClientOrFail().addEmail({ address: newAddress.trim() });
       await refresh();
       newAddress = "";
-      notice = settings_email_token_notice();
+      notice = account_email_token_notice();
     } catch (e) {
       error = msgOf(e);
     } finally {
@@ -82,7 +82,7 @@
       await archeionClientOrFail().verifyEmail({ token: token.trim() });
       await refresh();
       token = "";
-      notice = settings_email_verified_notice();
+      notice = account_email_verified_notice();
     } catch (e) {
       error = msgOf(e);
     } finally {
@@ -123,16 +123,16 @@
 
 <section class="space-y-3">
   <h2 class="text-sm font-medium uppercase opacity-60 tracking-wide">
-    {settings_email()}
+    {account_email()}
   </h2>
 
   <div class="card preset-tonal-surface p-4 space-y-3">
     <p class="text-xs opacity-60">
-      {settings_email_intro()}
+      {account_email_intro()}
     </p>
 
     {#if emails.length === 0}
-      <p class="text-sm opacity-60">{settings_email_none()}</p>
+      <p class="text-sm opacity-60">{account_email_none()}</p>
     {:else}
       <ul class="space-y-2">
         {#each emails as e (e.id)}
@@ -142,16 +142,16 @@
             <span class="flex shrink-0 items-center gap-2">
               {#if e.is_primary}
                 <span class="badge preset-filled-secondary-500"
-                  >{settings_email_primary()}</span
+                  >{account_email_primary()}</span
                 >
               {/if}
               {#if e.verified_at}
                 <span class="text-xs opacity-60"
-                  >{settings_email_verified()}</span
+                  >{account_email_verified()}</span
                 >
               {:else}
                 <span class="text-xs text-warning-500 dark:text-warning-400"
-                  >{settings_email_unverified()}</span
+                  >{account_email_unverified()}</span
                 >
               {/if}
             </span>
@@ -162,7 +162,7 @@
                   class="btn btn-sm preset-outlined-primary-500 hover:preset-filled-primary-500"
                   disabled={busy}
                   onclick={() => makePrimary(e)}
-                  >{settings_email_make_primary()}</button
+                  >{account_email_make_primary()}</button
                 >
               {/if}
               <button
@@ -210,13 +210,13 @@
 
     {#if newAddress.length > 0 && !addressValid}
       <p class="text-xs text-error-500 dark:text-error-400">
-        {settings_email_invalid()}
+        {account_email_invalid()}
       </p>
     {/if}
 
     <details class="text-xs">
       <summary class="cursor-pointer opacity-60"
-        >{settings_email_verify_token()}</summary
+        >{account_email_verify_token()}</summary
       >
       <form
         class="mt-2 flex gap-2"

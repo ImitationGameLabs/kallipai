@@ -11,7 +11,7 @@
     PasskeyPhase,
   } from "../../lib/passkeys.svelte.ts";
   import {
-    settings_passkeys,
+    account_passkeys,
     common_loading,
   } from "../../paraglide/messages.js";
   import AddDevice from "./AddDevice.svelte";
@@ -57,7 +57,7 @@
 
 <section class="space-y-3">
   <h2 class="text-sm font-medium uppercase opacity-60 tracking-wide">
-    {settings_passkeys()}
+    {account_passkeys()}
   </h2>
 
   {#if error}

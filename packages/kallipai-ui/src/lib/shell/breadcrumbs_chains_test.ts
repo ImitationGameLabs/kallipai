@@ -29,6 +29,8 @@ const {
   nav_rooms,
   room_label_fallback,
   settings_heading,
+  account_menu,
+  account_tokens,
 } = await import("../../paraglide/messages.js");
 
 Deno.test("the files page keeps its home-first chain", () => {
@@ -61,6 +63,13 @@ Deno.test("the room settings drill keeps the full chain", () => {
       href: "/rooms/r-1",
     },
     { label: settings_heading(), current: true },
+  ]);
+});
+Deno.test("the token page extends the account chain", () => {
+  assertEquals(matchTrail("/account/tokens"), [
+    { label: nav_home(), href: "/" },
+    { label: account_menu(), href: "/account" },
+    { label: account_tokens(), current: true },
   ]);
 });
 

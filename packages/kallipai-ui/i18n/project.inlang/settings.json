@@ -10,6 +10,7 @@
     "pathPattern": [
       "./project.inlang/messages/{locale}/common.json",
       "./project.inlang/messages/{locale}/shell.json",
+      "./project.inlang/messages/{locale}/account.json",
       "./project.inlang/messages/{locale}/auth.json",
       "./project.inlang/messages/{locale}/connect.json",
       "./project.inlang/messages/{locale}/chat.json",

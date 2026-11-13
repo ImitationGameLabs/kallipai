@@ -17,28 +17,27 @@
     common_cancel,
     common_save,
     auth_couldnt_reach,
-    settings_tokens,
-    settings_tokens_copy,
-    settings_tokens_create,
-    settings_tokens_created,
-    settings_tokens_edit,
-    settings_tokens_effect,
-    settings_tokens_expires,
-    settings_tokens_expiry,
-    settings_tokens_expiry_days,
-    settings_tokens_intro,
-    settings_tokens_last_used,
-    settings_tokens_name,
-    settings_tokens_name_placeholder,
-    settings_tokens_name_required,
-    settings_tokens_never_used,
-    settings_tokens_none,
-    settings_tokens_perms,
-    settings_tokens_perms_required,
-    settings_tokens_revoke,
-    settings_tokens_revoked,
-    settings_tokens_secret_desc,
-    settings_tokens_secret_title,
+    account_tokens_copy,
+    account_tokens_create,
+    account_tokens_created,
+    account_tokens_edit,
+    account_tokens_effect,
+    account_tokens_expires,
+    account_tokens_expiry,
+    account_tokens_expiry_days,
+    account_tokens_intro,
+    account_tokens_last_used,
+    account_tokens_name,
+    account_tokens_name_placeholder,
+    account_tokens_name_required,
+    account_tokens_never_used,
+    account_tokens_none,
+    account_tokens_perms,
+    account_tokens_perms_required,
+    account_tokens_revoke,
+    account_tokens_revoked,
+    account_tokens_secret_desc,
+    account_tokens_secret_title,
   } from "../../paraglide/messages.js";
 
   const tokens = $derived(archeionSession.tokens);
@@ -72,11 +71,11 @@
     error = null;
     notice = null;
     if (!name.trim()) {
-      error = settings_tokens_name_required();
+      error = account_tokens_name_required();
       return;
     }
     if (createPerms.length === 0) {
-      error = settings_tokens_perms_required();
+      error = account_tokens_perms_required();
       return;
     }
     creating = true;
@@ -109,7 +108,7 @@
   async function saveEdit(id: string): Promise<void> {
     if (busyId) return;
     if (editPerms.length === 0) {
-      error = settings_tokens_perms_required();
+      error = account_tokens_perms_required();
       return;
     }
     busyId = id;
@@ -118,7 +117,7 @@
     try {
       await archeionSession.updateToken(id, { perms: editPerms });
       editingId = null;
-      notice = settings_tokens_effect();
+      notice = account_tokens_effect();
     } catch (e) {
       error = msgOf(e);
     } finally {
@@ -143,16 +142,12 @@
 </script>
 
 <section class="space-y-3">
-  <h2 class="text-sm font-medium uppercase opacity-60 tracking-wide">
-    {settings_tokens()}
-  </h2>
-
   <div class="card preset-tonal-surface p-4 space-y-3">
-    <p class="text-xs opacity-60">{settings_tokens_intro()}</p>
-    <p class="text-xs opacity-60">{settings_tokens_effect()}</p>
+    <p class="text-xs opacity-60">{account_tokens_intro()}</p>
+    <p class="text-xs opacity-60">{account_tokens_effect()}</p>
 
     {#if tokens.length === 0}
-      <p class="text-sm opacity-60">{settings_tokens_none()}</p>
+      <p class="text-sm opacity-60">{account_tokens_none()}</p>
     {:else}
       <ul class="space-y-3">
         {#each tokens as t (t.id)}
@@ -169,7 +164,7 @@
               {/if}
               {#if t.revoked_at}
                 <span class="badge preset-filled-error-500 text-xs"
-                  >{settings_tokens_revoked({
+                  >{account_tokens_revoked({
                     date: stamp(t.revoked_at),
                   })}</span
                 >
@@ -191,19 +186,19 @@
 
             <div class="flex flex-wrap gap-x-3 gap-y-1 text-xs opacity-60">
               <span
-                >{settings_tokens_created({ date: stamp(t.created_at) })}</span
+                >{account_tokens_created({ date: stamp(t.created_at) })}</span
               >
               {#if t.expires_at}
                 <span
-                  >{settings_tokens_expires({
+                  >{account_tokens_expires({
                     date: stamp(t.expires_at),
                   })}</span
                 >
               {/if}
               <span
                 >{t.last_used_at
-                  ? settings_tokens_last_used({ date: stamp(t.last_used_at) })
-                  : settings_tokens_never_used()}</span
+                  ? account_tokens_last_used({ date: stamp(t.last_used_at) })
+                  : account_tokens_never_used()}</span
               >
             </div>
 
@@ -236,7 +231,7 @@
                   type="button"
                   class="btn btn-sm preset-outlined-surface-500 hover:preset-filled-surface-500"
                   disabled={busyId === t.id}
-                  onclick={() => startEdit(t)}>{settings_tokens_edit()}</button
+                  onclick={() => startEdit(t)}>{account_tokens_edit()}</button
                 >
                 {#if confirmingRevoke === t.id}
                   <button
@@ -244,7 +239,7 @@
                     class="btn btn-sm preset-filled-error-500"
                     disabled={busyId === t.id}
                     onclick={() => revoke(t.id)}
-                    >{settings_tokens_revoke()}</button
+                    >{account_tokens_revoke()}</button
                   >
                   <button
                     type="button"
@@ -259,7 +254,7 @@
                     class="btn btn-sm preset-outlined-error-500 hover:preset-filled-error-500"
                     disabled={busyId === t.id}
                     onclick={() => (confirmingRevoke = t.id)}
-                    >{settings_tokens_revoke()}</button
+                    >{account_tokens_revoke()}</button
                   >
                 {/if}
               </div>
@@ -271,10 +266,10 @@
 
     {#if issued}
       <NewSecretPanel
-        title={settings_tokens_secret_title()}
-        description={settings_tokens_secret_desc()}
+        title={account_tokens_secret_title()}
+        description={account_tokens_secret_desc()}
         secret={issued.plaintext}
-        copyLabel={settings_tokens_copy()}
+        copyLabel={account_tokens_copy()}
         onDismiss={() => (issued = null)}
       />
     {/if}
@@ -295,32 +290,32 @@
         create();
       }}
     >
-      <p class="text-sm font-medium">{settings_tokens_create()}</p>
+      <p class="text-sm font-medium">{account_tokens_create()}</p>
       <div class="flex flex-col gap-2 sm:flex-row">
         <input
           class="input text-sm"
           type="text"
           maxlength="64"
-          placeholder={settings_tokens_name_placeholder()}
-          aria-label={settings_tokens_name()}
+          placeholder={account_tokens_name_placeholder()}
+          aria-label={account_tokens_name()}
           bind:value={name}
           disabled={creating}
         />
         <select
           class="select text-sm shrink-0"
-          aria-label={settings_tokens_expiry()}
+          aria-label={account_tokens_expiry()}
           bind:value={expiry}
           disabled={creating}
         >
           {#each expiryChoices as days (days)}
             <option value={days}
-              >{settings_tokens_expiry_days({ days: String(days) })}</option
+              >{account_tokens_expiry_days({ days: String(days) })}</option
             >
           {/each}
         </select>
       </div>
       <fieldset class="space-y-1">
-        <legend class="text-xs opacity-60">{settings_tokens_perms()}</legend>
+        <legend class="text-xs opacity-60">{account_tokens_perms()}</legend>
         <PermChecklist
           value={createPerms}
           onChange={(next) => (createPerms = next)}
@@ -330,7 +325,7 @@
       <button
         type="submit"
         class="btn preset-filled-primary-500 text-sm"
-        disabled={creating}>{creating ? "…" : settings_tokens_create()}</button
+        disabled={creating}>{creating ? "…" : account_tokens_create()}</button
       >
     </form>
   </div>

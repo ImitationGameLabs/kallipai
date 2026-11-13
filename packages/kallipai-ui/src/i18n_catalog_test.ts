@@ -16,6 +16,7 @@ import { assert, assertEquals, assertFalse } from "@std/assert";
 const FILES = [
   "common",
   "shell",
+  "account",
   "auth",
   "connect",
   "chat",
@@ -52,6 +53,10 @@ const loaders: Record<string, Loader> = {
     }).then((m) => m.default as Record<string, string>),
   "en|shell": () =>
     import("../i18n/project.inlang/messages/en/shell.json", {
+      with: { type: "json" },
+    }).then((m) => m.default as Record<string, string>),
+  "en|account": () =>
+    import("../i18n/project.inlang/messages/en/account.json", {
       with: { type: "json" },
     }).then((m) => m.default as Record<string, string>),
   "en|auth": () =>
@@ -152,6 +157,10 @@ const loaders: Record<string, Loader> = {
     }).then((m) => m.default as Record<string, string>),
   "zh|shell": () =>
     import("../i18n/project.inlang/messages/zh/shell.json", {
+      with: { type: "json" },
+    }).then((m) => m.default as Record<string, string>),
+  "zh|account": () =>
+    import("../i18n/project.inlang/messages/zh/account.json", {
       with: { type: "json" },
     }).then((m) => m.default as Record<string, string>),
   "zh|auth": () =>
@@ -444,7 +453,7 @@ const PREFIX_FILES: Record<string, string> = {
   shell_status: "shell",
   connection: "shell",
   nav: "shell",
-  account: "shell",
+  account: "account",
   admin: "shell",
   auth: "auth",
   login: "auth",
@@ -585,7 +594,6 @@ const SYNONYMS: string[][] = [
   ],
   ["files_download_aria", "chat_file_download_aria"],
   ["chat_attachment_remove", "chat_mention_remove_aria"],
-  ["account_menu", "settings_account"],
   ["settings_heading", "rooms_menu_settings"],
   ["connection_connecting", "shell_connecting"],
   ["nav_manage", "tagma_menu_manage"],
@@ -602,7 +610,7 @@ const SYNONYMS: string[][] = [
   ["manage_tasks_col_archived", "manage_tasks_show_archived"],
   ["auth_creating", "rooms_creating"],
   ["login_username", "auth_username"],
-  ["auth_couldnt_reach", "settings_email_failed"],
+  ["auth_couldnt_reach", "account_email_failed"],
   ["room_settings_aria", "roomsettings_subtitle"],
   ["roomsettings_removing", "tagma_rooms_removing"],
   ["roomsettings_remove_failed", "tagma_rooms_remove_failed"],
@@ -681,19 +689,19 @@ const SYNONYMS: string[][] = [
   ["user_gateway_heading", "user_gateway_menu"],
   ["manage_agent_description", "user_gateway_set_description"],
   ["manage_profiles_providers", "user_gateway_providers"],
-  ["settings_tokens_perms", "tagma_credential_perms"],
+  ["account_tokens_perms", "tagma_credential_perms"],
   [
-    "settings_tokens_created",
+    "account_tokens_created",
     "tagma_credential_created",
     "tagma_profile_created",
   ],
   [
-    "settings_tokens_last_used",
+    "account_tokens_last_used",
     "tagma_credential_last_used",
-    "settings_last_used",
+    "account_last_used",
   ],
-  ["settings_tokens_never_used", "tagma_credential_never_used"],
-  ["settings_tokens_copy", "tagma_credential_copy"],
+  ["account_tokens_never_used", "tagma_credential_never_used"],
+  ["account_tokens_copy", "tagma_credential_copy"],
 ];
 
 Deno.test("catalog: same-value keys are all deliberate synonyms", () => {

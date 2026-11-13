@@ -3,7 +3,7 @@
   // `?code=...&state=...` (read from the URL by each app's thin route wrapper
   // and passed as props). The page exchanges them via the store, then navigates
   // by the result kind: a signin resumes to `returnPath`/home, a link returns to
-  // settings, a needs-username (unlinked identity) continues to the username
+  // the account page (the linked providers live there), a needs-username
   // step. A failure renders inline + a return-to-login link.
   import { onMount } from "svelte";
   import {
@@ -59,8 +59,8 @@
         });
         await navigate("/auth/signup");
       } else {
-        // A completed link returns to settings (the user is already signed in).
-        await navigate("/settings");
+        // A completed link returns to the account page (already signed in).
+        await navigate("/account");
       }
     } catch (e) {
       busy = false;

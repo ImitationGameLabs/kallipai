@@ -222,8 +222,32 @@ Deno.test(
     assertEquals(decide({ mode: "online", pathname: "/account", user: USER }), {
       kind: "render",
     });
+    // Access tokens are an online-only surface: offline folds the page back
+    // to the hub, which is where the way in lives.
+    assertEquals(decide({ mode: "offline", pathname: "/account/tokens" }), {
+      kind: "redirect",
+      url: "/account",
+    });
+    // The router drops one trailing slash, so the gate's offline test must
+    // fold both spellings of the same URL.
+    assertEquals(decide({ mode: "offline", pathname: "/account/tokens/" }), {
+      kind: "redirect",
+      url: "/account",
+    });
+    assertEquals(
+      decide({ mode: "online", pathname: "/account/tokens", user: USER }),
+      { kind: "render" },
+    );
   },
 );
+Deno.test("online + signed-in /pair -> redirect /account", () => {
+  // The add-device UI lives on the account page; leaving an authed user on
+  // the anonymous code-entry page would mint a second session.
+  assertEquals(decide({ mode: "online", pathname: "/pair", user: USER }), {
+    kind: "redirect",
+    url: "/account",
+  });
+});
 
 Deno.test("offline + /chats and /chats/* -> redirect /local", () => {
   // The hub is online-only; offline deep links collapse to the local home

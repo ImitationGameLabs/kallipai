@@ -10,10 +10,10 @@
 //     ArcheionSessionStore: `undefined` = unresolved (whoami running / failed),
 //     `null` = resolved logged-out, object = signed in. `authError` is set when
 //     whoami failed with a non-auth error (e.g. archeion unreachable). Online routes
-//     are /settings + /chat/{server-id} (relay conversations) + the mode-neutral
-//     /tagmata (the unified tagmata page: registry cards + local processes).
-//     `/` is the panorama home (the root route itself sends small screens
-//     to /chats). `/local/*` (offline-only routes) and the
+//     are /account, /account/tokens, /settings, /chat/{server-id} (relay
+//     conversations), the mode-neutral /tagmata (registry cards + local
+//     processes) and `/` (the panorama home; the root route sends small
+//     screens to /chats). `/local/*` (offline-only routes) and the
 //     `/chat/local` marker are not valid online destinations and redirect
 //     to /chats (the chats hub).
 //   - "offline" -- no auth, no identity. `localAttached` (a local conversation
@@ -96,7 +96,7 @@ export function appGateDecision(args: {
     }
     // online
     // A signed-in user hitting /pair (the anonymous-device code-entry page)
-    // goes to settings, where the mint UI lives — landing them on the code
+    // goes to /account, where the add-device UI lives — landing them on the
     // entry would be wrong (and would mint a second session for an already-
     // authed user).
     if (
@@ -104,7 +104,7 @@ export function appGateDecision(args: {
       args.user != null &&
       args.user !== undefined
     ) {
-      return { kind: "redirect", url: "/settings" };
+      return { kind: "redirect", url: "/account" };
     }
     // Already signed in: the front door is the panorama home.
     if (
@@ -157,6 +157,11 @@ export function appGateDecision(args: {
       args.pathname.startsWith("/rooms/")
     ) {
       return { kind: "redirect", url: "/local" };
+    }
+    // Access tokens are an online surface; /account is the way into them.
+    // The prefix match keeps the router's trailing-slash tolerance.
+    if (args.pathname.startsWith("/account/tokens")) {
+      return { kind: "redirect", url: "/account" };
     }
     // /settings: page owns its disconnected empty state.
     return { kind: "render" };

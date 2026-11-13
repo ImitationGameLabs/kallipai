@@ -6,9 +6,9 @@
   // threads through the step-up re-auth, so it must not be dropped while busy).
   import type { PasskeyAddHint } from "../../lib/passkeys.svelte.ts";
   import {
-    settings_passkey_label_placeholder,
-    settings_add_passkey,
-    settings_passwordless_hint,
+    account_passkey_label_placeholder,
+    account_add_passkey,
+    account_passwordless_hint,
     common_adding,
   } from "../../paraglide/messages.js";
 
@@ -58,7 +58,7 @@
   <div class="flex flex-wrap gap-2">
     <input
       class="input input-sm flex-1 min-w-32"
-      placeholder={settings_passkey_label_placeholder()}
+      placeholder={account_passkey_label_placeholder()}
       maxlength={64}
       bind:value={label}
       disabled={busy}
@@ -69,12 +69,12 @@
       disabled={!label.trim() || busy}
       onclick={submit}
     >
-      {busy ? common_adding() : settings_add_passkey()}
+      {busy ? common_adding() : account_add_passkey()}
     </button>
   </div>
   <label class="flex items-center gap-2 text-xs opacity-70 select-none">
     <input type="checkbox" bind:checked={discoverable} disabled={busy} />
-    {settings_passwordless_hint()}
+    {account_passwordless_hint()}
   </label>
   {#if hint}
     <div

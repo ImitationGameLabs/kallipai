@@ -14,11 +14,11 @@
   import AddPasskey from "./AddPasskey.svelte";
   import PairAnotherDevice from "./PairAnotherDevice.svelte";
   import {
-    settings_add_device_trigger,
-    settings_add_device_title,
-    settings_add_device_desc,
-    settings_another_device,
-    settings_this_device,
+    account_add_device_trigger,
+    account_add_device_title,
+    account_add_device_desc,
+    account_another_device,
+    account_this_device,
     common_done,
   } from "../../paraglide/messages.js";
 
@@ -62,7 +62,7 @@
   <Dialog.Trigger
     class="text-sm opacity-60 hover:opacity-100 transition-opacity cursor-pointer"
   >
-    {settings_add_device_trigger()}
+    {account_add_device_trigger()}
   </Dialog.Trigger>
 
   <Portal>
@@ -72,10 +72,10 @@
         class="card preset-tonal-surface w-full max-w-md p-5 space-y-4"
       >
         <Dialog.Title class="text-lg font-semibold"
-          >{settings_add_device_title()}</Dialog.Title
+          >{account_add_device_title()}</Dialog.Title
         >
         <Dialog.Description class="sr-only">
-          {settings_add_device_desc()}
+          {account_add_device_desc()}
         </Dialog.Description>
 
         <Tabs value={mode} onValueChange={(e) => (mode = e.value as Mode)}>
@@ -86,7 +86,7 @@
                 ? 'preset-filled-primary-500'
                 : 'preset-tonal-surface'}"
             >
-              {settings_another_device()}
+              {account_another_device()}
             </Tabs.Trigger>
             <Tabs.Trigger
               value="this"
@@ -94,7 +94,7 @@
                 ? 'preset-filled-primary-500'
                 : 'preset-tonal-surface'}"
             >
-              {settings_this_device()}
+              {account_this_device()}
             </Tabs.Trigger>
           </Tabs.List>
 

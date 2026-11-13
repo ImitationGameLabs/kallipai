@@ -12,12 +12,12 @@
   } from "../../lib/passkeys.svelte.ts";
   import { copyText } from "../../lib/clipboard.ts";
   import {
-    settings_pair_qr_alt,
-    settings_pair_show,
-    settings_pair_expires,
-    settings_copy_code,
-    settings_pair_intro,
-    settings_generate_pair_code,
+    account_pair_qr_alt,
+    account_pair_show,
+    account_pair_expires,
+    account_copy_code,
+    account_pair_intro,
+    account_generate_pair_code,
     common_copied,
     common_generating,
   } from "../../paraglide/messages.js";
@@ -89,37 +89,37 @@
     {#if qrDataUrl}
       <img
         src={qrDataUrl}
-        alt={settings_pair_qr_alt()}
+        alt={account_pair_qr_alt()}
         class="w-48 h-48 rounded"
       />
     {/if}
     <div class="text-center">
-      <div class="text-xs opacity-60">{settings_pair_show()}</div>
+      <div class="text-xs opacity-60">{account_pair_show()}</div>
       <div class="text-2xl font-mono tracking-widest font-semibold mt-1">
         {view.code}
       </div>
       <div class="text-xs opacity-60 mt-1">
-        {settings_pair_expires({ seconds: remaining })}
+        {account_pair_expires({ seconds: remaining })}
       </div>
     </div>
     <button
       class="btn min-w-24 preset-outlined-primary-500 hover:preset-filled-primary-500"
       onclick={copy}
     >
-      {copied ? common_copied() : settings_copy_code()}
+      {copied ? common_copied() : account_copy_code()}
     </button>
   </div>
 {:else}
   <div class="space-y-2">
     <p class="text-sm opacity-70">
-      {settings_pair_intro()}
+      {account_pair_intro()}
     </p>
     <button
       class="btn btn-sm preset-filled-primary-500"
       disabled={minting}
       onclick={onMint}
     >
-      {minting ? common_generating() : settings_generate_pair_code()}
+      {minting ? common_generating() : account_generate_pair_code()}
     </button>
     {#if error}
       <div class="text-xs text-error-600 dark:text-error-500">{error}</div>

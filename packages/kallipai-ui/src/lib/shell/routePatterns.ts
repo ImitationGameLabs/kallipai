@@ -13,6 +13,7 @@
 export const ROUTE_PATTERNS = [
   "",
   "account",
+  "account/tokens",
   "admin",
   "admin/gateway",
   "admin/gateway/collections/[name]",

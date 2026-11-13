@@ -8,12 +8,12 @@
   import { archeionSession } from "../../lib/session/archeion.svelte";
   import { ArcheionApiError } from "@kallipai/kallipai-archeion-client";
   import {
-    settings_linked_accounts,
-    settings_linked_intro,
-    settings_linked_none,
-    settings_unlink,
-    settings_link_provider,
-    settings_last_signin_error,
+    account_linked_accounts,
+    account_linked_intro,
+    account_linked_none,
+    account_unlink,
+    account_link_provider,
+    account_last_signin_error,
     auth_reauth_required,
   } from "../../paraglide/messages.js";
 
@@ -41,7 +41,7 @@
   function msgOf(e: unknown): string {
     if (e instanceof ArcheionApiError) {
       if (e.status === 409) {
-        return settings_last_signin_error();
+        return account_last_signin_error();
       }
       // The link begin is step-up gated; a 403 means the session's freshness
       // has expired. Surface a friendly prompt (the retry UI is a follow-up).
@@ -86,16 +86,16 @@
 
 <section class="space-y-3">
   <h2 class="text-sm font-medium uppercase opacity-60 tracking-wide">
-    {settings_linked_accounts()}
+    {account_linked_accounts()}
   </h2>
 
   <div class="card preset-tonal-surface p-4 space-y-3">
     <p class="text-xs opacity-60">
-      {settings_linked_intro()}
+      {account_linked_intro()}
     </p>
 
     {#if identities.length === 0}
-      <p class="text-sm opacity-60">{settings_linked_none()}</p>
+      <p class="text-sm opacity-60">{account_linked_none()}</p>
     {:else}
       <ul class="space-y-2">
         {#each identities as ident (ident.id)}
@@ -112,7 +112,7 @@
               type="button"
               class="btn btn-sm preset-outlined-error-500 hover:preset-filled-error-500 shrink-0"
               disabled={busy}
-              onclick={() => unlink(ident.id)}>{settings_unlink()}</button
+              onclick={() => unlink(ident.id)}>{account_unlink()}</button
             >
           </li>
         {/each}
@@ -133,7 +133,7 @@
             class="btn btn-sm preset-outlined-primary-500 hover:preset-filled-primary-500"
             disabled={busy}
             onclick={() => link(p.id)}
-            >{settings_link_provider({ provider: p.label })}</button
+            >{account_link_provider({ provider: p.label })}</button
           >
         {/each}
       </div>

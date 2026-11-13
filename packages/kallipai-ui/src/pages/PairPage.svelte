@@ -16,7 +16,7 @@
     auth_couldnt_reach,
     auth_add_this_device,
     auth_sign_in,
-    settings_passkey_duplicate,
+    account_passkey_duplicate,
     pair_title,
     pair_subtitle,
     pair_code_label,
@@ -97,7 +97,7 @@
       case "invalid-code":
         return pair_invalid_code();
       case "duplicate-credential":
-        return settings_passkey_duplicate();
+        return account_passkey_duplicate();
       case "rate-limited":
         return auth_rate_limited();
       default:

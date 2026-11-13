@@ -25,6 +25,7 @@ import {
 } from "./routes.ts";
 import {
   account_menu,
+  account_tokens,
   chat_title_local,
   manage_gateway_menu,
   manage_history_heading,
@@ -209,6 +210,11 @@ export const trailTable: TrailEntry[] = [
   entry("/account", () => [
     { label: nav_home(), href: "/" },
     { label: account_menu(), current: true },
+  ]),
+  entry("/account/tokens", () => [
+    { label: nav_home(), href: "/" },
+    { label: account_menu(), href: "/account" },
+    { label: account_tokens(), current: true },
   ]),
   // The matcher decodes captures once, aligned with the decoded params the
   // framework hands the page shells -- the resolver uses them as-is.

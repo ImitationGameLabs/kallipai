@@ -4,12 +4,12 @@
 // values: they must match the server byte for byte, so nothing here renames
 // them. The labels are the human face and live in the catalog.
 import {
-  settings_tokens_perm_archeion_account_read,
-  settings_tokens_perm_archeion_tagma_read,
-  settings_tokens_perm_archeion_tagma_write,
-  settings_tokens_perm_files_delivery_write,
-  settings_tokens_perm_files_record_read,
-  settings_tokens_perm_files_record_write,
+  account_tokens_perm_archeion_account_read,
+  account_tokens_perm_archeion_tagma_read,
+  account_tokens_perm_archeion_tagma_write,
+  account_tokens_perm_files_delivery_write,
+  account_tokens_perm_files_record_read,
+  account_tokens_perm_files_record_write,
 } from "../paraglide/messages.js";
 
 export const PERM_IDS = [
@@ -40,12 +40,12 @@ export const PAT_DEFAULT_PERMS: readonly PermId[] = [
 ];
 
 const LABELS: Record<PermId, () => string> = {
-  "archeion:tagma:read": settings_tokens_perm_archeion_tagma_read,
-  "archeion:tagma:write": settings_tokens_perm_archeion_tagma_write,
-  "archeion:account:read": settings_tokens_perm_archeion_account_read,
-  "files:record:read": settings_tokens_perm_files_record_read,
-  "files:record:write": settings_tokens_perm_files_record_write,
-  "files:delivery:write": settings_tokens_perm_files_delivery_write,
+  "archeion:tagma:read": account_tokens_perm_archeion_tagma_read,
+  "archeion:tagma:write": account_tokens_perm_archeion_tagma_write,
+  "archeion:account:read": account_tokens_perm_archeion_account_read,
+  "files:record:read": account_tokens_perm_files_record_read,
+  "files:record:write": account_tokens_perm_files_record_write,
+  "files:delivery:write": account_tokens_perm_files_delivery_write,
 };
 
 /** A human label for one permission string. An id outside the vocabulary (a
