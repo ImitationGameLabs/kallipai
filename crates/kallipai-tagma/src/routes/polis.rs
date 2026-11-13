@@ -5,8 +5,8 @@
 //! enrolled identity the tagma holds there, which is operator-level
 //! configuration; no agent identity reads or changes it. The tagma keeps no
 //! owner PAT: the caller brings an enrollment code, and the call spends it
-//! (`activate_relay`). The gateway's target list is the set resolved at
-//! startup, so every write response says in as many words that this boot's
+//! (`activate_relay`). The model gateway's platform list is the set resolved
+//! at startup, so every write response says in as many words that this boot's
 //! list did not move.
 
 use axum::Json;
@@ -21,17 +21,18 @@ use crate::polis_config::{self, PolisConfigError};
 use crate::state::SharedState;
 use crate::{EnrollEntry, RelayEntry};
 
-/// What a write did, and what it did not: the gateway's target list is the
-/// boot's, so an added entry serves the relay now and the gateway next start.
+/// What a write did, and what it did not: the model gateway's platform list
+/// is the boot's, so an added entry serves the relay now and the gateway
+/// at the next start.
 const ADDED_NOTE: &str = concat!(
-    "relay connected; the gateway's target list is still the one from startup, so ",
-    "this entry joins it on the next start"
+    "relay connected; the model gateway's platform list is still the one from ",
+    "startup, so this entry joins it on the next start"
 );
 
 /// The removal half of the same sentence.
 const REMOVED_NOTE: &str = concat!(
-    "entry removed and its relay stopped; the gateway's target list is still the ",
-    "one from startup, so this entry leaves it on the next start"
+    "entry removed and its relay stopped; the model gateway's platform list is ",
+    "still the one from startup, so this entry leaves it on the next start"
 );
 
 /// The same name and origin, credentials already stored, but nothing running:
@@ -73,12 +74,15 @@ pub(crate) async fn add_polis(
     let entry_dir = credentials_dir()?.join(&name);
     let stored = crate::credentials::load_tagma(&entry_dir);
 
-    // A code is never spent on a live enrollment: resolve_enroll_entry would
-    // ignore it and the platform would keep a registration nobody redeems.
-    if stored.is_some() && body.code.is_some() {
+    // A code is never spent on a live enrollment unless the caller asks
+    // for exactly that (a replacement: the code re-enrolls, and the new
+    // pair takes the old one's place). Without that request the platform
+    // would keep a registration nobody redeems.
+    if stored.is_some() && body.code.is_some() && !body.replace {
         return Err(ApiError::conflict(format!(
             "{name} is already enrolled; re-post without the code to reuse its \
-             credentials, or delete it first to rebind"
+             credentials, delete it first to rebind, or send \"replace\": true to \
+             enroll again and replace them"
         )));
     }
 
@@ -106,6 +110,10 @@ pub(crate) async fn add_polis(
     });
 
     let boot = match (stored.is_some(), code) {
+        (true, Some(code)) if body.replace => EnrollEntry::Fresh {
+            code,
+            replace: true,
+        },
         (true, _) => {
             let same_origin = existing
                 .as_ref()
@@ -132,7 +140,10 @@ pub(crate) async fn add_polis(
             crate::resolve_enroll_entry(stored.as_ref(), &origin, None)
                 .map_err(ApiError::internal)?
         }
-        (false, Some(code)) => EnrollEntry::Fresh { code },
+        (false, Some(code)) => EnrollEntry::Fresh {
+            code,
+            replace: false,
+        },
         (false, None) => {
             return Err(ApiError::bad_request(format!(
                 "{name} is not enrolled and the request carries no code: mint a \
@@ -143,6 +154,7 @@ pub(crate) async fn add_polis(
         }
     };
 
+    let spent_a_code = matches!(boot, EnrollEntry::Fresh { .. });
     if let Err(failure) = start_relay(&state, &name, &origin, boot).await {
         return Err(activation_error(
             &name,
@@ -154,29 +166,44 @@ pub(crate) async fn add_polis(
 
     if let Err(error) = polis_config::add(&name, &origin) {
         // Roll back what this call started, so a refused commit leaves the
-        // instance exactly as it was.
+        // instance exactly as it was. The pair on disk is read first, before the
+        // rollback deletes the directory that holds it: the platform
+        // registration this enrollment leaves behind is named below.
+        let on_disk = crate::credentials::load_tagma(&entry_dir);
         let stopped = stop_relay(&state, &name).await;
         if stored.is_none() {
             let _ = std::fs::remove_dir_all(&entry_dir);
         }
-        // A first enrollment leaves a registration on the platform that the
-        // rollback cannot undo: the code is spent either way, so the sentence
-        // names the way out.
-        let platform_note = if stored.is_none() {
-            "; the platform registration from this enrollment still exists, \
-             remove it with `kallipctl polis revoke <polis> <tagma-id>`"
+        // Enrollment leaves a registration on the platform that the rollback
+        // cannot undo: the code is spent either way, so the sentence names the
+        // way out. The platform stays a placeholder because only the operator
+        // knows which register entry the code was minted from.
+        let platform_note = if spent_a_code {
+            let tagma = on_disk
+                .as_ref()
+                .map_or_else(|| "<tagma-id>".to_owned(), |pair| pair.id.clone());
+            format!(
+                "; the platform registration from this enrollment still exists, \
+                 remove it with `kallipctl polis revoke <polis> {tagma}`"
+            )
         } else {
-            ""
+            String::new()
         };
+        let slug = crate::boot_slug().unwrap_or_else(|_| "<slug>".to_owned());
+        let credentials = write_failure_credentials(Refusal {
+            existing: existing.as_ref().map(|entry| entry.polis_url.as_str()),
+            stored: stored.is_some(),
+            spent_a_code,
+            body_replace: body.replace,
+            origin: &origin,
+            slug: &slug,
+            name: &name,
+        });
         return Err(ApiError::internal(format!(
             "the entry could not be written to polis.toml ({error}); the relay was \
              {} and credentials {}{platform_note}",
             describe_stop(stopped),
-            if stored.is_none() {
-                "created by this call were removed"
-            } else {
-                "kept (they predate this call)"
-            }
+            credentials
         )));
     }
 
@@ -187,6 +214,80 @@ pub(crate) async fn add_polis(
             "note": ADDED_NOTE,
         })),
     ))
+}
+
+/// What a refused write has to report: the pair the call found (`existing` is
+/// the file's address for that name), what it spent, and the origin it was
+/// asked for. The fields are named at every call site so two of them cannot
+/// trade places unnoticed.
+struct Refusal<'a> {
+    existing: Option<&'a str>,
+    stored: bool,
+    spent_a_code: bool,
+    body_replace: bool,
+    origin: &'a str,
+    slug: &'a str,
+    name: &'a str,
+}
+
+/// What a refused write did to the pair on disk, said in one sentence. The
+/// file's state under that name decides which recovery the sentence can name,
+/// and every branch says what this call did to the pair.
+fn write_failure_credentials(refusal: Refusal<'_>) -> String {
+    let Refusal {
+        existing,
+        stored,
+        spent_a_code,
+        body_replace,
+        origin,
+        slug,
+        name,
+    } = refusal;
+    // A replacement is only real when a code was spent on a pair that was
+    // already there: the CLI sets the flag whenever the caller brings a code,
+    // so an entry that held none is a first enrollment.
+    let replaced = stored && body_replace && spent_a_code;
+    let recorded = existing.map(|url| url == origin);
+    if !replaced {
+        return match (stored, recorded) {
+            // The activation points the stored pair at the requested origin
+            // before the file write runs (a rebind that fails only warns), so a
+            // moved entry has been used at the new origin while polis.toml
+            // still names the old one.
+            (true, Some(false)) => format!(
+                "kept; this call ran them against {origin}, and the next boot points \
+                 them back at the one polis.toml names; run the same `set` again to \
+                 bring the relay back"
+            ),
+            // The CLI cannot leave this state, because it finds the entry before
+            // it writes one. The way out is written for an API caller, which can
+            // post the address again.
+            (true, None) => format!(
+                "kept; this call ran them against {origin}. polis.toml has no entry \
+                 under that name: post that address again without a code to write \
+                 the entry back"
+            ),
+            (true, Some(true)) => "kept (they predate this call)".to_owned(),
+            (false, _) => "created by this call were removed".to_owned(),
+        };
+    }
+    match recorded {
+        Some(true) => format!(
+            "replaced by this call are on disk and polis.toml already names that \
+             origin; start the relay again with `kallipctl tagma polis set {slug} {name}`"
+        ),
+        Some(false) => format!(
+            "replaced by this call are on disk, while polis.toml still names the \
+             previous origin; point the entry at them with `kallipctl tagma polis \
+             set {slug} {name} <platform>`"
+        ),
+        // Only a hand-written POST reaches this: the CLI finds the entry before
+        // it replaces one, so `set` is no way out here.
+        None => "replaced by this call are on disk, but polis.toml has no entry \
+                under that name; post that address again without a code to write \
+                the entry back"
+            .to_owned(),
+    }
 }
 
 /// DELETE /polis/{name} — drop the entry from the file, stop that relay alone,
@@ -221,9 +322,9 @@ pub(crate) async fn remove_polis(
     let stopped = stop_relay(&state, &name).await;
     let credentials = if query.forget {
         match credentials_dir() {
-            Ok(root) => match std::fs::remove_dir_all(root.join(&name)) {
-                Ok(()) => "deleted",
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => "absent",
+            Ok(root) => match crate::credentials::remove_entry_dir(&root, &name) {
+                Ok(true) => "deleted",
+                Ok(false) => "absent",
                 Err(error) => {
                     return Err(ApiError::internal(format!(
                         "{name} is gone from polis.toml and its relay is stopped, \
@@ -250,6 +351,10 @@ pub(crate) async fn remove_polis(
 pub(crate) struct AddPolisBody {
     name: String,
     url: String,
+    /// Spend the code on an entry that already holds credentials: the
+    /// enrollment replaces the stored pair instead of being refused.
+    #[serde(default)]
+    replace: bool,
     #[serde(default)]
     code: Option<String>,
 }

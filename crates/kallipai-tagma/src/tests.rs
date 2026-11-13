@@ -513,7 +513,8 @@ fn fresh_code_enrolls_when_no_credentials_stored() {
     assert_eq!(
         entry,
         EnrollEntry::Fresh {
-            code: "sk-enroll-test".to_string()
+            code: "sk-enroll-test".to_string(),
+            replace: false,
         }
     );
 }
@@ -627,7 +628,7 @@ fn blank_stored_credentials_take_the_fresh_path() {
         Some("sk-code"),
     )
     .expect("a code with no stored pair enrolls fresh");
-    assert!(matches!(plan, EnrollEntry::Fresh { code } if code == "sk-code"));
+    assert!(matches!(plan, EnrollEntry::Fresh { code, replace: false } if code == "sk-code"));
 }
 
 /// A blank pair with no code lands in the fail-fast branch, not a third

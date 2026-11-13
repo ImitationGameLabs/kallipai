@@ -17,6 +17,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use kallipai_daemon_common::credentials::{TAGMA_ID_FILE, TAGMA_TOKEN_FILE};
 use kallipai_e2ee::DeviceKey;
+use tracing::warn;
 
 /// Load the device key from `credentials_dir/device.key`, or generate + persist
 /// a new one. The key is a 32-byte Ed25519 seed.
@@ -103,6 +104,179 @@ pub(crate) fn save_tagma(
     )?;
     write_credential_file(&id_path, tagma_id.as_bytes())?;
     Ok(())
+}
+
+/// The suffix a replacement uses for the directory it stages.
+const STAGED_SUFFIX: &str = ".new-";
+
+/// The suffix a replacement uses for the directory it retires.
+const RETIRED_SUFFIX: &str = ".old-";
+
+/// Replace an existing entry's `(id, token, origin)` as one swap.
+///
+/// [`save_tagma`] is written for the first-run branch, where the pair being
+/// replaced is already unusable, so clearing the id cannot cost anything.
+/// This call runs while a working enrollment is on disk, and the same write
+/// order would leave `archeion.url` new, the id gone and the token old — a
+/// directory that reads as not-enrolled. A failed replacement must not
+/// destroy a usable pair, so the three files are staged in a sibling
+/// directory and the pair is exchanged by renaming directories instead:
+///
+/// - a failure while staging leaves `<name>` exactly as it was;
+/// - a failure renaming `<name>` aside leaves it as it was (the staging
+///   directory is removed);
+/// - a failure renaming the staged directory into place renames the retired
+///   one back before reporting, so `<name>` is authoritative again;
+/// - being killed between those two renames is the one case no code can
+///   cover: `<name>` is then absent with `<name>.new-*` and `<name>.old-*`
+///   beside it, which reads as not-enrolled, and renaming either sibling
+///   back to `<name>` restores a pair.
+///
+/// The retired directory and any older siblings are cleared once the new pair
+/// is in place; cleanup failing is not a reason to fail the replacement, which
+/// is already on disk and consistent by then.
+pub(crate) fn replace_tagma(
+    credentials_dir: &Path,
+    tagma_id: &str,
+    tagma_token: &str,
+    archeion_url: &str,
+) -> Result<()> {
+    let parent = credentials_dir
+        .parent()
+        .context("an entry credentials directory with no parent")?;
+    let name = credentials_dir
+        .file_name()
+        .context("an entry credentials directory with no name")?
+        .to_string_lossy()
+        .into_owned();
+    let uniq = format!(
+        "{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_nanos())
+            .unwrap_or(0)
+    );
+    let staged = parent.join(format!("{name}{STAGED_SUFFIX}{uniq}"));
+    let retired = parent.join(format!("{name}{RETIRED_SUFFIX}{uniq}"));
+
+    let staged_result = (|| -> Result<()> {
+        std::fs::create_dir(&staged)
+            .with_context(|| format!("stage the new credentials in {staged:?}"))?;
+        set_owner_only(&staged)?;
+        write_credential_file(&staged.join("archeion.url"), archeion_url.as_bytes())?;
+        write_credential_file(&staged.join(TAGMA_ID_FILE), tagma_id.as_bytes())?;
+        write_credential_file(&staged.join(TAGMA_TOKEN_FILE), tagma_token.as_bytes())?;
+        Ok(())
+    })();
+    if let Err(error) = staged_result {
+        let _ = std::fs::remove_dir_all(&staged);
+        return Err(error);
+    }
+
+    if let Err(error) = std::fs::rename(credentials_dir, &retired) {
+        let _ = std::fs::remove_dir_all(&staged);
+        return Err(error).with_context(|| {
+            format!("retire the previous credentials in {credentials_dir:?} before replacing them")
+        });
+    }
+    if let Err(error) = std::fs::rename(&staged, credentials_dir) {
+        // The previous pair is authoritative until this call is reported as
+        // done, so put it back before saying anything. When putting it back
+        // fails, the staged pair stays where it is: it is the only copy of the
+        // credentials the platform just issued.
+        let restored = std::fs::rename(&retired, credentials_dir);
+        if restored.is_ok() {
+            let _ = std::fs::remove_dir_all(&staged);
+        }
+        return Err(error).with_context(|| match restored {
+            Ok(()) => format!(
+                "install the new credentials in {credentials_dir:?}; the previous ones were put back"
+            ),
+            Err(restore) => format!(
+                "install the new credentials in {credentials_dir:?}; putting the previous ones back also failed ({restore}), so they sit in {retired:?} and the staged set in {staged:?}"
+            ),
+        });
+    }
+    clear_swap_leftovers(credentials_dir);
+    crate::settings::sync_parent_dir(credentials_dir);
+    Ok(())
+}
+
+/// Delete `credentials/<name>` together with any directory a replacement
+/// left beside it, and say whether the entry directory itself was there.
+///
+/// A swap that was killed between its two renames, or one whose retired
+/// directory would not go away, leaves `<name>.new-*` and `<name>.old-*`
+/// siblings that no other verb knows about; forgetting an entry is the one
+/// place that looks, because the name is the only thing they have in common.
+pub(crate) fn remove_entry_dir(credentials_root: &Path, name: &str) -> std::io::Result<bool> {
+    let found = match std::fs::remove_dir_all(credentials_root.join(name)) {
+        Ok(()) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => return Err(error),
+    };
+    let staged_prefix = format!("{name}{STAGED_SUFFIX}");
+    let retired_prefix = format!("{name}{RETIRED_SUFFIX}");
+    let entries = match std::fs::read_dir(credentials_root) {
+        Ok(entries) => entries,
+        // The root is absent when nothing was ever stored, and the entry
+        // directory's own absence is then the whole answer.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(found),
+        Err(error) => return Err(error),
+    };
+    for entry in entries.flatten() {
+        let leaf = entry.file_name();
+        let leaf = leaf.to_string_lossy();
+        if !leaf.starts_with(staged_prefix.as_str()) && !leaf.starts_with(retired_prefix.as_str()) {
+            continue;
+        }
+        match std::fs::remove_dir_all(entry.path()) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                warn!(
+                    %error,
+                    path = %entry.path().display(),
+                    "forgot the entry but could not remove a leftover directory"
+                );
+            }
+        }
+    }
+    Ok(found)
+}
+
+/// Remove every directory a swap left beside the entry: the pair just retired
+/// and any older sibling. It is the only cleanup that keeps a killed swap from
+/// leaving an unowned directory in the credentials root forever, and the one
+/// place a replacement's leftovers are deleted.
+fn clear_swap_leftovers(credentials_dir: &Path) {
+    let Some(parent) = credentials_dir.parent() else {
+        return;
+    };
+    let Some(name) = credentials_dir.file_name() else {
+        return;
+    };
+    let name = name.to_string_lossy().into_owned();
+    let staged_prefix = format!("{name}{STAGED_SUFFIX}");
+    let retired_prefix = format!("{name}{RETIRED_SUFFIX}");
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let leaf = entry.file_name();
+        let leaf = leaf.to_string_lossy();
+        if !leaf.starts_with(staged_prefix.as_str()) && !leaf.starts_with(retired_prefix.as_str()) {
+            continue;
+        }
+        if let Err(error) = std::fs::remove_dir_all(entry.path()) {
+            warn!(
+                %error,
+                path = %entry.path().display(),
+                "could not remove a credentials directory a swap left behind"
+            );
+        }
+    }
 }
 
 /// Rebind the recorded enrollment origin to the configured one: write when
@@ -405,5 +579,80 @@ mod tests {
                 .mode();
             assert_eq!(mode & 0o777, 0o600, "{name} is owner-only");
         }
+    }
+
+    #[test]
+    fn replacing_an_entry_swaps_all_three_files_and_leaves_no_sibling() {
+        let root = tempfile::TempDir::new().unwrap();
+        let dir = root.path().join("main");
+        std::fs::create_dir(&dir).unwrap();
+        legacy_pair(&dir);
+        std::fs::write(dir.join("archeion.url"), "https://old.example.com").unwrap();
+        // A directory an earlier swap left behind: the replacement sweeps it.
+        let stale = root.path().join("main.new-stale");
+        std::fs::create_dir(&stale).unwrap();
+        std::fs::write(stale.join(TAGMA_ID_FILE), "tid-stale").unwrap();
+
+        replace_tagma(&dir, "tid-2", "sk-2", "https://new.example.com").expect("the swap succeeds");
+
+        let stored = load_tagma(&dir).expect("the entry reads as enrolled");
+        assert_eq!(stored.id, "tid-2");
+        assert_eq!(stored.token, "sk-2");
+        assert_eq!(
+            stored.archeion_url.as_deref(),
+            Some("https://new.example.com")
+        );
+        let siblings: Vec<String> = std::fs::read_dir(root.path())
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|leaf| leaf != "main")
+            .collect();
+        assert!(
+            siblings.is_empty(),
+            "a swap leaves no directory behind: {siblings:?}"
+        );
+    }
+
+    #[test]
+    fn a_failed_staging_leaves_the_stored_pair_in_place() {
+        let root = tempfile::TempDir::new().unwrap();
+        // A leaf at the name limit: the entry directory fits, its staged
+        // sibling does not, so staging is refused before anything moves.
+        let dir = root.path().join("e".repeat(250));
+        std::fs::create_dir(&dir).unwrap();
+        legacy_pair(&dir);
+
+        assert!(
+            replace_tagma(&dir, "tid-2", "sk-2", "https://archeion.example.com").is_err(),
+            "the refused staging is reported"
+        );
+        let stored = load_tagma(&dir).expect("the old pair is still an enrollment");
+        assert_eq!(stored.id, "tid-1");
+        assert_eq!(stored.token, "sk-test");
+    }
+
+    #[test]
+    fn forgetting_an_entry_deletes_it_with_the_siblings_a_swap_left() {
+        let root = tempfile::TempDir::new().unwrap();
+        let dir = root.path().join("main");
+        std::fs::create_dir(&dir).unwrap();
+        legacy_pair(&dir);
+        for leaf in ["main.old-17", "main.new-18", "mainline"] {
+            std::fs::create_dir(root.path().join(leaf)).unwrap();
+        }
+
+        assert!(remove_entry_dir(root.path(), "main").expect("the sweep runs"));
+        assert!(!dir.exists(), "the entry directory is gone");
+        assert!(!root.path().join("main.old-17").exists());
+        assert!(!root.path().join("main.new-18").exists());
+        assert!(
+            root.path().join("mainline").exists(),
+            "a name that only shares a prefix is left alone"
+        );
+        assert!(
+            !remove_entry_dir(root.path(), "main").expect("a second sweep runs"),
+            "nothing left to report"
+        );
     }
 }

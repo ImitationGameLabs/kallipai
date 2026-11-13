@@ -1631,21 +1631,32 @@ file; such an instance lists its one entry and refuses both write faces
 with 409, because a file beside those variables is the conflict the next
 start refuses on.
 
-`POST /polis` takes `{name, url, code}` and runs in this order: validate,
+`POST /polis` takes `{name, url, code, replace}` and runs in this order: validate,
 activate (reuse stored credentials, or spend `code` on a first enrollment,
 then start the relay), write the file. The tagma stores no owner access
 token: the platform mints the code (30 minutes by default) and this call
 spends it. An unparsable file, a refused code or a failed commit leaves the
 previous state: same bytes, no relay, and no credentials directory the call
 did not find. A code sent for an already-enrolled entry is refused (409)
-without reaching the platform; the same call without a code reuses the
-stored credentials and returns `already attached`, and its note says which
+without reaching the platform, unless the request asks for the replacement
+with `replace: true`: that is the one case where the code re-enrolls and the
+new pair takes the stored pair's place. The same call without a code reuses
+the stored credentials and returns `already attached`, and its note says which
 half of that answer holds: a relay was already running and stayed as it was,
 or none was running and one is started by this call. The row in a write
 response is read back from the file, not assembled for the reply. A file the
 tagma cannot parse answers 500 `polis_file_unreadable` with the cause and the
 instruction to fix the file, so an operator editing it by hand is not told a
 server is broken.
+
+A replacement writes the three credential files into a staging directory and
+exchanges directories by rename, so a failure a replacement reports leaves
+the stored pair intact instead of half-written. A process killed between the
+two renames leaves `<name>` absent with `<name>.new-*` and `<name>.old-*`
+beside it; `GET /polis` then reports `enrolled: false` for that name, and
+renaming either directory back to `<name>` restores a usable pair. The next
+replacement of that entry clears the leftovers, and so does `DELETE
+/polis/{name}?forget=true`.
 
 A failure says which half it came from. 400 means the request or the
 platform said no and nothing was spent: a bad name or origin, no code, or
@@ -1663,14 +1674,15 @@ removed answers 500 `polis_file_not_removed` and says the entry and its
 relay are still in place.
 
 `DELETE /polis/{name}` removes the entry, stops that relay alone and, with
-`?forget=true`, deletes `credentials/<name>/`. Removing the last entry
+`?forget=true`, deletes `credentials/<name>/` and the `<name>.new-*` or
+`<name>.old-*` directory a replacement may leave beside it. Removing the last entry
 deletes `polis.toml` itself, because a document with no `[[polis]]` entry
 is a configuration error at the next start while a missing file means
 local-only. The entry the model profile source is pinned to is refused
 with 409: switch or clear `[profiles.source] polis` first.
 
 Both write responses say the boundary in words: the relay connects (or
-stops) now, while the gateway's target list stays the one resolved at
+stops) now, while the model gateway's platform list stays the one resolved at
 startup, so a change there takes effect on the next start.
 
 ### SSE Event Types

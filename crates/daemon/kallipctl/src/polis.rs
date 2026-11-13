@@ -1,12 +1,14 @@
-//! The `polis` verbs: the platforms this host knows, and what a platform says
-//! about what its owner has registered.
+//! The two polis faces: `kallipctl polis`, the platforms this host knows and
+//! what a platform says about what its owner has registered, and
+//! `kallipctl tagma polis`, the entries one running instance carries in its
+//! own `polis.toml`.
 //!
 //! The register is a file the operator owns (`polis-registry.toml` under the
-//! config home, 0600). The register verbs read and write it without the
-//! daemon, so they work while it is down: those are the moments an operator
-//! wants to look at a platform or free a pending enrollment slot. The three
-//! instance verbs are the exception: they ask the daemon where the instance
-//! listens, which is what says where its operator token lives.
+//! config home, 0600). Those verbs read and write it without the daemon, so
+//! they work while it is down: those are the moments an operator wants to
+//! look at a platform or free a pending enrollment slot. The tagma verbs are
+//! the other side: they ask the daemon where the instance listens, then ask
+//! the instance itself over its operator token.
 //!
 //! Each verb returns the lines it would print; [`say`] is the only place
 //! that writes to stdout, which keeps the sentences testable without
@@ -30,7 +32,7 @@ use kallipai_archeion_common::tagmata::{TagmaState, TagmaSummary};
 use kallipai_daemon_client::DaemonClient;
 
 use crate::archeion::{self, Listing, Revoked};
-use crate::cli::{InstanceVerb, RegisterVerb};
+use crate::cli::{PolisCommand, TagmaPolisCommand};
 use crate::instance::{self, Instance};
 use crate::origin::Origin;
 use crate::registry::{Addition, Registry};
@@ -52,19 +54,19 @@ impl Outcome {
 }
 
 /// Run one register verb, printing what it has to say.
-pub(crate) async fn run_register(verb: &RegisterVerb<'_>, allow_plaintext: bool) -> Result<()> {
-    say(register_lines(verb, allow_plaintext).await?)
+pub(crate) async fn run_register(command: &PolisCommand, allow_plaintext: bool) -> Result<()> {
+    say(register_lines(command, allow_plaintext).await?)
 }
 
 /// Run one of the verbs that speaks to a running instance. The daemon has
 /// already said where it is, so there are two hops: ask the instance, then
 /// print.
-pub(crate) async fn run_instance(
-    verb: &InstanceVerb<'_>,
+pub(crate) async fn run_tagma(
+    command: &TagmaPolisCommand,
     allow_plaintext: bool,
     daemon: &DaemonClient,
 ) -> Result<()> {
-    say(instance_lines(verb, allow_plaintext, daemon).await?)
+    say(tagma_lines(command, allow_plaintext, daemon).await?)
 }
 
 /// The one place that writes to stdout.
@@ -80,21 +82,23 @@ fn say(outcome: Outcome) -> Result<()> {
 
 /// What a register verb says. A failure with nothing to print comes back
 /// as `Err`.
-async fn register_lines(verb: &RegisterVerb<'_>, allow_plaintext: bool) -> Result<Outcome> {
-    Ok(match verb {
-        RegisterVerb::Add { name, url, replace } => {
+async fn register_lines(command: &PolisCommand, allow_plaintext: bool) -> Result<Outcome> {
+    Ok(match command {
+        PolisCommand::Add { name, url, replace } => {
             Outcome::said(add_platform(name, url, *replace, allow_plaintext)?)
         }
-        RegisterVerb::Remove { name } => Outcome::said(remove_platform(name)?),
-        RegisterVerb::List => Outcome::said(list_platforms()?),
-        RegisterVerb::SetToken { name, token_file } => {
-            Outcome::said(set_token(name, *token_file, allow_plaintext).await?)
-        }
-        RegisterVerb::Status { name } => platform_status(name, allow_plaintext).await?,
-        RegisterVerb::Revoke { name, tagma } => {
+        PolisCommand::Remove { name } => Outcome::said(remove_platform(name)?),
+        PolisCommand::List => Outcome::said(list_platforms()?),
+        PolisCommand::Token { command } => match command {
+            crate::cli::PolisTokenCommand::Set { name, token_file } => {
+                Outcome::said(set_token(name, token_file.as_deref(), allow_plaintext).await?)
+            }
+        },
+        PolisCommand::Status { name } => platform_status(name, allow_plaintext).await?,
+        PolisCommand::Revoke { name, tagma } => {
             Outcome::said(revoke_tagma(name, tagma, allow_plaintext).await?)
         }
-        RegisterVerb::MintCode { platform } => {
+        PolisCommand::MintCode { platform } => {
             Outcome::said(mint_code(platform, allow_plaintext).await?)
         }
     })
@@ -103,26 +107,25 @@ async fn register_lines(verb: &RegisterVerb<'_>, allow_plaintext: bool) -> Resul
 /// What one of the instance verbs says. The instance is located once, from
 /// the verb's own slug: the daemon knows its port and its data directory,
 /// which is where the operator token lives.
-async fn instance_lines(
-    verb: &InstanceVerb<'_>,
+async fn tagma_lines(
+    command: &TagmaPolisCommand,
     allow_plaintext: bool,
     daemon: &DaemonClient,
 ) -> Result<Outcome> {
     // The cheap check the other verbs get in `main.rs`: the same grammar the
     // daemon enforces, caught here because this path never reaches it.
-    if !kallipai_daemon_common::wire::valid_slug(verb.slug()) {
+    if !kallipai_daemon_common::wire::valid_slug(command.slug()) {
         anyhow::bail!(
             "slug {:?} does not match [a-z0-9][a-z0-9-]* (max 64 chars)",
-            verb.slug()
+            command.slug()
         );
     }
-    let instance = instance::locate(daemon, verb.slug()).await?;
-    Ok(match verb {
-        InstanceVerb::Entries { .. } => Outcome::said(entries_in(&instance).await?),
-        InstanceVerb::AddEntry {
+    let instance = instance::locate(daemon, command.slug()).await?;
+    Ok(match command {
+        TagmaPolisCommand::List { .. } => Outcome::said(entries_in(&instance).await?),
+        TagmaPolisCommand::Add {
             name,
-            polis,
-            url,
+            platform,
             code,
             token_file,
             ..
@@ -131,35 +134,55 @@ async fn instance_lines(
                 &Registry::load()?,
                 &instance,
                 name,
-                Target::pick(*polis, *url)?,
+                platform,
                 Ask {
-                    code: *code,
-                    token_file: *token_file,
+                    code: code.as_deref(),
+                    token_file: token_file.as_deref(),
                 },
                 allow_plaintext,
             )
             .await?,
         ),
-        InstanceVerb::RemoveEntry { name, forget, .. } => {
+        TagmaPolisCommand::Set {
+            name,
+            platform,
+            code,
+            token_file,
+            ..
+        } => Outcome::said(
+            set_entry_in(
+                &Registry::load()?,
+                &instance,
+                name,
+                platform.as_deref(),
+                Ask {
+                    code: code.as_deref(),
+                    token_file: token_file.as_deref(),
+                },
+                allow_plaintext,
+            )
+            .await?,
+        ),
+        TagmaPolisCommand::Remove { name, forget, .. } => {
             Outcome::said(remove_entry_in(&instance, name, *forget).await?)
         }
     })
 }
 
 /// The entries inside the instance, one line each, the name first so it can
-/// be copied into `remove-entry`.
+/// be copied into `set` or `remove`.
 async fn entries_in(instance: &Instance) -> Result<Vec<String>> {
     let slug = instance.slug();
     let listing = instance.entries().await?;
     let mut lines = Vec::new();
     if listing.sugar {
         lines.push(format!(
-            "{slug} takes its entries from the environment, so they cannot be added or removed here"
+            "{slug} takes its entries from the environment, so they cannot be added, changed or removed here"
         ));
     }
     if listing.entries.is_empty() {
         lines.push(format!(
-            "no entries in {slug}; add one with `kallipctl polis add-entry {slug} <name> --polis <platform>`"
+            "no entries in {slug}; add one with `kallipctl tagma polis add {slug} <name> <platform>`"
         ));
         return Ok(lines);
     }
@@ -171,7 +194,7 @@ async fn entries_in(instance: &Instance) -> Result<Vec<String>> {
 /// that can be down independently of each other.
 fn entry_line(row: &instance::Row) -> String {
     format!(
-        "{}  relay={}  gateway={}",
+        "{}  relay={}  model-gateway={}",
         entry_head(row),
         on_off(row.relay),
         on_off(row.gateway)
@@ -184,7 +207,7 @@ fn on_off(flag: bool) -> &'static str {
     if flag { "on" } else { "off" }
 }
 
-/// One entry without the two run states: the head of an add-entry report.
+/// One entry without the two run states: the head of an add or set report.
 fn entry_head(row: &instance::Row) -> String {
     format!(
         "{}  {}  enrolled={}  tagma={}",
@@ -195,7 +218,7 @@ fn entry_head(row: &instance::Row) -> String {
     )
 }
 
-/// The cheap check both entry verbs make: an entry name is a slug, the grammar
+/// The cheap check every entry verb makes: an entry name is a slug, the grammar
 /// the instance enforces, and a name that is not one addresses a different
 /// path than the caller means.
 ///
@@ -210,35 +233,6 @@ fn check_entry_name(name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Where the entry points: a platform from the register, or an origin given
-/// outright.
-#[derive(Debug)]
-enum Target<'a> {
-    Platform(&'a str),
-    Url(&'a str),
-}
-
-impl<'a> Target<'a> {
-    /// The one reading of `--polis` / `--url`: clap refuses both at once, and
-    /// neither is a mistake worth a round trip.
-    fn pick(polis: Option<&'a str>, url: Option<&'a str>) -> Result<Self> {
-        match (polis, url) {
-            (Some(platform), _) => Ok(Self::Platform(platform)),
-            (None, Some(url)) => Ok(Self::Url(url)),
-            (None, None) => anyhow::bail!(
-                "say which platform this entry is for: --polis <name> from the register, or --url <origin>"
-            ),
-        }
-    }
-
-    fn platform(&self) -> Option<&'a str> {
-        match self {
-            Self::Platform(platform) => Some(platform),
-            Self::Url(_) => None,
-        }
-    }
-}
-
 /// What the caller brought to spend: a code to redeem, or the token file to
 /// mint with.
 struct Ask<'a> {
@@ -246,35 +240,29 @@ struct Ask<'a> {
     token_file: Option<&'a str>,
 }
 
-/// Add one entry: settle the target, make the checks the instance would make,
-/// mint a code unless one arrives, and let the instance enroll and start the
-/// relay in that one request. A code minted here never reaches a shell
-/// history, and its thirty-minute window is spent inside this call rather
-/// than becoming the operator's problem; a code the caller brings in is one
-/// they have already carried.
+/// Add one entry: settle the platform's address, make the checks the instance
+/// would make, mint a code unless one arrives, and let the instance enroll
+/// and start the relay in that one request. A code minted here never reaches
+/// a shell history, and its thirty-minute window is spent inside this call
+/// rather than becoming the operator's problem; a code the caller brings in
+/// is one they have already carried.
 async fn add_entry_in(
     registry: &Registry,
     instance: &Instance,
     name: &str,
-    target: Target<'_>,
+    platform: &str,
     ask: Ask<'_>,
     allow_plaintext: bool,
 ) -> Result<Vec<String>> {
     check_entry_name(name)?;
-    let from_register = target.platform();
-    let (origin, stored) = match target {
-        Target::Platform(platform) => (
-            settle_origin(
-                platform,
-                &platform_address(registry, platform)?,
-                allow_plaintext,
-            )?,
-            registry.entry(platform)?.secret.clone(),
-        ),
-        // The judgment a recorded address gets: a long-lived token travels
-        // with this origin, so a plaintext one needs the flag.
-        Target::Url(url) => (settle_origin("--url", url, allow_plaintext)?, None),
-    };
+    // The judgment a recorded address gets: a long-lived token travels
+    // with this origin, so a plaintext one needs the flag.
+    let origin = settle_origin(
+        platform,
+        &platform_address(registry, platform)?,
+        allow_plaintext,
+    )?;
+    let stored = registry.entry(platform)?.secret.clone();
     let code = match ask.code {
         Some(code) => code.to_owned(),
         None => {
@@ -292,31 +280,107 @@ async fn add_entry_in(
             let listing = instance.entries().await?;
             refuse_a_hopeless_add(instance, name, &listing)?;
             let Some(token) = token else {
-                match from_register {
-                    Some(platform) => anyhow::bail!(
-                        "no token to mint a code for {} with: pass --code, store one with `kallipctl polis token set {platform}`, or pass --token-file",
-                        origin.as_str()
-                    ),
-                    None => anyhow::bail!(
-                        "no token to mint a code for {} with: pass --code or --token-file",
-                        origin.as_str()
-                    ),
-                }
+                anyhow::bail!(
+                    "no token to mint a code for {} with: pass --code, store one with {}, or pass --token-file",
+                    origin.as_str(),
+                    store_a_token(platform)
+                );
             };
-            let minted = archeion::mint_enrollment(origin.as_str(), &token).await?;
-            // The code enrolls a pending tagma the platform has already made.
             // The read above and the write below are two calls, and another
             // writer can take the name in between; its id is what a failure
             // then leaves the operator to revoke.
-            eprintln!(
-                "pending tagma {} (code expires at {})",
-                minted.id, minted.expires_at
-            );
-            minted.code
+            mint_code_for(&origin, &token).await?
         }
     };
-    let added = instance.add(name, origin.as_str(), Some(&code)).await?;
+    let added = instance
+        .add(name, origin.as_str(), Some(&code), false)
+        .await?;
     Ok(vec![entry_head(&added.entry), added.note])
+}
+
+/// Change an entry that already exists: its address, its credentials, or
+/// neither. An address keeps the credentials the entry holds, because the
+/// stored pair belongs to the platform registration and not to the URL; a
+/// code (or a token file to mint one with) replaces that pair with a fresh
+/// enrollment, which the instance writes only after the platform accepts
+/// the code. Creating an entry is `add`'s job.
+async fn set_entry_in(
+    registry: &Registry,
+    instance: &Instance,
+    name: &str,
+    platform: Option<&str>,
+    ask: Ask<'_>,
+    allow_plaintext: bool,
+) -> Result<Vec<String>> {
+    check_entry_name(name)?;
+    let slug = instance.slug();
+    let listing = instance.entries().await?;
+    if listing.sugar {
+        anyhow::bail!(
+            "{slug} takes its entries from the environment, so they cannot be changed here; set or remove KALLIPAI_POLIS_URL and KALLIPAI_TAGMA_RELAY_ENROLLMENT_CODE in its spawn env and restart it"
+        );
+    }
+    let Some(current) = listing.entries.iter().find(|row| row.name == name) else {
+        anyhow::bail!(
+            "no entry named {name} in {slug}; add it with `kallipctl tagma polis add {slug} {name} <platform>`"
+        );
+    };
+    let replacing = ask.code.is_some() || ask.token_file.is_some();
+    if !current.enrolled && !replacing {
+        anyhow::bail!(
+            "{slug}'s entry {name} holds no credentials; `kallipctl tagma polis add {slug} {name} <platform>` enrolls it"
+        );
+    }
+    let origin = match platform {
+        Some(platform) => settle_origin(
+            platform,
+            &platform_address(registry, platform)?,
+            allow_plaintext,
+        )?,
+        None => Origin::parse(&format!("entry {name}"), &current.url)?,
+    };
+    // The registration a replaced enrollment leaves on the platform is a fact
+    // a failure cannot undo, so it is said before the write; what an address
+    // change does to the stored pair is only true once the write returns.
+    if replacing && let Some(tagma) = current.tagma_id.as_deref() {
+        eprintln!(
+            "the registration {tagma} stays on the platform; revoke it with `kallipctl polis revoke <platform> {tagma}`"
+        );
+    }
+    let moved = !replacing && current.url != origin.as_str();
+    let code = match ask.code {
+        Some(code) => Some(code.to_owned()),
+        None => match ask.token_file {
+            Some(path) => {
+                let token = archeion::read_token(Path::new(path))?;
+                Some(mint_code_for(&origin, &token).await?)
+            }
+            None => None,
+        },
+    };
+    let changed = instance
+        .add(name, origin.as_str(), code.as_deref(), replacing)
+        .await?;
+    if moved {
+        eprintln!(
+            "the entry now points at {} and keeps the credentials it was enrolled with at {}; pass --code to enroll again if that is a different platform",
+            origin.as_str(),
+            current.url
+        );
+    }
+    Ok(vec![entry_head(&changed.entry), changed.note])
+}
+
+/// Mint an enrollment code and print the pending tagma it leaves behind:
+/// before the write, so a failure past that point still leaves the operator
+/// the handle `polis revoke` takes.
+async fn mint_code_for(origin: &Origin, token: &str) -> Result<String> {
+    let minted = archeion::mint_enrollment(origin.as_str(), token).await?;
+    eprintln!(
+        "pending tagma {} (code expires at {})",
+        minted.id, minted.expires_at
+    );
+    Ok(minted.code)
 }
 
 /// The refusals the instance would answer with after the request, made before
@@ -341,7 +405,7 @@ fn refuse_a_hopeless_add(
         .any(|row| row.name == name && row.enrolled)
     {
         anyhow::bail!(
-            "{slug} already has an entry named {name}; `kallipctl polis remove-entry {slug} {name}` drops it first"
+            "{slug} already has an entry named {name}; `kallipctl tagma polis remove {slug} {name}` drops it first, or `kallipctl tagma polis set {slug} {name} --code <code>` replaces its credentials"
         );
     }
     Ok(())
@@ -349,6 +413,14 @@ fn refuse_a_hopeless_add(
 
 async fn remove_entry_in(instance: &Instance, name: &str, forget: bool) -> Result<Vec<String>> {
     check_entry_name(name)?;
+    // The same refusal `set` makes before its write: an environment-configured
+    // instance takes no writes, and the listing is where that shows.
+    let slug = instance.slug();
+    if instance.entries().await?.sugar {
+        anyhow::bail!(
+            "{slug} takes its entries from the environment, so they cannot be removed here; set or remove KALLIPAI_POLIS_URL and KALLIPAI_TAGMA_RELAY_ENROLLMENT_CODE in its spawn env and restart it"
+        );
+    }
     let removed = instance.remove(name, forget).await?;
     Ok(vec![
         format!("{} removed", removed.name),
@@ -383,7 +455,7 @@ async fn mint_code_in(
             minted.id, minted.id
         ),
         format!(
-            "redeem it on the instance within that lifetime: `kallipctl polis add-entry <slug> <name> --polis {platform} --code <code>`"
+            "redeem it on the instance within that lifetime: `kallipctl tagma polis add <slug> <name> {platform} --code <code>`"
         ),
     ])
 }
@@ -603,9 +675,17 @@ fn platform_address(registry: &Registry, name: &str) -> Result<String> {
 fn stored_token(registry: &Registry, name: &str) -> Result<String> {
     registry.entry(name)?.secret.clone().ok_or_else(|| {
         anyhow::anyhow!(
-            "no token stored for {name}; store one with `kallipctl polis token set {name}`"
+            "no token stored for {name}; store one with {}",
+            store_a_token(name)
         )
     })
+}
+
+/// How the operator stores a platform token. The two sentences that need it
+/// differ in what else they can offer (an `add` also takes a code or a token
+/// file), so only this clause is shared.
+fn store_a_token(platform: &str) -> String {
+    format!("`kallipctl polis token set {platform}`")
 }
 
 /// One platform row: the id first, so it can be copied straight into
@@ -804,6 +884,7 @@ mod tests {
         assert_eq!(lines.len(), 1);
         assert!(lines[0].contains("kallipctl polis add"), "{lines:?}");
     }
+
     #[tokio::test]
     async fn status_numbers_the_platform_rows() {
         let (polis, request) = serve_once(
@@ -1032,7 +1113,7 @@ mod tests {
         );
     }
 
-    /// An instance at a listener the test owns: the three instance verbs need
+    /// An instance at a listener the test owns: the instance verbs need
     /// nothing else.
     fn instance_at(
         slug: &str,
@@ -1056,7 +1137,7 @@ mod tests {
             lines[0]
         );
         assert!(lines[0].contains("relay=on"), "{}", lines[0]);
-        assert!(lines[0].contains("gateway=off"), "{}", lines[0]);
+        assert!(lines[0].contains("model-gateway=off"), "{}", lines[0]);
         handle.join().expect("stub");
     }
 
@@ -1067,7 +1148,7 @@ mod tests {
         assert_eq!(
             lines,
             vec![
-                "no entries in alpha; add one with `kallipctl polis add-entry alpha <name> --polis <platform>`".to_owned()
+                "no entries in alpha; add one with `kallipctl tagma polis add alpha <name> <platform>`".to_owned()
             ]
         );
         handle.join().expect("stub");
@@ -1093,12 +1174,12 @@ mod tests {
         let body = r#"{"entry":{"name":"local","url":"http://127.0.0.1:8080","enrolled":true,"tagma_id":"t-1","relay":false,"gateway":true},"note":"the relay starts on the next boot"}"#;
         let (instance, handle) = instance_at("alpha", 201, body);
         let dir = tempfile::tempdir().expect("tempdir");
-        let registry = Registry::load_from(&dir.path().join("polis-registry.toml")).expect("empty");
+        let registry = register(&dir, "local", "http://127.0.0.1:8080", None);
         let lines = add_entry_in(
             &registry,
             &instance,
             "local",
-            Target::Url("http://127.0.0.1:8080"),
+            "local",
             Ask {
                 code: Some("code-1"),
                 token_file: None,
@@ -1137,7 +1218,7 @@ mod tests {
             &registry,
             &instance,
             "local",
-            Target::Platform("local"),
+            "local",
             Ask {
                 code: None,
                 token_file: None,
@@ -1157,29 +1238,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn add_entry_without_a_code_or_a_token_names_both_ways_out() {
-        let (instance, _handle) = instance_answers("alpha", vec![(200, r#"{"entries":[]}"#)]);
-        let dir = tempfile::tempdir().expect("tempdir");
-        let registry = Registry::load_from(&dir.path().join("polis-registry.toml")).expect("empty");
-        let error = add_entry_in(
-            &registry,
-            &instance,
-            "local",
-            Target::Url("http://127.0.0.1:8080"),
-            Ask {
-                code: None,
-                token_file: None,
-            },
-            false,
-        )
-        .await
-        .expect_err("nothing to mint with");
-        let text = format!("{error:#}");
-        assert!(text.contains("--code"), "{text}");
-        assert!(!text.contains("polis token set"), "{text}");
-        assert!(text.contains("--token-file"), "{text}");
-    }
-    #[tokio::test]
     async fn add_entry_without_a_token_names_the_register_verb_that_stores_one() {
         let (instance, _handle) = instance_answers("alpha", vec![(200, r#"{"entries":[]}"#)]);
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1189,7 +1247,7 @@ mod tests {
             &registry,
             &instance,
             "local",
-            Target::Platform("local"),
+            "local",
             Ask {
                 code: None,
                 token_file: None,
@@ -1203,18 +1261,10 @@ mod tests {
         assert!(text.contains("--token-file"), "{text}");
     }
 
-    #[test]
-    fn add_entry_needs_to_know_which_platform_it_is_for() {
-        let error = Target::pick(None, None).expect_err("no platform");
-        let text = format!("{error:#}");
-        assert!(text.contains("--polis"), "{text}");
-        assert!(text.contains("--url"), "{text}");
-    }
-
     #[tokio::test]
-    async fn add_entry_judges_a_given_url_like_a_recorded_one() {
+    async fn add_entry_refuses_a_plaintext_platform_address_without_the_flag() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let registry = Registry::load_from(&dir.path().join("polis-registry.toml")).expect("empty");
+        let registry = register(&dir, "local", "http://edge.example.com", None);
         let instance = instance::stub(
             "alpha",
             "http://127.0.0.1:1".to_owned(),
@@ -1225,7 +1275,7 @@ mod tests {
             &registry,
             &instance,
             "local",
-            Target::Url("http://edge.example.com"),
+            "local",
             Ask {
                 code: Some("code-1"),
                 token_file: None,
@@ -1250,7 +1300,7 @@ mod tests {
             &registry,
             &instance,
             "local",
-            Target::Platform("local"),
+            "local",
             Ask {
                 code: None,
                 token_file: None,
@@ -1260,7 +1310,10 @@ mod tests {
         .await
         .expect_err("the name is taken");
         let text = format!("{error:#}");
-        assert!(text.contains("remove-entry alpha local"), "{text}");
+        assert!(
+            text.contains("kallipctl tagma polis remove alpha local"),
+            "{text}"
+        );
         handle.join().expect("stub");
     }
 
@@ -1348,7 +1401,7 @@ mod tests {
             &registry,
             &instance,
             "local",
-            Target::Platform("edge"),
+            "edge",
             Ask {
                 code: None,
                 token_file: Some(token_path.to_str().expect("a utf-8 path")),
@@ -1386,16 +1439,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn add_entry_normalizes_a_given_url() {
+    async fn add_entry_normalizes_a_recorded_address() {
         let body = r#"{"entry":{"name":"local","url":"http://127.0.0.1:8080","enrolled":true,"tagma_id":"t-1","relay":true,"gateway":true},"note":"enrolled"}"#;
         let (instance, handle) = instance_at("alpha", 201, body);
         let dir = tempfile::tempdir().expect("tempdir");
-        let registry = Registry::load_from(&dir.path().join("polis-registry.toml")).expect("empty");
+        let registry = register(&dir, "local", "http://127.0.0.1:8080/", None);
         add_entry_in(
             &registry,
             &instance,
             "local",
-            Target::Url("http://127.0.0.1:8080/"),
+            "local",
             Ask {
                 code: Some("code-1"),
                 token_file: None,
@@ -1441,7 +1494,8 @@ mod tests {
     #[tokio::test]
     async fn remove_entry_reports_the_relay_and_the_credentials() {
         let body = r#"{"name":"local","removed":true,"relay":"stopped","credentials":"kept","note":"the platform registration stays"}"#;
-        let (instance, handle) = instance_at("alpha", 200, body);
+        let listing = r#"{"entries":[],"sugar":false}"#;
+        let (instance, handle) = instance_answers("alpha", vec![(200, listing), (200, body)]);
         let lines = remove_entry_in(&instance, "local", false)
             .await
             .expect("removed");
@@ -1449,10 +1503,275 @@ mod tests {
         assert_eq!(lines[1], "relay=stopped");
         assert_eq!(lines[2], "credentials=kept");
         assert_eq!(lines[3], "the platform registration stays");
-        let request = handle.join().expect("stub");
+        let requests = handle.join().expect("stub");
         assert!(
-            request.starts_with("DELETE /polis/local?forget=false "),
-            "{request}"
+            requests[1].starts_with("DELETE /polis/local?forget=false "),
+            "{requests:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn remove_refuses_an_environment_configured_instance() {
+        let listing = r#"{"entries":[],"sugar":true}"#;
+        let (instance, handle) = instance_at("alpha", 200, listing);
+        let error = remove_entry_in(&instance, "local", false)
+            .await
+            .expect_err("an environment-configured instance takes no writes");
+        let text = format!("{error:#}");
+        assert!(
+            text.contains("takes its entries from the environment"),
+            "{text}"
+        );
+        assert!(text.contains("KALLIPAI_POLIS_URL"), "{text}");
+        let requests = handle.join().expect("stub");
+        // The stub answers one request only: a write would never be reached.
+        assert!(requests.starts_with("GET /polis "), "{requests}");
+    }
+
+    #[tokio::test]
+    async fn set_keeps_the_credentials_when_only_the_address_moves() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let registry = register(&dir, "edge", "https://edge.example.com", None);
+        let listing = r#"{"entries":[{"name":"local","url":"http://127.0.0.1:8080","enrolled":true,"tagma_id":"t-1","relay":true,"gateway":false}],"sugar":false}"#;
+        let written = r#"{"entry":{"name":"local","url":"https://edge.example.com","enrolled":true,"tagma_id":"t-1","relay":true,"gateway":false},"note":"already attached: the entry, its credentials and its relay are unchanged"}"#;
+        let (instance, handle) = instance_answers("alpha", vec![(200, listing), (200, written)]);
+        let lines = set_entry_in(
+            &registry,
+            &instance,
+            "local",
+            Some("edge"),
+            Ask {
+                code: None,
+                token_file: None,
+            },
+            false,
+        )
+        .await
+        .expect("set");
+        assert!(
+            lines[0].starts_with("local  https://edge.example.com"),
+            "{lines:?}"
+        );
+        let requests = handle.join().expect("stub");
+        assert_eq!(requests.len(), 2, "one read, one write");
+        assert!(requests[1].starts_with("POST /polis "), "{}", requests[1]);
+        assert!(
+            !requests[1].contains(r#""code""#),
+            "an address change spends no code: {}",
+            requests[1]
+        );
+        assert!(
+            !requests[1].contains("replace"),
+            "an address change replaces no credentials: {}",
+            requests[1]
+        );
+    }
+
+    #[tokio::test]
+    async fn set_with_a_code_replaces_the_credentials() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let registry = register(&dir, "edge", "https://edge.example.com", None);
+        let listing = r#"{"entries":[{"name":"local","url":"https://edge.example.com","enrolled":true,"tagma_id":"t-1","relay":true,"gateway":false}],"sugar":false}"#;
+        let written = r#"{"entry":{"name":"local","url":"https://edge.example.com","enrolled":true,"tagma_id":"t-2","relay":true,"gateway":false},"note":"relay connected"}"#;
+        let (instance, handle) = instance_answers("alpha", vec![(200, listing), (201, written)]);
+        let lines = set_entry_in(
+            &registry,
+            &instance,
+            "local",
+            Some("edge"),
+            Ask {
+                code: Some("code-2"),
+                token_file: None,
+            },
+            false,
+        )
+        .await
+        .expect("set");
+        assert!(lines[0].contains("tagma=t-2"), "{lines:?}");
+        let requests = handle.join().expect("stub");
+        assert!(
+            requests[1].contains(r#""code":"code-2""#),
+            "{}",
+            requests[1]
+        );
+        assert!(requests[1].contains(r#""replace":true"#), "{}", requests[1]);
+    }
+
+    /// `set --token-file` mints its own code with the token in the file and
+    /// sends the replacing write, so the file path goes through the same mint
+    /// the operator would run by hand.
+    #[tokio::test]
+    async fn set_with_a_token_file_mints_a_code_and_replaces() {
+        let (base, handle) = serve_answers(vec![
+            (
+                200,
+                r#"{"entries":[{"name":"local","url":"https://edge.example.com","enrolled":true,"tagma_id":"t-1","relay":true,"gateway":false}],"sugar":false}"#,
+            ),
+            (
+                200,
+                r#"{"code":"sk-enroll-from-file","id":"t-9","created_at":"2026-01-01T00:00:00Z","expires_at":"2026-01-01T00:10:00Z"}"#,
+            ),
+            (
+                200,
+                r#"{"entry":{"name":"local","url":"https://edge.example.com","enrolled":true,"tagma_id":"t-9","relay":true,"gateway":false},"note":"relay connected"}"#,
+            ),
+        ]);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let token_path = dir.path().join("token");
+        std::fs::write(&token_path, "sk-file-token\n").expect("write the token");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&token_path, std::fs::Permissions::from_mode(0o600))
+                .expect("chmod 600");
+        }
+        let registry = register(&dir, "edge", &base, None);
+        let instance = instance::stub(
+            "alpha",
+            base.clone(),
+            "op-secret",
+            std::time::Duration::from_secs(5),
+        );
+        let lines = set_entry_in(
+            &registry,
+            &instance,
+            "local",
+            Some("edge"),
+            Ask {
+                code: None,
+                token_file: Some(token_path.to_str().expect("a utf-8 path")),
+            },
+            false,
+        )
+        .await
+        .expect("set");
+        assert!(lines[0].contains("tagma=t-9"), "{lines:?}");
+        let requests = handle.join().expect("stub");
+        assert!(
+            requests[1]
+                .to_lowercase()
+                .contains("authorization: bearer sk-file-token"),
+            "{}",
+            requests[1]
+        );
+        assert!(
+            requests[2].contains("sk-enroll-from-file"),
+            "{}",
+            requests[2]
+        );
+        assert!(requests[2].contains(r#""replace":true"#), "{}", requests[2]);
+    }
+
+    #[tokio::test]
+    async fn set_without_a_target_or_a_code_brings_the_relay_back() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let registry = Registry::load_from(&dir.path().join("polis-registry.toml"))
+            .expect("an empty register");
+        let listing = r#"{"entries":[{"name":"local","url":"https://edge.example.com","enrolled":true,"tagma_id":"t-1","relay":false,"gateway":false}],"sugar":false}"#;
+        let written = r#"{"entry":{"name":"local","url":"https://edge.example.com","enrolled":true,"tagma_id":"t-1","relay":true,"gateway":false},"note":"already attached: the entry and its credentials are unchanged; no relay was running and one is started now"}"#;
+        let (instance, handle) = instance_answers("alpha", vec![(200, listing), (200, written)]);
+        set_entry_in(
+            &registry,
+            &instance,
+            "local",
+            None,
+            Ask {
+                code: None,
+                token_file: None,
+            },
+            false,
+        )
+        .await
+        .expect("set");
+        let requests = handle.join().expect("stub");
+        assert!(
+            requests[1].contains(r#""url":"https://edge.example.com""#),
+            "{}",
+            requests[1]
+        );
+        assert!(!requests[1].contains(r#""code""#), "{}", requests[1]);
+    }
+
+    #[tokio::test]
+    async fn set_refuses_a_name_the_instance_does_not_hold() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let registry = Registry::load_from(&dir.path().join("polis-registry.toml"))
+            .expect("an empty register");
+        let (instance, handle) = instance_at("alpha", 200, r#"{"entries":[],"sugar":false}"#);
+        let error = set_entry_in(
+            &registry,
+            &instance,
+            "local",
+            None,
+            Ask {
+                code: None,
+                token_file: None,
+            },
+            false,
+        )
+        .await
+        .expect_err("nothing to change");
+        let text = format!("{error:#}");
+        assert!(text.contains("no entry named local"), "{text}");
+        assert!(
+            text.contains("kallipctl tagma polis add alpha local"),
+            "{text}"
+        );
+        handle.join().expect("stub");
+    }
+
+    #[tokio::test]
+    async fn set_refuses_an_entry_with_no_credentials_and_no_code() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let registry = Registry::load_from(&dir.path().join("polis-registry.toml"))
+            .expect("an empty register");
+        let listing = r#"{"entries":[{"name":"local","url":"https://edge.example.com","enrolled":false,"tagma_id":null,"relay":false,"gateway":false}],"sugar":false}"#;
+        let (instance, handle) = instance_at("alpha", 200, listing);
+        let error = set_entry_in(
+            &registry,
+            &instance,
+            "local",
+            None,
+            Ask {
+                code: None,
+                token_file: None,
+            },
+            false,
+        )
+        .await
+        .expect_err("nothing to re-attach with");
+        let text = format!("{error:#}");
+        assert!(text.contains("holds no credentials"), "{text}");
+        assert!(text.contains("kallipctl tagma polis add"), "{text}");
+        handle.join().expect("stub");
+    }
+
+    #[tokio::test]
+    async fn set_refuses_an_environment_configured_instance() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let registry = Registry::load_from(&dir.path().join("polis-registry.toml"))
+            .expect("an empty register");
+        let listing = r#"{"entries":[{"name":"local","url":"https://edge.example.com","enrolled":true,"tagma_id":"t-1","relay":true,"gateway":true}],"sugar":true}"#;
+        let (instance, handle) = instance_at("alpha", 200, listing);
+        let error = set_entry_in(
+            &registry,
+            &instance,
+            "local",
+            None,
+            Ask {
+                code: None,
+                token_file: None,
+            },
+            false,
+        )
+        .await
+        .expect_err("the environment owns these entries");
+        let text = format!("{error:#}");
+        assert!(
+            text.contains("takes its entries from the environment"),
+            "{text}"
+        );
+        assert!(text.contains("KALLIPAI_POLIS_URL"), "{text}");
+        handle.join().expect("stub");
     }
 }

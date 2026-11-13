@@ -1364,8 +1364,11 @@ pub(crate) enum EnrollEntry {
     /// reports whether an enrollment code was present (it is ignored,
     /// as in the same-origin shape).
     StoredReorigin { had_code: bool },
-    /// No stored credentials: redeem `code` for a fresh enrollment.
-    Fresh { code: String },
+    /// No stored credentials, or a replacement that was asked for: redeem
+    /// `code` for a fresh enrollment. `replace` says a working pair is on
+    /// disk and this enrollment takes its place (the route sets it only for
+    /// an explicit request; a boot never does).
+    Fresh { code: String, replace: bool },
 }
 
 /// Decide the boot-time enrollment entry: reuse stored credentials or run
@@ -1409,6 +1412,7 @@ pub(crate) fn resolve_enroll_entry(
         }
         (None, Some(code)) => Ok(EnrollEntry::Fresh {
             code: code.to_owned(),
+            replace: false,
         }),
         (None, None) => Err(anyhow::anyhow!(
             "incomplete relay configuration: KALLIPAI_POLIS_URL is \
@@ -1559,7 +1563,7 @@ pub(crate) async fn activate_relay(
                 stored.token,
             )
         }
-        EnrollEntry::Fresh { code } => {
+        EnrollEntry::Fresh { code, replace } => {
             let client = kallipai_archeion_client::ArcheionClient::builder(&format!(
                 "{}/v1/archeion",
                 entry.polis_url
@@ -1580,11 +1584,15 @@ pub(crate) async fn activate_relay(
                         None => ActivationFailure::Unconfirmed(error),
                     }
                 })?;
-            credentials::save_tagma(&entry_dir, tagma_id.as_ref(), &token, &entry.polis_url)
-                .map_err(|error| ActivationFailure::CredentialsNotStored {
-                    tagma_id: tagma_id.to_string(),
-                    error,
-                })?;
+            let saved = if replace {
+                credentials::replace_tagma(&entry_dir, tagma_id.as_ref(), &token, &entry.polis_url)
+            } else {
+                credentials::save_tagma(&entry_dir, tagma_id.as_ref(), &token, &entry.polis_url)
+            };
+            saved.map_err(|error| ActivationFailure::CredentialsNotStored {
+                tagma_id: tagma_id.to_string(),
+                error,
+            })?;
             info!(relay = %entry.name, tagma = %tagma_id, "relay: enrolled with archeion");
             // First-run enroll boot: the projector's write-once ids are
             // claimed by the first successful enrollee — the primary-archeion

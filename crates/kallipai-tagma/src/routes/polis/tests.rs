@@ -125,7 +125,17 @@ fn body(name: &str, url: &str, code: Option<&str>) -> AddPolisBody {
     AddPolisBody {
         name: name.to_string(),
         url: url.to_string(),
+        replace: false,
         code: code.map(str::to_owned),
+    }
+}
+
+/// The same body with the replacement request set: the code is spent on an
+/// entry that already holds credentials.
+fn replacing(name: &str, url: &str, code: Option<&str>) -> AddPolisBody {
+    AddPolisBody {
+        replace: true,
+        ..body(name, url, code)
     }
 }
 
@@ -279,6 +289,51 @@ async fn post_with_a_code_for_an_enrolled_entry_is_refused_and_spends_no_code() 
 
 #[tokio::test]
 #[serial]
+async fn post_with_replace_re_enrolls_over_stored_credentials() {
+    reset("alpha-replace");
+    let (state, _dir) = state_with_root().await;
+    let stub = start_stub().await;
+    write_entry("alpha-replace", &stub.origin);
+    store_credentials("alpha-replace", &stub.origin);
+
+    let (status, Json(response)) = super::add_polis(
+        State(state.clone()),
+        operator(),
+        Json(replacing("alpha-replace", &stub.origin, Some("code-2"))),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(status, axum::http::StatusCode::CREATED, "{response}");
+    assert_eq!(
+        stub.enrollments(),
+        1,
+        "the code is spent on a new enrollment"
+    );
+    let root = crate::credentials_dir().unwrap();
+    let stored = crate::credentials::load_tagma(&root.join("alpha-replace")).unwrap();
+    assert_eq!(
+        stored.id, "tagma-1",
+        "the stub's enrollment replaced the pair"
+    );
+    assert_eq!(stored.token, "sk-tagma-x");
+    assert_eq!(stored.archeion_url.as_deref(), Some(stub.origin.as_str()));
+    assert_eq!(response["entry"]["tagma_id"], "tagma-1", "{response}");
+    let leftovers: Vec<String> = std::fs::read_dir(&root)
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|leaf| leaf.starts_with("alpha-replace."))
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "a swap leaves no directory behind: {leftovers:?}"
+    );
+    let _ = super::stop_relay(&state, "alpha-replace").await;
+}
+
+#[tokio::test]
+#[serial]
 async fn post_that_rebinds_the_pinned_entry_is_refused() {
     reset("alpha-pin");
     let (state, _dir) = state_with_root().await;
@@ -298,6 +353,41 @@ async fn post_that_rebinds_the_pinned_entry_is_refused() {
 
     assert_eq!(error.status, 409, "{error:?}");
     assert!(error.message.contains("pinned"), "{error:?}");
+}
+
+/// `replace` is the one flag that spends a code on an enrolled entry; the
+/// pinned-entry guard runs after it and is indifferent to the flag, so an
+/// origin move on the pinned entry is refused before any code is spent.
+#[tokio::test]
+#[serial]
+async fn post_with_replace_on_the_pinned_entry_is_still_refused() {
+    reset("alpha-pin-replace");
+    let (state, _dir) = state_with_root().await;
+    let stub = start_stub().await;
+    write_entry("alpha-pin-replace", &stub.origin);
+    store_credentials("alpha-pin-replace", &stub.origin);
+    crate::settings::save_profile_source_polis(Some(&stub.origin)).unwrap();
+
+    let error = super::add_polis(
+        State(state.clone()),
+        operator(),
+        Json(replacing(
+            "alpha-pin-replace",
+            "http://moved.example.test",
+            Some("code-3"),
+        )),
+    )
+    .await
+    .unwrap_err();
+    crate::settings::save_profile_source_polis(None).unwrap();
+
+    assert_eq!(error.status, 409, "{error:?}");
+    assert!(error.message.contains("pinned"), "{error:?}");
+    assert_eq!(
+        stub.enrollments(),
+        0,
+        "the guard runs before any code is spent"
+    );
 }
 
 #[tokio::test]
@@ -949,4 +1039,136 @@ async fn post_that_cannot_start_the_connector_reports_it_and_keeps_the_entry() {
     assert!(state.relay("alpha-noconnector").is_none());
     let entries = crate::polis_config::read_entries().unwrap();
     assert_eq!(entries.len(), 1, "the entry survives a failed activation");
+}
+
+/// The sentence a refused write carries: what the file holds under that name
+/// decides which way out it can name, and every branch says what this call did
+/// to the pair. The inputs are the ones the route hands over, so a value that
+/// stops being interpolated shows up here.
+#[test]
+fn a_refused_write_names_what_happened_to_the_pair() {
+    let old = "https://local.example.com";
+    let new = "https://edge.example.com";
+
+    // A replacement that moved the entry: the file still names the old origin,
+    // so the way out takes the platform name again.
+    let moved = super::write_failure_credentials(super::Refusal {
+        existing: Some(old),
+        stored: true,
+        spent_a_code: true,
+        body_replace: true,
+        origin: new,
+        slug: "alpha",
+        name: "relay",
+    });
+    assert!(moved.contains("are on disk"), "{moved}");
+    assert!(moved.contains("still names the previous origin"), "{moved}");
+    assert!(
+        moved.contains("`kallipctl tagma polis set alpha relay <platform>`"),
+        "{moved}"
+    );
+
+    // A same-origin replacement: only the relay has to come back, and the
+    // platform name has no business appearing.
+    let same = super::write_failure_credentials(super::Refusal {
+        existing: Some(new),
+        stored: true,
+        spent_a_code: true,
+        body_replace: true,
+        origin: new,
+        slug: "alpha",
+        name: "relay",
+    });
+    assert!(same.contains("already names that origin"), "{same}");
+    assert!(!same.contains("still names the previous origin"), "{same}");
+    assert!(
+        same.contains("`kallipctl tagma polis set alpha relay`"),
+        "{same}"
+    );
+    assert!(!same.contains("<platform>"), "{same}");
+
+    // A pair that predates the call, used at another origin: the activation ran
+    // it there, the file still names the old one, and a repeat `set` brings the
+    // relay back before the next boot undoes the rebind.
+    let rebound = super::write_failure_credentials(super::Refusal {
+        existing: Some(old),
+        stored: true,
+        spent_a_code: false,
+        body_replace: false,
+        origin: new,
+        slug: "alpha",
+        name: "relay",
+    });
+    assert!(
+        rebound.contains(&format!("ran them against {new}")),
+        "{rebound}"
+    );
+    assert!(rebound.contains("run the same `set` again"), "{rebound}");
+    assert!(!rebound.contains("predate"), "{rebound}");
+
+    // A pair that predates the call with no entry under that name in the file.
+    // The CLI cannot leave this state, so the way out is written for an API
+    // caller.
+    let absent_kept = super::write_failure_credentials(super::Refusal {
+        existing: None,
+        stored: true,
+        spent_a_code: false,
+        body_replace: false,
+        origin: new,
+        slug: "alpha",
+        name: "relay",
+    });
+    assert!(
+        absent_kept.contains("no entry under that name"),
+        "{absent_kept}"
+    );
+    assert!(
+        absent_kept.contains("post that address again without a code"),
+        "{absent_kept}"
+    );
+    assert!(!absent_kept.contains("`set`"), "{absent_kept}");
+
+    // The pair when the file already names its origin. The route never lands
+    // here, because a same-origin request returns before the write; the cell
+    // stays to pin the wording.
+    let kept = super::write_failure_credentials(super::Refusal {
+        existing: Some(new),
+        stored: true,
+        spent_a_code: false,
+        body_replace: false,
+        origin: new,
+        slug: "alpha",
+        name: "relay",
+    });
+    assert_eq!(kept, "kept (they predate this call)");
+
+    // Credentials on disk with no entry under that name, and a code spent: only
+    // a hand-written POST gets here, and `set` cannot recover it.
+    let absent = super::write_failure_credentials(super::Refusal {
+        existing: None,
+        stored: true,
+        spent_a_code: true,
+        body_replace: true,
+        origin: new,
+        slug: "alpha",
+        name: "relay",
+    });
+    assert!(absent.contains("no entry under that name"), "{absent}");
+    assert!(
+        absent.contains("post that address again without a code"),
+        "{absent}"
+    );
+    assert!(!absent.contains("polis set"), "{absent}");
+
+    // A first enrollment that could not be written: the directory is gone.
+    let created = super::write_failure_credentials(super::Refusal {
+        existing: None,
+        stored: false,
+        spent_a_code: true,
+        body_replace: false,
+        origin: new,
+        slug: "alpha",
+        name: "relay",
+    });
+    assert_eq!(created, "created by this call were removed");
 }

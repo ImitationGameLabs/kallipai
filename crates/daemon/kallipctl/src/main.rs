@@ -22,7 +22,7 @@ mod tests;
 mod token;
 
 use crate::blobs::{RewriteInvocation, run_blobs_rewrite};
-use crate::cli::{BlobsCommand, Cli, Command, ConfigCommand, EnvCommand, PolisVerb};
+use crate::cli::{BlobsCommand, Cli, Command, ConfigCommand, EnvCommand, TagmaCommand};
 use crate::logs::run_logs;
 use crate::print::print;
 use crate::restart::run_restart;
@@ -67,14 +67,14 @@ async fn run() -> Result<()> {
     }
     if let Command::Polis { command } = &cli.command {
         // The register verbs reach the register with the daemon stopped,
-        // which is half of why the register exists; the instance verbs need
-        // the daemon to say where that instance listens.
-        return match command.split() {
-            PolisVerb::Instance(verb) => {
-                polis::run_instance(&verb, cli.allow_plaintext, &daemon_client(&cli)?).await
-            }
-            PolisVerb::Register(verb) => polis::run_register(&verb, cli.allow_plaintext).await,
-        };
+        // which is half of why the register exists. The entry verbs live
+        // under `tagma` instead: they need the daemon to say where that
+        // instance listens, and the instance to answer for itself.
+        return polis::run_register(command, cli.allow_plaintext).await;
+    }
+    if let Command::Tagma { command } = &cli.command {
+        let TagmaCommand::Polis { command } = command;
+        return polis::run_tagma(command, cli.allow_plaintext, &daemon_client(&cli)?).await;
     }
     let client = daemon_client(&cli)?;
 
@@ -225,17 +225,18 @@ async fn run() -> Result<()> {
             EnvCommand::Set { slug, pairs } => RequestBody::EnvSet { slug, env: pairs },
             EnvCommand::Unset { slug, keys } => RequestBody::EnvUnset { slug, keys },
         },
-        // Neither family reaches a request body: `generate` writes completions
-        // straight to stdout, and `polis` verbs go to `polis::run_register`,
-        // or to `polis::run_instance` once the daemon has said where the
-        // instance listens. The arm keeps the match exhaustive; reaching it
-        // means the dispatch above stopped answering them, so it names where
-        // each family belongs instead of panicking.
-        Command::Generate { .. } | Command::Polis { .. } => anyhow::bail!(
-            "dispatch order broke: `generate` and `polis` are answered before a request \
-             body is chosen. `generate` writes completions to stdout; `polis` verbs \
-             go to `polis::run_register`, or to `polis::run_instance` once the \
-             daemon says where the instance listens. Neither builds a body here."
+        // No family here reaches a request body: `generate` writes completions
+        // straight to stdout, `polis` verbs go to `polis::run_register`, and
+        // `tagma polis` verbs to `polis::run_tagma` once the daemon has said
+        // where the instance listens. The arm keeps the match exhaustive;
+        // reaching it means the dispatch above stopped answering them, so it
+        // names where each family belongs instead of panicking.
+        Command::Generate { .. } | Command::Polis { .. } | Command::Tagma { .. } => anyhow::bail!(
+            "dispatch order broke: `generate`, `polis` and `tagma` are answered before a \
+             request body is chosen. `generate` writes completions to stdout; `polis` \
+             verbs go to `polis::run_register`; `tagma polis` verbs go to \
+             `polis::run_tagma` once the daemon says where the instance listens. None \
+             builds a body here."
         ),
     };
     let response = match client.call(body).await {

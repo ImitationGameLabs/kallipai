@@ -179,6 +179,13 @@ pub(crate) enum Command {
         #[command(subcommand)]
         command: PolisCommand,
     },
+    /// The entries one running instance carries: written to that
+    /// instance's data directory, and reachable only through the daemon
+    /// that locates it.
+    Tagma {
+        #[command(subcommand)]
+        command: TagmaCommand,
+    },
     /// Emit a shell completion script for this CLI to stdout. Hidden:
     /// an installer concern (nix postInstall, user dotfiles), not a
     /// daily verb.
@@ -356,47 +363,6 @@ pub(crate) enum PolisCommand {
         /// Tagma id, as `polis status` prints it.
         tagma: String,
     },
-    /// Print the entries inside a running instance: its own entries, not
-    /// this host's platform register. Needs the daemon, to learn where the
-    /// instance listens.
-    Entries {
-        /// Instance slug.
-        #[arg(add = ArgValueCompleter::new(complete_slug))]
-        slug: String,
-    },
-    /// Add an entry inside a running instance: enroll it (with a code
-    /// minted here unless --code brings one) and start its relay.
-    AddEntry {
-        /// Instance slug.
-        #[arg(add = ArgValueCompleter::new(complete_slug))]
-        slug: String,
-        /// Name for the entry inside the instance.
-        name: String,
-        /// A platform from the register: its address, and its token when
-        /// a code has to be minted.
-        #[arg(long, conflicts_with = "url", add = ArgValueCompleter::new(complete_polis_name))]
-        polis: Option<String>,
-        /// The platform origin, for a platform that is not in the register.
-        #[arg(long)]
-        url: Option<String>,
-        /// An enrollment code to redeem instead of minting one.
-        #[arg(long, conflicts_with = "token_file")]
-        code: Option<String>,
-        /// File holding the access token to mint with; 0600 or stricter.
-        #[arg(long)]
-        token_file: Option<String>,
-    },
-    /// Drop an entry from a running instance and stop its relay.
-    RemoveEntry {
-        /// Instance slug.
-        #[arg(add = ArgValueCompleter::new(complete_slug))]
-        slug: String,
-        /// Entry name, as `polis entries` prints it.
-        name: String,
-        /// Also delete the entry's credentials directory.
-        #[arg(long)]
-        forget: bool,
-    },
     /// Mint an enrollment code here, print it with its expiry and the pending
     /// tagma it created, and leave the redeeming to you: the hand-carried
     /// path, for an instance this CLI cannot reach.
@@ -407,125 +373,91 @@ pub(crate) enum PolisCommand {
     },
 }
 
-impl PolisCommand {
-    /// Which side answers this verb: the register, which reads and writes
-    /// this host's file with the daemon stopped, or a running instance,
-    /// which the daemon has to locate first. Every variant lands on exactly
-    /// one arm, so a verb added to the command line fails to compile until
-    /// it has been classified.
-    pub(crate) fn split(&self) -> PolisVerb<'_> {
-        match self {
-            Self::Add { name, url, replace } => PolisVerb::Register(RegisterVerb::Add {
-                name,
-                url,
-                replace: *replace,
-            }),
-            Self::Remove { name } => PolisVerb::Register(RegisterVerb::Remove { name }),
-            Self::List => PolisVerb::Register(RegisterVerb::List),
-            Self::Token { command } => match command {
-                PolisTokenCommand::Set { name, token_file } => {
-                    PolisVerb::Register(RegisterVerb::SetToken {
-                        name,
-                        token_file: token_file.as_deref(),
-                    })
-                }
-            },
-            Self::Status { name } => PolisVerb::Register(RegisterVerb::Status { name }),
-            Self::Revoke { name, tagma } => {
-                PolisVerb::Register(RegisterVerb::Revoke { name, tagma })
-            }
-            Self::MintCode { platform } => PolisVerb::Register(RegisterVerb::MintCode { platform }),
-            Self::Entries { slug } => PolisVerb::Instance(InstanceVerb::Entries { slug }),
-            Self::AddEntry {
-                slug,
-                name,
-                polis,
-                url,
-                code,
-                token_file,
-            } => PolisVerb::Instance(InstanceVerb::AddEntry {
-                slug,
-                name,
-                polis: polis.as_deref(),
-                url: url.as_deref(),
-                code: code.as_deref(),
-                token_file: token_file.as_deref(),
-            }),
-            Self::RemoveEntry { slug, name, forget } => {
-                PolisVerb::Instance(InstanceVerb::RemoveEntry {
-                    slug,
-                    name,
-                    forget: *forget,
-                })
-            }
-        }
-    }
+#[derive(Subcommand)]
+pub(crate) enum TagmaCommand {
+    /// The entries one running instance carries in its own
+    /// polis.toml, as opposed to the platform register this host keeps.
+    Polis {
+        #[command(subcommand)]
+        command: TagmaPolisCommand,
+    },
 }
 
-/// One `polis` verb, split by which side answers it. The dispatch and the
-/// answering code both work on this shape, so a verb cannot be one thing in
-/// one place and another in the next.
-pub(crate) enum PolisVerb<'a> {
-    Register(RegisterVerb<'a>),
-    Instance(InstanceVerb<'a>),
-}
-
-/// A verb the register answers: it reads or writes this host's platform
-/// file, and reaches a platform only when the verb names one.
-pub(crate) enum RegisterVerb<'a> {
+/// The entry verbs a running instance answers: the daemon says where the
+/// instance listens, and the instance answers over its own loopback faces.
+#[derive(Subcommand)]
+pub(crate) enum TagmaPolisCommand {
+    /// Print the entries inside a running instance: its own entries, not
+    /// this host's platform register. Needs the daemon, to learn where the
+    /// instance listens.
+    List {
+        /// Instance slug.
+        #[arg(add = ArgValueCompleter::new(complete_slug))]
+        slug: String,
+    },
+    /// Add an entry inside a running instance: enroll it (with a code
+    /// minted here unless --code brings one) and start its relay.
     Add {
-        name: &'a str,
-        url: &'a str,
-        replace: bool,
+        /// Instance slug.
+        #[arg(add = ArgValueCompleter::new(complete_slug))]
+        slug: String,
+        /// Name for the entry inside the instance.
+        name: String,
+        /// A platform from the register: its address, and its token when
+        /// a code has to be minted.
+        #[arg(add = ArgValueCompleter::new(complete_polis_name))]
+        platform: String,
+        /// An enrollment code to redeem instead of minting one.
+        #[arg(long, conflicts_with = "token_file")]
+        code: Option<String>,
+        /// File holding the access token to mint with; 0600 or stricter.
+        #[arg(long)]
+        token_file: Option<String>,
     },
+    /// Change an entry that already exists: its address (a platform from
+    /// the register), its credentials (--code or --token-file), or neither,
+    /// which only brings the relay back up. An address change keeps the
+    /// credentials the entry already holds; a code or a token file replaces
+    /// them with a fresh enrollment.
+    Set {
+        /// Instance slug.
+        #[arg(add = ArgValueCompleter::new(complete_slug))]
+        slug: String,
+        /// Entry name, as the list verb prints it.
+        name: String,
+        /// A platform from the register: the new address, and its token
+        /// when a code has to be minted. Leaving it out keeps the recorded
+        /// address.
+        #[arg(add = ArgValueCompleter::new(complete_polis_name))]
+        platform: Option<String>,
+        /// An enrollment code to redeem: this replaces the entry's credentials.
+        #[arg(long, conflicts_with = "token_file")]
+        code: Option<String>,
+        /// File holding the access token to mint the replacement code with.
+        #[arg(long)]
+        token_file: Option<String>,
+    },
+    /// Drop an entry from a running instance and stop its relay.
     Remove {
-        name: &'a str,
-    },
-    List,
-    SetToken {
-        name: &'a str,
-        token_file: Option<&'a str>,
-    },
-    Status {
-        name: &'a str,
-    },
-    Revoke {
-        name: &'a str,
-        tagma: &'a str,
-    },
-    MintCode {
-        platform: &'a str,
-    },
-}
-
-/// A verb answered by a running instance, which the daemon has to locate
-/// first.
-pub(crate) enum InstanceVerb<'a> {
-    Entries {
-        slug: &'a str,
-    },
-    AddEntry {
-        slug: &'a str,
-        name: &'a str,
-        polis: Option<&'a str>,
-        url: Option<&'a str>,
-        code: Option<&'a str>,
-        token_file: Option<&'a str>,
-    },
-    RemoveEntry {
-        slug: &'a str,
-        name: &'a str,
+        /// Instance slug.
+        #[arg(add = ArgValueCompleter::new(complete_slug))]
+        slug: String,
+        /// Entry name, as the list verb prints it.
+        name: String,
+        /// Also delete the entry's credentials directory.
+        #[arg(long)]
         forget: bool,
     },
 }
 
-impl<'a> InstanceVerb<'a> {
+impl TagmaPolisCommand {
     /// The instance this verb speaks to.
-    pub(crate) fn slug(&self) -> &'a str {
+    pub(crate) fn slug(&self) -> &str {
         match self {
-            Self::Entries { slug }
-            | Self::AddEntry { slug, .. }
-            | Self::RemoveEntry { slug, .. } => slug,
+            Self::List { slug }
+            | Self::Add { slug, .. }
+            | Self::Set { slug, .. }
+            | Self::Remove { slug, .. } => slug,
         }
     }
 }
@@ -549,7 +481,7 @@ pub(crate) enum PolisTokenCommand {
 mod tests {
     use clap::Parser as _;
 
-    use super::{Cli, Command, PolisCommand, PolisTokenCommand, PolisVerb};
+    use super::{Cli, Command, PolisCommand, PolisTokenCommand, TagmaCommand, TagmaPolisCommand};
 
     /// Parse `kallipctl polis <args>` and hand back the subcommand.
     fn polis(args: &[&str]) -> PolisCommand {
@@ -561,8 +493,27 @@ mod tests {
         }
     }
 
+    /// Parse `kallipctl tagma polis <args>` and hand back the subcommand.
+    fn tagma(args: &[&str]) -> TagmaPolisCommand {
+        let mut argv = vec!["kallipctl", "tagma", "polis"];
+        argv.extend_from_slice(args);
+        match Cli::try_parse_from(argv)
+            .expect("a tagma polis command")
+            .command
+        {
+            Command::Tagma {
+                command: TagmaCommand::Polis { command },
+            } => command,
+            _ => panic!("not a tagma polis command"),
+        }
+    }
+
+    fn parses(argv: &[&str]) -> bool {
+        Cli::try_parse_from(argv.iter().copied()).is_ok()
+    }
+
     #[test]
-    fn the_six_verbs_parse_into_their_own_shapes() {
+    fn the_host_verbs_parse_into_their_own_shapes() {
         assert!(matches!(polis(&["list"]), PolisCommand::List));
 
         match polis(&["add", "local", "http://127.0.0.1:8080", "--replace"]) {
@@ -601,6 +552,11 @@ mod tests {
             }
             _ => panic!("revoke must parse into Revoke"),
         }
+
+        match polis(&["mint-code", "edge"]) {
+            PolisCommand::MintCode { platform } => assert_eq!(platform, "edge"),
+            _ => panic!("mint-code must parse into MintCode"),
+        }
     }
 
     #[test]
@@ -612,6 +568,10 @@ mod tests {
             vec!["kallipctl", "polis", "token", "set"],
             vec!["kallipctl", "polis", "status"],
             vec!["kallipctl", "polis", "revoke", "local"],
+            vec!["kallipctl", "tagma", "polis", "list"],
+            vec!["kallipctl", "tagma", "polis", "add", "alpha"],
+            vec!["kallipctl", "tagma", "polis", "set", "alpha"],
+            vec!["kallipctl", "tagma", "polis", "remove", "alpha"],
         ] {
             assert!(
                 Cli::try_parse_from(argv.clone()).is_err(),
@@ -621,133 +581,104 @@ mod tests {
     }
 
     #[test]
-    fn the_instance_verbs_parse_into_their_own_shapes() {
+    fn the_tagma_verbs_parse_into_their_own_shapes() {
         assert!(matches!(
-            polis(&["entries", "alpha"]),
-            PolisCommand::Entries { slug } if slug == "alpha"
+            tagma(&["list", "alpha"]),
+            TagmaPolisCommand::List { slug } if slug == "alpha"
         ));
 
-        match polis(&[
-            "add-entry",
-            "alpha",
-            "local",
-            "--polis",
-            "edge",
-            "--code",
-            "abc",
-        ]) {
-            PolisCommand::AddEntry {
+        match tagma(&["add", "alpha", "local", "edge", "--code", "abc"]) {
+            TagmaPolisCommand::Add {
                 slug,
                 name,
-                polis,
-                url,
+                platform,
                 code,
                 token_file,
             } => {
                 assert_eq!(slug, "alpha");
                 assert_eq!(name, "local");
-                assert_eq!(polis.as_deref(), Some("edge"));
-                assert!(url.is_none());
+                assert_eq!(platform, "edge");
                 assert_eq!(code.as_deref(), Some("abc"));
                 assert!(token_file.is_none());
             }
-            _ => panic!("add-entry must parse into AddEntry"),
+            _ => panic!("add must parse into Add"),
         }
 
-        match polis(&[
-            "add-entry",
-            "alpha",
-            "local",
-            "--polis",
-            "edge",
-            "--token-file",
-            "/tmp/token",
-        ]) {
-            PolisCommand::AddEntry { token_file, .. } => {
-                assert_eq!(token_file.as_deref(), Some("/tmp/token"));
+        match tagma(&["add", "alpha", "local", "edge", "--token-file", "/tmp/t"]) {
+            TagmaPolisCommand::Add { token_file, .. } => {
+                assert_eq!(token_file.as_deref(), Some("/tmp/t"));
             }
-            _ => panic!("add-entry must parse into AddEntry"),
+            _ => panic!("add must parse into Add"),
         }
 
-        assert!(
-            Cli::try_parse_from([
-                "kallipctl",
-                "polis",
-                "add-entry",
-                "alpha",
-                "local",
-                "--polis",
-                "edge",
-                "--code",
-                "abc",
-                "--token-file",
-                "/tmp/token",
-            ])
-            .is_err(),
-            "a code and the token to mint with cannot both be given"
-        );
-
-        match polis(&[
-            "add-entry",
+        // The platform is a required positional: leaving it out is a parse
+        // error, not a runtime one.
+        assert!(!parses(&[
+            "kallipctl",
+            "tagma",
+            "polis",
+            "add",
             "alpha",
-            "local",
-            "--url",
-            "https://edge.example.com",
-        ]) {
-            PolisCommand::AddEntry { polis, url, .. } => {
-                assert!(polis.is_none());
-                assert_eq!(url.as_deref(), Some("https://edge.example.com"));
+            "local"
+        ]));
+
+        match tagma(&["set", "alpha", "local"]) {
+            TagmaPolisCommand::Set {
+                slug,
+                name,
+                platform,
+                code,
+                token_file,
+            } => {
+                assert_eq!(slug, "alpha");
+                assert_eq!(name, "local");
+                assert!(platform.is_none());
+                assert!(code.is_none() && token_file.is_none());
             }
-            _ => panic!("add-entry must parse into AddEntry"),
+            _ => panic!("set must parse into Set"),
         }
 
-        assert!(
-            Cli::try_parse_from([
-                "kallipctl",
-                "polis",
-                "add-entry",
-                "alpha",
-                "local",
-                "--polis",
-                "edge",
-                "--url",
-                "https://edge.example.com",
-            ])
-            .is_err(),
-            "one platform, named once: the two flags cannot meet"
-        );
+        match tagma(&["set", "alpha", "local", "edge"]) {
+            TagmaPolisCommand::Set { platform, .. } => {
+                assert_eq!(platform.as_deref(), Some("edge"));
+            }
+            _ => panic!("set must parse into Set"),
+        }
 
-        match polis(&["remove-entry", "alpha", "local", "--forget"]) {
-            PolisCommand::RemoveEntry { slug, name, forget } => {
+        match tagma(&["set", "alpha", "local", "--code", "abc"]) {
+            TagmaPolisCommand::Set { code, .. } => assert_eq!(code.as_deref(), Some("abc")),
+            _ => panic!("set must parse into Set"),
+        }
+
+        match tagma(&["remove", "alpha", "local", "--forget"]) {
+            TagmaPolisCommand::Remove { slug, name, forget } => {
                 assert_eq!(slug, "alpha");
                 assert_eq!(name, "local");
                 assert!(forget);
             }
-            _ => panic!("remove-entry must parse into RemoveEntry"),
-        }
-
-        match polis(&["mint-code", "edge"]) {
-            PolisCommand::MintCode { platform } => assert_eq!(platform, "edge"),
-            _ => panic!("mint-code must parse into MintCode"),
-        }
-    }
-
-    fn needs_the_daemon(command: &PolisCommand) -> Option<String> {
-        match command.split() {
-            PolisVerb::Instance(verb) => Some(verb.slug().to_owned()),
-            PolisVerb::Register(_) => None,
+            _ => panic!("remove must parse into Remove"),
         }
     }
 
     #[test]
-    fn only_the_instance_verbs_need_the_daemon() {
-        assert!(needs_the_daemon(&polis(&["entries", "alpha"])).is_some());
-        assert!(needs_the_daemon(&polis(&["remove-entry", "alpha", "local"])).is_some());
-        assert!(needs_the_daemon(&polis(&["list"])).is_none());
-        assert!(needs_the_daemon(&polis(&["mint-code", "edge"])).is_none());
-        assert_eq!(
-            needs_the_daemon(&polis(&["remove-entry", "alpha", "local"])),
-            Some("alpha".to_owned())
-        );
+    fn a_code_and_the_token_to_mint_with_cannot_meet() {
+        for verb in ["add", "set"] {
+            assert!(
+                !parses(&[
+                    "kallipctl",
+                    "tagma",
+                    "polis",
+                    verb,
+                    "alpha",
+                    "local",
+                    "edge",
+                    "--code",
+                    "abc",
+                    "--token-file",
+                    "/tmp/token",
+                ]),
+                "{verb}: a code and the token to mint with cannot both be given"
+            );
+        }
     }
 }

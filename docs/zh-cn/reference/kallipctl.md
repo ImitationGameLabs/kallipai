@@ -86,6 +86,9 @@ kallipctl --allow-plaintext spawn dev /srv/kallipai/dev --polis http://kallipai.
 | `polis token set NAME [--token-file PATH]` | 存下该平台的访问令牌 |
 | `polis status NAME` | 平台的判定，以及它名下登记的 tagma |
 | `polis revoke NAME TAGMA-ID` | 在平台上吊销一条登记 |
+| `polis mint-code NAME` | 在本机铸一枚注册码，连有效期和它新建的待定 tagma 一起打印 |
+
+登记表这组动词既不需要守护进程，也不需要实例在跑。`mint-code` 用的是登记表里的令牌，问的是平台，所以守护进程停着也能用；把这样的码交到实例，用 `tagma polis add --code`，落到已有凭据的条目上则是 `tagma polis set --code`。
 
 名字沿用实例 slug 的语法：小写字母、数字和 `-`。一个平台一个名字、一个名字一个
 平台：给已登记的地址再起一个名字会被拒，把名字改指新地址要加 `--replace`。
@@ -114,64 +117,78 @@ tagma-2  pending  created=2026-11-11T17:40:00Z  expires=2026-11-11T18:10:00Z
 
 ## 运行中实例里的条目
 
-`polis add` 记的是本机认识的平台；`polis add-entry` 写的是某一台实例自己的
-`polis.toml`：加一条、换注册码、把它的 relay 起起来。这一组动词要守护进程告诉它
-实例监听在哪，实例本身也必须正在运行。
+`polis add` 记的是本机认识的平台；`tagma polis` 写的是某一台实例自己的
+`polis.toml`：加一条、换地址、换凭据，并把它的 relay 起起来。这组动词要守护进程
+告诉它实例监听在哪，实例本身也必须正在运行。
 
 | 动词 | 作用 |
 | --- | --- |
-| `polis entries SLUG` | 该实例里的条目；若条目来自实例环境，也会说明 |
-| `polis add-entry SLUG NAME (--polis NAME \| --url ORIGIN) [--code CODE] [--token-file PATH]` | 加一条条目；没有现成注册码就地铸一枚，然后把 relay 起起来 |
-| `polis remove-entry SLUG NAME [--forget]` | 删一条条目并停掉它的 relay；`--forget` 连凭据目录一起删 |
-| `polis mint-code NAME` | 在本机铸一枚注册码，连有效期和它新建的待定 tagma 一起打印 |
+| `tagma polis list SLUG` | 该实例里的条目；若条目来自实例环境，也会说明 |
+| `tagma polis add SLUG NAME PLATFORM [--code CODE] [--token-file PATH]` | 加一条条目；PLATFORM 是登记表里的平台名，没有现成注册码就地铸一枚，然后把 relay 起起来 |
+| `tagma polis set SLUG NAME [PLATFORM] [--code CODE] [--token-file PATH]` | 改一条已存在的条目：地址（给平台名）、凭据，或两样都不改 |
+| `tagma polis remove SLUG NAME [--forget]` | 删一条条目并停掉它的 relay；`--forget` 连凭据目录一起删，换凭据留下的残留也一并删 |
 
-`mint-code` 是这一组里的例外：它不问实例，所以既不需要守护进程，也不需要实例在跑，
-只碰登记表与平台。
-
-`add-entry` 默认自己铸码、在同一次调用里兑换，所以码不会进 shell 历史，那三十分钟
+`add` 默认自己铸码、在同一次调用里兑换，所以码不会进 shell 历史，那三十分钟
 的窗口也不用你盯着：
 
 ```bash
-kallipctl polis add-entry alpha local --polis edge
+kallipctl tagma polis add alpha local edge
 ```
 
-铸码之前，它先问实例手里已经有什么：名字已带凭据、或实例的条目来自环境，都在不花
-任何注册码的情况下拒掉（没有凭据的那条正是注册码要修的）；`--url` 与登记过的地址
-同一套判据，明文地址照样要 `--allow-plaintext`。
+铸码之前，它先问实例手里已经有什么：名字已带凭据的，在不花任何注册码的情况下
+拒掉并指向 `set`；条目来自环境的实例直接拒掉。没有凭据的那条正是注册码要修的。
+地址只从登记表取，这一点约束的是 `kallipctl`：PLATFORM 给平台名，地址和铸码用的
+令牌都来自登记表，明文地址照样要 `--allow-plaintext`（HTTP API 仍收裸 URL，
+`polis.toml` 也能手改）。平台还没登记，就先 `kallipctl polis add NAME URL` 记一条，
+再回来加条目。`add` 建的条目都挂在登记名下，那条登记还在时，`polis status|revoke|token set`
+就服务得到它；把登记删掉、或用 `--replace` 改指别处，名字就从这些条目上撤走了。
+已经用 `polis mint-code` 铸好的码，用 `--code` 交进去。
 
-给了 `--polis`，地址和铸造用的令牌都取登记表里的；还没登记的平台用 `--url` 给
-地址，同时用 `--code` 或 `--token-file` 交代码从哪来。已经用 `polis mint-code`
-铸好的码，用 `--code` 交进去。
+`set` 改的是 `add` 建出来的那条，自己从不新建：实例里没有这个名字会拒，条目既
+没凭据也没码也会拒，后者是 `add` 的形状。
 
-`add-entry` 先报条目头，再报实例自己的说明：
+| 交什么 | 会发生什么 |
+| --- | --- |
+| 什么都不交 | 用盘上那对凭据把 relay 重新起起来；原本就在跑的，报条目未变 |
+| 平台名 | 条目指向登记表里那个地址，盘上的凭据留着。若这条正是模型画像源钉住的那条（设置里的 `[profiles.source] polis`），实例会原样拒掉并说明先改或清掉那项设置 |
+| `--code`，或用 `--token-file` 就地铸一枚 | 重新登记一次，新的一对顶掉盘上那对。旧凭据在平台上留下的登记仍在，命令会把释放它的 `polis revoke` 行打出来 |
+
+换凭据是整目录换位，所以 `set` 能报出来的失败，盘上要么是旧的一对、要么是新的一对，
+不会各剩一半。掉电是例外：新的一对文件已 fsync，装它们的目录没有，所以断电后可能是
+整对不见，而不是写了一半。两次换位之间被杀，条目目录旁会留下 `<name>.new-*` 和
+`<name>.old-*`，`list` 此时显示 `enrolled=off`；把其中任一个改回 `<name>` 就恢复出
+一对可用凭据。对这条条目再换一次凭据会清掉残留，`remove --forget` 也会一并删掉。
+
+`tagma polis list` 一条条目一行，两个运行状态用词写出来：
+
+```text
+local  https://edge.example.com  enrolled=on  tagma=t-9f2  relay=on  model-gateway=on
+```
+
+`model-gateway=off` 说明网关比这条条目起得早，这条条目要到实例下一次启动才进它的
+平台表。写入先报条目头，再报实例自己的说明：
 
 ```text
 local  https://edge.example.com  enrolled=on  tagma=t-9f2
-relay connected; the gateway's target list is still the one from startup, so this entry joins it on the next start
+relay connected; the model gateway's platform list is still the one from startup, so this entry joins it on the next start
 ```
 
 铸了码的那一趟，会先把待定 tagma 和有效期打到 stderr，所以之后再出错，`polis revoke
 NAME TAGMA` 要用的把手仍在。
 
-`polis entries` 一条条目一行，两个运行状态用词写出来：
-
-```text
-local  https://edge.example.com  enrolled=on  tagma=t-9f2  relay=on  gateway=on
-```
-
-`gateway=off` 说明网关比这条条目起得早，这条条目要到实例下一次启动才并进来。
-
 请求打的是实例自己的回环端口，带的是 `kallipctl operator-token show SLUG` 指向的
 运维令牌：启动时设了 `KALLIPAI_OPERATOR_TOKEN` 的实例以那个环境值为准、不读文件，
-这里同样以环境值为准。实例没在跑就直接拒掉，并给出该执行的
-`kallipctl start`：这里不替人启动任何东西。
+这里同样以环境值为准。实例没在跑就直接拒掉，并给出该执行的 `kallipctl start`：
+这里不替人启动任何东西。
 
 一次写入可能要等一会儿：排在前面的写者、平台的登记、被顶替的旧 relay 各有自己的
-上限，所以每次实例调用等 120 秒（会铸码的 `add-entry` 先后读一次、写一次）。真等到
-超时、或读不到答复，它会说实例可能仍在完成，让你先看 `polis entries SLUG` 再决定
-是否重试；不要先再铸一枚码，正在走的那枚可能已经花掉了。
+上限，所以每次实例调用等 120 秒（会铸码的 `add` 先后读一次、写一次）。真等到
+超时、或读不到答复，它会说实例可能仍在完成，让你先看 `tagma polis list SLUG` 再
+决定是否重试；不要先再铸一枚码，正在走的那枚可能已经花掉了。
 
-条目来自实例环境（spawn 时带了 `--polis`）的实例只列不写：两种写操作都会被实例拒。
+条目来自实例环境（spawn 时带了 `--polis`）的实例只列不写：`add`、`set`、`remove`
+都会被拒，得改 spawn 环境里的 `KALLIPAI_POLIS_URL` 和
+`KALLIPAI_TAGMA_RELAY_ENROLLMENT_CODE`，再重启实例。
 
 ## Shell 补全
 

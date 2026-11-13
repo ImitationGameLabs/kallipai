@@ -94,6 +94,9 @@ here needs the daemon, so the verbs work while it is down.
 | `polis token set NAME [--token-file PATH]` | stores the platform's access token |
 | `polis status NAME` | the platform's verdict plus the tagmas registered for its owner |
 | `polis revoke NAME TAGMA-ID` | revokes one registration on the platform |
+| `polis mint-code NAME` | mints an enrollment code here and prints it with its expiry and the pending tagma it created |
+
+The register verbs need neither the daemon nor a running instance. `mint-code` asks the register for the token and the platform for the code, so it works with the daemon down too; carrying that code to an instance is `tagma polis add --code`, and spending it on an entry that already holds credentials is `tagma polis set --code`.
 
 Names follow the instance slug grammar: lowercase letters, digits and `-`. One
 name per platform and one platform per name: a second name for a recorded
@@ -127,60 +130,79 @@ outcome it asked for.
 
 ## Entries inside a running instance
 
-`polis add` records a platform this host knows. `polis add-entry` writes one
-entry into one instance's own `polis.toml`, enrolls it, and starts its relay.
-The instance verbs need the daemon, to learn where the instance listens, and
-they need the instance running.
+`polis add` records a platform this host knows. `tagma polis` writes one entry
+into one instance's own `polis.toml`, enrolls it, and starts its relay. These
+verbs need the daemon, to learn where the instance listens, and the instance
+has to be running.
 
 | Verb | Does |
 | --- | --- |
-| `polis entries SLUG` | the entries inside that instance, plus whether it takes its entries from the environment instead |
-| `polis add-entry SLUG NAME (--polis NAME \| --url ORIGIN) [--code CODE] [--token-file PATH]` | adds one entry, mints a code unless one is given, and starts its relay |
-| `polis remove-entry SLUG NAME [--forget]` | drops one entry and stops its relay; `--forget` also deletes its credentials |
-| `polis mint-code NAME` | mints an enrollment code here and prints it with its expiry and the pending tagma it created |
+| `tagma polis list SLUG` | the entries inside that instance, plus whether it takes its entries from the environment instead |
+| `tagma polis add SLUG NAME PLATFORM [--code CODE] [--token-file PATH]` | adds one entry for a platform in the register, mints a code unless one is given, and starts its relay |
+| `tagma polis set SLUG NAME [PLATFORM] [--code CODE] [--token-file PATH]` | changes an entry that exists: its address (by naming a platform), its credentials, or neither |
+| `tagma polis remove SLUG NAME [--forget]` | drops one entry and stops its relay; `--forget` also deletes its credentials directory and any swap leftover beside it |
 
-`mint-code` is the exception among them: it asks the instance nothing, so it
-needs neither the daemon nor a running instance, only the register and the
-platform.
-
-`add-entry` normally mints the code itself and redeems it inside the same
-call, so the code never reaches a shell history and its thirty-minute window
-never becomes yours to watch:
+`add` normally mints the code itself and redeems it inside the same call, so
+the code never reaches a shell history and its thirty-minute window never
+becomes yours to watch:
 
 ```bash
-kallipctl polis add-entry alpha local --polis edge
+kallipctl tagma polis add alpha local edge
 ```
 
-Before it mints, it asks the instance what it already holds: a name the
-instance already holds credentials for, or an instance that takes its entries
-from the environment, is refused without spending anything; an entry without
-credentials is what a code repairs. `--url` is judged like a recorded
-address, so a plaintext one needs `--allow-plaintext`. With `--polis` the
-address, and the token to mint with, come from the register; a platform that
-is not registered goes in by `--url`, together with `--code` or
-`--token-file`. A code you already minted with `polis mint-code` is passed
-with `--code`.
+Before it mints, `add` asks the instance what it already holds: a name with
+credentials on it is refused without spending anything, and points at `set`;
+an instance that takes its entries from the environment is refused outright.
+An entry without credentials is the one a code repairs. `kallipctl` takes the
+address from the register and nowhere else: PLATFORM names the platform, and its
+address and the token to mint with both come from there, so a plaintext one
+still needs `--allow-plaintext`. That rule is `kallipctl`'s alone: the HTTP API
+still takes a bare URL, and `polis.toml` can be edited by hand. A platform that
+is not registered yet goes in first, with `kallipctl polis add NAME URL`, and
+the entry is added after that. Every entry `add` makes sits on a register
+name, so `polis status`, `revoke` and `token set` serve it for as long as that
+register entry is there: removing it, or pointing it elsewhere with
+`--replace`, takes the name away from the entries built on it. A code you
+already minted with `polis mint-code` goes in with `--code`.
 
-`add-entry` reports the entry head, then the instance's own note:
+`set` changes an entry that `add` created. It never creates one: a name the
+instance does not hold is refused, and so is an entry with no credentials and
+no code, which is `add`'s shape.
+
+| What you pass | What happens |
+| --- | --- |
+| nothing | the relay comes back up from the stored pair; a relay that was already up reports the entry unchanged |
+| PLATFORM | the entry points at that platform's address and keeps its stored credentials. The entry a model profile source is pinned to (`[profiles.source] polis` in settings) is refused with the instance's own sentence: switch or clear that setting first |
+| `--code`, or `--token-file` to mint one | a fresh enrollment takes the stored pair's place. The registration the old pair left on the platform stays, and the command prints the `polis revoke` line that frees it |
+
+A credentials swap is a directory rename, so a failure `set` can report
+leaves either the old pair or the new one in place, never half of each. A
+power cut is the exception: the staged files are synced, the directory
+holding them is not, so the pair can be absent rather than half-written. A
+kill between the two renames leaves `<name>.new-*` and `<name>.old-*` beside
+the entry directory, and `list` then shows `enrolled=off`; renaming either
+directory back to `<name>` restores a usable pair. The next swap of that
+entry clears the leftovers, and `remove --forget` deletes them.
+
+`tagma polis list` prints one line per entry, with the two run states spelled
+out as words:
+
+```text
+local  https://edge.example.com  enrolled=on  tagma=t-9f2  relay=on  model-gateway=on
+```
+
+`model-gateway=off` means the gateway was started before this entry, so the
+entry joins the gateway's platform list on the instance's next boot. A write
+reports the entry head, then the instance's own note:
 
 ```text
 local  https://edge.example.com  enrolled=on  tagma=t-9f2
-relay connected; the gateway's target list is still the one from startup, so this entry joins it on the next start
+relay connected; the model gateway's platform list is still the one from startup, so this entry joins it on the next start
 ```
 
 A run that minted names the pending tagma and the code's expiry on stderr
 before the entry is written, so a failure past that point still leaves the
 handle `polis revoke NAME TAGMA` takes.
-
-`polis entries` prints one line per entry, with the two run states spelled out
-as words:
-
-```text
-local  https://edge.example.com  enrolled=on  tagma=t-9f2  relay=on  gateway=on
-```
-
-`gateway=off` means the gateway was started before this entry, so the entry
-joins on the instance's next boot.
 
 The instance is reached over its own loopback port, with the operator token
 `kallipctl operator-token show SLUG` points at; an instance started with
@@ -191,14 +213,16 @@ you.
 
 A write may take a while: a concurrent writer's turn, the platform's
 enrollment, and a displaced relay each have their own bound, so the client
-waits up to 120 seconds on each call to the instance (an `add-entry` that
-mints makes two: the check, then the write). When it gives up anyway, or
-cannot read the answer, it says the instance may still be finishing, and
-points at `polis entries SLUG` before you retry; do not mint another code
-first, since the one in flight may already be spent.
+waits up to 120 seconds on each call to the instance (an `add` that mints
+makes two: the check, then the write). When it gives up anyway, or cannot read
+the answer, it says the instance may still be finishing, and points at
+`tagma polis list SLUG` before you retry; do not mint another code first,
+since the one in flight may already be spent.
 
 An instance whose entries come from its environment (a spawn that carried
-`--polis`) lists them and refuses both writes.
+`--polis`) lists them and refuses `add`, `set` and `remove`: change
+`KALLIPAI_POLIS_URL` and `KALLIPAI_TAGMA_RELAY_ENROLLMENT_CODE` in its spawn
+environment and restart it.
 
 ## Shell completions
 

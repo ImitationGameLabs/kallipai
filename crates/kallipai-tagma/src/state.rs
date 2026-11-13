@@ -1106,7 +1106,7 @@ impl AppState {
     }
 
     /// The platform faces this boot resolved, in configuration order: name
-    /// and origin. This is the gateway's target list, and it does not change
+    /// and origin. This is the model gateway's platform list, and it does not
     /// while the process runs; `GET /polis` reads an entry the file does not
     /// hold (a sugar boot's one entry) from here.
     pub fn gateway_faces(&self) -> Vec<(String, String)> {

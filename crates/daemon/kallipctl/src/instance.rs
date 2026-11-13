@@ -191,11 +191,24 @@ impl Instance {
         answer(&self.slug, CHECK_FIRST, response).await
     }
 
-    pub(crate) async fn add(&self, name: &str, url: &str, code: Option<&str>) -> Result<Added> {
+    /// One write against the instance's entry file. `replace` is the one
+    /// case where a code may arrive for an entry that already holds
+    /// credentials: the instance then enrolls again and swaps the stored
+    /// pair, instead of refusing the code as spent on a live registration.
+    pub(crate) async fn add(
+        &self,
+        name: &str,
+        url: &str,
+        code: Option<&str>,
+        replace: bool,
+    ) -> Result<Added> {
         let endpoint = format!("{}/polis", self.base);
         let mut body = serde_json::json!({ "name": name, "url": url });
         if let Some(code) = code {
             body["code"] = serde_json::Value::String(code.to_owned());
+        }
+        if replace {
+            body["replace"] = serde_json::Value::Bool(true);
         }
         let response = self
             .http()?
@@ -257,10 +270,10 @@ impl Instance {
 
 /// What to do when a read or a removal hit the deadline. `{slug}` is filled
 /// in by the caller.
-const CHECK_FIRST: &str = "Run `kallipctl polis entries {slug}` before anything else.";
+const CHECK_FIRST: &str = "Run `kallipctl tagma polis list {slug}` before anything else.";
 
 /// The same, for the one call that may have spent an enrollment code.
-const MINT_FIRST: &str = "Run `kallipctl polis entries {slug}` before anything else, and do not mint another code first: this one may already be spent.";
+const MINT_FIRST: &str = "Run `kallipctl tagma polis list {slug}` before anything else, and do not mint another code first: this one may already be spent.";
 
 /// The instance's answer, or the sentence its refusal deserves. Every failure
 /// after the request went out names what to check first, because it may have
@@ -371,7 +384,7 @@ mod tests {
         let (base, handle) = serve_once("201 Created", body);
         let instance = stub("alpha", base, "op-secret", Duration::from_secs(5));
         let added = instance
-            .add("local", "http://127.0.0.1:8080", Some("abc123"))
+            .add("local", "http://127.0.0.1:8080", Some("abc123"), false)
             .await
             .expect("added");
         assert_eq!(added.entry.name, "local");
@@ -379,6 +392,32 @@ mod tests {
         let request = handle.join().expect("stub");
         assert!(request.starts_with("POST /polis "), "{request}");
         assert!(request.contains("\"code\":\"abc123\""), "{request}");
+    }
+
+    #[tokio::test]
+    async fn a_replacing_write_says_so_in_the_body() {
+        let body = r#"{"entry":{"name":"local","url":"http://127.0.0.1:8080","enrolled":true,"tagma_id":"t-2","relay":true,"gateway":false},"note":"enrolled"}"#;
+        let (base, handle) = serve_once("201 Created", body);
+        let instance = stub("alpha", base, "op-secret", Duration::from_secs(5));
+        instance
+            .add("local", "http://127.0.0.1:8080", Some("abc123"), true)
+            .await
+            .expect("replaced");
+        let request = handle.join().expect("stub");
+        assert!(request.contains("\"replace\":true"), "{request}");
+    }
+
+    #[tokio::test]
+    async fn a_plain_write_leaves_the_replace_key_out() {
+        let body = r#"{"entry":{"name":"local","url":"http://127.0.0.1:8080","enrolled":true,"tagma_id":"t-1","relay":true,"gateway":false},"note":"enrolled"}"#;
+        let (base, handle) = serve_once("201 Created", body);
+        let instance = stub("alpha", base, "op-secret", Duration::from_secs(5));
+        instance
+            .add("local", "http://127.0.0.1:8080", None, false)
+            .await
+            .expect("added");
+        let request = handle.join().expect("stub");
+        assert!(!request.contains("replace"), "{request}");
     }
 
     #[tokio::test]
@@ -418,12 +457,12 @@ mod tests {
         let base = serve_silently();
         let instance = stub("alpha", base, "op-secret", Duration::from_millis(150));
         let err = instance
-            .add("local", "http://127.0.0.1:8080", None)
+            .add("local", "http://127.0.0.1:8080", None, false)
             .await
             .expect_err("deadline");
         let text = err.to_string();
         assert!(text.contains("did not answer within"), "{text}");
-        assert!(text.contains("kallipctl polis entries alpha"), "{text}");
+        assert!(text.contains("kallipctl tagma polis list alpha"), "{text}");
         assert!(text.contains("do not mint another code first"), "{text}");
     }
 
@@ -433,7 +472,7 @@ mod tests {
         let (base, handle) = serve_once("500 Internal Server Error", body);
         let instance = stub("alpha", base, "op-secret", Duration::from_secs(5));
         let err = instance
-            .add("local", "http://127.0.0.1:8080", Some("abc123"))
+            .add("local", "http://127.0.0.1:8080", Some("abc123"), false)
             .await
             .expect_err("refused");
         let text = err.to_string();
