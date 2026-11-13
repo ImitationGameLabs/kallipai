@@ -120,10 +120,6 @@
   let confirmingRevoke = $state(false);
   let revoking = $state(false);
   let revokeError = $state<string | null>(null);
-  // Names the attempt rather than the window: a cancel bumps it, so a reply
-  // that comes back for an attempt nobody is waiting on any more can be told
-  // apart from the one the open window belongs to.
-  let revokeSeq = 0;
 
   /** Typed archeion failures keep their server copy; transport failures are
    * qualitative, details to the console. */
@@ -137,29 +133,14 @@
   // Access-credential dialog: the tagma's permission list and secret, opened
   // lazily from the menu (same treatment as the rooms dialog).
   let credentialOpen = $state(false);
-
   async function confirmRevoke() {
     if (revoking || !onRevoke || !tagma) return;
-    const mine = ++revokeSeq;
     revoking = true;
     revokeError = null;
     try {
       await onRevoke(tagma.tagmaId);
-      // A cancelled attempt must not close a window opened after it.
-      if (mine !== revokeSeq) return;
       confirmingRevoke = false;
     } catch (e) {
-      // Two guards, two jobs: `mine` says whether this attempt still speaks
-      // for the window (a cancel bumps `revokeSeq`), `confirmingRevoke`
-      // whether a window is left to render a line in at all. Either failing
-      // means the reason has no reader, so it goes to the console.
-      if (mine !== revokeSeq || !confirmingRevoke) {
-        console.error(
-          "[tagmata] revoke failed after its attempt was abandoned:",
-          e,
-        );
-        return;
-      }
       revokeError = msgOf(e);
     } finally {
       revoking = false;
@@ -437,7 +418,6 @@
   error={revokeError ? tagma_revoke_failed({ error: revokeError }) : null}
   onConfirm={confirmRevoke}
   onCancel={() => {
-    revokeSeq += 1;
     confirmingRevoke = false;
     revokeError = null;
   }}

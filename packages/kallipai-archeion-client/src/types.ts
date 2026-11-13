@@ -271,9 +271,9 @@ export interface PublicTagmaProfile {
 // record the migration carried has no masked tail at all.
 
 /** One credential record as its owner sees it (a `GET /me/tokens` row, and
- * the `token` half of `GET /tagmata/{id}/credential`). Revoked records stay
- * in the list with `revoked_at` set: the owner can still read what was cut
- * off and when. */
+ * the `token` half of `GET /tagmata/{id}/credential`). The endpoint keeps
+ * revoked records, marked by `revoked_at`; a page that lists live tokens
+ * filters them out. */
 export interface TokenView {
   readonly id: string;
   readonly name: string;

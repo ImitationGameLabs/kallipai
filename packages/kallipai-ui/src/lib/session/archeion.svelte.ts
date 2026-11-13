@@ -294,11 +294,11 @@ class ArcheionSessionStore {
   // inline (success / reauth-required / duplicate / cancelled).
   lastAddPasskey: AddPasskeyResult | null = $state(null);
 
-  // The signed-in user's personal access tokens, oldest first, revoked rows
-  // included: the list is the audit surface, so a secret that was cut off
-  // stays readable with its `revoked_at`. Mirrors the passkeys discipline:
-  // a list failure lands in `tokensError`; create/update/revoke THROW so one
-  // failure does not blank the section.
+  // The signed-in user's personal access tokens, oldest first. The fetch keeps
+  // revoked rows, which carry `revoked_at`; the tokens page hides them because
+  // nothing on the surface audits them, so a cut-off secret is not listed.
+  // Mirrors the passkeys discipline: a list failure lands in `tokensError`;
+  // create/update/revoke THROW so one failure does not blank the section.
   tokens: TokenView[] = $state([]);
   tokensError: string | null = $state(null);
   tokensLoaded = $state(false);

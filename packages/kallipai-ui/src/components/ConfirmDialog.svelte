@@ -2,10 +2,11 @@
   // A generic confirmation modal: the shared shell for any one-click,
   // irreversible action that deserves a second chance (leave room, remove
   // member, pull a tagma from a room). Built on the skeleton-svelte `Dialog`
-  // (controlled `open`); dismiss routes through `onCancel` and is suppressed
-  // while `busy` so a transient failure is surfaced rather than dropped. `tone`
-  // picks the confirm button's preset (`danger` for destructive actions,
-  // `primary` otherwise).
+  // (controlled `open`); every way out routes through `onCancel`, and while
+  // `busy` the dialog's own dismiss and the cancel key both stay shut, so a
+  // transient failure is surfaced rather than dropped. `tone` picks the
+  // confirm button's preset (`danger` for destructive actions, `primary`
+  // otherwise).
   import { Dialog, Portal } from "@skeletonlabs/skeleton-svelte";
   import { common_cancel } from "../paraglide/messages.js";
 
@@ -60,6 +61,7 @@
           <button
             type="button"
             class="btn flex-1 preset-outlined-surface-500 hover:preset-filled-surface-500"
+            disabled={busy}
             onclick={onCancel}
           >
             {common_cancel()}

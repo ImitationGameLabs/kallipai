@@ -29,7 +29,7 @@
 
 <!-- The shell's mobile top row carries this page's heading below md (title prop in RootLayout); this container's padding is plain -- the shell row owns the safe-area inset. -->
 <div class="h-full overflow-y-auto">
-  <div class="px-2 py-4 md:p-6 max-w-md space-y-6">
+  <div class="px-2 py-4 md:p-6 max-w-2xl space-y-6">
     <h1 class="text-xl font-semibold hidden md:block">
       {account_tokens()}
     </h1>

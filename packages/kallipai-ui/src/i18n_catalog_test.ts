@@ -608,7 +608,7 @@ const SYNONYMS: string[][] = [
   ["tagma_presence_online", "room_member_online_aria"],
   ["tagma_presence_offline", "room_member_offline_aria", "shell_offline"],
   ["manage_tasks_col_archived", "manage_tasks_show_archived"],
-  ["auth_creating", "rooms_creating"],
+  ["account_tokens_creating", "auth_creating", "rooms_creating"],
   ["login_username", "auth_username"],
   ["auth_couldnt_reach", "account_email_failed"],
   ["room_settings_aria", "roomsettings_subtitle"],

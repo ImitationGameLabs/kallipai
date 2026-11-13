@@ -7,6 +7,7 @@ import { codeLines } from "../lib/testing/source_pins.ts";
 // over the callers keeps that boundary honest.
 
 const SHELL = new URL("./FormDialog.svelte", import.meta.url);
+const TOKEN_PAGE = new URL("./account/AccessTokens.svelte", import.meta.url);
 
 const DIALOGS = {
   collection: new URL(
@@ -39,6 +40,8 @@ const DIALOGS = {
   userProvider: new URL("./gateway/UserProviderDialog.svelte", import.meta.url),
   userPublish: new URL("./gateway/UserPublishDialog.svelte", import.meta.url),
   userSet: new URL("./gateway/UserSetDialog.svelte", import.meta.url),
+  tokenCreate: new URL("./account/TokenCreateDialog.svelte", import.meta.url),
+  tokenEdit: new URL("./account/TokenEditDialog.svelte", import.meta.url),
 };
 
 // The dialogs that offer a destructive action beside save. The list is the
@@ -177,5 +180,51 @@ Deno.test("the create-room dialog's save key follows the save", () => {
   assert(
     src.includes("rooms_create_failed({ error })"),
     "the dialog builds the failure message, since the shell prints what it is given",
+  );
+});
+
+Deno.test(
+  "the token create dialog's save key reads the name and the perms",
+  () => {
+    const src = codeLines(DIALOGS.tokenCreate);
+    assert(
+      src.includes('nameDraft.trim() !== "" && permsDraft.length > 0'),
+      "an empty name or an empty permission list keeps the save key disabled",
+    );
+  },
+);
+
+Deno.test("the token create dialog reseeds every draft on open", () => {
+  const src = codeLines(DIALOGS.tokenCreate);
+  const from = src.indexOf("function reseed()");
+  assert(from >= 0, "the dialog keeps a reseed for its open transition");
+  const body = src.slice(from, src.indexOf("}", from));
+  for (const line of [
+    'nameDraft = "";',
+    "daysDraft = 90;",
+    "permsDraft = [...PAT_DEFAULT_PERMS];",
+    "nameTouched = false;",
+    "permsTouched = false;",
+  ]) {
+    assert(body.includes(line), `a reopen starts clean: ${line} is in reseed`);
+  }
+});
+
+// An edit's lock cannot ride on the dialog's own token: the edit shell keeps
+// its cancel key open, so a cancel clears the window while the request runs.
+// The page keeps the row id the request belongs to and reads that.
+Deno.test("the token page locks a row on its in-flight request", () => {
+  const src = codeLines(TOKEN_PAGE);
+  assert(
+    src.includes("return editBusyId === id || revokeBusyId === id;"),
+    "the lock reads the request's own row id",
+  );
+  assert(
+    src.includes("if (editBusyId === row.id) return;"),
+    "a revoke waits while that row's edit is still out",
+  );
+  assertFalse(
+    src.includes("editingBusy && editing?.id"),
+    "the window's token cannot stand in for the request's row",
   );
 });
