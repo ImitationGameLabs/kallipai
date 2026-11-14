@@ -1,12 +1,13 @@
-// Tests for the unread store badge model: rooms keep their local fold (the
-// lesche has no per-room stamp), 1:1 badges are ASSIGNED from the tagma's
-// stamped count instead of accumulated from landed rows, the stamp ordering
-// drops stale carriers, explicit-open viewing suppresses the badge, and the
-// room cursor write coalesces into one request per throttle window.
+// Tests for the unread store badge model: BOTH kinds of badge are assigned by
+// a server -- a room's count is the lesche's answer for this member (the badge
+// says what reached them, which a client cannot recompute from the rows it
+// pulled), a 1:1's is the tagma's stamped count. The store never derives a
+// number locally, orders 1:1 stamps by their cursor, suppresses room counts and
+// 1:1 badges while the page is open, and coalesces room cursor writes into one
+// request per throttle window.
 // Rune-bearing module under `deno test`: passthrough $state shim (the
-// statusCard_test pattern). The tagma owns every 1:1 number, so the store
-// holds no device-local watermark at all -- there is nothing to persist or
-// rehydrate. All IO seams are stubbed; no network, no real timers.
+// statusCard_test pattern). All IO seams are stubbed; no network, no real
+// timers.
 
 declare global {
   function $state<T>(initial: T): T;
@@ -16,15 +17,21 @@ declare global {
 (globalThis as Record<string, unknown>)["$state"] = (v: unknown) => v;
 
 const { assertEquals } = await import("@std/assert");
-const { unreadStore, badgeLabel, roomKey, tagmaKey, CATCHUP_PAGE } =
+const { unreadStore, badgeLabel, roomKey, tagmaKey } =
   await import("./unread.svelte.ts");
 
 // -- seams -------------------------------------------------------------------
 
 let armed: (() => void)[] = [];
 let puts: [string, number][] = [];
-let selfId: string | null = "me";
-let pages: Map<string, { seq: number; senderId: string }[]>;
+let fetches: string[] = [];
+let counts: Map<string, { unread: number; cursor: number }>;
+let failNext = false;
+let putFails = false;
+// When gated, a count read hangs until the test releases it -- the way a real
+// request sits in flight while more envelopes land.
+let gated = false;
+let releases: (() => void)[] = [];
 
 function installSeams(): void {
   unreadStore.setTimerArmer((fn) => {
@@ -33,25 +40,38 @@ function installSeams(): void {
   });
   unreadStore.setReadCursorPutter((roomId, seq) => {
     puts.push([roomId, seq]);
+    if (putFails) {
+      putFails = false;
+      return Promise.reject(new Error("cursor write failed"));
+    }
     return Promise.resolve();
   });
-  unreadStore.setSelfId(() => selfId);
-  unreadStore.setRoomPageFetcher((roomId, afterSeq, limit) => {
-    assertEquals(limit, CATCHUP_PAGE);
-    return Promise.resolve(
-      (pages.get(roomId) ?? []).filter((r) => r.seq > afterSeq).slice(0, limit),
-    );
+  unreadStore.setRoomUnreadFetcher((roomId) => {
+    fetches.push(roomId);
+    if (failNext) {
+      failNext = false;
+      return Promise.reject(new Error("count read failed"));
+    }
+    const answer = () => counts.get(roomId) ?? { unread: 0, cursor: 0 };
+    if (!gated) return Promise.resolve(answer());
+    return new Promise((resolve) => {
+      releases.push(() => resolve(answer()));
+    });
   });
 }
 
-/** Drain pending microtasks so fire-and-forget pulls settle. */
+/** Drain pending microtasks so fire-and-forget reads settle. */
 const flush = () => new Promise<void>((r) => setTimeout(r, 0));
 
 function baseline(): void {
   armed = [];
   puts = [];
-  selfId = "me";
-  pages = new Map();
+  fetches = [];
+  counts = new Map();
+  failNext = false;
+  putFails = false;
+  gated = false;
+  releases = [];
   installSeams();
   unreadStore.reset();
 }
@@ -123,7 +143,7 @@ Deno.test(
     // The ONLY clear path is enter() from the conversation page's mount effect
     // (boot auto-open never calls the store -- see channels.ensureOpen: it has
     // no unread surface). A registry re-list must not clear either.
-    unreadStore.initRooms([{ roomId: "r1", lastReadSeq: 0 }]);
+    unreadStore.initRooms([]);
     assertEquals(unreadStore.countOf(tagmaKey("t1")), 2);
     unreadStore.enter(tagmaKey("t1"));
     assertEquals(unreadStore.countOf(tagmaKey("t1")), 0);
@@ -134,47 +154,37 @@ Deno.test(
 Deno.test("the bar total is the sum across conversations", async () => {
   baseline();
   unreadStore.setTagmaUnread("t1", { unread: 2, cursor: 3 });
-  pages.set("r1", [
-    { seq: 1, senderId: "p" },
-    { seq: 2, senderId: "p" },
-    { seq: 3, senderId: "p" },
-  ]);
+  counts.set("r1", { unread: 3, cursor: 0 });
   unreadStore.initRooms([{ roomId: "r1", lastReadSeq: 0 }]);
   await flush();
   assertEquals(unreadStore.total(), 5);
 });
 
-// -- rooms: the local fold (no server stamp) ---------------------------------
+// -- rooms: the count is the server's answer --------------------------------
 
-Deno.test(
-  "room pull counts precisely, skips own lines; a full page reads 99+",
-  async () => {
-    baseline();
-    pages.set("r1", [
-      { seq: 1, senderId: "peer" },
-      { seq: 2, senderId: "peer" },
-      { seq: 3, senderId: "me" },
-      { seq: 4, senderId: "peer" },
-    ]);
-    unreadStore.initRooms([{ roomId: "r1", lastReadSeq: 0 }]);
-    await flush();
-    // 4 rows, 1 mine -> 3; my own row still advances the fence.
-    assertEquals(unreadStore.countOf(roomKey("r1")), 3);
-    unreadStore.noteRoomActivity("r1");
-    await flush();
-    assertEquals(unreadStore.countOf(roomKey("r1")), 3); // no double-count
+Deno.test("a room badge is assigned from the server count", async () => {
+  baseline();
+  counts.set("r1", { unread: 3, cursor: 0 });
+  unreadStore.initRooms([{ roomId: "r1", lastReadSeq: 0 }]);
+  await flush();
+  assertEquals(unreadStore.countOf(roomKey("r1")), 3);
+  // A later envelope replaces the number with the newer answer; it never adds
+  // to it, so a burst cannot double-count.
+  counts.set("r1", { unread: 4, cursor: 0 });
+  unreadStore.noteRoomActivity("r1");
+  await flush();
+  assertEquals(unreadStore.countOf(roomKey("r1")), 4);
+  assertEquals(fetches, ["r1", "r1"]);
+});
 
-    const fullPage = Array.from({ length: CATCHUP_PAGE }, (_, i) => ({
-      seq: i + 1,
-      senderId: "peer",
-    }));
-    pages.set("r2", fullPage);
-    unreadStore.initRooms([{ roomId: "r2", lastReadSeq: 0 }]);
-    await flush();
-    assertEquals(unreadStore.countOf(roomKey("r2")), CATCHUP_PAGE);
-    assertEquals(badgeLabel(unreadStore.countOf(roomKey("r2"))), "99+");
-  },
-);
+Deno.test("a count above the cap still renders as 99+", async () => {
+  baseline();
+  counts.set("r1", { unread: 250, cursor: 0 });
+  unreadStore.initRooms([{ roomId: "r1", lastReadSeq: 0 }]);
+  await flush();
+  assertEquals(unreadStore.countOf(roomKey("r1")), 250);
+  assertEquals(badgeLabel(unreadStore.countOf(roomKey("r1"))), "99+");
+});
 
 Deno.test("badgeLabel caps the display at the cap", () => {
   assertEquals(badgeLabel(0), "0");
@@ -183,81 +193,180 @@ Deno.test("badgeLabel caps the display at the cap", () => {
   assertEquals(badgeLabel(100), "99+");
 });
 
-Deno.test(
-  "cursor-changed reduces by the advance; stale events never regress",
-  async () => {
-    baseline();
-    unreadStore.initRooms([{ roomId: "r1", lastReadSeq: 10 }]);
-    pages.set(
-      "r1",
-      [11, 12, 13, 14, 15].map((seq) => ({ seq, senderId: "peer" })),
-    );
-    unreadStore.noteRoomActivity("r1");
-    await flush();
-    assertEquals(unreadStore.countOf(roomKey("r1")), 5);
-    // Another session read through 13: exactly 11..13 leave the count.
-    unreadStore.applyServerRead("r1", 13);
-    assertEquals(unreadStore.countOf(roomKey("r1")), 2);
-    // A stale/duplicated echo below the newest watermark is a no-op.
-    unreadStore.applyServerRead("r1", 12);
-    assertEquals(unreadStore.countOf(roomKey("r1")), 2);
-    // A jump past everything we have seen zeroes without going negative.
-    unreadStore.applyServerRead("r1", 40);
-    assertEquals(unreadStore.countOf(roomKey("r1")), 0);
-  },
-);
+Deno.test("a cursor echo asks again; the store does not subtract", async () => {
+  baseline();
+  counts.set("r1", { unread: 5, cursor: 10 });
+  unreadStore.initRooms([{ roomId: "r1", lastReadSeq: 10 }]);
+  await flush();
+  assertEquals(unreadStore.countOf(roomKey("r1")), 5);
+  // Another session read through 13: the answer is the server's, and the
+  // store never derives it from the watermark advance.
+  counts.set("r1", { unread: 2, cursor: 13 });
+  unreadStore.applyServerRead("r1", 13);
+  await flush();
+  assertEquals(unreadStore.countOf(roomKey("r1")), 2);
+  // A stale echo below the stored watermark asks nothing.
+  const before = fetches.length;
+  unreadStore.applyServerRead("r1", 12);
+  await flush();
+  assertEquals(fetches.length, before);
+  assertEquals(unreadStore.countOf(roomKey("r1")), 2);
+  // A jump past everything zeroes because the server says so.
+  counts.set("r1", { unread: 0, cursor: 40 });
+  unreadStore.applyServerRead("r1", 40);
+  await flush();
+  assertEquals(unreadStore.countOf(roomKey("r1")), 0);
+});
 
 Deno.test(
   "tab scope: a fresh store converges from server truth (no cross-tab broadcast)",
   async () => {
     baseline();
-    pages.set(
-      "r1",
-      [11, 12, 13, 14, 15].map((seq) => ({ seq, senderId: "peer" })),
-    );
+    counts.set("r1", { unread: 5, cursor: 0 });
     unreadStore.initRooms([{ roomId: "r1", lastReadSeq: 0 }]);
     await flush();
     assertEquals(unreadStore.countOf(roomKey("r1")), 5);
     // A second tab starts from the registry watermark (its own store state)
-    // and converges via the list + its own pull -- there is no cross-tab
-    // broadcast, and the count is recomputed from server truth, not inherited.
+    // and converges via the list + its own read -- there is no cross-tab
+    // broadcast, and the count comes from server truth, not inherited.
+    counts.set("r1", { unread: 0, cursor: 15 });
     unreadStore.initRooms([{ roomId: "r1", lastReadSeq: 15 }]);
-    assertEquals(unreadStore.countOf(roomKey("r1")), 0);
-    unreadStore.noteRoomActivity("r1");
     await flush();
     assertEquals(unreadStore.countOf(roomKey("r1")), 0);
   },
 );
 
 Deno.test(
-  "viewing: count holds at zero, cursor writes coalesce, leave flushes",
+  "a burst during a read lands on the last answer, one read in flight",
   async () => {
     baseline();
+    gated = true;
+    counts.set("r1", { unread: 1, cursor: 0 });
+    unreadStore.initRooms([{ roomId: "r1", lastReadSeq: 0 }]);
+    assertEquals(fetches, ["r1"]);
+    // Two more envelopes arrive while that read is still open: they queue one
+    // trailing pass instead of stacking requests.
+    unreadStore.noteRoomActivity("r1");
+    unreadStore.noteRoomActivity("r1");
+    assertEquals(fetches, ["r1"]);
+    counts.set("r1", { unread: 5, cursor: 0 });
+    releases.shift()!();
+    await flush();
+    assertEquals(fetches, ["r1", "r1"]);
+    releases.shift()!();
+    await flush();
+    assertEquals(unreadStore.countOf(roomKey("r1")), 5);
+  },
+);
+
+Deno.test(
+  "a failed read leaves the badge alone and the next event asks again",
+  async () => {
+    baseline();
+    counts.set("r1", { unread: 4, cursor: 0 });
+    failNext = true;
     unreadStore.initRooms([{ roomId: "r1", lastReadSeq: 0 }]);
     await flush();
+    assertEquals(unreadStore.countOf(roomKey("r1")), 0);
+    unreadStore.noteRoomActivity("r1");
+    await flush();
+    assertEquals(unreadStore.countOf(roomKey("r1")), 4);
+  },
+);
+
+Deno.test(
+  "viewing: count holds at zero, no read while open, one after the flush",
+  async () => {
+    baseline();
+    counts.set("r1", { unread: 3, cursor: 0 });
+    unreadStore.initRooms([{ roomId: "r1", lastReadSeq: 0 }]);
+    await flush();
+    assertEquals(unreadStore.countOf(roomKey("r1")), 3);
+
     unreadStore.enter(roomKey("r1"));
+    assertEquals(unreadStore.countOf(roomKey("r1")), 0);
     assertEquals(armed.length, 1); // the enter-scheduled write window
     assertEquals(puts.length, 0);
-    // New lines arrive while viewing: the page's line tick advances the fence
-    // (count stays 0) and the writes coalesce into the open window.
-    pages.set(
-      "r1",
-      [1, 2, 3].map((seq) => ({ seq, senderId: "peer" })),
-    );
+
+    // Envelopes while viewing ask for nothing: the answer would be masked.
+    unreadStore.noteRoomActivity("r1");
+    await flush();
+    assertEquals(fetches, ["r1"]);
+
+    // Rendered lines advance the cursor, coalesced into the open window.
     unreadStore.noteViewedLines("r1", 1);
     unreadStore.noteViewedLines("r1", 2);
     unreadStore.noteViewedLines("r1", 3);
     assertEquals(armed.length, 1); // still one window, no per-line requests
     assertEquals(puts.length, 0);
-    armed[0](); // the window elapses -> one merged write with the latest cursor
+    armed[0]!(); // the window elapses -> one merged write with the latest cursor
     await flush();
     assertEquals(puts, [["r1", 3]]);
-    // Switching away flushes the final cursor at once.
+
+    // Leaving flushes the final cursor, then asks for the count behind it.
+    counts.set("r1", { unread: 0, cursor: 9 });
     unreadStore.leaveRoom("r1", 9);
     await flush();
     assertEquals(puts, [
       ["r1", 3],
       ["r1", 9],
     ]);
+    assertEquals(fetches, ["r1", "r1"]);
+    assertEquals(unreadStore.countOf(roomKey("r1")), 0);
   },
 );
+
+Deno.test("a room dropped from the list drops its badge", async () => {
+  baseline();
+  counts.set("r1", { unread: 6, cursor: 0 });
+  unreadStore.initRooms([{ roomId: "r1", lastReadSeq: 0 }]);
+  await flush();
+  assertEquals(unreadStore.countOf(roomKey("r1")), 6);
+  unreadStore.initRooms([]);
+  assertEquals(unreadStore.countOf(roomKey("r1")), 0);
+  assertEquals(unreadStore.total(), 0);
+});
+
+Deno.test(
+  "a failed cursor write on leave claims nothing the server never recorded",
+  async () => {
+    baseline();
+    counts.set("r1", { unread: 2, cursor: 0 });
+    unreadStore.initRooms([{ roomId: "r1", lastReadSeq: 0 }]);
+    await flush();
+    assertEquals(unreadStore.countOf(roomKey("r1")), 2);
+
+    unreadStore.enter(roomKey("r1"));
+    unreadStore.noteViewedLines("r1", 5);
+    // The write fails, so the watermark must not move: the answer behind it
+    // still speaks about cursor 0 and is the truth about what the server holds.
+    // Its number is deliberately not the one already shown: an implementation
+    // that raised the read watermark before the write would drop this answer.
+    putFails = true;
+    counts.set("r1", { unread: 7, cursor: 0 });
+    unreadStore.leaveRoom("r1", 5);
+    await flush();
+    assertEquals(unreadStore.countOf(roomKey("r1")), 7);
+  },
+);
+
+Deno.test("a count answer older than a landed cursor is dropped", async () => {
+  baseline();
+  counts.set("r1", { unread: 4, cursor: 0 });
+  unreadStore.initRooms([{ roomId: "r1", lastReadSeq: 0 }]);
+  await flush();
+  assertEquals(unreadStore.countOf(roomKey("r1")), 4);
+
+  // A newer answer lands: nothing past cursor 6.
+  counts.set("r1", { unread: 0, cursor: 6 });
+  unreadStore.noteRoomActivity("r1");
+  await flush();
+  assertEquals(unreadStore.countOf(roomKey("r1")), 0);
+
+  // A stale answer (taken before that cursor) arrives next; showing it would
+  // relight rows the member has read.
+  counts.set("r1", { unread: 4, cursor: 0 });
+  unreadStore.noteRoomActivity("r1");
+  await flush();
+  assertEquals(unreadStore.countOf(roomKey("r1")), 0);
+});

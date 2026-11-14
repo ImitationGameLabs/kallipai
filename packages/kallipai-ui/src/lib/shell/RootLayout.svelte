@@ -109,13 +109,13 @@
           env.ciphertext,
           env.sender,
         );
-        // The transcript renders live; the unread store no-ops while the
-        // room is being viewed and pull-counts when open-but-not-viewed.
+        // The transcript renders live; the unread store asks the lesche for
+        // this member's count, and asks for nothing while the room is viewed.
         unreadStore.noteRoomActivity(env.channel_id);
         maybeNotifyRoom(env);
       } else if (roomsStore.has(env.channel_id)) {
-        // A room envelope with no open conversation: the unread store
-        // pull-counts it precisely (live room envelopes carry no seq).
+        // A room envelope with no open conversation: the store asks for the
+        // count (a live envelope carries no seq, so there is nothing to count).
         unreadStore.noteRoomActivity(env.channel_id);
         maybeNotifyRoom(env);
       } else {

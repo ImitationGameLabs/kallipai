@@ -39,12 +39,17 @@ import type {
  * lesche stores room payloads opaquely; `ciphertext` (base64) is the plaintext
  * `RoomMessage` JSON bytes (rooms are server-readable). `seq` is per-room,
  * monotonic from 1 (the `after_seq` cursor); `created_at` is ISO8601.
+ *
+ * `thread` is the discussion this row belongs to: the `seq` of the row that
+ * heads it. It is absent when the row heads its own discussion, so read it as
+ * `thread ?? seq`; absence is the normal case, not an error.
  */
 export interface RoomMessageView {
   readonly seq: number;
   readonly sender: Participant;
   readonly epoch: number;
   readonly ciphertext: string;
+  readonly thread?: number | null;
   readonly created_at: string;
 }
 
@@ -99,6 +104,17 @@ export interface RoomView {
    * room never read. Present on list-rooms responses; the public discovery
    * listing always carries 0 (the caller is not a member). */
   readonly last_read_seq: number;
+}
+
+/** `GET /rooms/{id}/unread` -- the caller's badge in a room: how many rows
+ * past their read cursor reached them, and the cursor it was counted against.
+ * "Reached" follows the delivery rule in force: a head row reaches the whole
+ * room, a row inside a thread reaches that thread's participants and every
+ * human member. The count is the server's, so a client that never pulled the
+ * history still badges correctly. */
+export interface RoomUnreadView {
+  readonly unread: number;
+  readonly cursor: number;
 }
 
 /** `GET /rooms/{id}` -- a single room's live membership snapshot (member-only;

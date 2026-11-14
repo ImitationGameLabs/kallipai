@@ -57,6 +57,10 @@ pub struct MessageDelivery<'a> {
     /// shape, the cap and the roster are the tagma's to judge. Empty is the
     /// same as none -- the request leaves the key off the wire.
     pub mentions: &'a [String],
+    /// The thread this send declares: a position in the same room's log whose
+    /// discussion the message joins. `None` heads its own discussion.
+    /// Room sends only -- the tagma refuses one on a bilateral or direct send.
+    pub thread: Option<i64>,
 }
 
 impl TagmaClient {
@@ -88,6 +92,7 @@ impl TagmaClient {
                         tagma: delivery.tagma.map(str::to_owned),
                         quote: delivery.quote,
                         mentions: delivery.mentions.to_vec(),
+                        thread: delivery.thread,
                     }),
             )
             .send()
@@ -744,6 +749,36 @@ mod tests {
             .expect("delivery accepted");
     }
 
+    #[tokio::test]
+    async fn post_message_delivery_sends_the_thread_it_was_given() {
+        let server = MockServer::start().await;
+        let id = AgentId::random();
+        Mock::given(method("POST"))
+            .and(path(format!("/agents/{id}/lesche/messages")))
+            .and(body_partial_json(serde_json::json!({
+                "text": "ping",
+                "room": "ops",
+                "thread": 3
+            })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": true })),
+            )
+            .mount(&server)
+            .await;
+        client_for(&server)
+            .post_message_delivery(
+                &id,
+                "ping",
+                MessageDelivery {
+                    room: Some("ops"),
+                    thread: Some(3),
+                    ..MessageDelivery::default()
+                },
+            )
+            .await
+            .expect("delivery accepted");
+    }
+
     #[test]
     fn a_message_request_carries_the_mentions_it_was_given() {
         let wire = serde_json::to_value(crate::types::LescheMessageRequest {
@@ -752,6 +787,7 @@ mod tests {
             tagma: None,
             quote: None,
             mentions: vec!["62626262-6262-4262-8262-626262626262".to_owned()],
+            thread: None,
         })
         .expect("serializes");
         assert_eq!(
@@ -768,10 +804,38 @@ mod tests {
             tagma: None,
             quote: None,
             mentions: Vec::new(),
+            thread: None,
         })
         .expect("serializes");
         assert!(wire.get("quote").is_none(), "{wire}");
         assert!(wire.get("mentions").is_none(), "{wire}");
         assert!(wire.get("tagma").is_none(), "{wire}");
+    }
+
+    /// The tagma declares its own `LescheMessageRequest`, so a field renamed
+    /// here still compiles and only the wire key goes wrong: pin the key.
+    #[test]
+    fn a_message_request_carries_the_thread_it_declares() {
+        let wire = serde_json::to_value(crate::types::LescheMessageRequest {
+            text: "ping".to_owned(),
+            room: Some("ops".to_owned()),
+            tagma: None,
+            quote: None,
+            mentions: Vec::new(),
+            thread: Some(3),
+        })
+        .expect("serializes");
+        assert_eq!(wire["thread"], serde_json::json!(3));
+
+        let wire = serde_json::to_value(crate::types::LescheMessageRequest {
+            text: "ping".to_owned(),
+            room: Some("ops".to_owned()),
+            tagma: None,
+            quote: None,
+            mentions: Vec::new(),
+            thread: None,
+        })
+        .expect("serializes");
+        assert!(wire.get("thread").is_none(), "{wire}");
     }
 }

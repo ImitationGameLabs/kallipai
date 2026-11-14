@@ -1,12 +1,14 @@
 // The room-message plaintext codec. A room's message payload is a
 // JSON-serialized `RoomMessage` (rooms and the bilateral 1:1 path are
 // disjoint address spaces; text, an optional attachment, an optional quoted
-// seq, and the participant ids it mentions -- no `req_id`/ack), per
+// seq, an optional declared thread, and the participant ids it names -- no
+// `req_id`/ack), per
 // crates/platform/kallipai-lesche-common/src/message.rs:
 //   pub struct RoomMessage {
 //     pub text: String,
 //     pub attachment: Option<FileAttachment>,
 //     pub quote: Option<i64>,
+//     pub thread: Option<i64>,  // the thread it declares, if any
 //     pub mentions: Vec<MemberId>,  // empty unless the sender named members
 //   }
 // The tagma's room inbound (`relay/mod.rs::handle_room_message`) does

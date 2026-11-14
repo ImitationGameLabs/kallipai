@@ -63,7 +63,7 @@ class RoomsStore {
       this.roomsLoaded = true;
       this.roomsError = null;
       // Hand the fresh list (with the caller-scoped read cursors) to the
-      // unread store: it seeds room entries + schedules the counting pulls.
+      // unread store: it seeds room entries and asks for one count per room.
       unreadStore.initRooms(
         roomsRes.value.map((r) => ({
           roomId: r.room_id,

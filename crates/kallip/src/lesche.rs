@@ -30,6 +30,7 @@ pub(crate) async fn run_lesche(client: &TagmaClient, cmd: &LescheCommand) -> Res
             // quote, or a mention without a room, is answerable without the message body.
             let quote = send_quote(args)?;
             let mentions = send_mentions(args)?;
+            let thread = send_thread(args)?;
             let text = read_text_stdin()?;
             client
                 .post_message_delivery(
@@ -40,6 +41,7 @@ pub(crate) async fn run_lesche(client: &TagmaClient, cmd: &LescheCommand) -> Res
                         tagma: args.tagma.as_deref(),
                         quote,
                         mentions: &mentions,
+                        thread,
                     },
                 )
                 .await?;
@@ -217,6 +219,18 @@ fn send_quote(args: &SendArgs) -> Result<Option<i64>> {
             anyhow::bail!("--quote rides a room or direct send: a seq names a row in that log")
         }
         quote => Ok(quote),
+    }
+}
+
+/// The thread a `lesche send` declares: a position in a room's log, so the
+/// flag rides a room send only -- the bilateral 1:1 and a peer tagma's direct
+/// session have no threads. The tagma answers the same refusal with a 400.
+fn send_thread(args: &SendArgs) -> Result<Option<i64>> {
+    match args.thread {
+        Some(_) if args.room.is_none() => {
+            anyhow::bail!("--thread rides a room send: a thread is a room's discussion")
+        }
+        thread => Ok(thread),
     }
 }
 
@@ -699,6 +713,29 @@ mod tests {
             expect_named_block(block.clone(), 42).expect("a body quoting a block"),
             block
         );
+    }
+
+    #[test]
+    fn a_thread_rides_a_room_send_only() {
+        assert_eq!(
+            send_thread(&parsed_send(&["--room", ROOM, "--thread", "3"])).expect("room send"),
+            Some(3)
+        );
+        assert_eq!(
+            send_thread(&parsed_send(&["--room", ROOM])).expect("room send"),
+            None
+        );
+        // A thread is a room's discussion: no room, no thread.
+        for flags in [
+            vec!["--thread", "3"],
+            vec!["--tagma", "peer", "--thread", "3"],
+        ] {
+            let err = send_thread(&parsed_send(&flags)).expect_err("no room to join a thread in");
+            assert!(
+                err.to_string().contains("--thread rides a room send"),
+                "{err}"
+            );
+        }
     }
 
     #[test]

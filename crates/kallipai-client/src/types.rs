@@ -35,6 +35,11 @@ pub struct LescheMessageRequest {
     /// names nobody leaves the key off the wire, the way the CLI does.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mentions: Vec<String>,
+    /// The thread this send declares: a position in the same room's log whose
+    /// discussion the message joins. Room sends only; absent means the message
+    /// heads its own discussion. Not derived from `quote`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thread: Option<i64>,
 }
 
 /// One row of the unified session list (`GET /agents/{id}/lesche/sessions`,

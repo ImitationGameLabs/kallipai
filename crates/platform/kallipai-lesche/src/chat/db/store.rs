@@ -15,6 +15,7 @@
 use std::collections::HashMap;
 
 use kallipai_archeion_common::ids::ParticipantKind;
+use kallipai_lesche_common::message::ThreadFacts;
 use kallipai_lesche_common::rooms::{MemberId, RoomMember, RoomMembership};
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, ConnectionTrait, DatabaseBackend, EntityTrait,
@@ -25,6 +26,7 @@ use time::OffsetDateTime;
 use super::Db;
 use super::entity::{
     room_member_revocations, room_members, room_messages, room_read_cursors, rooms,
+    thread_participants,
 };
 
 /// One stored message, as read back for a history pull. Carries the sender's
@@ -38,6 +40,9 @@ pub struct StoredMessage {
     pub sender_kind: ParticipantKind,
     pub epoch: i64,
     pub ciphertext: Vec<u8>,
+    /// The discussion this row belongs to: the `seq` of its head row, or `None`
+    /// when the row heads its own (`root_seq.unwrap_or(seq)` is the head).
+    pub root_seq: Option<i64>,
     pub created_at: OffsetDateTime,
 }
 
@@ -63,13 +68,61 @@ async fn next_seq(txn: &impl ConnectionTrait, room: &str) -> Result<i64, sea_orm
     Ok(seq)
 }
 
+/// The policy for a failed participant read, in one place: a send must never
+/// fail because the audience could not be read. An empty set is the signal the
+/// caller turns into "wake the whole room" (see [`crate::chat::audience`]).
+fn participants_or_empty(
+    room: &str,
+    root: i64,
+    result: Result<Vec<ThreadParticipant>, sea_orm::DbErr>,
+) -> Vec<MemberId> {
+    match result {
+        Ok(rows) => rows.into_iter().map(|p| p.participant_id).collect(),
+        Err(e) => {
+            tracing::warn!(
+                room_id = room,
+                root,
+                error = %e,
+                "thread participants read failed; the audience falls back to the whole room"
+            );
+            Vec::new()
+        }
+    }
+}
+
+/// What an append produced: the row's position, the thread it landed in, and
+/// the agents recorded in that thread (empty for a head row, which defines its
+/// own thread and needs no participants to scope its delivery).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Appended {
+    /// The assigned position in the room's log.
+    pub seq: i64,
+    /// The thread this row belongs to; `None` when it heads its own.
+    pub root: Option<i64>,
+    /// Agents recorded in `root`, deduplicated by the table's primary key.
+    pub participants: Vec<MemberId>,
+}
+
 /// Append a room-message payload row to the room's history (the payload is
 /// plaintext `RoomMessage` JSON stored opaquely -- the column name `ciphertext`
-/// is a legacy shared-`Envelope` term). Returns the assigned `seq`. Only the
-/// sender's stable identity (a `MemberId` + kind) is persisted; the display
-/// handle is derived at read time, so none is taken here.
+/// is a legacy shared-`Envelope` term). Returns [`Appended`]: the assigned
+/// `seq`, the thread the row landed in, and everyone recorded in that thread.
+/// Only the sender's stable identity (a `MemberId` + kind) is persisted; the
+/// display handle is derived at read time, so none is taken here.
 /// The sequence is advanced and the row inserted in the same transaction, so a
 /// failed insert rolls the sequence back (no gaps in the log).
+///
+/// `facts` carries the two write-path facts the payload declares: the thread
+/// (a position in this room's log), resolved here rather than inferred from the
+/// payload's `quote` -- a quote is a display gesture, while a thread decides
+/// which wake scope a message belongs to; see [`resolve_thread_root`] for the
+/// normalization, the NULL cases, and why a thread root never backfills. Its
+/// mentions are already narrowed to current AGENT members by the caller (see
+/// [`record_participants`] for why the store does not judge membership itself).
+///
+/// Mentions on a HEAD message are never recorded, here or by any backfill: a
+/// head wakes the whole room, so its mentions narrow nothing, and the
+/// participant table describes threads.
 pub async fn append(
     db: &Db,
     room: &str,
@@ -77,16 +130,26 @@ pub async fn append(
     sender_kind: ParticipantKind,
     epoch: i64,
     ciphertext: &[u8],
-) -> Result<i64, sea_orm::DbErr> {
+    facts: &ThreadFacts,
+) -> Result<Appended, sea_orm::DbErr> {
     let result = db
-        .transaction::<_, i64, sea_orm::DbErr>(|txn| {
+        .transaction::<_, (i64, Option<i64>), sea_orm::DbErr>(|txn| {
             let room = room.to_string();
             let kind = sender_kind.as_str().to_string();
             let id = sender_id.as_ref().to_string();
             let ciphertext = ciphertext.to_vec();
+            let facts = facts.clone();
             Box::pin(async move {
                 let seq = next_seq(txn, &room).await?;
+                let root_seq = resolve_thread_root(txn, &room, seq, &id, facts.thread).await?;
                 let now = OffsetDateTime::now_utc();
+                // Same transaction as the message row below, so a thread's
+                // participants exist exactly when the message that put them
+                // there exists. Ordering inside the transaction is irrelevant:
+                // the head this reads is an already-committed earlier row.
+                if let Some(root) = root_seq {
+                    record_participants(txn, &room, root, seq, &id, sender_kind, &facts).await?;
+                }
                 room_messages::ActiveModel {
                     room_id: Set(room),
                     seq: Set(seq),
@@ -94,20 +157,284 @@ pub async fn append(
                     sender_id: Set(id),
                     epoch: Set(epoch),
                     ciphertext: Set(ciphertext),
+                    root_seq: Set(root_seq),
                     created_at: Set(now),
                 }
                 .insert(txn)
                 .await?;
-                Ok(seq)
+                Ok((seq, root_seq))
             })
         })
         .await;
     // Flatten the TransactionError (the store surfaces only DbErr; there is no
     // business-rule rejection to carry as an ApiError at this layer).
-    let seq = result.map_err(|e| match e {
+    let (seq, root) = result.map_err(|e| match e {
         sea_orm::TransactionError::Connection(e) | sea_orm::TransactionError::Transaction(e) => e,
     })?;
-    Ok(seq)
+
+    // The participants are read AFTER the transaction commits, and that is
+    // deliberate, not an oversight:
+    //
+    // - a failed statement inside a Postgres transaction aborts the whole
+    //   transaction, so tolerating a failed read in there would need a
+    //   SAVEPOINT on every send, for an error path that must never fail the
+    //   send anyway;
+    // - the read sees the table as it stands WHEN IT RUNS, not as this row's
+    //   own commit left it. That is the baseline every claim below is made
+    //   against, and it is not the baseline the thread's future state gives:
+    //   - a reply still uncommitted at this instant is MISSING from the set,
+    //     and the agent that sent it is not woken for this row -- the fan of
+    //     that reply, when it commits, wakes the rest;
+    //   - a reply that commits between this row's commit and this read IS in
+    //     the set, and its sender is woken for this row even though the row
+    //     was not visible when this message landed.
+    //   Both come from one source (the table at read time) and both are the
+    //   same kind of lag; neither is a widening the code chose.
+    // - what this read can never lose is this message's own rows: they commit
+    //   with the row above, so the sender's participation is always visible.
+    //   The set comes out empty when the thread holds nothing but the sender's
+    //   own rows, because a sender is never in its own audience.
+    //
+    // The one widening BY DESIGN is the failed read: it warns, hands back an
+    // empty set, and the wake falls back to the whole room. Outside this
+    // window a send can widen too, earlier and for a different reason: a
+    // declared thread that resolves to no row (`resolve_thread_root`) lands
+    // the message as a head, and a head wakes the room. A miss inside the
+    // window is allowed to stand because the reply that was missed renders its
+    // own fan when it commits (and that read sees this message's rows), and a
+    // narrow wake costs an agent one re-pull, not a row.
+    let participants = match root {
+        None => Vec::new(),
+        Some(root) => participants_or_empty(room, root, participants_of(db, room, root).await),
+    };
+
+    Ok(Appended {
+        seq,
+        root,
+        participants,
+    })
+}
+
+/// Normalize a sender's declared thread into the value stored on the row: the
+/// position of the row that heads its discussion.
+///
+/// A declared position names a row in THIS room. The stored value is that row's
+/// own thread root when it carries one (`root_seq.unwrap_or(seq)`), so every row
+/// of one discussion names the same head instead of a chain of parents.
+///
+/// A position this room does not hold lands as NULL, which reads as the row
+/// heading its own discussion: never assigned, assigned by a DIFFERENT room (the
+/// lookup is scoped by `room_id`, so a same-numbered row elsewhere cannot be
+/// mistaken for this one), or not written yet. That last case is a deliberate
+/// divergence from `quote`, which resolves against rows that arrive later: a
+/// thread decides who gets woken, so it never backfills and a late target does
+/// not move a message into a discussion after the fact. The miss is logged
+/// because a NULL thread is otherwise indistinguishable from an undeclared one.
+async fn resolve_thread_root(
+    txn: &impl ConnectionTrait,
+    room: &str,
+    seq: i64,
+    sender_id: &str,
+    declared: Option<i64>,
+) -> Result<Option<i64>, sea_orm::DbErr> {
+    let Some(declared) = declared.filter(|d| *d > 0) else {
+        return Ok(None);
+    };
+    // A primary-key point lookup, NOT a range read: `read_before(before = d + 1)`
+    // returns the nearest row BELOW a missing number, which would silently attach
+    // this message to the wrong discussion.
+    let row = txn
+        .query_one(Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            "SELECT seq, root_seq FROM room_messages WHERE room_id = $1 AND seq = $2",
+            [room.into(), declared.into()],
+        ))
+        .await?;
+    let Some(row) = row else {
+        tracing::warn!(
+            room_id = room,
+            declared_thread = declared,
+            seq,
+            sender = sender_id,
+            "declared thread names no row in this room; storing none"
+        );
+        return Ok(None);
+    };
+    let target_seq: i64 = row.try_get("", "seq")?;
+    let target_root: Option<i64> = row.try_get("", "root_seq")?;
+    Ok(Some(target_root.unwrap_or(target_seq)))
+}
+
+/// Why a member is in a thread: the `joined_via` column, and its whole domain.
+///
+/// The FIRST reason a member lands in a thread is the recorded one; a later
+/// message does not rewrite it, so the column answers "how did it get here"
+/// rather than "what has it done since".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JoinedVia {
+    /// Authored the thread's head row.
+    Started,
+    /// Posted a message inside the thread.
+    Replied,
+    /// A message inside the thread named it.
+    Mentioned,
+}
+
+impl JoinedVia {
+    /// The stored label.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            JoinedVia::Started => "started",
+            JoinedVia::Replied => "replied",
+            JoinedVia::Mentioned => "mentioned",
+        }
+    }
+
+    /// Read a stored label back. A value outside the domain is `None` rather
+    /// than a default: this table is written by the store alone, so a foreign
+    /// label would mean the row did not come from here.
+    pub fn from_label(label: &str) -> Option<Self> {
+        match label {
+            "started" => Some(JoinedVia::Started),
+            "replied" => Some(JoinedVia::Replied),
+            "mentioned" => Some(JoinedVia::Mentioned),
+            _ => None,
+        }
+    }
+}
+
+/// One member recorded in a thread, with the reason it first joined.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThreadParticipant {
+    pub participant_id: MemberId,
+    pub joined_via: JoinedVia,
+    pub joined_at_seq: i64,
+}
+
+/// Record who takes part in a thread, for a message that just landed in it.
+///
+/// Three sources, all of them AGENTS: the head row's author (`started`, joined
+/// at the head), the sender (`replied`, joined at `seq`), and the members this
+/// message named (`mentioned`, joined at `seq`). A human is in none of them --
+/// the table's domain is agents, so a human head or a human reply writes
+/// nothing, and `facts.mentions` arrives pre-narrowed by the caller. Judging
+/// membership here would mean the store reading `room_members` for a fact the
+/// route already holds: one predicate, one place.
+///
+/// Every insert is `ON CONFLICT DO NOTHING`, so the first reason wins and
+/// replaying a message is a no-op rather than a rewrite. The whole set lands in
+/// ONE statement: a message's participants appear together or not at all.
+async fn record_participants(
+    txn: &impl ConnectionTrait,
+    room: &str,
+    root: i64,
+    seq: i64,
+    sender_id: &str,
+    sender_kind: ParticipantKind,
+    facts: &ThreadFacts,
+) -> Result<(), sea_orm::DbErr> {
+    let mut rows: Vec<(String, JoinedVia, i64)> = Vec::with_capacity(2 + facts.mentions.len());
+    // The head row, not the message being appended: a head may be older than
+    // the row count this transaction touches, and it is the row whose author
+    // started the discussion.
+    let head = txn
+        .query_one(Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            "SELECT sender_id, sender_kind FROM room_messages WHERE room_id = $1 AND seq = $2",
+            [room.into(), root.into()],
+        ))
+        .await?;
+    if let Some(head) = head {
+        let head_kind: String = head.try_get("", "sender_kind")?;
+        if head_kind == ParticipantKind::Agent.as_str() {
+            rows.push((head.try_get("", "sender_id")?, JoinedVia::Started, root));
+        }
+    }
+    if sender_kind == ParticipantKind::Agent {
+        rows.push((sender_id.to_owned(), JoinedVia::Replied, seq));
+    }
+    for id in &facts.mentions {
+        rows.push((id.as_ref().to_owned(), JoinedVia::Mentioned, seq));
+    }
+    if rows.is_empty() {
+        return Ok(());
+    }
+    // Six placeholders per row; the row count is bounded by the head, the
+    // sender and `MENTIONS_MAX` mentions, so the statement stays small.
+    let now = OffsetDateTime::now_utc();
+    let mut sql = String::from(
+        "INSERT INTO thread_participants \
+         (room_id, root_seq, participant_id, joined_via, joined_at_seq, created_at) VALUES ",
+    );
+    let mut values: Vec<sea_orm::Value> = Vec::with_capacity(rows.len() * 6);
+    for (i, (participant, via, at)) in rows.iter().enumerate() {
+        if i > 0 {
+            sql.push_str(", ");
+        }
+        let base = i * 6;
+        sql.push_str(&format!(
+            "(${}, ${}, ${}, ${}, ${}, ${})",
+            base + 1,
+            base + 2,
+            base + 3,
+            base + 4,
+            base + 5,
+            base + 6
+        ));
+        values.push(room.into());
+        values.push(root.into());
+        values.push(participant.as_str().into());
+        values.push(via.as_str().into());
+        values.push((*at).into());
+        values.push(now.into());
+    }
+    sql.push_str(" ON CONFLICT (room_id, root_seq, participant_id) DO NOTHING");
+    txn.execute(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
+        sql,
+        values,
+    ))
+    .await?;
+    Ok(())
+}
+
+/// Who is in a thread, ordered by participant id.
+///
+/// The only read of the table on the DELIVERY path: a thread is addressed by
+/// its head position. The badge's count reads the table a second time
+/// ([`unread_for_member`]), because a badge answers what reached a member and
+/// that question needs the same rows; the room tests bind the two readings
+/// with `the_badge_moves_exactly_for_the_members_the_audience_named`.
+///
+/// Rows outlive a member leaving the room, so "in this thread" is this set
+/// intersected with the CURRENT membership -- the predicate does the work no
+/// cleanup job would.
+pub async fn participants_of(
+    db: &Db,
+    room: &str,
+    root: i64,
+) -> Result<Vec<ThreadParticipant>, sea_orm::DbErr> {
+    let rows = thread_participants::Entity::find()
+        .filter(thread_participants::Column::RoomId.eq(room))
+        .filter(thread_participants::Column::RootSeq.eq(root))
+        .order_by_asc(thread_participants::Column::ParticipantId)
+        .all(db)
+        .await?;
+    rows.into_iter()
+        .map(|r| {
+            let joined_via = JoinedVia::from_label(&r.joined_via).ok_or_else(|| {
+                sea_orm::DbErr::Custom(format!(
+                    "thread_participants row carries unknown joined_via {:?}",
+                    r.joined_via
+                ))
+            })?;
+            Ok(ThreadParticipant {
+                participant_id: MemberId::from(r.participant_id),
+                joined_via,
+                joined_at_seq: r.joined_at_seq,
+            })
+        })
+        .collect()
 }
 
 /// Read the room's history with `seq > after_seq`, ascending, up to `limit`.
@@ -139,6 +466,7 @@ fn stored_of(r: room_messages::Model) -> StoredMessage {
         sender_kind: ParticipantKind::from_label(&r.sender_kind).unwrap_or(ParticipantKind::Agent),
         epoch: r.epoch,
         ciphertext: r.ciphertext,
+        root_seq: r.root_seq,
         created_at: r.created_at,
     }
 }
@@ -295,6 +623,105 @@ pub async fn read_cursors_for_member(
         .collect())
 }
 
+/// A member's badge in one room, with the watermark it was taken against.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RoomUnread {
+    /// Rows past the cursor that reached the member, capped at 100. Display
+    /// caps lower, so the cap is never the number a person sees.
+    pub unread: i64,
+    /// The member's stored cursor, `0` when they have no row.
+    pub cursor: i64,
+}
+
+/// The member's badge in one room: how many rows past their cursor reached
+/// them, plus the cursor that count was taken against. Both numbers come from
+/// one statement, so the count and the watermark cannot disagree.
+///
+/// A row counts when all three hold: it is past the member's cursor, its sender
+/// is not the member, and it reached the member: a head row (`root_seq IS NULL`)
+/// reached the whole room and counts, and a row inside a thread counts when
+/// the member is a human (humans never enter the participant table and are
+/// always in the audience) or when a participant row joins them to that thread
+/// at or before the row's `seq`.
+///
+/// The badge counts what the fan-out delivers, so an agent's badge leaves out
+/// threads it never joined and a human's counts every row; a badge that stayed
+/// equal would be counting rows the agent was never sent.
+///
+/// The count is recomputed from the tables as they stand now, not from the
+/// audience the rows were delivered to, so the two agree only while nothing
+/// moves in between. Four ways they can differ:
+///
+/// - A participant read that fails, or that succeeds and finds no rows for a
+///   thread that has replies, widens delivery to the whole room
+///   ([`crate::chat::audience`]) and this count cannot see it: those rows were
+///   delivered and are not counted. The route logs both shapes at WARN, and a
+///   thread only humans took part in is the ordinary way to reach it: its
+///   participant rows are empty by design, so an agent in the room is woken
+///   and the badge does not count that row.
+/// - `seq` is assigned inside the transaction that stores the row, so two
+///   concurrent replies can commit out of `seq` order. Inside the window
+///   [`append`] documents, a row is read before a lower one commits, and the
+///   count then disagrees with that delivery in either direction.
+/// - A member removed and added back keeps both their participant rows and
+///   their cursor, so the rows of their absence count as reached. This one
+///   leaves no log line, and it rests on exactly the rows an exit would clean.
+/// - A member with no cursor row starts at 0 and counts the room's whole
+///   history, including what was sent before they joined. No log line either.
+///
+/// The first two are deviations of the delivery window. The last two are
+/// choices about membership history: keep an absence in the count, count a
+/// room from its start. Any leaving-cleanup must revisit this function and
+/// its callers in one change.
+///
+/// The count stops at 100 rows. The `LIMIT 100` subquery bounds the number
+/// returned, not the work: proving there is no 101st row still walks every
+/// row of the unread span through the `(room_id, seq)` scan, with each thread
+/// row resolved through the `thread_participants` primary key. The cursor
+/// advances as the member reads, so the span is the rows they have not seen
+/// yet; a member who never opened the room walks all of it on every
+/// envelope. The display caps lower than the cap.
+pub async fn unread_for_member(
+    db: &Db,
+    room: &str,
+    member: &MemberId,
+) -> Result<RoomUnread, sea_orm::DbErr> {
+    let row = db
+        .query_one(Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            "WITH cur AS ( \
+                 SELECT COALESCE((SELECT last_read_seq FROM room_read_cursors \
+                                   WHERE room_id = $1 AND member_id = $2), 0) AS last_read_seq, \
+                        EXISTS (SELECT 1 FROM room_members me \
+                                 WHERE me.room_id = $1 \
+                                   AND me.member_id = $2 \
+                                   AND me.kind = 'human') AS is_human \
+             ) \
+             SELECT cur.last_read_seq AS cursor, \
+                    (SELECT count(*) FROM (\
+                     SELECT 1 FROM room_messages m \
+                      WHERE m.room_id = $1 \
+                        AND m.seq > cur.last_read_seq \
+                        AND m.sender_id <> $2 \
+                        AND (m.root_seq IS NULL \
+                             OR cur.is_human \
+                             OR EXISTS (SELECT 1 FROM thread_participants p \
+                                         WHERE p.room_id = m.room_id \
+                                           AND p.root_seq = m.root_seq \
+                                           AND p.participant_id = $2 \
+                                           AND p.joined_at_seq <= m.seq)) \
+                     LIMIT 100) AS capped) AS unread \
+             FROM cur",
+            [room.into(), member.as_ref().into()],
+        ))
+        .await?
+        .ok_or_else(|| sea_orm::DbErr::Custom("room unread read returned no row".into()))?;
+    Ok(RoomUnread {
+        unread: row.try_get("", "unread")?,
+        cursor: row.try_get("", "cursor")?,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     //! Append + read round-trip against ephemeral Postgres: the per-room
@@ -318,6 +745,15 @@ mod tests {
         )
     }
 
+    /// The write-path facts a test append declares: a thread position, and
+    /// nobody named.
+    fn declaring(thread: Option<i64>) -> ThreadFacts {
+        ThreadFacts {
+            thread,
+            mentions: Vec::new(),
+        }
+    }
+
     fn agent() -> (MemberId, ParticipantKind) {
         (MemberId::from("t-1".to_string()), ParticipantKind::Agent)
     }
@@ -337,18 +773,51 @@ mod tests {
         .expect("seed room");
     }
 
+    /// `append` hands back [`Appended`]; these tests were written against the
+    /// bare position it used to return, so they take the `seq` and keep their
+    /// subject (the log, not the audience).
+    async fn append_seq(
+        db: &Db,
+        room: &str,
+        sender_id: &MemberId,
+        sender_kind: ParticipantKind,
+        epoch: i64,
+        ciphertext: &[u8],
+        facts: &ThreadFacts,
+    ) -> Result<i64, sea_orm::DbErr> {
+        append(db, room, sender_id, sender_kind, epoch, ciphertext, facts)
+            .await
+            .map(|a| a.seq)
+    }
+
     #[tokio::test]
     async fn append_assigns_monotonic_seq_and_reads_back() {
         let db = fresh_db().await;
         seed_room(&db, "room-1").await;
         let (alice_pid, human) = user("alice");
         let (tagma_pid, agent_kind) = agent();
-        let s1 = append(&db, "room-1", &alice_pid, human, 1, b"ct-1")
-            .await
-            .unwrap();
-        let s2 = append(&db, "room-1", &tagma_pid, agent_kind, 1, b"ct-2")
-            .await
-            .unwrap();
+        let s1 = append_seq(
+            &db,
+            "room-1",
+            &alice_pid,
+            human,
+            1,
+            b"ct-1",
+            &ThreadFacts::default(),
+        )
+        .await
+        .unwrap();
+        let s2 = append_seq(
+            &db,
+            "room-1",
+            &tagma_pid,
+            agent_kind,
+            1,
+            b"ct-2",
+            &ThreadFacts::default(),
+        )
+        .await
+        .unwrap();
         assert_eq!(s1, 1);
         assert_eq!(s2, 2);
 
@@ -371,9 +840,17 @@ mod tests {
         assert_eq!(tail[0].seq, 2);
 
         // limit caps the window (insert a third, then cap at 2 from the start).
-        append(&db, "room-1", &alice_pid, human, 2, b"ct-3")
-            .await
-            .unwrap();
+        append_seq(
+            &db,
+            "room-1",
+            &alice_pid,
+            human,
+            2,
+            b"ct-3",
+            &ThreadFacts::default(),
+        )
+        .await
+        .unwrap();
         let capped = read_since(&db, "room-1", 0, 2).await.unwrap();
         assert_eq!(capped.len(), 2);
         assert_eq!(capped[0].seq, 1);
@@ -384,6 +861,189 @@ mod tests {
         assert_eq!(after2[0].epoch, 2);
     }
 
+    /// The thread a row lands with: an undeclared send heads its own
+    /// discussion (NULL, read as its own `seq`), a declared head resolves to
+    /// that row, a declared REPLY resolves to the SAME head, and anything the
+    /// room cannot point at lands NULL rather than guessing.
+    #[tokio::test]
+    async fn a_declared_thread_resolves_to_the_rows_head() {
+        let db = fresh_db().await;
+        seed_room(&db, "room-t").await;
+        seed_room(&db, "room-other").await;
+        let (alice, human) = user("alice");
+
+        // 1: undeclared -- the head of its own discussion.
+        let head = append_seq(
+            &db,
+            "room-t",
+            &alice,
+            human,
+            1,
+            b"head",
+            &ThreadFacts::default(),
+        )
+        .await
+        .unwrap();
+        // 2: declares the head; stores the head's position.
+        append_seq(
+            &db,
+            "room-t",
+            &alice,
+            human,
+            1,
+            b"reply",
+            &declaring(Some(head)),
+        )
+        .await
+        .unwrap();
+        // 3: declares row 2, which already names row 1 -- folds to row 1.
+        append_seq(
+            &db,
+            "room-t",
+            &alice,
+            human,
+            1,
+            b"reply to reply",
+            &declaring(Some(2)),
+        )
+        .await
+        .unwrap();
+        // 4: declares a position this room never assigned.
+        append_seq(
+            &db,
+            "room-t",
+            &alice,
+            human,
+            1,
+            b"dangling",
+            &declaring(Some(99)),
+        )
+        .await
+        .unwrap();
+        // 5: declares position 10, which only ANOTHER room holds -- the other
+        // room really has ten rows, so dropping the room scope would find one.
+        for _ in 0..10 {
+            append_seq(
+                &db,
+                "room-other",
+                &alice,
+                human,
+                1,
+                b"o",
+                &ThreadFacts::default(),
+            )
+            .await
+            .unwrap();
+        }
+        append_seq(
+            &db,
+            "room-t",
+            &alice,
+            human,
+            1,
+            b"cross",
+            &declaring(Some(10)),
+        )
+        .await
+        .unwrap();
+        // 6-7: no position is a declaration -- zero and a negative number both
+        // read as undeclared and reach no lookup.
+        append_seq(
+            &db,
+            "room-t",
+            &alice,
+            human,
+            1,
+            b"zero",
+            &declaring(Some(0)),
+        )
+        .await
+        .unwrap();
+        append_seq(
+            &db,
+            "room-t",
+            &alice,
+            human,
+            1,
+            b"negative",
+            &declaring(Some(-5)),
+        )
+        .await
+        .unwrap();
+
+        let rows = read_since(&db, "room-t", 0, 100).await.unwrap();
+        let roots: Vec<Option<i64>> = rows.iter().map(|r| r.root_seq).collect();
+        assert_eq!(
+            roots,
+            vec![None, Some(1), Some(1), None, None, None, None],
+            "undeclared and unresolvable rows head themselves; a reply names its head"
+        );
+    }
+
+    /// The unresolvable case leaves a trace: a NULL thread otherwise looks
+    /// exactly like an undeclared one, so the miss names the room, the declared
+    /// position and the row that failed to resolve it.
+    #[tokio::test]
+    async fn an_unresolvable_thread_names_itself_in_a_warning() {
+        use std::io::Write as _;
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone, Default)]
+        struct Sink(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Sink {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Sink {
+            type Writer = Sink;
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        let sink = Sink::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(sink.clone())
+            .with_ansi(false)
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let db = fresh_db().await;
+        seed_room(&db, "room-log").await;
+        let (alice, human) = user("alice");
+        append_seq(
+            &db,
+            "room-log",
+            &alice,
+            human,
+            1,
+            b"dangling",
+            &declaring(Some(42)),
+        )
+        .await
+        .unwrap();
+        let _ = std::io::stdout().flush();
+
+        let logged = String::from_utf8_lossy(&sink.0.lock().unwrap()).to_string();
+        assert!(
+            logged.contains("declared thread names no row"),
+            "the miss is logged: {logged}"
+        );
+        assert!(
+            logged.contains("declared_thread=42"),
+            "the declared position: {logged}"
+        );
+        assert!(
+            logged.contains("room_id=\"room-log\""),
+            "the room: {logged}"
+        );
+    }
+
     /// Sequences are independent per room (each starts at 1).
     #[tokio::test]
     async fn seq_is_per_room() {
@@ -391,15 +1051,39 @@ mod tests {
         seed_room(&db, "room-a").await;
         seed_room(&db, "room-b").await;
         let (alice, human) = user("alice");
-        let a = append(&db, "room-a", &alice, human, 1, b"a1")
-            .await
-            .unwrap();
-        let b = append(&db, "room-b", &alice, human, 1, b"b1")
-            .await
-            .unwrap();
-        let a2 = append(&db, "room-a", &alice, human, 2, b"a2")
-            .await
-            .unwrap();
+        let a = append_seq(
+            &db,
+            "room-a",
+            &alice,
+            human,
+            1,
+            b"a1",
+            &ThreadFacts::default(),
+        )
+        .await
+        .unwrap();
+        let b = append_seq(
+            &db,
+            "room-b",
+            &alice,
+            human,
+            1,
+            b"b1",
+            &ThreadFacts::default(),
+        )
+        .await
+        .unwrap();
+        let a2 = append_seq(
+            &db,
+            "room-a",
+            &alice,
+            human,
+            2,
+            b"a2",
+            &ThreadFacts::default(),
+        )
+        .await
+        .unwrap();
         assert_eq!(a, 1);
         assert_eq!(b, 1);
         assert_eq!(a2, 2);
@@ -420,7 +1104,17 @@ mod tests {
             let db = db.clone();
             let alice = alice.clone();
             handles.push(tokio::spawn(async move {
-                append(&db, "room-c", &alice, human, 1, b"x").await.unwrap()
+                append_seq(
+                    &db,
+                    "room-c",
+                    &alice,
+                    human,
+                    1,
+                    b"x",
+                    &ThreadFacts::default(),
+                )
+                .await
+                .unwrap()
             }));
         }
         let mut seqs: Vec<i64> = Vec::with_capacity(handles.len());
@@ -451,9 +1145,17 @@ mod tests {
             let db = db.clone();
             let alice = alice.clone();
             handles.push(tokio::spawn(async move {
-                append(&db, "room-seed", &alice, human, 1, b"s")
-                    .await
-                    .unwrap()
+                append_seq(
+                    &db,
+                    "room-seed",
+                    &alice,
+                    human,
+                    1,
+                    b"s",
+                    &ThreadFacts::default(),
+                )
+                .await
+                .unwrap()
             }));
         }
         let mut seqs: Vec<i64> = Vec::new();
@@ -479,9 +1181,17 @@ mod tests {
         let db = fresh_db().await;
         seed_room(&db, "room-gone").await;
         let (alice, human) = user("alice");
-        append(&db, "room-gone", &alice, human, 1, b"ct-1")
-            .await
-            .unwrap();
+        append_seq(
+            &db,
+            "room-gone",
+            &alice,
+            human,
+            1,
+            b"ct-1",
+            &ThreadFacts::default(),
+        )
+        .await
+        .unwrap();
         // Sanity: the row + its seq exist.
         assert_eq!(read_since(&db, "room-gone", 0, 10).await.unwrap().len(), 1);
 
@@ -604,13 +1314,14 @@ mod tests {
         seed_room(&db, "room-back").await;
         let (alice, human) = user("alice");
         for i in 1..=5 {
-            append(
+            append_seq(
                 &db,
                 "room-back",
                 &alice,
                 human,
                 1,
                 format!("ct-{i}").as_bytes(),
+                &ThreadFacts::default(),
             )
             .await
             .unwrap();
@@ -654,13 +1365,14 @@ mod tests {
         seed_room(&db, "room-peek").await;
         let (alice, human) = user("alice");
         for i in 1..=2 {
-            append(
+            append_seq(
                 &db,
                 "room-peek",
                 &alice,
                 human,
                 1,
                 format!("c{i}").as_bytes(),
+                &ThreadFacts::default(),
             )
             .await
             .unwrap();
@@ -687,6 +1399,586 @@ mod tests {
                 .await
                 .unwrap()
                 .is_empty()
+        );
+    }
+
+    fn agent_of(tag: &str) -> (MemberId, ParticipantKind) {
+        (MemberId::from(format!("t-{tag}")), ParticipantKind::Agent)
+    }
+
+    /// The facts of a send that declares a thread position and names members.
+    fn naming(thread: i64, mentions: &[&MemberId]) -> ThreadFacts {
+        ThreadFacts {
+            thread: Some(thread),
+            mentions: mentions.iter().map(|m| (*m).clone()).collect(),
+        }
+    }
+
+    /// A thread's participants as `(member, reason, joined_at)`, sorted so the
+    /// assertion does not depend on row order.
+    async fn thread_rows(db: &Db, room: &str, root: i64) -> Vec<(String, &'static str, i64)> {
+        let mut rows: Vec<(String, &'static str, i64)> = participants_of(db, room, root)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|p| {
+                (
+                    p.participant_id.as_ref().to_string(),
+                    p.joined_via.as_str(),
+                    p.joined_at_seq,
+                )
+            })
+            .collect();
+        rows.sort();
+        rows
+    }
+
+    /// The three ways a member joins a thread, recorded with the reason and the
+    /// position that put them there: the head's author as `started` (at the
+    /// head, not at the reply), the sender as `replied`, the named member as
+    /// `mentioned`. A message that joins no thread records nothing.
+    #[tokio::test]
+    async fn a_thread_records_started_replied_and_mentioned() {
+        let db = fresh_db().await;
+        seed_room(&db, "room-p").await;
+        let (a, agent_kind) = agent_of("a");
+        let (b, _) = agent_of("b");
+        let (c, _) = agent_of("c");
+
+        // 1: an undeclared send heads its own thread and records nobody.
+        let head = append_seq(&db, "room-p", &a, agent_kind, 1, b"head", &declaring(None))
+            .await
+            .unwrap();
+        assert!(thread_rows(&db, "room-p", head).await.is_empty());
+
+        // 2: B replies in that thread and names C.
+        append_seq(
+            &db,
+            "room-p",
+            &b,
+            agent_kind,
+            1,
+            b"reply",
+            &naming(head, &[&c]),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            thread_rows(&db, "room-p", head).await,
+            vec![
+                (a.as_ref().to_string(), "started", head),
+                (b.as_ref().to_string(), "replied", head + 1),
+                (c.as_ref().to_string(), "mentioned", head + 1),
+            ]
+        );
+
+        // A position that heads nothing is not a thread: nothing to record.
+        assert!(thread_rows(&db, "room-p", head + 5).await.is_empty());
+    }
+
+    /// The first reason wins: a member named in one message and replying later
+    /// stays `mentioned`, and a second mention does not rewrite the row.
+    #[tokio::test]
+    async fn a_member_keeps_the_first_reason_it_joined() {
+        let db = fresh_db().await;
+        seed_room(&db, "room-first").await;
+        let (a, agent_kind) = agent_of("a");
+        let (b, _) = agent_of("b");
+        let (c, _) = agent_of("c");
+
+        let head = append_seq(&db, "room-first", &a, agent_kind, 1, b"h", &declaring(None))
+            .await
+            .unwrap();
+        append_seq(
+            &db,
+            "room-first",
+            &b,
+            agent_kind,
+            1,
+            b"m",
+            &naming(head, &[&c]),
+        )
+        .await
+        .unwrap();
+        // C replies AND is named again; B names C once more.
+        append_seq(
+            &db,
+            "room-first",
+            &c,
+            agent_kind,
+            1,
+            b"c-reply",
+            &naming(head, &[]),
+        )
+        .await
+        .unwrap();
+        append_seq(
+            &db,
+            "room-first",
+            &b,
+            agent_kind,
+            1,
+            b"again",
+            &naming(head, &[&c]),
+        )
+        .await
+        .unwrap();
+
+        let rows = thread_rows(&db, "room-first", head).await;
+        assert_eq!(
+            rows,
+            vec![
+                (a.as_ref().to_string(), "started", head),
+                (b.as_ref().to_string(), "replied", head + 1),
+                (c.as_ref().to_string(), "mentioned", head + 1),
+            ],
+            "one row per member, holding the reason it first landed"
+        );
+    }
+
+    /// The table's domain is agents: a human head author is not `started`, and a
+    /// human reply records nothing at all. The agent on the other side of the
+    /// same thread is still recorded.
+    #[tokio::test]
+    async fn humans_never_enter_the_participant_table() {
+        let db = fresh_db().await;
+        seed_room(&db, "room-h").await;
+        let (alice, human) = user("alice");
+        let (a, agent_kind) = agent_of("a");
+
+        let head = append_seq(&db, "room-h", &alice, human, 1, b"h", &declaring(None))
+            .await
+            .unwrap();
+        append_seq(&db, "room-h", &a, agent_kind, 1, b"r", &naming(head, &[]))
+            .await
+            .unwrap();
+        // Alice replies inside the same thread: no row for her.
+        append_seq(&db, "room-h", &alice, human, 1, b"r2", &naming(head, &[]))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            thread_rows(&db, "room-h", head).await,
+            vec![(a.as_ref().to_string(), "replied", head + 1)],
+            "a human head or human reply is outside the table's domain"
+        );
+    }
+    /// Two shapes the guard has to hold. A message that declares no thread
+    /// records nothing even when it names members: there is no head to key a
+    /// row on, and a mention outside a thread has nowhere to belong. And a
+    /// sender naming itself inside a thread lands as one row, not as a
+    /// duplicate-key error from the multi-row statement.
+    #[tokio::test]
+    async fn a_mention_outside_a_thread_records_nothing() {
+        let db = fresh_db().await;
+        seed_room(&db, "room-loose").await;
+        let (a, agent_kind) = agent_of("a");
+        let (b, _) = agent_of("b");
+
+        let loose = append_seq(
+            &db,
+            "room-loose",
+            &a,
+            agent_kind,
+            1,
+            b"loose",
+            &ThreadFacts {
+                thread: None,
+                mentions: vec![b.clone(), a.clone()],
+            },
+        )
+        .await
+        .unwrap();
+        assert!(
+            thread_rows(&db, "room-loose", loose).await.is_empty(),
+            "no thread, no rows, mentions included"
+        );
+
+        // The same send inside a thread, naming itself: one row for the sender,
+        // and the statement survives its own duplicate key.
+        let head = append_seq(&db, "room-loose", &a, agent_kind, 1, b"h", &declaring(None))
+            .await
+            .unwrap();
+        append_seq(
+            &db,
+            "room-loose",
+            &b,
+            agent_kind,
+            1,
+            b"self",
+            &naming(head, &[&b]),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            thread_rows(&db, "room-loose", head).await,
+            vec![
+                (a.as_ref().to_string(), "started", head),
+                (b.as_ref().to_string(), "replied", head + 1),
+            ],
+            "a self-mention adds no second row"
+        );
+    }
+
+    /// The write cost is bounded by what the message itself carries: the head,
+    /// the sender, and the mention list at its cap.
+    #[tokio::test]
+    async fn a_full_mention_list_stays_within_the_row_bound() {
+        let db = fresh_db().await;
+        seed_room(&db, "room-cap").await;
+        let (a, agent_kind) = agent_of("a");
+        let named: Vec<MemberId> = (0..kallipai_lesche_common::message::MENTIONS_MAX)
+            .map(|i| MemberId::from(format!("t-cap-{i}")))
+            .collect();
+        let refs: Vec<&MemberId> = named.iter().collect();
+
+        // A DIFFERENT agent heads the thread, so the head's author and the
+        // sender are two rows: the bound counts them separately.
+        let (head_author, _) = agent_of("head");
+        let head = append_seq(
+            &db,
+            "room-cap",
+            &head_author,
+            agent_kind,
+            1,
+            b"h",
+            &declaring(None),
+        )
+        .await
+        .unwrap();
+        append_seq(
+            &db,
+            "room-cap",
+            &a,
+            agent_kind,
+            1,
+            b"m",
+            &naming(head, &refs),
+        )
+        .await
+        .unwrap();
+
+        let rows = participants_of(&db, "room-cap", head).await.unwrap();
+        assert_eq!(
+            rows.len(),
+            2 + kallipai_lesche_common::message::MENTIONS_MAX,
+            "the head's author, the sender, and one row per named member"
+        );
+    }
+
+    /// What an append hands back for a live-delivery decision: the position,
+    /// the thread, and the thread's recorded agents -- the head author included,
+    /// because a reply is delivered to the person whose thread it is.
+    #[tokio::test]
+    async fn an_append_returns_the_thread_and_its_agents() {
+        let db = fresh_db().await;
+        seed_room(&db, "room-aud").await;
+        let (a, agent_kind) = agent_of("a");
+        let (b, _) = agent_of("b");
+
+        let head = append(&db, "room-aud", &a, agent_kind, 1, b"h", &declaring(None))
+            .await
+            .unwrap();
+        assert_eq!(head.root, None, "a head row heads its own thread");
+        assert!(
+            head.participants.is_empty(),
+            "a head has no participants to scope its own wake"
+        );
+
+        let reply = append(
+            &db,
+            "room-aud",
+            &b,
+            agent_kind,
+            1,
+            b"r",
+            &naming(head.seq, &[]),
+        )
+        .await
+        .unwrap();
+        assert_eq!(reply.root, Some(head.seq));
+        let mut got: Vec<String> = reply
+            .participants
+            .iter()
+            .map(|m| m.as_ref().to_string())
+            .collect();
+        got.sort();
+        assert_eq!(got, vec![a.as_ref().to_string(), b.as_ref().to_string()]);
+    }
+
+    /// A failed participant read is not a failed send: the policy hands back an
+    /// empty set (the route turns that into "wake the whole room"), and the
+    /// warning carries the reason.
+    #[test]
+    fn a_failed_participant_read_yields_no_participants() {
+        let got = participants_or_empty(
+            "room-x",
+            7,
+            Err(sea_orm::DbErr::Custom("read exploded".to_string())),
+        );
+        assert!(got.is_empty());
+    }
+
+    /// Seed one `room_members` row: the badge's human check reads the member's
+    /// kind from the local membership graph, which the message rows do not
+    /// carry.
+    async fn seed_member(db: &Db, room: &str, member: &MemberId, kind: ParticipantKind) {
+        db.execute(Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            "INSERT INTO room_members (room_id, member_id, kind, source_id, joined_at, added_by) \
+             VALUES ($1, $2, $3, $4, NOW(), 'creator')",
+            [
+                room.into(),
+                member.as_ref().into(),
+                kind.as_str().into(),
+                format!("src-{}", member.as_ref()).into(),
+            ],
+        ))
+        .await
+        .expect("seed member");
+    }
+
+    /// The badge counts rows past the cursor from someone else, with the cursor
+    /// the count was taken against (0 for a member with no row).
+    #[tokio::test]
+    async fn unread_counts_rows_past_the_cursor_from_others() {
+        let db = fresh_db().await;
+        seed_room(&db, "room-u").await;
+        let (a, agent_kind) = agent_of("a");
+        let (b, _) = agent_of("b");
+        for n in 1..=3 {
+            append_seq(
+                &db,
+                "room-u",
+                &a,
+                agent_kind,
+                1,
+                format!("a-{n}").as_bytes(),
+                &ThreadFacts::default(),
+            )
+            .await
+            .unwrap();
+        }
+        append_seq(
+            &db,
+            "room-u",
+            &b,
+            agent_kind,
+            1,
+            b"b-1",
+            &ThreadFacts::default(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            unread_for_member(&db, "room-u", &b).await.unwrap(),
+            RoomUnread {
+                unread: 3,
+                cursor: 0
+            }
+        );
+        // The member's own rows never count.
+        assert_eq!(
+            unread_for_member(&db, "room-u", &a).await.unwrap(),
+            RoomUnread {
+                unread: 1,
+                cursor: 0
+            }
+        );
+
+        set_read_cursor(&db, "room-u", &b, 2).await.unwrap();
+        // Past the cursor: seq 3 and seq 4; seq 4 is B's own row.
+        assert_eq!(
+            unread_for_member(&db, "room-u", &b).await.unwrap(),
+            RoomUnread {
+                unread: 1,
+                cursor: 2
+            }
+        );
+    }
+
+    /// The count stops at the cap: 101 rows past the cursor answer 100, a
+    /// number the surface then caps lower still.
+    #[tokio::test]
+    async fn unread_stops_at_a_hundred_rows() {
+        let db = fresh_db().await;
+        seed_room(&db, "room-cap").await;
+        let (a, agent_kind) = agent_of("a");
+        let (b, _) = agent_of("b");
+        for n in 1..=101 {
+            append_seq(
+                &db,
+                "room-cap",
+                &a,
+                agent_kind,
+                1,
+                format!("a-{n}").as_bytes(),
+                &ThreadFacts::default(),
+            )
+            .await
+            .unwrap();
+        }
+        assert_eq!(
+            unread_for_member(&db, "room-cap", &b).await.unwrap(),
+            RoomUnread {
+                unread: 100,
+                cursor: 0
+            }
+        );
+    }
+
+    /// The badge counts what reached the member: the threads they are in, the
+    /// head rows everyone got, and for a human every row.
+    #[tokio::test]
+    async fn unread_follows_who_reached_the_member() {
+        let db = fresh_db().await;
+        seed_room(&db, "room-th").await;
+        let (a, agent_kind) = agent_of("a");
+        let (b, _) = agent_of("b");
+        let (c, _) = agent_of("c");
+        let (h, human_kind) = user("h");
+
+        // 1 A heads a thread, 2 B replies in it, 3 B heads a second thread,
+        // 4 B replies there and names C. A is a participant of the first
+        // thread only; B started and replied in both.
+        let first = append_seq(
+            &db,
+            "room-th",
+            &a,
+            agent_kind,
+            1,
+            b"head-1",
+            &declaring(None),
+        )
+        .await
+        .unwrap();
+        append_seq(
+            &db,
+            "room-th",
+            &b,
+            agent_kind,
+            1,
+            b"reply-1",
+            &declaring(Some(first)),
+        )
+        .await
+        .unwrap();
+        let second = append_seq(
+            &db,
+            "room-th",
+            &b,
+            agent_kind,
+            1,
+            b"head-2",
+            &declaring(None),
+        )
+        .await
+        .unwrap();
+        append_seq(
+            &db,
+            "room-th",
+            &b,
+            agent_kind,
+            1,
+            b"reply-2",
+            &naming(second, &[&c]),
+        )
+        .await
+        .unwrap();
+
+        // A is in the first thread only: of B's three rows, seq 2 reached them
+        // and the head at seq 3 arrived as a head row; seq 4 did not reach them.
+        assert_eq!(
+            unread_for_member(&db, "room-th", &a).await.unwrap().unread,
+            2
+        );
+        // B's own rows never count; A's head at seq 1 reached everyone.
+        assert_eq!(
+            unread_for_member(&db, "room-th", &b).await.unwrap().unread,
+            1
+        );
+        // C is named in the second thread: both heads plus that reply, not the
+        // first thread's reply.
+        assert_eq!(
+            unread_for_member(&db, "room-th", &c).await.unwrap().unread,
+            3
+        );
+        // A human counts every row: nothing narrows their audience, and they
+        // never appear in the participant table.
+        seed_member(&db, "room-th", &h, human_kind).await;
+        assert_eq!(
+            unread_for_member(&db, "room-th", &h).await.unwrap().unread,
+            4
+        );
+    }
+
+    /// The participant row's position is the whole of "this thread is mine from
+    /// here": a member named late counts from the row that named them, not from the
+    /// thread's head. Without the `joined_at_seq <= m.seq` term this member would
+    /// read three rows here instead of one, so this test is what keeps the term
+    /// alive.
+    #[tokio::test]
+    async fn unread_starts_at_the_participant_row_not_at_the_thread() {
+        let db = fresh_db().await;
+        seed_room(&db, "room-late").await;
+        let (a, agent_kind) = agent_of("a");
+        let (c, _) = agent_of("c");
+
+        // 1 A heads a thread; 2 and 3 A replies naming nobody; 4 A replies and
+        // names C. C has read the head, so only the naming row is past the cursor.
+        let head = append_seq(
+            &db,
+            "room-late",
+            &a,
+            agent_kind,
+            1,
+            b"head",
+            &declaring(None),
+        )
+        .await
+        .unwrap();
+        append_seq(
+            &db,
+            "room-late",
+            &a,
+            agent_kind,
+            1,
+            b"r-2",
+            &declaring(Some(head)),
+        )
+        .await
+        .unwrap();
+        append_seq(
+            &db,
+            "room-late",
+            &a,
+            agent_kind,
+            1,
+            b"r-3",
+            &declaring(Some(head)),
+        )
+        .await
+        .unwrap();
+        append_seq(
+            &db,
+            "room-late",
+            &a,
+            agent_kind,
+            1,
+            b"r-4",
+            &naming(head, &[&c]),
+        )
+        .await
+        .unwrap();
+        set_read_cursor(&db, "room-late", &c, head).await.unwrap();
+
+        assert_eq!(
+            unread_for_member(&db, "room-late", &c).await.unwrap(),
+            RoomUnread {
+                unread: 1,
+                cursor: head
+            }
         );
     }
 }

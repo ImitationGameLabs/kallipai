@@ -611,6 +611,7 @@ mod tests {
             attachment: None,
             quote: None,
             mentions: Vec::new(),
+            thread: None,
         })
         .expect("room payload")
     }

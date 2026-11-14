@@ -10,8 +10,10 @@
 //!    without a store, i.e. mock tests). Room payloads are plaintext
 //!    `RoomMessage` JSON, stored opaquely -- the lesche is the room's store of
 //!    record and the server is trusted to read room content.
-//! 3. **Fanned** -- delivered to every other member via [`crate::chat::fan::fan_envelope`]
-//!    (user members' app streams, tagma members' agent streams).
+//! 3. **Fanned** -- delivered to the audience the message's thread implies
+//!    ([`crate::chat::audience`]) via [`crate::chat::fan::fan_envelope_to`]
+//!    (user members' app streams, tagma members' agent streams). A head wakes
+//!    the whole room, and a reply with no participant rows falls back to it.
 
 use axum::Json;
 use axum::Router;
@@ -23,15 +25,16 @@ use kallipai_archeion_common::ids::ParticipantKind;
 use kallipai_archeion_common::principal::Principal;
 use kallipai_common::protocol::ApiError;
 use kallipai_lesche_common::event::LescheEvent;
-use kallipai_lesche_common::message::{Envelope, Participant};
-use kallipai_lesche_common::rooms::{MemberId, RoomId};
+use kallipai_lesche_common::message::{Envelope, Participant, ThreadFacts, thread_facts};
+use kallipai_lesche_common::rooms::{MemberId, RoomId, RoomMembership};
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
 use crate::auth::{AuthPrincipal, OptUserDisplay};
+use crate::chat::audience;
 use crate::chat::db::map_db_err;
 use crate::chat::db::store;
-use crate::chat::fan::fan_envelope;
+use crate::chat::fan::fan_envelope_to;
 use crate::chat::identity::{agent_handle, degraded_handle, human_handle};
 use crate::chat::member_identity::{MemberRef, degraded, resolve_handles};
 use crate::state::{AgentProfile, SharedConvState};
@@ -56,6 +59,7 @@ pub fn router() -> Router<SharedConvState> {
         .route("/rooms/{room_id}/envelopes", post(post_room_envelope))
         .route("/rooms/{room_id}/messages", get(room_history))
         .route("/rooms/{room_id}/read-cursor", put(put_read_cursor))
+        .route("/rooms/{room_id}/unread", get(room_unread))
 }
 
 async fn post_room_envelope(
@@ -152,34 +156,239 @@ async fn post_room_envelope(
         _ => None,
     };
 
+    // The payload's write-path facts: the declared thread and the members it
+    // names. A payload the relay cannot read is sent with no facts (and
+    // logged), matching the read side's leniency -- content trouble must never
+    // block a message.
+    let facts = match thread_facts(&env.ciphertext.0) {
+        Some(facts) => facts,
+        None => {
+            tracing::warn!(
+                room_id = room.as_ref(),
+                "room payload facts read failed: thread and mentions dropped"
+            );
+            ThreadFacts::default()
+        }
+    };
+    // Mentions are narrowed HERE, to current AGENT members: the thread table
+    // records agents only, and "is this a member" is a fact this route already
+    // holds. The store takes the narrowed list and never reads membership.
+    let facts = ThreadFacts {
+        thread: facts.thread,
+        mentions: facts
+            .mentions
+            .into_iter()
+            .filter(|mid| is_member(&membership, mid, ParticipantKind::Agent))
+            .collect(),
+    };
+
     // Persist the room payload (plaintext `RoomMessage` JSON), stored opaquely
     // as bytes. The lesche is the room's store of record and is trusted to read
     // room content. Only the sender's stable identity (`id` + `kind`) is
     // persisted; the stamped `handle` rides the live fan-out below and is
     // re-derived from the registry on history read, so no display handle is
     // frozen into the row.
-    store::append(
+    let appended = store::append(
         db,
         room.as_ref(),
         &authed_mid,
         env.sender.kind,
         membership.membership_epoch,
         &env.ciphertext.0,
+        &facts,
     )
     .await
     .map_err(|e| ApiError::internal(format_args!("store error: {e}")))?;
 
-    // Fan to every other member under the registry read lock. The `membership`
-    // snapshot is read once above (no lock on the room row), so a member removed
-    // by a concurrent mutation in this window may receive this one extra live
-    // envelope -- self-healing (the durable row is correct and the next fan-out
-    // excludes them); not worth a row lock on the send hot path.
+    // Who this message wakes, computed on every send: the numbers logged
+    // here are what the delivery did, and the DEBUG line says how much
+    // narrower than the room it was.
+    let decided = audience::audience(
+        &membership,
+        &authed_mid,
+        appended.root,
+        &appended.participants,
+    );
+    check_audience_strangers(&membership, &authed_mid, &decided);
+    check_empty_audience(
+        room.as_ref(),
+        appended.seq,
+        &membership,
+        &authed_mid,
+        env.sender.kind,
+        &decided,
+        appended.participants.len(),
+    );
+    if decided.fallback == Some(audience::Fallback::NoParticipants) {
+        // A reply whose thread has no participant rows: the table never held
+        // them, the read failed, or the backfill missed the window. The wake
+        // falls back to the whole room, which is the safe direction, and this
+        // is the one shape worth seeing -- a head message and
+        // a hole in the table must not look alike.
+        tracing::warn!(
+            room_id = room.as_ref(),
+            seq = appended.seq,
+            root_seq = appended.root,
+            "thread reply has no participant rows: waking the whole room"
+        );
+    }
+    log_audience(
+        room.as_ref(),
+        appended.seq,
+        &membership,
+        &authed_mid,
+        env.sender.kind,
+        &decided,
+    );
+
+    // Fan under the registry read lock. The `membership` snapshot is read once
+    // above (no lock on the room row), so a member removed by a concurrent
+    // mutation in this window may receive this one extra live envelope --
+    // self-healing (the durable row is correct and the next fan-out excludes
+    // them); not worth a row lock on the send hot path.
     let _out = {
         let reg = state.read()?;
-        fan_envelope(&reg, &membership, &env)
+        fan_envelope_to(&reg, &membership, &env, &decided.ids)
     };
 
     Ok(StatusCode::ACCEPTED)
+}
+
+/// One bound an audience must satisfy: no id outside this room, and never the
+/// sender.
+///
+/// This is deliberately not the predicate. The exact set belongs to
+/// [`audience::audience`] and its unit tests own it; what production can show
+/// without a test failing is a set reaching someone who is not in the room, so
+/// that half is restated here from the membership alone. The "who is promised"
+/// half is NOT restated: a copy of the predicate would assert nothing, and one
+/// written before tiers land would warn falsely the day they do.
+///
+/// A violation warns and the send goes on: a delivery decision must not take a
+/// message down, and the fan cannot reach a non-member anyway.
+fn check_audience_strangers(
+    membership: &RoomMembership,
+    sender: &MemberId,
+    decided: &audience::Audience,
+) {
+    const NAMES: usize = 16;
+
+    let strangers: Vec<&str> = decided
+        .ids
+        .iter()
+        .filter(|id| **id == *sender || !membership.members.iter().any(|member| member.id == **id))
+        .take(NAMES)
+        .map(MemberId::as_ref)
+        .collect();
+
+    if !strangers.is_empty() {
+        tracing::warn!(
+            room_members = membership.members.len(),
+            audience = decided.ids.len(),
+            strangers = ?strangers,
+            "room audience reaches a stranger or the sender"
+        );
+    }
+}
+
+/// A delivery decision that leaves nobody to wake, in a room that holds someone
+/// else.
+///
+/// An empty audience is a lower bound, not a verdict. A legitimate narrowing
+/// produces it -- an agent speaking in its own thread in a room with no
+/// humans, since a human is always in the audience and keeps the set
+/// non-empty -- and so does the hole this check exists for: a reply whose
+/// only recorded rows are the sender's own. Only one of those is a hole, and
+/// this line cannot tell which: it reports the shape. The send goes on, under
+/// the same rule as [`check_audience_strangers`], because a delivery decision
+/// never takes a message down.
+///
+/// A room whose only member is the sender is not even that shape (nobody else
+/// was there), which is why the check counts the room rather than trusting the
+/// empty set alone. Returns whether it warned, so the branch itself is
+/// testable without a tracing subscriber.
+///
+/// The log carries what separates the two readings: `fallback` (a head or a
+/// failed read widened this message anyway), `humans` (zero keeps a legitimate
+/// narrow possible), and `participants` (who the thread actually recorded).
+fn check_empty_audience(
+    room: &str,
+    seq: i64,
+    membership: &RoomMembership,
+    sender: &MemberId,
+    sender_kind: ParticipantKind,
+    decided: &audience::Audience,
+    participants: usize,
+) -> bool {
+    if !decided.ids.is_empty() || membership.members.len() <= 1 {
+        return false;
+    }
+    tracing::warn!(
+        room_id = room,
+        seq,
+        room_members = membership.members.len(),
+        sender = sender.as_ref(),
+        sender_kind = ?sender_kind,
+        fallback = ?decided.fallback,
+        humans = membership
+            .members
+            .iter()
+            .filter(|m| m.kind == ParticipantKind::Human && m.id != *sender)
+            .count(),
+        participants,
+        "room audience is empty while other members exist"
+    );
+    true
+}
+
+/// One DEBUG line per send: how much narrower than the room the audience is.
+///
+/// The numbers are the whole story for a delivery -- how many agents the
+/// thread left out (the saving), how many humans the wake reaches regardless
+/// (every human member but a human sender: a human has no per-thread
+/// subscription, and the sender is never woken), how big the audience is, and
+/// which fallback ran.
+///
+/// Every count but `room_members` is over the room MINUS the sender, the same
+/// domain as `total`: the sender is a member the audience never contains, so
+/// counting it as narrowed would report a saving the room never had.
+fn log_audience(
+    room: &str,
+    seq: i64,
+    membership: &RoomMembership,
+    sender: &MemberId,
+    sender_kind: ParticipantKind,
+    decided: &audience::Audience,
+) {
+    if !tracing::enabled!(tracing::Level::DEBUG) {
+        return;
+    }
+    let agents_in = membership
+        .members
+        .iter()
+        .filter(|member| member.kind == ParticipantKind::Agent && decided.ids.contains(&member.id))
+        .count();
+    let agents_room = membership
+        .members
+        .iter()
+        .filter(|member| member.kind == ParticipantKind::Agent && member.id != *sender)
+        .count();
+    let humans_room = membership
+        .members
+        .iter()
+        .filter(|member| member.kind == ParticipantKind::Human && member.id != *sender)
+        .count();
+    tracing::debug!(
+        room_id = room,
+        seq,
+        total = decided.ids.len(),
+        agents_narrowed = agents_room.saturating_sub(agents_in),
+        humans_always = humans_room,
+        room_members = membership.members.len(),
+        sender_kind = ?sender_kind,
+        fallback = ?decided.fallback,
+        "room audience"
+    );
 }
 
 #[derive(Deserialize, Default)]
@@ -205,6 +414,12 @@ struct StoredMessageView {
     sender: Participant,
     epoch: i64,
     ciphertext: Ciphertext,
+    /// The discussion this row belongs to: the head row's `seq`. Omitted when
+    /// the row heads its own discussion, so readers use `thread.unwrap_or(seq)`
+    /// and the wire stays byte-compatible for every row that predates the
+    /// column.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thread: Option<i64>,
     #[serde(with = "time::serde::iso8601")]
     created_at: OffsetDateTime,
 }
@@ -263,7 +478,7 @@ async fn put_read_cursor(
 
     // Fan the stored (clamped) watermark to the caller's live app stream:
     // best-effort, under the registry read lock, no await (the fan-out
-    // discipline shared with `fan_envelope`). A failed send is a lagged or
+    // discipline shared with `fan_envelope_to`). A failed send is a lagged or
     // absent stream -- the next room-list fetch resyncs, so it is not a
     // write failure.
     if let Principal::User(user_id) = &principal {
@@ -418,11 +633,62 @@ async fn resolve_history_views(
                 },
                 epoch: r.epoch,
                 ciphertext: Ciphertext(r.ciphertext),
+                thread: r.root_seq,
                 created_at: r.created_at,
             }
         })
         .collect();
     Ok(views)
+}
+
+/// Body of `GET /rooms/{id}/unread`: the caller's badge and the watermark it
+/// was counted against.
+///
+/// `cursor` is the badge-side name of the watermark `RoomView` reports as
+/// `last_read_seq`: one stored number, two readings of it.
+#[derive(Debug, Serialize)]
+pub struct RoomUnreadView {
+    pub unread: i64,
+    pub cursor: i64,
+}
+
+/// The caller's unread badge in a room: how many rows past their cursor
+/// reached them, plus that cursor. Member-only, with the same existence-oracle
+/// 404 as the rest of the surface (unknown room, non-member, Admin).
+///
+/// The count runs under the same rule the fan-out delivered under, so the badge
+/// speaks for what reached the member, not for what the log holds:
+/// [`store::unread_for_member`] carries what the number does and does not
+/// promise.
+async fn room_unread(
+    State(state): State<SharedConvState>,
+    AuthPrincipal(principal): AuthPrincipal,
+    Path(room_id): Path<String>,
+) -> Result<Json<RoomUnreadView>, ApiError> {
+    let room = RoomId::from(room_id);
+    let db = state.require_db()?;
+    let membership = store::room_membership(db, room.as_ref())
+        .await
+        .map_err(map_db_err)?
+        .ok_or_else(|| ApiError::not_found("unknown room"))?;
+    let (authed_mid, authed_kind) = match (
+        principal.participant_id().map(MemberId::from),
+        principal.participant_kind(),
+    ) {
+        (Some(mid), Some(kind)) => (mid, kind),
+        _ => return Err(ApiError::not_found("unknown room")), // Admin
+    };
+    if !is_member(&membership, &authed_mid, authed_kind) {
+        return Err(ApiError::not_found("unknown room"));
+    }
+
+    let badge = store::unread_for_member(db, room.as_ref(), &authed_mid)
+        .await
+        .map_err(|e| ApiError::internal(format_args!("store error: {e}")))?;
+    Ok(Json(RoomUnreadView {
+        unread: badge.unread,
+        cursor: badge.cursor,
+    }))
 }
 
 #[cfg(test)]

@@ -10,6 +10,7 @@
 
 pub(crate) mod db;
 
+mod audience;
 mod direct;
 mod fan;
 mod identity;

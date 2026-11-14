@@ -8,3 +8,4 @@ pub mod room_members;
 pub mod room_messages;
 pub mod room_read_cursors;
 pub mod rooms;
+pub mod thread_participants;

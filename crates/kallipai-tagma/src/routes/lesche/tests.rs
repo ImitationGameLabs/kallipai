@@ -51,6 +51,7 @@ async fn message_unavailable_when_no_relay() {
             attachment: None,
             quote: None,
             mentions: None,
+            thread: None,
         }),
     )
     .await
@@ -88,6 +89,7 @@ async fn room_send_unavailable_without_projector() {
             attachment: None,
             quote: None,
             mentions: None,
+            thread: None,
         }),
     )
     .await
@@ -181,6 +183,7 @@ async fn message_forbidden_for_operator() {
             attachment: None,
             quote: None,
             mentions: None,
+            thread: None,
         }),
     )
     .await
@@ -217,6 +220,7 @@ async fn message_forbidden_for_other_agent() {
             attachment: None,
             quote: None,
             mentions: None,
+            thread: None,
         }),
     )
     .await
@@ -260,6 +264,7 @@ async fn message_forbidden_for_subagent() {
             attachment: None,
             quote: None,
             mentions: None,
+            thread: None,
         }),
     )
     .await
@@ -296,6 +301,7 @@ async fn direct_send_rejects_both_targets() {
             attachment: None,
             quote: None,
             mentions: None,
+            thread: None,
         }),
     )
     .await
@@ -329,6 +335,7 @@ async fn direct_send_unavailable_without_projector() {
             attachment: None,
             quote: None,
             mentions: None,
+            thread: None,
         }),
     )
     .await
@@ -773,6 +780,7 @@ async fn direct_send_hits_the_burst_cap_before_any_relay_contact() {
             attachment: None,
             quote: None,
             mentions: None,
+            thread: None,
         }),
     )
     .await
@@ -811,6 +819,7 @@ async fn room_send_carries_the_quote_to_the_lesche() {
             None,
             Vec::new(),
             Some(7),
+            None,
         )
         .await
         .expect("quoted room send")
@@ -818,7 +827,7 @@ async fn room_send_carries_the_quote_to_the_lesche() {
         .ok
     );
     assert!(
-        send_shaped(state, id, Some("room-1"), None, Vec::new(), Some(0))
+        send_shaped(state, id, Some("room-1"), None, Vec::new(), Some(0), None)
             .await
             .expect("zero-quote room send")
             .0
@@ -832,6 +841,61 @@ async fn room_send_carries_the_quote_to_the_lesche() {
     assert_eq!(quoted.text, "ping");
     let zero = wire_room_message(&bodies[1]);
     assert_eq!(zero.quote, None, "a zero quote is no quote on the wire");
+}
+
+/// The thread the sender declares crosses the wire as its OWN field: the
+/// payload's `quote` and `thread` are adjacent same-typed slots, so a swap
+/// would compile, and only reading the payload back catches it.
+#[tokio::test]
+async fn room_send_carries_the_declared_thread_to_the_lesche() {
+    let (state, id, mock) = setup_lesche_send(Vec::new()).await;
+    state
+        .joined_rooms
+        .mark_rooms_rosterless("test", [RoomId::from("room-1".to_string())])
+        .await;
+
+    let sent = send_shaped(
+        state,
+        id,
+        Some("room-1"),
+        None,
+        Vec::new(),
+        Some(4),
+        Some(2),
+    )
+    .await
+    .expect("a room send that quotes a row and declares a thread");
+    assert!(sent.0.ok, "the send is accepted");
+
+    let bodies = mock.posted.lock().unwrap().clone();
+    let sent = wire_room_message(&bodies[0]);
+    assert_eq!(sent.quote, Some(4), "the quoted row crosses the wire");
+    assert_eq!(
+        sent.thread,
+        Some(2),
+        "the declared thread is its own field, not the quoted row"
+    );
+}
+
+/// The route reads its request off JSON bytes, and the client's request is a
+/// separate struct: a renamed field here would compile while the `thread` key
+/// the client sends fell on the floor, so pin the wire key itself.
+#[test]
+fn the_request_reads_a_thread_from_the_wire_key() {
+    let declared: LescheMessageRequest = serde_json::from_value(serde_json::json!({
+        "text": "ping",
+        "room": "ops",
+        "thread": 3
+    }))
+    .expect("decodes");
+    assert_eq!(declared.thread, Some(3), "the declared thread reads in");
+
+    let absent: LescheMessageRequest = serde_json::from_value(serde_json::json!({
+        "text": "ping",
+        "room": "ops"
+    }))
+    .expect("decodes");
+    assert_eq!(absent.thread, None, "a send that declares none stays none");
 }
 
 /// A direct-session send reaches the lesche with the quote on the wire, and
@@ -849,6 +913,7 @@ async fn direct_send_carries_the_quote_to_the_lesche() {
             Some("tagma-peer"),
             Vec::new(),
             Some(7),
+            None,
         )
         .await
         .expect("quoted direct send")
@@ -862,7 +927,8 @@ async fn direct_send_carries_the_quote_to_the_lesche() {
             None,
             Some("tagma-peer"),
             Vec::new(),
-            None
+            None,
+            None,
         )
         .await
         .expect("plain direct send")
@@ -870,11 +936,19 @@ async fn direct_send_carries_the_quote_to_the_lesche() {
         .ok
     );
     assert!(
-        send_shaped(state, id, None, Some("tagma-peer"), Vec::new(), Some(0))
-            .await
-            .expect("zero-quote direct send")
-            .0
-            .ok
+        send_shaped(
+            state,
+            id,
+            None,
+            Some("tagma-peer"),
+            Vec::new(),
+            Some(0),
+            None
+        )
+        .await
+        .expect("zero-quote direct send")
+        .0
+        .ok
     );
 
     let bodies = mock.direct_posted.lock().unwrap().clone();
@@ -1036,7 +1110,7 @@ async fn send_with(
     tagma: Option<&str>,
     mentions: Vec<String>,
 ) -> Result<Json<DeliveryResponse>, ApiError> {
-    send_shaped(state, id, room, tagma, mentions, None).await
+    send_shaped(state, id, room, tagma, mentions, None, None).await
 }
 
 /// One send with every field the route reads spelled out: `send_with` for
@@ -1049,6 +1123,7 @@ async fn send_shaped(
     tagma: Option<&str>,
     mentions: Vec<String>,
     quote: Option<i64>,
+    thread: Option<i64>,
 ) -> Result<Json<DeliveryResponse>, ApiError> {
     post_message(
         State(state),
@@ -1061,6 +1136,7 @@ async fn send_shaped(
             attachment: None,
             quote,
             mentions: Some(mentions),
+            thread,
         }),
     )
     .await
@@ -1517,6 +1593,7 @@ async fn read_one_room_row(text: &str, quote: Option<i64>, mentions: Vec<MemberI
         attachment: None,
         quote,
         mentions,
+        thread: None,
     })
     .expect("room message json");
     let page = serde_json::json!([{
@@ -1636,9 +1713,16 @@ async fn read_room_rejects_a_dot_segment_at_this_hop() {
 async fn send_room_rejects_a_dot_segment_at_this_hop() {
     let state = make_state();
 
-    let err = send_room_message(&state, "..".to_string(), "hello".into(), None, Vec::new())
-        .await
-        .expect_err("a dot segment -> 400");
+    let err = send_room_message(
+        &state,
+        "..".to_string(),
+        "hello".into(),
+        None,
+        Vec::new(),
+        None,
+    )
+    .await
+    .expect_err("a dot segment -> 400");
     assert_eq!(err.status, 400, "expected 400, got {}", err.status);
     assert_eq!(err.message, DOT_SEGMENT_ANSWER);
 }
@@ -1734,6 +1818,39 @@ async fn read_room_counts_the_other_members_a_stored_row_names() {
     );
 }
 
+/// A thread names a discussion inside a ROOM, so a send with no room -- the
+/// bilateral 1:1 and a peer tagma's direct session -- answers one with 400.
+/// It is a declaration, so it is refused on its own account: no quote rides it.
+#[tokio::test]
+async fn thread_without_a_room_is_bad_request() {
+    let state = make_state();
+    let id = AgentId::random();
+    state.registry.write().await.register(
+        id.clone(),
+        RegistryEntry::Live(make_entry(None, "tok".into())),
+    );
+
+    for (room, tagma) in [(None, None), (None, Some("peer".to_string()))] {
+        let err = post_message(
+            State(state.clone()),
+            AuthIdentity::test_new(Identity::Agent { id: id.clone() }),
+            Path(id.clone()),
+            Json(LescheMessageRequest {
+                text: "hi".into(),
+                room,
+                tagma,
+                attachment: None,
+                quote: None,
+                mentions: None,
+                thread: Some(3),
+            }),
+        )
+        .await
+        .expect_err("a thread needs a room");
+        assert_eq!(err.status, 400, "expected 400, got {}", err.status);
+    }
+}
+
 /// A quote names a position in a conversation's own log, so the bilateral
 /// 1:1 -- which has none -- answers a send carrying one with 400.
 #[tokio::test]
@@ -1756,6 +1873,7 @@ async fn quote_on_a_bilateral_send_is_bad_request() {
             attachment: None,
             quote: Some(3),
             mentions: None,
+            thread: None,
         }),
     )
     .await
@@ -1775,6 +1893,7 @@ async fn quote_on_a_bilateral_send_is_bad_request() {
             attachment: None,
             quote: Some(0),
             mentions: None,
+            thread: None,
         }),
     )
     .await

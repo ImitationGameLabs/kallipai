@@ -74,6 +74,14 @@ pub(crate) struct LescheMessageRequest {
     /// request, and no membership judgement on the way out.
     #[serde(default)]
     pub mentions: Option<Vec<String>>,
+    /// The thread this send DECLARES: a position in the room's log whose
+    /// discussion this message joins. Room sends only -- a thread is a room
+    /// scope, so a bilateral or direct-session send carrying one is a 400.
+    /// Absent or non-positive means no declaration, and the message then heads
+    /// its own discussion. Deliberately NOT derived from `quote`: which thread
+    /// a message joins decides who gets woken, which is not a display gesture.
+    #[serde(default)]
+    pub thread: Option<i64>,
 }
 
 /// Deliver a user-facing message: bilateral 1:1 (default) or into a room
@@ -97,6 +105,16 @@ pub async fn post_message(
     if quote.is_some() && req.room.is_none() && req.tagma.is_none() {
         return Err(ApiError::bad_request(
             "quote rides a room or direct send: a seq names a row in that conversation's log",
+        ));
+    }
+    // `<= 0` reads as no thread at all (no row 0 exists), normalized here for
+    // the same reason as the quote: only a real position reaches the payload.
+    let thread = req.thread.filter(|r| *r > 0);
+    // A thread names a position in a ROOM's log: the bilateral 1:1 and direct
+    // sessions have no threads, so a thread there is a caller bug.
+    if thread.is_some() && req.room.is_none() {
+        return Err(ApiError::bad_request(
+            "thread rides a room send: a thread is a room's discussion",
         ));
     }
     // A mention names a member of the room the send enters, so it rides a
@@ -133,7 +151,7 @@ pub async fn post_message(
                     "attachments ride direct-session sends only; a room send is text",
                 ));
             }
-            return send_room_message(&state, room, req.text, quote, mentions)
+            return send_room_message(&state, room, req.text, quote, mentions, thread)
                 .await
                 .map(|_| {
                     Json(DeliveryResponse {
@@ -184,6 +202,28 @@ pub async fn post_message(
     }
 }
 
+/// The room plaintext for one send: text plus the optional references, no
+/// `req_id`/ack (rooms and the bilateral 1:1 are disjoint address spaces).
+///
+/// Its own function because `quote` and `thread` are two adjacent, same-typed
+/// slots: swapping them compiles, so a test reads this payload back instead of
+/// trusting the call site.
+pub(super) fn room_payload(
+    text: String,
+    quote: Option<i64>,
+    thread: Option<i64>,
+    mentions: Vec<MemberId>,
+) -> Result<Vec<u8>, ApiError> {
+    serde_json::to_vec(&RoomMessage {
+        text,
+        attachment: None,
+        quote,
+        thread,
+        mentions,
+    })
+    .map_err(|e| ApiError::bad_gateway(format!("encode room message: {e:#}")))
+}
+
 /// Send a message into a room (the `kallip lesche send --room <room>` path).
 /// This is the outbound room counterpart of the bilateral `record_outbound`:
 /// it shares the per-tagma burst cap (one agent voice = one rate limit), then
@@ -204,6 +244,7 @@ pub(super) async fn send_room_message(
     text: String,
     quote: Option<i64>,
     mentions: Vec<MemberId>,
+    thread: Option<i64>,
 ) -> Result<(), ApiError> {
     let room = RoomId::from(room_str);
     // Same rule as the read: the id reaches the lesche in a path segment, so
@@ -247,13 +288,7 @@ pub(super) async fn send_room_message(
     // The lesche stores + relays it opaquely and member-gates the envelope
     // route, so the payload here is the plaintext itself.
     // The caller normalized `<= 0` to no quote (see `post_message`).
-    let plain = serde_json::to_vec(&RoomMessage {
-        text,
-        attachment: None,
-        quote,
-        mentions,
-    })
-    .map_err(|e| ApiError::bad_gateway(format!("encode room message: {e:#}")))?;
+    let plain = room_payload(text, quote, thread, mentions)?;
     // post_room_envelope overwrites channel_id from `room`, so the value
     // set here is irrelevant; mirror the room id for clarity.
     let envelope = Envelope {

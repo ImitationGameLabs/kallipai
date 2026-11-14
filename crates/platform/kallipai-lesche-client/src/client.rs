@@ -80,6 +80,11 @@ pub struct RoomMessageView {
     pub sender: kallipai_lesche_common::message::Participant,
     pub epoch: i64,
     pub ciphertext: kallipai_archeion_common::bytes::Ciphertext,
+    /// The discussion this row belongs to: the `seq` of the row that heads it.
+    /// Absent when the row heads its own, so readers use `thread.unwrap_or(seq)`
+    /// rather than treating absence as an error.
+    #[serde(default)]
+    pub thread: Option<i64>,
     #[serde(with = "time::serde::iso8601")]
     pub created_at: time::OffsetDateTime,
 }
@@ -1148,7 +1153,47 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].seq, 3);
         assert_eq!(rows[0].epoch, 1);
+        assert_eq!(
+            rows[0].thread, None,
+            "a row heading its own discussion carries no thread"
+        );
         assert_eq!(rows[0].ciphertext.0.len(), 32);
+    }
+
+    #[tokio::test]
+    async fn fetch_room_messages_reads_a_rows_thread() {
+        use wiremock::matchers::query_param;
+        let server = MockServer::start().await;
+        let room = RoomId::from("room-1".to_string());
+        let body = serde_json::json!([{
+            "seq": 5,
+            "sender": {"id": "p-tagma-1", "kind": "agent", "handle": "Tagma"},
+            "epoch": 1,
+            "ciphertext": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+            "thread": 3,
+            "created_at": "2026-11-13T00:00:00Z",
+        }]);
+        Mock::given(method("GET"))
+            .and(path("/rooms/room-1/messages"))
+            .and(query_param("after_seq", "4"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(&server)
+            .await;
+        let rows = client(&server)
+            .fetch_room_messages(
+                &room,
+                RoomHistoryQuery {
+                    after_seq: Some(4),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("history fetched");
+        assert_eq!(
+            rows[0].thread,
+            Some(3),
+            "the head position crosses the wire"
+        );
     }
 
     #[tokio::test]

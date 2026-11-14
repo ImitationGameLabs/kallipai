@@ -21,6 +21,7 @@ export type {
   HistoryEntry,
   Participant,
   RoomMessageView,
+  RoomUnreadView,
   SignalEvent,
   TagmaReply,
   TagmaStatusPayload,

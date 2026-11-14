@@ -63,6 +63,15 @@ pub(crate) struct SendArgs {
     /// where the room is, not here.
     #[arg(long = "mention", allow_hyphen_values = true)]
     pub mention: Vec<String>,
+    /// The thread this send joins: a position in the SAME room's log. Any row
+    /// of a thread names the same thread -- lesche resolves the declared
+    /// position to the row that heads it, so a reply's position works as well
+    /// as its head's. A room send only, since a thread is a room's discussion.
+    /// Absent means this message heads its own thread. Never inferred from
+    /// `--quote`: joining a thread decides who gets woken, which is not a
+    /// display gesture.
+    #[arg(long, value_parser = clap::value_parser!(i64).range(1..))]
+    pub thread: Option<i64>,
 }
 
 /// Args for `kallip lesche read` (pull a conversation's history).

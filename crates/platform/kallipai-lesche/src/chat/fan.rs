@@ -13,6 +13,8 @@
 //! message on reconnect. The caller decides whether zero-delivered
 //! is a 503 (no one reachable).
 
+use std::collections::BTreeSet;
+
 use kallipai_archeion_common::ids::ParticipantKind;
 use kallipai_lesche_common::event::{LescheAgentEvent, LescheEvent};
 use kallipai_lesche_common::message::Envelope;
@@ -29,14 +31,48 @@ pub struct FanOut {
     pub missed: usize,
 }
 
-/// Deliver `envelope` to every member of `membership` except the sender, under
-/// the caller's registry read lock. Human members receive via their app
-/// event-stream; Agent members via their agent stream. The sender is
-/// excluded by participant-id equality. Returns the delivery counts.
+/// Deliver `envelope` to every member of `membership` except the sender: the
+/// whole-room audience. Direct sessions and membership churn reach everyone,
+/// and this name says so; room messages route through [`fan_envelope_to`].
 pub fn fan_envelope(
     registry: &Registry,
     membership: &RoomMembership,
     envelope: &Envelope,
+) -> FanOut {
+    let sender_mid = MemberId::from(envelope.sender.id.clone());
+    let audience: BTreeSet<MemberId> = membership
+        .members
+        .iter()
+        .map(|m| m.id.clone())
+        .filter(|id| *id != sender_mid)
+        .collect();
+    fan_envelope_to(registry, membership, envelope, &audience)
+}
+
+/// Deliver `envelope` to the members named by `audience`, under the caller's
+/// registry read lock. Human members receive via their app event-stream; Agent
+/// members via their agent stream.
+///
+/// The audience is a wake decision the caller made (see
+/// [`crate::chat::audience`]); this function only carries it out. Two
+/// consequences are deliberate:
+///
+/// - the loop walks `membership`, so the KIND -- which stream to reach -- comes
+///   from the membership atom and never from the audience set. An id in
+///   `audience` that is not a current member is not delivered (the caller's
+///   bound check warns about that; reaching a non-member is not an option).
+/// - a member outside `audience` is neither `delivered` nor `missed`: the
+///   audience IS this send's recipient list, so the counters describe it and
+///   nothing else.
+///
+/// The sender is skipped here as well even though a room-wide audience already
+/// excludes it: an audience is the caller's answer, and this function should
+/// not be the place that silently depends on it being right.
+pub fn fan_envelope_to(
+    registry: &Registry,
+    membership: &RoomMembership,
+    envelope: &Envelope,
+    audience: &BTreeSet<MemberId>,
 ) -> FanOut {
     let mut delivered = 0;
     let mut missed = 0;
@@ -46,6 +82,9 @@ pub fn fan_envelope(
     let sender_mid = MemberId::from(envelope.sender.id.clone());
 
     for member in &membership.members {
+        if !audience.contains(&member.id) {
+            continue;
+        }
         // Skip the sender (it authored the envelope).
         if member.id == sender_mid {
             continue;
@@ -236,5 +275,49 @@ mod tests {
         drop(app_rx);
         assert_eq!(out.delivered, 1, "only alice reachable");
         assert_eq!(out.missed, 2, "carol + t2 offline");
+    }
+
+    /// The audience is the recipient list: a member outside it is not delivered
+    /// to AND not counted as missed (the counts describe the audience, not the
+    /// room), while an audience member with no live channel is missed.
+    #[tokio::test]
+    async fn a_narrowed_audience_counts_only_itself() {
+        let (state, _control) = make_state();
+        // Sender is tagma t1; t2 is online but NOT in the audience; carol is
+        // offline and in it.
+        let mem = membership(&["alice", "carol"], &["t1", "t2"]);
+        let agent_rx = {
+            let mut reg = state.registry.write().unwrap();
+            for t in ["t1", "t2"] {
+                let (tx, _rx) = tokio::sync::broadcast::channel::<LescheAgentEvent>(8);
+                reg.register_agent_stream(
+                    &TagmaId::from(t.to_string()),
+                    tx,
+                    std::sync::Arc::new(()),
+                );
+            }
+            let (tx, rx) = tokio::sync::broadcast::channel::<LescheAgentEvent>(8);
+            reg.register_agent_stream(
+                &TagmaId::from("t2".to_string()),
+                tx,
+                std::sync::Arc::new(()),
+            );
+            rx
+        };
+        let app_rx = {
+            let mut reg = state.write().unwrap();
+            reg.open_app_stream(&UserId::from("alice".to_string()))
+                .subscribe()
+        };
+
+        let env = envelope_from(agent("Tagma", "t1"));
+        let audience: BTreeSet<MemberId> =
+            BTreeSet::from([MemberId::for_user(&UserId::from("carol".to_string()))]);
+        let reg = state.read().unwrap();
+        let out = fan_envelope_to(&reg, &mem, &env, &audience);
+        drop(agent_rx);
+        drop(app_rx);
+        assert_eq!(out.delivered, 0, "the online tagma is outside the audience");
+        assert_eq!(out.missed, 1, "carol is in the audience and offline");
     }
 }

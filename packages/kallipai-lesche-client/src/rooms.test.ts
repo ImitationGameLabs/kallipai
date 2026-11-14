@@ -318,6 +318,33 @@ Deno.test(
   },
 );
 
+Deno.test(
+  "fetchRoomUnread GETs /rooms/{id}/unread and reads the stamp",
+  async () => {
+    const captured: string[] = [];
+    const stub: typeof fetch = (input) => {
+      captured.push(
+        typeof input === "string" ? input : (input as URL).toString(),
+      );
+      return Promise.resolve(
+        new Response(JSON.stringify({ unread: 7, cursor: 12 }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      );
+    };
+    let got: { unread: number; cursor: number } | undefined;
+    await withFetch(stub, async () => {
+      got = await new LescheClient(BASE).fetchRoomUnread("room-1");
+    });
+    assertEquals(
+      captured[0],
+      "https://lesche.test/v1/lesche/rooms/room-1/unread",
+    );
+    assertEquals(got, { unread: 7, cursor: 12 });
+  },
+);
+
 Deno.test("listRooms GETs /rooms with no CSRF marker", async () => {
   const captured: string[] = [];
   const stub: typeof fetch = (input) => {

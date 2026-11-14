@@ -334,7 +334,7 @@ List output is newest first.
 room with `--room`, or a peer tagma's direct session with `--tagma`:
 
 ```bash
-kallip lesche send [--room <ROOM>] [--tagma <TAGMA>] [--quote <SEQ>] [--mention <PARTICIPANT-ID>]...
+kallip lesche send [--room <ROOM>] [--tagma <TAGMA>] [--quote <SEQ>] [--thread <SEQ>] [--mention <PARTICIPANT-ID>]...
 kallip lesche rooms
 kallip lesche read (--room <ROOM> | --tagma <TAGMA> | --session <SESSION> | --quote <ID>) [--after <N>] [--before <N>] [--limit <N>]
 kallip lesche sessions
@@ -390,6 +390,16 @@ And when the rooms listing cannot answer for the room -- the fetch fails, or
 its answer does not cover that room -- a send's mentions go out unjudged:
 the envelope POST backs off and retries on 503, the rooms GET has no such
 retry.
+
+`send --thread <SEQ>` declares the thread a message joins: `<SEQ>` is a
+position in the same room's log, so the flag rides a room send, and any row
+of a thread names the same thread -- lesche resolves the declared position to
+the row that heads it, so naming a reply lands where naming its head does. It
+is the sender's declaration, never derived from `--quote` -- answering a row
+does not join its thread -- and a send that declares none starts a thread of
+its own. A declared position the room does not hold starts a thread of its own
+too: the send goes out as any other and the miss is only logged.
+
 The user's client renders messages as Markdown.
 
 ### `policy`: Inspect Agent Permissions

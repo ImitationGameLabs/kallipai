@@ -84,6 +84,27 @@ pub struct RoomMessage {
     /// not reached yet begins pointing at that row later.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quote: Option<i64>,
+    /// The thread this send declares: a position in THIS room's log. The relay
+    /// normalizes it on write -- the declared row's own thread root when that
+    /// row carries one, else that row's `seq`; a declared position the room
+    /// does not hold lands as NULL. Unlike a quote, a thread is never
+    /// backfilled: a quote may name a row that arrives later, a declared
+    /// thread may not.
+    ///
+    /// What crosses the wire here is the DECLARATION as the sender wrote it,
+    /// not a normalized fact: a declared position the room does not hold stays
+    /// in the payload. A reader that needs the fact reads the stored column
+    /// (the history view's `thread`), which is NULL exactly when the
+    /// declaration resolved to nothing.
+    ///
+    /// A NULL thread reads as the message heading its own discussion: readers
+    /// use `thread.unwrap_or(seq)`. It names the discussion a message belongs
+    /// to, which is the wake scope the later batches route on; it is not access
+    /// control, and the room still receives every message as before. Optional
+    /// with `serde(default)` + `skip_serializing_if` (the `quote` pattern): an
+    /// undeclared send keeps the historical wire shape byte-for-byte.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread: Option<i64>,
     /// The room members this message names: their participant ids, in the order the
     /// sender picked them. Only the id crosses the wire -- the display handle is
     /// derived at read time from the registry, so a renamed account or a departed
@@ -247,16 +268,58 @@ fn mentions_from_the_wire<'de, D>(deserializer: D) -> Result<Vec<MemberId>, D::E
 where
     D: serde::Deserializer<'de>,
 {
-    let raw = serde_json::Value::deserialize(deserializer)?;
+    Ok(mentions_of(&serde_json::Value::deserialize(deserializer)?))
+}
+
+/// The one place a mention list is read out of a decoded JSON value: entries
+/// that are not participant ids are dropped and repeats fold, so every reader
+/// of a payload sees the same list the typed decode would have produced.
+fn mentions_of(raw: &serde_json::Value) -> Vec<MemberId> {
     let Some(items) = raw.as_array() else {
-        return Ok(Vec::new());
+        return Vec::new();
     };
-    Ok(normalize_mentions(
+    normalize_mentions(
         items
             .iter()
             .filter_map(|item| item.as_str())
             .map(|id| MemberId::from(id.to_owned())),
-    ))
+    )
+}
+
+/// The two facts the relay's write path reads out of a room payload: the thread
+/// the sender declared, and the members the message names. Everything else in
+/// the payload stays opaque -- the lesche stores room content it does not parse.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ThreadFacts {
+    /// The declaration as written ([`RoomMessage::thread`]), not a normalized
+    /// head: resolving it against the room's log is the store's job.
+    pub thread: Option<i64>,
+    /// The named members, normalized exactly as a typed decode leaves them.
+    pub mentions: Vec<MemberId>,
+}
+
+/// Read [`ThreadFacts`] out of a room payload, or `None` when the payload is not
+/// a JSON OBJECT -- undecodable, or a JSON array/string/number. Nothing a
+/// room message can be, and the caller decides how loudly to say so: the
+/// difference between "no facts" and "not a message at all" is the only
+/// thing this `Option` carries, and dropping it would silence that signal.
+///
+/// A field within an object is lenient in the same way the typed decode is:
+/// an unreadable `thread` reads as undeclared, and a malformed `mentions`
+/// entry is dropped rather than costing the rest of the list. Content trouble
+/// must never cost the message, so nothing here fails a send.
+///
+/// The write path is therefore MORE FORGIVING than the typed decode, and on
+/// purpose: a payload the typed reader would refuse still lands, and what it
+/// loses is the facts, not the message. The one place the two agree is the
+/// frame itself -- neither accepts a payload that is not an object.
+pub fn thread_facts(payload: &[u8]) -> Option<ThreadFacts> {
+    let value = serde_json::from_slice::<serde_json::Value>(payload).ok()?;
+    let object = value.as_object()?;
+    Some(ThreadFacts {
+        thread: object.get("thread").and_then(serde_json::Value::as_i64),
+        mentions: object.get("mentions").map(mentions_of).unwrap_or_default(),
+    })
 }
 
 /// App -> tagma: one semantic operation against the tagma, encrypted inside an
@@ -590,6 +653,7 @@ mod tests {
                 modality: None,
             }),
             quote: None,
+            thread: None,
             mentions: Vec::new(),
         };
         let json = serde_json::to_string(&msg).unwrap();
@@ -718,6 +782,7 @@ mod tests {
             text: "hi from a room".into(),
             attachment: None,
             quote: None,
+            thread: None,
             mentions: Vec::new(),
         };
         let json = serde_json::to_string(&msg).unwrap();
@@ -732,6 +797,7 @@ mod tests {
             text: "look".into(),
             attachment: None,
             quote: None,
+            thread: None,
             mentions: Vec::new(),
         };
         let json = serde_json::to_string(&plain).unwrap();
@@ -744,12 +810,50 @@ mod tests {
             text: "look".into(),
             attachment: None,
             quote: Some(42),
+            thread: None,
             mentions: Vec::new(),
         };
         let json = serde_json::to_string(&quoted).unwrap();
         assert!(json.contains("quote"));
         let back: RoomMessage = serde_json::from_str(&json).unwrap();
         assert_eq!(back.quote, Some(42));
+    }
+
+    /// The thread is a DECLARATION carried in the payload: absent unless the
+    /// sender names one, independent of the quote, and it survives a
+    /// decode/re-encode like every other room field.
+    #[test]
+    fn room_message_thread_is_optional_and_independent_of_its_quote() {
+        let plain = RoomMessage {
+            text: "hi".into(),
+            attachment: None,
+            quote: None,
+            thread: None,
+            mentions: Vec::new(),
+        };
+        let json = serde_json::to_string(&plain).unwrap();
+        assert!(!json.contains("thread"), "an undeclared send adds no field");
+
+        let declared = RoomMessage {
+            text: "hi".into(),
+            attachment: None,
+            quote: Some(4),
+            thread: Some(2),
+            mentions: Vec::new(),
+        };
+        let json = serde_json::to_string(&declared).unwrap();
+        let back: RoomMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.thread, Some(2));
+        assert_eq!(
+            back.quote,
+            Some(4),
+            "quoting row 4 says nothing about which thread this joins"
+        );
+
+        // A payload without the key (the historical shape) still decodes, as
+        // no declaration.
+        let old: RoomMessage = serde_json::from_str(r#"{"text":"hi","quote":4}"#).unwrap();
+        assert_eq!(old.thread, None);
     }
 
     /// A mention list is part of the room plaintext: the ids a sender named
@@ -772,12 +876,49 @@ mod tests {
             text: "hi".into(),
             attachment: None,
             quote: None,
+            thread: None,
             mentions: Vec::new(),
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert_eq!(json, r#"{"text":"hi"}"#);
         let back: RoomMessage = serde_json::from_str(r#"{"text":"hi"}"#).unwrap();
         assert!(back.mentions.is_empty());
+    }
+
+    /// The write-path reader sees what the typed decode sees: the same
+    /// mention normalization, the same tolerance for a malformed entry, and no
+    /// thread when the value is not a position.
+    #[test]
+    fn thread_facts_share_the_typed_decodes_reading_of_a_payload() {
+        let named = "6f9619ff-8b86-d011-b42d-00cf4fc964ff";
+        let repeated = "6f9619ff-8b86-d011-b42d-00cf4fc964ff";
+        let wire = serde_json::json!({
+            "text": "look",
+            "thread": 7,
+            "mentions": [named, repeated, "not-an-id"],
+        });
+        let payload = serde_json::to_vec(&wire).unwrap();
+        let facts = thread_facts(&payload).expect("a JSON object yields facts");
+        let typed: RoomMessage = serde_json::from_value(wire).unwrap();
+        assert_eq!(facts.thread, Some(7));
+        assert_eq!(
+            facts.mentions, typed.mentions,
+            "one normalization, one list"
+        );
+
+        let off = serde_json::to_vec(&serde_json::json!({ "thread": "soon" })).unwrap();
+        let facts = thread_facts(&off).expect("still a JSON object");
+        assert_eq!(facts.thread, None, "a non-position reads as undeclared");
+        assert!(facts.mentions.is_empty());
+
+        assert!(
+            thread_facts(b"not json").is_none(),
+            "an undecodable payload is not a message"
+        );
+        assert!(
+            thread_facts(b"[1, 2]").is_none(),
+            "JSON that is not an object is not a message either"
+        );
     }
 
     /// The ids travel in the sender's order, as they were picked.
@@ -789,6 +930,7 @@ mod tests {
             text: "look".into(),
             attachment: None,
             quote: None,
+            thread: None,
             mentions: vec![MemberId::from(bo.clone()), MemberId::from(ada.clone())],
         };
         let json = serde_json::to_string(&msg).unwrap();

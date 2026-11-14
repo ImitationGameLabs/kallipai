@@ -1321,6 +1321,7 @@ fn room_envelope_naming(
         attachment: None,
         quote,
         mentions,
+        thread: None,
     })
     .unwrap();
     Envelope {

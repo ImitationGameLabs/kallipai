@@ -769,3 +769,775 @@ async fn put_read_cursor_accepts_tagma_member_without_fan() {
     .unwrap();
     assert_eq!(stored.get("room-1"), Some(&9));
 }
+
+/// The history view is what a pre-column reader sees: a row that heads its own
+/// thread omits the key entirely, so the shape stays byte-compatible, and a row
+/// inside a thread carries the head position.
+#[test]
+fn a_history_view_emits_thread_only_when_the_row_is_inside_one() {
+    let sender = human("@alice", "u-alice");
+    let view = |thread: Option<i64>| StoredMessageView {
+        seq: 5,
+        sender: sender.clone(),
+        epoch: 1,
+        ciphertext: Ciphertext(vec![1, 2, 3]),
+        thread,
+        created_at: OffsetDateTime::now_utc(),
+    };
+
+    let head = serde_json::to_value(view(None)).unwrap();
+    assert!(
+        head.get("thread").is_none(),
+        "a row heading its own discussion adds no key: {head}"
+    );
+    let reply = serde_json::to_value(view(Some(2))).unwrap();
+    assert_eq!(reply.get("thread"), Some(&serde_json::json!(2)));
+}
+
+/// The write path reads the payload's facts leniently: the declared thread and
+/// the members it names. A payload it cannot decode costs the facts (and a
+/// warning), never the send.
+#[test]
+fn the_write_path_reads_both_facts_out_of_a_payload() {
+    let named = MemberId::from("6f1c4c4e-4f5d-4b6a-9a2e-1d3c5b7a9e01".to_string());
+    let payload = serde_json::to_vec(&kallipai_lesche_common::message::RoomMessage {
+        text: "hi".into(),
+        attachment: None,
+        quote: Some(4),
+        thread: Some(2),
+        mentions: vec![named.clone()],
+    })
+    .unwrap();
+    let facts = thread_facts(&payload).expect("a decoded payload yields facts");
+    assert_eq!(facts.thread, Some(2));
+    assert_eq!(facts.mentions, vec![named]);
+
+    let no_thread = serde_json::to_vec(&kallipai_lesche_common::message::RoomMessage {
+        text: "hi".into(),
+        attachment: None,
+        quote: Some(4),
+        thread: None,
+        mentions: Vec::new(),
+    })
+    .unwrap();
+    let facts = thread_facts(&no_thread).expect("a decoded payload yields facts");
+    assert_eq!(facts.thread, None);
+    assert!(facts.mentions.is_empty());
+
+    assert!(
+        thread_facts(b"not json").is_none(),
+        "an undecodable payload costs the facts, not the send"
+    );
+}
+
+/// An envelope carrying a real `RoomMessage` payload, so the write path sees the
+/// thread and mention facts a client would actually send.
+fn message_envelope(
+    sender: Participant,
+    room: &str,
+    thread: Option<i64>,
+    mentions: Vec<MemberId>,
+) -> Envelope {
+    let mut env = envelope(sender, room);
+    env.ciphertext = Ciphertext(
+        serde_json::to_vec(&kallipai_lesche_common::message::RoomMessage {
+            text: "hi".into(),
+            attachment: None,
+            quote: None,
+            thread,
+            mentions,
+        })
+        .unwrap(),
+    );
+    env
+}
+
+/// A wire participant id in the room domain (the space mentions arrive in).
+fn mid(pid: &ParticipantId) -> MemberId {
+    MemberId::from(pid.as_ref().to_string())
+}
+
+/// The write path records agents only, and only members: a human head is not
+/// `started`, a human named in the message is not recorded, and a stranger is
+/// not either -- the room already knows who its members are.
+#[tokio::test]
+async fn a_threaded_envelope_records_only_the_agent_members_it_names() {
+    let (state, _control) = db_state().await;
+    let alice = uid("alice");
+    let bob = uid("bob");
+    let t1 = TagmaId::from("t1".to_string());
+    let t2 = TagmaId::from("t2".to_string());
+    let db = state.db.as_ref().unwrap();
+    seed_room(db, "room-1", &alice, &[&bob], &[&t1, &t2]).await;
+
+    let t1_pid = ParticipantId::for_tagma(&t1);
+    let t2_pid = ParticipantId::for_tagma(&t2);
+    let bob_pid = ParticipantId::for_user(&bob);
+    let stranger = ParticipantId::from("00000000-0000-4000-8000-000000000000".to_string());
+
+    // Alice (human) heads the thread. A head message records nobody.
+    let status = post_room_envelope(
+        State(state.clone()),
+        participant("alice"),
+        opt_user("alice"),
+        Path("room-1".to_string()),
+        Json(message_envelope(
+            human("Alice", "alice"),
+            "room-1",
+            None,
+            Vec::new(),
+        )),
+    )
+    .await
+    .expect("accepted");
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert!(
+        store::participants_of(db, "room-1", 1)
+            .await
+            .unwrap()
+            .is_empty(),
+        "a message that joins no thread records no participant"
+    );
+
+    // t1 replies inside it, naming t2 (agent member), bob (human member) and a
+    // stranger (not a member at all).
+    let status = post_room_envelope(
+        State(state.clone()),
+        AuthPrincipal(Principal::Tagma(t1.clone())),
+        OptUserDisplay(None),
+        Path("room-1".to_string()),
+        Json(message_envelope(
+            agent("T1", &t1),
+            "room-1",
+            Some(1),
+            vec![mid(&t2_pid), mid(&bob_pid), mid(&stranger)],
+        )),
+    )
+    .await
+    .expect("accepted");
+    assert_eq!(status, StatusCode::ACCEPTED);
+
+    let mut rows: Vec<(String, &'static str)> = store::participants_of(db, "room-1", 1)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|p| (p.participant_id.as_ref().to_string(), p.joined_via.as_str()))
+        .collect();
+    rows.sort();
+    let mut want = vec![
+        (mid(&t1_pid).as_ref().to_string(), "replied"),
+        (mid(&t2_pid).as_ref().to_string(), "mentioned"),
+    ];
+    want.sort();
+    assert_eq!(
+        rows, want,
+        "the sender and the named agent, and no human and no stranger"
+    );
+}
+
+/// Collects the formatted log of one test. The audience line is written only
+/// when DEBUG is enabled, so capturing it also proves it is reachable at all.
+#[derive(Clone, Default)]
+struct LogSink(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for LogSink {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogSink {
+    type Writer = LogSink;
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+/// The DEBUG line says what a delivery did: how much narrower than
+/// the room this send was, split into the agents it left out, the humans woken
+/// anyway, and the audience size. Every count is over the room minus the
+/// sender, so the sender is never reported as a saving.
+#[tokio::test]
+async fn the_audience_log_says_how_much_the_thread_left_out() {
+    let sink = LogSink::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(sink.clone())
+        .with_max_level(tracing::Level::DEBUG)
+        .with_ansi(false)
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    let (state, _control) = db_state().await;
+    let alice = uid("alice");
+    let t1 = TagmaId::from("t1".to_string());
+    let t2 = TagmaId::from("t2".to_string());
+    seed_room(
+        state.db.as_ref().unwrap(),
+        "room-1",
+        &alice,
+        &[],
+        &[&t1, &t2],
+    )
+    .await;
+
+    // Alice (human) heads the thread; t1 replies inside it; t2 never takes
+    // part; then alice replies inside her own thread. The first reply's
+    // audience is alice alone: t1 is the sender and no saving, so one agent
+    // (t2) is left out and one human is woken.
+    let post = |state: SharedConvState,
+                sender: Participant,
+                principal: AuthPrincipal,
+                opt: OptUserDisplay,
+                thread: Option<i64>| async move {
+        post_room_envelope(
+            State(state),
+            principal,
+            opt,
+            Path("room-1".to_string()),
+            Json(message_envelope(sender, "room-1", thread, Vec::new())),
+        )
+        .await
+        .expect("accepted")
+    };
+    post(
+        state.clone(),
+        human("Alice", "alice"),
+        participant("alice"),
+        opt_user("alice"),
+        None,
+    )
+    .await;
+    post(
+        state.clone(),
+        agent("T1", &t1),
+        AuthPrincipal(Principal::Tagma(t1.clone())),
+        OptUserDisplay(None),
+        Some(1),
+    )
+    .await;
+    post(
+        state,
+        human("Alice", "alice"),
+        participant("alice"),
+        opt_user("alice"),
+        Some(1),
+    )
+    .await;
+
+    let logged = String::from_utf8_lossy(&sink.0.lock().unwrap()).to_string();
+    let lines: Vec<&str> = logged
+        .lines()
+        .filter(|line| line.contains("room audience"))
+        .collect();
+    assert_eq!(
+        lines.len(),
+        3,
+        "one audience line per send, head and two replies: {logged}"
+    );
+    assert!(
+        lines[0].contains("fallback=Some(Head)"),
+        "a head message is the expected whole-room case: {}",
+        lines[0]
+    );
+    let reply = lines[1];
+    assert!(
+        reply.contains("agents_narrowed=1"),
+        "t1 sends, so t2 is the only agent saved: {reply}"
+    );
+    assert!(
+        reply.contains("humans_always=1"),
+        "alice is woken anyway: {reply}"
+    );
+    assert!(reply.contains("total=1"), "alice alone: {reply}");
+    assert!(
+        reply.contains("fallback=None"),
+        "the reply is scoped by its thread: {reply}"
+    );
+    let human_reply = lines[2];
+    assert!(
+        human_reply.contains("humans_always=0"),
+        "the human sender is not a human woken: {human_reply}"
+    );
+    assert!(
+        human_reply.contains("agents_narrowed=1"),
+        "t2 is still the only agent saved: {human_reply}"
+    );
+}
+
+/// A reply whose thread has no participant rows wakes the whole room, not
+/// nobody, and says so at WARN. An empty set here is a hole in the
+/// table (or a failed read), never an audience of zero, so the wake falls
+/// back to the whole room. A human-headed thread with only human replies is
+/// the ordinary way to reach it, since no agent row is written for either.
+#[tokio::test]
+async fn a_reply_with_no_participants_wakes_the_whole_room_and_says_so() {
+    let sink = LogSink::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(sink.clone())
+        .with_max_level(tracing::Level::DEBUG)
+        .with_ansi(false)
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    let (state, _control) = db_state().await;
+    let alice = uid("alice");
+    let bob = uid("bob");
+    let t1 = TagmaId::from("t1".to_string());
+    let t2 = TagmaId::from("t2".to_string());
+    seed_room(
+        state.db.as_ref().unwrap(),
+        "room-1",
+        &alice,
+        &[&bob],
+        &[&t1, &t2],
+    )
+    .await;
+
+    let mut alice_rx = app_rx(&state, &alice);
+    let mut t1_rx = agent_rx(&state, &t1);
+    let mut t2_rx = agent_rx(&state, &t2);
+
+    // Alice (human) heads the thread; nobody has replied yet.
+    post_room_envelope(
+        State(state.clone()),
+        participant("alice"),
+        opt_user("alice"),
+        Path("room-1".to_string()),
+        Json(message_envelope(
+            human("Alice", "alice"),
+            "room-1",
+            None,
+            Vec::new(),
+        )),
+    )
+    .await
+    .expect("accepted");
+    let _ = t1_rx.recv().await.expect("t1, the head");
+    let _ = t2_rx.recv().await.expect("t2, the head");
+
+    // Bob (human, no agent) replies inside it: the store writes no participant
+    // row, so the table answers empty for a thread that plainly has a reply.
+    post_room_envelope(
+        State(state),
+        participant("bob"),
+        opt_user("bob"),
+        Path("room-1".to_string()),
+        Json(message_envelope(
+            human("Bob", "bob"),
+            "room-1",
+            Some(1),
+            Vec::new(),
+        )),
+    )
+    .await
+    .expect("accepted");
+
+    let _ = alice_rx.recv().await.expect("alice, the head author");
+    let _ = t1_rx.recv().await.expect("t1, woken by the fallback");
+    let _ = t2_rx.recv().await.expect("t2, woken by the fallback");
+
+    let logged = String::from_utf8_lossy(&sink.0.lock().unwrap()).to_string();
+    assert!(
+        logged.contains("thread reply has no participant rows"),
+        "the hole is named at WARN: {logged}"
+    );
+    assert!(
+        logged.contains("fallback=Some(NoParticipants)"),
+        "and the audience line says which fallback ran: {logged}"
+    );
+    assert_eq!(
+        logged.matches("fallback=Some(Head)").count(),
+        1,
+        "only the head message takes the Head fallback: {logged}"
+    );
+}
+
+/// A reply wakes the thread's agents and every human, and leaves a
+/// non-participating agent alone. The head message wakes the room.
+#[tokio::test]
+async fn a_reply_narrows_to_its_thread_and_the_humans() {
+    let (state, _control) = db_state().await;
+    let alice = uid("alice");
+    let bob = uid("bob");
+    let t1 = TagmaId::from("t1".to_string());
+    let t2 = TagmaId::from("t2".to_string());
+    seed_room(
+        state.db.as_ref().unwrap(),
+        "room-1",
+        &alice,
+        &[&bob],
+        &[&t1, &t2],
+    )
+    .await;
+
+    let mut alice_rx = app_rx(&state, &alice);
+    let mut bob_rx = app_rx(&state, &bob);
+    let mut t1_rx = agent_rx(&state, &t1);
+    let mut t2_rx = agent_rx(&state, &t2);
+
+    // Alice posts the head: everyone but alice.
+    post_room_envelope(
+        State(state.clone()),
+        participant("alice"),
+        opt_user("alice"),
+        Path("room-1".to_string()),
+        Json(message_envelope(
+            human("Alice", "alice"),
+            "room-1",
+            None,
+            Vec::new(),
+        )),
+    )
+    .await
+    .expect("accepted");
+    let _ = bob_rx.recv().await.expect("bob");
+    let _ = t1_rx.recv().await.expect("t1");
+    let _ = t2_rx.recv().await.expect("t2");
+    assert!(alice_rx.try_recv().is_err(), "the sender gets no echo");
+
+    // t1 replies inside the thread: the humans and nobody else.
+    post_room_envelope(
+        State(state.clone()),
+        AuthPrincipal(Principal::Tagma(t1.clone())),
+        OptUserDisplay(None),
+        Path("room-1".to_string()),
+        Json(message_envelope(
+            agent("T1", &t1),
+            "room-1",
+            Some(1),
+            Vec::new(),
+        )),
+    )
+    .await
+    .expect("accepted");
+    let _ = alice_rx.recv().await.expect("alice, the head author");
+    let _ = bob_rx.recv().await.expect("bob, a human member");
+    assert!(
+        t2_rx.try_recv().is_err(),
+        "t2 never took part in this thread"
+    );
+    assert!(t1_rx.try_recv().is_err(), "the sender gets no echo");
+    // One envelope each on the streams that are in the audience, and no
+    // second copy of the same row on any of them.
+    tokio::task::yield_now().await;
+    assert!(alice_rx.try_recv().is_err());
+    assert!(bob_rx.try_recv().is_err());
+}
+
+/// The badge route: rows past the caller's cursor that someone else sent, the
+/// cursor they were counted against, and one uniform 404 for every non-member.
+#[tokio::test]
+async fn room_unread_counts_past_the_cursor_and_is_member_only() {
+    let (state, _control) = db_state().await;
+    let alice = uid("alice");
+    let t1 = TagmaId::from("t1".to_string());
+    let t2 = TagmaId::from("t2".to_string());
+    let db = state.db.as_ref().unwrap();
+    seed_room(db, "room-1", &alice, &[], &[&t1, &t2]).await;
+
+    // Two members send. Neither is Alice, so both rows are hers to read, and
+    // both are heads: a head reaches everyone.
+    for (tagma, handle) in [(&t1, "T1"), (&t2, "T2")] {
+        let status = post_room_envelope(
+            State(state.clone()),
+            AuthPrincipal(Principal::Tagma((*tagma).clone())),
+            OptUserDisplay(None),
+            Path("room-1".to_string()),
+            Json(message_envelope(
+                agent(handle, tagma),
+                "room-1",
+                None,
+                Vec::new(),
+            )),
+        )
+        .await
+        .expect("accepted");
+        assert_eq!(status, StatusCode::ACCEPTED);
+    }
+
+    let badge = room_unread(
+        State(state.clone()),
+        participant("alice"),
+        Path("room-1".to_string()),
+    )
+    .await
+    .expect("a member reads their badge");
+    assert_eq!((badge.0.unread, badge.0.cursor), (2, 0));
+
+    // The watermark comes back as stored, and the count moves with it.
+    put_read_cursor(
+        State(state.clone()),
+        participant("alice"),
+        Path("room-1".to_string()),
+        Json(ReadCursorRequest { last_read_seq: 1 }),
+    )
+    .await
+    .expect("accepted");
+    let badge = room_unread(
+        State(state.clone()),
+        participant("alice"),
+        Path("room-1".to_string()),
+    )
+    .await
+    .expect("a member reads their badge");
+    assert_eq!((badge.0.unread, badge.0.cursor), (1, 1));
+
+    // An agent member never counts its own rows: t1 sees t2's send only.
+    let badge = room_unread(
+        State(state.clone()),
+        AuthPrincipal(Principal::Tagma(t1.clone())),
+        Path("room-1".to_string()),
+    )
+    .await
+    .expect("an agent member reads its badge");
+    assert_eq!((badge.0.unread, badge.0.cursor), (1, 0));
+
+    // Unknown room, non-member and Admin collapse to one 404.
+    let err = room_unread(
+        State(state.clone()),
+        participant("alice"),
+        Path("room-none".to_string()),
+    )
+    .await
+    .expect_err("unknown room rejected");
+    assert_eq!(err.status, 404);
+    let err = room_unread(
+        State(state.clone()),
+        participant("bob"),
+        Path("room-1".to_string()),
+    )
+    .await
+    .expect_err("non-member rejected");
+    assert_eq!(err.status, 404);
+    let err = room_unread(
+        State(state.clone()),
+        AuthPrincipal(Principal::Admin),
+        Path("room-1".to_string()),
+    )
+    .await
+    .expect_err("admin rejected");
+    assert_eq!(err.status, 404);
+}
+
+/// The badge follows the wake rule: an agent that stayed out of a thread does
+/// not count its rows, while a human's badge counts every row (every human is
+/// in every audience).
+#[tokio::test]
+async fn room_unread_narrows_an_agent_and_not_a_human() {
+    let (state, _control) = db_state().await;
+    let alice = uid("alice");
+    let bob = uid("bob");
+    let t1 = TagmaId::from("t1".to_string());
+    let t2 = TagmaId::from("t2".to_string());
+    let db = state.db.as_ref().unwrap();
+    seed_room(db, "room-1", &alice, &[&bob], &[&t1, &t2]).await;
+
+    // t1 heads a thread; t2 replies inside it without naming anyone.
+    for (tagma, handle, thread) in [(&t1, "T1", None), (&t2, "T2", Some(1))] {
+        let status = post_room_envelope(
+            State(state.clone()),
+            AuthPrincipal(Principal::Tagma((*tagma).clone())),
+            OptUserDisplay(None),
+            Path("room-1".to_string()),
+            Json(message_envelope(
+                agent(handle, tagma),
+                "room-1",
+                thread,
+                Vec::new(),
+            )),
+        )
+        .await
+        .expect("accepted");
+        assert_eq!(status, StatusCode::ACCEPTED);
+    }
+
+    // t2 stayed out of that thread: the head reached it, the reply did not.
+    let badge = room_unread(
+        State(state.clone()),
+        AuthPrincipal(Principal::Tagma(t2.clone())),
+        Path("room-1".to_string()),
+    )
+    .await
+    .expect("an agent member reads its badge");
+    assert_eq!(badge.0.unread, 1);
+
+    // Alice is a human: both rows reached her.
+    let badge = room_unread(
+        State(state.clone()),
+        participant("alice"),
+        Path("room-1".to_string()),
+    )
+    .await
+    .expect("a human member reads her badge");
+    assert_eq!(badge.0.unread, 2);
+}
+
+/// The empty-audience tripwire speaks only for a room that had someone else to
+/// wake: the guard is the room's size, not the empty set on its own.
+#[test]
+fn empty_audience_warns_only_when_the_room_has_another_member() {
+    use kallipai_lesche_common::rooms::RoomMember;
+    use std::collections::BTreeSet;
+
+    let t1_pid = ParticipantId::for_tagma(&TagmaId::from("t1".to_string()));
+    let t2_pid = ParticipantId::for_tagma(&TagmaId::from("t2".to_string()));
+    let sender = mid(&t1_pid);
+    let alone = RoomMembership {
+        members: vec![RoomMember {
+            id: sender.clone(),
+            kind: ParticipantKind::Agent,
+        }],
+        membership_epoch: 1,
+    };
+    let shared = RoomMembership {
+        members: vec![
+            RoomMember {
+                id: sender.clone(),
+                kind: ParticipantKind::Agent,
+            },
+            RoomMember {
+                id: mid(&t2_pid),
+                kind: ParticipantKind::Agent,
+            },
+        ],
+        membership_epoch: 1,
+    };
+    let empty = audience::Audience {
+        ids: BTreeSet::new(),
+        fallback: None,
+    };
+
+    assert!(
+        check_empty_audience(
+            "room-1",
+            2,
+            &shared,
+            &sender,
+            ParticipantKind::Agent,
+            &empty,
+            0
+        ),
+        "a room with another member and nobody to wake is a hole"
+    );
+    assert!(
+        !check_empty_audience(
+            "room-1",
+            2,
+            &alone,
+            &sender,
+            ParticipantKind::Agent,
+            &empty,
+            0
+        ),
+        "a room whose only member is the sender has nobody else to wake"
+    );
+    let mut ids = BTreeSet::new();
+    ids.insert(mid(&t2_pid));
+    let woken = audience::Audience {
+        ids,
+        fallback: None,
+    };
+    assert!(
+        !check_empty_audience(
+            "room-1",
+            2,
+            &shared,
+            &sender,
+            ParticipantKind::Agent,
+            &woken,
+            1
+        ),
+        "a non-empty audience is not a hole"
+    );
+}
+
+/// The wake and the badge answer one question -- what reached this member --
+/// and the repo answers it twice: `audience()` in Rust, the count in
+/// `store::unread_for_member`'s SQL. Nothing in the type system ties the two,
+/// so this test does, one append at a time: a member's thread badge moves by
+/// exactly one if the audience named them and stays put if it did not. A term
+/// added to one side alone -- the tier term `audience()` keeps for the day
+/// tiers land -- turns this red on the first row it touches.
+/// The equivalence asserted here is strict, so no send in this test may fall
+/// back to the whole room (a thread with replies but no participant rows):
+/// the audience would name the room while the badge counts nothing, and this
+/// test would call that drift. That shape is covered by the fallback test.
+#[tokio::test]
+async fn the_badge_moves_exactly_for_the_members_the_audience_named() {
+    let (state, _control) = db_state().await;
+    let alice = uid("alice");
+    let t1 = TagmaId::from("t1".to_string());
+    let t2 = TagmaId::from("t2".to_string());
+    let db = state.db.as_ref().unwrap();
+    seed_room(db, "room-1", &alice, &[], &[&t1, &t2]).await;
+
+    let membership = store::room_membership(db, "room-1")
+        .await
+        .expect("membership read")
+        .expect("the room exists");
+    let t1_mid = mid(&ParticipantId::for_tagma(&t1));
+    let t2_mid = mid(&ParticipantId::for_tagma(&t2));
+    let members = [
+        (
+            mid(&ParticipantId::for_user(&alice)),
+            ParticipantKind::Human,
+        ),
+        (t1_mid.clone(), ParticipantKind::Agent),
+        (t2_mid.clone(), ParticipantKind::Agent),
+    ];
+
+    // Who sends, in which thread, naming whom: a human head, a reply naming
+    // nobody, a reply naming the other agent, an agent head, and a human reply
+    // that names an agent.
+    let sends: [(usize, Option<i64>, Vec<MemberId>); 5] = [
+        (0, None, Vec::new()),
+        (1, Some(1), Vec::new()),
+        (1, Some(1), vec![t2_mid.clone()]),
+        (2, None, Vec::new()),
+        (0, Some(1), vec![t1_mid.clone()]),
+    ];
+
+    for (who, thread, mentions) in sends {
+        let (sender, kind) = members[who].clone();
+        let mut before = Vec::new();
+        for (member, _) in &members {
+            before.push(
+                store::unread_for_member(db, "room-1", member)
+                    .await
+                    .expect("badge")
+                    .unread,
+            );
+        }
+        let appended = store::append(
+            db,
+            "room-1",
+            &sender,
+            kind,
+            membership.membership_epoch,
+            b"hi",
+            &ThreadFacts { thread, mentions },
+        )
+        .await
+        .expect("append");
+        let decided =
+            audience::audience(&membership, &sender, appended.root, &appended.participants);
+        for (index, (member, _)) in members.iter().enumerate() {
+            let after = store::unread_for_member(db, "room-1", member)
+                .await
+                .expect("badge")
+                .unread;
+            let expected = if decided.ids.contains(member) { 1 } else { 0 };
+            assert_eq!(
+                after - before[index],
+                expected,
+                "{} on send ({who}, {thread:?}) which woke {:?}",
+                member.as_ref(),
+                decided.ids
+            );
+        }
+    }
+}

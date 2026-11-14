@@ -26,6 +26,7 @@ import type {
   RoomInviteView,
   RoomMessageView,
   RoomRosterView,
+  RoomUnreadView,
   RoomView,
   TagmaRoomView,
   Visibility,
@@ -139,6 +140,12 @@ export class LescheClient extends BaseClient {
         last_read_seq: lastReadSeq,
       },
     );
+  }
+
+  /** `GET /rooms/{id}/unread` -- the caller's unread badge in a room, with the
+   * read cursor it was counted against. Member-only. */
+  fetchRoomUnread(roomId: string): Promise<RoomUnreadView> {
+    return this.json(`/rooms/${encodeURIComponent(roomId)}/unread`, "GET");
   }
 
   /** `GET /rooms/{id}` — a room's live roster (member-only). */
