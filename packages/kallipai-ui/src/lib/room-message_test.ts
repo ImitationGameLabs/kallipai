@@ -13,6 +13,7 @@ import {
   roomMessageLabel,
   roomRowAnchorId,
   roomRowAnnouncement,
+  roomThreadRowAnchorId,
   shortIdOf,
   type MentionTarget,
   type RoomLine,
@@ -450,6 +451,62 @@ Deno.test("a wire quote reaches the rendered line", () => {
     { seq: 9, createdAt: "2026-10-21T00:00:00Z", selfId: "u1" },
   );
   assertEquals(line.quote, 4);
+});
+
+// --- threads: a line names the discussion it joins by that head's seq ---
+
+Deno.test("a thread declaration is decoded and a bad one dropped", () => {
+  const decode = (raw: string) =>
+    decodeRoomMessage(new TextEncoder().encode(raw));
+  assertEquals(decode('{"text":"hi","thread":7}'), {
+    op: "message",
+    text: "hi",
+    thread: 7,
+  });
+  // Same rule as the quote: only a positive integer names a row, and a
+  // malformed field costs the field, never the message.
+  for (const thread of ["0", "-2", "2.5", '"7"', "null"]) {
+    assertEquals(decode(`{"text":"hi","thread":${thread}}`), {
+      op: "message",
+      text: "hi",
+    });
+  }
+});
+
+Deno.test("a send emits a thread only when it declares one", () => {
+  assertEquals(encodeRoomSendMessage("hi"), '{"text":"hi"}');
+  assertEquals(
+    encodeRoomSendMessage("hi", { thread: 4 }),
+    '{"text":"hi","thread":4}',
+  );
+  // A thread names a row the way a quote does, so it is refused the same
+  // way: a send that quietly shipped as a head would look like a reply that
+  // landed in the wrong place.
+  assertThrows(
+    () => encodeRoomSendMessage("hi", { thread: 0 }),
+    Error,
+    "not a thread root seq",
+  );
+});
+
+Deno.test("a settled thread wins over the payload declaration", () => {
+  // A reply declaring a line inside a discussion is stored against that
+  // discussion's head: the stored fact groups, the declaration is only what
+  // a live frame has. An undeclared line carries no thread key at all.
+  const decoded = { op: "message" as const, text: "reply", thread: 5 };
+  const options = {
+    seq: 9,
+    createdAt: "2026-10-21T00:00:00Z",
+    selfId: "u1",
+  };
+  const sender = { id: "u1", kind: "human" as const, handle: "@ada" };
+  assertEquals(
+    roomLineFrom(decoded, sender, { ...options, thread: 4 }).thread,
+    4,
+  );
+  assertEquals(roomLineFrom(decoded, sender, options).thread, 5);
+  const head = roomLineFrom({ op: "message", text: "head" }, sender, options);
+  assertEquals("thread" in head, false);
 });
 
 Deno.test("a wire mention list survives the decode", () => {
@@ -1011,6 +1068,22 @@ Deno.test("a room row's anchor is its own name, not a shared one", () => {
     "two rows never share an anchor",
   );
 });
+
+Deno.test(
+  "a discussion panel's anchor does not shadow the transcript's",
+  () => {
+    // The same seq can be drawn as a transcript row and as a panel row at the
+    // same time: a discussion head is both. Two ids, one row each.
+    assert(
+      roomThreadRowAnchorId(7) !== roomRowAnchorId(7),
+      "the panel's row and the transcript's row are named apart",
+    );
+    assert(
+      roomThreadRowAnchorId(7) !== roomThreadRowAnchorId(8),
+      "two panel rows never share an anchor",
+    );
+  },
+);
 
 // The room transcript's delete action. A room send has no durable row behind
 // it, so the reducer is the whole of the discard; what it refuses is the part

@@ -474,9 +474,9 @@ async fn a_session_id_that_is_not_canonical_is_refused() {
 }
 
 /// A position is an ordinal in the log, so a negative one is no direction
-/// at all. Both reads answer it here, and the room query is refused on
-/// either cursor: the lesche would read a negative one as "from the start",
-/// and this hop would surface that answer as an upstream fault.
+/// at all. Both reads answer it here, on either cursor: the lesche reads a
+/// negative one as "from the start", and this hop would surface that as an
+/// upstream fault rather than the caller's mistake.
 #[tokio::test]
 async fn a_negative_position_is_refused_by_both_reads() {
     let state = make_state();
@@ -506,11 +506,13 @@ async fn a_negative_position_is_refused_by_both_reads() {
         LescheHistoryQuery {
             after_seq: Some(-1),
             before_seq: None,
+            thread: None,
             limit: None,
         },
         LescheHistoryQuery {
             after_seq: None,
             before_seq: Some(-1),
+            thread: None,
             limit: None,
         },
     ] {
@@ -525,6 +527,50 @@ async fn a_negative_position_is_refused_by_both_reads() {
         )
         .await
         .expect_err("a negative position is not a page direction");
+        assert_eq!(room.status, 400, "bad request, not an unavailable relay");
+    }
+}
+
+/// A discussion root is a seq like any other, so below 1 it names nothing; and
+/// a discussion is read forward only, so a backward cursor beside it is a page
+/// this hop cannot serve. Both are the caller's mistake, refused here instead
+/// of being smoothed over into an upstream fault.
+#[tokio::test]
+async fn a_thread_position_must_be_positive_and_forward_only() {
+    let state = make_state();
+    let id = AgentId::random();
+    let entry = make_entry(None, "tok".to_string());
+    state
+        .registry
+        .write()
+        .await
+        .register(id.clone(), RegistryEntry::Live(entry));
+
+    for query in [
+        LescheHistoryQuery {
+            after_seq: None,
+            before_seq: None,
+            thread: Some(0),
+            limit: None,
+        },
+        LescheHistoryQuery {
+            after_seq: None,
+            before_seq: Some(8),
+            thread: Some(1),
+            limit: None,
+        },
+    ] {
+        let room = read_room_messages(
+            State(state.clone()),
+            AuthIdentity::test_new(Identity::Agent { id: id.clone() }),
+            Path((
+                id.clone(),
+                "00000000-0000-0000-0000-000000000aa1".to_string(),
+            )),
+            Query(query),
+        )
+        .await
+        .expect_err("a discussion root below 1 or beside a backward cursor is no page");
         assert_eq!(room.status, 400, "bad request, not an unavailable relay");
     }
 }
@@ -649,6 +695,7 @@ async fn room_reads_forbidden_for_operator() {
         Query(LescheHistoryQuery {
             after_seq: None,
             before_seq: None,
+            thread: None,
             limit: None,
         }),
     )
@@ -1635,6 +1682,7 @@ async fn read_one_room_row(text: &str, quote: Option<i64>, mentions: Vec<MemberI
         Query(LescheHistoryQuery {
             after_seq: None,
             before_seq: None,
+            thread: None,
             limit: None,
         }),
     )
@@ -1661,6 +1709,7 @@ async fn read_room_rejects_both_cursors_at_this_hop() {
         Query(LescheHistoryQuery {
             after_seq: Some(2),
             before_seq: Some(8),
+            thread: None,
             limit: None,
         }),
     )
@@ -1698,6 +1747,7 @@ async fn read_room_rejects_a_dot_segment_at_this_hop() {
         Query(LescheHistoryQuery {
             after_seq: None,
             before_seq: None,
+            thread: None,
             limit: None,
         }),
     )
@@ -1763,6 +1813,7 @@ async fn read_room_forwards_the_backward_cursor() {
         Query(LescheHistoryQuery {
             after_seq: None,
             before_seq: Some(8),
+            thread: None,
             limit: Some(1),
         }),
     )
@@ -1775,6 +1826,59 @@ async fn read_room_forwards_the_backward_cursor() {
         asked,
         vec!["before_seq=8&limit=1".to_string()],
         "one backward request, and no forward cursor on it"
+    );
+}
+
+/// A discussion page crosses this hop with its root intact: the lesche is
+/// asked for the thread position and a forward cursor, and nothing else is
+/// added to the request.
+#[tokio::test]
+async fn read_room_forwards_the_thread_position() {
+    let (lesche_url, asked) = spawn_room_history_stub().await;
+    let state = make_state();
+    let id = AgentId::random();
+    state.registry.write().await.register(
+        id.clone(),
+        RegistryEntry::Live(make_entry(None, "tok".into())),
+    );
+    let client = kallipai_lesche_client::LescheClient::builder(&lesche_url, "tok")
+        .build()
+        .expect("lesche client");
+    let handle = crate::relay::RelayHandle::new(
+        client,
+        "test".to_string(),
+        TagmaId::from("t1".to_string()),
+        "Tagma".into(),
+        kallipai_e2ee::DeviceKey::generate(),
+        id.clone(),
+        std::sync::Arc::downgrade(&state),
+    );
+    crate::test_helpers::install_relay(&state, "test", handle);
+    state
+        .joined_rooms
+        .mark_rooms_rosterless("test", [RoomId::from("room-1".to_string())])
+        .await;
+
+    let body = read_room_messages(
+        State(state),
+        AuthIdentity::test_new(Identity::Agent { id: id.clone() }),
+        Path((id, "room-1".to_string())),
+        Query(LescheHistoryQuery {
+            after_seq: Some(0),
+            before_seq: None,
+            thread: Some(3),
+            limit: Some(5),
+        }),
+    )
+    .await
+    .expect("an empty page renders as nothing");
+    assert!(body.is_empty(), "empty page: {body}");
+
+    let asked = asked.lock().unwrap().clone();
+    assert_eq!(
+        asked,
+        vec!["after_seq=0&thread=3&limit=5".to_string()],
+        "one discussion page, rooted and forward"
     );
 }
 

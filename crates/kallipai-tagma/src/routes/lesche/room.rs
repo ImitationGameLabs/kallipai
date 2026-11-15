@@ -48,6 +48,10 @@ pub(crate) struct LescheHistoryQuery {
     /// exclusive with `after_seq`: the pair is rejected on both hops. A single
     /// row lookup is `before_seq = seq + 1` with `limit = 1`.
     pub before_seq: Option<i64>,
+    /// Restrict the page to one discussion: the head row at `thread` plus every
+    /// reply naming it. Forward only (`after_seq`); the pair with `before_seq`
+    /// is refused on both hops, because nothing pages a discussion backwards.
+    pub thread: Option<i64>,
     /// Max messages to return. Server-clamped by lesche.
     pub limit: Option<u64>,
 }
@@ -85,6 +89,18 @@ pub async fn read_room_messages(
     // Both cursors are this request's own shape, refused before any relay is
     // resolved for the reason above.
     refuse_negative_position(&[q.after_seq, q.before_seq])?;
+    // A discussion reads forward only and a non-positive root names no row:
+    // both are refused here for the same reason as the pair above.
+    if let Some(thread) = q.thread {
+        if thread < 1 {
+            return Err(ApiError::bad_request("thread must be >= 1"));
+        }
+        if q.before_seq.is_some() {
+            return Err(ApiError::bad_request(
+                "thread reads forward only: before_seq is not accepted with it",
+            ));
+        }
+    }
     let room = RoomId::from(room);
     // The room id rides this read's path to the lesche, and a dot
     // segment survives encoding, so it is refused here: left to the
@@ -123,6 +139,7 @@ pub async fn read_room_messages(
                 after_seq: q.after_seq,
                 before_seq: q.before_seq,
                 limit: q.limit,
+                thread: q.thread,
             },
         )
         .await

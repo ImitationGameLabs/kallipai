@@ -101,6 +101,10 @@ pub struct RoomHistoryQuery {
     /// rows, returned ascending). A single-row lookup is `before_seq =
     /// seq + 1` with `limit = 1`.
     pub before_seq: Option<i64>,
+    /// Restrict the page to one discussion: the head row at `thread` plus every
+    /// reply naming it. Forward only (`after_seq`); the relay rejects it next
+    /// to `before_seq`, because nothing pages a discussion backwards.
+    pub thread: Option<i64>,
     /// Page size; the relay clamps it.
     pub limit: Option<u64>,
 }
@@ -359,6 +363,9 @@ impl LescheClient {
         }
         if let Some(b) = page.before_seq {
             query.push(("before_seq", b.to_string()));
+        }
+        if let Some(t) = page.thread {
+            query.push(("thread", t.to_string()));
         }
         if let Some(l) = page.limit {
             query.push(("limit", l.to_string()));
@@ -1224,6 +1231,39 @@ mod tests {
             requests[0].url.query(),
             Some("before_seq=8&limit=1"),
             "one backward page request: {}",
+            requests[0].url
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_room_messages_sends_thread_for_a_discussion_page() {
+        let server = MockServer::start().await;
+        let room = RoomId::from("room-1".to_string());
+        Mock::given(method("GET"))
+            .and(path("/rooms/room-1/messages"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+            .mount(&server)
+            .await;
+        let rows = client(&server)
+            .fetch_room_messages(
+                &room,
+                RoomHistoryQuery {
+                    after_seq: Some(4),
+                    thread: Some(3),
+                    limit: Some(10),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("discussion page fetched");
+        assert!(rows.is_empty());
+        // The exact query string pins both the thread position and the
+        // forward cursor it pages with.
+        let requests = server.received_requests().await.expect("requests recorded");
+        assert_eq!(
+            requests[0].url.query(),
+            Some("after_seq=4&thread=3&limit=10"),
+            "one discussion page request: {}",
             requests[0].url
         );
     }

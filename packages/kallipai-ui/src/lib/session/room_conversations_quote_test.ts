@@ -31,7 +31,7 @@ Deno.test("the optimistic line carries the quote it was sent with", () => {
 Deno.test("the payload carries the settled quote", () => {
   const src = flat(source(STORE));
   assert(
-    src.includes("encodeRoomSendMessage(trimmed, { mentions, quote })"),
+    src.includes("encodeRoomSendMessage(trimmed, { mentions, quote, thread })"),
     "the wire gets the same seq the optimistic line drew",
   );
 });

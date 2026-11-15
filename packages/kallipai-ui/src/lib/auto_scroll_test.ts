@@ -192,6 +192,50 @@ Deno.test(
 );
 
 Deno.test(
+  "detach parks a surface at its start; the pill still serves it",
+  async () => {
+    // A discussion panel opens on the page its root sits on, so it is not
+    // following the tail: the rows that land below must leave the reading
+    // position alone and must not be reported as missed conversation.
+    (globalThis as Record<string, unknown>)["$state"] = (v: unknown) => v;
+    const { createAutoScroll } = await import("./transcript.svelte.ts");
+    const scroll = createAutoScroll();
+    let top = 0;
+    scroll.viewport = {
+      get scrollTop() {
+        return top;
+      },
+      set scrollTop(v: number) {
+        top = v;
+      },
+      scrollHeight: 24000,
+      clientHeight: 400,
+    } as HTMLDivElement;
+    // Parked with no baseline, every row that lands is counted for the
+    // pill, and none of them moves the reader.
+    scroll.detach();
+    assertEquals(scroll.follow, false);
+    scroll.stick(200, 200);
+    scroll.stick(400, 400);
+    assertEquals(top, 0);
+    assertEquals(scroll.missed, 400);
+    // Parked on the page in front of the reader, that page is not a miss:
+    // the badge counts only what lands after it.
+    scroll.reset();
+    scroll.detach(400, 400);
+    assertEquals(scroll.missed, 0);
+    scroll.stick(600, 600);
+    assertEquals(scroll.missed, 200);
+    assertEquals(top, 0);
+    // The pill still serves the reader: one call brings them to the tail,
+    // and the count goes with it.
+    scroll.forceBottom();
+    assertEquals(top, 24000);
+    assertEquals(scroll.missed, 0);
+  },
+);
+
+Deno.test(
   "observe re-anchors a following transcript on resize; inert detached",
   async () => {
     // The layout bug: a growing composer shrinks the scroll container
@@ -353,3 +397,93 @@ Deno.test("reanchorIfFollowing writes only while following", async () => {
   scroll.reanchorIfFollowing();
   assertEquals(top, 1400);
 });
+
+Deno.test(
+  "stickOnAppend off leaves the viewport where the reader put it",
+  async () => {
+    // A reader paging forward through a discussion is following in the sense
+    // the pill cares about -- nothing below them is unseen -- but a page that
+    // lands must not pull them to its bottom: they are reading, not chasing
+    // the tail. Following the tail is a transcript's rule, not a pager's.
+    (globalThis as Record<string, unknown>)["$state"] = (v: unknown) => v;
+    const { createAutoScroll } = await import("./transcript.svelte.ts");
+    let top = 400;
+    const vp = {
+      get scrollTop() {
+        return top;
+      },
+      set scrollTop(v: number) {
+        top = v;
+      },
+      scrollHeight: 1400,
+      clientHeight: 1000,
+    } as HTMLDivElement;
+    const pager = createAutoScroll({ stickOnAppend: false });
+    pager.viewport = vp;
+    pager.onScroll();
+    assertEquals(pager.follow, true);
+    pager.stick(201, 11);
+    assertEquals(top, 400);
+    // The tail-following controller keeps its old rule, so the transcript is
+    // unchanged by the option's default.
+    const chat = createAutoScroll();
+    chat.viewport = vp;
+    chat.onScroll();
+    chat.stick(301, 12);
+    assertEquals(top, 1400);
+  },
+);
+
+Deno.test(
+  "a page lands under the reader; a row the room brings is followed",
+  async () => {
+    // Two content sources, two rules: the page the reader asked for lands
+    // below them and leaves them reading, while a row someone wrote arrives
+    // as news -- followed when they sit on the newest row, counted for the
+    // pill when they are above it.
+    (globalThis as Record<string, unknown>)["$state"] = (v: unknown) => v;
+    const { createAutoScroll } = await import("./transcript.svelte.ts");
+    const scroll = createAutoScroll({ stickOnAppend: false });
+    let top = 0;
+    let height = 24000;
+    scroll.viewport = {
+      get scrollTop() {
+        return top;
+      },
+      set scrollTop(v: number) {
+        top = v;
+      },
+      get scrollHeight() {
+        return height;
+      },
+      clientHeight: 400,
+    } as unknown as HTMLDivElement;
+    // The panel opened on its first page and the reader read to its bottom.
+    scroll.detach(200, 200);
+    top = height - 400;
+    scroll.onScroll();
+    assertEquals(scroll.follow, true);
+    // The page they asked for lands below them: they stay where they were
+    // reading, and the stretch it added ends the following.
+    height = 48000;
+    scroll.stick(400, 400);
+    assertEquals(top, 23600);
+    assertEquals(scroll.follow, false);
+    assertEquals(scroll.missed, 0);
+    // A reply someone else wrote is not a page: it is counted for the pill,
+    // and it does not move a reader who is above the tail.
+    height = 48200;
+    scroll.arrived(401, 401);
+    assertEquals(top, 23600);
+    assertEquals(scroll.missed, 1);
+    // Back on the newest row, the next reply keeps them on it: they are
+    // watching the end of the discussion, not paging through it.
+    top = height - 400;
+    scroll.onScroll();
+    assertEquals(scroll.follow, true);
+    height = 48400;
+    scroll.arrived(402, 402);
+    assertEquals(top, 48400);
+    assertEquals(scroll.missed, 0);
+  },
+);

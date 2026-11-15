@@ -41,6 +41,11 @@ export type RoomMessage =
       readonly attachment?: FileAttachment;
       /** The room seq this message quotes, when the sender quoted one. */
       readonly quote?: number;
+      /** The thread root this line declares: the seq of the row whose
+       *  discussion it joins; absent on a line heading its own discussion.
+       *  The wire carries the DECLARATION, not the settled fact -- a reader
+       *  that needs the fact reads the history row's own `thread`. */
+      readonly thread?: number;
       /** The participant ids this message names, when the sender named any.
        *  Ids only: the handle is resolved against the roster at render time, so
        *  a rename or a departed member still reads as the same participant. */
@@ -57,6 +62,9 @@ export type RoomSendOptions = {
    *  quoted row that leaves the window still shows as a quote rather than a
    *  copy of text someone else wrote. */
   readonly quote?: number;
+  /** The discussion this line joins: the head row's seq. Absent on a line
+   *  that heads its own discussion. */
+  readonly thread?: number;
   readonly mentions?: readonly string[];
 };
 
@@ -65,10 +73,21 @@ export type RoomSendOptions = {
  *  reason `checkedMentions` is: a quote that silently ships as no quote is a
  *  message quietly claiming to answer nothing. */
 export function checkedQuote(seq: number | undefined): number | undefined {
-  if (seq === undefined) return undefined;
-  if (!Number.isInteger(seq) || seq <= 0) {
-    throw new Error(`not a quoted room seq: ${seq}`);
-  }
+  return seq === undefined ? undefined : checkedSeq(seq, "quoted room seq");
+}
+
+/** The thread root a send declares, or undefined when the line heads its
+ *  own discussion. Strict for the same reason `checkedQuote` is. */
+export function checkedThread(seq: number | undefined): number | undefined {
+  return seq === undefined ? undefined : checkedSeq(seq, "thread root seq");
+}
+
+/** A positive-integer position in the room's log, or a throw naming what
+ *  the caller passed it as. Both optional references go through here, so a
+ *  bad position fails the same way whichever field carried it. */
+function checkedSeq(seq: number, what: string): number {
+  if (!Number.isInteger(seq) || seq <= 0)
+    throw new Error(`not a ${what}: ${seq}`);
   return seq;
 }
 
@@ -118,6 +137,12 @@ export function quoteField(seq: number | undefined): { quote?: number } {
   return seq !== undefined ? { quote: seq } : {};
 }
 
+/** The `thread` field a payload or a line carries: present only when the
+ *  line joins a discussion. The twin of `quoteField`, same reason. */
+export function threadField(seq: number | undefined): { thread?: number } {
+  return seq !== undefined ? { thread: seq } : {};
+}
+
 /** Serialize a chat line for the room wire. The result is the plaintext payload
  * the sender base64s into the envelope. The mention list and the quoted seq are
  * taken strictly (see `checkedMentions` / `checkedQuote`): a send names the
@@ -129,10 +154,12 @@ export function encodeRoomSendMessage(
   const attachment = options?.attachment;
   const mentions = checkedMentions(options?.mentions);
   const quote = checkedQuote(options?.quote);
+  const thread = checkedThread(options?.thread);
   return JSON.stringify({
     text,
     ...(attachment ? { attachment } : {}),
     ...quoteField(quote),
+    ...threadField(thread),
     ...mentionsField(mentions),
   });
 }
@@ -149,6 +176,7 @@ export function decodeRoomMessage(plaintext: Uint8Array): RoomMessage {
     text?: unknown;
     attachment?: unknown;
     quote?: unknown;
+    thread?: unknown;
     mentions?: unknown;
   };
   try {
@@ -168,23 +196,26 @@ export function decodeRoomMessage(plaintext: Uint8Array): RoomMessage {
     ) {
       return { op: "unknown", raw };
     }
-    const quoted = quotedSeq(value.quote);
+    const thread = positiveSeq(value.thread);
+    const quoted = positiveSeq(value.quote);
     const named = mentionIds(value.mentions);
     return {
       op: "message",
       text: value.text,
       ...(att !== undefined && att !== null ? { attachment: att } : {}),
       ...(quoted !== undefined ? { quote: quoted } : {}),
+      ...threadField(thread),
       ...mentionsField(named),
     };
   }
   return { op: "unknown", raw };
 }
 
-/** A quoted room seq, or undefined. The wire reads `<= 0` as no quote (there
- *  is no row 0); anything that is not a positive integer is dropped rather
- *  than the whole frame -- a malformed quote must not cost the message. */
-function quotedSeq(raw: unknown): number | undefined {
+/** A positive position on the wire, or undefined. The wire reads `<= 0` as
+ *  no position (there is no row 0); anything that is not a positive integer
+ *  is dropped rather than the whole frame -- a malformed reference must not
+ *  cost the message, an attachment, or the text someone wrote. */
+function positiveSeq(raw: unknown): number | undefined {
   return typeof raw === "number" && Number.isInteger(raw) && raw > 0
     ? raw
     : undefined;
@@ -258,6 +289,9 @@ export interface RoomLine {
   readonly text: string;
   /** The room seq this line quotes, when the sender quoted one. */
   readonly quote?: number;
+  /** The discussion this line belongs to: the head row's seq, or absent
+   *  when the line heads its own. Grouping uses `thread ?? seq`. */
+  readonly thread?: number;
   /** The participant ids this line names, when the sender named any. */
   readonly mentions?: readonly string[];
   readonly createdAt: string;
@@ -286,6 +320,9 @@ export function roomLineFrom(
     readonly seq: number;
     readonly createdAt: string;
     readonly selfId: string | null;
+    /** The settled thread the caller already knows (a history row's own
+     *  `thread`). Falls back to the payload's declaration. */
+    readonly thread?: number | null;
   },
 ): RoomLine {
   return {
@@ -296,6 +333,7 @@ export function roomLineFrom(
     senderTagmaId: sender.tagma_id,
     text: decoded.text,
     ...(decoded.quote !== undefined ? { quote: decoded.quote } : {}),
+    ...threadField(options.thread ?? decoded.thread),
     ...mentionsField(decoded.mentions),
     createdAt: options.createdAt,
     mine: sender.id === options.selfId,
@@ -544,6 +582,15 @@ export function dropFailedRoomLine(
  *  unit-tested in room-message_test.ts. */
 export function roomRowAnchorId(seq: number): string {
   return "room-msg-a11y-" + seq;
+}
+
+/** The anchor id a row of the discussion panel stamps on itself: the panel
+ *  draws a reply the main transcript does not, so it needs an id of its own.
+ *  Namespaced away from `roomRowAnchorId` because the same seq can be drawn
+ *  in both places at once: a discussion head is a transcript row and a panel
+ *  row. Pure: unit-tested in room-message_test.ts. */
+export function roomThreadRowAnchorId(seq: number): string {
+  return "room-thread-msg-a11y-" + seq;
 }
 
 /** Who wrote a room row, as spoken: the roster's display name once it has

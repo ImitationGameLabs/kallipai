@@ -100,31 +100,57 @@ Deno.test(
 );
 
 Deno.test(
-  "both views hand the landing the render index of the row that left",
-  { permissions: { read: [VIEW, ROOM_PAGE] } },
+  "the channel view hands the landing the render index of the row that left",
+  { permissions: { read: [VIEW] } },
   () => {
     // The store drops the line as it answers, so a list read afterwards no
     // longer holds it and a lookup by id answers with the first row of the
     // transcript: the reader is sent to the top, which also unsticks the
     // transcript from its tail. The row's own index survives both writes, so
-    // both views must pass it rather than look the row up again.
-    for (const [name, url, call] of [
-      ["the channel view", VIEW, "discardRow(line.historyId, i)"],
-      ["the room page", ROOM_PAGE, "discardRow(line.seq, i)"],
-    ] as const) {
-      const src = flat(source(url));
-      assert(
-        src.includes(`onConfirm={() => ${call}}`),
-        `${name} must hand its discard the row's render index, not a lookup`,
-      );
-      assert(
-        !src.includes("indexOf(removed)") && !src.includes("indexOf(seq)"),
-        `${name} must not look the departed row up in what remains`,
-      );
-      assert(
-        src.includes("reveal.land("),
-        `${name} must land through the one row table`,
-      );
-    }
+    // this view must pass it rather than look the row up again.
+    const src = flat(source(VIEW));
+    assert(
+      src.includes("onConfirm={() => discardRow(line.historyId, i)}"),
+      "the channel view must hand its discard the row's render index",
+    );
+    assert(
+      !src.includes("indexOf(removed)") && !src.includes("indexOf(seq)"),
+      "the channel view must not look the departed row up in what remains",
+    );
+    assert(
+      src.includes("reveal.land("),
+      "the channel view must land through the one row table",
+    );
+  },
+);
+
+Deno.test(
+  "the room page reads a discussion's place before the store drops the row",
+  { permissions: { read: [ROOM_PAGE] } },
+  () => {
+    // The room transcript draws one entry per discussion, so a row's render
+    // index no longer names its place. The page reads the place first and
+    // only then lets the store drop the row: a lookup afterwards fails the
+    // same way it always did, with nothing left to name and the reader sent
+    // to the top of the transcript.
+    const src = flat(source(ROOM_PAGE));
+    const place = src.indexOf("const at = groups.findIndex(");
+    const drop = src.indexOf("roomConversationsStore.discard(roomId, removed)");
+    assert(
+      src.includes("onConfirm={() => discardRow(line.seq)}"),
+      "the room page wires its discard from the row that failed",
+    );
+    assert(
+      place >= 0 && drop > place,
+      "the room page must read the place before the store drops the row",
+    );
+    assert(
+      !src.includes("indexOf(removed)") && !src.includes("indexOf(seq)"),
+      "the room page must not look the departed row up in what remains",
+    );
+    assert(
+      src.includes("reveal.land("),
+      "the room page must land through the one row table",
+    );
   },
 );

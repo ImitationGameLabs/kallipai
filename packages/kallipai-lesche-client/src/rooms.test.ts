@@ -138,6 +138,33 @@ Deno.test(
   },
 );
 
+Deno.test("fetchRoomMessages sends thread for a discussion page", async () => {
+  const captured: { url: string }[] = [];
+  const stub: typeof fetch = (input) => {
+    captured.push({
+      url: typeof input === "string" ? input : input.toString(),
+    });
+    return Promise.resolve(
+      new Response(JSON.stringify([]), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+  };
+  await withFetch(stub, async () => {
+    const c = new LescheClient(BASE);
+    await c.fetchRoomMessages("room-1", {
+      afterSeq: 4,
+      thread: 3,
+      limit: 50,
+    });
+  });
+  assertEquals(
+    captured[0]!.url,
+    "https://lesche.test/v1/lesche/rooms/room-1/messages?after_seq=4&thread=3&limit=50",
+  );
+});
+
 Deno.test("fetchRoomMessages omits the query when no opts given", async () => {
   const captured: { url: string }[] = [];
   const stub: typeof fetch = (input) => {

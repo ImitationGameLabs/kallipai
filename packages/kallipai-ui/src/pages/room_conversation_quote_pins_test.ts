@@ -61,8 +61,16 @@ Deno.test("the jump is offered only for a target in the window", () => {
     "the spoken target and the click read it, so they cannot drift",
   );
   assert(
-    src.includes("reveal.jump(quoteTarget)"),
-    "the jump scrolls to the quoted seq",
+    src.includes("jumpToQuote(quoteTarget)"),
+    "the click lands on the row the block names",
+  );
+  assert(
+    src.includes("void openThreadAt(root, seq)"),
+    "a target the transcript does not draw opens its discussion",
+  );
+  assert(
+    src.includes("threadReveal.jump(seq)"),
+    "and the panel locates the row there",
   );
 });
 
@@ -137,8 +145,18 @@ Deno.test("a row's anchor and the quote block name the same row", () => {
     "each row stamps its own seq as the anchor a quote points at",
   );
   assert(
-    src.includes("roomRowAnchorId(quoteTarget)"),
-    "and the quote block points at the target row's anchor",
+    src.includes("quoteAnchor(quoteTarget)"),
+    "and the quote block asks the page which anchor names the target",
+  );
+  assert(
+    src.includes("if (root === seq) return roomRowAnchorId(seq);"),
+    "a head is named by the transcript's anchor",
+  );
+  assert(
+    src.includes(
+      "return openThreadRoot === root ? roomThreadRowAnchorId(seq) : undefined;",
+    ),
+    "a reply only while the panel that draws it is open",
   );
 });
 
@@ -148,12 +166,15 @@ Deno.test("a room change drops the sentence it spoke", () => {
   assert(at !== -1, "the page has one effect that owns the room swap");
   const effect = blockAt(src, at);
   assert(
-    effect.includes("return () => reveal.destroy();"),
-    "the sentence spoken in the room that left goes with it",
+    effect.includes("return () => {") &&
+      effect.includes("reveal.destroy();") &&
+      effect.includes("threadReveal.destroy();"),
+    "the sentence spoken in the room that left goes with it, in both tables",
   );
+  const body = effect.slice(0, effect.indexOf("return () => {"));
   assert(
-    !effect.replace("return () => reveal.destroy();", "").includes("destroy"),
-    "the body does not fire the reset itself",
+    body.includes("closeThread();") && !body.includes("destroy"),
+    "the body closes the panel and fires no reset itself",
   );
   assert(
     !src.includes("reveal.destroy(); untrack(() => unreadStore.leaveRoom("),

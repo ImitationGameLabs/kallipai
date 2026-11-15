@@ -13,9 +13,10 @@ use kallipai_lesche_common::ids::path_segment;
 /// directions, so they travel as named fields: a page moves one way at a time
 /// (the data plane rejects a request naming both), and a caller that leaves
 /// `before_seq` at `None` sends no such key at all -- `0` there reads as "no
-/// row", not as "from the start". The data plane's own `RoomHistoryQuery`
-/// carries the same three fields; the two are kept in step by hand, because
-/// this crate does not depend on `kallipai-lesche-client`.
+/// row", not as "from the start". The data plane's `RoomHistoryQuery` carries
+/// the same positions and one more field, a discussion filter this surface does
+/// not offer; the two are kept in step by hand, because this crate does not
+/// depend on `kallipai-lesche-client`.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct RoomReadQuery {
     /// Rows with `seq > after_seq` (forward: the first page of newer rows).

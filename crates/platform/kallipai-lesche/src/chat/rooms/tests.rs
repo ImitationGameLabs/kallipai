@@ -24,6 +24,18 @@ fn envelope(sender: Participant, room: &str) -> Envelope {
     }
 }
 
+/// An envelope whose payload declares a discussion root; the relay reads the
+/// plaintext `thread` key to decide which discussion the row joins.
+fn in_thread(sender: Participant, room: &str, thread: i64) -> Envelope {
+    let mut env = envelope(sender, room);
+    env.ciphertext = Ciphertext(
+        serde_json::json!({ "thread": thread })
+            .to_string()
+            .into_bytes(),
+    );
+    env
+}
+
 fn human(handle: &str, user: &str) -> Participant {
     Participant {
         id: ParticipantId::for_user(&UserId::from(user.to_string())),
@@ -497,6 +509,7 @@ async fn history_before_seq_pages_backwards_and_rejects_both_cursors() {
         Query(HistoryQuery {
             after_seq: None,
             before_seq: Some(3),
+            thread: None,
             limit: None,
         }),
     )
@@ -513,11 +526,101 @@ async fn history_before_seq_pages_backwards_and_rejects_both_cursors() {
         Query(HistoryQuery {
             after_seq: Some(0),
             before_seq: Some(3),
+            thread: None,
             limit: None,
         }),
     )
     .await
     .expect_err("both cursors -> bad request");
+    assert_eq!(err.status, 400, "expected 400, got {}", err.status);
+}
+
+/// A `thread` page is the discussion itself: the head row plus the replies that
+/// name it, and nothing else. A position that is not a head matches no row --
+/// the relay does not reinterpret it -- and the two combinations with no
+/// meaning here are refused instead of silently picking a side.
+#[tokio::test]
+async fn history_thread_pages_one_discussion_and_rejects_bad_roots() {
+    let (state, control) = db_state().await;
+    let alice = uid("alice");
+    let t1 = TagmaId::from("t1".to_string());
+    control.enroll_tagma(
+        &t1,
+        alice.clone(),
+        kallipai_archeion_common::bytes::Ed25519PublicKey(vec![1u8; 32]),
+        "tagma-token",
+    );
+    seed_room(state.db.as_ref().unwrap(), "room-1", &alice, &[], &[&t1]).await;
+
+    // 1: the head (no declared thread), 2: an unrelated row, 3: a reply to 1.
+    for env in [
+        envelope(human("alice", "alice"), "room-1"),
+        envelope(human("alice", "alice"), "room-1"),
+        in_thread(human("alice", "alice"), "room-1", 1),
+    ] {
+        let _ = post_room_envelope(
+            State(state.clone()),
+            participant("alice"),
+            opt_user("alice"),
+            Path("room-1".to_string()),
+            Json(env),
+        )
+        .await
+        .expect("alice send");
+    }
+
+    let page = |thread: Option<i64>, after: Option<i64>| {
+        let state = state.clone();
+        async move {
+            room_history(
+                State(state),
+                participant("alice"),
+                Path("room-1".to_string()),
+                Query(HistoryQuery {
+                    after_seq: after,
+                    before_seq: None,
+                    thread,
+                    limit: None,
+                }),
+            )
+            .await
+        }
+    };
+
+    let Json(rows) = page(Some(1), None).await.expect("thread page");
+    let seqs: Vec<i64> = rows.iter().map(|r| r.seq).collect();
+    assert_eq!(seqs, vec![1, 3]);
+    assert_eq!(rows[0].thread, None, "the head names itself by omission");
+    assert_eq!(rows[1].thread, Some(1));
+
+    // Forward paging stays inside the discussion.
+    let Json(rows) = page(Some(1), Some(1)).await.expect("thread after");
+    let seqs: Vec<i64> = rows.iter().map(|r| r.seq).collect();
+    assert_eq!(seqs, vec![3]);
+
+    // A reply's seq is not a root: nothing matches and nothing is invented.
+    let Json(rows) = page(Some(3), None).await.expect("non-head root");
+    assert!(rows.is_empty());
+
+    // thread=0 names no row: refused like every other bad position.
+    let err = page(Some(0), None).await.expect_err("zero root");
+    assert_eq!(err.status, 400, "expected 400, got {}", err.status);
+
+    // A discussion never pages backwards, so the pair is refused rather than
+    // resolved by silently dropping one cursor.
+    let err = room_history(
+        State(state),
+        participant("alice"),
+        Path("room-1".to_string()),
+        Query(HistoryQuery {
+            after_seq: None,
+            before_seq: Some(3),
+            thread: Some(1),
+            limit: None,
+        }),
+    )
+    .await
+    .expect_err("thread + before_seq");
     assert_eq!(err.status, 400, "expected 400, got {}", err.status);
 }
 
@@ -554,6 +657,7 @@ async fn history_limit_zero_takes_one_row() {
         Query(HistoryQuery {
             after_seq: None,
             before_seq: None,
+            thread: None,
             limit: Some(0),
         }),
     )

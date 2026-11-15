@@ -223,6 +223,7 @@ impl RelayHandle {
                                         .checked_add(1)
                                         .ok_or(NoRow::Absent(QUOTE_READ_POSITION_OUT_OF_RANGE))?,
                                 ),
+                                thread: None,
                                 limit: Some(1),
                             },
                         )

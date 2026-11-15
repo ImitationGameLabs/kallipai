@@ -401,6 +401,11 @@ struct HistoryQuery {
     /// one page moves in one direction. The single-row lookup behind a quote
     /// is `before_seq = seq + 1, limit = 1`.
     before_seq: Option<i64>,
+    /// Restrict the page to one discussion: the head row at `thread` plus every
+    /// reply naming it. Reads forward only (`after_seq`), because the one reader
+    /// pages from the room's start; naming `before_seq` as well is rejected
+    /// rather than having one of the two silently ignored.
+    thread: Option<i64>,
     /// Max messages to return. Server-clamped.
     limit: Option<u64>,
 }
@@ -536,9 +541,25 @@ async fn room_history(
             "after_seq and before_seq are mutually exclusive",
         ));
     }
-    let rows = match q.before_seq {
-        Some(before) => store::read_before(db, room.as_ref(), before, limit).await,
-        None => store::read_since(db, room.as_ref(), q.after_seq.unwrap_or(0), limit).await,
+    // A discussion reads forward only, so `thread` and `before_seq` cannot be
+    // combined. No caller pages a discussion backwards today; rejecting the
+    // pair keeps the asymmetry visible instead of silently dropping one.
+    if let Some(thread) = q.thread {
+        if thread < 1 {
+            return Err(ApiError::bad_request("thread must be >= 1"));
+        }
+        if q.before_seq.is_some() {
+            return Err(ApiError::bad_request(
+                "thread reads forward only: before_seq is not accepted with it",
+            ));
+        }
+    }
+    let rows = match (q.thread, q.before_seq) {
+        (Some(thread), _) => {
+            store::read_thread(db, room.as_ref(), thread, q.after_seq.unwrap_or(0), limit).await
+        }
+        (None, Some(before)) => store::read_before(db, room.as_ref(), before, limit).await,
+        (None, None) => store::read_since(db, room.as_ref(), q.after_seq.unwrap_or(0), limit).await,
     }
     .map_err(|e| ApiError::internal(format_args!("store error: {e}")))?;
     let views = resolve_history_views(&state, db, room.as_ref(), rows).await?;

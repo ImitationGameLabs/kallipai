@@ -29,12 +29,14 @@ import {
   appendRoomLine,
   checkedMentions,
   checkedQuote,
+  checkedThread,
   decodeRoomMessage,
   dropFailedRoomLine,
   encodeRoomSendMessage,
   mentionsField,
   quoteField,
   roomLineFrom,
+  threadField,
   type RoomLine,
   type RoomLineSender,
   type RoomMessage,
@@ -45,6 +47,17 @@ import {
 // room-message.ts; the store re-exports the type so consumers import from one
 // place).
 export type { RoomLine };
+
+/** The server's page ceiling for one history request (`HISTORY_MAX_LIMIT` in
+ *  chat/rooms.rs). A page shorter than this is the end of the log. */
+const HISTORY_PAGE_SIZE = 200;
+
+/** How many pages one automatic walk down a discussion may take before it
+ *  stops and asks. A jump to a quoted reply and the walk back to the newest
+ *  reply both use it; the reader scrolling page by page is not bounded by it.
+ *  The page is the discussion's own rows (the relay filters by `thread`), so
+ *  this bounds one long discussion rather than the room. */
+export const THREAD_WALK_MAX_PAGES = 20;
 
 type RoomStatus = "loading" | "open" | "error";
 
@@ -66,6 +79,13 @@ export class RoomConversation {
   lastSeq: number | null = $state(null);
   status: RoomStatus = $state<RoomStatus>("loading");
   error: string | null = $state(null);
+  /** Whether the transcript has reached the room's present. The first page
+   *  is the OLDEST rows (the route pages forward from 0), so a large room is
+   *  behind its tail until the polls walk it forward; a short page proves the
+   *  walk finished. A discussion's reply count may be shown as a number only
+   *  once this is true: replies always sit after their head, so a window that
+   *  reaches the present holds all of them. */
+  caughtUp = $state(false);
   /** Whether a line can be written here. The room's carrier is the shared
    *  lesche client rather than a per-room transport, and a send renders an
    *  optimistic line that a failure marks in place for retry -- so the gate is
@@ -273,6 +293,7 @@ class RoomConversationsStore {
     if (!participantId) throw new Error("no signed-in user");
     const mentions = checkedMentions(options?.mentions);
     const quote = checkedQuote(options?.quote);
+    const thread = checkedThread(options?.thread);
     const conv = this.convs.get(roomId);
     // Optimistic line: synthetic seq below any real (positive) seq. Sender is
     // the participant id (not the raw user_id) so the history echo dedups it.
@@ -294,12 +315,13 @@ class RoomConversationsStore {
       mine: true,
       ...mentionsField(mentions),
       ...quoteField(quote),
+      ...threadField(thread),
     };
     if (conv) conv.lines = [...conv.lines, optimistic];
     try {
       const payload = encodeB64(
         new TextEncoder().encode(
-          encodeRoomSendMessage(trimmed, { mentions, quote }),
+          encodeRoomSendMessage(trimmed, { mentions, quote, thread }),
         ),
       );
       await lescheClientOrFail().postRoomEnvelope(
@@ -337,6 +359,7 @@ class RoomConversationsStore {
     await this.send(roomId, line.text, {
       mentions: line.mentions,
       quote: line.quote,
+      thread: line.thread,
     });
   }
 
@@ -367,6 +390,67 @@ class RoomConversationsStore {
     const conv = this.convs.get(roomId);
     if (!conv) return;
     this.renderPublic(conv, ciphertextB64, sender, /*seq*/ null);
+  }
+
+  /** Read ONE page of a discussion: the rows the server returns for a cursor,
+   *  plus the cursor the next page starts from. The panel opens on the page
+   *  the root sits on and walks down from there, one page per call.
+   *
+   *  `lastSeq` is the highest seq among the page's RAW rows -- the cursor for
+   *  the next page -- and `null` for an empty page. It is read off what the
+   *  server returned, not off the lines kept below: a row the fallback filter
+   *  drops still moves the cursor, so the next page cannot return it twice and
+   *  the walk cannot stall on a page it kept nothing from. `hasMore` is true
+   *  exactly when the page came back full.
+   *
+   *  The stored column is the fact and the payload's declaration is the
+   *  fallback, so a reply to a reply lands under the discussion's head either
+   *  way. The relay is asked to filter by the discussion (`thread: root`); the
+   *  local check stays as the guard for a relay that predates the parameter,
+   *  where the same walk returns room rows instead. Does not touch the room's
+   *  transcript state: a panel reading a discussion is not the room advancing
+   *  past what it rendered. */
+  async fetchThreadPage(
+    roomId: string,
+    root: number,
+    afterSeq: number,
+  ): Promise<{ lines: RoomLine[]; lastSeq: number | null; hasMore: boolean }> {
+    const selfId = archeionSession.participantId;
+    const lines: RoomLine[] = [];
+    // A root below 1 names no row: seqs start at 1, and a stored root is a seq,
+    // so an empty discussion is what the server would answer. The request
+    // would be refused instead, so it is not sent.
+    if (!Number.isInteger(root) || root < 1) {
+      return { lines, lastSeq: null, hasMore: false };
+    }
+    const rows = await lescheClientOrFail().fetchRoomMessages(roomId, {
+      afterSeq,
+      thread: root,
+      limit: HISTORY_PAGE_SIZE,
+    });
+    let lastSeq: number | null = null;
+    for (const row of rows) {
+      lastSeq = lastSeq === null ? row.seq : Math.max(lastSeq, row.seq);
+      try {
+        const decoded = decodeRoomPayload(row.ciphertext);
+        if (decoded.op !== "message") continue;
+        const thread = row.thread ?? decoded.thread ?? null;
+        if (row.seq !== root && thread !== root) continue;
+        lines.push(
+          roomLineFrom(decoded, row.sender, {
+            seq: row.seq,
+            createdAt: row.created_at,
+            selfId,
+            thread: row.thread,
+          }),
+        );
+      } catch (e) {
+        // A row whose payload does not decode loses that row, never the page,
+        // and the cursor below has already moved past it.
+        console.error("[room thread] decode failed:", e);
+      }
+    }
+    return { lines, lastSeq, hasMore: rows.length >= HISTORY_PAGE_SIZE };
   }
 
   /** Drop a room's state (on leave). */
@@ -468,9 +552,11 @@ class RoomConversationsStore {
           row.sender,
           row.seq,
           row.created_at,
+          row.thread,
         );
       }
       conv.status = "open";
+      conv.caughtUp = rows.length < HISTORY_PAGE_SIZE;
       conv.error = null;
     } catch (e) {
       conv.status = "error";
@@ -490,6 +576,7 @@ class RoomConversationsStore {
     sender: RoomLineSender,
     seq: number | null,
     createdAt?: string,
+    thread?: number | null,
   ): void {
     if (seq !== null && conv.lastSeq !== null && seq <= conv.lastSeq) return;
     let decoded;
@@ -506,6 +593,7 @@ class RoomConversationsStore {
       seq: seq ?? conv.nextSyntheticSeq(),
       createdAt: createdAt ?? new Date().toISOString(),
       selfId: me,
+      thread,
     });
     this.commitLine(conv, line, seq);
   }

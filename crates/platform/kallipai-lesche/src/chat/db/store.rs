@@ -19,7 +19,7 @@ use kallipai_lesche_common::message::ThreadFacts;
 use kallipai_lesche_common::rooms::{MemberId, RoomMember, RoomMembership};
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, ConnectionTrait, DatabaseBackend, EntityTrait,
-    QueryFilter, QueryOrder, QuerySelect, Statement, TransactionTrait,
+    QueryFilter, QueryOrder, QuerySelect, Statement, TransactionTrait, query::Condition,
 };
 use time::OffsetDateTime;
 
@@ -457,8 +457,54 @@ pub async fn read_since(
     Ok(rows.into_iter().map(stored_of).collect())
 }
 
+/// Read one discussion forward: the head row plus every reply that names it,
+/// `seq > after_seq`, ascending, up to `limit`.
+///
+/// A row names its discussion head in `root_seq` (NULL on the head itself), so
+/// the predicate is `root_seq = thread OR (seq = thread AND root_seq IS NULL)`;
+/// the bare `root_seq = thread` would drop the head row, and the head is the
+/// opening message the panel renders.
+///
+/// Forward-only on purpose: the one reader of a discussion pages from the
+/// room's start, and nothing pages a discussion backwards. A backward variant
+/// would be a path with no caller today; add it when a caller appears.
+///
+/// A `thread` that names a REPLY rather than a head matches no row: every row
+/// stores the head's seq in `root_seq` (see `resolve_thread_root`), so a reply
+/// is never that value, and it carries a `root_seq` of its own. The empty page
+/// is the honest answer: this reader does not reinterpret a position as a
+/// different discussion, and it answers a position past the last row the same
+/// way. Whether the discussion exists is the caller's question -- it opened it
+/// from a row it already holds, and a head the room never had is the only way
+/// to ask for nothing.
+pub async fn read_thread(
+    db: &Db,
+    room: &str,
+    thread: i64,
+    after_seq: i64,
+    limit: u64,
+) -> Result<Vec<StoredMessage>, sea_orm::DbErr> {
+    let rows = room_messages::Entity::find()
+        .filter(room_messages::Column::RoomId.eq(room))
+        .filter(room_messages::Column::Seq.gt(after_seq))
+        .filter(
+            Condition::any()
+                .add(room_messages::Column::RootSeq.eq(thread))
+                .add(
+                    Condition::all()
+                        .add(room_messages::Column::Seq.eq(thread))
+                        .add(room_messages::Column::RootSeq.is_null()),
+                ),
+        )
+        .order_by_asc(room_messages::Column::Seq)
+        .limit(limit)
+        .all(db)
+        .await?;
+    Ok(rows.into_iter().map(stored_of).collect())
+}
+
 /// Map one stored room-message row to the transport-neutral shape. Shared by
-/// both readers, so the two paging directions cannot drift apart.
+/// every reader, so none of them can drift apart.
 fn stored_of(r: room_messages::Model) -> StoredMessage {
     StoredMessage {
         seq: r.seq,
@@ -1399,6 +1445,116 @@ mod tests {
                 .await
                 .unwrap()
                 .is_empty()
+        );
+    }
+
+    /// One discussion forward: the head row (stored with no `root_seq`) and
+    /// every reply naming it, in seq order, cut by `after_seq` and `limit` like
+    /// any other page. The room's other rows never appear.
+    #[tokio::test]
+    async fn read_thread_returns_the_head_and_its_replies() {
+        let db = fresh_db().await;
+        seed_room(&db, "room-t").await;
+        let (alice, human) = user("alice");
+
+        // 1: head, 2: unrelated, 3: reply to 1, 4: reply to the reply (still
+        // 1's discussion), 5: unrelated, 6: another reply to 1.
+        for facts in [
+            declaring(None),
+            declaring(None),
+            declaring(Some(1)),
+            declaring(Some(3)),
+            declaring(None),
+            declaring(Some(1)),
+        ] {
+            append_seq(&db, "room-t", &alice, human, 1, b"ct", &facts)
+                .await
+                .unwrap();
+        }
+
+        let page = read_thread(&db, "room-t", 1, 0, 10).await.unwrap();
+        let seqs: Vec<i64> = page.iter().map(|m| m.seq).collect();
+        assert_eq!(seqs, vec![1, 3, 4, 6]);
+        assert_eq!(page[0].root_seq, None, "the head is stored without a root");
+        assert_eq!(
+            page[3].root_seq,
+            Some(1),
+            "a reply to a reply names the head"
+        );
+
+        // after_seq cuts inside the discussion, ascending.
+        let rest = read_thread(&db, "room-t", 1, 3, 10).await.unwrap();
+        let seqs: Vec<i64> = rest.iter().map(|m| m.seq).collect();
+        assert_eq!(seqs, vec![4, 6]);
+
+        // limit cuts the page, oldest row first.
+        let first = read_thread(&db, "room-t", 1, 0, 2).await.unwrap();
+        let seqs: Vec<i64> = first.iter().map(|m| m.seq).collect();
+        assert_eq!(seqs, vec![1, 3]);
+
+        // A reply's seq is not a head: no row names it, so the page is empty.
+        assert!(
+            read_thread(&db, "room-t", 3, 0, 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        // A discussion this room does not hold reads empty.
+        assert!(
+            read_thread(&db, "room-t", 99, 0, 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        // The filter is (room, discussion), not the discussion alone: a head
+        // numbered in another room stays out of this page.
+        seed_room(&db, "room-u").await;
+        append_seq(&db, "room-u", &alice, human, 1, b"other", &declaring(None))
+            .await
+            .unwrap();
+        append_seq(
+            &db,
+            "room-u",
+            &alice,
+            human,
+            1,
+            b"other",
+            &declaring(Some(1)),
+        )
+        .await
+        .unwrap();
+        let page = read_thread(&db, "room-t", 1, 0, 10).await.unwrap();
+        let seqs: Vec<i64> = page.iter().map(|m| m.seq).collect();
+        assert_eq!(seqs, vec![1, 3, 4, 6]);
+    }
+
+    /// The discussion read's index exists after migrations, and it is the
+    /// partial one the read relies on: `WHERE root_seq IS NOT NULL` leaves head
+    /// rows out, since the primary key already finds them. The statement is raw
+    /// SQL (sea-query carries no partial predicate), so a constructor-shaped
+    /// rewrite would silently widen the index and nothing else would notice.
+    #[tokio::test]
+    async fn the_thread_index_is_partial_on_named_roots() {
+        let db = fresh_db().await;
+        let row = db
+            .query_one(Statement::from_string(
+                DatabaseBackend::Postgres,
+                "SELECT indexdef FROM pg_indexes \
+                 WHERE indexname = 'idx_room_messages_thread_seq'",
+            ))
+            .await
+            .expect("the catalog answers")
+            .expect("the migration created the thread index");
+        let def: String = row.try_get("", "indexdef").expect("indexdef is text");
+        assert!(
+            def.contains("(room_id, root_seq, seq)"),
+            "the index keys are the read's: {def}"
+        );
+        assert!(
+            def.contains("root_seq IS NOT NULL"),
+            "head rows are left out of the index: {def}"
         );
     }
 

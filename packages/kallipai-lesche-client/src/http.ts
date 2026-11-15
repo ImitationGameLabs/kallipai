@@ -60,10 +60,18 @@ export class LescheClient extends BaseClient {
    * one direction. `afterSeq` is exclusive forward (`seq > afterSeq`);
    * `beforeSeq` is exclusive backward (the newest rows with `seq < beforeSeq`,
    * returned ascending). Sending both is a 400 -- one page moves one way.
+   * `thread` narrows the page to one discussion: the head row at that seq plus
+   * every reply naming it. It reads forward only, so the relay rejects it next
+   * to `beforeSeq`.
    * `limit` caps the page. 404 = not a member. */
   fetchRoomMessages(
     roomId: string,
-    opts?: { afterSeq?: number; beforeSeq?: number; limit?: number },
+    opts?: {
+      afterSeq?: number;
+      beforeSeq?: number;
+      thread?: number;
+      limit?: number;
+    },
   ): Promise<RoomMessageView[]> {
     const params = new URLSearchParams();
     if (opts?.afterSeq !== undefined) {
@@ -72,6 +80,7 @@ export class LescheClient extends BaseClient {
     if (opts?.beforeSeq !== undefined) {
       params.set("before_seq", String(opts.beforeSeq));
     }
+    if (opts?.thread !== undefined) params.set("thread", String(opts.thread));
     if (opts?.limit !== undefined) params.set("limit", String(opts.limit));
     const query = params.toString();
     return this.json(

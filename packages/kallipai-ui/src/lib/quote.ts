@@ -158,13 +158,18 @@ type QuoteKeyOf = (line: QuotableLine) => number | undefined;
  *  ceiling: a history page is capped at 200 rows server-side, but the store
  *  appends every page and every live frame without trimming, so a long session
  *  renders thousands of rows. Indexing once per render keeps that linear; a
- *  lookup per row is quadratic in the same number. */
+ *  lookup per row is quadratic in the same number.
+ *
+ *  Rows in `context` are indexed for resolution only: a surface that draws one
+ *  window still resolves a quote whose target sits outside it. */
 function quoteBlocksByKey(
   lines: readonly QuotableLine[],
   keyOf: QuoteKeyOf,
+  context: readonly QuotableLine[] = [],
 ): Map<number, QuoteView> {
   const bySeq = new Map<number, QuotableLine>();
   for (const line of lines) bySeq.set(line.seq, line);
+  for (const line of context) bySeq.set(line.seq, line);
   const quotes = new Map<number, QuoteView>();
   for (const line of lines) {
     const key = keyOf(line);
@@ -176,11 +181,15 @@ function quoteBlocksByKey(
 }
 
 /** The quote blocks a room transcript draws, keyed by the seq of the line
- *  carrying them -- the same seq the room page renders that line under. */
+ *  carrying them -- the same seq the room page renders that line under.
+ *
+ *  Rows in `context` are indexed for resolution only, so a panel that draws
+ *  one discussion still resolves a quote of a room message outside it. */
 export function roomQuoteBlocksByLine(
   lines: readonly QuotableLine[],
+  context: readonly QuotableLine[] = [],
 ): Map<number, QuoteView> {
-  return quoteBlocksByKey(lines, (line) => line.seq);
+  return quoteBlocksByKey(lines, (line) => line.seq, context);
 }
 
 /** One line's block, resolved against an already-indexed window: a loaded

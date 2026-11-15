@@ -7,6 +7,15 @@
 export interface AutoScrollOptions {
   /** Distance from the bottom (px) within which the viewport is "following". */
   readonly threshold?: number;
+  /** Whether content that lands while following also moves the viewport to
+   *  the new bottom. On by default: a transcript reads from the tail, so the
+   *  newest line is where the reader is. A reader paging forward through a
+   *  discussion turns it off -- the next page lands below them and they
+   *  carry on from where they were, and only an explicit return (the pill,
+   *  their own send, a walk they asked for) moves them. Such a page ends
+   *  the following: the reader sits above the tail it grew until they
+   *  scroll down to it. */
+  readonly stickOnAppend?: boolean;
 }
 
 export interface AutoScroll {
@@ -18,13 +27,28 @@ export interface AutoScroll {
   readonly missed: number;
   /** Attach to the viewport's `onscroll`. */
   onScroll: () => void;
+  /** Park the reader away from the tail on purpose: a surface that opens at
+   *  the top of its content is not following it, so the next appended row
+   *  must not drag them to the bottom. Pass the content the reader parked
+   *  on, so the rows already there are not counted as new: the badge starts
+   *  clean and counts only what landed after they chose to sit above the
+   *  tail. */
+  detach: (contentLength?: number, tailKey?: string | number) => void;
   /**
    * Call from a content-change effect with the line count and the tail
-   * line's stable key. Scrolls down only if following; while detached it
-   * counts the appended lines into `missed` (a grown array whose tail key
+   * line's stable key. Appended content carries a following reader down with
+   * it, except on a surface that pages forward: a page it took lands below
+   * the reader and never moves them, and ends the following. While detached
+   * it counts the appended lines into `missed` (a grown array whose tail key
    * did not move is an older-history prepend, not new conversation).
    */
   stick: (contentLength: number, tailKey?: string | number) => void;
+  /** A row the reader did not fetch landed: another member's reply, or the
+   *  room's own row joining the window. While following, the newest row is
+   *  where the reader is, so they are kept on it; while they read above the
+   *  tail, the rows are counted for the pill. Content the reader asked for
+   *  goes through stick(), which never moves them. */
+  arrived: (contentLength: number, tailKey?: string | number) => void;
   /** Unconditional jump to the tail: resume following, drop the count. */
   forceBottom: () => void;
   /** Re-anchor to the tail right now if following; a no-op while
@@ -67,21 +91,47 @@ export function missedLines(
 
 export function createAutoScroll(options: AutoScrollOptions = {}): AutoScroll {
   const threshold = options.threshold ?? 24;
+  const stickOnAppend = options.stickOnAppend ?? true;
   let viewport: HTMLDivElement | undefined = $state();
   let follow = $state(true);
   let missed = $state(0);
   let lastTail: TailSnapshot = { length: 0, key: undefined };
 
+  /** Whether the viewport sits at the tail: the one place the threshold is
+   *  read. */
+  function atTail(el: HTMLDivElement): boolean {
+    return el.scrollHeight - el.scrollTop - el.clientHeight < threshold;
+  }
+
   function onScroll(): void {
     if (!viewport) return;
-    const distanceFromBottom =
-      viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight;
-    follow = distanceFromBottom < threshold;
+    follow = atTail(viewport);
     // Back at the tail by hand: whatever piled up while away is seen now.
     if (follow) missed = 0;
   }
 
   function stick(contentLength: number, tailKey?: string | number): void {
+    missed += missedLines(
+      lastTail,
+      { length: contentLength, key: tailKey },
+      follow,
+    );
+    lastTail = { length: contentLength, key: tailKey };
+    if (!viewport) return;
+    if (stickOnAppend) {
+      if (follow) viewport.scrollTop = viewport.scrollHeight;
+      return;
+    }
+    // A page the surface took itself ends the following: the reader is
+    // above the tail it grew, until they scroll down to it.
+    if (follow && !atTail(viewport)) follow = false;
+  }
+
+  /** A row the reader did not fetch landed below the viewport: another
+   *  member's reply, or a room row the window caught up with. While
+   *  following, the newest row is where the reader is, so they go with it;
+   *  while they read above the tail, the row is counted for the pill. */
+  function arrived(contentLength: number, tailKey?: string | number): void {
     missed += missedLines(
       lastTail,
       { length: contentLength, key: tailKey },
@@ -101,6 +151,18 @@ export function createAutoScroll(options: AutoScrollOptions = {}): AutoScroll {
     missed = 0;
     lastTail = { length: 0, key: undefined };
   }
+
+  /** Stop following without moving the reader: a surface that opens above
+   *  the tail stays there until they ask to come back, and only rows
+   *  appended after the parked content move the badge. */
+  function detach(contentLength?: number, tailKey?: string | number): void {
+    follow = false;
+    missed = 0;
+    if (contentLength !== undefined) {
+      lastTail = { length: contentLength, key: tailKey };
+    }
+  }
+
   function reanchorIfFollowing(): void {
     if (viewport && follow) viewport.scrollTop = viewport.scrollHeight;
   }
@@ -131,8 +193,10 @@ export function createAutoScroll(options: AutoScrollOptions = {}): AutoScroll {
     get missed() {
       return missed;
     },
+    detach,
     onScroll,
     stick,
+    arrived,
     forceBottom,
     reanchorIfFollowing,
     reset,

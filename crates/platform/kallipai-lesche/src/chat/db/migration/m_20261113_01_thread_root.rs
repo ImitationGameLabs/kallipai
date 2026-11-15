@@ -9,9 +9,9 @@
 //! `root_seq = X OR (seq = X AND root_seq IS NULL)`: the head row stores NULL,
 //! so a predicate of just `root_seq = X` silently drops the head itself.
 //!
-//! No index: the only read that resolves a thread is a primary-key point lookup of
-//! the row a sender declared, which the composite `(room_id, seq)` key already
-//! scopes. A later batch that lists a whole thread can add one then.
+//! No index here: the only read that resolves a discussion is the primary-key
+//! lookup of the row a sender declared, which the composite `(room_id, seq)`
+//! key already scopes.
 
 use sea_orm_migration::prelude::*;
 

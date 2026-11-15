@@ -154,6 +154,25 @@ Deno.test("a quote outside the window reads as absence", () => {
   assertEquals(roomQuoteBlocksByLine(lines).get(9), { status: "off-window" });
 });
 
+Deno.test("a quote resolves against the rows drawn around it", () => {
+  // A panel draws one discussion, and a reply in it may quote a room
+  // message the transcript draws outside the panel: the block names that
+  // message instead of calling it absent.
+  const panel = [quotable({ seq: 9, text: "the reply", quote: 4 })];
+  const room = [
+    quotable({ seq: 4, text: "the original", senderHandle: "@ada" }),
+  ];
+  assertEquals(roomQuoteBlocksByLine(panel).get(9), { status: "off-window" });
+  assertEquals(roomQuoteBlocksByLine(panel, room).get(9), {
+    status: "found",
+    author: "@ada",
+    jumpable: true,
+    preview: "the original",
+  });
+  // Context rows resolve only: a room line files no block of its own.
+  assertEquals(roomQuoteBlocksByLine(panel, room).size, 1);
+});
+
 Deno.test("a quote never resolves against a synthetic seq", () => {
   // Optimistic and unreconciled lines carry a negative seq, and a quote names
   // a lesche-assigned row, so neither side of a negative pair can match.
