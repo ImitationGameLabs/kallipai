@@ -232,6 +232,10 @@ units on upgrade; the switch above turns them off. The compose form runs the
 same stores in containers, described in the [container
 guide](../container.md).
 
+The switch is also when the restarted services migrate their own stores.
+When the release notes name an index build,
+[Upgrades Run Migrations](../index.md) says when that wants a quiet window.
+
 ## Gateway Admin Face
 
 The model gateway's management face carries two credential families on

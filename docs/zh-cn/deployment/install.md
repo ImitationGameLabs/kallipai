@@ -75,6 +75,8 @@ sudo bash install.sh --tarball ./kallipai-1.0.0-linux-x86_64.tar.gz --with-syste
 
 单元会被 enable，升级时已处于 active 的单元会被重启。用更新的 tarball 重跑同一命令即完成原位升级。
 
+这次重启也是各服务把自己那份存储迁到新形状的时候。发布说明点到建索引时，何时该留一段清静时间见[升级会跑迁移](index.md)。
+
 polis 服务预期存在 PostgreSQL，每个服务一个数据库与角色（本地 unix socket 上的 peer 认证），与 NixOS 模块默认一致；数据库本身由部署者提供。可选项放在 drop-in（`systemctl edit <单元>`）里；每个单元模板的头注释都带一个示例。
 例如在原生 Debian 系主机上：
 

@@ -109,6 +109,7 @@ EXAMPLES
       cat <<EXAMPLES
 KALLIPAI_STACK_DIR=/var/lib/kallipai/stack
 TELEMETRY_BASE=/var/lib/kallipai/telemetry
+KALLIPAI_TELEMETRY_INTAKE_TOKEN_FILE=/etc/kallipai/intake-token
 GF_SECURITY_ADMIN_PASSWORD=change-me
 KALLIPAI_DOMAIN=example.com
 # The gateway's published base follows KALLIPAI_DOMAIN; uncomment to point

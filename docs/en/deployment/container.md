@@ -106,11 +106,45 @@ needs `docker login` on both sides.
 Two files carry the deployment's values:
 
 - `compose/.env`, which compose reads and interpolates;
-  `scripts/compose-env.sh --example prod` prints a starting point, and the
-  compose files themselves name every value they need, so a missing one is
-  reported by compose before anything is built;
+  `scripts/compose-env.sh --example prod` prints a starting point for each
+  of the seven that belong here, and the table below says where each one
+  comes from;
 - the service environment file named by `KALLIPAI_ENV_FILE`, whose keys are
   described in `compose/.env.prod.example`.
+
+These are the values a prod render stops on. `compose.yaml` and
+`compose.prod.yaml` mark each of them with `${...:?}`, so a value missing
+from `compose/.env` stops compose before it starts any container:
+
+| Value | Where it comes from | What it decides |
+| --- | --- | --- |
+| `KALLIPAI_DOMAIN` | `scripts/compose-env.sh --example prod` | the domain the site serves |
+| `KALLIPAI_ENV_FILE` | `scripts/compose-env.sh --example prod` | absolute path of the service environment file |
+| `KALLIPAI_INSTANCES_STATE_DIR` | `scripts/compose-env.sh --example prod` | the daemon's runtime directory, mounted into the instances service |
+| `KALLIPAI_TLS_DIR` | `scripts/compose-env.sh --example prod` | the certificate pair the edge serves |
+| `TELEMETRY_BASE` | `scripts/compose-env.sh --example prod` | where tempo and grafana keep their data |
+| `GF_SECURITY_ADMIN_PASSWORD` | `scripts/compose-env.sh --example prod` | Grafana's admin password; prod turns anonymous access off |
+| `KALLIPAI_TELEMETRY_INTAKE_TOKEN_FILE` | `scripts/compose-env.sh --example prod` | the path of the bearer token file every OTLP push carries ([Directories and volumes](#directories-and-volumes) lists its mount) |
+| `KALLIPAI_STACK_DIR` | `scripts/compose-env.sh --example prod` | the directory the stack renders its observability configs into; the generator prints a starting point, and `scripts/compose-up.sh` exports the path it built |
+| `KALLIPAI_IMAGE_TAG` | `scripts/compose-up.sh` | the tag of the images it built or found; the generator does not print it, and the script exports it over any value in `compose/.env` |
+
+The seven in the top group live in `compose/.env`, and the generator prints
+a starting value for each. Three of those printed values need replacing: the
+password is the `change-me` placeholder, which `scripts/compose-up.sh` refuses
+to start with; `KALLIPAI_DOMAIN` is printed as `example.com`, which the same
+script refuses; and the instances runtime directory is printed as
+`/run/user/<uid>/…`, where `<uid>` is a placeholder the script does not know,
+so put your own id there.
+
+The intake token path must name a file that exists and holds the token the
+collector expects. The password reaches the grafana service through its own
+`service.environment`, which wins over `env_file`, so a value in the service
+env file never reaches it.
+
+The last two are the stack's, not yours: `scripts/compose-up.sh` exports both
+over whatever `compose/.env` holds, because an env-file tag would name images
+that run never loaded and an env-file stack directory would point at configs
+that run never rendered.
 
 Operational keys such as listen addresses, the internal token path and the
 archeion hop are pinned inside `compose.yaml`; the env file cannot override
@@ -336,6 +370,17 @@ one is the longest part of that window.
    image carries busybox so that the edge container, or a one-shot container of
    the same image, has a shell and `wget` to ask with.
 
+   A deployment whose allowlist predates the instances name answers the probe
+   with `403`, and the run fails on the instances line. The list is
+   `KALLIPAI_INSTANCES_ALLOWED_HOSTS` in the service env file
+   (`compose/.env.prod.example` shows the shape): add `instances` beside the
+   public name. The list reaches the process through the compose-level
+   `env_file`, which compose reads once, when it creates the container, so
+   recreate the service after the edit — `scripts/compose-up.sh prod -- up -d
+   instances`, with `--force-recreate` when compose keeps the container — and
+   probe again. `docker compose restart` keeps the environment the container
+   was created with.
+
    The probe proves less than it looks like. `/healthz` answers `ok`
    unconditionally, so a wrong database URL still reads `ok`;
    `docker compose -f compose/compose.yaml -f compose/compose.prod.yaml logs archeion` shows
@@ -382,6 +427,26 @@ after a reboot; a host that reboots without docker enabled comes back with
 nothing running. Verify once with a reboot on the rehearsal host:
 `docker compose -f compose/compose.yaml -f compose/compose.prod.yaml ps` must show every
 container `Up` without a manual start.
+
+##### Upgrades
+
+A new version is a new checkout and one more start. Move the checkout to the
+revision you want, then run `scripts/compose-up.sh prod`: it builds that
+revision's images, loads them, and starts the stack on the tag it loaded. A
+`KALLIPAI_IMAGE_TAG` in `compose/.env` does not decide that — the script
+exports its own over it, so the file cannot point the stack at images the run
+never loaded. The stack keeps its volumes.
+
+On a host without nix, the registry route above applies: push the new batch
+from a machine that has nix, then set `KALLIPAI_IMAGE_PREFIX` and
+`KALLIPAI_IMAGE_TAG` in `compose/.env` and run
+`docker compose -f compose/compose.yaml -f compose/compose.prod.yaml up -d`.
+There the tag in the file decides, and it has to name a batch that was pushed.
+
+Each service migrates its own store at boot, so stop the stack first when the
+release notes name a maintenance window. When they name an index build,
+[Upgrades Run Migrations](index.md) says why the build wants a quiet one and
+how much of the table makes it matter.
 
 #### The Tagma Host
 

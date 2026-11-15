@@ -107,6 +107,10 @@ Units are enabled and already-active units are restarted through an
 upgrade. Re-running the same command with a newer tarball upgrades in
 place.
 
+That restart is also when each service migrates its own store. When the
+release notes name an index build, [Upgrades Run Migrations](index.md) says
+when to plan a quiet window.
+
 The polis services expect PostgreSQL with one database and role per
 service (peer authentication over the local unix socket), mirroring the
 NixOS module defaults; the database itself is provided by the deployer.

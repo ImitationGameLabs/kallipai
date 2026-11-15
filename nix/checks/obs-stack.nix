@@ -50,6 +50,61 @@ let
   # the budgets are read off the pruner's.
   script = stripComments (builtins.readFile ../../scripts/compose-up.sh);
 
+  # The example generator a reader copies into compose/.env. Its prod output
+  # has to carry every value compose marks required, so the required set is
+  # derived from the compose files here instead of being listed twice; the two
+  # names the start script supplies are the only ones written out, because
+  # nothing in the files tells those apart from the ones a deployment writes.
+  envScript = stripComments (builtins.readFile ../../scripts/compose-env.sh);
+  # Every `${NAME:?}` on a line, not only the last one: `builtins.match`
+  # returns one capture, so a line like `- ${A:?}:${B:?}` would keep B, drop A,
+  # and leave both nails below green while compose still requires A.
+  # `builtins.split` hands back each match as the list of its groups, which
+  # with one group is exactly the name.
+  requiredKeys = lib.unique (
+    lib.concatMap
+      (
+        file:
+        lib.concatMap (
+          line:
+          lib.concatMap (part: if builtins.isList part then part else [ ]) (
+            builtins.split "[$][{]([A-Z0-9_]+):[?]" line
+          )
+        ) (linesOf file)
+      )
+      [
+        compose
+        composeProd
+      ]
+  );
+  scriptSupplied = [
+    "KALLIPAI_IMAGE_TAG"
+    "KALLIPAI_STACK_DIR"
+  ];
+  writtenKeys = lib.filter (k: !(lib.elem k scriptSupplied)) requiredKeys;
+
+  # The example generator's prod block, taken by itself: the dev branch prints
+  # some of the same names, so a check over the whole script stays green after
+  # a line is dropped from the prod heredoc -- the one thing it guards. With no
+  # marker the block is empty, so every name below reads as missing.
+  prodMarker = "prod)\n      cat <<EXAMPLES\n";
+  prodExample =
+    if lib.hasInfix prodMarker envScript then
+      builtins.head (
+        lib.splitString "\nEXAMPLES" (builtins.elemAt (lib.splitString prodMarker envScript) 1)
+      )
+    else
+      "";
+
+  # Nine is today's count, so a regex that stops matching fails here instead
+  # of passing on an empty set. A new required value moves the count, and the
+  # example has to grow with it; a `:?` that turns into a default moves it the
+  # other way and fails here too, which is intended -- retake the count in the
+  # change that moves it. Each name is looked for in the prod block alone,
+  # where one line per value is the contract.
+  exampleCoversRequired =
+    builtins.length requiredKeys == 9 && lib.all (k: occurrences "${k}=" prodExample == 1) writtenKeys;
+
   # What compose is supposed to mount: every text the package writes. No text is
   # written for a host process, so this is the whole set.
   mountedNames = stackPackage.textNames;
@@ -400,6 +455,10 @@ let
     (expect "the start script builds the stack from the flake" (
       lib.hasInfix "nix build .#kallipai-stack --no-link --print-out-paths" script
     ))
+    # A reader starts from the generator's output: a required value it leaves
+    # out sends that reader back to the render error the guide was meant to
+    # spare them.
+    (expect "the prod example names every required value compose asks for" exampleCoversRequired)
   ];
 
   # Filtering forces every assertion above; a throw fails the eval.
