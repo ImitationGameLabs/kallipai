@@ -20,7 +20,9 @@ import {
 import { decodeB64, encodeB64, uuidV4 } from "@kallipai/kallipai-common";
 import { SvelteMap, SvelteSet } from "svelte/reactivity";
 import { archeionSession, lescheClientOrFail } from "./archeion.svelte.ts";
+import { recentStore } from "./recent.svelte.ts";
 import { roomsStore } from "./rooms.svelte.ts";
+import { roomKey } from "./unread.svelte.ts";
 import {
   room_history_failed,
   rooms_couldnt_reach,
@@ -328,6 +330,9 @@ class RoomConversationsStore {
         roomId,
         this.buildEnvelope(roomId, payload),
       );
+      // The room moved: recents order by this on its own, so a room read to
+      // the end (no badge left to fall) still climbs when something lands.
+      recentStore.note(roomKey(roomId));
       // Confirm the optimistic line without waiting for the next poll: the
       // lesche fan excludes the sender, so my own echo only arrives via a
       // history fetch (which dedups the pending line by sender + text).

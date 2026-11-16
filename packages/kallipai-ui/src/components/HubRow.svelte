@@ -25,6 +25,7 @@
     label,
     indicator,
     badge = 0,
+    time = undefined,
   }: {
     href?: string;
     onclick?: () => void;
@@ -33,6 +34,8 @@
     indicator?: NavIndicator;
     /** The unread count (rendered through badgeLabel; 0 renders nothing). */
     badge?: number;
+    /** When this conversation last moved, already formatted. */
+    time?: string;
   } = $props();
 </script>
 
@@ -41,12 +44,12 @@
     <!-- Spinning ring for pending (mirrors the sidebar dot: a filled dot has
            no visible rotation axis); size scaled to the row's size-7 icon. -->
     <span
-      class="size-3 rounded-full border-2 border-surface-400-600 border-t-transparent animate-spin shrink-0 opacity-70"
+      class="size-3 mt-2 rounded-full border-2 border-surface-400-600 border-t-transparent animate-spin shrink-0 opacity-70"
       aria-hidden="true"
     ></span>
   {:else if indicator}
     <span
-      class="size-3 rounded-full shrink-0 opacity-70 {navIndicatorDotClass(
+      class="size-3 mt-2 rounded-full shrink-0 opacity-70 {navIndicatorDotClass(
         indicator,
       )}"
       aria-hidden="true"
@@ -54,26 +57,40 @@
   {:else if Icon}
     <Icon class="size-7 shrink-0 opacity-70" aria-hidden="true" />
   {/if}
-  <span class="text-lg font-medium">{label}</span>
+  <!-- break-words, not truncate: a manager list keeps the whole name,
+       and the stamp already rides the first line, so a wrapped name
+       costs height rather than hiding text. -->
+  <span class="text-lg font-medium leading-7 min-w-0 break-words">{label}</span>
   {#if indicator}
     <span class="sr-only">{navIndicatorLabel(indicator)}</span>
   {/if}
-  {#if badge > 0}
-    <span
-      class="ml-auto shrink-0 rounded-full px-1.5 py-0.5 text-[11px] leading-none font-semibold preset-filled-primary-500"
-    >
-      {badgeLabel(badge)}
+  {#if time !== undefined || badge > 0}
+    <!-- Everything at the row's trailing edge sits in one group under one
+         auto margin, the shape NavLink uses: two auto margins would split
+         the spare space and leave the stamp short of the pill. -->
+    <span class="ml-auto flex items-center gap-2 shrink-0 h-7">
+      {#if time !== undefined}
+        <!-- Same contrast floor as the sidebar stamp (NavLink). -->
+        <span class="text-xs tabular-nums opacity-80">{time}</span>
+      {/if}
+      {#if badge > 0}
+        <span
+          class="rounded-full px-1.5 py-0.5 text-[11px] leading-none font-semibold preset-filled-primary-500"
+        >
+          {badgeLabel(badge)}
+        </span>
+        <span class="sr-only"
+          >{chat_unread_badge_aria({ count: badgeLabel(badge) })}</span
+        >
+      {/if}
     </span>
-    <span class="sr-only"
-      >{chat_unread_badge_aria({ count: badgeLabel(badge) })}</span
-    >
   {/if}
 {/snippet}
 
 {#if href}
   <a
     {href}
-    class="flex items-center gap-4 min-h-16 px-4 hover:preset-filled-surface-500 transition-colors"
+    class="flex items-start gap-4 min-h-16 px-4 py-4 hover:preset-filled-surface-500 transition-colors"
   >
     {@render rowContent()}
   </a>
@@ -81,7 +98,7 @@
   <button
     type="button"
     {onclick}
-    class="flex items-center gap-4 min-h-16 px-4 w-full text-left hover:preset-filled-surface-500 transition-colors"
+    class="flex items-start gap-4 min-h-16 px-4 py-4 w-full text-left hover:preset-filled-surface-500 transition-colors"
   >
     {@render rowContent()}
   </button>

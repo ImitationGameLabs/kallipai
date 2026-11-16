@@ -15,7 +15,11 @@
   import { untrack } from "svelte";
   import ConversationView from "../components/ConversationView.svelte";
   import { filesClientOrFail } from "../lib/session/archeion.svelte.ts";
-  import { directSessionsStore } from "../lib/session/directSessions.svelte";
+  import {
+    directSessionsStore,
+    pairKey,
+  } from "../lib/session/directSessions.svelte";
+  import { recentStore } from "../lib/session/recent.svelte.ts";
   import { createDirectTranscript } from "../lib/session/directTranscript.svelte.ts";
   import { saveBlob } from "../lib/saveBlob.ts";
   import { directQuoteBlocksByTarget } from "../lib/quote.ts";
@@ -35,6 +39,16 @@
   const transcript = createDirectTranscript({
     fetchPage: (tagma, peer, afterSeq, limit) =>
       directSessionsStore.fetchTranscript(tagma, peer, afterSeq, limit),
+  });
+
+  // Opening the session is the only activity signal this group has: its
+  // messages never enter this client's inbound flow (the transcript is polled
+  // read-only through the daemon's manage bridge), so there is no arrival
+  // boundary to stamp. The recents row for a pair therefore orders by "last
+  // opened", not by "last spoke".
+  $effect(() => {
+    const key = pairKey(tagmaId, peerId);
+    untrack(() => recentStore.note(key));
   });
   const phase = $derived(transcript.phase);
   const lines = $derived(

@@ -14,6 +14,7 @@
   import { createComposer } from "../lib/composer.svelte.ts";
   import { saveBlob } from "../lib/saveBlob.ts";
   import { bindDraft } from "../lib/session/drafts.svelte.ts";
+  import { untrack } from "svelte";
   import { OfflineConversation } from "../lib/session/conversation/offlineConversation.svelte.ts";
   import { RelayConversation } from "../lib/session/conversation/relayConversation.svelte.ts";
   import { statusCardStore } from "../lib/session/statusCard.svelte.ts";
@@ -56,6 +57,7 @@
   import type { FileAttachment } from "@kallipai/kallipai-lesche-client";
   import { createQuotes } from "../lib/quotes.svelte.ts";
   import { unreadStore, tagmaKey } from "../lib/session/unread.svelte.ts";
+  import { recentStore } from "../lib/session/recent.svelte.ts";
   import { formatDateTime } from "../lib/tagmata.svelte";
   import { navigate } from "../lib/shell/port.ts";
   import {
@@ -96,6 +98,16 @@
       (line) => line.status !== "sending" && line.status !== "failed",
     )?.createdAt,
   );
+
+  // Opening a conversation is activity on the recents order for both
+  // transports, so the stamp lands before the relay-only unread work.
+  $effect(() => {
+    const partition = conv?.pendingKey;
+    if (partition !== undefined && partition !== "local") {
+      // Untracked: note() reads the ledger it writes.
+      untrack(() => recentStore.note(tagmaKey(partition)));
+    }
+  });
 
   // Viewing: the open chat page clears the badge for the tagma's
   // 1:1 conversation and reports the read cursor (markRead), so the

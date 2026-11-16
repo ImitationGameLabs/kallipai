@@ -5,6 +5,7 @@ import {
   pathMatches,
   tagmaNavIndicator,
 } from "./links.ts";
+import { RECENT_CAP } from "../session/recent.ts";
 
 // navFor only stores the icon components; dummies suffice.
 const icons = {
@@ -34,25 +35,28 @@ function shape(sections: ReturnType<typeof navFor>): {
   }));
 }
 
-Deno.test("navFor online -> Chats hub section + Manage cell (no gears)", () => {
-  const sections = navFor({ mode: "online", icons });
-  assertEquals(shape(sections), [
-    {
-      title: "Chats",
-      manage: null,
-      hub: "/chats",
-      smallScreenHidden: false,
-      items: [],
-    },
-    {
-      title: "Tagmata",
-      manage: null,
-      hub: null,
-      smallScreenHidden: false,
-      items: ["/tagmata", "/files"],
-    },
-  ]);
-});
+Deno.test(
+  "navFor online -> Chats hub section with its gear + Manage cell",
+  () => {
+    const sections = navFor({ mode: "online", icons });
+    assertEquals(shape(sections), [
+      {
+        title: "Chats",
+        manage: "/chats",
+        hub: "/chats",
+        smallScreenHidden: false,
+        items: [],
+      },
+      {
+        title: "Tagmata",
+        manage: null,
+        hub: null,
+        smallScreenHidden: false,
+        items: ["/tagmata", "/files"],
+      },
+    ]);
+  },
+);
 
 Deno.test(
   "navFor online lists each room in the Chats hub section (rooms icons)",
@@ -61,14 +65,14 @@ Deno.test(
       mode: "online",
       icons,
       rooms: [
-        { roomId: "r1", label: "Design" },
-        { roomId: "r2", label: "Ops" },
+        { key: "room:r1", roomId: "r1", label: "Design" },
+        { key: "room:r2", roomId: "r2", label: "Ops" },
       ],
     });
     assertEquals(shape(sections), [
       {
         title: "Chats",
-        manage: null,
+        manage: "/chats",
         hub: "/chats",
         smallScreenHidden: false,
         items: ["/rooms/r1", "/rooms/r2"],
@@ -89,9 +93,9 @@ Deno.test("navFor online lists every enrolled tagma in the hub section", () => {
     mode: "online",
     icons,
     tagmata: [
-      { tagmaId: "t1", label: "Laptop", indicator: "live" },
-      { tagmaId: "t2", label: null, indicator: "down" },
-      { tagmaId: "t3", label: "Phone", indicator: "pending" },
+      { key: "tagma:t1", tagmaId: "t1", label: "Laptop", indicator: "live" },
+      { key: "tagma:t2", tagmaId: "t2", label: null, indicator: "down" },
+      { key: "tagma:t3", tagmaId: "t3", label: "Phone", indicator: "pending" },
     ],
   });
   // Tagmas use an indicator dot, not an icon, and link to the tagma-keyed
@@ -116,7 +120,7 @@ Deno.test("navFor online lists every enrolled tagma in the hub section", () => {
     [
       {
         title: "Chats",
-        manage: null,
+        manage: "/chats",
         hub: "/chats",
         smallScreenHidden: false,
         items: [
@@ -165,18 +169,20 @@ Deno.test("navFor online lists every enrolled tagma in the hub section", () => {
 });
 
 Deno.test(
-  "navFor online merged ordering: tagma chats first, rooms after",
+  "with an empty ledger the hub keeps registration order: chats, then rooms",
   () => {
     const sections = navFor({
       mode: "online",
       icons,
-      tagmata: [{ tagmaId: "t1", label: "Laptop", indicator: "live" }],
-      rooms: [{ roomId: "r1", label: "Design" }],
+      tagmata: [
+        { key: "tagma:t1", tagmaId: "t1", label: "Laptop", indicator: "live" },
+      ],
+      rooms: [{ key: "room:r1", roomId: "r1", label: "Design" }],
     });
     assertEquals(shape(sections), [
       {
         title: "Chats",
-        manage: null,
+        manage: "/chats",
         hub: "/chats",
         smallScreenHidden: false,
         items: ["/tagma/t1/chat", "/rooms/r1"],
@@ -191,6 +197,48 @@ Deno.test(
     ]);
   },
 );
+
+Deno.test(
+  "the recents ledger orders the hub and stamps only the rows it knows",
+  () => {
+    const sections = navFor({
+      mode: "online",
+      icons,
+      tagmata: [
+        { key: "tagma:t1", tagmaId: "t1", label: "Laptop", indicator: "live" },
+      ],
+      rooms: [
+        { key: "room:r1", roomId: "r1", label: "Design" },
+        { key: "room:r2", roomId: "r2", label: "Ops" },
+      ],
+      recent: { "room:r1": 2_000, "tagma:t1": 1_000 },
+    });
+    // Newest first across kinds; the row the ledger never saw keeps its place
+    // after the stamped ones instead of being dropped.
+    assertEquals(
+      sections[0].items.map((i) => i.href),
+      ["/rooms/r1", "/tagma/t1/chat", "/rooms/r2"],
+    );
+    assertEquals(
+      sections[0].items.map((i) => i.time !== undefined),
+      [true, true, false],
+    );
+  },
+);
+
+Deno.test("the hub caps at the sidebar share, newest first", () => {
+  const tagmata = Array.from({ length: 12 }, (_, i) => ({
+    key: `tagma:t${i}`,
+    tagmaId: `t${i}`,
+    label: `T${i}`,
+    indicator: "live" as const,
+  }));
+  const recent = Object.fromEntries(tagmata.map((t, i) => [t.key, i]));
+  const sections = navFor({ mode: "online", icons, tagmata, recent });
+  const hrefs = sections[0].items.map((i) => i.href);
+  assertEquals(hrefs.length, RECENT_CAP);
+  assertEquals(hrefs[0], "/tagma/t11/chat");
+});
 
 Deno.test("tagmaNavIndicator maps each channel state", () => {
   // open -> live while the peer reads online (or presence is unresolved);

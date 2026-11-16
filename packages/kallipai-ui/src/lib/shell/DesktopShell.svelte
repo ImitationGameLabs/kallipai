@@ -46,12 +46,22 @@
   wiring by contract: everything (links, active matcher, account menu,
   error view) arrives as props from the shared RootLayout layer.
 -->
-<div class="h-dvh grid grid-cols-[auto_1fr] overflow-hidden">
-  <!-- The descendant variant bumps the Skeleton trigger-text past its
-       default size so labels read at desktop scale. -->
+<!-- The sidebar column is fixed: with `auto`, one long conversation
+     name or a language switch widened it and moved every row. The width
+     holds the labels we ship today; a name longer than that ellipsizes
+     (NavLink) instead of widening the column, and the trailing stamp
+     keeps its edge. -->
+<div class="h-dvh grid grid-cols-[24rem_1fr] overflow-hidden">
+  <!-- The descendant variants bump the Skeleton trigger-text to the
+       desktop label size and add 8px after the name, which with the row's
+       own gap puts 16px between a shortened name and its stamp. The rows
+       would otherwise size to their content and overflow the fixed
+       column, clipping the stamp: a zero-minimum single column plus
+       w-full makes them fit, and min-w-0 on the section wrappers is what
+       lets a long name ellipsize instead of pushing the stamp out. -->
   <Navigation
     layout="sidebar"
-    class="grid grid-rows-[auto_1fr_auto] gap-4 [&_[data-part='trigger-text']]:text-lg"
+    class="w-full grid grid-cols-[minmax(0,1fr)] grid-rows-[auto_1fr_auto] gap-4 [&>*]:min-w-0 [&_[data-part='trigger-text']]:text-lg [&_[data-part='trigger-text']]:me-2"
   >
     <Navigation.Header>
       {#if brand}
@@ -73,7 +83,7 @@
               class="px-2 pt-2 flex items-center justify-between gap-2 min-w-0"
             >
               <h2
-                class="text-xs font-semibold uppercase tracking-wider opacity-60"
+                class="text-xs font-semibold uppercase tracking-wider opacity-80"
               >
                 {section.title}
               </h2>
@@ -83,7 +93,7 @@
                   href={section.manage.href}
                   aria-label={section.manage.label}
                   title={section.manage.label}
-                  class="size-5 grid place-items-center rounded-base opacity-50 hover:opacity-100 hover:preset-filled-surface-500 shrink-0"
+                  class="size-5 grid place-items-center rounded-base opacity-70 hover:opacity-100 hover:preset-filled-surface-500 shrink-0"
                 >
                   <ManageIcon class="size-3.5" />
                 </a>

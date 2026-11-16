@@ -1,15 +1,18 @@
 // Derive the nav link sections from the app mode. The two modes are mutually
 // exclusive front-door choices (see lib/config/mode.ts):
-//   - online  -> a merged "Chats" section: every enrolled tagma chat (whether
-//     or not a relay channel is open -- the link is always navigable and the
-//     channel opens on demand at /tagma/{tagmaId}/chat) followed by the
-//     caller's rooms as direct chat entries (/rooms/{id}); the two groups are
-//     told apart by their leading mark (status dot vs rooms icon). The section
-//     declares hub -> /chats, so the bottom bar folds it into one cell and the
-//     /chats hub page carries the grouped view as pure conversation rows. A
-//     second two-item "Manage" section carries the combined manage page
-//     (/tagmata: Tagmata registry + Rooms management) and the files page
-//     (/files), both reached directly.
+//   - online  -> a merged "Chats" section ordered by when each conversation
+//     last moved on this device (the ledger in session/recent.ts), capped to
+//     the sidebar's share of the list. Rows are enrolled tagma chats
+//     (whether or not a relay channel is open -- the link is always
+//     navigable and the channel opens on demand at /tagma/{tagmaId}/chat),
+//     the caller's rooms (/rooms/{id}) and direct sessions
+//     (/tagma/{tagmaId}/direct/{peerId}). One table, three leading marks: a
+//     status dot for a tagma channel, `icons.rooms` for a room, `icons.direct`
+//     for a one-to-one session. `hub` folds the section into one small-screen
+//     cell and the gear beside the title opens /chats, which lists the same
+//     order whole, grouped by kind. A second two-item "Manage" section
+//     carries the combined manage page (/tagmata: Tagmata registry + Rooms
+//     management) and the files page (/files), both reached directly.
 //   - offline -> Chat (the single local conversation at /local/chat), no header.
 // Settings is intentionally NOT a nav link: it lives in the AccountMenu
 // dropdown (footer) alongside the other account/system actions.
@@ -21,6 +24,13 @@ import type { NavIndicator, NavItem } from "../shell.ts";
 import { filesPath, tagmaChatPath } from "./routes.ts";
 import type { TagmaChannelState } from "../session/channels.svelte.ts";
 import {
+  capRecent,
+  recentConversations,
+  type Ledger,
+  type RecentRow,
+} from "../session/recent.ts";
+import { formatRecentTime } from "./navTime.ts";
+import {
   nav_agents,
   nav_budget,
   nav_chat,
@@ -30,6 +40,7 @@ import {
   nav_overview,
   nav_profiles,
   nav_chats,
+  nav_chats_all,
   nav_schedules,
   nav_tasks,
   nav_tagmata,
@@ -63,6 +74,8 @@ export interface NavIcons {
   chat: Component;
   tagmata: Component;
   rooms: Component;
+  /** A one-to-one conversation with a peer tagma (the direct rows). */
+  direct: Component;
   /** Gear icon for the section-management entry beside each section title. */
   settings: Component;
   /** Management section icons (offline mode only). */
@@ -84,6 +97,8 @@ export interface NavIcons {
  * always navigable -- the relay channel opens on demand at the
  * /tagma/{tagmaId}/chat route. */
 export interface NavTagma {
+  /** The recents key for this chat, built by the caller (tagmaKey). */
+  key: string;
   tagmaId: string;
   label: string | null;
   indicator: NavIndicator;
@@ -94,6 +109,8 @@ export interface NavTagma {
 /** One room as a sidebar chat entry (`/rooms/{id}`). Rooms have no live
  * transport status to dot, so they carry the rooms icon as their leading mark. */
 export interface NavRoom {
+  /** The recents key for this room, built by the caller (roomKey). */
+  key: string;
   roomId: string;
   label: string;
   /** The unread count for this room (rendered through badgeLabel). */
@@ -104,6 +121,8 @@ export interface NavRoom {
  *  /tagma/{tagmaId}/direct/{peerId}. The fetch-through daemon is the
  *  canonical min side; the label resolves through the store. */
 export interface NavDirect {
+  /** The recents key for this pair, built by the caller (pairKey). */
+  key: string;
   tagmaId: string;
   peerId: string;
   label: string;
@@ -159,10 +178,17 @@ export function navFor(args: {
   tagmata?: NavTagma[];
   rooms?: NavRoom[];
   directs?: NavDirect[];
+  /** The device's recents ledger (session/recent.ts), keyed exactly as the
+   *  rows above carry `key`. Omitted (empty) leaves every group in
+   *  registration order with unread rows first. */
+  recent?: Ledger;
   /** The chats total for the small-screen hub cell (the Chats bar badge). */
   chatsBadge?: number;
+  /** The reader's display zone for row stamps, already resolved: this module
+   *  stays pure and never reads the setting itself. */
+  zone?: string | null;
 }): NavSection[] {
-  const { mode, icons, tagmata, rooms, directs } = args;
+  const { mode, icons, tagmata, rooms, directs, recent } = args;
   if (mode === "offline") {
     return [
       {
@@ -213,14 +239,61 @@ export function navFor(args: {
       },
     ];
   }
+  // Every chat row carries its ledger key, so the shared selector decides
+  // the order and this module only spells out how a row renders. The cap is
+  // the sidebar's; /chats shows the same order whole.
+  const chatRows: (RecentRow & { item: NavItem })[] = [
+    ...(tagmata ?? []).map((t) => ({
+      key: t.key,
+      unread: t.badge,
+      item: {
+        href: tagmaChatPath(t.tagmaId),
+        label: t.label ?? tagma_profile_unnamed(),
+        indicator: t.indicator,
+        badge: t.badge,
+      } satisfies NavItem,
+    })),
+    ...(rooms ?? []).map((r) => ({
+      key: r.key,
+      unread: r.badge,
+      item: {
+        href: `/rooms/${r.roomId}`,
+        label: r.label,
+        badge: r.badge,
+        icon: icons.rooms,
+      } satisfies NavItem,
+    })),
+    ...(directs ?? []).map((d) => ({
+      key: d.key,
+      item: {
+        href: `/tagma/${d.tagmaId}/direct/${d.peerId}`,
+        label: d.label,
+        icon: icons.direct,
+      } satisfies NavItem,
+    })),
+  ];
+  const ledger = recent ?? {};
+  const stampedAt = Date.now();
+  const chatItems: NavItem[] = capRecent(
+    recentConversations(chatRows, ledger),
+  ).map((row) => {
+    const at = ledger[row.key];
+    return {
+      ...row.item,
+      time:
+        at === undefined
+          ? undefined
+          : formatRecentTime(at, stampedAt, args.zone),
+    };
+  });
   return [
     {
-      // Merged chats hub: tagma rows (status dots) then room rows (rooms
-      // icons) in one section -- the leading mark tells the groups apart.
-      // `hub` folds it into the small-screen Chats bar cell; /chats lists
-      // both groups as pure conversation rows -- no manage chip. Rooms
-      // management lives on the combined /tagmata page (the withdrawn
-      // chip/AccountMenu ideas were never shipped).
+      // Merged chats hub: the conversations that moved last, newest first,
+      // whatever their kind. The leading mark names the kind: a status dot
+      // for a tagma channel, `icons.rooms` for a room, `icons.direct` for a
+      // one-to-one session. `hub` folds the section into the small-screen
+      // Chats bar cell, and the gear beside the title opens /chats, which
+      // lists the same order whole and grouped.
       title: nav_chats(),
       hub: {
         href: "/chats",
@@ -228,25 +301,8 @@ export function navFor(args: {
         icon: icons.chat,
         badge: args.chatsBadge,
       },
-      items: [
-        ...(tagmata ?? []).map((t) => ({
-          href: tagmaChatPath(t.tagmaId),
-          label: t.label ?? tagma_profile_unnamed(),
-          indicator: t.indicator,
-          badge: t.badge,
-        })),
-        ...(rooms ?? []).map((r) => ({
-          href: `/rooms/${r.roomId}`,
-          label: r.label,
-          badge: r.badge,
-          icon: icons.rooms,
-        })),
-        ...(directs ?? []).map((d) => ({
-          href: `/tagma/${d.tagmaId}/direct/${d.peerId}`,
-          label: d.label,
-          icon: icons.rooms,
-        })),
-      ],
+      manage: { href: "/chats", label: nav_chats_all(), icon: icons.chat },
+      items: chatItems,
     },
     {
       // The combined manage page and the user-scope files page as direct

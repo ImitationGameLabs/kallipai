@@ -49,6 +49,8 @@ import {
   lastConversationOf,
   rememberConversationOf,
 } from "./convOf.ts";
+import { recentStore } from "./recent.svelte.ts";
+import { tagmaKey } from "./unread.svelte.ts";
 /** Automatic channel-open backoff: first retry after 1s, doubling, capped at
  *  60s; six straight failures silence the automatic path for the session. */
 const OPEN_BACKOFF_BASE_MS = 1_000;
@@ -639,6 +641,14 @@ export class ChannelsStore {
     // A closed or carrier-less one says so through conv.send (conv.error),
     // never by swallowing the text.
     if (!conv) return;
+    // Speaking counts as activity before the wire confirms it: the line is
+    // accepted into the outbox here and renders at once, and a failed POST
+    // leaves an errored line rather than an unmoved conversation. The local
+    // shell's partition is not a tagma, so it has no recents entry.
+    const partition = conv.pendingKey;
+    if (partition !== "local" && conv.link.canWrite) {
+      recentStore.note(tagmaKey(partition));
+    }
     void conv.send(text, options);
   }
 

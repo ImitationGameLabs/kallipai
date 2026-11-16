@@ -9,6 +9,7 @@ import { channelsStore } from "./channels.svelte.ts";
 import { roomsStore } from "./rooms.svelte.ts";
 import { roomConversationsStore } from "./roomConversations.svelte.ts";
 import { chatDraftsStore } from "./drafts.ts";
+import { recentStore } from "./recent.svelte.ts";
 import { unreadStore } from "./unread.svelte.ts";
 
 // Online: end the archeion session (destroys the cookie -- distinct from
@@ -35,4 +36,8 @@ export async function logout() {
   // stays mounted (and typable) until the gate redirects, so an earlier
   // reset would let a keystroke during the await re-persist the draft.
   chatDraftsStore.reset();
+  // The recents ledger is persisted per user and ordered by what each
+  // session saw: drop it after the same round-trip, so a note from a still
+  // mounted page cannot re-persist the leaving user's ordering.
+  recentStore.reset();
 }

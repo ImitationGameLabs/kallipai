@@ -5,6 +5,7 @@
   "connection_not_connected": "未连接",
   "nav_chat": "聊天",
   "nav_chats": "会话",
+  "nav_chats_all": "全部会话",
   "nav_chats_empty": "暂无会话——先注册 tagma 或加入群聊。",
   "nav_files": "文件",
   "nav_home": "主页",

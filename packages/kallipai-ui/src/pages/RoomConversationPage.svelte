@@ -52,8 +52,9 @@
   import SenderIdentity from "../components/rooms/SenderIdentity.svelte";
   import ThreadPanel from "../components/rooms/ThreadPanel.svelte";
   import { roomConversationsStore } from "../lib/session/roomConversations.svelte.ts";
+  import { recentStore } from "../lib/session/recent.svelte.ts";
   import { archeionSession } from "../lib/session/archeion.svelte";
-  import { unreadStore } from "../lib/session/unread.svelte.ts";
+  import { roomKey, unreadStore } from "../lib/session/unread.svelte.ts";
   import { navigate } from "../lib/shell/port.ts";
   import { roomThreadPath } from "../lib/shell/routes.ts";
   import { profileHref } from "../lib/room-message.ts";
@@ -403,10 +404,13 @@
   // effect mid-flush (the write/read ping-pong with the mount effect's
   // cleanup above). Lines and lastSeq advance together, so the count alone
   // is a sound tick.
+  // The same tick stamps the room in the recents ledger: reading a room is
+  // activity even when it had no badge to clear.
   $effect(() => {
     if (conv?.lines.length === undefined) return;
     untrack(() => {
       unreadStore.noteViewedLines(roomId, conv?.lastSeq ?? null);
+      recentStore.note(roomKey(roomId));
     });
   });
 

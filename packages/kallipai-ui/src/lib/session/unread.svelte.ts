@@ -138,6 +138,11 @@ export class UnreadEntry {
    *  the next stamp has to beat, so opening the page cannot lower the bar a
    *  later stamp has to clear. */
   stampCount = 0;
+  /** Whether a count has ever reached this device for the key. `enter()` and
+   *  `initRooms` seed an entry with a zero badge, and a seed is not a fact:
+   *  without this flag the replay after opening a page would beat that zero
+   *  and stamp days-old backlog as an arrival. */
+  stampSeen = false;
 
   constructor(count: number, knownSeq: number, readSeq: number) {
     this.count = count;
@@ -257,6 +262,7 @@ class UnreadStore {
     }
     entry.stampCursor = stamp.cursor;
     entry.stampCount = Math.max(0, Math.floor(unread));
+    entry.stampSeen = true;
     entry.count = this.viewing.has(key) ? 0 : entry.stampCount;
   }
 
@@ -353,6 +359,20 @@ class UnreadStore {
   /** The badge count for one conversation key (0 when absent). */
   countOf(key: string): number {
     return this.entries.get(key)?.count ?? 0;
+  }
+
+  /** The count as stamped on this device, or undefined when none has ever
+   *  reached it. "Unknown" and "zero" answer different questions: a replayed
+   *  stamp for a conversation this device already counted must not read as a
+   *  new arrival, and only the caller knows which conversation that is.
+   *  Reads {@link UnreadEntry.stampCount}: the badge is 0 while the page is
+   *  open, and a frame replayed to a mounted page must still be judged
+   *  against what this device knew, not against the suppressed badge. An
+   *  entry seeded by opening the page has never been told a count, so it
+   *  answers undefined until one arrives. */
+  countOrUndefined(key: string): number | undefined {
+    const entry = this.entries.get(key);
+    return entry?.stampSeen ? entry.stampCount : undefined;
   }
 
   /** Whether the conversation page is explicitly mounted (viewing). The

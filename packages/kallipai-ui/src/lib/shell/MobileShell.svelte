@@ -133,7 +133,7 @@
           1}, minmax(0, 1fr));"
       >
         {#each slots.visible as item (item.href)}
-          <NavLink {item} {isActive} />
+          <NavLink {item} {isActive} compact />
         {/each}
         {#if slots.hasMore}
           <button
@@ -149,6 +149,7 @@
           </button>
         {/if}
         <NavLink
+          compact
           item={{ href: "/account", label: account_menu(), icon: User }}
           {isActive}
         />

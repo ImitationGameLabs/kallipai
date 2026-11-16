@@ -24,6 +24,29 @@ export const STAMP_SECONDS: Intl.DateTimeFormatOptions = {
   second: "2-digit",
 };
 
+// One formatter per (locale, zone, shape). A transcript renders the same shape
+// for every row and /chats formats a whole ledger whenever it changes, so
+// building a formatter per call costs tens of milliseconds there. The locale is
+// part of the key because a language switch has to change the words.
+const FORMATTERS = new Map<string, Intl.DateTimeFormat>();
+
+function formatterFor(
+  locale: string,
+  shape: Intl.DateTimeFormatOptions,
+  timeZone?: string,
+): Intl.DateTimeFormat {
+  const key = `${locale}|${timeZone ?? ""}|${JSON.stringify(shape)}`;
+  let formatter = FORMATTERS.get(key);
+  if (formatter === undefined) {
+    formatter = new Intl.DateTimeFormat(
+      locale,
+      timeZone === undefined ? shape : { timeZone, ...shape },
+    );
+    FORMATTERS.set(key, formatter);
+  }
+  return formatter;
+}
+
 export function formatStampInZone(
   value: string | number,
   opts: Intl.DateTimeFormatOptions | undefined,
@@ -37,16 +60,13 @@ export function formatStampInZone(
   const { timeZone: _ignored, ...rest } = opts ?? {};
   if (timezone) {
     try {
-      return new Intl.DateTimeFormat(locale, {
-        timeZone: timezone,
-        ...rest,
-      }).format(date);
+      return formatterFor(locale, rest, timezone).format(date);
     } catch {
       // Unknown stored zone: fall through to the browser default.
     }
   }
   try {
-    return new Intl.DateTimeFormat(locale, rest).format(date);
+    return formatterFor(locale, rest).format(date);
   } catch {
     return date.toISOString();
   }

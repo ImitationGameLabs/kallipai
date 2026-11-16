@@ -38,7 +38,8 @@ import { reverifySession, type SessionVerifier } from "./realtimeReverify.ts";
 import type { TagmaStatusSummary } from "../tagmata.svelte.ts";
 import { keryxClientOrFail, lescheClientOrFail } from "./archeion.svelte.ts";
 import { MeCursor, ResyncBatcher, type ResyncPlan } from "./cursor.ts";
-import { unreadStore } from "./unread.svelte.ts";
+import { recentStore } from "./recent.svelte.ts";
+import { tagmaKey, unreadStore } from "./unread.svelte.ts";
 
 /** Sink for inbound conversation envelopes. Bound by the shell to
  * `channelsStore.deliver`. `null` (the default) drops envelopes -- harmless
@@ -549,16 +550,29 @@ class RealtimeStore {
         // and/or a transient system line.
         this.signalSink?.(ev.tagma_id, ev.event);
         break;
-      case "tagma_unread":
+      case "tagma_unread": {
         // The tagma's own count for this conversation: stamped when it
         // appended a reply or when a read cursor moved (another device's
         // included -- that is how a badge falls on this one). No local
         // tally anywhere: the store assigns what the tagma counted.
+        const key = tagmaKey(ev.tagma_id);
+        const before = unreadStore.countOrUndefined(key);
         unreadStore.setTagmaUnread(ev.tagma_id, {
           unread: ev.unread,
           cursor: ev.cursor,
         });
+        // The tagma spoke: recents order by that, not by the badge. Only a
+        // count that rose is an arrival on this device. Every new stream
+        // replays each cached partition's count, so a replay held still by a
+        // row already known here, or a count another device brought down,
+        // leaves the stamp where it was instead of claiming "just now". A
+        // conversation this device has never counted has no bar to clear: the
+        // first rise it sees is not an arrival here, so it goes unstamped.
+        if (before !== undefined && ev.unread > before) {
+          recentStore.note(key);
+        }
         break;
+      }
       case "file_delivered":
         // A file landed in the user's files space. The files listing is the
         // resync ground truth (the recipient fetches content by record id);

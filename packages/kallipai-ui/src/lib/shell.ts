@@ -60,6 +60,7 @@ export type NavItem =
       icon: Component;
       indicator?: never;
       badge?: number;
+      time?: string;
     }
   | {
       href: string;
@@ -67,6 +68,7 @@ export type NavItem =
       icon?: never;
       indicator: NavIndicator;
       badge?: number;
+      time?: string;
     }
   | {
       href: string;
@@ -74,8 +76,15 @@ export type NavItem =
       icon?: never;
       indicator?: never;
       badge?: number;
+      time?: string;
     };
 
 // `badge` is the unread count for the entry (0 = absent; rendered through
-// `badgeLabel` in NavLink, so the display caps at "99+"). Purely additive:
-// the three leading-mark arms stay mutually exclusive.
+// `badgeLabel` in NavLink, so the display caps at "99+").
+//
+// `time` is an already-formatted short stamp for a conversation that moved
+// recently (see shell/navTime.ts); it renders between the label and the
+// badge and is absent for every other entry.
+//
+// Both fields are purely additive: the three leading-mark arms stay
+// mutually exclusive.

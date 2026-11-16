@@ -370,3 +370,31 @@ Deno.test("a count answer older than a landed cursor is dropped", async () => {
   await flush();
   assertEquals(unreadStore.countOf(roomKey("r1")), 0);
 });
+
+Deno.test(
+  "the stamped count survives viewing so a replay cannot beat it",
+  () => {
+    baseline();
+    unreadStore.setTagmaUnread("t1", { unread: 5, cursor: 5 });
+    assertEquals(unreadStore.countOrUndefined(tagmaKey("t1")), 5);
+
+    // Opening the page zeroes the badge but not the fact a later frame has to
+    // beat: the replay every new stream sends (5 at cursor 5) must not read as
+    // an arrival, or the row jumps to the top claiming "just now".
+    unreadStore.enter(tagmaKey("t1"));
+    assertEquals(unreadStore.countOf(tagmaKey("t1")), 0);
+    assertEquals(unreadStore.countOrUndefined(tagmaKey("t1")), 5);
+  },
+);
+
+Deno.test("a page opened before any count leaves the bar unset", () => {
+  baseline();
+  // Opening the conversation first seats an entry with a zero badge. That zero
+  // is a seed, not a fact: a replayed 5 after a reconnect must not beat it and
+  // stamp days-old backlog as an arrival, so the bar stays undefined.
+  unreadStore.enter(tagmaKey("t1"));
+  assertEquals(unreadStore.countOrUndefined(tagmaKey("t1")), undefined);
+
+  unreadStore.setTagmaUnread("t1", { unread: 5, cursor: 5 });
+  assertEquals(unreadStore.countOrUndefined(tagmaKey("t1")), 5);
+});

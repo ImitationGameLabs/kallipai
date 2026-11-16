@@ -13,11 +13,16 @@
   import { channelsStore } from "../session/channels.svelte";
   import { statusCardStore } from "../session/statusCard.svelte.ts";
   import { roomsStore } from "../session/rooms.svelte";
-  import { directSessionsStore } from "../session/directSessions.svelte";
+  import {
+    directSessionsStore,
+    pairKey,
+  } from "../session/directSessions.svelte";
   import { instancesStore } from "../instances/instances.svelte.ts";
   import { realtimeStore } from "../session/realtime.svelte";
   import { roomConversationsStore } from "../session/roomConversations.svelte";
   import { roomKey, tagmaKey, unreadStore } from "../session/unread.svelte.ts";
+  import { recentStore } from "../session/recent.svelte.ts";
+  import { timezoneSetting } from "../time/stamp.svelte.ts";
   import { notify, shouldNotifyRoom } from "../session/notify.ts";
   import { decodeB64 } from "@kallipai/kallipai-common";
   import { decodeRoomMessage } from "../room-message.ts";
@@ -111,12 +116,16 @@
         );
         // The transcript renders live; the unread store asks the lesche for
         // this member's count, and asks for nothing while the room is viewed.
+        // Recents order by the same signal, independently of the badge.
         unreadStore.noteRoomActivity(env.channel_id);
+        recentStore.note(roomKey(env.channel_id));
         maybeNotifyRoom(env);
       } else if (roomsStore.has(env.channel_id)) {
         // A room envelope with no open conversation: the store asks for the
         // count (a live envelope carries no seq, so there is nothing to count).
+        // Same recents stamp: the reader may not have the room open.
         unreadStore.noteRoomActivity(env.channel_id);
+        recentStore.note(roomKey(env.channel_id));
         maybeNotifyRoom(env);
       } else {
         channelsStore.deliver(env);
@@ -284,6 +293,13 @@
     void roomsStore.refresh();
   });
 
+  // The recents ledger is per user, so the store follows the same primitive
+  // key: a different user_id swaps the bucket (and a sign-out empties it).
+  // No mode check -- the ordering is local state, not a server read.
+  $effect(() => {
+    recentStore.useUser(archeionSession.user?.user_id);
+  });
+
   // The direct-session poller (lesche T↔T): online-only, signed-in. The
   // store skips tagmas without an open channel, so this costs nothing
   // beyond the channels the boot sweep already opens. Same keying
@@ -355,6 +371,7 @@
   // cannot spin forever -- auto-open only fires for online tagmas.
   const tagmaNav = $derived(
     archeionSession.enrolledCards.map((c) => ({
+      key: tagmaKey(c.tagmaId),
       tagmaId: c.tagmaId,
       label: c.label,
       indicator: tagmaNavIndicator(
@@ -371,16 +388,22 @@
       icons,
       tagmata: tagmaNav,
       rooms: roomsStore.rooms.map((r) => ({
+        key: roomKey(r.room_id),
         roomId: r.room_id,
         label: r.name || room_label_fallback({ id: r.room_id.slice(0, 8) }),
         badge: unreadStore.countOf(roomKey(r.room_id)),
       })),
       directs: directSessionsStore.list().map((s) => ({
+        key: pairKey(s.tagmaId, s.peerId),
         tagmaId: s.tagmaId,
         peerId: s.peerId,
         label: directSessionsStore.peerLabel(s.peerId, s.peerHandle),
       })),
       chatsBadge: unreadStore.total(),
+      // The device's own activity order, read here (not in links.ts) so the
+      // section builder stays free of store imports and runs in plain tests.
+      recent: recentStore.ledger(),
+      zone: timezoneSetting.value,
     }),
   );
 

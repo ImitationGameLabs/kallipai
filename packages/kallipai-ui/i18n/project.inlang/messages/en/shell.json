@@ -5,6 +5,7 @@
   "connection_not_connected": "not connected",
   "nav_chat": "Chat",
   "nav_chats": "Chats",
+  "nav_chats_all": "All conversations",
   "nav_chats_empty": "No chats yet -- enroll a tagma or join a room to start.",
   "nav_files": "Files",
   "nav_home": "Home",

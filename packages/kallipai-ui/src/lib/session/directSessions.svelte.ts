@@ -241,8 +241,11 @@ export class DirectSessionsStore {
   }
 }
 
-function pairKey(a: string, b: string): string {
-  return a < b ? `${a}|${b}` : `${b}|${a}`;
+/** The recents/map key for an agent-to-agent pair. Prefixed like `room:` and
+ *  `tagma:` so the three families can never share a namespace, and ordered so
+ *  both ends of the pair name the same key. */
+export function pairKey(a: string, b: string): string {
+  return a < b ? `pair:${a}|${b}` : `pair:${b}|${a}`;
 }
 
 export const directSessionsStore = new DirectSessionsStore();
