@@ -10,6 +10,13 @@ import { flat } from "../test_support/flat.ts";
 
 const PAGE = new URL("./RoomConversationPage.svelte", import.meta.url);
 
+const CONVERSATION = new URL(
+  "../components/rooms/ThreadConversation.svelte",
+  import.meta.url,
+);
+
+const SESSION = new URL("../lib/rooms/roomSession.svelte.ts", import.meta.url);
+
 const STORE = new URL(
   "../lib/session/roomConversations.svelte.ts",
   import.meta.url,
@@ -65,12 +72,12 @@ Deno.test("the jump is offered only for a target in the window", () => {
     "the click lands on the row the block names",
   );
   assert(
-    src.includes("void openThreadAt(root, seq)"),
-    "a target the transcript does not draw opens its discussion",
+    src.includes("void navigate(roomThreadPath(roomId, root, { at: seq }))"),
+    "a target the transcript does not draw goes to its discussion, on that row",
   );
   assert(
-    src.includes("threadReveal.jump(seq)"),
-    "and the panel locates the row there",
+    src.includes("threadBody?.jump(seq)"),
+    "and the panel's body locates the row there",
   );
 });
 
@@ -145,18 +152,10 @@ Deno.test("a row's anchor and the quote block name the same row", () => {
     "each row stamps its own seq as the anchor a quote points at",
   );
   assert(
-    src.includes("quoteAnchor(quoteTarget)"),
-    "and the quote block asks the page which anchor names the target",
-  );
-  assert(
-    src.includes("if (root === seq) return roomRowAnchorId(seq);"),
-    "a head is named by the transcript's anchor",
-  );
-  assert(
     src.includes(
-      "return openThreadRoot === root ? roomThreadRowAnchorId(seq) : undefined;",
+      "return quotedRoot(seq) === seq ? roomRowAnchorId(seq) : undefined;",
     ),
-    "a reply only while the panel that draws it is open",
+    "only a head is named: a reply is drawn on its discussion's page",
   );
 });
 
@@ -166,10 +165,13 @@ Deno.test("a room change drops the sentence it spoke", () => {
   assert(at !== -1, "the page has one effect that owns the room swap");
   const effect = blockAt(src, at);
   assert(
-    effect.includes("return () => {") &&
-      effect.includes("reveal.destroy();") &&
-      effect.includes("threadReveal.destroy();"),
-    "the sentence spoken in the room that left goes with it, in both tables",
+    effect.includes("return () => {") && effect.includes("reveal.destroy();"),
+    "the sentence spoken in the room that left goes with this page's table",
+  );
+  const panelBody = flat(source(CONVERSATION));
+  assert(
+    panelBody.includes("$effect(() => () => reveal.destroy());"),
+    "the panel's own table goes with the panel, on every surface that mounts it",
   );
   const body = effect.slice(0, effect.indexOf("return () => {"));
   assert(
@@ -182,22 +184,6 @@ Deno.test("a room change drops the sentence it spoke", () => {
   );
 });
 
-Deno.test("the armed quote is read through its own room", () => {
-  const src = flat(source(PAGE));
-  assert(
-    src.includes("armedQuoteSeq(pendingQuote, roomId)"),
-    "one gate decides whether the armed seq is readable here",
-  );
-  assert(
-    !src.includes("line.seq === pendingQuote"),
-    "no read of the armed seq without that gate",
-  );
-  assert(
-    src.includes("{#if armedSeq !== undefined}"),
-    "the quote bar draws only for a seq this room can read",
-  );
-});
-
 Deno.test("a quote never adds a fetch to the page", () => {
   const src = flat(source(PAGE));
   assert(
@@ -206,7 +192,18 @@ Deno.test("a quote never adds a fetch to the page", () => {
   );
   assert(!src.includes("peekRow"), "a room surface has no probe to fire");
   const refreshes = src.match(/roomConversationsStore\.refresh\(/gu) ?? [];
-  assertEquals(refreshes.length, 1, "one poll refresh, unchanged by quoting");
+  assertEquals(
+    refreshes.length,
+    0,
+    "the room session owns the poll; the page adds none, quoting included",
+  );
+  const session = flat(source(SESSION));
+  const poll = session.match(/roomConversationsStore\.refresh\(/gu) ?? [];
+  assertEquals(
+    poll.length,
+    1,
+    "one poll refresh in the session, quoting included",
+  );
 });
 
 Deno.test(
@@ -251,21 +248,19 @@ Deno.test("the page hands the picker its own room", () => {
   );
 });
 
-Deno.test("the quote control arms the row it is drawn for", () => {
+Deno.test("the quote control aims the reply at the row's discussion", () => {
   const src = flat(source(PAGE));
   assert(
     src.includes("{#snippet extraActions()}"),
     "the row's own action rides in through the bubble's slot",
   );
   assert(
-    src.includes("{#if quotable(line)}"),
+    src.includes("{#if quotableLine(line)}"),
     "an optimistic or failed row offers no quote entry",
   );
   assert(
-    src.includes(
-      "onclick={() => (pendingQuote = { scope: roomId, seq: line.seq })}",
-    ),
-    "the button arms this room and this seq, the pair the send reads",
+    src.includes("roomThreadPath(roomId, group.root, { quote: line.seq }),"),
+    "the button hands the discussion's page the row it answers",
   );
   assert(
     src.includes("{extraActions}"),

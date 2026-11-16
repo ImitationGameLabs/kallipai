@@ -22,7 +22,9 @@
   import MentionChips from "./MentionChips.svelte";
   import type { Snippet } from "svelte";
   import type { TogglePin } from "../lib/transcript.svelte.ts";
-  import { ROW_LANDED } from "../lib/classes.ts";
+  import { BUBBLE_ENTRY_MARK, ROW_LANDED } from "../lib/classes.ts";
+  import { bubbleActivates } from "../lib/bubble_click.ts";
+  import { selectionAtClickOf } from "../lib/selection.ts";
   import type { QuoteView } from "../lib/quote.ts";
   import type { MentionChip } from "../lib/room-message.ts";
   import type { FileAttachment } from "@kallipai/kallipai-lesche-client";
@@ -36,7 +38,7 @@
     text,
     markdown = false,
     mine = false,
-    bare = false,
+    noActionRow = false,
     pending = false,
     failed = false,
     failureCopy,
@@ -49,6 +51,8 @@
     onQuoteClick,
     onQuoteRetry,
     extraActions,
+    footer,
+    entry,
   }: {
     text: string;
     /** Render the source as markdown (agent/assistant replies) with a raw-text toggle.
@@ -57,9 +61,12 @@
     /** Own message: right-aligned column + filled-primary fill (the column lives in the
      *  parent; this only picks the fill). */
     mine?: boolean;
-    /** Omit the copy/raw-toggle row (e.g. an in-flight optimistic own message, where the
-     *  sending pulse replaces the actions). */
-    bare?: boolean;
+    /** Draw no action row under the bubble: the copy, the raw toggle, and
+     *  the surface's own action. Each surface that omits it has its own
+     *  reason: a line still sending shows the pulse instead, a failed one
+     *  carries its retry outside the box, and a discussion bubble keeps its
+     *  actions in the panel. */
+    noActionRow?: boolean;
     /** Dim the box (optimistic/unconfirmed lines). */
     pending?: boolean;
     /** Failed line: error outline on the box. */
@@ -94,6 +101,18 @@
      *  row under the bubble, before the copy and raw toggles. Absent, the
      *  row holds the bubble's own controls alone. */
     extraActions?: Snippet;
+    /** Content the surface draws inside the box, under everything else: a
+     *  discussion row states there how many replies it holds. Absent, the box
+     *  ends where it always did. */
+    footer?: Snippet;
+    /** The room's entry for a discussion: a click on the box body opens it,
+     *  and the box wears the ring that says an entry sits here -- at rest, so
+     *  a reader sees where a discussion starts before touching it, and the
+     *  hover thickens that ring instead of recolouring the box. One prop
+     *  carries both halves because they never come apart: a ring without the
+     *  click advertises nothing, a click without the ring is a target no one
+     *  can see. The box itself stays a target, not a control. */
+    entry?: () => void;
   } = $props();
 
   // Per-bubble raw-source view: ephemeral, resets when the bubble unmounts.
@@ -104,6 +123,23 @@
   function toggleRaw(): void {
     raw = !raw;
     if (box && actionRow) pin?.(box, actionRow);
+  }
+
+  // A click on the box body belongs to the surface, when it asked for one.
+  // Two things inside keep their own click: an inner control (the quote
+  // block, the download button, a link) and a drag that selected text. The
+  // keyboard path is the surface's own control inside `footer`, which is why
+  // the box is not a control itself and does not pretend to be one.
+  // The gate only counts a control the box itself holds: a click that
+  // walked up to a control above the bubble is the body's.
+  function activate(event: MouseEvent): void {
+    if (entry === undefined) return;
+    const body = event.target instanceof Element ? event.target : null;
+    const selectionAtClick = selectionAtClickOf(
+      globalThis.getSelection(),
+      box ?? null,
+    );
+    if (bubbleActivates(body, selectionAtClick, box)) entry();
   }
 
   // A failed download renders inline (unavailable) -- never a dialog or a
@@ -121,16 +157,21 @@
   }
 </script>
 
+<!-- The box body is a target for the surface, not a control: the keyboard
+     path is the button the surface renders inside `footer`. -->
+<!-- svelte-ignore a11y_click_events_have_key_events -->
+<!-- svelte-ignore a11y_no_static_element_interactions -->
 <div
   bind:this={box}
   data-landing-target
+  onclick={entry === undefined ? undefined : activate}
   class="max-w-full min-w-0 rounded-base px-3 py-2 text-sm {ROW_LANDED} {mine
     ? 'preset-filled-primary-100-900'
     : 'preset-tonal-surface'} {!markdown
     ? 'whitespace-pre-wrap break-words'
     : ''} {pending ? 'opacity-60' : ''} {failed
     ? 'ring-1 ring-error-500 dark:ring-error-400'
-    : ''}"
+    : ''} {entry ? BUBBLE_ENTRY_MARK : ''}"
 >
   {#if attachment}
     <div
@@ -185,11 +226,12 @@
       {failureCopy}
     </p>
   {/if}
+  {@render footer?.()}
 </div>
-{#if !bare}
+{#if !noActionRow}
   <!-- Under the bubble: natural width, so the row's alignment puts it on the
        same side as the bubble, and the row costs the bubble no width. The
-       surface's own action leads; a bare (failed) line draws no row here. -->
+       surface's own action leads; a line that omits the row draws none here. -->
   <div bind:this={actionRow} class="flex items-center gap-1">
     {@render extraActions?.()}
     <CopyButton getText={() => text} />

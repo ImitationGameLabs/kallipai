@@ -29,6 +29,7 @@ export const ROUTE_PATTERNS = [
   "rooms",
   "rooms/[id]",
   "rooms/[id]/settings",
+  "rooms/[id]/threads/[root]",
   "settings",
   "tagma/[id]",
   "tagma/[id]/chat",

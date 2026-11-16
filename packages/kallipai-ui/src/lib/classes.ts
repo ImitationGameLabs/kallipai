@@ -42,3 +42,43 @@ export const MENU_ITEM_DANGER =
 // primary-500 it replaced sat 0.18 above the 3:1 floor, too thin for a mark.
 export const ROW_LANDED =
   "rounded-base data-[landing]:outline-2 data-[landing]:outline-offset-2 data-[landing]:outline-primary-800 dark:data-[landing]:outline-primary-200";
+
+// A discussion's entry bubble: the room list is one row per discussion, so the
+// row that holds one has to say so before the reader hovers it. The ring is
+// that mark, and hover thickens it rather than recolouring it -- the mark IS
+// the ring, and a hover that swapped its colour would erase the reading. The
+// polarity pair is ROW_LANDED's, measured again on the entry's own fills:
+// primary-800 sits 4.59:1 on the agent bubble and 4.12:1 on the own-message
+// fill; dark primary-200 sits 6.42:1 and 4.83:1 on the same two. ROW_LANDED's
+// ledger states the light pairs and the dark own-fill one, so the dark figure
+// for the agent bubble is measured here rather than quoted. The pointer and the
+// shadow transition ride along, so the ring arrives without a jolt.
+export const BUBBLE_ENTRY_MARK =
+  "cursor-pointer transition-shadow ring-1 ring-primary-800 dark:ring-primary-200 hover:ring-2";
+
+// A discussion entry's preview row: the reply body leads and its author trails
+// at the row's own size, dropped to 0.8 opacity. At 0.6 a name that size
+// measures 3.02:1 on the card in light and 3.48:1 in dark, under what text
+// owes; 0.8 measures 4.77 and 4.90 and still reads quieter than the reply it
+// summarizes. The gap is 16px: at 6px a body that filled its box ended a
+// word-space short of the handle, so the name read as the last word of the
+// sentence. A handle longer than the row can hold is capped at half of it and
+// cut with an ellipsis: at 1280px a 32-character handle outgrew the card
+// rather than the body giving way. The full name stays in the title, and the
+// discussion's own page writes it out beside every reply.
+export const PREVIEW_ROW = "flex items-baseline gap-4 min-w-0";
+export const PREVIEW_HANDLE =
+  "ml-auto shrink-0 opacity-80 max-w-[50%] truncate";
+
+// The chat transcript's column: one centred measure every chat surface draws its
+// rows inside, so the direct, room, channel and discussion pages cannot drift
+// into different widths and paddings. The scroll pill hangs in the same measure.
+export const TRANSCRIPT_COLUMN =
+  "mx-auto w-full max-w-[80rem] p-4 flex flex-col gap-3";
+
+// That pill. The raised form is the one that may outrank a later sibling of the
+// hosting page; the room page keeps the bare form on purpose, because its
+// members panel is a later sibling at the same level and has to win.
+export const SCROLL_PILL =
+  "absolute inset-x-0 bottom-4 mx-auto flex max-w-[80rem] justify-end px-4 pointer-events-none";
+export const SCROLL_PILL_RAISED = `${SCROLL_PILL} z-10`;

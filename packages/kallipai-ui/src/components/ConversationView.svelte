@@ -22,7 +22,11 @@
   import { authorName, jumpAnnouncement } from "../lib/rowSpeech.ts";
   import { formatStamp, timezoneSetting } from "../lib/time/stamp.svelte.ts";
   import { ROW_TIME } from "../lib/time/stamp.ts";
-  import { ROW_LANDED } from "../lib/classes.ts";
+  import {
+    ROW_LANDED,
+    SCROLL_PILL_RAISED,
+    TRANSCRIPT_COLUMN,
+  } from "../lib/classes.ts";
   import { neighbourRow } from "../lib/row_focus.ts";
   import {
     chat_transcript_aria,
@@ -219,6 +223,9 @@
   // Only a message that exists on the tagma is quotable: an optimistic line
   // still sending (or failed) has no id the other side could resolve, and a
   // system line has no author at all.
+  // This surface also asks whether anyone offers quoting at all (onQuote). The
+  // room's own rule is `quotableLine` in lib/room-message.ts: same question,
+  // decided on a room line's seq instead of a conversation's historyId.
   function quotable(line: ConversationLine): boolean {
     return (
       onQuote !== undefined &&
@@ -364,10 +371,7 @@
     aria-label={chat_transcript_aria()}
     onscroll={scroll.onScroll}
   >
-    <div
-      class="mx-auto w-full max-w-[80rem] p-4 flex flex-col gap-3"
-      role="log"
-    >
+    <div class={TRANSCRIPT_COLUMN} role="log">
       {#if loadOlder}
         <!-- Pager sentinel: zero-height and inert to layout; the observer
            reports zero-area targets entering the root fine. -->
@@ -440,11 +444,11 @@
               >
             {/if}
             <!-- The row is the bubble's only width cap and its alignment. A
-                 non-bare line's actions ride in the bubble's own row under it,
-                 on the sender's side without capping the bubble. -->
+                 line that keeps its action row rides it in the bubble's own row
+                 under it, on the sender's side without capping the bubble. -->
             <MessageRow mine={line.role === "user"}>
               {#if line.role === "user" && line.status === "failed"}
-                <!-- Failed lines are transient: a bare bubble carries the
+                <!-- Failed lines are transient: a row-less bubble carries
                    outline and the text; retry and delete appear only where the
                    page wires a handler, retry beside the bubble and delete
                    under it; no copy, raw toggle or quote rides here. -->
@@ -463,7 +467,7 @@
                     <MessageBubble
                       text={line.text}
                       mine
-                      bare
+                      noActionRow
                       failed
                       failureCopy={line.errorCode === "profile_set_unusable"
                         ? chat_error_profile_set_unusable()
@@ -488,7 +492,8 @@
                   text={line.text}
                   markdown={line.role === "assistant"}
                   mine={line.role === "user"}
-                  bare={line.role === "user" && line.status === "sending"}
+                  noActionRow={line.role === "user" &&
+                    line.status === "sending"}
                   pending={line.status === "sending"}
                   attachment={line.attachment}
                   {downloadAttachment}
@@ -518,11 +523,8 @@
     </div>
   </div>
   {#if !scroll.follow}
-    <!-- z-10: a hosting page may append absolute siblings after this one;
-      later siblings stack above by DOM order unless outranked. -->
-    <div
-      class="absolute inset-x-0 bottom-4 z-10 mx-auto flex max-w-[80rem] justify-end px-4 pointer-events-none"
-    >
+    <!-- Why the raise: see SCROLL_PILL_RAISED. -->
+    <div class={SCROLL_PILL_RAISED}>
       <ScrollToBottomButton
         missed={scroll.missed}
         onclick={() => scroll.forceBottom()}

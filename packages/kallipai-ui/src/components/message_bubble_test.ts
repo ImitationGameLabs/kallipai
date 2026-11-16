@@ -41,12 +41,12 @@ Deno.test(
 );
 
 Deno.test(
-  "the action row is still the bubble's, under the bare guard",
+  "the action row is still the bubble's, under the no-row guard",
   { permissions: { read: [BUBBLE] } },
   () => {
     const src = source(BUBBLE);
-    const guard = src.indexOf("{#if !bare}");
-    assert(guard >= 0, "the row hides for a bare bubble");
+    const guard = src.indexOf("{#if !noActionRow}");
+    assert(guard >= 0, "the row hides for a bubble that omits it");
     const body = src.slice(guard);
     assert(body.includes("bind:this={actionRow}"));
     assert(

@@ -334,3 +334,124 @@ export function createTogglePin(
     }, 200);
   };
 }
+
+/** The scroll a growth owes back to the reader, in pixels. The growth is inserted
+ *  at the bottom of the row, so the question is where that point sat before it:
+ *  at or above the viewport's top edge, and the rows below the edge all moved
+ *  down by the whole gain, whatever part of it the reader could see; below it,
+ *  and nothing they are looking at moved at all. Height, not position: the
+ *  reader scrolls between one observation and the next, so an element's
+ *  viewport-relative top moves without the element changing, and reading growth
+ *  off it would hand back the reader's own scrolling. A row that shrank is
+ *  never chased upward.
+ *
+ *  The rule rests on one premise: new content is appended at the row's bottom,
+ *  so that point is where the row ended before it grew. Something inserted
+ *  above the bubble's own text breaks it -- the reader's line would move while
+ *  the point did not. Nothing sits below the bubble but its own padding: the
+ *  growth is inserted a padding above the row's bottom, and an edge that falls
+ *  inside that band goes unhanded.
+ *  Pure: unit-tested in above_fold_pin_test.ts. */
+export function aboveFoldShift(
+  rect: { readonly top: number; readonly height: number },
+  viewportTop: number,
+  heightBefore: number,
+): number {
+  const grown = rect.height - heightBefore;
+  if (grown <= 0) return 0;
+  // The row's bottom is where the growth was inserted: at or above the viewport's
+  // top edge, it moved every line below that edge down by the whole gain; below
+  // the edge, none of what the reader is looking at moved.
+  const bottomBefore = rect.top + rect.height - grown;
+  return bottomBefore <= viewportTop ? grown : 0;
+}
+
+/** The disposer a row keeps while it stays mounted. */
+export type ReleaseHold = () => void;
+
+/** A growth pin for rows that grow above the reader. The transcript turns native
+ *  anchoring off (`[overflow-anchor:none]`), so when a row above the viewport's
+ *  top edge gets taller -- an entry bubble that gains a reply preview, say -- the
+ *  rows the reader is looking at are pushed down by the same height, out from
+ *  under their eyes. The pin watches a row from the moment the row can grow and
+ *  hands each such growth back to `scrollTop`, so the rows below keep their
+ *  place.
+ *
+ *  The edge of that promise: a row subscribes with the shape it mounts with,
+ *  and a discussion's footer arrives later. A plain row that turns into an
+ *  entry because a page of history brought its replies grows in the frame its
+ *  footer appears, one frame before `update` runs on this action, and that
+ *  growth goes unhanded. Subscribing every row would close it and put a resize
+ *  observer on every message; nobody has measured that cost.
+ *
+ *  Where `createTogglePin` follows a click for a couple of hundred milliseconds,
+ *  this one stays on: the growth it guards arrives with a later fetch, not with a
+ *  gesture, and nothing tells the row when. The two never share a row: `pin` is a
+ *  gesture's short follow, this is a standing subscription, and a row carrying
+ *  both would have two writers on one `scrollTop`. The page hands each row one.
+ *  One controller per transcript, as with `pin`: two controllers adjusting the
+ *  same `scrollTop` would double-correct.
+ *  Pure; the caller passes a `getViewport` that reads the live scroll container. */
+export type HoldAboveFold = (target: HTMLElement) => ReleaseHold;
+
+export function createAboveFoldPin(
+  getViewport: () => HTMLDivElement | undefined,
+): HoldAboveFold {
+  return (target) => {
+    let rect = target.getBoundingClientRect();
+    let heightBefore = rect.height;
+    let widthBefore = rect.width;
+    const hold = (): void => {
+      rect = target.getBoundingClientRect();
+      // A width change reflowed the row (the window was resized): every row
+      // moved, so the height difference is the layout's, not new content. Take
+      // the new baseline and hand nothing back -- the reader is watching a
+      // reflow, not a message arriving.
+      if (rect.width !== widthBefore) {
+        widthBefore = rect.width;
+        heightBefore = rect.height;
+        return;
+      }
+      const viewport = getViewport();
+      if (!viewport) return;
+      const shift = aboveFoldShift(
+        rect,
+        viewport.getBoundingClientRect().top,
+        heightBefore,
+      );
+      heightBefore = rect.height;
+      if (shift !== 0) viewport.scrollTop += shift;
+    };
+    const ro = new ResizeObserver(hold);
+    ro.observe(target);
+    return () => ro.disconnect();
+  };
+}
+
+/** The `use:` form of a growth pin. The registration belongs to the row -- a row
+ *  of a transcript may grow, and the transcript is what keeps the reader's place
+ *  -- not to the bubble drawn inside it: a bubble draws a preview, it does not
+ *  subscribe to its own height. The amount handed back is the row's own growth,
+ *  measured on the row element: a row wraps the bubble and its notes, so what the
+ *  rows below were pushed by is the row's height, whatever inside it grew.
+ *
+ *  `undefined` says this row cannot grow and takes no observation. The shape of a
+ *  row can change under it (a discussion's head enters the window), which is why
+ *  the action answers `update` rather than reading its parameter once. */
+export function holdAboveFold(
+  node: HTMLElement,
+  pin: HoldAboveFold | undefined,
+): { update(next: HoldAboveFold | undefined): void; destroy(): void } {
+  let release = pin?.(node);
+  return {
+    update(next) {
+      if (next === pin) return;
+      release?.();
+      pin = next;
+      release = next?.(node);
+    },
+    destroy() {
+      release?.();
+    },
+  };
+}

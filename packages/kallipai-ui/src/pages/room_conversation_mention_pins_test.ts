@@ -54,15 +54,17 @@ Deno.test("the field is told what the popup is showing", () => {
   );
 });
 
-Deno.test("a send spends both strips and hands them over", () => {
+Deno.test("a send spends the picks and hands them over", () => {
   const src = flat(source(PAGE));
   const at = src.indexOf("send: (text) => {");
   assert(at !== -1, "the page builds the send closure");
   const block = src.slice(at, at + 420);
   assert(block.includes("const mentions = picker.picked"), "the picks");
-  assert(block.includes("const quote = armedSeq"), "only this room's seq");
   assert(block.includes("picker.clear()"), "the picks are spent");
-  assert(block.includes("pendingQuote = null"), "and so is the quote");
+  assert(
+    block.includes("roomConversationsStore.send(roomId, text, { mentions })"),
+    "and the send carries them",
+  );
 });
 
 Deno.test("the page keeps the keyboard state machine out of itself", () => {
@@ -77,34 +79,24 @@ Deno.test("the page keeps the keyboard state machine out of itself", () => {
   );
 });
 
-Deno.test("a send carries both the picks and the quote", () => {
-  const src = flat(source(PAGE));
-  assert(
-    src.includes(
-      "roomConversationsStore.send(roomId, text, { mentions, quote })",
-    ),
-    "one send, one options object",
-  );
-});
-
 Deno.test(
   "every confirmed room row can be quoted, an optimistic one cannot",
   () => {
     const src = flat(source(PAGE));
-    assert(src.includes("function quotable(line: RoomLine)"), "one predicate");
-    const at = src.indexOf("function quotable(line: RoomLine)");
-    const body = src.slice(at, at + 200);
-    assert(body.includes("line.seq > 0"), "a synthetic seq names no row");
     assert(
-      body.includes("!roomLinePending(line)"),
-      "an in-flight row is not quotable",
+      !src.includes("function quotable("),
+      "the page keeps no predicate of its own",
     );
-    assert(body.includes("!line.failed"), "nor is a failed one");
+    assert(src.includes("quotableLine"), "it takes the shared one");
+    assert(
+      src.includes("{#if quotableLine(line)}"),
+      "and asks it before drawing the control",
+    );
   },
 );
 
 Deno.test(
-  "the page draws the shared row, the quote strip and the picker",
+  "the page draws the shared row, the quote control and the picker",
   () => {
     const src = flat(source(PAGE));
     assert(
@@ -112,8 +104,8 @@ Deno.test(
       "the shared row draws the bubble the quote control rides in",
     );
     assert(
-      src.includes("<QuoteBar") && src.includes("<MentionPicker"),
-      "and the armed quote and the candidate popup still render",
+      src.includes("<QuoteButton") && src.includes("<MentionPicker"),
+      "the quote control and the candidate popup still render",
     );
   },
 );

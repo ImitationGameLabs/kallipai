@@ -289,8 +289,10 @@ export interface RoomLine {
   readonly text: string;
   /** The room seq this line quotes, when the sender quoted one. */
   readonly quote?: number;
-  /** The discussion this line belongs to: the head row's seq, or absent
-   *  when the line heads its own. Grouping uses `thread ?? seq`. */
+  /** The discussion the room filed this line under: the head row's seq, or
+   *  absent when the line heads its own. A row that only quotes another
+   *  belongs to the discussion it answers (see `threadDiscussion` in
+   *  `lib/threads.ts`). */
   readonly thread?: number;
   /** The participant ids this line names, when the sender named any. */
   readonly mentions?: readonly string[];
@@ -556,6 +558,29 @@ export function appendRoomLine(
  * seq sign alone. Pure: unit-tested in room-message_test.ts. */
 export function roomLinePending(line: Pick<RoomLine, "mine" | "seq">): boolean {
   return line.mine && line.seq < 0;
+}
+/** Whether a room line may be quoted: one the room has numbered, not still
+ *  sending, and not failed -- an optimistic line has no seq the other side
+ *  could resolve, and a failed one is about to be resent as a different line.
+ *
+ *  Three clauses, and the seq test settles the other two today, for two
+ *  different reasons: a pending line is one holding a negative seq by
+ *  definition, while failure is a production fact -- the store marks it only
+ *  on an optimistic line, and that one is negative too. Each clause still
+ *  states a rule of its own (a failed row and an in-flight row must not be
+ *  quotable). Only the failed clause faces a row the seq test lets through,
+ *  so it is the one the test pins; the pending clause stays for the reader,
+ *  since `seq > 0` already implies it.
+ *
+ *  The direct conversation decides the same question for its own lines (see
+ *  `quotable` in ConversationView, which also asks whether the surface offers
+ *  quoting at all); this one is the room's.
+ *
+ *  Pure: unit-tested in room-message_test.ts. */
+export function quotableLine(
+  line: Pick<RoomLine, "mine" | "seq" | "failed">,
+): boolean {
+  return line.seq > 0 && !roomLinePending(line) && !line.failed;
 }
 
 /** Drop one failed own line: the delete action's reducer for a room

@@ -28,6 +28,7 @@ import PairPage from "../../pages/PairPage.svelte";
 import RegisterPage from "../../pages/RegisterPage.svelte";
 import RoomsPage from "../../pages/RoomsPage.svelte";
 import RoomConversationPage from "../../pages/RoomConversationPage.svelte";
+import RoomThreadPage from "../../pages/RoomThreadPage.svelte";
 import RoomSettingsPage from "../../pages/RoomSettingsPage.svelte";
 import SettingsPage from "../../pages/SettingsPage.svelte";
 import TagmaProfilePage from "../../pages/TagmaProfilePage.svelte";
@@ -187,7 +188,24 @@ export const ROUTES = [
   row({
     pattern: "rooms/[id]",
     component: RoomConversationPage,
-    props: ({ params }) => ({ roomId: params.id ?? "" }),
+    // `at` is the row a deep link lands on (a discussion's own page sends
+    // its room step here, and a quote jump names the row it answers).
+    props: ({ params, search }) => ({
+      roomId: params.id ?? "",
+      at: search.get("at") ?? undefined,
+    }),
+  }),
+  row({
+    pattern: "rooms/[id]/threads/[root]",
+    component: RoomThreadPage,
+    // A discussion's own address: the root is in the path, and the reader
+    // may be sent to one of its rows (`at`) or asked to answer one (`quote`).
+    props: ({ params, search }) => ({
+      roomId: params.id ?? "",
+      root: params.root ?? "",
+      at: search.get("at") ?? undefined,
+      quote: search.get("quote") ?? undefined,
+    }),
   }),
   row({
     pattern: "rooms/[id]/settings",

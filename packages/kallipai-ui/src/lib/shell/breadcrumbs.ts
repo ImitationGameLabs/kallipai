@@ -17,7 +17,11 @@ import { channelsStore } from "../session/channels.svelte.ts";
 import { roomsStore } from "../session/rooms.svelte.ts";
 import { RelayConversation } from "../session/conversation/relayConversation.svelte.ts";
 import { directSessionsStore } from "../session/directSessions.svelte.ts";
+import { threadHeadOf } from "../rooms/threadHeads.svelte.ts";
+import { roomLabelOf } from "../rooms/roomLabel.ts";
+import { rowParamOf } from "../rooms/rowParam.ts";
 import {
+  roomPath,
   tagmaAgentPath,
   tagmaDetailsPath,
   tagmaDetailsSectionPath,
@@ -42,7 +46,7 @@ import {
   nav_schedules,
   nav_tasks,
   nav_tagmata,
-  room_label_fallback,
+  room_thread_view,
   settings_heading,
   tagma_fallback_label,
   user_gateway_menu,
@@ -158,26 +162,43 @@ export const trailTable: TrailEntry[] = [
   // following a crumb must not reshape the bar. Every entry also opens
   // with Home (target /) -- the bar's universal first crumb.
   entry("/rooms/:id", ({ id }: With<"id">) => {
-    const name = roomsStore.rooms.find((r) => r.room_id === id)?.name;
+    const name = roomLabelOf(roomsStore.rooms, id);
     return [
       { label: nav_home(), href: "/" },
       { label: nav_rooms(), href: "/rooms" },
       {
-        label: name || room_label_fallback({ id: id.slice(0, 8) }),
+        label: name,
         current: true,
       },
     ];
   }),
   entry("/rooms/:id/settings", ({ id }: With<"id">) => {
-    const name = roomsStore.rooms.find((r) => r.room_id === id)?.name;
+    const name = roomLabelOf(roomsStore.rooms, id);
     return [
       { label: nav_home(), href: "/" },
       { label: nav_rooms(), href: "/rooms" },
       {
-        label: name || room_label_fallback({ id: id.slice(0, 8) }),
-        href: `/rooms/${id}`,
+        label: name,
+        href: roomPath(id),
       },
       { label: settings_heading(), current: true },
+    ];
+  }),
+  // A discussion's own page hangs off its room: the room step links back to
+  // the transcript with the discussion's root as the row to land on, and the
+  // tail is the discussion's first line once a surface has read its root
+  // page (the window records it there), else the trail's own label.
+  entry("/rooms/:id/threads/:root", ({ id, root }: With<"id" | "root">) => {
+    const seq = rowParamOf(root);
+    const head = seq === null ? null : threadHeadOf(id, seq);
+    return [
+      { label: nav_home(), href: "/" },
+      { label: nav_rooms(), href: "/rooms" },
+      {
+        label: roomLabelOf(roomsStore.rooms, id),
+        href: roomPath(id, { at: seq ?? undefined }),
+      },
+      { label: head ?? room_thread_view(), current: true },
     ];
   }),
   entry("/chat/:id", ({ id }: With<"id">) => {

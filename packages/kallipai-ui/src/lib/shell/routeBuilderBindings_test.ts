@@ -12,6 +12,8 @@ import {
   agentHistoryPath,
   filesPath,
   gatewayPath,
+  roomPath,
+  roomThreadPath,
   tagmaAgentPath,
   tagmaChatPath,
   tagmaDetailsPath,
@@ -50,6 +52,12 @@ Deno.test("every path builder lands on exactly the row it names", () => {
     [filesPath(), "files", {}],
     [gatewayPath(), "gateway", {}],
     [adminGatewayPath(), "admin/gateway", {}],
+    [roomPath("abc"), "rooms/[id]", { id: "abc" }],
+    [
+      roomThreadPath("abc", 7),
+      "rooms/[id]/threads/[root]",
+      { id: "abc", root: "7" },
+    ],
     [
       adminGatewayCollectionPath("alpha"),
       "admin/gateway/collections/[name]",
@@ -61,4 +69,25 @@ Deno.test("every path builder lands on exactly the row it names", () => {
     assertEquals(hit.pattern, pattern, path);
     assertEquals(hit.params, params, path);
   }
+});
+
+Deno.test("a room path carries the row it lands on", () => {
+  assertEquals(roomPath("abc"), "/rooms/abc");
+  assertEquals(roomPath("abc", { at: 7 }), "/rooms/abc?at=7");
+});
+
+Deno.test("a discussion path carries its root and the rows it names", () => {
+  assertEquals(roomThreadPath("abc", 7), "/rooms/abc/threads/7");
+  assertEquals(
+    roomThreadPath("abc", 7, { at: 12 }),
+    "/rooms/abc/threads/7?at=12",
+  );
+  assertEquals(
+    roomThreadPath("abc", 7, { quote: 12 }),
+    "/rooms/abc/threads/7?quote=12",
+  );
+  assertEquals(
+    roomThreadPath("abc", 7, { at: 3, quote: 12 }),
+    "/rooms/abc/threads/7?at=3&quote=12",
+  );
 });

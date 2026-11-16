@@ -4,7 +4,8 @@
   // bubble's only width cap and its alignment -- nothing else -- so a bubble
   // can never widen past the transcript's 80% whatever its content, and the
   // sender alone decides the boundary. Every chat surface draws through here,
-  // so the direct, room and channel shapes cannot drift apart again.
+  // so the direct, room, channel and discussion shapes cannot drift apart
+  // again.
   import type { Snippet } from "svelte";
 
   let {

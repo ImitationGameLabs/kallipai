@@ -3,7 +3,6 @@
 
 import { assertEquals } from "@std/assert";
 import {
-  armedQuoteSeq,
   directQuoteBlocksByTarget,
   findQuotedLine,
   previewOf,
@@ -203,13 +202,6 @@ Deno.test("a quote names a row only when it is a positive integer", () => {
     quotable({ seq: 11, text: "negative", quote: -3 }),
   ];
   assertEquals(roomQuoteBlocksByLine(lines).size, 0);
-});
-
-Deno.test("a quote armed in one room is unreadable in another", () => {
-  const armed = { scope: "room-a", seq: 7 };
-  assertEquals(armedQuoteSeq(armed, "room-b"), undefined);
-  assertEquals(armedQuoteSeq(armed, "room-a"), 7);
-  assertEquals(armedQuoteSeq(null, "room-a"), undefined);
 });
 
 // --- the direct-session surface: the same lookup, another line shape ---

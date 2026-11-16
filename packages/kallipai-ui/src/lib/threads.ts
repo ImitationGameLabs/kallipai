@@ -1,8 +1,16 @@
 // Thread grouping for the room transcript. A room line belongs to at most one
-// discussion, named by `thread ?? seq` (a head row carries no `thread`, so it
-// names its own). The main view draws one entry per discussion; everything
-// else about a discussion (its replies, whether they are all here) is what
-// this module answers, so the view stays a renderer.
+// discussion: the thread it declares, or the discussion of the row it quotes,
+// or its own seq when it names neither (a head names the discussion it heads).
+// Everything else about a discussion (its replies, whether they are all here)
+// is what this module answers, so the view stays a renderer.
+
+//
+// Two questions live here and they are not the same: what the room stored
+// (declaredThread) is what a read filters by, so it decides whether another
+// page is worth asking for; where a reader sees a row belong
+// (threadDiscussion) is resolved against the window, quotes included. A row
+// whose resolution is not its declaration stored no root, so no read returns
+// it: the panel draws that one from the window it already holds.
 
 import { type RoomLine } from "./room-message.ts";
 
@@ -18,7 +26,8 @@ export type ThreadRootState = "rooted" | "older" | "pending" | "unknown";
 export interface ThreadGroup {
   /** The discussion's root seq, whether or not its root row is loaded. */
   readonly root: number;
-  /** The row the main view draws for this discussion. */
+  /** The row that gives the discussion its place in the transcript; drawn
+   *  only when `rootState` is `rooted`. */
   readonly head: RoomLine;
   /** The loaded replies, in transcript order. */
   readonly replies: readonly RoomLine[];
@@ -38,9 +47,51 @@ export interface ThreadGroup {
   readonly repliesExact: boolean;
 }
 
-/** The seq of the discussion a line belongs to. */
-export function threadRoot(line: RoomLine): number {
+/** The discussion the room filed this line under: its declared thread, or its
+ *  own seq when it declares none. A read filters by this root, so a page asked
+ *  for it brings exactly the rows it names; the discussion a reader sees the
+ *  line in may be wider (see `threadDiscussion`). */
+export function declaredThread(line: RoomLine): number {
   return line.thread ?? line.seq;
+}
+/** The discussion a line belongs to, resolved against the rows on hand. A
+ *  declared thread is the server's own answer and stands as written. A line
+ *  that only quotes another is a reply to it: the room composer sends a quote
+ *  with the discussion it joins, and a row stored before that change carries
+ *  the quote alone, so the window walks from the quoted row to the discussion
+ *  it belongs to. A quoted row the window does not hold leaves the quoted seq
+ *  as the head the window can name, and a cycle of quotes stops at the row
+ *  that closes it instead of looping. */
+export function threadDiscussion(
+  line: RoomLine,
+  bySeq: ReadonlyMap<number, RoomLine>,
+): number {
+  const seen = new Set<number>();
+  let current = line;
+  for (;;) {
+    if (current.thread !== undefined) return current.thread;
+    const quoted = current.quote;
+    if (quoted === undefined) return current.seq;
+    if (seen.has(quoted)) return quoted;
+    seen.add(quoted);
+    const target = bySeq.get(quoted);
+    if (target === undefined) return quoted;
+    current = target;
+  }
+}
+
+/** Rows by seq, the lookup a quote resolves through: a pending line has no
+ *  position in the room's log, so nothing can quote it. */
+export function threadIndex(
+  ...windows: readonly (readonly RoomLine[])[]
+): Map<number, RoomLine> {
+  const index = new Map<number, RoomLine>();
+  for (const lines of windows) {
+    for (const line of lines) {
+      if (line.seq >= 0) index.set(line.seq, line);
+    }
+  }
+  return index;
 }
 
 /** The state the panel header may claim for the discussion it draws open. A
@@ -60,8 +111,13 @@ export function drawnRootState(
 
 /** Group the transcript into discussions, ordered by where each discussion's
  *  drawn head sits in the transcript. Input order is preserved inside a group,
- *  so a reply that arrives before its root still lands after it. */
-export function threadGroups(lines: readonly RoomLine[]): ThreadGroup[] {
+ *  so a reply that arrives before its root still lands after it. An index the
+ *  caller already built over the same window may be passed in; it must place
+ *  every row of `lines`. */
+export function threadGroups(
+  lines: readonly RoomLine[],
+  bySeq: ReadonlyMap<number, RoomLine> = threadIndex(lines),
+): ThreadGroup[] {
   const position = new Map<RoomLine, number>();
   const buckets = new Map<number, RoomLine[]>();
   // The window's own bounds: the smallest and largest room-numbered row it
@@ -75,7 +131,7 @@ export function threadGroups(lines: readonly RoomLine[]): ThreadGroup[] {
       lower = lower === undefined ? line.seq : Math.min(lower, line.seq);
       upper = upper === undefined ? line.seq : Math.max(upper, line.seq);
     }
-    const root = threadRoot(line);
+    const root = threadDiscussion(line, bySeq);
     const bucket = buckets.get(root);
     if (bucket === undefined) buckets.set(root, [line]);
     else bucket.push(line);
@@ -118,7 +174,8 @@ function words(line: RoomLine): string {
  *  room already placed inside the stretch those pages cover, which a read may
  *  not return. An own pending send has no seq yet, and a reply whose declared
  *  head did not exist when it was written stores no root, so the read's
- *  stored-root filter never sees it while the room's entry counts it. Rows are
+ *  stored-root filter never sees it while the room's entry counts it. A row
+ *  that only quotes another is one too (see `threadDiscussion`). Rows are
  *  deduplicated by seq and by sender+text -- the last pending line with those
  *  words and its confirmed echo are one message; the pending ones are drawn
  *  last, below an own reply the room confirmed past the stretch.
@@ -129,15 +186,18 @@ function words(line: RoomLine): string {
  *  between is missing (see `threadWindowEnd`). A room row beyond it is not
  *  drawn: it would sit across a stretch nobody fetched, and the walk only
  *  goes down. A pending line has no position, so it joins at the end
- *  whatever the stretch is. An own reply the room has confirmed past that end
- *  joins there too, above the pending ones: it keeps a place at the foot of
- *  the window rather than leaving it with the line it replaced. */
+ *  whatever the stretch is. A row the pages cannot bring joins there too,
+ *  above the pending ones: an own reply the room confirmed, or one whose
+ *  discussion only a quote decides. Each keeps a place at the foot of the
+ *  window rather than being drawn nowhere. */
 export function threadRows(
   root: number,
   loaded: readonly RoomLine[],
   fetched: readonly RoomLine[],
   coveredTo: number | null,
 ): RoomLine[] {
+  const bySeq = threadIndex(loaded, fetched);
+
   // A pending line and its echo carry the same words from the same sender.
   // The last pending with those words is the one an echo claims, and only a
   // row a page brings as a new arrival counts as an echo: an older own reply
@@ -146,7 +206,7 @@ export function threadRows(
   // time comes from this client, the echo's from the room.
   const lastPending = new Map<string, RoomLine>();
   for (const line of loaded) {
-    if (line.seq < 0 && threadRoot(line) === root) {
+    if (line.seq < 0 && threadDiscussion(line, bySeq) === root) {
       lastPending.set(words(line), line);
     }
   }
@@ -154,7 +214,7 @@ export function threadRows(
     (row) => !loaded.some((held) => held.seq === row.seq),
   );
   const placed = loaded.filter((line) => {
-    if (threadRoot(line) !== root) return false;
+    if (threadDiscussion(line, bySeq) !== root) return false;
     if (fetched.some((row) => row.seq === line.seq)) return false;
     if (line.seq < 0) {
       if (lastPending.get(words(line)) !== line) return true;
@@ -162,14 +222,25 @@ export function threadRows(
     }
     return coveredTo !== null && line.seq >= root && line.seq <= coveredTo;
   });
-  // An own reply the room confirmed past the stretch: the echo replaced the
-  // pending line, and it would otherwise leave the window the reader just
-  // saw it in. It keeps that place until a page draws it in order.
+  // Two kinds of row step ahead of the pages, and the rule is narrow on
+  // purpose. An own reply the room confirmed keeps the place it was sent from,
+  // so its echo does not leave the window the reader just saw it in. A row
+  // whose discussion only a quote decides stored no root, so a read cannot
+  // return it: the panel is the only place it can be drawn. Everyone else
+  // waits for a page, because a page returns every row that declared this
+  // discussion and still sat where it said. Drawing those here would put a
+  // plain reply at the foot and move it back into order later, and would let a
+  // row jump a hole in the window.
   const beyond = loaded
     .filter((line) => {
-      if (line.mine !== true || line.seq <= 0) return false;
-      if (threadRoot(line) !== root) return false;
-      // A null edge sets no limit, so the client's own rows stay past it.
+      if (line.seq <= 0) return false;
+      // The discussion is resolved, not read off the declaration: a row that
+      // only quotes into this one belongs here too.
+      const resolves = threadDiscussion(line, bySeq);
+      if (resolves !== root) return false;
+      if (line.mine !== true && resolves === declaredThread(line)) return false;
+      // A null edge sets no limit: these two kinds stay drawn even before
+      // the first page lands.
       if (coveredTo !== null && line.seq <= coveredTo) return false;
       return true;
     })
@@ -250,7 +321,11 @@ export function threadRoomBeyondCount(
 ): number {
   if (coveredTo === null) return 0;
   return loaded.filter(
-    (line) => line.seq > coveredTo && threadRoot(line) === root,
+    // Declared roots, as above: this count is the reason to ask the room for one
+    // more page, and the read filters by the root it stored. A row that only
+    // resolves into this discussion is one no page for it can bring, so counting
+    // it would ask for a page that answers with what the reader already has.
+    (line) => line.seq > coveredTo && declaredThread(line) === root,
   ).length;
 }
 
@@ -306,16 +381,77 @@ export function threadAtEnd(
  *  reply only when the count is known to be the room's whole count. The count
  *  comes from confirmed rows alone (a pending or failed own line is not in the
  *  room), and a window that has caught up is what makes the loaded head's
- *  replies the whole set. Otherwise the entry is the plain invitation to open
- *  the discussion, and names nobody: a wrong last sender is worse than none. */
+ *  replies the whole set -- a number claims the whole set, so it waits for
+ *  `caughtUp`. The preview under it does not (see `threadPreview`). Otherwise
+ *  the entry is the plain invitation to open the discussion, and names nobody:
+ *  a wrong last sender is worse than none. */
+export interface ThreadEntry {
+  readonly count?: number;
+  readonly last?: RoomLine;
+}
+
 export function threadEntry(
   group: ThreadGroup,
   caughtUp: boolean,
-): { readonly count?: number; readonly last?: RoomLine } {
+): ThreadEntry {
   if (!caughtUp || !group.repliesExact || group.confirmed.length === 0) {
     return {};
   }
   return { count: group.confirmed.length, last: group.confirmed.at(-1) };
+}
+
+/** The start of a discussion, as the room list draws it inside the bubble: the
+ *  first replies in transcript order, so that opening the discussion carries on
+ *  from where the preview stopped. Its rows come from `confirmed` alone -- a
+ *  pending or failed line of the reader's own is not in the room, and a preview
+ *  is the one place a message nobody received could pass for a message that was.
+ *  A row with nothing to say (an empty body) is skipped rather than drawn as a
+ *  gap.
+ *
+ *  One gate, `group.repliesExact`: the head of this discussion is among the lines
+ *  this client holds (`repliesExact` is `rootState === "rooted"`). Its three
+ *  ways of being false -- the head lies below the loaded window, above it, or the
+ *  window's own bounds are unknown -- all leave replies with no start in hand,
+ *  and showing those first would call a stretch of the middle the beginning, the
+ *  one claim the input cannot back. `caughtUp` is not part of this gate: the
+ *  count asks whether it has them all, the preview asks only whether these are
+ *  the first. They are, because `confirmed` holds only rows the forward walk
+ *  delivered and that walk starts at the room's first row -- so its rows are the
+ *  discussion's earliest replies, whatever the window's top edge. The window's
+ *  tail may hold a live row the walk never reached (a synthetic sequence number,
+ *  which `confirmed` drops), which is why this rests on `confirmed` and not on
+ *  the window. A big room therefore shows the replies before it can state a
+ *  count, which is the shape a reader needs to judge whether the discussion is
+ *  worth opening.
+ *
+ *  A row draws the message's source rather than the rendered markdown an agent's
+ *  reply gets on the discussion page: the clamp needs a line count it can trust,
+ *  and a rendered block would re-flow its own emphasis and fences into the
+ *  bubble. The cost is that a reader sees `**` where the discussion shows bold;
+ *  that is the price of the clamp, not a bug to fix.
+ *  Pure: unit-tested in threads_test.ts. */
+export interface ThreadPreview {
+  readonly rows: readonly RoomLine[];
+}
+
+/** How many replies a preview draws before the discussion page takes over. */
+const PREVIEW_ROWS = 3;
+
+export function threadPreview(group: ThreadGroup): ThreadPreview {
+  if (!group.repliesExact) return { rows: [] };
+  const sayable = group.confirmed.filter((row) => row.text.trim() !== "");
+  return { rows: sayable.slice(0, PREVIEW_ROWS) };
+}
+
+/** How the room list draws one group. A discussion the reader can see a body
+ *  for is drawn as a bubble that IS its entry: the whole row opens it, and the
+ *  reply line under the copy controls moves into the panel with them. A group
+ *  whose head is out of the window draws no body at all, so it keeps the plain
+ *  entry button and its note -- there is nothing there to click. Pure:
+ *  unit-tested in threads_test.ts. */
+export function roomRowShape(group: ThreadGroup): "plain" | "thread" | "entry" {
+  if (group.rootState !== "rooted") return "entry";
+  return group.replies.length > 0 ? "thread" : "plain";
 }
 
 /** Why the reader is in a discussion, as the panel header says it. */

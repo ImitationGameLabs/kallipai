@@ -10,6 +10,7 @@ import {
   parseParticipantHandle,
   roomLineFrom,
   roomLinePending,
+  quotableLine,
   roomMessageLabel,
   roomRowAnchorId,
   roomRowAnnouncement,
@@ -359,6 +360,27 @@ Deno.test(
     assertEquals(roomLinePending(mine), false);
   },
 );
+
+Deno.test("quotableLine takes a row the room has numbered", () => {
+  const theirs: Pick<RoomLine, "mine" | "seq" | "failed"> = {
+    mine: false,
+    seq: 7,
+  };
+  assertEquals(quotableLine(theirs), true);
+  assertEquals(quotableLine({ mine: true, seq: 41 }), true);
+});
+
+Deno.test("quotableLine refuses the rows the room has not numbered", () => {
+  // An optimistic line has no seq the other side could resolve.
+  assertEquals(quotableLine({ mine: true, seq: -3 }), false);
+  assertEquals(quotableLine({ mine: false, seq: 0 }), false);
+  // A failed line is about to be resent as a different row.
+  assertEquals(quotableLine({ mine: true, seq: -1, failed: true }), false);
+  // The failed clause stands on its own: production marks failure only on an
+  // optimistic line, so a failed row holding a real seq is unreachable today.
+  // If one ever arrives, it still must not be quotable.
+  assertEquals(quotableLine({ mine: true, seq: 4, failed: true }), false);
+});
 
 Deno.test("roomLinePending is false for a live inbound line", () => {
   // The regression: a live inbound frame carries a synthetic NEGATIVE seq

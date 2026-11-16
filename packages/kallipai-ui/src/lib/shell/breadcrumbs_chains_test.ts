@@ -28,6 +28,7 @@ const {
   nav_home,
   nav_rooms,
   room_label_fallback,
+  room_thread_view,
   settings_heading,
   account_menu,
   account_tokens,
@@ -150,3 +151,25 @@ Deno.test("the agent turn history extends the agent chain", () => {
     { label: manage_history_heading(), current: true },
   ]);
 });
+
+Deno.test("a discussion's page chains through its room", () => {
+  assertEquals(matchTrail("/rooms/r-1/threads/7"), [
+    { label: nav_home(), href: "/" },
+    { label: nav_rooms(), href: "/rooms" },
+    { label: room_label_fallback({ id: "r-1" }), href: "/rooms/r-1?at=7" },
+    { label: room_thread_view(), current: true },
+  ]);
+});
+
+Deno.test(
+  "a discussion the window has read is named by its first line",
+  async () => {
+    const { rememberThreadHead } =
+      await import("../rooms/threadHeads.svelte.ts");
+    rememberThreadHead("r-2", 9, "the opening words");
+    const trail = matchTrail("/rooms/r-2/threads/9");
+    if (!trail) throw new Error("the discussion chain must resolve");
+    assertEquals(trail.at(-1), { label: "the opening words", current: true });
+    assertEquals(trail[2]?.href, "/rooms/r-2?at=9");
+  },
+);

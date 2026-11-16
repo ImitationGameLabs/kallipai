@@ -1,25 +1,37 @@
-// Two source-read pins. The first fixes the only shape the surfaces may keep:
+// Three source-read pins. The first fixes the only shape the surfaces may keep:
 // a quotable row offers the quote control inside the bubble's own action row,
 // once, and nothing else draws it. A type-check cannot see a second placement,
 // or a surface that stopped handing the row something to render. The second
-// pins the one reveal segment the three action buttons share.
+// pins the one reveal segment the three action buttons share. The third holds
+// the table those loops walk to the files that draw a bubble, so a new surface
+// is a failure here instead of a quiet gap.
 
 import { assert, assertEquals } from "@std/assert";
+
+import { source } from "../lib/testing/source_pins.ts";
+import { transcriptSurfaces } from "../lib/testing/transcript_surfaces.ts";
 
 const BUBBLE = new URL("./MessageBubble.svelte", import.meta.url);
 const VIEW = new URL("./ConversationView.svelte", import.meta.url);
 const ROOM = new URL("../pages/RoomConversationPage.svelte", import.meta.url);
+const CONVERSATION = new URL(
+  "./rooms/ThreadConversation.svelte",
+  import.meta.url,
+);
 
-function source(url: URL): string {
-  return new TextDecoder().decode(Deno.readFileSync(url));
-}
+/** Every surface that draws a bubble, with the name its failure reads. */
+const SURFACES = [
+  ["direct and channel", VIEW],
+  ["room", ROOM],
+  ["discussion", CONVERSATION],
+] as const;
 
 Deno.test(
   "a quotable row offers the quote control in the action row, once",
   () => {
     const bubble = source(BUBBLE);
-    const guard = bubble.indexOf("{#if !bare}");
-    assert(guard >= 0, "the action row renders under the non-bare guard");
+    const guard = bubble.indexOf("{#if !noActionRow}");
+    assert(guard >= 0, "the action row renders under the no-row guard");
     const row = bubble.slice(guard);
     const slot = row.indexOf("{@render extraActions?.()}");
     const copy = row.indexOf("<CopyButton");
@@ -32,10 +44,7 @@ Deno.test(
       "the bubble itself draws no quote control",
     );
 
-    for (const [label, url] of [
-      ["direct and channel", VIEW],
-      ["room", ROOM],
-    ] as const) {
+    for (const [label, url] of SURFACES) {
       const src = source(url);
       const open = src.indexOf("{#snippet extraActions()}");
       const close = src.indexOf("{/snippet}", open);
@@ -51,7 +60,9 @@ Deno.test(
         `${label} draw the quote control once`,
       );
       assert(
-        snippet.includes("{#if quotable(line)}"),
+        snippet.includes(
+          url === VIEW ? "{#if quotable(line)}" : "{#if quotableLine(line)}",
+        ),
         `${label} offer it only on a row it can quote`,
       );
       assertEquals(
@@ -91,4 +102,14 @@ Deno.test("every action button reveals through the one shared segment", () => {
       `${entry.name} writes no reveal of its own`,
     );
   }
+});
+
+Deno.test("the surface table is the files that draw the shared row", () => {
+  assertEquals(
+    transcriptSurfaces()
+      .map((surface) => surface.url.href)
+      .sort(),
+    SURFACES.map(([, url]) => url.href).sort(),
+    "a file that draws the shared row is missing from the surface table",
+  );
 });

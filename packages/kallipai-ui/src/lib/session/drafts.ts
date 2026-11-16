@@ -137,6 +137,12 @@ export function restoreFailedDraft(args: {
 export const tagmaDraftKey = (tagmaId: string) => `t:${tagmaId}`;
 export const roomDraftKey = (roomId: string) => `r:${roomId}`;
 export const convDraftKey = (conversationId: string) => `c:${conversationId}`;
+/** A discussion's own bucket: replies to one row are not the room's draft,
+ *  and two discussions are two stretches of writing. `th:` rather than `t:`,
+ *  which is the tagma key: the two never meet, and the next reader should not
+ *  have to work that out. */
+export const roomThreadDraftKey = (roomId: string, root: number) =>
+  `th:${roomId}:${root}`;
 
 /** The one storage key a chat page derives and shares: its draft and its
  *  attachment tray then key on the same bucket. The tagma id once the

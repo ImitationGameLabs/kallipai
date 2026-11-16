@@ -12,8 +12,8 @@
   // scroll is the shared `createAutoScroll`. A poll pump refreshes the history
   // + roster on a slow cadence (the room_membership_changed SSE nudge is the
   // fast path; the poll is the dropped-frame backstop).
-  import { onMount, tick, untrack } from "svelte";
-  import { Settings, Users, X } from "@lucide/svelte";
+  import { tick, untrack } from "svelte";
+  import { MessageSquare, Settings, Users, X } from "@lucide/svelte";
   import { Dialog, Portal } from "@skeletonlabs/skeleton-svelte";
   import Composer from "../components/Composer.svelte";
   import MessageBubble from "../components/MessageBubble.svelte";
@@ -21,17 +21,16 @@
   import PageHeader from "../components/PageHeader.svelte";
   import ScrollToBottomButton from "../components/ScrollToBottomButton.svelte";
   import {
+    createAboveFoldPin,
     createAutoScroll,
     createTogglePin,
+    holdAboveFold,
   } from "../lib/transcript.svelte.ts";
-  import type { ArmedQuote } from "../lib/quote.ts";
-  import {
-    armedQuoteSeq,
-    previewOf,
-    roomQuoteBlocksByLine,
-  } from "../lib/quote.ts";
+  import { roomQuoteBlocksByLine } from "../lib/quote.ts";
   import { createReveal, revealMark } from "../lib/reveal.svelte.ts";
   import { ROW_TIME } from "../lib/time/stamp.ts";
+  import { selectionAtClick } from "../lib/selection.ts";
+  import { selectionHoldsText } from "../lib/bubble_click.ts";
   import { createComposer } from "../lib/composer.svelte.ts";
   import { createMentionPicker } from "../lib/mentionPicker.svelte.ts";
   import { mentionOptionId } from "../lib/mentions.ts";
@@ -39,48 +38,45 @@
   import { roomDraftKey } from "../lib/session/drafts.ts";
   import {
     mentionChipsOf,
-    type RoomLine,
     roomRowAnnouncement,
     roomLinePending,
     roomMessageLabel,
     roomRowAnchorId,
-    roomThreadRowAnchorId,
+    quotableLine,
   } from "../lib/room-message.ts";
   import MemberRow from "../components/rooms/MemberRow.svelte";
   import MentionPicker from "../components/rooms/MentionPicker.svelte";
   import MentionChips from "../components/MentionChips.svelte";
   import MessageRow from "../components/MessageRow.svelte";
   import QuoteButton from "../components/QuoteButton.svelte";
-  import QuoteBar from "../components/QuoteBar.svelte";
   import SenderIdentity from "../components/rooms/SenderIdentity.svelte";
   import ThreadPanel from "../components/rooms/ThreadPanel.svelte";
-  import {
-    roomConversationsStore,
-    THREAD_WALK_MAX_PAGES,
-  } from "../lib/session/roomConversations.svelte.ts";
-  import { roomsStore } from "../lib/session/rooms.svelte";
+  import { roomConversationsStore } from "../lib/session/roomConversations.svelte.ts";
   import { archeionSession } from "../lib/session/archeion.svelte";
-  import { unreadStore, roomKey } from "../lib/session/unread.svelte.ts";
+  import { unreadStore } from "../lib/session/unread.svelte.ts";
   import { navigate } from "../lib/shell/port.ts";
+  import { roomThreadPath } from "../lib/shell/routes.ts";
   import { profileHref } from "../lib/room-message.ts";
-  import { startVisibleInterval } from "../lib/visibleInterval.ts";
-  import { TONAL_ICON_SURF } from "../lib/classes.ts";
+  import { createRoomSession } from "../lib/rooms/roomSession.svelte.ts";
+  import { createThreadWindow } from "../lib/rooms/threadWindow.svelte.ts";
+  import { rowParamOf } from "../lib/rooms/rowParam.ts";
   import {
-    appendThreadPage,
+    PREVIEW_HANDLE,
+    PREVIEW_ROW,
+    SCROLL_PILL,
+    TONAL_ICON_SURF,
+    TRANSCRIPT_COLUMN,
+  } from "../lib/classes.ts";
+  import {
     drawnRootState,
-    threadAtEnd,
     threadEntry,
+    threadPreview,
     threadGroups,
-    threadMembership,
-    threadRoot,
-    threadRows,
-    type ThreadPage,
-    type ThreadMore,
+    threadDiscussion,
+    threadIndex,
     type ThreadRootState,
-    threadWindowEnd,
-    threadPaging,
-    threadPageClaim,
-    threadRoomBeyondCount,
+    type ThreadEntry,
+    roomRowShape,
   } from "../lib/threads.ts";
   import { lgQuery } from "../lib/shell/breakpoint.ts";
   import { formatStamp } from "../lib/time/stamp.svelte.ts";
@@ -88,7 +84,6 @@
     common_loading,
     common_retry,
     room_title,
-    room_label_fallback,
     room_member_one,
     room_member_other,
     room_id_label,
@@ -103,7 +98,6 @@
     room_members,
     room_close_members_aria,
     room_unavailable,
-    nav_rooms,
     chat_transcript_aria,
     room_thread_last_from,
     room_thread_orphan_note,
@@ -115,18 +109,15 @@
     room_thread_view,
   } from "../paraglide/messages.js";
 
-  let { roomId }: { roomId: string } = $props();
+  let { roomId, at }: { roomId: string; at?: string } = $props();
 
-  const conv = $derived(roomConversationsStore.get(roomId));
+  const session = createRoomSession(() => roomId);
+  const conv = $derived(session.conv);
   // The registry view for this room (name/description/visibility), for the
   // header title. Null only if the room has not surfaced in the registry yet (a
   // brief resolving window).
-  const room = $derived(
-    roomsStore.rooms.find((r) => r.room_id === roomId) ?? null,
-  );
-  const roomLabel = $derived(
-    room?.name || room_label_fallback({ id: roomId.slice(0, 8) }),
-  );
+  const room = $derived(session.room);
+  const roomLabel = $derived(session.roomLabel);
 
   // The quote block each line draws, resolved once per render over the window
   // already on screen. The room transcript keeps every line it has loaded (a
@@ -136,8 +127,10 @@
 
   // Each discussion the transcript draws, one entry per head. A reply whose
   // root the loaded window does not hold still gets an entry (see lib/threads.ts):
-  // a row that vanishes from a transcript reads as a message never sent.
-  const groups = $derived(threadGroups(conv?.lines ?? []));
+  // and only that entry: the row that answers a message is drawn in its
+  // discussion, never in place of the topic it answers.
+  const lineIndex = $derived(threadIndex(conv?.lines ?? []));
+  const groups = $derived(threadGroups(conv?.lines ?? [], lineIndex));
   // A reply count is a number only for a discussion whose head is loaded and
   // only once the transcript has reached the room's present: replies sit after
   // their head, so a window that reaches the present holds all of them, while
@@ -152,405 +145,95 @@
   // here; a mention carries ids alone, so the chip resolves label/handle/href
   // here too. Undefined for a sender not in the roster / before the roster
   // lands (handle alone); rebuilt with the roster, so a rename re-renders both.
-  const memberById = $derived(
-    new Map((conv?.roster?.members ?? []).map((m) => [m.id, m] as const)),
-  );
+  const memberById = $derived(session.memberById);
 
-  // The discussion the panel is reading, and the stretch of it that has landed.
-  // It all belongs to one room: the page instance survives a room-id change
-  // (the route keys on the pattern, not the id), so the room reset effect
-  // closes it.
+  // The room's discussion panel, which nothing opens. Every entry point that
+  // used to open one navigates to `/rooms/<id>/threads/<root>` instead (a row's
+  // bubble, its summary, the reply entry, and the quote control), so the only
+  // writer of this root is `closeThread`, and no effect here syncs the window:
+  // no read is asked for either. The two gates below therefore stay false and
+  // the panel draws nowhere. The panel's code stays where it is.
   let openThreadRoot = $state<number | null>(null);
-  let threadRead = $state<ThreadPage | null>(null);
-  // How many pages of the open discussion have landed, the first one included:
-  // the panel tells its own fetches from rows the room brings in, and only the
-  // latter are followed.
-  let threadPages = $state(0);
-  let threadLoading = $state(false);
-  let threadUnreadable = $state(false);
-  let threadLoadingMore = $state(false);
-  let threadMoreFailed = $state(false);
-  // One walk down the discussion toward a row the panel does not hold yet. The
-  // target outlives a walk that stopped at the page cap, so the reader can ask
-  // for the next stretch from where it stopped.
-  let threadWalkTarget = $state<number | "newest" | null>(null);
-  // A walk is in flight: the panel follows it down, so the reader sees the
-  // pages arrive rather than a count off screen.
-  let threadWalking = $state(false);
-  let threadWalkStopped = $state(false);
-  let threadWalkMissing = $state(false);
-  // Rows of this discussion the room holds past the read that no page will
-  // bring, counted as they stood when a short page answered for them. That
-  // count is the key a verdict is taken back on: rows the room takes since
-  // are a fresh claim and earn one more page, where a latch would keep them
-  // out of the panel until the discussion was opened again.
-  let threadSpentClaim = $state<number | null>(null);
+  // One discussion's pages and the reads that take them: the window, its walk
+  // and its generation guards live in the module, because a discussion's own
+  // page reads the same thing. Which discussion is open stays here.
+  // The panel's body, which owns the row table a jump would land on: the
+  // transcript's reveal only covers rows this page draws.
+  let threadBody = $state<{
+    jump(seq: number): boolean;
+    land(seq: number): boolean;
+  } | null>(null);
 
-  // What the foot of the panel says, from the state that makes it true.
-  /** How a walk down a discussion ended: on the row it was sent for, at the
-   *  discussion's end without drawing that row, at the page cap, on a page
-   *  that failed, or on a panel that is no longer the one that asked. Only
-   *  `found` lands on a row; `failed` keeps its target, so the panel's retry
-   *  can carry the walk on. */
-  type WalkOutcome = "found" | "end" | "capped" | "failed" | "gone";
-
-  /** How many 25ms waits a walk gives a page already in flight before it
-   *  gives up: ten seconds, well past a page that is merely slow. */
-  const WALK_WAIT_LIMIT = 400;
-  // The end of the stretch the panel may draw: the pages' last cursor carried
-  // forward over the room rows already held. The transcript and the paging
-  // gate both start from it, so it is worked out once.
-  const threadCovered = $derived(
-    threadWindowEnd(threadRead?.lastSeq ?? null, conv?.lines ?? []),
-  );
-
-  // How many rows of this discussion the room places past that stretch: a
-  // page still worth asking for, until a short page answers for them.
-  const threadBeyond = $derived(
-    openThreadRoot === null
-      ? 0
-      : threadRoomBeyondCount(openThreadRoot, threadCovered, conv?.lines ?? []),
-  );
-
-  // What the open read makes of the paging gate and the foot, from the rows
-  // the room places past the stretch and the count a short page answered for.
-  const threadPagingNow = $derived(
-    threadPaging(threadRead, threadBeyond, threadSpentClaim),
-  );
-  const threadMore = $derived.by((): ThreadMore => {
-    if (threadWalkMissing) return "missing";
-    if (threadWalkStopped) return "stopped";
-    if (threadMoreFailed) return "failed";
-    if (threadLoadingMore) return "loading";
-    if (threadPagingNow.spent) return "unreachable";
-    return "idle";
+  const threadWindow = createThreadWindow({
+    roomId: () => roomId,
+    root: () => openThreadRoot,
+    lines: () => conv?.lines ?? [],
+    onLanded: (seq) => threadBody?.jump(seq),
   });
 
-  /** Everything the panel holds of a discussion, back to nothing. Opening
-   *  another discussion and closing this one differ only in whether a root
-   *  is left behind, so the state is cleared in one place. */
-  function clearThreadWindow(): void {
-    threadRead = null;
-    threadPages = 0;
-    threadLoading = false;
-    threadUnreadable = false;
-    threadLoadingMore = false;
-    threadMoreFailed = false;
-    threadSpentClaim = null;
-    threadWalkTarget = null;
-    threadWalkStopped = false;
-    threadWalkMissing = false;
-    threadWalking = false;
-  }
-
-  /** Start the panel on a discussion with nothing read yet. */
-  function resetThreadWindow(root: number): void {
-    openThreadRoot = root;
-    clearThreadWindow();
-  }
-
-  /** Read one page and keep it only if the panel on screen asked for it: a
-   *  page that lands after another discussion opened answers a panel that is
-   *  gone, and drawing it would put one discussion's rows under another's
-   *  head. The room is captured with the root: a page must never land in the
-   *  room next door. */
-  async function readThreadPage(
-    room: string,
-    root: number,
-    afterSeq: number,
-  ): Promise<ThreadPage | null> {
-    const page = await roomConversationsStore.fetchThreadPage(
-      room,
-      root,
-      afterSeq,
-    );
-    return roomId === room && openThreadRoot === root ? page : null;
-  }
-
-  /** Record what a landing page claims, from the count taken before the ask:
-   *  both fetches measure the rows past the stretch first and hand that count
-   *  here, so a reply that arrives while the page is in flight is not swallowed
-   *  as one the page answered for. See `threadPageClaim`. */
-  function recordSpentClaim(
-    page: { readonly hasMore: boolean },
-    beyondBefore: number,
-  ): void {
-    threadSpentClaim = threadPageClaim(page, beyondBefore);
-  }
-
-  /** Open one discussion: the panel shows its loading state at once, then
-   *  the page the root sits on lands and the reader starts at its top. The
-   *  root's own page is asked for by position, so a discussion opens in one
-   *  round trip however long it is. */
-  async function openThread(root: number): Promise<void> {
-    const room = roomId;
-    resetThreadWindow(root);
-    threadLoading = true;
-    try {
-      const page = await readThreadPage(room, root, root - 1);
-      if (page !== null) {
-        threadRead = page;
-        threadPages += 1;
-        // A first page has no drawn stretch before it, so no row it could have
-        // answered for: it claims nothing.
-        recordSpentClaim(page, 0);
-      }
-    } catch (e) {
-      console.error("[room thread] first page failed:", e);
-      if (roomId === room && openThreadRoot === root) {
-        threadUnreadable = true;
-      }
-    } finally {
-      if (roomId === room && openThreadRoot === root) {
-        threadLoading = false;
-      }
-    }
-  }
+  // The window's reads, as derived cells: the module hands out getters, and the
+  // markup and the grouping below want names.
+  const threadLines = $derived(threadWindow.lines);
+  const threadHasMore = $derived(threadWindow.hasMore);
+  const threadMore = $derived(threadWindow.more);
+  const threadWalking = $derived(threadWindow.walking);
+  const threadPages = $derived(threadWindow.pages);
+  const threadLoading = $derived(threadWindow.loading);
+  const threadUnreadable = $derived(threadWindow.unreadable);
 
   /** Ask again for a first page the panel could not read. */
-  async function retryThread(): Promise<void> {
-    const root = openThreadRoot;
-    if (root === null) return;
-    await openThread(root);
-  }
+  const retryThread = threadWindow.retryThread;
 
-  /** Take the page below what the panel holds. One page per call; the read's
-   *  `hasMore` says whether another exists. `walkTo` and the panel's own
-   *  scrolling both come through here, and both need to know whether a page
-   *  was actually taken: a call that returns while another page is in flight
-   *  fetched nothing, and a walk that counted it would spend its budget on
-   *  pages it never asked for. */
-  async function loadMoreThread(): Promise<"page" | "none" | "failed"> {
-    const root = openThreadRoot;
-    const read = threadRead;
-    if (root === null || read === null) return "none";
-    if (threadLoadingMore) return "none";
-    // The last page can be short and the discussion still be behind the room:
-    // a reply taken since sits past the stretch those pages drew.
-    if (!threadHasMore) return "none";
-    const room = roomId;
-    const cursor = read.lastSeq ?? root - 1;
-    // The rows of this discussion the room shows past the stretch before the
-    // ask: a short page under them is the server's last word for this cursor,
-    // and this count is what that verdict is taken back on. Measured here, so
-    // a reply taken while the page is in flight is not claimed as answered.
-    const beyondBefore = threadRoomBeyondCount(
-      root,
-      threadCovered,
-      conv?.lines ?? [],
-    );
-    threadLoadingMore = true;
-    threadMoreFailed = false;
-    try {
-      const page = await readThreadPage(room, root, cursor);
-      if (page === null) return "none";
-      const next = appendThreadPage(threadRead, page);
-      threadRead = next;
-      recordSpentClaim(next, beyondBefore);
-      threadPages += 1;
-      // A page landed, so whatever the foot said about where the window
-      // stopped is out of date.
-      threadWalkStopped = false;
-      return "page";
-    } catch (e) {
-      console.error("[room thread] next page failed:", e);
-      if (roomId === room && openThreadRoot === root) {
-        threadMoreFailed = true;
-      }
-      return "failed";
-    } finally {
-      if (roomId === room && openThreadRoot === root) {
-        threadLoadingMore = false;
-      }
-    }
-  }
+  /** Take the page below what the panel holds. */
+  const loadMoreThread = threadWindow.loadMoreThread;
 
-  /** The panel's retry after a page failed. A walk that ran into the
-   *  failure still holds its target, so the retry carries it on rather than
-   *  leaving the reader to find the row themselves. */
-  async function retryMore(): Promise<void> {
-    const how = await loadMoreThread();
-    if (how !== "page") return;
-    const target = threadWalkTarget;
-    const root = openThreadRoot;
-    if (target === null || root === null) return;
-    if (typeof target === "number") {
-      await walkAndLand(root, target);
-      return;
-    }
-    await walkTo(target);
-  }
-
-  /** Walk down the open discussion until the target is drawn, or until the
-   *  discussion ends. A quote jump and the way back to the newest reply share
-   *  this walk and its page cap; a walk that stops at the cap keeps its
-   *  target, so the reader can carry on from where it stopped. */
-  async function walkTo(target: number | "newest"): Promise<WalkOutcome> {
-    const root = openThreadRoot;
-    if (root === null || threadRead === null) return "gone";
-    const room = roomId;
-    threadWalkTarget = target;
-    threadWalkStopped = false;
-    threadWalkMissing = false;
-    // Found is a row the panel draws, not a page it fetched: the panel draws
-    // the room's rows inside the stretch it read as well as the pages (see
-    // threadRows), so a row can be on screen while no page returned it. A
-    // position the window has passed is not the same fact.
-    const drawn = (): boolean =>
-      target !== "newest" && threadLines.some((line) => line.seq === target);
-    let pages = 0;
-    // A page already in flight means a fetch of ours returns at once
-    // having taken nothing; the walk waits for that page rather than
-    // spending budget on it, and a wait that never settles leaves the walk
-    // undecided rather than spinning or calling the row absent.
-    let waits = 0;
-    let undecided = false;
-    for (;;) {
-      if (drawn()) break;
-      const read = threadRead;
-      if (read === null || !threadHasMore) break;
-      if (pages >= THREAD_WALK_MAX_PAGES) {
-        threadWalkStopped = true;
-        return "capped";
-      }
-      // Only a page that is actually being read gives the reader anything
-      // to follow: a walk that finds its row here moves no scroll at all.
-      let how: "page" | "none" | "failed";
-      try {
-        threadWalking = true;
-        how = await loadMoreThread();
-      } finally {
-        threadWalking = false;
-      }
-      if (roomId !== room || openThreadRoot !== root) return "gone";
-      if (how === "failed") return "failed";
-      if (how === "none") {
-        if (waits >= WALK_WAIT_LIMIT) {
-          undecided = true;
-          break;
-        }
-        waits += 1;
-        await new Promise((resolve) => setTimeout(resolve, 25));
-        continue;
-      }
-      pages += 1;
-    }
-    if (drawn()) {
-      threadWalkTarget = null;
-      return "found";
-    }
-    if (undecided) {
-      // The page the walk waited on never settled, so the discussion's
-      // end was not read: nothing here says the row is absent. The
-      // target stays, and the foot offers the way on that carries it.
-      const more = threadHasMore;
-      threadWalkStopped = more;
-      threadMoreFailed = !more;
-      return more ? "capped" : "failed";
-    }
-    threadWalkTarget = null;
-    if (target === "newest") return "end";
-    // The discussion ended without drawing the row: no further page can.
-    // This is also where a spent read ends the walk: the gate is shut, so the
-    // row is one no page brings rather than one that was never here, and the
-    // foot's words for it are only approximate. A branch of its own would be
-    // rarer than the sentence costs; see `threadPageClaim`.
-    threadWalkMissing = true;
-    return "end";
-  }
-
-  /** Walk down the open discussion and land on the row that was asked for.
-   *  A quote takes this path whether it opens the discussion or carries on a
-   *  walk that stopped at the page cap: reaching the row and stopping there
-   *  belong together, or the reader is left at the bottom of what was read
-   *  with the row they asked for somewhere above them. */
-  async function walkAndLand(root: number, target: number): Promise<void> {
-    const how = await walkTo(target);
-    if (how !== "found") return;
-    await tick();
-    if (openThreadRoot === root) threadReveal.jump(target);
-  }
+  /** The panel's retry after a page failed: a walk that ran into the failure
+   *  carries on rather than leaving the reader to find the row. */
+  const retryMore = threadWindow.retryMore;
 
   /** Carry on a walk that stopped at the page cap. */
-  async function continueWalk(): Promise<void> {
-    const target = threadWalkTarget;
-    const root = openThreadRoot;
-    if (target === null || root === null) return;
-    threadWalkStopped = false;
-    if (typeof target === "number") {
-      await walkAndLand(root, target);
-      return;
-    }
-    await walkTo(target);
-  }
+  const continueWalk = threadWindow.continueWalk;
 
-  /** Open a discussion and then put the reader on one of its rows: a quote
-   *  can name a reply the transcript never drew, so its jump opens the
-   *  discussion that holds it and walks down to that row rather than asking
-   *  this transcript for a missing row. */
-  async function openThreadAt(root: number, seq: number): Promise<void> {
-    await openThread(root);
-    if (openThreadRoot !== root) return;
-    await walkAndLand(root, seq);
-  }
-
-  /** Send one reply into the open discussion, then walk to the newest row so
-   *  the confirmed echo takes the pending line's place. A rejection goes to
-   *  panel, which keeps the reader's text and shows the shared failure
-   *  line. */
-  async function sendReply(text: string): Promise<void> {
-    const room = roomId;
-    const root = openThreadRoot;
-    if (root === null) return;
-    await roomConversationsStore.send(room, text, { thread: root });
-    if (roomId !== room || openThreadRoot !== root) return;
-    await walkTo("newest");
-  }
+  /** Send one reply into the open discussion, then follow it to the newest
+   *  row so the confirmed echo takes the pending line's place. */
+  const sendReply = threadWindow.sendReply;
 
   /** The panel's way back to the discussion's newest reply: the same walk a
    *  reply takes, so it stops at the same page cap. */
   async function returnToNewest(): Promise<void> {
     if (openThreadRoot === null) return;
-    await walkTo("newest");
+    await threadWindow.walkTo("newest");
   }
 
-  /** Close the panel: the discussion leaves, and so does everything read of
-   *  it, so opening it again starts at its root page. */
+  /** The words a room entry uses for its discussion: the count, and the last
+   *  sender. Built in one place so the sentence the eye reads and the label a
+   *  screen reader hears are the same words in the same order -- an entry whose
+   *  name said something the header does not would be two accounts of one row. */
+  function threadSummaryText(summary: ThreadEntry): {
+    readonly head: string;
+    readonly tail?: string;
+    readonly label: string;
+  } {
+    const head =
+      summary.count === undefined
+        ? room_thread_view()
+        : summary.count === 1
+          ? room_thread_replies_one({ count: summary.count })
+          : room_thread_replies_other({ count: summary.count });
+    const tail =
+      summary.last === undefined
+        ? undefined
+        : room_thread_last_from({ handle: summary.last.senderHandle });
+    const label = tail === undefined ? head : head + " · " + tail;
+    return { head, tail, label };
+  }
+
+  /** Close the panel. Nothing opens it (see the root's comment above); the
+   *  sheet's dismiss still calls this, and it drops all the window read. */
   function closeThread(): void {
     openThreadRoot = null;
-    clearThreadWindow();
+    threadWindow.clear();
   }
-
-  // The rows the panel draws: the pages read so far, plus the room's own rows
-  // of this discussion inside the stretch those pages cover, which a read may
-  // not return (an own pending send; a reply whose declared head was missing
-  // when it was written, and so stored no root). `threadCovered` carries the
-  // stretch past the last page over rows the room already holds, so a reply
-  // that lands after the read still shows.
-  const threadLines = $derived(
-    openThreadRoot === null
-      ? []
-      : threadRows(
-          openThreadRoot,
-          conv?.lines ?? [],
-          threadRead?.lines ?? [],
-          threadCovered,
-        ),
-  );
-
-  // The panel asks for a page while the read says more, and while the room
-  // holds a row of this discussion past the stretch its pages drew; it stops
-  // once a short page has answered for exactly those rows, because no page
-  // starts below them. See `threadPaging`.
-  const threadHasMore = $derived(threadPagingNow.more);
-
-  // Whether the panel has read the discussion to its end. A window that stops
-  // on a full page, or one the room still holds rows of, may not present
-  // itself as the whole: the gate closing is not the same fact as the read
-  // having drawn every row.
-  const threadIsComplete = $derived(
-    threadAtEnd(threadRead) && threadBeyond === 0,
-  );
 
   // Where the open discussion's root sits relative to the loaded window, read
   // from the same grouping the transcript draws: the entry and the panel header
@@ -581,44 +264,21 @@
     ),
   );
 
-  // The panel's own row table: it draws replies the transcript does not, so a
-  // quote whose target is a reply lands here.
-  const threadReveal = createReveal({
-    scope: () =>
-      openThreadRoot === null ? undefined : `${roomId}:${openThreadRoot}`,
-    describe: (seq) => {
-      const line = threadLines.find((row) => row.seq === seq);
-      if (line === undefined) return undefined;
-      return roomRowAnnouncement(line, {
-        time: formatStamp(line.createdAt, ROW_TIME),
-        authorLabel: memberById.get(line.senderId)?.label,
-      });
-    },
-  });
-
   // Why the reader is in the open discussion, as the panel header says it:
   // null when the read could not see the whole discussion, so a half
   // discussion never explains the wrong reason.
-  const membership = $derived(
-    openThreadRoot === null
-      ? null
-      : threadMembership(
-          openThreadRoot,
-          threadLines,
-          archeionSession.participantId,
-          threadIsComplete,
-        ),
-  );
+  const membership = $derived(threadWindow.membership);
 
   /** The discussion a quote target belongs to: a head is its own, a reply is
    *  filed under another row. */
   function quotedRoot(seq: number): number | undefined {
-    const line = conv?.lines.find((row) => row.seq === seq);
-    return line === undefined ? undefined : threadRoot(line);
+    const line = lineIndex.get(seq);
+    return line === undefined ? undefined : threadDiscussion(line, lineIndex);
   }
 
   /** A quote block's jump. A head is drawn here, so scroll to it; a reply is
-   *  drawn only in the panel, so open the discussion that holds it. */
+   *  drawn in the discussion that holds it, so the reader goes there and lands
+   *  on the row. */
   function jumpToQuote(seq: number): void {
     const root = quotedRoot(seq);
     if (root === undefined) return;
@@ -626,18 +286,14 @@
       reveal.jump(seq);
       return;
     }
-    void openThreadAt(root, seq);
+    void navigate(roomThreadPath(roomId, root, { at: seq }));
   }
 
   /** The id that describes a quote block: the target row's own hidden label,
-   *  and only while this view draws that row. A reply's label lives in the
-   *  panel, so the block points there while that panel is open; a closed panel
-   *  would leave a dangling id. */
+   *  and only while this view draws that row. A reply is drawn on its
+   *  discussion's page, so a block naming one points nowhere here. */
   function quoteAnchor(seq: number): string | undefined {
-    const root = quotedRoot(seq);
-    if (root === undefined) return undefined;
-    if (root === seq) return roomRowAnchorId(seq);
-    return openThreadRoot === root ? roomThreadRowAnchorId(seq) : undefined;
+    return quotedRoot(seq) === seq ? roomRowAnchorId(seq) : undefined;
   }
 
   // Width decides where the panel lives: a column beside the room on lg+, a
@@ -653,49 +309,22 @@
 
   // Whether the roster has landed -- the chip draws the bare short id until
   // it does.
-  const rosterLoaded = $derived(conv?.roster != null);
+  const rosterLoaded = $derived(session.rosterLoaded);
 
-  // Open the conversation (loads the history). Driven from an effect (not a
-  // one-shot onMount) gated on the self participant id (needed to flag own
-  // messages -- `mine`). Otherwise a refresh races open() ahead of it resolving
-  // and bakes wrong `mine` flags into the rendered lines. open() is idempotent
-  // and re-opens from an error state, so re-firing once ready recovers it.
-  // Refresh the roster alongside for an at-once member count.
+  // Open the conversation (loads the history) through the room session, gated
+  // on the self participant id: own `mine` flags need it, and a refresh racing
+  // open() ahead of it would bake wrong flags into the rendered lines. open()
+  // is idempotent and re-opens from an error state, so re-firing once ready
+  // recovers it.
   //
-  // The store calls are commands keyed on the participant id, not reactive
-  // derivations, so they run inside `untrack`: enter() reads the very entry
-  // fields it resets, and the cleanup's leaveRoom() advances them -- tracked,
-  // every unread-store write re-fired this effect, and with two instances of
-  // the page mounted the interleaved cleanup writes drove the knownSeq
-  // ping-pong into effect_update_depth_exceeded (operator live log 2026-09-01).
+  // The effect learns the room id through session.sync(), which reads the
+  // getter untracked only around its store commands: the page instance
+  // survives a room-id change (the route keys on the pattern, not the id), so
+  // a change must open the room that is now on screen.
   $effect(() => {
     if (!archeionSession.participantId) return;
-    untrack(() => {
-      void roomConversationsStore.open(roomId);
-      // Viewing: an explicitly opened room page clears its badge
-      // and starts the cursor-write schedule; the cleanup (unmount or a
-      // participantId re-fire) syncs the watermark to the conversation's live
-      // cursor and flushes the write.
-      unreadStore.enter(roomKey(roomId));
-      void roomConversationsStore.refreshRoster(roomId);
-    });
-    return () => untrack(() => unreadStore.leaveRoom(roomId, conv?.lastSeq));
-  });
-
-  // Slow poll: the dropped-frame backstop for the room_membership_changed
-  // roster nudge + offline-member catch-up. Bounded so a long-idle open tab
-  // does not spin. Cleared on unmount.
-  onMount(() => {
-    const stop = startVisibleInterval(() => {
-      // A terminal error (e.g. this member was removed) stops the poll: the
-      // room is gone to this user, and refreshing would only loop the failure.
-      if (conv?.status === "error") return;
-      void roomConversationsStore.refresh(roomId);
-      // Refresh the roster (member count + creator badge) at the same cadence;
-      // the room_membership_changed SSE is the faster trigger.
-      void roomConversationsStore.refreshRoster(roomId);
-    }, 10_000);
-    return () => stop();
+    session.sync();
+    return () => untrack(() => session.stop());
   });
 
   // Stick to the tail as lines arrive; stop once the user scrolls up to read.
@@ -736,14 +365,10 @@
   }
   // Session-key reset must be declared BEFORE the stick effect: effects in
   // the same flush run in declaration order, so a param change resets the
-  // controllers before stick() observes the new room's lines. A pending
-  // quote is not cleared here: the bar reads it through armedQuoteSeq, which
-  // compares scopes only, so a seq armed in the room just left is unreadable
-  // here while the state stays: returning to that room shows the strip again,
-  // and cancelling or sending are the two paths that clear it. The sentence
-  // the reveal spoke goes with them, from this effect's cleanup: destroy()
-  // reads back the spoken slot it wrote to flip it, and a tracked body would
-  // register that read and dirty itself; a cleanup has no reaction to record.
+  // controllers before stick() observes the new room's lines. The sentence the
+  // reveal spoke goes with them, from this effect's cleanup: destroy() reads
+  // back the spoken slot it wrote to flip it, and a tracked body would register
+  // that read and dirty itself; a cleanup has no reaction to record.
   $effect(() => {
     void roomId;
     // The page instance survives a room-id change (the route keys on the
@@ -753,7 +378,6 @@
     scroll.reset();
     return () => {
       reveal.destroy();
-      threadReveal.destroy();
     };
   });
   $effect(() => {
@@ -791,6 +415,14 @@
   // action row to it on a raw toggle.
   const togglePin = createTogglePin(() => scroll.viewport);
 
+  // The transcript turns native anchoring off, so a discussion row that gains a
+  // reply preview while the reader is further down would push what they are
+  // reading down with it. One growth pin for the whole transcript, as with the
+  // toggle above; the rows that can grow hang it on themselves with `use:`. A row
+  // takes one of the two: `pin` follows a click for a moment, this one stays
+  // subscribed, and two writers on one `scrollTop` would double-correct.
+  const aboveFoldPin = createAboveFoldPin(() => scroll.viewport);
+
   // Jumping to the row a quote names: the same row table, scroll and brief
   // mark the 1:1 transcript uses, keyed by this room's seq.
   const reveal = createReveal({
@@ -798,7 +430,7 @@
     // A jump moves focus without a word, so the controller speaks the row it
     // landed on: the author and time that row's own label names.
     describe: (seq) => {
-      const line = conv?.lines.find((row) => row.seq === seq);
+      const line = lineIndex.get(seq);
       if (line === undefined) return undefined;
       return roomRowAnnouncement(line, {
         time: formatStamp(line.createdAt, ROW_TIME),
@@ -807,26 +439,28 @@
     },
   });
 
+  // A deep link that names a row: a discussion's own page sends its room
+  // step here, and the reader expects to land on that discussion rather than
+  // the room's newest line. Landing happens once per room and row, after the
+  // history lands -- a refresh of the same link must not pull the reader
+  // back. A row the loaded window does not hold leaves the reader at the
+  // newest line, which is where the transcript opens anyway.
+  let landedKey: string | null = null;
+  $effect(() => {
+    const key = `${roomId}:${at ?? ""}`;
+    if (landedKey === key || !conv?.historyLoaded) return;
+    landedKey = key;
+    const landAt = rowParamOf(at);
+    if (landAt === null) return;
+    untrack(() => reveal.land(landAt));
+  });
+
   const disabled = $derived(!conv?.historyLoaded);
 
   // The togglable member side-panel (online dots driven by the room's live
   // online-member set + roster identity).
   let showMembers = $state(false);
 
-  // The row this send answers, tagged with the room that armed it: one quote
-  // at a time, replaced by quoting another row and spent by sending or Escape.
-  let pendingQuote = $state<ArmedQuote | null>(null);
-
-  // Reads go through one gate: a seq armed in the room just left numbers a
-  // different row here, so the bar, the preview and the send see undefined.
-  const armedSeq = $derived(armedQuoteSeq(pendingQuote, roomId));
-
-  // Only a row the room has numbered can be quoted: an optimistic line has no
-  // seq the other side could resolve, and a failed one is about to be resent as
-  // a different line.
-  function quotable(line: RoomLine): boolean {
-    return line.seq > 0 && !roomLinePending(line) && !line.failed;
-  }
   // A flash timer outliving the transcript would touch a torn-down view:
   // the final teardown runs the reveal's own cleanup -- its mark and
   // sentence with the timer -- and a room swap drops the sentence from its
@@ -837,15 +471,13 @@
 
   const composer = createComposer({
     send: (text) => {
-      // One send spends the strips: the picks and the quote are captured here
-      // and cleared before the transport await, so a second submit cannot
-      // inherit what the user already spent. A failed send keeps both on the
-      // optimistic line, which is where the retry reads them back.
+      // The picks are the send's: captured here and cleared before the
+      // transport awaits, so a second submit cannot inherit what the user
+      // already spent. A failed send keeps them on the optimistic line, which
+      // is where the retry reads them back.
       const mentions = picker.picked;
-      const quote = armedSeq;
       picker.clear();
-      pendingQuote = null;
-      return roomConversationsStore.send(roomId, text, { mentions, quote });
+      return roomConversationsStore.send(roomId, text, { mentions });
     },
     // Busy is not a gate: send renders the optimistic line at once + posts.
     canSubmit: () => conv?.historyLoaded ?? false,
@@ -905,15 +537,6 @@
     }
     return false;
   }
-
-  // The row the armed quote points at, re-resolved every render against the
-  // window: a row that scrolls out of it drops to the neutral author label
-  // instead of showing stale copy.
-  const quotedLine = $derived(
-    armedSeq === undefined
-      ? undefined
-      : conv?.lines.find((line) => line.seq === armedSeq),
-  );
 
   // The message wire carries the sender's kind + server-resolved stable handle
   // (the lesche derives it fresh at read time via the same resolver the roster
@@ -996,6 +619,7 @@
     {#snippet threadPanel()}
       <ThreadPanel
         root={openThreadRoot ?? 0}
+        {roomId}
         lines={threadLines}
         roomLines={conv.lines}
         {memberById}
@@ -1016,9 +640,7 @@
         onContinueWalk={continueWalk}
         onReturnToNewest={returnToNewest}
         onDiscard={discardReplyLine}
-        trackRow={threadReveal.trackRow}
-        highlightId={threadReveal.highlightId}
-        onQuoteJump={(seq) => threadReveal.jump(seq)}
+        bind:this={threadBody}
       />
     {/snippet}
     <div class="flex-1 min-h-0 flex">
@@ -1052,7 +674,7 @@
             aria-label={chat_transcript_aria()}
             onscroll={scroll.onScroll}
           >
-            <div class="mx-auto w-full max-w-[80rem] p-4 flex flex-col gap-3">
+            <div class={TRANSCRIPT_COLUMN}>
               {#if conv.lines.length === 0}
                 <p class="text-sm opacity-60 text-center mt-8">
                   {room_empty()}
@@ -1082,53 +704,138 @@
                   line.senderHandle,
                   line.senderTagmaId,
                 )}
+                {@const shape = roomRowShape(group)}
+                {@const summary = threadEntry(group, countsKnown)}
+                {@const preview = threadPreview(group)}
+                {@const words = threadSummaryText(summary)}
                 {#snippet extraActions()}
-                  {#if quotable(line)}
+                  {#if quotableLine(line)}
                     <QuoteButton
                       onclick={() =>
-                        (pendingQuote = { scope: roomId, seq: line.seq })}
+                        void navigate(
+                          roomThreadPath(roomId, group.root, {
+                            quote: line.seq,
+                          }),
+                        )}
                     />
                   {/if}
                 {/snippet}
+
+                <!-- The discussion a row IS: the summary sits inside the
+                     bubble, and the whole box opens the discussion. -->
+                <!-- A failed line is never an entry: a discussion's head is a row
+                     the room numbered, and a failed line of the reader's own has
+                     no number yet. -->
+                <!-- Copy both surfaces share. The stamp is the one difference:
+                     an entry button is the only place a reader learns when the
+                     last reply landed (no bubble body sits under it), while a
+                     footer sits under the full text, where a stamp would only
+                     squeeze it. -->
+                {#snippet threadSummaryLines(withStamp: boolean)}
+                  <span class="font-medium shrink-0">{words.head}</span>
+                  {#if words.tail !== undefined}
+                    <span class="opacity-60 truncate">
+                      · {words.tail}{#if withStamp && summary.last !== undefined}
+                        · {formatStamp(summary.last.createdAt, ROW_TIME)}{/if}
+                    </span>
+                  {/if}
+                {/snippet}
+                {#snippet threadSummary()}
+                  <!-- The entry says what its discussion holds and shows the
+                     start of it; the whole strip opens it. The name a screen
+                     reader hears is the header's own sentence (`words.label`),
+                     so nothing is announced that the eye is not reading. A row
+                     leads with the body and trails the author at the row's own
+                     size, and no divider separates the strip from the message:
+                     the ring already bounds the block. Sizes, the cap and the
+                     opacity live with PREVIEW_ROW and PREVIEW_HANDLE. -->
+                  <button
+                    type="button"
+                    aria-label={words.label}
+                    class="mt-2 w-full min-w-0 pt-1.5 text-left text-xs flex flex-col gap-1 cursor-pointer"
+                    onclick={(event) => {
+                      if (!selectionHoldsText(selectionAtClick(event))) {
+                        void navigate(roomThreadPath(roomId, group.root));
+                      }
+                    }}
+                  >
+                    <span class="flex items-center gap-1.5 min-w-0">
+                      <MessageSquare
+                        class="size-3.5 shrink-0"
+                        aria-hidden="true"
+                      />
+                      {@render threadSummaryLines(false)}
+                    </span>
+                    {#if preview.rows.length > 0}
+                      <span class="flex flex-col gap-1 min-w-0">
+                        {#each preview.rows as row (row.seq)}
+                          <span class={PREVIEW_ROW}>
+                            <span class="line-clamp-2 break-words min-w-0"
+                              >{row.text}</span
+                            >
+                            <span
+                              class={PREVIEW_HANDLE}
+                              title={row.senderHandle}>{row.senderHandle}</span
+                            >
+                          </span>
+                        {/each}
+                      </span>
+                    {/if}
+                  </button>
+                {/snippet}
                 <div
                   use:reveal.trackRow={line.seq}
+                  use:holdAboveFold={shape === "thread"
+                    ? aboveFoldPin
+                    : undefined}
                   tabindex="-1"
                   class="group flex flex-col {line.mine
                     ? 'items-end'
                     : 'items-start'} {revealMark(reveal.highlightId, line.seq)}"
                 >
-                  <span id={roomRowAnchorId(line.seq)} class="sr-only">
-                    {rowLabel}
-                  </span>
-                  <span
-                    class="text-xs px-1 mb-0.5 max-w-[80%] min-w-0 flex items-center"
-                  >
-                    <SenderIdentity
-                      kind={line.senderKind}
-                      handle={line.senderHandle}
-                      label={memberById.get(line.senderId)?.label}
-                      {href}
-                    />
-                  </span>
-                  <MessageRow mine={line.mine}>
-                    <MessageBubble
-                      {extraActions}
-                      text={line.text}
-                      markdown={line.senderKind === "agent"}
-                      mine={line.mine}
-                      {pending}
-                      bare={pending}
-                      pin={togglePin}
-                      quote={q}
-                      quoteDescribedBy={quoteTarget === undefined
-                        ? undefined
-                        : quoteAnchor(quoteTarget)}
-                      mentions={chips}
-                      onQuoteClick={quoteTarget === undefined
-                        ? undefined
-                        : () => jumpToQuote(quoteTarget)}
-                    />
-                  </MessageRow>
+                  {#if shape !== "entry"}
+                    <span id={roomRowAnchorId(line.seq)} class="sr-only">
+                      {rowLabel}
+                    </span>
+                    <span
+                      class="text-xs px-1 mb-0.5 max-w-[80%] min-w-0 flex items-center"
+                    >
+                      <SenderIdentity
+                        kind={line.senderKind}
+                        handle={line.senderHandle}
+                        label={memberById.get(line.senderId)?.label}
+                        {href}
+                      />
+                    </span>
+                    <MessageRow mine={line.mine}>
+                      <MessageBubble
+                        {extraActions}
+                        text={line.text}
+                        markdown={line.senderKind === "agent"}
+                        mine={line.mine}
+                        {pending}
+                        footer={shape === "thread" ? threadSummary : undefined}
+                        entry={shape === "thread"
+                          ? () => {
+                              void navigate(roomThreadPath(roomId, group.root));
+                            }
+                          : undefined}
+                        noActionRow={pending || shape === "thread"}
+                        pin={shape === "thread" ? undefined : togglePin}
+                        quote={q}
+                        quoteDescribedBy={quoteTarget === undefined
+                          ? undefined
+                          : quoteAnchor(quoteTarget)}
+                        mentions={chips}
+                        onQuoteClick={quoteTarget === undefined
+                          ? undefined
+                          : () => jumpToQuote(quoteTarget)}
+                      />
+                    </MessageRow>
+                  {/if}
+                  <!-- The send's own state, not the row's body: a reply whose
+                       discussion head is out of the window is not drawn here,
+                       but its Retry and its way out still are. -->
                   {#if line.mine && pending && !line.failed}
                     <span
                       class="text-xs opacity-50 animate-pulse"
@@ -1151,30 +858,17 @@
                       onConfirm={() => discardRow(line.seq)}
                     />
                   {/if}
-                  {#if group.replies.length > 0 || group.rootState !== "rooted"}
-                    {@const entry = threadEntry(group, countsKnown)}
+                  {#if shape === "entry"}
                     <button
                       type="button"
                       class="mt-1 text-xs px-2 py-1 rounded-base preset-tonal-surface hover:preset-filled-surface-500 flex items-center gap-1.5 max-w-[80%] min-w-0"
-                      onclick={() => void openThread(group.root)}
+                      onclick={(event) => {
+                        if (!selectionHoldsText(selectionAtClick(event))) {
+                          void navigate(roomThreadPath(roomId, group.root));
+                        }
+                      }}
                     >
-                      <span class="font-medium shrink-0">
-                        {#if entry.count === undefined}
-                          {room_thread_view()}
-                        {:else if entry.count === 1}
-                          {room_thread_replies_one({ count: entry.count })}
-                        {:else}
-                          {room_thread_replies_other({ count: entry.count })}
-                        {/if}
-                      </span>
-                      {#if entry.last}
-                        <span class="opacity-60 truncate">
-                          · {room_thread_last_from({
-                            handle: entry.last.senderHandle,
-                          })}
-                          · {formatStamp(entry.last.createdAt, ROW_TIME)}
-                        </span>
-                      {/if}
+                      {@render threadSummaryLines(true)}
                     </button>
                   {/if}
                   {#if entryRootStates.get(group.root) === "older"}
@@ -1198,11 +892,9 @@
             </div>
           </div>
           {#if !scroll.follow}
-            <!-- No z-index on purpose: the members panel (z-10, a later
-          sibling) must win when open. -->
-            <div
-              class="absolute inset-x-0 bottom-4 mx-auto flex max-w-[80rem] justify-end px-4 pointer-events-none"
-            >
+            <!-- The bare pill, not the raised one: the members panel is a
+          later sibling at the same level and must win when open. -->
+            <div class={SCROLL_PILL}>
               <ScrollToBottomButton
                 missed={scroll.missed}
                 onclick={() => scroll.forceBottom()}
@@ -1261,7 +953,6 @@
           disabledNotice={room_unavailable()}
           onSubmitted={() => scroll.forceBottom()}
           onResized={() => scroll.reanchorIfFollowing()}
-          onCancelQuote={() => (pendingQuote = null)}
           {onComposeKey}
           mentionAria={{
             open: picker.open,
@@ -1271,20 +962,9 @@
                 : mentionOptionId(picker.activeId),
           }}
         >
-          <!-- The two strips and the popup live in the composer's own slot family:
-           the quote this send answers, the members it names, and the
-           candidates while an `@` token is open. -->
-          {#snippet quoteBar()}
-            {#if armedSeq !== undefined}
-              <QuoteBar
-                author={quotedLine?.senderHandle}
-                preview={quotedLine === undefined
-                  ? undefined
-                  : previewOf(quotedLine)}
-                onCancel={() => (pendingQuote = null)}
-              />
-            {/if}
-          {/snippet}
+          <!-- The strips and the popup live in the composer's own slot family:
+           the members this send names, and the candidates while an `@` token
+           is open. -->
           {#snippet mentionBar()}
             {#if pickedChips.length > 0}
               <div class="mb-1">
@@ -1307,6 +987,8 @@
           {/snippet}
         </Composer>
       </div>
+      <!-- The aside the panel would sit in. The gate never opens: its root is
+           null from the first render on (see the root's comment above). -->
       {#if wide && openThreadRoot !== null}
         <aside
           class="w-96 max-w-[40vw] shrink-0 min-h-0 flex flex-col border-l border-surface-200-800 bg-surface-100-900"
@@ -1316,6 +998,7 @@
         </aside>
       {/if}
     </div>
+    <!-- The sheet the same panel would fill. The gate never opens, as above. -->
     {#if !wide && openThreadRoot !== null}
       <Dialog
         open={true}

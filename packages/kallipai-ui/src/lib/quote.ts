@@ -113,26 +113,6 @@ export function unresolvedQuote(
   return { status };
 }
 
-/** A quote armed by a transcript, tagged with the transcript that armed it. */
-export interface ArmedQuote {
-  /** The transcript that armed it: a room id, on a room surface. */
-  readonly scope: string;
-  /** The row seq armed within that transcript. */
-  readonly seq: number;
-}
-
-/** The seq a read should act on: the armed one, only while its own transcript
- *  is still the one on screen. Every transcript numbers its rows from 1, so a
- *  seq armed in the transcript just left names a different row here. The quote
- *  bar, the preview lookup and the send all read through this one gate, so none
- *  of them can reach a row of a transcript the user has left. */
-export function armedQuoteSeq(
-  armed: ArmedQuote | null,
-  scope: string,
-): number | undefined {
-  return armed !== null && armed.scope === scope ? armed.seq : undefined;
-}
-
 /** The minimum a loaded line must expose for a window quote lookup. */
 export interface QuotableLine extends Previewable {
   /** The seq the surface assigned this line, unique within its transcript;

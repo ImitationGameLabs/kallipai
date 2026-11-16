@@ -7,18 +7,21 @@
 import { assert, assertEquals } from "@std/assert";
 import { type RoomLine } from "./room-message.ts";
 import {
+  declaredThread,
   drawnRootState,
   threadAtEnd,
+  threadDiscussion,
   threadEntry,
+  threadPreview,
   threadGroups,
   threadMembership,
-  threadRoot,
   threadRows,
   appendThreadPage,
   threadWindowEnd,
   threadPageClaim,
   threadPaging,
   threadRoomBeyondCount,
+  roomRowShape,
 } from "./threads.ts";
 
 function line(seq: number, thread?: number, failed?: boolean): RoomLine {
@@ -35,6 +38,10 @@ function line(seq: number, thread?: number, failed?: boolean): RoomLine {
   };
 }
 
+function quoting(seq: number, quote: number): RoomLine {
+  return { ...line(seq), quote };
+}
+
 Deno.test("a head and its replies form one group", () => {
   const groups = threadGroups([line(1), line(2), line(3, 1), line(4)]);
   assertEquals(groups.length, 3);
@@ -47,6 +54,82 @@ Deno.test("a head and its replies form one group", () => {
   assertEquals(groups[0].rootState, "rooted");
   assertEquals(groups[1].head.seq, 2);
   assertEquals(groups[1].replies.length, 0);
+});
+
+Deno.test("a row that only quotes another joins that discussion", () => {
+  // A send from the room composer quotes a row without declaring a thread,
+  // so the stored row carries the quote alone: the discussion is the one it
+  // answers, and the top level keeps the row it quotes.
+  const groups = threadGroups([line(1), line(2), quoting(3, 1)]);
+  assertEquals(groups.length, 2);
+  assertEquals(groups[0].root, 1);
+  assertEquals(
+    groups[0].replies.map((r) => r.seq),
+    [3],
+  );
+  assertEquals(groups[0].rootState, "rooted");
+  assertEquals(groups[1].root, 2);
+  assertEquals(groups[1].replies.length, 0);
+});
+
+Deno.test(
+  "a quote of a reply joins the discussion the reply belongs to",
+  () => {
+    const groups = threadGroups([line(1), line(2, 1), quoting(3, 2)]);
+    assertEquals(groups.length, 1);
+    assertEquals(groups[0].root, 1);
+    assertEquals(
+      groups[0].replies.map((r) => r.seq),
+      [2, 3],
+    );
+  },
+);
+
+Deno.test("a quote stored before threads came along walks to the head", () => {
+  // The second row quotes the first, so both answer the head the chain ends
+  // at rather than the row each names.
+  const groups = threadGroups([line(1), quoting(2, 1), quoting(3, 2)]);
+  assertEquals(groups.length, 1);
+  assertEquals(groups[0].root, 1);
+  assertEquals(
+    groups[0].replies.map((r) => r.seq),
+    [2, 3],
+  );
+});
+
+Deno.test(
+  "a quote naming a row the window does not hold leaves no head",
+  () => {
+    // Nobody loads the quoted row here, so the discussion's head is out of
+    // reach: the grouping still files the quoting row as a reply, and the view
+    // keeps the entry rather than drawing that reply as a topic.
+    const groups = threadGroups([line(5), quoting(6, 3)]);
+    assertEquals(groups.length, 2);
+    assertEquals(groups[1].root, 3);
+    assertEquals(groups[1].rootState, "older");
+    assertEquals(groups[1].head.seq, 6);
+    assertEquals(groups[1].replies.length, 0);
+  },
+);
+
+Deno.test("a cycle of quotes resolves to a name, not a hang", () => {
+  const four = quoting(4, 5);
+  const five = quoting(5, 4);
+  const bySeq = new Map<number, RoomLine>([
+    [4, four],
+    [5, five],
+  ]);
+  assertEquals(threadDiscussion(four, bySeq), 5);
+  assertEquals(threadDiscussion(five, bySeq), 4);
+});
+
+Deno.test("the panel draws a quote-only row the stretch covers", () => {
+  const loaded = [line(1), quoting(2, 1)];
+  const rows = threadRows(1, loaded, [line(1)], 2);
+  assertEquals(
+    rows.map((r) => r.seq),
+    [1, 2],
+  );
 });
 
 Deno.test("a root the panel draws is rooted over the window's verdict", () => {
@@ -130,7 +213,7 @@ Deno.test(
 Deno.test("a live head with no thread heads its own discussion", () => {
   const groups = threadGroups([line(1), line(-7)]);
   assertEquals(groups.length, 2);
-  assertEquals(threadRoot(line(-7)), -7);
+  assertEquals(declaredThread(line(-7)), -7);
   assertEquals(groups[1].head.seq, -7);
   assertEquals(groups[1].rootState, "rooted");
 });
@@ -402,6 +485,8 @@ Deno.test("a window stops at the first seq the room does not hold", () => {
   // made, so the row waits until the missing ones arrive.
   const loaded = [line(1), line(2, 1), line(5, 1)];
   assertEquals(threadWindowEnd(2, loaded), 2);
+  // The row past the gap waits for the pages it declares: one for this
+  // discussion returns it, and drawing it here would jump the stretch.
   assertEquals(threadRows(1, loaded, [line(1), line(2, 1)], 2).length, 2);
 });
 
@@ -482,6 +567,19 @@ Deno.test("a short page over another discussion's rows is not spent", () => {
   assertEquals(threadRoomBeyondCount(7, 2, loaded), 1);
 });
 
+Deno.test("a row only a quote places is drawn, not asked for", () => {
+  // A hole this row falls through: it answers row 1 but declares no root, so
+  // no page for discussion 1 can bring it back, and counting it would ask for
+  // a page that answers with what the reader already has. Leaving it out of
+  // the panel too would draw it nowhere at all, whoever sent it.
+  const loaded = [line(1), line(2, 1), quoting(4691, 1)];
+  assertEquals(threadRoomBeyondCount(1, 2, loaded), 0);
+  assertEquals(
+    threadRows(1, loaded, [], 2).map((row) => row.seq),
+    [1, 2, 4691],
+  );
+});
+
 Deno.test(
   "a short page with nothing of this discussion past it is its end",
   () => {
@@ -553,3 +651,128 @@ Deno.test("a page asked for before the room took a row earns one more", () => {
   assertEquals(gate.spent, false);
   assertEquals(gate.more, true);
 });
+
+Deno.test("a discussion with replies is drawn as its own entry", () => {
+  const [group] = threadGroups([line(1), line(2, 1)]);
+  assertEquals(roomRowShape(group), "thread");
+});
+
+Deno.test("a message nobody answered is drawn plain", () => {
+  const [group] = threadGroups([line(1)]);
+  assertEquals(roomRowShape(group), "plain");
+});
+
+Deno.test(
+  "a discussion whose head is out of the window keeps the button",
+  () => {
+    // No body is drawn for this group, so there is nothing to make clickable:
+    // the entry button and its note stay the only way in.
+    const [group] = threadGroups([line(5, 99)]);
+    assert(group.rootState !== "rooted", "the head is not in the window");
+    assertEquals(roomRowShape(group), "entry");
+  },
+);
+
+Deno.test(
+  "a discussion that fell off the top of the window keeps the button",
+  () => {
+    // The head is below every row the window holds, so it is older than the
+    // window, not still ahead of it: the reader can still open it.
+    const [group] = threadGroups([line(10, 3), line(11)]);
+    assertEquals(group.rootState, "older");
+    assertEquals(roomRowShape(group), "entry");
+  },
+);
+
+Deno.test("a discussion whose only reply has failed is still a bubble", () => {
+  // The reply is drawn even though it never landed: the reader keeps its
+  // retry, and the summary still opens the discussion.
+  const [group] = threadGroups([line(1), line(-1, 1, true)]);
+  assertEquals(group.rootState, "rooted");
+  assertEquals(group.replies.length, 1);
+  assertEquals(roomRowShape(group), "thread");
+});
+
+Deno.test("an entry previews the start of its discussion", () => {
+  // The preview answers what the discussion is about, so it takes the first
+  // replies in transcript order; opening the page carries on from there.
+  const [group] = threadGroups([
+    line(1),
+    line(2, 1),
+    line(3, 1),
+    line(4, 1),
+    line(5, 1),
+  ]);
+  const preview = threadPreview(group);
+  assertEquals(
+    preview.rows.map((row) => row.seq),
+    [2, 3, 4],
+  );
+});
+
+Deno.test("a preview shows only replies the room holds", () => {
+  // A pending line of the reader's own and a failed one sit in the window but
+  // not in the room: a preview is exactly where one of those could pass for a
+  // message somebody else received.
+  const [group] = threadGroups([
+    line(1),
+    line(-2, 1),
+    line(-3, 1, true),
+    line(4, 1),
+  ]);
+  const preview = threadPreview(group);
+  assertEquals(
+    preview.rows.map((row) => row.seq),
+    [4],
+  );
+});
+
+Deno.test("a preview skips a reply with nothing to say", () => {
+  // An empty body is a gap in a list of lines, not a message; skipping it also
+  // keeps it from taking one of the places the preview has.
+  const [group] = threadGroups([
+    line(1),
+    { ...line(2, 1), text: "   " },
+    line(3, 1),
+  ]);
+  const preview = threadPreview(group);
+  assertEquals(
+    preview.rows.map((row) => row.seq),
+    [3],
+  );
+});
+
+Deno.test("a preview does not wait for the window to catch up", () => {
+  // The window is a prefix, so the replies it holds of a discussion are that
+  // discussion's first ones; a count waits for the window to reach the present,
+  // a preview does not.
+  const [group] = threadGroups([line(1), line(2, 1), line(3, 1)]);
+  assertEquals(
+    threadPreview(group).rows.map((row) => row.seq),
+    [2, 3],
+  );
+});
+
+Deno.test(
+  "a preview draws nothing when the head is not among the lines held",
+  () => {
+    // Two ways the head can be missing while one of its replies is in the
+    // window, so a row is there to draw and the gate is the only reason not
+    // to: calling line 7 the start would make a stretch of the middle look
+    // like one. Below the window, then above it.
+    const group = threadGroups([line(6, 3), line(7, 3)])[0];
+    assertEquals(group.repliesExact, false);
+    assertEquals(
+      group.confirmed.map((row) => row.seq),
+      [7],
+    );
+    assertEquals(threadPreview(group).rows.length, 0);
+    const ahead = threadGroups([line(6, 9), line(7, 9)])[0];
+    assertEquals(ahead.repliesExact, false);
+    assertEquals(
+      ahead.confirmed.map((row) => row.seq),
+      [7],
+    );
+    assertEquals(threadPreview(ahead).rows.length, 0);
+  },
+);

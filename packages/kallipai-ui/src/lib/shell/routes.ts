@@ -63,3 +63,29 @@ export function adminGatewayCollectionPath(name: string): string {
 export function gatewayPath(): string {
   return "/gateway";
 }
+
+/** A room's transcript: `/rooms/<id>`, optionally landing on a row. */
+export function roomPath(
+  roomId: string,
+  options: { at?: number } = {},
+): string {
+  const path = `/rooms/${roomId}`;
+  return options.at === undefined ? path : `${path}?at=${options.at}`;
+}
+
+/** One discussion's own page: `/rooms/<id>/threads/<root>`.
+ *  `at` lands the read on a reply; `quote` hands the page a row to answer. */
+export function roomThreadPath(
+  roomId: string,
+  root: number,
+  options: { at?: number; quote?: number } = {},
+): string {
+  const path = `/rooms/${roomId}/threads/${root}`;
+  const query = new URLSearchParams();
+  if (options.at !== undefined) query.set("at", String(options.at));
+  if (options.quote !== undefined) {
+    query.set("quote", String(options.quote));
+  }
+  const search = query.toString();
+  return search === "" ? path : `${path}?${search}`;
+}
