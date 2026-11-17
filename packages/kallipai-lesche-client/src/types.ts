@@ -117,6 +117,33 @@ export interface RoomUnreadView {
   readonly cursor: number;
 }
 
+/** A member's choice in one thread: `following` wakes them on every reply,
+ * `muted` on none but the ones that name them. This is the stored row; what
+ * delivery actually does is {@link ThreadDelivery}. */
+export type ThreadChoice = "following" | "muted";
+
+/** The rule delivery applies to one member in one thread: the stored choice
+ * when they hold one, else the default -- following for a human, following for
+ * an agent the thread holds as a participant, involved for any other agent. */
+export type ThreadDelivery = "following" | "muted" | "involved";
+
+/** `GET|PUT /rooms/{id}/threads/{root}/subscription` -- the caller's standing
+ * in one thread. `override` is the row they hold (null when none, whose wire
+ * name is `override` because that is what it is), `effective` the rule
+ * delivery applies, and `since_seq` the room position the choice took effect
+ * at (null when they hold no row). Replies at or before `since_seq` keep the
+ * default: the choice is an interval, not a moment. */
+export interface ThreadSubscriptionView {
+  readonly override: ThreadChoice | null;
+  readonly effective: ThreadDelivery;
+  readonly since_seq: number | null;
+}
+
+/** The body of a write to the subscription route. */
+export interface ThreadSubscriptionRequest {
+  readonly state: ThreadChoice;
+}
+
 /** `GET /rooms/{id}` -- a single room's live membership snapshot (member-only;
  * a non-member gets 404). `is_creator` is server-authoritative. `members` carry
  * server-resolved display identity. */

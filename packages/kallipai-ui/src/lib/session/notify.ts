@@ -160,3 +160,19 @@ export function shouldNotifyRoom(args: {
 }): boolean {
   return !args.own && !args.viewing && args.unreadCount > 0;
 }
+
+/** What a room notification is called: the room alone, or the room and the
+ *  thread the line answered. A title carries one thread name and nothing else
+ *  -- the count and the sender belong to the body, and a second separator would
+ *  turn one notification into a summary.
+ *
+ *  Pure so the two arms are testable: a title that appended an empty thread
+ *  name would read as a room called "name ·". */
+export function composeRoomTitle(
+  roomLabel: string,
+  threadHead: string | null,
+): string {
+  return threadHead === null || threadHead === ""
+    ? roomLabel
+    : `${roomLabel} · ${threadHead}`;
+}

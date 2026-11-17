@@ -13,7 +13,18 @@
 //! 3. **Fanned** -- delivered to the audience the message's thread implies
 //!    ([`crate::chat::audience`]) via [`crate::chat::fan::fan_envelope_to`]
 //!    (user members' app streams, tagma members' agent streams). A head wakes
-//!    the whole room, and a reply with no participant rows falls back to it.
+//!    the whole room; a reply falls to each member's default and choice, a
+//!    mention of the member's own wakes them inside a muted thread (who a
+//!    message named is recorded in `room_message_mentions`), and a reply whose
+//!    audience could not be read is named at WARN along with the table that
+//!    failed.
+//!
+//! The same module serves each member's standing choice about one discussion
+//! (`GET`/`PUT`/`DELETE /rooms/{room_id}/threads/{root}/subscription`): the
+//! caller's own row in `thread_subscriptions`, which the fan-out above reads at
+//! each message's position. Only the caller's own row is addressable -- the
+//! member comes from the authenticated principal, and `{root}` must head a
+//! thread this room holds.
 
 use axum::Json;
 use axum::Router;
@@ -26,14 +37,16 @@ use kallipai_archeion_common::principal::Principal;
 use kallipai_common::protocol::ApiError;
 use kallipai_lesche_common::event::LescheEvent;
 use kallipai_lesche_common::message::{Envelope, Participant, ThreadFacts, thread_facts};
-use kallipai_lesche_common::rooms::{MemberId, RoomId, RoomMembership};
+use kallipai_lesche_common::rooms::{
+    MemberId, RoomId, RoomMembership, ThreadChoice, ThreadDelivery, ThreadSubscriptionView,
+};
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
 use crate::auth::{AuthPrincipal, OptUserDisplay};
 use crate::chat::audience;
-use crate::chat::db::map_db_err;
 use crate::chat::db::store;
+use crate::chat::db::{Db, map_db_err};
 use crate::chat::fan::fan_envelope_to;
 use crate::chat::identity::{agent_handle, degraded_handle, human_handle};
 use crate::chat::member_identity::{MemberRef, degraded, resolve_handles};
@@ -60,6 +73,12 @@ pub fn router() -> Router<SharedConvState> {
         .route("/rooms/{room_id}/messages", get(room_history))
         .route("/rooms/{room_id}/read-cursor", put(put_read_cursor))
         .route("/rooms/{room_id}/unread", get(room_unread))
+        .route(
+            "/rooms/{room_id}/threads/{root}/subscription",
+            get(thread_subscription)
+                .put(put_thread_subscription)
+                .delete(delete_thread_subscription),
+        )
 }
 
 async fn post_room_envelope(
@@ -170,15 +189,27 @@ async fn post_room_envelope(
             ThreadFacts::default()
         }
     };
-    // Mentions are narrowed HERE, to current AGENT members: the thread table
-    // records agents only, and "is this a member" is a fact this route already
-    // holds. The store takes the narrowed list and never reads membership.
+    // Mentions are narrowed HERE, twice, because the two tables take different
+    // halves and "is this a member" is a fact this route already holds:
+    // `room_message_mentions` records every member a message named -- a mention
+    // is what pierces a mute, and a human can mute -- while
+    // `thread_participants` records agents only. The store takes both lists
+    // narrowed and never reads membership.
+    let mentioned: Vec<MemberId> = facts
+        .mentions
+        .iter()
+        .filter(|mid| {
+            is_member(&membership, mid, ParticipantKind::Human)
+                || is_member(&membership, mid, ParticipantKind::Agent)
+        })
+        .cloned()
+        .collect();
     let facts = ThreadFacts {
         thread: facts.thread,
-        mentions: facts
-            .mentions
-            .into_iter()
+        mentions: mentioned
+            .iter()
             .filter(|mid| is_member(&membership, mid, ParticipantKind::Agent))
+            .cloned()
             .collect(),
     };
 
@@ -196,6 +227,7 @@ async fn post_room_envelope(
         membership.membership_epoch,
         &env.ciphertext.0,
         &facts,
+        &mentioned,
     )
     .await
     .map_err(|e| ApiError::internal(format_args!("store error: {e}")))?;
@@ -207,7 +239,10 @@ async fn post_room_envelope(
         &membership,
         &authed_mid,
         appended.root,
-        &appended.participants,
+        appended.seq,
+        appended.participants.as_deref(),
+        appended.subscriptions.as_deref(),
+        &mentioned,
     );
     check_audience_strangers(&membership, &authed_mid, &decided);
     check_empty_audience(
@@ -217,21 +252,12 @@ async fn post_room_envelope(
         &authed_mid,
         env.sender.kind,
         &decided,
-        appended.participants.len(),
+        appended.participants.as_ref().map(Vec::len),
     );
-    if decided.fallback == Some(audience::Fallback::NoParticipants) {
-        // A reply whose thread has no participant rows: the table never held
-        // them, the read failed, or the backfill missed the window. The wake
-        // falls back to the whole room, which is the safe direction, and this
-        // is the one shape worth seeing -- a head message and
-        // a hole in the table must not look alike.
-        tracing::warn!(
-            room_id = room.as_ref(),
-            seq = appended.seq,
-            root_seq = appended.root,
-            "thread reply has no participant rows: waking the whole room"
-        );
-    }
+    // Each table's answer is reported where it is read (`store::append`), so
+    // this line does not reconstruct one from the other or from the shape of
+    // the wake: the DEBUG below carries the whole reading for a send that wants
+    // it.
     log_audience(
         room.as_ref(),
         appended.seq,
@@ -295,22 +321,25 @@ fn check_audience_strangers(
 /// else.
 ///
 /// An empty audience is a lower bound, not a verdict. A legitimate narrowing
-/// produces it -- an agent speaking in its own thread in a room with no
-/// humans, since a human is always in the audience and keeps the set
-/// non-empty -- and so does the hole this check exists for: a reply whose
-/// only recorded rows are the sender's own. Only one of those is a hole, and
-/// this line cannot tell which: it reports the shape. The send goes on, under
-/// the same rule as [`check_audience_strangers`], because a delivery decision
-/// never takes a message down.
+/// produces it -- an agent speaking in its own thread that every other member
+/// muted or never joined -- and so does the hole this check exists for: a
+/// reply whose only recorded rows are the sender's own. Only one of those is a
+/// hole, and this line cannot tell which: it reports the shape. The send goes
+/// on, under the same rule as [`check_audience_strangers`], because a delivery
+/// decision never takes a message down.
+///
+/// Any member can be left out, a human included, so the empty scoped audience
+/// is a reachable state even when the tables hold no hole.
 ///
 /// A room whose only member is the sender is not even that shape (nobody else
 /// was there), which is why the check counts the room rather than trusting the
 /// empty set alone. Returns whether it warned, so the branch itself is
 /// testable without a tracing subscriber.
 ///
-/// The log carries what separates the two readings: `fallback` (a head or a
-/// failed read widened this message anyway), `humans` (zero keeps a legitimate
-/// narrow possible), and `participants` (who the thread actually recorded).
+/// The log carries what separates the readings: `fallback` (a head or a failed
+/// read widened this message anyway), `humans` (zero keeps a legitimate narrow
+/// possible), `muted` (how many members a choice silenced), and `participants`
+/// (who the thread recorded, or `None` when that read failed).
 fn check_empty_audience(
     room: &str,
     seq: i64,
@@ -318,7 +347,7 @@ fn check_empty_audience(
     sender: &MemberId,
     sender_kind: ParticipantKind,
     decided: &audience::Audience,
-    participants: usize,
+    participants: Option<usize>,
 ) -> bool {
     if !decided.ids.is_empty() || membership.members.len() <= 1 {
         return false;
@@ -330,6 +359,8 @@ fn check_empty_audience(
         sender = sender.as_ref(),
         sender_kind = ?sender_kind,
         fallback = ?decided.fallback,
+        muted = decided.muted,
+        following = decided.following,
         humans = membership
             .members
             .iter()
@@ -344,10 +375,13 @@ fn check_empty_audience(
 /// One DEBUG line per send: how much narrower than the room the audience is.
 ///
 /// The numbers are the whole story for a delivery -- how many agents the
-/// thread left out (the saving), how many humans the wake reaches regardless
-/// (every human member but a human sender: a human has no per-thread
-/// subscription, and the sender is never woken), how big the audience is, and
+/// thread left out (the saving), how many humans the wake reaches by default,
+/// how many members silenced the thread or followed it, how many were woken by
+/// a mention inside a thread they had silenced, how big the audience is, and
 /// which fallback ran.
+///
+/// A member woken by a `following` choice is counted in `following` and not
+/// in `agents_narrowed`, so the two together describe the same audience.
 ///
 /// Every count but `room_members` is over the room MINUS the sender, the same
 /// domain as `total`: the sender is a member the audience never contains, so
@@ -387,6 +421,9 @@ fn log_audience(
         room_members = membership.members.len(),
         sender_kind = ?sender_kind,
         fallback = ?decided.fallback,
+        muted = decided.muted,
+        following = decided.following,
+        mentioned = decided.mentioned,
         "room audience"
     );
 }
@@ -710,6 +747,175 @@ async fn room_unread(
         unread: badge.unread,
         cursor: badge.cursor,
     }))
+}
+
+/// Body of `PUT /rooms/{id}/threads/{root}/subscription`.
+#[derive(Debug, Deserialize)]
+pub struct ThreadSubscriptionRequest {
+    /// `following` or `muted`. The third answer -- holding no choice at all --
+    /// is the absent row, reached with `DELETE`, so it has no value here.
+    pub state: String,
+}
+
+/// The caller as a current member of `room`.
+///
+/// The envelope surface's gate shape: the authenticated principal must be a
+/// room participant (id + kind), and everything else -- unknown room,
+/// non-member, Admin -- collapses into one 404 that confirms nothing.
+async fn room_member(
+    state: &SharedConvState,
+    principal: &Principal,
+    room: &str,
+) -> Result<(MemberId, ParticipantKind), ApiError> {
+    let db = state.require_db()?;
+    let membership = store::room_membership(db, room)
+        .await
+        .map_err(map_db_err)?
+        .ok_or_else(|| ApiError::not_found("unknown room"))?;
+    let (member, kind) = match (
+        principal.participant_id().map(MemberId::from),
+        principal.participant_kind(),
+    ) {
+        (Some(member), Some(kind)) => (member, kind),
+        _ => return Err(ApiError::not_found("unknown room")), // Admin
+    };
+    if !is_member(&membership, &member, kind) {
+        return Err(ApiError::not_found("unknown room"));
+    }
+    Ok((member, kind))
+}
+
+/// Resolve a `{root}` path segment to a thread this room holds.
+///
+/// A subscription key names the thread's HEAD row: `seq = root` with no
+/// `root_seq`. A reply, a position the log never reached and a seq from another
+/// room all answer 404 here -- storing the row would create a key nothing
+/// matches, and the read would then report a followed thread that does not
+/// exist.
+///
+/// A segment that is no position at all is a different mistake, and answers
+/// 400: the request's shape is wrong before any lookup happens, and the tagma
+/// hop judges that shape itself. One code for one mistake, whichever hop sees
+/// it first.
+async fn require_thread_head(db: &Db, room: &str, raw_root: &str) -> Result<i64, ApiError> {
+    let root = raw_root
+        .parse::<i64>()
+        .ok()
+        .filter(|root| *root >= 1)
+        .ok_or_else(|| ApiError::bad_request("thread root must be a position >= 1"))?;
+    if store::is_thread_head(db, room, root)
+        .await
+        .map_err(map_db_err)?
+    {
+        Ok(root)
+    } else {
+        Err(ApiError::not_found("unknown thread"))
+    }
+}
+
+/// The answer the subscription routes return for one member: their recorded
+/// choice, the rule delivery will apply, and the position the choice took
+/// effect at.
+///
+/// With no row the effective rule is the default: `following` for a human (the
+/// app shows one room timeline), and for an agent `following` when the thread
+/// holds their participation, else `involved` -- the same participant fact
+/// `audience()` reads for an agent without a choice.
+async fn subscription_view(
+    db: &Db,
+    room: &str,
+    root: i64,
+    member: &MemberId,
+    kind: ParticipantKind,
+    row: Option<store::ThreadSubscription>,
+) -> Result<ThreadSubscriptionView, ApiError> {
+    let effective = match (&row, kind) {
+        (Some(row), _) => match row.state {
+            ThreadChoice::Following => ThreadDelivery::Following,
+            ThreadChoice::Muted => ThreadDelivery::Muted,
+        },
+        (None, ParticipantKind::Human) => ThreadDelivery::Following,
+        (None, _) => {
+            let participants = store::participants_of(db, room, root)
+                .await
+                .map_err(map_db_err)?;
+            if participants.iter().any(|p| p.participant_id == *member) {
+                ThreadDelivery::Following
+            } else {
+                ThreadDelivery::Involved
+            }
+        }
+    };
+    Ok(ThreadSubscriptionView {
+        choice: row.as_ref().map(|row| row.state),
+        effective,
+        since_seq: row.map(|row| row.since_seq),
+    })
+}
+
+/// `GET /rooms/{id}/threads/{root}/subscription` -- the caller's standing
+/// choice about one thread and the rule it implies.
+async fn thread_subscription(
+    State(state): State<SharedConvState>,
+    AuthPrincipal(principal): AuthPrincipal,
+    Path((room_id, root)): Path<(String, String)>,
+) -> Result<Json<ThreadSubscriptionView>, ApiError> {
+    let room = RoomId::from(room_id);
+    let (member, kind) = room_member(&state, &principal, room.as_ref()).await?;
+    let db = state.require_db()?;
+    let root = require_thread_head(db, room.as_ref(), &root).await?;
+    let row = store::subscription_of(db, room.as_ref(), root, &member)
+        .await
+        .map_err(map_db_err)?;
+    Ok(Json(
+        subscription_view(db, room.as_ref(), root, &member, kind, row).await?,
+    ))
+}
+
+/// `PUT /rooms/{id}/threads/{root}/subscription` -- record the caller's choice
+/// about one thread.
+///
+/// The member is the authenticated principal and never a body field, so a
+/// member can only change their own standing. The position is the store's one
+/// statement (the room's current max seq): boundary and choice are read from
+/// one snapshot, and a repeated write keeps the stored boundaries. The answer is
+/// the row read back, so the caller sees what delivery will apply.
+async fn put_thread_subscription(
+    State(state): State<SharedConvState>,
+    AuthPrincipal(principal): AuthPrincipal,
+    Path((room_id, root)): Path<(String, String)>,
+    Json(req): Json<ThreadSubscriptionRequest>,
+) -> Result<Json<ThreadSubscriptionView>, ApiError> {
+    let choice = ThreadChoice::parse(req.state.trim())
+        .ok_or_else(|| ApiError::bad_request("state must be following or muted"))?;
+    let room = RoomId::from(room_id);
+    let (member, kind) = room_member(&state, &principal, room.as_ref()).await?;
+    let db = state.require_db()?;
+    let root = require_thread_head(db, room.as_ref(), &root).await?;
+    let row = store::set_subscription(db, room.as_ref(), root, &member, choice)
+        .await
+        .map_err(|e| ApiError::internal(format_args!("store error: {e}")))?;
+    Ok(Json(
+        subscription_view(db, room.as_ref(), root, &member, kind, Some(row)).await?,
+    ))
+}
+
+/// `DELETE /rooms/{id}/threads/{root}/subscription` -- drop the caller's choice
+/// so the thread goes back to the default. Idempotent: holding no row is not an
+/// error, and the mute window goes with the row.
+async fn delete_thread_subscription(
+    State(state): State<SharedConvState>,
+    AuthPrincipal(principal): AuthPrincipal,
+    Path((room_id, root)): Path<(String, String)>,
+) -> Result<StatusCode, ApiError> {
+    let room = RoomId::from(room_id);
+    let (member, _kind) = room_member(&state, &principal, room.as_ref()).await?;
+    let db = state.require_db()?;
+    let root = require_thread_head(db, room.as_ref(), &root).await?;
+    store::clear_subscription(db, room.as_ref(), root, &member)
+        .await
+        .map_err(|e| ApiError::internal(format_args!("store error: {e}")))?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[cfg(test)]

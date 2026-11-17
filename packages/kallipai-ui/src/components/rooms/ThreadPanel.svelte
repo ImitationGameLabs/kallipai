@@ -6,6 +6,7 @@
   // the header and the two handles a host may call.
   import { X } from "@lucide/svelte";
   import ThreadConversation from "./ThreadConversation.svelte";
+  import ThreadFollowControl from "./ThreadFollowControl.svelte";
   import { TONAL_ICON_SURF } from "../../lib/classes.ts";
   import type { MentionTarget, RoomLine } from "../../lib/room-message.ts";
   import { type ThreadMembership, type ThreadMore } from "../../lib/threads.ts";
@@ -120,14 +121,17 @@
       <p class="text-xs opacity-60">{membershipCopy}</p>
     {/if}
   </div>
-  <button
-    type="button"
-    class="size-7 {TONAL_ICON_SURF}"
-    aria-label={room_thread_close_aria()}
-    onclick={onClose}
-  >
-    <X class="size-4" />
-  </button>
+  <div class="flex items-center gap-2 shrink-0">
+    <ThreadFollowControl {roomId} {root} />
+    <button
+      type="button"
+      class="size-7 {TONAL_ICON_SURF}"
+      aria-label={room_thread_close_aria()}
+      onclick={onClose}
+    >
+      <X class="size-4" />
+    </button>
+  </div>
 </header>
 
 <ThreadConversation

@@ -238,6 +238,75 @@ pub struct RoomRosterView {
     pub visibility: Visibility,
 }
 
+/// The standing choice a member records about one thread
+/// (`PUT /rooms/{room_id}/threads/{root}/subscription`).
+///
+/// Two values only: "no choice" is the absence of a row, not a third variant.
+/// A choice also carries the POSITION it took effect at, so a type that spelled
+/// "none" as a variant would invite a reader to drop that position.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThreadChoice {
+    /// Every reply in the thread wakes the member.
+    Following,
+    /// No reply wakes the member, except one that names them.
+    Muted,
+}
+
+impl ThreadChoice {
+    /// The stable wire/DB label.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Following => "following",
+            Self::Muted => "muted",
+        }
+    }
+
+    /// Parse a wire label. `None` on anything unrecognized.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "following" => Some(Self::Following),
+            "muted" => Some(Self::Muted),
+            _ => None,
+        }
+    }
+}
+
+/// What delivery does for one caller in one thread: their recorded
+/// [`ThreadChoice`] when they hold one, else the default their identity
+/// implies.
+///
+/// [`ThreadDelivery::Involved`] keeps an agent's default from being called a
+/// mute: the agent wakes on a reply when the thread holds something of theirs
+/// (they take part in it), which is neither "every reply" nor "none".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThreadDelivery {
+    /// Every reply wakes the member.
+    Following,
+    /// No reply wakes the member, except one that names them.
+    Muted,
+    /// A reply wakes the member only when the thread holds their participation.
+    Involved,
+}
+
+/// One member's standing answer about one thread: the choice they recorded (if
+/// any), the rule that will decide delivery for them, and the position the
+/// choice took effect at.
+///
+/// Served by `GET` and `PUT /rooms/{room_id}/threads/{root}/subscription`.
+/// `override` is the wire name for [`Self::choice`] and is `null` when the
+/// member holds no row -- the answer "the default decides".
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ThreadSubscriptionView {
+    #[serde(rename = "override", default)]
+    pub choice: Option<ThreadChoice>,
+    pub effective: ThreadDelivery,
+    /// The room position the choice took effect at: replies at or before it
+    /// keep the default. Absent when the member holds no row.
+    pub since_seq: Option<i64>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -387,6 +456,32 @@ mod tests {
                 "room_id",
                 "visibility"
             ]
+        );
+    }
+
+    /// Pin the subscription answer: the wire spells the choice `override` and
+    /// keeps it `null` when the member holds none, and the effective rule is
+    /// one of three labels. A rename here reaches the app and the CLI at once.
+    #[test]
+    fn thread_subscription_wire_shape_is_pinned() {
+        let chosen = ThreadSubscriptionView {
+            choice: Some(ThreadChoice::Muted),
+            effective: ThreadDelivery::Muted,
+            since_seq: Some(17),
+        };
+        assert_eq!(
+            serde_json::to_value(&chosen).unwrap(),
+            serde_json::json!({"override": "muted", "effective": "muted", "since_seq": 17})
+        );
+
+        let defaulted = ThreadSubscriptionView {
+            choice: None,
+            effective: ThreadDelivery::Involved,
+            since_seq: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&defaulted).unwrap(),
+            serde_json::json!({"override": null, "effective": "involved", "since_seq": null})
         );
     }
 }

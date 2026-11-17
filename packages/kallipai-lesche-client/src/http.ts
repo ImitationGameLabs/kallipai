@@ -29,6 +29,9 @@ import type {
   RoomUnreadView,
   RoomView,
   TagmaRoomView,
+  ThreadChoice,
+  ThreadSubscriptionRequest,
+  ThreadSubscriptionView,
   Visibility,
 } from "./types.ts";
 
@@ -155,6 +158,49 @@ export class LescheClient extends BaseClient {
    * read cursor it was counted against. Member-only. */
   fetchRoomUnread(roomId: string): Promise<RoomUnreadView> {
     return this.json(`/rooms/${encodeURIComponent(roomId)}/unread`, "GET");
+  }
+
+  /** `GET /rooms/{id}/threads/{root}/subscription` -- the caller's standing in
+   * one thread: the choice they hold, the rule delivery applies, and the room
+   * position that rule starts after. Member-only, and `{root}` must head a
+   * thread of this room: a non-member, a room that does not exist, and a
+   * position that is no thread's head are all one 404. */
+  fetchThreadSubscription(
+    roomId: string,
+    root: number,
+  ): Promise<ThreadSubscriptionView> {
+    return this.json(
+      `/rooms/${encodeURIComponent(roomId)}/threads/${root}/subscription`,
+      "GET",
+    );
+  }
+
+  /** `PUT /rooms/{id}/threads/{root}/subscription` -- record the caller's
+   * choice in one thread. The member is the authenticated caller, so the body
+   * names only the choice; a write is idempotent and answers the standing it
+   * left (a repeated write keeps the position the first one took). */
+  setThreadSubscription(
+    roomId: string,
+    root: number,
+    state: ThreadChoice,
+  ): Promise<ThreadSubscriptionView> {
+    const body: ThreadSubscriptionRequest = { state };
+    return this.json(
+      `/rooms/${encodeURIComponent(roomId)}/threads/${root}/subscription`,
+      "PUT",
+      body,
+    );
+  }
+
+  /** `DELETE /rooms/{id}/threads/{root}/subscription` -- drop the caller's
+   * choice and take the thread's default. 204; holding no row is not an
+   * error. */
+  clearThreadSubscription(roomId: string, root: number): Promise<void> {
+    return this.json(
+      `/rooms/${encodeURIComponent(roomId)}/threads/${root}/subscription`,
+      "DELETE",
+      undefined,
+    );
   }
 
   /** `GET /rooms/{id}` — a room's live roster (member-only). */

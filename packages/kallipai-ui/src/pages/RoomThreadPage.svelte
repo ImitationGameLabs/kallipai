@@ -13,6 +13,7 @@
   import { untrack } from "svelte";
   import PageHeader from "../components/PageHeader.svelte";
   import ThreadConversation from "../components/rooms/ThreadConversation.svelte";
+  import ThreadFollowControl from "../components/rooms/ThreadFollowControl.svelte";
   import { createRoomSession } from "../lib/rooms/roomSession.svelte.ts";
   import { createThreadWindow } from "../lib/rooms/threadWindow.svelte.ts";
   import { threadHeadOf } from "../lib/rooms/threadHeads.svelte.ts";
@@ -201,6 +202,11 @@
     {#snippet title()}
       <p class="text-sm font-semibold truncate">{title}</p>
       <p class="text-xs opacity-50 truncate">{roomLabel}</p>
+    {/snippet}
+    {#snippet actions()}
+      {#if rootSeq !== null}
+        <ThreadFollowControl {roomId} root={rootSeq} />
+      {/if}
     {/snippet}
   </PageHeader>
 

@@ -12,8 +12,9 @@
 use anyhow::Result;
 use kallipai_client::types::LescheSessionEntry;
 use kallipai_client::{DirectReadQuery, MessageDelivery, RoomReadQuery, TagmaClient};
+use kallipai_lesche_common::rooms::{ThreadChoice, ThreadSubscriptionView};
 
-use crate::args::lesche::{LescheCommand, ReadArgs, SendArgs};
+use crate::args::lesche::{LescheCommand, ReadArgs, SendArgs, ThreadCommand};
 use crate::{agent_id_from_env, read_text_stdin};
 
 /// Run one `lesche` command against the tagma's relay.
@@ -102,6 +103,42 @@ pub(crate) async fn run_lesche(client: &TagmaClient, cmd: &LescheCommand) -> Res
             };
             print!("{text}");
         }
+        LescheCommand::Thread(args) => {
+            // Self-only: the choice is the calling agent's own standing
+            // (KALLIPAI_ID), and the tagma takes the member from the token, so
+            // no flag can name another member.
+            let id = agent_id_from_env()?;
+            match &args.command {
+                ThreadCommand::Follow(target) => {
+                    let view = client
+                        .set_thread_subscription(
+                            &id,
+                            &target.room,
+                            target.root,
+                            ThreadChoice::Following,
+                        )
+                        .await?;
+                    println!("{}", render_thread_choice(&target.room, target.root, &view));
+                }
+                ThreadCommand::Mute(target) => {
+                    let view = client
+                        .set_thread_subscription(
+                            &id,
+                            &target.room,
+                            target.root,
+                            ThreadChoice::Muted,
+                        )
+                        .await?;
+                    println!("{}", render_thread_choice(&target.room, target.root, &view));
+                }
+                ThreadCommand::Default(target) => {
+                    client
+                        .clear_thread_subscription(&id, &target.room, target.root)
+                        .await?;
+                    println!("thread {} in {}: default", target.root, target.room);
+                }
+            }
+        }
         LescheCommand::Sessions => {
             // Self-only: every addressable surface in one list. The tagma
             // aggregates (bilateral + rooms + direct sessions); print one
@@ -118,6 +155,19 @@ pub(crate) async fn run_lesche(client: &TagmaClient, cmd: &LescheCommand) -> Res
         }
     }
     Ok(())
+}
+
+/// One line saying what the caller holds in that thread now.
+///
+/// `since_seq` is a boundary, not a click: replies at or before it keep the
+/// default, so the line reads `after seq <n>` rather than naming a moment the
+/// member acted.
+fn render_thread_choice(room: &str, root: i64, view: &ThreadSubscriptionView) -> String {
+    let state = view.choice.map(ThreadChoice::as_str).unwrap_or("default");
+    match view.since_seq {
+        Some(seq) => format!("thread {root} in {room}: {state}, after seq {seq}"),
+        None => format!("thread {root} in {room}: {state}"),
+    }
 }
 
 /// Refuse a backward cursor at a target that has no such rows. `--before`
@@ -267,8 +317,10 @@ fn render_session_line(entry: &LescheSessionEntry) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::args::lesche::ThreadArgs;
     use crate::args::{Cli, Commands};
     use clap::Parser;
+    use kallipai_lesche_common::rooms::ThreadDelivery;
 
     /// The room and session the arg tests address. Both are canonical UUIDs,
     /// because a `read` target rides a request path and the CLI refuses any
@@ -811,6 +863,55 @@ mod tests {
         assert!(
             Cli::try_parse_from(["kallip", "lesche", "send", "--room", ROOM, "--quote", "0"])
                 .is_err()
+        );
+    }
+
+    /// Parse a `lesche thread` invocation the same way.
+    fn parsed_thread(extra: &[&str]) -> ThreadArgs {
+        let mut argv = vec!["kallip", "lesche", "thread"];
+        argv.extend_from_slice(extra);
+        let cli = Cli::try_parse_from(argv).expect("parses");
+        match cli.command.expect("command") {
+            Commands::Lesche(LescheCommand::Thread(args)) => args,
+            _ => panic!("expected lesche thread"),
+        }
+    }
+
+    #[test]
+    fn a_thread_verb_names_a_room_and_a_head_position() {
+        let ThreadCommand::Mute(target) = parsed_thread(&["mute", ROOM, "9"]).command else {
+            panic!("expected the mute verb");
+        };
+        assert_eq!(target.room, ROOM);
+        assert_eq!(target.root, 9);
+
+        // The room id rides a request path, so a non-canonical spelling is
+        // refused before a request exists, like every other room target.
+        let Err(err) =
+            Cli::try_parse_from(["kallip", "lesche", "thread", "follow", "../../agents", "9"])
+        else {
+            panic!("a room target must be a canonical id")
+        };
+        assert!(err.to_string().contains("room id"), "{err}");
+
+        // A position starts at one.
+        let Err(err) = Cli::try_parse_from(["kallip", "lesche", "thread", "follow", ROOM, "0"])
+        else {
+            panic!("0 names no row")
+        };
+        assert!(err.to_string().contains("not in 1.."), "{err}");
+    }
+
+    #[test]
+    fn a_thread_choice_prints_the_rule_and_its_boundary() {
+        let view = ThreadSubscriptionView {
+            choice: Some(ThreadChoice::Muted),
+            effective: ThreadDelivery::Muted,
+            since_seq: Some(17),
+        };
+        assert_eq!(
+            render_thread_choice(ROOM, 9, &view),
+            format!("thread 9 in {ROOM}: muted, after seq 17")
         );
     }
 }

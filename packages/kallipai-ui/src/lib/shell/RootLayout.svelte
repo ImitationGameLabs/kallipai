@@ -23,7 +23,12 @@
   import { roomKey, tagmaKey, unreadStore } from "../session/unread.svelte.ts";
   import { recentStore } from "../session/recent.svelte.ts";
   import { timezoneSetting } from "../time/stamp.svelte.ts";
-  import { notify, shouldNotifyRoom } from "../session/notify.ts";
+  import {
+    composeRoomTitle,
+    notify,
+    shouldNotifyRoom,
+  } from "../session/notify.ts";
+  import { resolveThreadHead } from "../rooms/threadHeads.svelte.ts";
   import { decodeB64 } from "@kallipai/kallipai-common";
   import { decodeRoomMessage } from "../room-message.ts";
   import type { Envelope } from "@kallipai/kallipai-lesche-client";
@@ -449,11 +454,29 @@
     ) {
       return;
     }
-    const row = roomsStore.rooms.find((r) => r.room_id === roomId);
-    void notify({
-      tag: key,
-      title: row?.name || room_label_fallback({ id: roomId.slice(0, 8) }),
-      body: decoded.text,
+    const roomLabel =
+      roomsStore.rooms.find((r) => r.room_id === roomId)?.name ||
+      room_label_fallback({ id: roomId.slice(0, 8) });
+    void notifyRoom(roomId, roomLabel, decoded.thread, decoded.text);
+  }
+
+  /** Show the room's notification, naming the thread the line answered when
+   *  that thread's head is known. At most two reads, each on a short deadline,
+   *  and no retry: a title is worth a round trip, not a wait, and a head that
+   *  cannot be read leaves the room's name alone (see `resolveThreadHead`). A
+   *  line that declares no thread heads its own discussion and names none. */
+  async function notifyRoom(
+    roomId: string,
+    roomLabel: string,
+    thread: number | undefined,
+    body: string,
+  ): Promise<void> {
+    const head =
+      thread === undefined ? null : await resolveThreadHead(roomId, thread);
+    await notify({
+      tag: roomKey(roomId),
+      title: composeRoomTitle(roomLabel, head),
+      body,
     });
   }
 

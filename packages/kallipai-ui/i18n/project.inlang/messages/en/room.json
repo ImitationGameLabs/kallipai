@@ -43,5 +43,12 @@
   "room_thread_sheet_description": "Replies to this topic, where you can add your own.",
   "room_thread_membership_started": "You started this discussion.",
   "room_thread_membership_replied": "You replied here.",
-  "room_thread_membership_mentioned": "Someone named you here."
+  "room_thread_membership_mentioned": "Someone named you here.",
+  "room_thread_following": "Following",
+  "room_thread_muted": "Muted",
+  "room_thread_involved": "Only when mentioned",
+  "room_thread_mute_action": "Mute this thread",
+  "room_thread_default_action": "Back to default",
+  "room_thread_follow_action": "Follow this thread",
+  "room_thread_choice_failed": "Could not change this thread. Try again."
 }

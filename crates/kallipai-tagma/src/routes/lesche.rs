@@ -31,8 +31,10 @@ mod sessions;
 mod shared;
 #[cfg(test)]
 mod tests;
+mod thread;
 
 pub use direct::{read_direct_session_messages, read_direct_session_messages_by_id};
 pub use room::{list_joined_rooms, read_room_messages};
 pub use send::post_message;
 pub use sessions::list_lesche_sessions;
+pub use thread::{delete_thread_subscription, get_thread_subscription, put_thread_subscription};

@@ -8,6 +8,10 @@ use super::direct::{
 use super::room::{LescheHistoryQuery, list_joined_rooms, read_room_messages};
 use super::send::{LescheMessageRequest, post_message, send_room_message};
 use super::sessions::list_lesche_sessions;
+use super::thread::{
+    ThreadChoiceRequest, delete_thread_subscription, get_thread_subscription,
+    put_thread_subscription,
+};
 
 use axum::Json;
 use axum::extract::{Path, Query, State};
@@ -2003,4 +2007,78 @@ async fn quote_on_a_bilateral_send_is_bad_request() {
     .await
     .expect_err("no projector in this harness");
     assert_eq!(err.status, 503, "expected 503, got {}", err.status);
+}
+
+/// The thread-choice face takes the send path's voice (root only), judges its
+/// own path segments before any relay is resolved, and answers unavailable when
+/// no relay owns the room -- the same order and the same answers the room
+/// history read gives.
+#[tokio::test]
+async fn thread_choice_guards_voice_shape_and_relay() {
+    let state = make_state();
+    let root = AgentId::random();
+    let sub = AgentId::random();
+    {
+        let mut registry = state.registry.write().await;
+        registry.register(
+            root.clone(),
+            RegistryEntry::Live(make_entry(None, "root".into())),
+        );
+        registry.register(
+            sub.clone(),
+            RegistryEntry::Live(make_entry(Some(root.clone()), "sub".into())),
+        );
+    }
+    let room = "00000000-0000-0000-0000-0000000000b1".to_string();
+    let agent = || AuthIdentity::test_new(Identity::Agent { id: root.clone() });
+
+    // A subagent does not hold this voice.
+    let err = get_thread_subscription(
+        State(state.clone()),
+        AuthIdentity::test_new(Identity::Agent { id: sub.clone() }),
+        Path((sub, room.clone(), "1".to_string())),
+    )
+    .await
+    .expect_err("subagent -> forbidden");
+    assert_eq!(err.status, 403);
+
+    // A root segment that is no position and a room id that is a dot segment
+    // are this request's own mistakes: both are refused before a relay is
+    // looked for, so neither surfaces as a missing relay.
+    let err = get_thread_subscription(
+        State(state.clone()),
+        agent(),
+        Path((root.clone(), room.clone(), "0".to_string())),
+    )
+    .await
+    .expect_err("0 names no row");
+    assert_eq!(err.status, 400, "bad request, not a missing relay");
+
+    let err = put_thread_subscription(
+        State(state.clone()),
+        agent(),
+        Path((root.clone(), room.clone(), "1".to_string())),
+        Json(ThreadChoiceRequest {
+            state: "loud".into(),
+        }),
+    )
+    .await
+    .expect_err("unknown state");
+    assert_eq!(err.status, 400, "bad request, not a missing relay");
+
+    let err = delete_thread_subscription(
+        State(state.clone()),
+        agent(),
+        Path((root.clone(), "..".to_string(), "1".to_string())),
+    )
+    .await
+    .expect_err("a dot segment is no room id");
+    assert_eq!(err.status, 400, "bad request, not a missing relay");
+
+    // No poll has warmed the joined-rooms cache: unavailable, the answer the
+    // room history read gives for the same cold cache.
+    let err = get_thread_subscription(State(state), agent(), Path((root, room, "1".to_string())))
+        .await
+        .expect_err("no relay owns the room");
+    assert_eq!(err.status, 503);
 }

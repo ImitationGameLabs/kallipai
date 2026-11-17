@@ -16,7 +16,7 @@ use std::collections::HashMap;
 
 use kallipai_archeion_common::ids::ParticipantKind;
 use kallipai_lesche_common::message::ThreadFacts;
-use kallipai_lesche_common::rooms::{MemberId, RoomMember, RoomMembership};
+use kallipai_lesche_common::rooms::{MemberId, RoomMember, RoomMembership, ThreadChoice};
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, ConnectionTrait, DatabaseBackend, EntityTrait,
     QueryFilter, QueryOrder, QuerySelect, Statement, TransactionTrait, query::Condition,
@@ -26,7 +26,7 @@ use time::OffsetDateTime;
 use super::Db;
 use super::entity::{
     room_member_revocations, room_members, room_messages, room_read_cursors, rooms,
-    thread_participants,
+    thread_participants, thread_subscriptions,
 };
 
 /// One stored message, as read back for a history pull. Carries the sender's
@@ -69,38 +69,100 @@ async fn next_seq(txn: &impl ConnectionTrait, room: &str) -> Result<i64, sea_orm
 }
 
 /// The policy for a failed participant read, in one place: a send must never
-/// fail because the audience could not be read. An empty set is the signal the
-/// caller turns into "wake the whole room" (see [`crate::chat::audience`]).
-fn participants_or_empty(
+/// fail because the audience could not be read. `None` rather than an empty
+/// vector, because EMPTY is the ordinary answer -- a thread only humans
+/// replied in records no participant row -- and a failed read must stay
+/// distinguishable from it.
+///
+/// The two answers go opposite ways once the audience reads them. An empty set
+/// leaves each agent on its default, which is out. A failed read counts every
+/// agent as recorded, which is in: a wake costs an agent a re-pull, while a
+/// message it was never woken for is a message the thread lost for it.
+///
+/// Both answers are reported HERE, where the table is read: the failure beside
+/// the table that failed, the empty table as the fact it is. A reader of the log
+/// should not have to infer either from how a wake came out -- an empty
+/// participants table is the ordinary shape of a thread only humans replied in,
+/// and it stays visible whether or not some member also recorded a choice.
+fn participants_or_unknown(
     room: &str,
     root: i64,
+    seq: i64,
     result: Result<Vec<ThreadParticipant>, sea_orm::DbErr>,
-) -> Vec<MemberId> {
+) -> Option<Vec<MemberId>> {
     match result {
-        Ok(rows) => rows.into_iter().map(|p| p.participant_id).collect(),
+        Ok(rows) => {
+            // The line says this thread holds no participant row yet, which
+            // is the ordinary shape of a thread only humans took part in --
+            // not a fault. Debug, because a WARN per reply would teach readers
+            // to ignore the level.
+            if rows.is_empty() {
+                tracing::debug!(
+                    room_id = room,
+                    root,
+                    seq,
+                    "thread participants table holds no rows for this reply; its agents fall to the default"
+                );
+            }
+            Some(rows.into_iter().map(|p| p.participant_id).collect())
+        }
         Err(e) => {
             tracing::warn!(
                 room_id = room,
                 root,
                 error = %e,
-                "thread participants read failed; the audience falls back to the whole room"
+                "thread participants read failed; the audience treats every agent as recorded"
             );
-            Vec::new()
+            None
         }
     }
 }
 
-/// What an append produced: the row's position, the thread it landed in, and
-/// the agents recorded in that thread (empty for a head row, which defines its
-/// own thread and needs no participants to scope its delivery).
+/// The policy for a failed subscription read, next to [`participants_or_unknown`]
+/// and for the same reason: a send must never fail because an audience input
+/// could not be read.
+///
+/// `None` rather than an empty vector, because EMPTY is the ordinary answer
+/// here -- every member is on the default -- so a failed read has to be
+/// distinguishable. Collapsing the two would read a store hiccup as a room
+/// that muted itself; the caller widens to the whole room instead.
+fn subscriptions_or_unknown(
+    room: &str,
+    root: i64,
+    result: Result<Vec<ThreadSubscription>, sea_orm::DbErr>,
+) -> Option<Vec<ThreadSubscription>> {
+    match result {
+        Ok(rows) => Some(rows),
+        Err(e) => {
+            tracing::warn!(
+                room_id = room,
+                root,
+                error = %e,
+                "thread subscriptions read failed; the audience falls back to the whole room"
+            );
+            None
+        }
+    }
+}
+
+/// What an append produced: the row's position, the thread it landed in, the
+/// agents recorded in that thread (`None` when that read failed; empty for a
+/// head row), and the choices its members recorded about it (empty for a head
+/// row and for a thread nobody has chosen in yet).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Appended {
     /// The assigned position in the room's log.
     pub seq: i64,
     /// The thread this row belongs to; `None` when it heads its own.
     pub root: Option<i64>,
-    /// Agents recorded in `root`, deduplicated by the table's primary key.
-    pub participants: Vec<MemberId>,
+    /// Agents recorded in `root`, deduplicated by the table's primary key, or
+    /// `None` when the read failed -- see [`participants_or_unknown`] for why
+    /// "failed" and "nobody recorded" cannot share one representation.
+    pub participants: Option<Vec<MemberId>>,
+    /// The thread's recorded choices ([`ThreadSubscription`] rows, raw), or
+    /// `None` when the read failed -- see [`subscriptions_or_unknown`] for why
+    /// "failed" and "nobody chose" cannot share one representation.
+    pub subscriptions: Option<Vec<ThreadSubscription>>,
 }
 
 /// Append a room-message payload row to the room's history (the payload is
@@ -112,17 +174,20 @@ pub struct Appended {
 /// The sequence is advanced and the row inserted in the same transaction, so a
 /// failed insert rolls the sequence back (no gaps in the log).
 ///
-/// `facts` carries the two write-path facts the payload declares: the thread
-/// (a position in this room's log), resolved here rather than inferred from the
-/// payload's `quote` -- a quote is a display gesture, while a thread decides
-/// which wake scope a message belongs to; see [`resolve_thread_root`] for the
+/// `facts` carries the thread write-path fact the payload declares (a position
+/// in this room's log), resolved here rather than inferred from the payload's
+/// `quote` -- a quote is a display gesture, while a thread decides which wake
+/// scope a message belongs to; see [`resolve_thread_root`] for the
 /// normalization, the NULL cases, and why a thread root never backfills. Its
 /// mentions are already narrowed to current AGENT members by the caller (see
-/// [`record_participants`] for why the store does not judge membership itself).
+/// [`record_participants`] for why the store does not judge membership).
 ///
-/// Mentions on a HEAD message are never recorded, here or by any backfill: a
-/// head wakes the whole room, so its mentions narrow nothing, and the
-/// participant table describes threads.
+/// `mentioned` is that same payload list narrowed instead to every current
+/// member, and it feeds [`record_mentions`]: one row per member named,
+/// whatever its kind, because a mention is what pierces a mute and a human
+/// can mute. A head records them like any other row -- the row states who a
+/// message named, and a head naming somebody is the same fact.
+#[allow(clippy::too_many_arguments)] // the write's own shape: the row, and the thread facts that ride it
 pub async fn append(
     db: &Db,
     room: &str,
@@ -131,6 +196,7 @@ pub async fn append(
     epoch: i64,
     ciphertext: &[u8],
     facts: &ThreadFacts,
+    mentioned: &[MemberId],
 ) -> Result<Appended, sea_orm::DbErr> {
     let result = db
         .transaction::<_, (i64, Option<i64>), sea_orm::DbErr>(|txn| {
@@ -139,6 +205,7 @@ pub async fn append(
             let id = sender_id.as_ref().to_string();
             let ciphertext = ciphertext.to_vec();
             let facts = facts.clone();
+            let mentioned = mentioned.to_vec();
             Box::pin(async move {
                 let seq = next_seq(txn, &room).await?;
                 let root_seq = resolve_thread_root(txn, &room, seq, &id, facts.thread).await?;
@@ -150,6 +217,7 @@ pub async fn append(
                 if let Some(root) = root_seq {
                     record_participants(txn, &room, root, seq, &id, sender_kind, &facts).await?;
                 }
+                record_mentions(txn, &room, seq, &mentioned).await?;
                 room_messages::ActiveModel {
                     room_id: Set(room),
                     seq: Set(seq),
@@ -195,23 +263,50 @@ pub async fn append(
     //   The set comes out empty when the thread holds nothing but the sender's
     //   own rows, because a sender is never in its own audience.
     //
-    // The one widening BY DESIGN is the failed read: it warns, hands back an
-    // empty set, and the wake falls back to the whole room. Outside this
-    // window a send can widen too, earlier and for a different reason: a
-    // declared thread that resolves to no row (`resolve_thread_root`) lands
+    // A failed participant read is the other widening: it warns and hands back
+    // `None`, which the audience reads as every agent being recorded here, so
+    // the wake grows to the room minus whatever mute that read did return.
+    // Delivery and the badge disagree inside this window, and the count is the
+    // smaller number: the badge sees the thread's rows and cannot see the
+    // widening. That is the direction to be wrong in -- an extra wake costs an
+    // agent a re-pull, while a message it was never woken for is gone from its
+    // view.
+    //
+    // Outside this window a send can widen, earlier and for a different reason:
+    // a declared thread that resolves to no row (`resolve_thread_root`) lands
     // the message as a head, and a head wakes the room. A miss inside the
     // window is allowed to stand because the reply that was missed renders its
     // own fan when it commits (and that read sees this message's rows), and a
     // narrow wake costs an agent one re-pull, not a row.
+    //
+    // The thread's CHOICES are read the same way -- a second statement, right
+    // after -- and they add a widening the participant table cannot: a `muted`
+    // row that has not committed yet is missing from the read, the member falls
+    // back to the default, and the default WAKES them. A miss can therefore
+    // widen, the opposite of the participant read above; it is allowed because
+    // the widened side is the DEFAULT (no choice was mistrusted) and a wake
+    // costs an agent a re-pull, not a row.
+    //
+    // Two statements rather than one, deliberately: each table fails on its
+    // own -- a failed statement aborts a Postgres transaction, so a shared one
+    // could not keep `NoParticipants`, `UnreadableParticipants` and
+    // `NoSubscriptions` apart -- and only the two reads together decide who
     let participants = match root {
-        None => Vec::new(),
-        Some(root) => participants_or_empty(room, root, participants_of(db, room, root).await),
+        None => Some(Vec::new()),
+        Some(root) => {
+            participants_or_unknown(room, root, seq, participants_of(db, room, root).await)
+        }
+    };
+    let subscriptions = match root {
+        None => Some(Vec::new()),
+        Some(root) => subscriptions_or_unknown(room, root, subscriptions_of(db, room, root).await),
     };
 
     Ok(Appended {
         seq,
         root,
         participants,
+        subscriptions,
     })
 }
 
@@ -311,6 +406,26 @@ pub struct ThreadParticipant {
     pub joined_at_seq: i64,
 }
 
+/// One member's choice about one thread, as stored.
+///
+/// This is the RAW row, deliberately: the audience needs `since_seq` to judge
+/// a message at its own position, and `muted_from_seq` to keep a mute window
+/// closed after a re-follow. Collapsing these rows into a "following" set and
+/// a "muted" set drops both, and delivery would then answer for a different
+/// position than the badge's SQL does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThreadSubscription {
+    pub member: MemberId,
+    /// The member's choice, in the wire vocabulary the routes and the CLI
+    /// speak: one type for the label, here and on the surface.
+    pub state: ThreadChoice,
+    /// The position the current choice takes effect at: rows at or before it
+    /// keep the default.
+    pub since_seq: i64,
+    /// The lower bound of the mute window this row remembers, if any.
+    pub muted_from_seq: Option<i64>,
+}
+
 /// Record who takes part in a thread, for a message that just landed in it.
 ///
 /// Three sources, all of them AGENTS: the head row's author (`started`, joined
@@ -398,6 +513,49 @@ async fn record_participants(
     Ok(())
 }
 
+/// Who one message named, one row per member, in the message's own
+/// transaction.
+///
+/// `mentioned` is the caller's list, already narrowed to current members and
+/// deduplicated by `normalize_mentions` upstream; the primary key is the
+/// second guard, so a replay is a no-op rather than a rewrite. The row is
+/// what pierces a mute on both sides of the delivery (see
+/// [`crate::chat::audience`] and [`unread_for_member`]), so it is written for
+/// every message that names somebody -- a head included, since the row states
+/// a fact about the message rather than a thread.
+async fn record_mentions(
+    txn: &impl ConnectionTrait,
+    room: &str,
+    seq: i64,
+    mentioned: &[MemberId],
+) -> Result<(), sea_orm::DbErr> {
+    if mentioned.is_empty() {
+        return Ok(());
+    }
+    // Three placeholders per row; the count is bounded by `MENTIONS_MAX`.
+    let mut sql =
+        String::from("INSERT INTO room_message_mentions (room_id, seq, member_id) VALUES ");
+    let mut values: Vec<sea_orm::Value> = Vec::with_capacity(mentioned.len() * 3);
+    for (i, member) in mentioned.iter().enumerate() {
+        if i > 0 {
+            sql.push_str(", ");
+        }
+        let base = i * 3;
+        sql.push_str(&format!("(${}, ${}, ${})", base + 1, base + 2, base + 3));
+        values.push(room.into());
+        values.push(seq.into());
+        values.push(member.as_ref().into());
+    }
+    sql.push_str(" ON CONFLICT (room_id, seq, member_id) DO NOTHING");
+    txn.execute(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
+        sql,
+        values,
+    ))
+    .await?;
+    Ok(())
+}
+
 /// Who is in a thread, ordered by participant id.
 ///
 /// The only read of the table on the DELIVERY path: a thread is addressed by
@@ -435,6 +593,158 @@ pub async fn participants_of(
             })
         })
         .collect()
+}
+
+/// Every choice recorded in one thread, ordered by member id.
+///
+/// The delivery path's second view of the choice table (the first is the
+/// badge's SQL); `the_badge_moves_exactly_for_the_members_the_audience_named`
+/// in the room tests binds the two.
+pub async fn subscriptions_of(
+    db: &Db,
+    room: &str,
+    root: i64,
+) -> Result<Vec<ThreadSubscription>, sea_orm::DbErr> {
+    let rows = thread_subscriptions::Entity::find()
+        .filter(thread_subscriptions::Column::RoomId.eq(room))
+        .filter(thread_subscriptions::Column::RootSeq.eq(root))
+        .order_by_asc(thread_subscriptions::Column::MemberId)
+        .all(db)
+        .await?;
+    rows.into_iter().map(subscription_row_of).collect()
+}
+
+/// One member's choice in one thread, if they made one.
+pub async fn subscription_of(
+    db: &Db,
+    room: &str,
+    root: i64,
+    member: &MemberId,
+) -> Result<Option<ThreadSubscription>, sea_orm::DbErr> {
+    let row = thread_subscriptions::Entity::find()
+        .filter(thread_subscriptions::Column::RoomId.eq(room))
+        .filter(thread_subscriptions::Column::RootSeq.eq(root))
+        .filter(thread_subscriptions::Column::MemberId.eq(member.as_ref().to_string()))
+        .one(db)
+        .await?;
+    row.map(subscription_row_of).transpose()
+}
+
+fn subscription_row_of(
+    row: thread_subscriptions::Model,
+) -> Result<ThreadSubscription, sea_orm::DbErr> {
+    let state = ThreadChoice::parse(&row.state).ok_or_else(|| {
+        sea_orm::DbErr::Custom(format!(
+            "thread_subscriptions row carries unknown state {:?}",
+            row.state
+        ))
+    })?;
+    Ok(ThreadSubscription {
+        member: MemberId::from(row.member_id),
+        state,
+        since_seq: row.since_seq,
+        muted_from_seq: row.muted_from_seq,
+    })
+}
+
+/// Record a member's choice about a thread at the room's current position.
+///
+/// One statement, for two reasons. The `max(seq)` this reads and the
+/// `since_seq` it writes have to come from the same snapshot -- two
+/// statements would let a reply land in between and be judged on the wrong
+/// side of the boundary -- and the update rules belong in the same `ON
+/// CONFLICT` clause that takes the row lock:
+///
+/// - the first write of a choice sets both boundaries to the current position;
+/// - a write that CHANGES the state moves `since_seq`, and entering `muted`
+///   sets the window's lower bound with it;
+/// - a write that repeats the stored state keeps `since_seq` and the bound, so
+///   the row's history does not depend on how many times a button was pressed.
+///   Advancing `since_seq` on a repeat would strip the coverage of whatever the
+///   member followed in between (a repeat follow) or forfeit the first mute
+///   window (a repeat mute);
+/// - a write never moves the boundary BACKWARD. Its `max(seq)` comes from its
+///   own snapshot, so a request that read the room while a newer choice was
+///   committing arrives with an older position than the row holds; taking it
+///   would open a mute window over rows already counted (they leave the badge
+///   unread by anyone) or re-open rows a mute had already silenced. The
+///   boundary becomes the further of the two, and a mute's lower bound opens
+///   where the boundary then is.
+///
+/// `updated_at` moves on every write, repeats included: it records the write,
+/// not the decision.
+pub async fn set_subscription(
+    db: &Db,
+    room: &str,
+    root: i64,
+    member: &MemberId,
+    state: ThreadChoice,
+) -> Result<ThreadSubscription, sea_orm::DbErr> {
+    let row = db
+        .query_one(Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            "INSERT INTO thread_subscriptions \
+             (room_id, root_seq, member_id, state, since_seq, muted_from_seq, created_at, updated_at) \
+             SELECT $1, $2, $3, $4::text, COALESCE(MAX(seq), 0), \
+                    CASE WHEN $4::text = $5::text THEN COALESCE(MAX(seq), 0) ELSE NULL END, \
+                    NOW(), NOW() \
+               FROM room_messages WHERE room_id = $1 \
+             ON CONFLICT (room_id, root_seq, member_id) DO UPDATE SET \
+             state = EXCLUDED.state, \
+             since_seq = CASE WHEN thread_subscriptions.state = EXCLUDED.state \
+                              THEN thread_subscriptions.since_seq \
+                              ELSE GREATEST(thread_subscriptions.since_seq, EXCLUDED.since_seq) END, \
+             muted_from_seq = CASE WHEN EXCLUDED.state = $5::text \
+                                    AND thread_subscriptions.state <> $5::text \
+                                   THEN GREATEST(thread_subscriptions.since_seq, EXCLUDED.muted_from_seq) \
+                                   ELSE thread_subscriptions.muted_from_seq END, \
+             updated_at = NOW() \
+             RETURNING state, since_seq, muted_from_seq",
+            [
+                room.into(),
+                root.into(),
+                member.as_ref().into(),
+                state.as_str().into(),
+                ThreadChoice::Muted.as_str().into(),
+            ],
+        ))
+        .await?
+        .ok_or_else(|| {
+            sea_orm::DbErr::Custom("thread_subscriptions upsert returned no row".into())
+        })?;
+    let stored = row.try_get::<String>("", "state")?;
+    let stored = ThreadChoice::parse(&stored).ok_or_else(|| {
+        sea_orm::DbErr::Custom(format!(
+            "thread_subscriptions stored unknown state {stored:?}"
+        ))
+    })?;
+    Ok(ThreadSubscription {
+        member: member.clone(),
+        state: stored,
+        since_seq: row.try_get("", "since_seq")?,
+        muted_from_seq: row.try_get("", "muted_from_seq")?,
+    })
+}
+
+/// Drop a member's choice: the thread goes back to the default.
+///
+/// Idempotent -- a row that is not there is not an error -- and it forgets the
+/// mute window with the row, which is the documented difference between "back
+/// to the default" and "undo the mute": the default counts the rows the mute
+/// left out, because that is what the default has always done.
+pub async fn clear_subscription(
+    db: &Db,
+    room: &str,
+    root: i64,
+    member: &MemberId,
+) -> Result<(), sea_orm::DbErr> {
+    thread_subscriptions::Entity::delete_many()
+        .filter(thread_subscriptions::Column::RoomId.eq(room))
+        .filter(thread_subscriptions::Column::RootSeq.eq(root))
+        .filter(thread_subscriptions::Column::MemberId.eq(member.as_ref().to_string()))
+        .exec(db)
+        .await?;
+    Ok(())
 }
 
 /// Read the room's history with `seq > after_seq`, ascending, up to `limit`.
@@ -501,6 +811,20 @@ pub async fn read_thread(
         .all(db)
         .await?;
     Ok(rows.into_iter().map(stored_of).collect())
+}
+
+/// Does `root` head a thread in `room`? A subscription key names a HEAD: the
+/// row at `seq = root` carrying no `root_seq`. A reply, a position the log
+/// never reached and a seq from another room all answer No, which is why the
+/// write routes refuse them instead of storing a key nothing matches.
+pub async fn is_thread_head(db: &Db, room: &str, root: i64) -> Result<bool, sea_orm::DbErr> {
+    let row = room_messages::Entity::find()
+        .filter(room_messages::Column::RoomId.eq(room))
+        .filter(room_messages::Column::Seq.eq(root))
+        .filter(room_messages::Column::RootSeq.is_null())
+        .one(db)
+        .await?;
+    Ok(row.is_some())
 }
 
 /// Map one stored room-message row to the transport-neutral shape. Shared by
@@ -683,12 +1007,24 @@ pub struct RoomUnread {
 /// them, plus the cursor that count was taken against. Both numbers come from
 /// one statement, so the count and the watermark cannot disagree.
 ///
-/// A row counts when all three hold: it is past the member's cursor, its sender
-/// is not the member, and it reached the member: a head row (`root_seq IS NULL`)
-/// reached the whole room and counts, and a row inside a thread counts when
-/// the member is a human (humans never enter the participant table and are
-/// always in the audience) or when a participant row joins them to that thread
-/// at or before the row's `seq`.
+/// A row counts when all four hold: it is past the member's cursor, its sender
+/// is not the member, the member's choice about its thread includes it, and --
+/// when the choice is the default -- it reached the member: a head row
+/// (`root_seq IS NULL`) reached the whole room and counts, and a row inside a
+/// thread counts when the member is a human (humans never enter the participant
+/// table and are woken by every reply) or when a participant row joins them to
+/// that thread at or before the row's `seq`.
+///
+/// A mention outranks the choice, in one direction only: a row that names the
+/// member counts even when their choice is a mute (`room_message_mentions`,
+/// one row per (message, member)). The mute still silences every other row of
+/// the thread, and a mention never narrows a row that counted anyway.
+///
+/// The choice is judged at the ROW's position, never at now: `following` counts
+/// every reply after its `since_seq`, a mute counts nothing after its
+/// `muted_from_seq`, and rows before the choice fall through to the default.
+/// That is what keeps a mute from taking back unread already counted, and a
+/// re-follow from resurrecting what the mute never delivered.
 ///
 /// The badge counts what the fan-out delivers, so an agent's badge leaves out
 /// threads it never joined and a human's counts every row; a badge that stayed
@@ -698,17 +1034,17 @@ pub struct RoomUnread {
 /// audience the rows were delivered to, so the two agree only while nothing
 /// moves in between. Four ways they can differ:
 ///
-/// - A participant read that fails, or that succeeds and finds no rows for a
-///   thread that has replies, widens delivery to the whole room
-///   ([`crate::chat::audience`]) and this count cannot see it: those rows were
-///   delivered and are not counted. The route logs both shapes at WARN, and a
-///   thread only humans took part in is the ordinary way to reach it: its
-///   participant rows are empty by design, so an agent in the room is woken
-///   and the badge does not count that row.
 /// - `seq` is assigned inside the transaction that stores the row, so two
 ///   concurrent replies can commit out of `seq` order. Inside the window
 ///   [`append`] documents, a row is read before a lower one commits, and the
 ///   count then disagrees with that delivery in either direction.
+/// - A read that fails widens delivery, and this count cannot see it: a failed
+///   choice read falls back to the whole room
+///   ([`crate::chat::audience::Fallback::NoSubscriptions`]), and a failed
+///   participant read treats every agent as recorded
+///   ([`crate::chat::audience::Fallback::UnreadableParticipants`]). A read
+///   that succeeds but is early widens too: a `muted` row it missed leaves the
+///   member on the default, and the default wakes them.
 /// - A member removed and added back keeps both their participant rows and
 ///   their cursor, so the rows of their absence count as reached. This one
 ///   leaves no log line, and it rests on exactly the rows an exit would clean.
@@ -723,7 +1059,9 @@ pub struct RoomUnread {
 /// The count stops at 100 rows. The `LIMIT 100` subquery bounds the number
 /// returned, not the work: proving there is no 101st row still walks every
 /// row of the unread span through the `(room_id, seq)` scan, with each thread
-/// row resolved through the `thread_participants` primary key. The cursor
+/// row resolved through the `thread_participants` primary key, up to three
+/// probes on `thread_subscriptions`, and one index probe on
+/// `room_message_mentions`. The cursor
 /// advances as the member reads, so the span is the rows they have not seen
 /// yet; a member who never opened the room walks all of it on every
 /// envelope. The display caps lower than the cap.
@@ -750,15 +1088,40 @@ pub async fn unread_for_member(
                         AND m.seq > cur.last_read_seq \
                         AND m.sender_id <> $2 \
                         AND (m.root_seq IS NULL \
-                             OR cur.is_human \
-                             OR EXISTS (SELECT 1 FROM thread_participants p \
-                                         WHERE p.room_id = m.room_id \
-                                           AND p.root_seq = m.root_seq \
-                                           AND p.participant_id = $2 \
-                                           AND p.joined_at_seq <= m.seq)) \
+                             OR EXISTS (SELECT 1 FROM thread_subscriptions s \
+                                         WHERE s.room_id = m.room_id \
+                                           AND s.root_seq = m.root_seq \
+                                           AND s.member_id = $2 \
+                                           AND s.state = $3 \
+                                           AND s.since_seq < m.seq) \
+                             OR ((cur.is_human \
+                                  OR EXISTS (SELECT 1 FROM thread_participants p \
+                                              WHERE p.room_id = m.room_id \
+                                                AND p.root_seq = m.root_seq \
+                                                AND p.participant_id = $2 \
+                                                AND p.joined_at_seq <= m.seq)) \
+                                 AND NOT EXISTS (SELECT 1 FROM thread_subscriptions s \
+                                                  WHERE s.room_id = m.room_id \
+                                                    AND s.root_seq = m.root_seq \
+                                                    AND s.member_id = $2 \
+                                                    AND s.since_seq < m.seq) \
+                                 AND NOT EXISTS (SELECT 1 FROM thread_subscriptions s \
+                                                  WHERE s.room_id = m.room_id \
+                                                    AND s.root_seq = m.root_seq \
+                                                    AND s.member_id = $2 \
+                                                    AND s.muted_from_seq IS NOT NULL \
+                                                    AND s.muted_from_seq < m.seq)) \
+                             OR EXISTS (SELECT 1 FROM room_message_mentions mm \
+                                         WHERE mm.room_id = m.room_id \
+                                           AND mm.seq = m.seq \
+                                           AND mm.member_id = $2)) \
                      LIMIT 100) AS capped) AS unread \
              FROM cur",
-            [room.into(), member.as_ref().into()],
+            [
+                room.into(),
+                member.as_ref().into(),
+                ThreadChoice::Following.as_str().into(),
+            ],
         ))
         .await?
         .ok_or_else(|| sea_orm::DbErr::Custom("room unread read returned no row".into()))?;
@@ -831,9 +1194,18 @@ mod tests {
         ciphertext: &[u8],
         facts: &ThreadFacts,
     ) -> Result<i64, sea_orm::DbErr> {
-        append(db, room, sender_id, sender_kind, epoch, ciphertext, facts)
-            .await
-            .map(|a| a.seq)
+        append(
+            db,
+            room,
+            sender_id,
+            sender_kind,
+            epoch,
+            ciphertext,
+            facts,
+            &[],
+        )
+        .await
+        .map(|a| a.seq)
     }
 
     #[tokio::test]
@@ -1832,12 +2204,23 @@ mod tests {
         let (a, agent_kind) = agent_of("a");
         let (b, _) = agent_of("b");
 
-        let head = append(&db, "room-aud", &a, agent_kind, 1, b"h", &declaring(None))
-            .await
-            .unwrap();
+        let head = append(
+            &db,
+            "room-aud",
+            &a,
+            agent_kind,
+            1,
+            b"h",
+            &declaring(None),
+            &[],
+        )
+        .await
+        .unwrap();
         assert_eq!(head.root, None, "a head row heads its own thread");
         assert!(
-            head.participants.is_empty(),
+            head.participants
+                .as_ref()
+                .is_some_and(|rows| rows.is_empty()),
             "a head has no participants to scope its own wake"
         );
 
@@ -1849,12 +2232,15 @@ mod tests {
             1,
             b"r",
             &naming(head.seq, &[]),
+            &[],
         )
         .await
         .unwrap();
         assert_eq!(reply.root, Some(head.seq));
         let mut got: Vec<String> = reply
             .participants
+            .as_ref()
+            .expect("the participant read succeeded")
             .iter()
             .map(|m| m.as_ref().to_string())
             .collect();
@@ -1862,17 +2248,67 @@ mod tests {
         assert_eq!(got, vec![a.as_ref().to_string(), b.as_ref().to_string()]);
     }
 
-    /// A failed participant read is not a failed send: the policy hands back an
-    /// empty set (the route turns that into "wake the whole room"), and the
-    /// warning carries the reason.
+    /// A mention lands as its own row, in the message's own transaction: the
+    /// audience and the badge both ask it per message, and neither parses a
+    /// payload to answer.
+    #[tokio::test]
+    async fn an_append_records_who_the_message_named() {
+        let db = fresh_db().await;
+        seed_room(&db, "room-men").await;
+        let (a, agent_kind) = agent_of("a");
+        let (b, _) = agent_of("b");
+
+        let head = append(
+            &db,
+            "room-men",
+            &a,
+            agent_kind,
+            1,
+            b"h",
+            &declaring(None),
+            &[],
+        )
+        .await
+        .unwrap();
+        let reply = append(
+            &db,
+            "room-men",
+            &a,
+            agent_kind,
+            1,
+            b"r",
+            &naming(head.seq, &[&b]),
+            std::slice::from_ref(&b),
+        )
+        .await
+        .unwrap();
+        let rows = db
+            .query_all(Statement::from_sql_and_values(
+                DatabaseBackend::Postgres,
+                "SELECT member_id FROM room_message_mentions WHERE room_id = $1 AND seq = $2",
+                ["room-men".into(), reply.seq.into()],
+            ))
+            .await
+            .unwrap();
+        let got: Vec<String> = rows
+            .iter()
+            .map(|row| row.try_get::<String>("", "member_id").unwrap())
+            .collect();
+        assert_eq!(got, vec![b.as_ref().to_string()]);
+    }
+
+    /// A failed participant read is not a failed send: the policy hands back
+    /// `None`, which the audience reads as every agent being recorded, and
+    /// the warning carries the reason.
     #[test]
-    fn a_failed_participant_read_yields_no_participants() {
-        let got = participants_or_empty(
+    fn a_failed_participant_read_is_not_an_empty_one() {
+        let got = participants_or_unknown(
             "room-x",
             7,
+            9,
             Err(sea_orm::DbErr::Custom("read exploded".to_string())),
         );
-        assert!(got.is_empty());
+        assert!(got.is_none());
     }
 
     /// Seed one `room_members` row: the badge's human check reads the member's
@@ -2135,6 +2571,364 @@ mod tests {
                 unread: 1,
                 cursor: head
             }
+        );
+    }
+
+    /// Repeating a click is not a new decision: the second write of the same
+    /// state leaves both boundaries where the first one put them, which is
+    /// what keeps a repeated follow from stripping the coverage in between.
+    #[tokio::test]
+    async fn repeating_a_choice_leaves_both_boundaries_alone() {
+        let db = fresh_db().await;
+        seed_room(&db, "room-subs").await;
+        let (a, agent_kind) = agent();
+        let (c, _) = user("carol");
+        let head = append_seq(
+            &db,
+            "room-subs",
+            &a,
+            agent_kind,
+            1,
+            b"head",
+            &ThreadFacts::default(),
+        )
+        .await
+        .unwrap();
+        let first = set_subscription(&db, "room-subs", head, &c, ThreadChoice::Muted)
+            .await
+            .unwrap();
+        assert_eq!(first.since_seq, head);
+        assert_eq!(first.muted_from_seq, Some(head));
+        append_seq(
+            &db,
+            "room-subs",
+            &a,
+            agent_kind,
+            1,
+            b"reply",
+            &declaring(Some(head)),
+        )
+        .await
+        .unwrap();
+        let again = set_subscription(&db, "room-subs", head, &c, ThreadChoice::Muted)
+            .await
+            .unwrap();
+        assert_eq!(again.since_seq, first.since_seq);
+        assert_eq!(again.muted_from_seq, first.muted_from_seq);
+    }
+
+    /// A re-follow moves the start of the row and keeps the mute bound, so a
+    /// reply muted inside the window stays out of the badge. The judgement is
+    /// read back through `audience::choice`, the function delivery uses: one
+    /// row, one answer, whichever side asks.
+    #[tokio::test]
+    async fn a_re_follow_keeps_the_mute_bound_and_moves_the_start() {
+        let db = fresh_db().await;
+        seed_room(&db, "room-window").await;
+        let (a, agent_kind) = agent();
+        let (c, _) = user("carol");
+        let head = append_seq(
+            &db,
+            "room-window",
+            &a,
+            agent_kind,
+            1,
+            b"head",
+            &ThreadFacts::default(),
+        )
+        .await
+        .unwrap();
+        set_subscription(&db, "room-window", head, &c, ThreadChoice::Muted)
+            .await
+            .unwrap();
+        let inside = append_seq(
+            &db,
+            "room-window",
+            &a,
+            agent_kind,
+            1,
+            b"inside the mute",
+            &declaring(Some(head)),
+        )
+        .await
+        .unwrap();
+        let followed = set_subscription(&db, "room-window", head, &c, ThreadChoice::Following)
+            .await
+            .unwrap();
+        assert_eq!(followed.since_seq, inside);
+        assert_eq!(followed.muted_from_seq, Some(head));
+        let rows = subscriptions_of(&db, "room-window", head).await.unwrap();
+        assert_eq!(
+            crate::chat::audience::choice(&rows, &c, inside),
+            Some(ThreadChoice::Muted)
+        );
+        assert_eq!(
+            crate::chat::audience::choice(&rows, &c, inside + 1),
+            Some(ThreadChoice::Following)
+        );
+    }
+
+    /// The badge and the fan agree on a mute end to end: a muted human stops
+    /// counting, a re-follow restarts the count after the window, and dropping
+    /// the row returns the member to the default the mute had replaced.
+    #[tokio::test]
+    async fn the_badge_follows_a_mute_a_re_follow_and_a_clear() {
+        let db = fresh_db().await;
+        seed_room(&db, "room-badge").await;
+        let (a, agent_kind) = agent();
+        let (c, _) = user("carol");
+        db.execute(Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            "INSERT INTO room_members (room_id, member_id, kind, source_id, joined_at, \
+             added_by) VALUES ($1, $2, 'human', $2, NOW(), $2)",
+            ["room-badge".into(), c.as_ref().into()],
+        ))
+        .await
+        .expect("seed carol as a human member");
+        let head = append_seq(
+            &db,
+            "room-badge",
+            &a,
+            agent_kind,
+            1,
+            b"head",
+            &ThreadFacts::default(),
+        )
+        .await
+        .unwrap();
+        let second = append_seq(
+            &db,
+            "room-badge",
+            &a,
+            agent_kind,
+            1,
+            b"reply",
+            &declaring(Some(head)),
+        )
+        .await
+        .unwrap();
+        set_read_cursor(&db, "room-badge", &c, second)
+            .await
+            .unwrap();
+        set_subscription(&db, "room-badge", head, &c, ThreadChoice::Muted)
+            .await
+            .unwrap();
+        append_seq(
+            &db,
+            "room-badge",
+            &a,
+            agent_kind,
+            1,
+            b"muted reply",
+            &declaring(Some(head)),
+        )
+        .await
+        .unwrap();
+        let muted = unread_for_member(&db, "room-badge", &c).await.unwrap();
+        assert_eq!(muted.unread, 0);
+        set_subscription(&db, "room-badge", head, &c, ThreadChoice::Following)
+            .await
+            .unwrap();
+        append_seq(
+            &db,
+            "room-badge",
+            &a,
+            agent_kind,
+            1,
+            b"followed reply",
+            &declaring(Some(head)),
+        )
+        .await
+        .unwrap();
+        let followed = unread_for_member(&db, "room-badge", &c).await.unwrap();
+        assert_eq!(followed.unread, 1);
+        clear_subscription(&db, "room-badge", head, &c)
+            .await
+            .unwrap();
+        let cleared = unread_for_member(&db, "room-badge", &c).await.unwrap();
+        assert_eq!(cleared.unread, 2);
+        assert_eq!(cleared.cursor, second);
+        clear_subscription(&db, "room-badge", head, &c)
+            .await
+            .unwrap();
+    }
+
+    /// Insert a choice row directly, standing in for one a newer write
+    /// committed while this write's snapshot was still being read.
+    async fn seed_choice(
+        db: &Db,
+        room: &str,
+        root: i64,
+        member: &MemberId,
+        state: ThreadChoice,
+        since_seq: i64,
+        muted_from_seq: Option<i64>,
+    ) {
+        db.execute(Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            "INSERT INTO thread_subscriptions \
+             (room_id, root_seq, member_id, state, since_seq, muted_from_seq, \
+              created_at, updated_at) \
+             VALUES ($1, $2, $3, $4::text, $5, $6, NOW(), NOW())",
+            [
+                room.into(),
+                root.into(),
+                member.as_ref().to_string().into(),
+                state.as_str().into(),
+                since_seq.into(),
+                muted_from_seq.into(),
+            ],
+        ))
+        .await
+        .expect("seed a choice row");
+    }
+
+    /// The CHECKs catch the writes the upsert cannot produce: a mute with
+    /// no bound, a bound past the row's own start, and a state no reader
+    /// can name.
+    #[tokio::test]
+    async fn the_checks_reject_a_row_that_drifts() {
+        let db = fresh_db().await;
+        seed_room(&db, "room-checks").await;
+        for (state, bound) in [
+            ("muted", None),
+            ("following", Some(9i64)),
+            ("napping", None),
+        ] {
+            let drifted = db
+                .execute(Statement::from_sql_and_values(
+                    DatabaseBackend::Postgres,
+                    "INSERT INTO thread_subscriptions \
+                     (room_id, root_seq, member_id, state, since_seq, muted_from_seq, \
+                      created_at, updated_at) \
+                     VALUES ($1, $2, $3, $4::text, $5, $6, NOW(), NOW())",
+                    [
+                        "room-checks".into(),
+                        1i64.into(),
+                        "u-carol".into(),
+                        state.into(),
+                        5i64.into(),
+                        bound.into(),
+                    ],
+                ))
+                .await;
+            assert!(
+                drifted.is_err(),
+                "a row written as {state} with bound {bound:?} must violate a check"
+            );
+        }
+    }
+
+    /// A write whose snapshot predates the row keeps the further boundary.
+    ///
+    /// The row holds a position this statement cannot see -- one a newer choice
+    /// committed while this request was reading the room -- so its own
+    /// `max(seq)` is the smaller number. Taking it would judge the rows between
+    /// the two positions by the wrong rule: a mute window opened over them
+    /// drops them from the badge unread by anyone, and a re-follow re-opens
+    /// rows a mute had already silenced.
+    #[tokio::test]
+    async fn a_write_whose_snapshot_predates_the_row_keeps_the_further_boundary() {
+        let db = fresh_db().await;
+        seed_room(&db, "room-race").await;
+        let (alice, human) = user("alice");
+        let head = append_seq(
+            &db,
+            "room-race",
+            &alice,
+            human,
+            1,
+            b"head",
+            &ThreadFacts::default(),
+        )
+        .await
+        .unwrap();
+        let end = append_seq(
+            &db,
+            "room-race",
+            &alice,
+            human,
+            1,
+            b"reply",
+            &declaring(Some(head)),
+        )
+        .await
+        .unwrap();
+        let ahead = end + 20;
+
+        // A newer choice committed `following` past this write's snapshot.
+        let stale_mute = MemberId::from("u-stale-mute".to_string());
+        seed_choice(
+            &db,
+            "room-race",
+            head,
+            &stale_mute,
+            ThreadChoice::Following,
+            ahead,
+            None,
+        )
+        .await;
+        let muted = set_subscription(&db, "room-race", head, &stale_mute, ThreadChoice::Muted)
+            .await
+            .unwrap();
+        assert_eq!(muted.state, ThreadChoice::Muted);
+        assert_eq!(
+            muted.since_seq, ahead,
+            "the boundary keeps the further position"
+        );
+        assert_eq!(
+            muted.muted_from_seq,
+            Some(ahead),
+            "the mute window opens where the boundary is"
+        );
+
+        // The same the other way: a stale re-follow keeps the window closed.
+        let stale_follow = MemberId::from("u-stale-follow".to_string());
+        seed_choice(
+            &db,
+            "room-race",
+            head,
+            &stale_follow,
+            ThreadChoice::Muted,
+            ahead,
+            Some(ahead),
+        )
+        .await;
+        let followed = set_subscription(
+            &db,
+            "room-race",
+            head,
+            &stale_follow,
+            ThreadChoice::Following,
+        )
+        .await
+        .unwrap();
+        assert_eq!(followed.state, ThreadChoice::Following);
+        assert_eq!(followed.since_seq, ahead);
+        assert_eq!(
+            followed.muted_from_seq,
+            Some(ahead),
+            "the window the row remembers stays closed"
+        );
+
+        // A boundary behind the room's end still moves up to it.
+        let plain = MemberId::from("u-plain".to_string());
+        seed_choice(
+            &db,
+            "room-race",
+            head,
+            &plain,
+            ThreadChoice::Following,
+            head,
+            None,
+        )
+        .await;
+        let advanced = set_subscription(&db, "room-race", head, &plain, ThreadChoice::Muted)
+            .await
+            .unwrap();
+        assert_eq!(
+            advanced.since_seq, end,
+            "the boundary follows the room's end forward"
         );
     }
 }

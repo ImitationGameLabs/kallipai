@@ -9,3 +9,4 @@ pub mod room_messages;
 pub mod room_read_cursors;
 pub mod rooms;
 pub mod thread_participants;
+pub mod thread_subscriptions;

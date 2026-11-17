@@ -14,6 +14,8 @@ mod m_20261114_01_thread_participants;
 mod m_20261114_02_thread_participants_backfill;
 mod m_20261114_03_thread_participants_mentions;
 mod m_20261114_04_room_thread_index;
+mod m_20261117_01_thread_subscriptions;
+mod m_20261117_02_room_message_mentions;
 
 pub struct Migrator;
 
@@ -34,6 +36,8 @@ impl MigratorTrait for Migrator {
             Box::new(m_20261114_02_thread_participants_backfill::Migration),
             Box::new(m_20261114_03_thread_participants_mentions::Migration),
             Box::new(m_20261114_04_room_thread_index::Migration),
+            Box::new(m_20261117_01_thread_subscriptions::Migration),
+            Box::new(m_20261117_02_room_message_mentions::Migration),
         ]
     }
 }

@@ -43,5 +43,12 @@
   "room_thread_sheet_description": "这条话题下的回复，你也可以在这里回一句。",
   "room_thread_membership_started": "这条讨论是你发起的。",
   "room_thread_membership_replied": "你在这里回复过。",
-  "room_thread_membership_mentioned": "有人在这里点了你的名。"
+  "room_thread_membership_mentioned": "有人在这里点了你的名。",
+  "room_thread_following": "正在跟随",
+  "room_thread_muted": "已静音",
+  "room_thread_involved": "仅被提及时提醒",
+  "room_thread_mute_action": "静音这个讨论串",
+  "room_thread_default_action": "恢复默认",
+  "room_thread_follow_action": "跟随这个讨论串",
+  "room_thread_choice_failed": "没能改过来，再试一次。"
 }

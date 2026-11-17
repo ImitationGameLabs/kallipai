@@ -42,7 +42,7 @@ use kallipai_lesche_common::event::{LescheAgentEvent, UpstreamEvent};
 use kallipai_lesche_common::ids::path_segment;
 use kallipai_lesche_common::message::Envelope;
 use kallipai_lesche_common::proof::tunnel_transcript;
-use kallipai_lesche_common::rooms::{RoomId, TagmaRoomView};
+use kallipai_lesche_common::rooms::{RoomId, TagmaRoomView, ThreadChoice, ThreadSubscriptionView};
 
 struct Inner {
     base_url: String,
@@ -393,6 +393,105 @@ impl LescheClient {
             .into());
         }
         resp.json().await.context("decode room history")
+    }
+
+    /// The caller's standing choice about one thread:
+    /// `GET /rooms/{room_id}/threads/{root}/subscription`. Member-only, and
+    /// `{root}` must head a thread of that room: a reply's seq, a position past
+    /// the log and an unknown room are all 404.
+    pub async fn thread_subscription(
+        &self,
+        room_id: &RoomId,
+        root: i64,
+    ) -> Result<ThreadSubscriptionView> {
+        let url = self.url(&format!(
+            "/rooms/{}/threads/{root}/subscription",
+            path_segment(room_id.as_ref())?
+        ));
+        let resp = self
+            .send_authorized("thread subscription GET", |token| {
+                self.inner.http_post.get(&url).bearer_auth(token)
+            })
+            .await?;
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(LescheHttpError {
+                op: "thread subscription GET",
+                status,
+                detail: None,
+            }
+            .into());
+        }
+        resp.json().await.context("decode thread subscription")
+    }
+
+    /// Record the caller's choice about one thread:
+    /// `PUT /rooms/{room_id}/threads/{root}/subscription` with `{"state": ...}`.
+    /// The member is the authenticated principal, so this writes the caller's
+    /// own row and nothing else; the answer is the row read back, whose
+    /// `since_seq` is the room position the choice took effect at.
+    pub async fn set_thread_subscription(
+        &self,
+        room_id: &RoomId,
+        root: i64,
+        choice: ThreadChoice,
+    ) -> Result<ThreadSubscriptionView> {
+        #[derive(serde::Serialize)]
+        struct Body<'a> {
+            state: &'a str,
+        }
+        let url = self.url(&format!(
+            "/rooms/{}/threads/{root}/subscription",
+            path_segment(room_id.as_ref())?
+        ));
+        let body = Body {
+            state: choice.as_str(),
+        };
+        let resp = self
+            .send_authorized("thread subscription PUT", |token| {
+                self.inner
+                    .http_post
+                    .put(&url)
+                    .json(&body)
+                    .bearer_auth(token)
+            })
+            .await?;
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(LescheHttpError {
+                op: "thread subscription PUT",
+                status,
+                detail: None,
+            }
+            .into());
+        }
+        resp.json().await.context("decode thread subscription")
+    }
+
+    /// Drop the caller's choice about one thread
+    /// (`DELETE /rooms/{room_id}/threads/{root}/subscription`) so it goes back
+    /// to the default. Idempotent: holding no row answers the same as holding
+    /// one.
+    pub async fn clear_thread_subscription(&self, room_id: &RoomId, root: i64) -> Result<()> {
+        let url = self.url(&format!(
+            "/rooms/{}/threads/{root}/subscription",
+            path_segment(room_id.as_ref())?
+        ));
+        let resp = self
+            .send_authorized("thread subscription DELETE", |token| {
+                self.inner.http_post.delete(&url).bearer_auth(token)
+            })
+            .await?;
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(LescheHttpError {
+                op: "thread subscription DELETE",
+                status,
+                detail: None,
+            }
+            .into());
+        }
+        Ok(())
     }
 
     /// List the calling tagma's rooms with each room's live membership + whether
@@ -973,6 +1072,7 @@ mod tests {
     };
     use kallipai_lesche_common::event::{AgentState, SignalEvent, TagmaStatusPayload};
     use kallipai_lesche_common::message::{Envelope, Participant};
+    use kallipai_lesche_common::rooms::ThreadDelivery;
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -2187,5 +2287,76 @@ mod tests {
             answered.trace_id, asked.trace_id,
             "the keryx did not join the caller's trace"
         );
+    }
+
+    #[tokio::test]
+    async fn thread_subscription_reads_the_choice_and_the_effective_rule() {
+        let server = MockServer::start().await;
+        let room = RoomId::from("room-1".to_string());
+        let body = serde_json::json!({
+            "override": "muted",
+            "effective": "muted",
+            "since_seq": 17,
+        });
+        Mock::given(method("GET"))
+            .and(path("/rooms/room-1/threads/9/subscription"))
+            .and(header("authorization", "Bearer sk-tagma-test"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(&server)
+            .await;
+
+        let view = client(&server)
+            .thread_subscription(&room, 9)
+            .await
+            .expect("read the choice");
+        assert_eq!(view.choice, Some(ThreadChoice::Muted));
+        assert_eq!(view.effective, ThreadDelivery::Muted);
+        assert_eq!(view.since_seq, Some(17));
+    }
+
+    #[tokio::test]
+    async fn set_thread_subscription_puts_the_state_it_was_given() {
+        let server = MockServer::start().await;
+        let room = RoomId::from("room-1".to_string());
+        let body = serde_json::json!({
+            "override": "following",
+            "effective": "following",
+            "since_seq": 4,
+        });
+        Mock::given(method("PUT"))
+            .and(path("/rooms/room-1/threads/9/subscription"))
+            .and(header("authorization", "Bearer sk-tagma-test"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(&server)
+            .await;
+
+        let view = client(&server)
+            .set_thread_subscription(&room, 9, ThreadChoice::Following)
+            .await
+            .expect("write the choice");
+        assert_eq!(view.choice, Some(ThreadChoice::Following));
+        assert_eq!(view.effective, ThreadDelivery::Following);
+
+        let requests = server.received_requests().await.expect("requests recorded");
+        let sent: serde_json::Value =
+            serde_json::from_slice(&requests[0].body).expect("the body is JSON");
+        assert_eq!(sent, serde_json::json!({"state": "following"}));
+    }
+
+    #[tokio::test]
+    async fn clear_thread_subscription_deletes_and_accepts_no_content() {
+        let server = MockServer::start().await;
+        let room = RoomId::from("room-1".to_string());
+        Mock::given(method("DELETE"))
+            .and(path("/rooms/room-1/threads/9/subscription"))
+            .and(header("authorization", "Bearer sk-tagma-test"))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+
+        client(&server)
+            .clear_thread_subscription(&room, 9)
+            .await
+            .expect("drop the choice");
     }
 }

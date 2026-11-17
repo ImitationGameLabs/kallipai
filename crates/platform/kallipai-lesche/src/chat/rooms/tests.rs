@@ -1143,7 +1143,7 @@ async fn the_audience_log_says_how_much_the_thread_left_out() {
         "one audience line per send, head and two replies: {logged}"
     );
     assert!(
-        lines[0].contains("fallback=Some(Head)"),
+        lines[0].contains("fallback=[]"),
         "a head message is the expected whole-room case: {}",
         lines[0]
     );
@@ -1158,7 +1158,7 @@ async fn the_audience_log_says_how_much_the_thread_left_out() {
     );
     assert!(reply.contains("total=1"), "alice alone: {reply}");
     assert!(
-        reply.contains("fallback=None"),
+        reply.contains("fallback=[]"),
         "the reply is scoped by its thread: {reply}"
     );
     let human_reply = lines[2];
@@ -1172,13 +1172,14 @@ async fn the_audience_log_says_how_much_the_thread_left_out() {
     );
 }
 
-/// A reply whose thread has no participant rows wakes the whole room, not
-/// nobody, and says so at WARN. An empty set here is a hole in the
-/// table (or a failed read), never an audience of zero, so the wake falls
-/// back to the whole room. A human-headed thread with only human replies is
-/// the ordinary way to reach it, since no agent row is written for either.
+/// A reply whose thread has no participant rows is named at debug -- that
+/// shape is ordinary, not a fault -- and the wake falls to each member's
+/// default: the human who did not send it hears it, and the room's agents do
+/// not, because no row joins them to the thread. A human-headed thread with
+/// only human replies is the ordinary way to reach it, since no agent row is
+/// written for either human.
 #[tokio::test]
-async fn a_reply_with_no_participants_wakes_the_whole_room_and_says_so() {
+async fn a_reply_with_no_participants_names_the_empty_table_and_wakes_the_defaults() {
     let sink = LogSink::default();
     let subscriber = tracing_subscriber::fmt()
         .with_writer(sink.clone())
@@ -1241,22 +1242,24 @@ async fn a_reply_with_no_participants_wakes_the_whole_room_and_says_so() {
     .expect("accepted");
 
     let _ = alice_rx.recv().await.expect("alice, the head author");
-    let _ = t1_rx.recv().await.expect("t1, woken by the fallback");
-    let _ = t2_rx.recv().await.expect("t2, woken by the fallback");
+    assert!(
+        t1_rx.try_recv().is_err(),
+        "no participant row joins t1 to a thread of humans"
+    );
+    assert!(t2_rx.try_recv().is_err(), "nor t2");
 
     let logged = String::from_utf8_lossy(&sink.0.lock().unwrap()).to_string();
     assert!(
-        logged.contains("thread reply has no participant rows"),
-        "the hole is named at WARN: {logged}"
+        logged.contains("thread participants table holds no rows for this reply"),
+        "the empty table is named where it is read: {logged}"
     );
     assert!(
-        logged.contains("fallback=Some(NoParticipants)"),
-        "and the audience line says which fallback ran: {logged}"
+        logged.contains("fallback=[NoParticipants]"),
+        "and the reply's reading carries it, whatever the wake came out like: {logged}"
     );
-    assert_eq!(
-        logged.matches("fallback=Some(Head)").count(),
-        1,
-        "only the head message takes the Head fallback: {logged}"
+    assert!(
+        !logged.contains("could not be scoped"),
+        "the route does not rebuild the reading it does not own: {logged}"
     );
 }
 
@@ -1512,7 +1515,10 @@ fn empty_audience_warns_only_when_the_room_has_another_member() {
     };
     let empty = audience::Audience {
         ids: BTreeSet::new(),
-        fallback: None,
+        fallback: Vec::new(),
+        muted: 0,
+        following: 0,
+        mentioned: 0,
     };
 
     assert!(
@@ -1523,7 +1529,7 @@ fn empty_audience_warns_only_when_the_room_has_another_member() {
             &sender,
             ParticipantKind::Agent,
             &empty,
-            0
+            Some(0)
         ),
         "a room with another member and nobody to wake is a hole"
     );
@@ -1535,7 +1541,7 @@ fn empty_audience_warns_only_when_the_room_has_another_member() {
             &sender,
             ParticipantKind::Agent,
             &empty,
-            0
+            Some(0)
         ),
         "a room whose only member is the sender has nobody else to wake"
     );
@@ -1543,7 +1549,10 @@ fn empty_audience_warns_only_when_the_room_has_another_member() {
     ids.insert(mid(&t2_pid));
     let woken = audience::Audience {
         ids,
-        fallback: None,
+        fallback: Vec::new(),
+        muted: 0,
+        following: 0,
+        mentioned: 0,
     };
     assert!(
         !check_empty_audience(
@@ -1553,7 +1562,7 @@ fn empty_audience_warns_only_when_the_room_has_another_member() {
             &sender,
             ParticipantKind::Agent,
             &woken,
-            1
+            Some(1)
         ),
         "a non-empty audience is not a hole"
     );
@@ -1566,18 +1575,18 @@ fn empty_audience_warns_only_when_the_room_has_another_member() {
 /// exactly one if the audience named them and stays put if it did not. A term
 /// added to one side alone -- the tier term `audience()` keeps for the day
 /// tiers land -- turns this red on the first row it touches.
-/// The equivalence asserted here is strict, so no send in this test may fall
-/// back to the whole room (a thread with replies but no participant rows):
-/// the audience would name the room while the badge counts nothing, and this
-/// test would call that drift. That shape is covered by the fallback test.
+/// The empty-participant shape -- a thread only humans replied in -- is in
+/// here on purpose: the wake and the badge used to disagree exactly there,
+/// and they must agree now that delivery judges each member's own default.
 #[tokio::test]
 async fn the_badge_moves_exactly_for_the_members_the_audience_named() {
     let (state, _control) = db_state().await;
     let alice = uid("alice");
+    let bob = uid("bob");
     let t1 = TagmaId::from("t1".to_string());
     let t2 = TagmaId::from("t2".to_string());
     let db = state.db.as_ref().unwrap();
-    seed_room(db, "room-1", &alice, &[], &[&t1, &t2]).await;
+    seed_room(db, "room-1", &alice, &[&bob], &[&t1, &t2]).await;
 
     let membership = store::room_membership(db, "room-1")
         .await
@@ -1590,23 +1599,54 @@ async fn the_badge_moves_exactly_for_the_members_the_audience_named() {
             mid(&ParticipantId::for_user(&alice)),
             ParticipantKind::Human,
         ),
+        (mid(&ParticipantId::for_user(&bob)), ParticipantKind::Human),
         (t1_mid.clone(), ParticipantKind::Agent),
         (t2_mid.clone(), ParticipantKind::Agent),
     ];
 
-    // Who sends, in which thread, naming whom: a human head, a reply naming
-    // nobody, a reply naming the other agent, an agent head, and a human reply
-    // that names an agent.
-    let sends: [(usize, Option<i64>, Vec<MemberId>); 5] = [
+    // Who sends, in which thread, naming whom: a human head, an agent reply
+    // naming nobody, a reply naming the other agent, an agent head, a human
+    // reply that names an agent, then a human head followed by a human reply:
+    // that last thread holds no agent at all, so the participant table
+    // answers empty for it.
+    let sends: [(usize, Option<i64>, Vec<MemberId>); 7] = [
         (0, None, Vec::new()),
-        (1, Some(1), Vec::new()),
-        (1, Some(1), vec![t2_mid.clone()]),
-        (2, None, Vec::new()),
+        (2, Some(1), Vec::new()),
+        (2, Some(1), vec![t2_mid.clone()]),
+        (3, None, Vec::new()),
         (0, Some(1), vec![t1_mid.clone()]),
+        (0, None, Vec::new()),
+        (1, Some(7), Vec::new()),
     ];
+    // Two passes over the same sends: the second records a choice on the
+    // thread first, so the pair of implementations is bound under choices as
+    // well as under the defaults. Muting every other member keeps both
+    // outcomes in play -- a muted participant and a following non-participant
+    // in the same send.
+    let planned: Vec<(bool, usize, Option<i64>, Vec<MemberId>)> = [false, true]
+        .into_iter()
+        .flat_map(|with_choices| {
+            sends
+                .iter()
+                .map(move |(who, thread, mentions)| (with_choices, *who, *thread, mentions.clone()))
+        })
+        .collect();
 
-    for (who, thread, mentions) in sends {
+    for (with_choices, who, thread, mentions) in planned {
         let (sender, kind) = members[who].clone();
+        if with_choices && let Some(root) = thread {
+            for (index, (member, _)) in members.iter().enumerate() {
+                let state = if index % 2 == 0 {
+                    ThreadChoice::Muted
+                } else {
+                    ThreadChoice::Following
+                };
+                store::set_subscription(db, "room-1", root, member, state)
+                    .await
+                    .expect("record a choice");
+            }
+        }
+
         let mut before = Vec::new();
         for (member, _) in &members {
             before.push(
@@ -1616,6 +1656,7 @@ async fn the_badge_moves_exactly_for_the_members_the_audience_named() {
                     .unread,
             );
         }
+        let mentioned = mentions.clone();
         let appended = store::append(
             db,
             "room-1",
@@ -1624,11 +1665,19 @@ async fn the_badge_moves_exactly_for_the_members_the_audience_named() {
             membership.membership_epoch,
             b"hi",
             &ThreadFacts { thread, mentions },
+            &mentioned,
         )
         .await
         .expect("append");
-        let decided =
-            audience::audience(&membership, &sender, appended.root, &appended.participants);
+        let decided = audience::audience(
+            &membership,
+            &sender,
+            appended.root,
+            appended.seq,
+            appended.participants.as_deref(),
+            appended.subscriptions.as_deref(),
+            &mentioned,
+        );
         for (index, (member, _)) in members.iter().enumerate() {
             let after = store::unread_for_member(db, "room-1", member)
                 .await
@@ -1644,4 +1693,440 @@ async fn the_badge_moves_exactly_for_the_members_the_audience_named() {
             );
         }
     }
+}
+
+/// A mention pierces a mute on both sides at once: the wake reaches the member
+/// who muted the thread, and the badge counts exactly that row. Rows around
+/// it stay muted, which is what makes this a pair of rules and not one
+/// widened one.
+#[tokio::test]
+async fn a_mention_wakes_a_muted_member_and_moves_their_badge() {
+    let (state, _control) = db_state().await;
+    let alice = uid("alice");
+    let bob = uid("bob");
+    let t1 = TagmaId::from("t1".to_string());
+    let t2 = TagmaId::from("t2".to_string());
+    let db = state.db.as_ref().unwrap();
+    seed_room(db, "room-1", &alice, &[&bob], &[&t1, &t2]).await;
+    let membership = store::room_membership(db, "room-1")
+        .await
+        .expect("membership read")
+        .expect("the room exists");
+    let alice_mid = mid(&ParticipantId::for_user(&alice));
+    let bob_mid = mid(&ParticipantId::for_user(&bob));
+    let t1_mid = mid(&ParticipantId::for_tagma(&t1));
+    let t2_mid = mid(&ParticipantId::for_tagma(&t2));
+
+    let head = store::append(
+        db,
+        "room-1",
+        &alice_mid,
+        ParticipantKind::Human,
+        membership.membership_epoch,
+        b"head",
+        &ThreadFacts::default(),
+        &[],
+    )
+    .await
+    .expect("append the head");
+    store::set_subscription(db, "room-1", head.seq, &t1_mid, ThreadChoice::Muted)
+        .await
+        .expect("mute the thread");
+
+    let before = store::unread_for_member(db, "room-1", &t1_mid)
+        .await
+        .expect("badge")
+        .unread;
+    let named = vec![t1_mid.clone()];
+    let reply = store::append(
+        db,
+        "room-1",
+        &bob_mid,
+        ParticipantKind::Human,
+        membership.membership_epoch,
+        b"reply",
+        &ThreadFacts {
+            thread: Some(head.seq),
+            mentions: named.clone(),
+        },
+        &named,
+    )
+    .await
+    .expect("append the reply");
+    let decided = audience::audience(
+        &membership,
+        &bob_mid,
+        reply.root,
+        reply.seq,
+        reply.participants.as_deref(),
+        reply.subscriptions.as_deref(),
+        &named,
+    );
+    assert!(
+        decided.ids.contains(&t1_mid),
+        "a mention wakes the member who muted the thread"
+    );
+    assert!(!decided.ids.contains(&t2_mid), "nobody named t2");
+    let after = store::unread_for_member(db, "room-1", &t1_mid)
+        .await
+        .expect("badge")
+        .unread;
+    assert_eq!(
+        after - before,
+        1,
+        "the badge counts the row the mention reached"
+    );
+
+    // The same thread without a mention: the mute holds on both sides.
+    let quiet = store::append(
+        db,
+        "room-1",
+        &bob_mid,
+        ParticipantKind::Human,
+        membership.membership_epoch,
+        b"reply",
+        &ThreadFacts {
+            thread: Some(head.seq),
+            mentions: Vec::new(),
+        },
+        &[],
+    )
+    .await
+    .expect("append the reply");
+    let quiet_decided = audience::audience(
+        &membership,
+        &bob_mid,
+        quiet.root,
+        quiet.seq,
+        quiet.participants.as_deref(),
+        quiet.subscriptions.as_deref(),
+        &[],
+    );
+    assert!(
+        !quiet_decided.ids.contains(&t1_mid),
+        "the mute holds without a mention"
+    );
+    let quiet_after = store::unread_for_member(db, "room-1", &t1_mid)
+        .await
+        .expect("badge")
+        .unread;
+    assert_eq!(quiet_after, after, "a muted row moves no badge");
+}
+
+/// The subscription round trip: a member holding no row reads the default, a
+/// mute records the room position it took effect at, a repeat keeps that
+/// position, and dropping the row returns the thread to the default.
+#[tokio::test]
+async fn thread_subscription_roundtrip_follows_mutes_and_defaults() {
+    let (state, _control) = db_state().await;
+    let alice = uid("alice");
+    let db = state.db.as_ref().unwrap();
+    seed_room(db, "room-1", &alice, &[], &[]).await;
+    let membership = store::room_membership(db, "room-1").await.unwrap().unwrap();
+    let alice_mid = mid(&ParticipantId::for_user(&alice));
+    let head = store::append(
+        db,
+        "room-1",
+        &alice_mid,
+        ParticipantKind::Human,
+        membership.membership_epoch,
+        b"head",
+        &ThreadFacts::default(),
+        &[],
+    )
+    .await
+    .expect("append the head");
+    let second = store::append(
+        db,
+        "room-1",
+        &alice_mid,
+        ParticipantKind::Human,
+        membership.membership_epoch,
+        b"second",
+        &ThreadFacts {
+            thread: Some(head.seq),
+            mentions: Vec::new(),
+        },
+        &[],
+    )
+    .await
+    .expect("append a reply");
+    let path = || Path(("room-1".to_string(), head.seq.to_string()));
+
+    // No row: a human's default follows the thread.
+    let view = thread_subscription(State(state.clone()), participant("alice"), path())
+        .await
+        .expect("read")
+        .0;
+    assert_eq!(view.choice, None);
+    assert_eq!(view.effective, ThreadDelivery::Following);
+    assert_eq!(view.since_seq, None);
+
+    // The mute lands at the room's current end and reads back the same way.
+    let muted = put_thread_subscription(
+        State(state.clone()),
+        participant("alice"),
+        path(),
+        Json(ThreadSubscriptionRequest {
+            state: "muted".into(),
+        }),
+    )
+    .await
+    .expect("mute")
+    .0;
+    assert_eq!(muted.choice, Some(ThreadChoice::Muted));
+    assert_eq!(muted.effective, ThreadDelivery::Muted);
+    assert_eq!(muted.since_seq, Some(second.seq));
+
+    // A repeat is the same decision: the boundary stays where it was.
+    let repeated = put_thread_subscription(
+        State(state.clone()),
+        participant("alice"),
+        path(),
+        Json(ThreadSubscriptionRequest {
+            state: "muted".into(),
+        }),
+    )
+    .await
+    .expect("repeat")
+    .0;
+    assert_eq!(repeated.since_seq, Some(second.seq));
+
+    // A label the table does not hold is refused, not guessed.
+    let err = put_thread_subscription(
+        State(state.clone()),
+        participant("alice"),
+        path(),
+        Json(ThreadSubscriptionRequest {
+            state: "loud".into(),
+        }),
+    )
+    .await
+    .expect_err("unknown state");
+    assert_eq!(err.status, 400);
+
+    // Back to the default: the row goes with the choice, and the read answers
+    // the default again.
+    let status = delete_thread_subscription(State(state.clone()), participant("alice"), path())
+        .await
+        .expect("delete");
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert!(
+        store::subscription_of(db, "room-1", head.seq, &alice_mid)
+            .await
+            .unwrap()
+            .is_none(),
+        "the row is gone"
+    );
+    let view = thread_subscription(State(state.clone()), participant("alice"), path())
+        .await
+        .expect("read")
+        .0;
+    assert_eq!(view.choice, None);
+    assert_eq!(view.effective, ThreadDelivery::Following);
+
+    // Deleting what is not there is not an error.
+    let status = delete_thread_subscription(State(state), participant("alice"), path())
+        .await
+        .expect("second delete");
+    assert_eq!(status, StatusCode::NO_CONTENT);
+}
+
+/// An agent's default is not a mute, and the write names the caller: with no
+/// row the agent reads `involved` until the thread holds its participation,
+/// and a body naming another member leaves that member alone.
+#[tokio::test]
+async fn thread_subscription_judges_an_agent_by_participation_and_writes_only_the_caller() {
+    let (state, _control) = db_state().await;
+    let alice = uid("alice");
+    let t1 = TagmaId::from("t1".to_string());
+    let t2 = TagmaId::from("t2".to_string());
+    let db = state.db.as_ref().unwrap();
+    seed_room(db, "room-1", &alice, &[], &[&t1, &t2]).await;
+    let membership = store::room_membership(db, "room-1").await.unwrap().unwrap();
+    let alice_mid = mid(&ParticipantId::for_user(&alice));
+    let t1_mid = mid(&ParticipantId::for_tagma(&t1));
+    let t2_mid = mid(&ParticipantId::for_tagma(&t2));
+    let head = store::append(
+        db,
+        "room-1",
+        &alice_mid,
+        ParticipantKind::Human,
+        membership.membership_epoch,
+        b"head",
+        &ThreadFacts::default(),
+        &[],
+    )
+    .await
+    .expect("append the head");
+    let path = || Path(("room-1".to_string(), head.seq.to_string()));
+
+    // Nothing of t1's in the thread yet: its default is `involved`.
+    let view = thread_subscription(
+        State(state.clone()),
+        AuthPrincipal(Principal::Tagma(t1.clone())),
+        path(),
+    )
+    .await
+    .expect("read")
+    .0;
+    assert_eq!(view.choice, None);
+    assert_eq!(view.effective, ThreadDelivery::Involved);
+
+    // Its own reply puts it in the participant table: the default follows.
+    store::append(
+        db,
+        "room-1",
+        &t1_mid,
+        ParticipantKind::Agent,
+        membership.membership_epoch,
+        b"reply",
+        &ThreadFacts {
+            thread: Some(head.seq),
+            mentions: Vec::new(),
+        },
+        &[],
+    )
+    .await
+    .expect("append the agent's reply");
+    let view = thread_subscription(
+        State(state.clone()),
+        AuthPrincipal(Principal::Tagma(t1.clone())),
+        path(),
+    )
+    .await
+    .expect("read")
+    .0;
+    assert_eq!(view.effective, ThreadDelivery::Following);
+
+    // A body carrying another member's id changes nothing about that member:
+    // the row the route can write is the caller's own.
+    let request: ThreadSubscriptionRequest = serde_json::from_value(serde_json::json!({
+        "state": "muted",
+        "member_id": t2_mid.as_ref(),
+    }))
+    .expect("unknown fields are ignored");
+    let muted = put_thread_subscription(
+        State(state.clone()),
+        AuthPrincipal(Principal::Tagma(t1.clone())),
+        path(),
+        Json(request),
+    )
+    .await
+    .expect("mute")
+    .0;
+    assert_eq!(muted.choice, Some(ThreadChoice::Muted));
+    assert!(
+        store::subscription_of(db, "room-1", head.seq, &t2_mid)
+            .await
+            .unwrap()
+            .is_none(),
+        "the body named t2; the caller's row is the one written"
+    );
+}
+
+/// The gate and the key: an unknown room, a non-member and a `{root}` that
+/// heads no thread of this room all answer 404. A reply's own seq, a position
+/// past the log and a segment that is no position at all are each that same
+/// 404, and a refused write leaves no row behind.
+#[tokio::test]
+async fn thread_subscription_refuses_non_members_and_roots_that_head_no_thread() {
+    let (state, _control) = db_state().await;
+    let alice = uid("alice");
+    let db = state.db.as_ref().unwrap();
+    seed_room(db, "room-1", &alice, &[], &[]).await;
+    let membership = store::room_membership(db, "room-1").await.unwrap().unwrap();
+    let alice_mid = mid(&ParticipantId::for_user(&alice));
+    let head = store::append(
+        db,
+        "room-1",
+        &alice_mid,
+        ParticipantKind::Human,
+        membership.membership_epoch,
+        b"head",
+        &ThreadFacts::default(),
+        &[],
+    )
+    .await
+    .expect("append the head");
+    let reply = store::append(
+        db,
+        "room-1",
+        &alice_mid,
+        ParticipantKind::Human,
+        membership.membership_epoch,
+        b"reply",
+        &ThreadFacts {
+            thread: Some(head.seq),
+            mentions: Vec::new(),
+        },
+        &[],
+    )
+    .await
+    .expect("append a reply");
+
+    // An unknown room and a non-member answer the same way; the read confirms
+    // nothing about either.
+    let err = thread_subscription(
+        State(state.clone()),
+        participant("alice"),
+        Path(("ghost".to_string(), head.seq.to_string())),
+    )
+    .await
+    .expect_err("unknown room");
+    assert_eq!(err.status, 404);
+    let err = thread_subscription(
+        State(state.clone()),
+        participant("carol"),
+        Path(("room-1".to_string(), head.seq.to_string())),
+    )
+    .await
+    .expect_err("non-member");
+    assert_eq!(err.status, 404);
+
+    // A head is the only key: a reply and a position past the log are refused
+    // as missing.
+    for root in [reply.seq.to_string(), (head.seq + 99).to_string()] {
+        let err = thread_subscription(
+            State(state.clone()),
+            participant("alice"),
+            Path(("room-1".to_string(), root.clone())),
+        )
+        .await
+        .expect_err("a root that heads no thread");
+        assert_eq!(err.status, 404, "root {root}");
+    }
+
+    // A segment that is no position at all is the request's own shape error:
+    // 400 here, the code the tagma hop gives the same segment.
+    for root in ["0".to_string(), "head".to_string()] {
+        let err = thread_subscription(
+            State(state.clone()),
+            participant("alice"),
+            Path(("room-1".to_string(), root.clone())),
+        )
+        .await
+        .expect_err("a root that is no position");
+        assert_eq!(err.status, 400, "root {root}");
+    }
+
+    // The write refuses the same keys, and a refused write stores nothing.
+    let err = put_thread_subscription(
+        State(state.clone()),
+        participant("alice"),
+        Path(("room-1".to_string(), reply.seq.to_string())),
+        Json(ThreadSubscriptionRequest {
+            state: "muted".into(),
+        }),
+    )
+    .await
+    .expect_err("a reply heads nothing");
+    assert_eq!(err.status, 404);
+    assert!(
+        store::subscription_of(db, "room-1", reply.seq, &alice_mid)
+            .await
+            .unwrap()
+            .is_none(),
+        "a refused write leaves no row"
+    );
 }

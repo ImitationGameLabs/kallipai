@@ -82,6 +82,18 @@
       "/rooms/{room_id}/read-cursor"
     ],
     [
+      "DELETE",
+      "/rooms/{room_id}/threads/{root}/subscription"
+    ],
+    [
+      "GET",
+      "/rooms/{room_id}/threads/{root}/subscription"
+    ],
+    [
+      "PUT",
+      "/rooms/{room_id}/threads/{root}/subscription"
+    ],
+    [
       "GET",
       "/tagmata/{id}/events"
     ],

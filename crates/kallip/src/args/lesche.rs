@@ -23,6 +23,11 @@ pub(crate) enum LescheCommand {
     Rooms,
     /// Read a conversation's history (`--room` or `--tagma` required).
     Read(ReadArgs),
+    /// Record the caller's own choice about one discussion: `follow` wakes on
+    /// every reply, `mute` on none of them (a message that names the caller
+    /// still wakes them), `default` drops the choice. The tagma takes the
+    /// member from the token, so only the caller's own standing can change.
+    Thread(ThreadArgs),
     /// List every addressable surface in one list: the user's bilateral 1:1,
     /// the joined rooms, and this tagma's direct sessions (each with kind,
     /// id, and peer metadata).
@@ -157,6 +162,46 @@ pub(crate) struct ReadArgs {
     /// which always reads one row.
     #[arg(long)]
     pub limit: Option<u64>,
+}
+
+/// Args for `kallip lesche thread`: the caller's own standing choice about one
+/// discussion in one room.
+///
+/// An agent holds no badge -- its unread cost is re-reading a transcript -- so
+/// what a choice buys it is not a number: it is not being woken by threads it
+/// has nothing to do with, and being woken by the ones it does.
+#[derive(Args)]
+pub(crate) struct ThreadArgs {
+    #[command(subcommand)]
+    pub command: ThreadCommand,
+}
+
+/// The three things a member can say about a thread. `default` is not a third
+/// state: it drops the row, and the thread goes back to what the member's
+/// identity implies.
+#[derive(Subcommand)]
+pub(crate) enum ThreadCommand {
+    /// Wake on every reply in the thread.
+    Follow(ThreadTarget),
+    /// Wake on none of them; a message that names the caller still wakes them.
+    Mute(ThreadTarget),
+    /// Drop the choice and take the default again.
+    Default(ThreadTarget),
+}
+
+/// Which discussion, in which room: the room id and the thread's head position.
+///
+/// Any row of a thread names the same thread, but the choice is recorded
+/// against the head, so a reply's own position is refused rather than read as a
+/// different thread.
+#[derive(Args)]
+pub(crate) struct ThreadTarget {
+    /// The room id (as `kallip lesche rooms` lists it).
+    #[arg(value_parser = room_id)]
+    pub room: String,
+    /// The thread: a position in that room's log whose row heads it.
+    #[arg(value_parser = clap::value_parser!(i64).range(1..))]
+    pub root: i64,
 }
 
 /// A room id as the lesche mints it: a canonical UUID.

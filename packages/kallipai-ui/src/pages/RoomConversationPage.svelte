@@ -13,7 +13,7 @@
   // + roster on a slow cadence (the room_membership_changed SSE nudge is the
   // fast path; the poll is the dropped-frame backstop).
   import { tick, untrack } from "svelte";
-  import { MessageSquare, Settings, Users, X } from "@lucide/svelte";
+  import { BellOff, MessageSquare, Settings, Users, X } from "@lucide/svelte";
   import { Dialog, Portal } from "@skeletonlabs/skeleton-svelte";
   import Composer from "../components/Composer.svelte";
   import MessageBubble from "../components/MessageBubble.svelte";
@@ -62,6 +62,10 @@
   import { createThreadWindow } from "../lib/rooms/threadWindow.svelte.ts";
   import { rowParamOf } from "../lib/rooms/rowParam.ts";
   import {
+    ensureThreadChoice,
+    threadChoiceOf,
+  } from "../lib/rooms/threadChoices.svelte.ts";
+  import {
     PREVIEW_HANDLE,
     PREVIEW_ROW,
     SCROLL_PILL,
@@ -108,6 +112,7 @@
     room_thread_replies_one,
     room_thread_replies_other,
     room_thread_view,
+    room_thread_muted,
   } from "../paraglide/messages.js";
 
   let { roomId, at }: { roomId: string; at?: string } = $props();
@@ -132,6 +137,19 @@
   // discussion, never in place of the topic it answers.
   const lineIndex = $derived(threadIndex(conv?.lines ?? []));
   const groups = $derived(threadGroups(conv?.lines ?? [], lineIndex));
+
+  // The standing of every discussion this window draws. The preview's mute mark
+  // and the follow control read one cache; the entries drawn are the natural
+  // bound on the reads (one per thread, shared while in flight, an unreadable
+  // one remembered as unknown). Nothing the cache holds is tracked here: a
+  // landing answer would re-run an effect that asked for it.
+  $effect(() => {
+    const room = roomId;
+    const roots = groups.map((group) => group.root);
+    untrack(() => {
+      for (const root of roots) void ensureThreadChoice(room, root);
+    });
+  });
   // A reply count is a number only for a discussion whose head is loaded and
   // only once the transcript has reached the room's present: replies sit after
   // their head, so a window that reaches the present holds all of them, while
@@ -210,7 +228,10 @@
    *  sender. Built in one place so the sentence the eye reads and the label a
    *  screen reader hears are the same words in the same order -- an entry whose
    *  name said something the header does not would be two accounts of one row. */
-  function threadSummaryText(summary: ThreadEntry): {
+  function threadSummaryText(
+    summary: ThreadEntry,
+    muted: boolean,
+  ): {
     readonly head: string;
     readonly tail?: string;
     readonly label: string;
@@ -225,7 +246,10 @@
       summary.last === undefined
         ? undefined
         : room_thread_last_from({ handle: summary.last.senderHandle });
-    const label = tail === undefined ? head : head + " · " + tail;
+    const sentence = tail === undefined ? head : head + " · " + tail;
+    // The mark the eye reads (a bell with a slash) and the word a screen reader
+    // hears are one fact: a muted discussion says so in the entry's name.
+    const label = muted ? sentence + " · " + room_thread_muted() : sentence;
     return { head, tail, label };
   }
 
@@ -711,7 +735,9 @@
                 {@const shape = roomRowShape(group)}
                 {@const summary = threadEntry(group, countsKnown)}
                 {@const preview = threadPreview(group)}
-                {@const words = threadSummaryText(summary)}
+                {@const muted =
+                  threadChoiceOf(roomId, group.root)?.effective === "muted"}
+                {@const words = threadSummaryText(summary, muted)}
                 {#snippet extraActions()}
                   {#if quotableLine(line)}
                     <QuoteButton
@@ -768,6 +794,9 @@
                         class="size-3.5 shrink-0"
                         aria-hidden="true"
                       />
+                      {#if muted}
+                        <BellOff class="size-3.5 shrink-0" aria-hidden="true" />
+                      {/if}
                       {@render threadSummaryLines(false)}
                     </span>
                     {#if preview.rows.length > 0}

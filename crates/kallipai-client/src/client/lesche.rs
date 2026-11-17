@@ -8,6 +8,7 @@ use super::TagmaClient;
 use anyhow::{Context, Result};
 use kallipai_common::agentid::AgentId;
 use kallipai_lesche_common::ids::path_segment;
+use kallipai_lesche_common::rooms::{ThreadChoice, ThreadSubscriptionView};
 
 /// The page a room-history read asks for. The two positions mean opposite
 /// directions, so they travel as named fields: a page moves one way at a time
@@ -164,6 +165,79 @@ impl TagmaClient {
             .context("failed to read room history body")
     }
 
+    /// The caller's standing choice about one discussion (`GET
+    /// /agents/{id}/lesche/rooms/{room}/threads/{root}/subscription`): the
+    /// choice recorded (if any), the rule delivery applies, and the position
+    /// the choice took effect at. `{root}` names the discussion by the row that
+    /// heads it; a position heading none answers 404.
+    pub async fn thread_subscription(
+        &self,
+        id: &AgentId,
+        room: &str,
+        root: i64,
+    ) -> Result<ThreadSubscriptionView> {
+        self.handle_response(
+            self.with_auth(self.inner.http.get(self.url(&format!(
+                "/agents/{}/lesche/rooms/{}/threads/{root}/subscription",
+                path_segment(id.as_ref())?,
+                path_segment(room)?,
+            ))))
+            .send()
+            .await
+            .context("failed to read the thread choice")?,
+            "failed to parse the thread choice response",
+        )
+        .await
+    }
+
+    /// Record the caller's choice about one discussion (`PUT .../subscription`).
+    /// The tagma writes the authenticated agent's own row; the answer is the row
+    /// read back, whose `since_seq` is the room position the choice starts at.
+    pub async fn set_thread_subscription(
+        &self,
+        id: &AgentId,
+        room: &str,
+        root: i64,
+        choice: ThreadChoice,
+    ) -> Result<ThreadSubscriptionView> {
+        self.handle_response(
+            self.with_auth(self.inner.http.put(self.url(&format!(
+                "/agents/{}/lesche/rooms/{}/threads/{root}/subscription",
+                path_segment(id.as_ref())?,
+                path_segment(room)?,
+            ))))
+            .json(&serde_json::json!({ "state": choice.as_str() }))
+            .send()
+            .await
+            .context("failed to write the thread choice")?,
+            "failed to parse the thread choice response",
+        )
+        .await
+    }
+
+    /// Drop the caller's choice (`DELETE .../subscription`) so the discussion
+    /// goes back to the default. Idempotent: no stored row answers the same.
+    pub async fn clear_thread_subscription(
+        &self,
+        id: &AgentId,
+        room: &str,
+        root: i64,
+    ) -> Result<()> {
+        let response = self
+            .with_auth(self.inner.http.delete(self.url(&format!(
+                "/agents/{}/lesche/rooms/{}/threads/{root}/subscription",
+                path_segment(id.as_ref())?,
+                path_segment(room)?,
+            ))))
+            .send()
+            .await
+            .context("failed to drop the thread choice")?;
+        if !response.status().is_success() {
+            return Err(super::error_from_response(response).await);
+        }
+        Ok(())
+    }
+
     /// Read a direct session's history (`GET
     /// /agents/{id}/lesche/direct-sessions/{peer}/messages`), as a readable
     /// text block the tagma renders server-side. The agent's `kallip lesche
@@ -304,6 +378,7 @@ impl TagmaClient {
 mod tests {
     use super::*;
     use kallipai_common::protocol::ApiError;
+    use kallipai_lesche_common::rooms::ThreadDelivery;
     use wiremock::matchers::{
         body_partial_json, method, path, query_param, query_param_is_missing,
     };
@@ -838,5 +913,84 @@ mod tests {
         })
         .expect("serializes");
         assert!(wire.get("thread").is_none(), "{wire}");
+    }
+
+    /// The thread-choice verbs dial the room's own thread path, and the write
+    /// sends the choice as the body the tagma reads.
+    #[tokio::test]
+    async fn thread_choice_verbs_dial_the_room_thread_path() {
+        let server = MockServer::start().await;
+        let id = AgentId::random();
+        let room = "room-1";
+        let answer = serde_json::json!({
+            "override": "muted",
+            "effective": "muted",
+            "since_seq": 17,
+        });
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/agents/{id}/lesche/rooms/{room}/threads/9/subscription"
+            )))
+            .respond_with(ResponseTemplate::new(200).set_body_json(answer.clone()))
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path(format!(
+                "/agents/{id}/lesche/rooms/{room}/threads/9/subscription"
+            )))
+            .and(body_partial_json(serde_json::json!({"state": "muted"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(answer))
+            .mount(&server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path(format!(
+                "/agents/{id}/lesche/rooms/{room}/threads/9/subscription"
+            )))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+        let client = client_for(&server);
+
+        let read = client
+            .thread_subscription(&id, room, 9)
+            .await
+            .expect("read the choice");
+        assert_eq!(read.choice, Some(ThreadChoice::Muted));
+        assert_eq!(read.since_seq, Some(17));
+
+        let written = client
+            .set_thread_subscription(&id, room, 9, ThreadChoice::Muted)
+            .await
+            .expect("write the choice");
+        assert_eq!(written.effective, ThreadDelivery::Muted);
+
+        client
+            .clear_thread_subscription(&id, room, 9)
+            .await
+            .expect("drop the choice");
+    }
+
+    /// A root that heads no thread of the room is the tagma's 404, carried as
+    /// the verdict rather than a transport failure.
+    #[tokio::test]
+    async fn a_thread_root_that_heads_nothing_is_a_404() {
+        let server = MockServer::start().await;
+        let id = AgentId::random();
+        let room = "room-1";
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/agents/{id}/lesche/rooms/{room}/threads/4/subscription"
+            )))
+            .respond_with(
+                ResponseTemplate::new(404)
+                    .set_body_string(r#"{"error":{"message":"unknown thread"}}"#),
+            )
+            .mount(&server)
+            .await;
+        let err = client_for(&server)
+            .thread_subscription(&id, room, 4)
+            .await
+            .expect_err("a reply's position heads nothing");
+        assert_eq!(as_api_error(&err).status, 404);
     }
 }

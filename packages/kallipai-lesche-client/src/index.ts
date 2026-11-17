@@ -40,6 +40,10 @@ export type {
   RoomRosterView,
   RoomView,
   TagmaRoomView,
+  ThreadChoice,
+  ThreadDelivery,
+  ThreadSubscriptionRequest,
+  ThreadSubscriptionView,
   Visibility,
 } from "./types.ts";
 export { DataPlaneApiError } from "./types.ts";

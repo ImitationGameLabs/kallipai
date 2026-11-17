@@ -1,6 +1,11 @@
 import { assertEquals } from "@std/assert";
 import { assertRejects } from "@std/assert";
-import type { Envelope, RoomMessageView, RoomRosterView } from "./types.ts";
+import type {
+  Envelope,
+  RoomMessageView,
+  RoomRosterView,
+  ThreadSubscriptionView,
+} from "./types.ts";
 import { DataPlaneApiError } from "./types.ts";
 import { LescheClient } from "./http.ts";
 
@@ -645,5 +650,108 @@ Deno.test(
       is_creator: true,
       visibility: "private",
     });
+  },
+);
+
+Deno.test(
+  "fetchThreadSubscription GETs the thread path and reads the standing",
+  async () => {
+    const captured: string[] = [];
+    const stub: typeof fetch = (input) => {
+      captured.push(
+        typeof input === "string" ? input : (input as URL).toString(),
+      );
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({
+            override: "muted",
+            effective: "muted",
+            since_seq: 12,
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+      );
+    };
+    let got: ThreadSubscriptionView | undefined;
+    await withFetch(stub, async () => {
+      got = await new LescheClient(BASE).fetchThreadSubscription("room-1", 12);
+    });
+    assertEquals(
+      captured[0],
+      "https://lesche.test/v1/lesche/rooms/room-1/threads/12/subscription",
+    );
+    assertEquals(got, {
+      override: "muted",
+      effective: "muted",
+      since_seq: 12,
+    });
+  },
+);
+
+Deno.test(
+  "setThreadSubscription PUTs the state with the CSRF marker",
+  async () => {
+    const captured: {
+      url: string;
+      method: string;
+      headers: Record<string, string>;
+      body: unknown;
+    }[] = [];
+    const stub: typeof fetch = (input, init) => {
+      captured.push({
+        url: typeof input === "string" ? input : input.toString(),
+        method: init?.method ?? "GET",
+        headers: (init?.headers as Record<string, string>) ?? {},
+        body: init?.body ? JSON.parse(init.body as string) : null,
+      });
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({
+            override: "following",
+            effective: "following",
+            since_seq: 12,
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+      );
+    };
+    let got: ThreadSubscriptionView | undefined;
+    await withFetch(stub, async () => {
+      got = await new LescheClient(BASE).setThreadSubscription(
+        "room-1",
+        12,
+        "following",
+      );
+    });
+    assertEquals(
+      captured[0]!.url,
+      "https://lesche.test/v1/lesche/rooms/room-1/threads/12/subscription",
+    );
+    assertEquals(captured[0]!.method, "PUT");
+    assertEquals(captured[0]!.body, { state: "following" });
+    assertEquals(captured[0]!.headers["X-Requested-With"], "kallipai");
+    assertEquals(got!.override, "following");
+  },
+);
+
+Deno.test(
+  "clearThreadSubscription DELETEs the thread path and takes the 204",
+  async () => {
+    const captured: { url: string; method: string }[] = [];
+    const stub: typeof fetch = (input, init) => {
+      captured.push({
+        url: typeof input === "string" ? input : input.toString(),
+        method: init?.method ?? "GET",
+      });
+      return Promise.resolve(new Response(null, { status: 204 }));
+    };
+    await withFetch(stub, async () => {
+      await new LescheClient(BASE).clearThreadSubscription("room-1", 12);
+    });
+    assertEquals(
+      captured[0]!.url,
+      "https://lesche.test/v1/lesche/rooms/room-1/threads/12/subscription",
+    );
+    assertEquals(captured[0]!.method, "DELETE");
   },
 );

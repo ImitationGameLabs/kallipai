@@ -80,6 +80,12 @@ pub fn router() -> Router<SharedState> {
             axum::routing::get(lesche::read_room_messages),
         )
         .route(
+            "/agents/{id}/lesche/rooms/{room}/threads/{root}/subscription",
+            axum::routing::get(lesche::get_thread_subscription)
+                .put(lesche::put_thread_subscription)
+                .delete(lesche::delete_thread_subscription),
+        )
+        .route(
             "/agents/{id}/lesche/direct-sessions/{peer}/messages",
             axum::routing::get(lesche::read_direct_session_messages),
         )

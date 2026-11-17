@@ -14,6 +14,7 @@ declare global {
 
 const { assertEquals } = await import("@std/assert");
 const {
+  composeRoomTitle,
   initNotificationBackend,
   notify,
   notificationPermission,
@@ -191,3 +192,17 @@ Deno.test(
     );
   },
 );
+
+Deno.test("a room title names the thread when its head is known", () => {
+  assertEquals(
+    composeRoomTitle("Standup", "can we move Friday's call?"),
+    "Standup · can we move Friday's call?",
+  );
+});
+
+Deno.test("a room title names the room alone without a head", () => {
+  // A head nobody could read leaves the room's name; an empty one would leave a
+  // title that reads as a room called "Standup ·".
+  assertEquals(composeRoomTitle("Standup", null), "Standup");
+  assertEquals(composeRoomTitle("Standup", ""), "Standup");
+});
