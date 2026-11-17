@@ -202,6 +202,17 @@ watch is the only start point. The notice offers a reload and never
 performs one: a reload the user did not ask for throws away the message
 they are typing.
 
+`answerFor` reads one response, and the question it answers is whether the
+deployment publishes a readable version document, not what number the status
+carries: a 404 or a 410 says it does not, and so does a 200 whose body is
+something else -- a file the build lacks comes back as `index.html`, since
+`compose/site.caddy` answers `try_files {path} /index.html`, and a body that
+is not JSON or a document without a string `version` says the same. Those
+answers are final, so the watch makes one ask and stops; an id too odd to
+believe (empty, spaces inside, longer than a token) ends it the same way, since
+the next ask would read the same bytes. A 5xx, another status, or a read that
+fails leaves the question open, and the next interval asks again.
+
 The probe carries `?t=`, so it works even where the edge caches the
 file. The entry document's `Cache-Control` is still the edge's call:
 `compose/site.caddy` sends `no-cache` for the bundle and caches

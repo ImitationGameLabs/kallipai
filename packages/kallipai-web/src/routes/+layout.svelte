@@ -7,6 +7,7 @@
   import "../app.css";
   import {
     RootLayout,
+    fetchVersionAnswer,
     initShell,
     initShellIdentity,
     initArcheion,
@@ -89,19 +90,10 @@
   // notice never reloads on its own -- the user may be mid-message.
   let updateAvailable = $state(false);
 
-  async function fetchBuildVersion(): Promise<unknown> {
-    const res = await fetch(`${base}/_app/version.json?t=${Date.now()}`);
-    if (!res.ok) return null;
-    const body: unknown = await res.json();
-    return typeof body === "object" && body !== null && "version" in body
-      ? body.version
-      : null;
-  }
-
   onMount(() =>
     startVersionWatch({
       current: version,
-      fetchVersion: fetchBuildVersion,
+      fetchVersion: () => fetchVersionAnswer(base),
       onAvailable: () => (updateAvailable = true),
     }),
   );

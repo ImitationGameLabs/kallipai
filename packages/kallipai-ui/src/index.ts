@@ -100,7 +100,9 @@ export {
   isPublicRoute,
 } from "./lib/shell/gate.ts";
 export {
+  fetchVersionAnswer,
   startVersionWatch,
+  type VersionAnswer,
   type VersionDocument,
   type VersionWatchOptions,
 } from "./lib/shell/buildVersion.ts";
