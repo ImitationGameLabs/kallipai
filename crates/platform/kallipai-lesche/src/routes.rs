@@ -46,6 +46,7 @@ pub(crate) const ROUTE_TABLE: &[(&str, &str)] = &[
     ("DELETE", "/rooms/{room_id}/threads/{root}/subscription"),
     ("GET", "/rooms/{room_id}/threads/{root}/subscription"),
     ("PUT", "/rooms/{room_id}/threads/{root}/subscription"),
+    ("GET", "/rooms/{room_id}/unread"),
     ("GET", "/tagmata/{id}/events"),
     ("GET", "/tagmata/{tagma_id}/rooms"),
 ];
