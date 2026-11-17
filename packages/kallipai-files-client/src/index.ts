@@ -1,5 +1,14 @@
-export { FilesClient } from "./client.ts";
-export { CSRF_MARKER, FilesApiError } from "./http.ts";
+export {
+  deleteRecord,
+  FilesClient,
+  getRecord,
+  headRecord,
+  listRecords,
+  putRecord,
+  sendRecord,
+} from "./client.ts";
+export { FilesApiError } from "./http.ts";
+export type { FilesFailure, FilesRequest } from "./http.ts";
 export type {
   FileEntryView,
   ListOptions,

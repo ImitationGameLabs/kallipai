@@ -10,8 +10,55 @@
 
 export const PACKAGE_NAME = "@kallipai/kallipai-archeion-client";
 
-export { ArcheionClient } from "./http.ts";
-export type { LoginBeginRequest, RegisterBeginRequest } from "./http.ts";
+export {
+  ArcheionClient,
+  addEmail,
+  addPasskeyBegin,
+  addPasskeyFinish,
+  adminLogin,
+  createToken,
+  getTagma,
+  getTagmaCredential,
+  getTagmaProfile,
+  getUserProfile,
+  listEmails,
+  listExternalIdentities,
+  listOAuthProviders,
+  listPasskeys,
+  listTagmata,
+  listTokens,
+  loginBegin,
+  loginDiscoverableBegin,
+  loginDiscoverableFinish,
+  loginFinish,
+  logout,
+  makeEmailPrimary,
+  me,
+  mintPairingCode,
+  mintTagma,
+  oauthFinish,
+  oauthLinkBegin,
+  oauthSignInBegin,
+  oauthSignupComplete,
+  pairBegin,
+  pairFinish,
+  registerBegin,
+  registerFinish,
+  removeEmail,
+  renamePasskey,
+  renameTagma,
+  resetTagmaCredential,
+  revokePasskey,
+  revokeTagma,
+  revokeToken,
+  unlinkExternalIdentity,
+  updateTagmaCredential,
+  updateToken,
+  usernameAvailability,
+  verifyEmail,
+} from "./client.ts";
+export type { ArcheionFailure } from "./http.ts";
+export type { LoginBeginRequest, RegisterBeginRequest } from "./client.ts";
 export {
   addPasskey,
   adminLoginWithKey,

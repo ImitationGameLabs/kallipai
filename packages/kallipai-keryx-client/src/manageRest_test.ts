@@ -4,21 +4,9 @@
 // keryx csrf_guard expects.
 
 import { assertEquals } from "@std/assert";
-import { ManageRestClient } from "./manageRest.ts";
+import { withFetch } from "@kallipai/kallipai-common/testing";
 
-/** Swap global fetch for the duration of `run`; restores it after. */
-async function withFetch<T>(
-  stub: (input: string | URL, init?: RequestInit) => Promise<Response>,
-  run: () => Promise<T>,
-): Promise<T> {
-  const original = globalThis.fetch;
-  globalThis.fetch = stub as typeof fetch;
-  try {
-    return await run();
-  } finally {
-    globalThis.fetch = original;
-  }
-}
+import { ManageRestClient } from "./manageRest.ts";
 
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {

@@ -1,5 +1,5 @@
 import { assertEquals } from "@std/assert";
-import { ArcheionClient } from "./http.ts";
+import { ArcheionClient } from "./client.ts";
 import type { TagmaCredentialView, TokenView } from "./types.ts";
 
 // Wire-contract tests for the credential surface (personal tokens + the tagma

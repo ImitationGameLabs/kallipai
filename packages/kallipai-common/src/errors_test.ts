@@ -1,5 +1,10 @@
-import { assertEquals } from "@std/assert";
-import { readApiError } from "./errors.ts";
+import { assert, assertEquals } from "@std/assert";
+import {
+  DataPlaneApiError,
+  KallipaiError,
+  readApiError,
+  TransportError,
+} from "./errors.ts";
 
 Deno.test("readApiError parses the nested error envelope", async () => {
   const resp = new Response(
@@ -103,4 +108,36 @@ Deno.test("readApiError leaves code empty on a non-JSON body", async () => {
   const api = await readApiError(resp);
   assertEquals(api.message, "upstream connect error");
   assertEquals(api.code, undefined);
+});
+
+// The taxonomy a caller branches on: a tag on every class, plus the
+// `instanceof` shape a call site uses until it branches on the tag.
+Deno.test("the error classes carry a tag and keep their payload", () => {
+  const api = new KallipaiError({ status: 409, message: "room is full" });
+  assertEquals(api._tag, "KallipaiError");
+  assertEquals(api.message, "room is full");
+  assertEquals(api.api.status, 409);
+  // The UI's bundler-duplicate fallback reads `name`: it must match the tag.
+  assertEquals(api.name, "KallipaiError");
+  assert(api instanceof Error, "KallipaiError must stay an Error");
+  assert(api instanceof KallipaiError);
+
+  const cause = new TypeError("connection refused");
+  const transport = new TransportError("connection refused", { cause });
+  assertEquals(transport._tag, "TransportError");
+  assertEquals(transport.message, "connection refused");
+  assertEquals(transport.cause, cause);
+  assertEquals(transport.name, "TransportError");
+  assert(transport instanceof Error);
+
+  const plane = new DataPlaneApiError(
+    503,
+    "auth backend down",
+    "auth_backend_unavailable",
+  );
+  assertEquals(plane._tag, "DataPlaneApiError");
+  assertEquals(plane.status, 503);
+  assertEquals(plane.code, "auth_backend_unavailable");
+  assertEquals(plane.name, "DataPlaneApiError");
+  assert(plane instanceof Error);
 });

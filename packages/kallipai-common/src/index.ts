@@ -1,11 +1,12 @@
 // @kallipai/kallipai-common
 //
 // Transport-agnostic shared layer: identifiers, errors, the standard base64
-// wire codec, a shared SSE parser, and the data-plane fetch discipline the
-// relay clients share. The frontend talks to the tagma through
+// wire codec, a shared SSE parser, and the JSON/CSRF fetch discipline the
+// plane clients (lesche, keryx, files) share; the archeion browser client has
+// its own base today. The frontend talks to the tagma through
 // transport-specific clients (@kallipai/kallipai-client for the direct path,
-// @kallipai/kallipai-lesche-client / -keryx-client for the relayed paths)
-// rather than a shared session contract.
+// @kallipai/kallipai-lesche-client / -keryx-client / -files-client for the
+// relayed and transfer paths) rather than a shared session contract.
 export * from "./ids.ts";
 export * from "./errors.ts";
 export * from "./base64.ts";

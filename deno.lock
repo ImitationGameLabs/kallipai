@@ -27,6 +27,7 @@
     "npm:@types/qrcode@^1.5.5": "1.5.6",
     "npm:@zxing/browser@~0.1.5": "0.1.5_@zxing+library@0.21.3",
     "npm:comark@0.7": "0.7.0_shiki@4.3.1",
+    "npm:effect@4.1.4": "4.1.4",
     "npm:jssha@3.3.2": "3.3.2",
     "npm:pagefind@^1.5.2": "1.5.2",
     "npm:prettier-plugin-svelte@^4.1.1": "4.1.1_prettier@3.8.5_svelte@5.56.4",
@@ -1405,6 +1406,9 @@
         "domhandler"
       ]
     },
+    "effect@4.1.4": {
+      "integrity": "sha512-Tgrv/9FN+TZYyOn8XSli+fVqAfwDrDAkiX5Uu9vztINb675VTQdhD0gWI5Kzvhlh9QqzjZvw72iugqw5pwoghQ=="
+    },
     "emoji-regex@8.0.0": {
       "integrity": "sha512-MSjYzcWNOA0ewAHpz0MxpYFvwg6yjy1NG3xteoqz644VCo/RPgnr1/GGt+ic3iJTzQ8Eu3TdM14SawnVUmGE6A=="
     },
@@ -2207,6 +2211,7 @@
         "packageJson": {
           "dependencies": [
             "npm:@jsr/std__assert@^1.0.19",
+            "npm:effect@4.1.4",
             "npm:jssha@3.3.2"
           ]
         }

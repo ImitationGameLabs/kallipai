@@ -3,6 +3,7 @@
 // (same seam the browser uses), so the assertions cover the exact paths and
 // the wire shapes the keryx serves.
 
+import { withFetch } from "@kallipai/kallipai-common/testing";
 import { assertEquals, assertRejects } from "@std/assert";
 import { LinearBackoff, ProjectionClient } from "./projection.ts";
 
@@ -14,44 +15,32 @@ const AGENTS_BODY = {
   status: { root_state: "idle" },
 };
 
-function withFetch(
-  stub: (url: string, init?: RequestInit) => Promise<Response>,
-) {
-  const real = globalThis.fetch;
-  globalThis.fetch = stub as typeof fetch;
-  return () => {
-    globalThis.fetch = real;
-  };
-}
-
 Deno.test("projection agents GET hits the per-tagma agents path", async () => {
   const seen: string[] = [];
-  const restore = withFetch((url) => {
-    seen.push(url);
-    return Promise.resolve(Response.json(AGENTS_BODY));
-  });
-  try {
-    const client = new ProjectionClient("http://keryx.test/v1/keryx");
-    const resp = await client.agents("t-a");
-    assertEquals(seen, ["http://keryx.test/v1/keryx/tagmata/t-a/agents"]);
-    assertEquals(resp.seq, 7);
-    assertEquals(resp.stale, false);
-    assertEquals(resp.agents.length, 1);
-  } finally {
-    restore();
-  }
+  await withFetch(
+    (url) => {
+      seen.push(String(url));
+      return Promise.resolve(Response.json(AGENTS_BODY));
+    },
+    async () => {
+      const client = new ProjectionClient("http://keryx.test/v1/keryx");
+      const resp = await client.agents("t-a");
+      assertEquals(seen, ["http://keryx.test/v1/keryx/tagmata/t-a/agents"]);
+      assertEquals(resp.seq, 7);
+      assertEquals(resp.stale, false);
+      assertEquals(resp.agents.length, 1);
+    },
+  );
 });
 
 Deno.test("projection GET failure surfaces the status", async () => {
-  const restore = withFetch(() =>
-    Promise.resolve(new Response("no projection", { status: 404 })),
+  await withFetch(
+    () => Promise.resolve(new Response("no projection", { status: 404 })),
+    async () => {
+      const client = new ProjectionClient("http://keryx.test/v1/keryx");
+      await assertRejects(() => client.agents("gone"), Error, "404");
+    },
   );
-  try {
-    const client = new ProjectionClient("http://keryx.test/v1/keryx");
-    await assertRejects(() => client.agents("gone"), Error, "404");
-  } finally {
-    restore();
-  }
 });
 
 Deno.test(
@@ -60,26 +49,26 @@ Deno.test(
     const sseBody =
       'data: {"tagma_id":"t-a","seq":1}\n\n' +
       'data: {"tagma_id":"t-a","seq":2}\n\n';
-    const restore = withFetch((url) => {
-      assertEquals(url, "http://keryx.test/v1/keryx/tagmata/t-a/state");
-      return Promise.resolve(
-        new Response(sseBody, {
-          status: 200,
-          headers: { "content-type": "text/event-stream" },
-        }),
-      );
-    });
-    try {
-      const client = new ProjectionClient("http://keryx.test/v1/keryx");
-      const frames: number[] = [];
-      for await (const dirty of client.state("t-a")) {
-        frames.push(dirty.seq);
-        if (frames.length === 2) break;
-      }
-      assertEquals(frames, [1, 2]);
-    } finally {
-      restore();
-    }
+    await withFetch(
+      (url) => {
+        assertEquals(url, "http://keryx.test/v1/keryx/tagmata/t-a/state");
+        return Promise.resolve(
+          new Response(sseBody, {
+            status: 200,
+            headers: { "content-type": "text/event-stream" },
+          }),
+        );
+      },
+      async () => {
+        const client = new ProjectionClient("http://keryx.test/v1/keryx");
+        const frames: number[] = [];
+        for await (const dirty of client.state("t-a")) {
+          frames.push(dirty.seq);
+          if (frames.length === 2) break;
+        }
+        assertEquals(frames, [1, 2]);
+      },
+    );
   },
 );
 

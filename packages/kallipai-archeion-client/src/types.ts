@@ -3,6 +3,8 @@
 // `admin.rs`). Timestamps are RFC3339 strings (time::OffsetDateTime serde)
 // unless noted.
 
+import { Data } from "effect";
+
 import type {
   PublicKeyCredentialJson,
   RegisterPublicKeyCredentialJson,
@@ -342,13 +344,18 @@ export interface TagmaCredentialUpdateRequest {
  * distinct surface from `kallipai-ui`'s tagma-transport `classifyError` -- the
  * archeion errors are rendered inline by the auth/dashboard pages, not through the
  * shared AppShell banner.
+ *
+ * A tagged error because it travels in a failure channel as data: a call site
+ * branches on `_tag` instead of catching a thrown value. `code` carries the
+ * envelope's machine-readable reason when the service sent one; nothing branches
+ * on it yet.
  */
-export class ArcheionApiError extends Error {
-  constructor(
-    readonly status: number,
-    message: string,
-  ) {
-    super(message);
-    this.name = "ArcheionApiError";
+export class ArcheionApiError extends Data.TaggedError("ArcheionApiError")<{
+  readonly status: number;
+  readonly message: string;
+  readonly code?: string;
+}> {
+  constructor(status: number, message: string, code?: string) {
+    super({ status, message, code });
   }
 }

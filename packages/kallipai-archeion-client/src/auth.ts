@@ -3,7 +3,7 @@
 // throwing raw. The page decides how to render each `reason` (a user cancel is
 // a soft hint, a 429 is a rate-limit message, etc.).
 
-import type { ArcheionClient } from "./http.ts";
+import type { ArcheionClient } from "./client.ts";
 import { ArcheionApiError, type PasskeySummary } from "./types.ts";
 import {
   loginCredentialToJson,

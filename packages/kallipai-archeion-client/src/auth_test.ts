@@ -8,7 +8,7 @@ import {
   loginWithDiscoverablePasskey,
 } from "./auth.ts";
 import { ArcheionApiError } from "./types.ts";
-import type { ArcheionClient } from "./http.ts";
+import type { ArcheionClient } from "./client.ts";
 
 // `classifyRegisterConflict` is the only code in this package whose
 // correctness depends on EXACT string matching against the archeion's 409 prose
