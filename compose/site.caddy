@@ -14,13 +14,21 @@
 	}
 }
 
-# The runtime config the SPA reads at startup. The compose stack always runs its
-# instances service, so the key is a constant; an unset key reads as true in the
-# SPA as well.
+# The runtime config the SPA reads at startup. Whether this deployment runs an
+# instances service is the deployment's own switch: only `1` and lowercase
+# `true` read as on. An empty value reads as off here, at the edge; the repo's
+# overrides fill an empty value with `1` before it arrives. A deployment that
+# gates the service behind a profile passes `0` unless the host has a daemon
+# socket.
 (app-config) {
 	@config path /config.js
 	header @config Content-Type application/javascript
-	respond @config `window.KALLIPAI_CONFIG = {"domain":"{$KALLIPAI_DOMAIN}","apiBase":"{$KALLIPAI_API_BASE}","instancesServiceEnabled":true};`
+	map {env.KALLIPAI_INSTANCES} {instances_enabled} {
+		1 "true"
+		true "true"
+		default "false"
+	}
+	respond @config `window.KALLIPAI_CONFIG = {"domain":"{$KALLIPAI_DOMAIN}","apiBase":"{$KALLIPAI_API_BASE}","instancesServiceEnabled":{instances_enabled}};`
 }
 
 # What every app host answers regardless of its content source.

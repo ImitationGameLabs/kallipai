@@ -470,6 +470,13 @@ instance host (an instances service backed by a process daemon on its
 machine). Unset means it does, and that is the shipped default. So does
 any value other than the literal `false`: a template that renders an
 empty string, or a key spelled differently, still keeps the full page.
+A compose stack writes that key at the edge: `KALLIPAI_INSTANCES` decides the
+value, and only `1` or lowercase `true` read as on. This repo's overrides pass
+`1` when the variable is unset or empty, because they start the service
+themselves.
+Whether that container starts is the stack's profile, which a deployment's own
+start script adds from this same switch; the two must agree (see
+`docs/en/deployment/container.md`).
 
 Decide by what the deployment serves, not by what the page shows: if
 `/v1/instances` answers from this deployment's own edge and a local

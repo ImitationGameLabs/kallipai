@@ -190,6 +190,9 @@ services:
       KALLIPAI_KERYX_UPSTREAM: 127.0.0.1:7210
       KALLIPAI_FILES_UPSTREAM: 127.0.0.1:7400
       KALLIPAI_INSTANCES_UPSTREAM: 127.0.0.1:7300
+      # The page's instances answer follows this switch, and these overrides
+      # start that service themselves: on unless a stack sets 0.
+      KALLIPAI_INSTANCES: ${KALLIPAI_INSTANCES:-1}
       KALLIPAI_MODEL_GATEWAY_UPSTREAM: 127.0.0.1:7500
       # Both ports publish on loopback for the tagma that runs on the host;
       # the edge is the only way in from off the machine.

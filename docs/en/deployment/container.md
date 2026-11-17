@@ -253,13 +253,32 @@ The bundle lives in the edge image (`packages.kallipai-caddy-web-image`):
 into `/srv/web` beside the entries and the body they share, and the image's
 caddy serves it. Nothing is copied onto the host. The runtime config is not a
 file either: the edge answers `/config.js` with a response built from its own
-environment, so `KALLIPAI_DOMAIN` and `KALLIPAI_API_BASE` decide what the
-browser reads, and changing the domain restarts this container instead of
-rebuilding the site. The payload states `instancesServiceEnabled: true` as a
-constant: this stack always runs its instances service, and the SPA reads an
-unset key the same way. The api host is served at `KALLIPAI_API_BASE` itself,
-scheme and port included, so the address the browser is given and the one the
-edge answers on are one value.
+environment, so `KALLIPAI_DOMAIN`, `KALLIPAI_API_BASE` and `KALLIPAI_INSTANCES`
+decide what the browser reads, and changing the domain restarts this container
+instead of rebuilding the site. The api host is served at `KALLIPAI_API_BASE`
+itself, scheme and port included, so the address the browser is given and the
+one the edge answers on are one value.
+
+`KALLIPAI_INSTANCES` answers one question: whether the page renders the
+instances half and asks for the service. Only `1` and lowercase `true` read as
+on at the edge; anything else (`0`, `TRUE`, `yes`, `01`, a value with spaces)
+reads as off, and the payload then carries `instancesServiceEnabled: false`, so
+the page asks for nothing under `/v1/instances/*` and draws no process half.
+`0` is what a stack without a daemon socket sets. These overrides pass `1` when
+the variable is unset or empty, because they start the service themselves. The
+key is not one of the `KALLIPAI_INSTANCES_*` family: those configure the
+service itself.
+
+Whether the `instances` container starts is a separate decision, made by the
+stack's profile. This repo's compose pair starts the service unconditionally,
+so its overrides default the switch to `1`. A deployment that keeps the service
+behind a compose profile adds that profile from the same switch in its own
+start script and defaults it to `0`; the two must agree. Opening the switch
+without a daemon socket is the shape to avoid: the page renders the instances
+view and polls a service that cannot start, and because a stopped container's
+refusal carries no CORS headers the browser reports it as a CORS failure. A
+deployment that already runs the `instances` container sets the switch to `1`;
+left off, its page loses that half.
 
 The model gateway keeps a host of its own, `KALLIPAI_MODEL_GW_SITE`, for its
 forwarding face. The gateway's forwarding routes carry no `/v1` prefix, while a

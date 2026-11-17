@@ -118,6 +118,9 @@ services:
       KALLIPAI_KERYX_UPSTREAM: keryx:7210
       KALLIPAI_FILES_UPSTREAM: files:7400
       KALLIPAI_INSTANCES_UPSTREAM: instances:7300
+      # The page's instances answer follows this switch, and these overrides
+      # start that service themselves: on unless a stack sets 0.
+      KALLIPAI_INSTANCES: ${KALLIPAI_INSTANCES:-1}
       KALLIPAI_MODEL_GATEWAY_UPSTREAM: gateway:7500
       KALLIPAI_MODEL_GATEWAY_FORWARD_UPSTREAM: gateway:7501
     # The Caddyfile, the route table and the site are in the image; the
