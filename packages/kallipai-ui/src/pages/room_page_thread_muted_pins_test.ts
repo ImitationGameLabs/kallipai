@@ -2,8 +2,8 @@
 // and what it must not add.
 //
 //   - the mark is the reader's own standing, read from the same cache the
-//     follow control writes, and only for discussions the window draws (the
-//     drawn entries are the bound on the reads);
+//     follow control writes, and only for discussions whose head the window
+//     holds (a `pending` or `older` group is grouped, never read);
 //   - a muted discussion says so in the words a screen reader hears: the icon
 //     is decorative, so the entry's name is where the fact lives;
 //   - the mark adds nothing else. A count or a line number beside it would turn
@@ -22,12 +22,12 @@ Deno.test("the mark is the reader's muted rule on a drawn discussion", () => {
     "the mark follows the rule in force, not the stored row",
   );
   assert(
-    code.includes("const roots = groups.map((group) => group.root);"),
-    "only the discussions the window draws are asked about",
+    code.includes("const roots = rootedRoots(groups);"),
+    "only discussions whose head the window holds are asked about",
   );
   assert(
     code.includes("void ensureThreadChoice(room, root);"),
-    "each drawn discussion asks once",
+    "each such discussion asks once",
   );
 });
 

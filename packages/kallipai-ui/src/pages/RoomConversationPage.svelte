@@ -74,6 +74,7 @@
   } from "../lib/classes.ts";
   import {
     drawnRootState,
+    rootedRoots,
     threadEntry,
     threadPreview,
     threadGroups,
@@ -138,14 +139,16 @@
   const lineIndex = $derived(threadIndex(conv?.lines ?? []));
   const groups = $derived(threadGroups(conv?.lines ?? [], lineIndex));
 
-  // The standing of every discussion this window draws. The preview's mute mark
-  // and the follow control read one cache; the entries drawn are the natural
-  // bound on the reads (one per thread, shared while in flight, an unreadable
-  // one remembered as unknown). Nothing the cache holds is tracked here: a
-  // landing answer would re-run an effect that asked for it.
+  // The standing of every discussion whose head this window holds: the mute
+  // mark in the preview is drawn there, so only a rooted group has a reader.
+  // A group whose head has not arrived or fell off the window shows no mark,
+  // and asking for its standing would spend one request per thread on an
+  // answer nothing shows. One read per thread, shared while in flight, an
+  // unreadable one remembered as unknown. Nothing the cache holds is tracked
+  // here: a landing answer would re-run an effect that asked for it.
   $effect(() => {
     const room = roomId;
-    const roots = groups.map((group) => group.root);
+    const roots = rootedRoots(groups);
     untrack(() => {
       for (const root of roots) void ensureThreadChoice(room, root);
     });

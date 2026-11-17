@@ -9,6 +9,7 @@ import { type RoomLine } from "./room-message.ts";
 import {
   declaredThread,
   drawnRootState,
+  rootedRoots,
   threadAtEnd,
   threadDiscussion,
   threadEntry,
@@ -55,6 +56,21 @@ Deno.test("a head and its replies form one group", () => {
   assertEquals(groups[1].head.seq, 2);
   assertEquals(groups[1].replies.length, 0);
 });
+
+Deno.test(
+  "only a discussion whose head is loaded is worth a standing read",
+  () => {
+    // A window starting at 5 holds a reply to a topic older than the window and
+    // one to a topic the forward walk has not reached: neither head is drawn, so
+    // neither has a mark or a control to answer.
+    const groups = threadGroups([line(5), line(6, 3), line(7, 9)]);
+    assertEquals(
+      groups.map((group) => group.rootState),
+      ["rooted", "older", "pending"],
+    );
+    assertEquals(rootedRoots(groups), [5]);
+  },
+);
 
 Deno.test("a row that only quotes another joins that discussion", () => {
   // A send from the room composer quotes a row without declaring a thread,

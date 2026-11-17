@@ -164,6 +164,17 @@ export function threadGroups(
   return groups.sort((a, b) => a.at - b.at).map((entry) => entry.group);
 }
 
+/** The discussions whose head this window holds, in transcript order: the only
+ *  ones a standing has a reader for. A group whose head fell off the window
+ *  (`older`) or has not arrived (`pending`) shows no mute mark in the preview,
+ *  so asking for its standing spends one request per thread on an answer
+ *  nothing shows. */
+export function rootedRoots(groups: readonly ThreadGroup[]): number[] {
+  return groups
+    .filter((group) => group.rootState === "rooted")
+    .map((group) => group.root);
+}
+
 /** The words a line carries from its sender: what a pending line and the row
  *  the room numbered for it have in common. */
 function words(line: RoomLine): string {
