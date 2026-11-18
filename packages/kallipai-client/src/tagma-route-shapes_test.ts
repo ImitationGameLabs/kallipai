@@ -12,8 +12,8 @@
 //
 // A row's `query` and `body` lists are the keys that travel, sorted; an
 // empty list means the verb sends none. A row records what this client
-// sends, which can be narrower than what the server accepts: `postMessage`
-// leaves `defer` at its default, and `closeTask` cannot carry
+// sends, which can be narrower than what the server accepts. For example,
+// `postMessage` leaves `defer` at its default, and `closeTask` cannot carry
 // `dossier_tar_b64` at all, a capability gap rather than a default-value
 // difference. Path-parameter escaping is outside the pin too: dropping an
 // `encodeURIComponent` would not turn it red.
@@ -315,7 +315,7 @@ const AGENT_ROWS: readonly Row[] = [
   },
 ];
 
-/** The task ledger: the list and read verbs, then one row per write verb. */
+/** The task ledger: list and read verbs, write verbs, then the exports. */
 const TASK_ROWS: readonly Row[] = [
   {
     name: "listTasks",
