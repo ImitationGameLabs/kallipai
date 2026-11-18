@@ -197,11 +197,18 @@ and passes the `AbortSignal` the client method already takes when the
 work has to be interruptible.
 
 `effect` imports live in `kallipai-common` and the `*-client` packages;
-`kallipai-ui` has none. Nothing enforces that today: `effect` resolves
-from the hoisted root `node_modules`, so `deno check` and `deno lint`
-both pass on an import from a store, and the reader is the only check.
-The comments above `runClientEffect` and `runClientStream` are the source
-text for this seam, and the survey behind it is
+`kallipai-ui` has none, and
+`packages/kallipai-ui/src/lib/effect_import_test.ts` scans every TypeScript
+and Svelte file under `src` for an import specifier naming the
+package, its own file excepted since its shims are import text by
+definition. Components are in the set because `deno lint` never reads
+them and `effect` resolves from the hoisted root `node_modules`, so a
+type check passes on the import too. The scan judges import text on
+its own: a computed module name, a re-export from outside `src`, and
+anything assembled at runtime stay out of reach, so a green run says
+this tree names no such import, not that the boundary cannot be
+crossed. The comments above `runClientEffect` and `runClientStream`
+are the source text for this seam, and the survey behind it is
 `dev-reports/20261118-svelte-effect-seam.md` in the team workspace.
 
 ### Update Notice and Bundle Caching
