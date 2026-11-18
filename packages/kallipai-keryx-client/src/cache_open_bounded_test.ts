@@ -5,7 +5,7 @@
 // transactions, put/get/getAll/delete/clear, a cursor that reports exhaustion,
 // close, and the blocked event an upgrade fires when another tab holds the
 // older version open. Every case imports `cache.ts` under a unique query
-// string, because the open and migration promises are module state.
+// string, because the open promise is module state.
 
 type Row = Record<string, unknown>;
 
@@ -425,3 +425,21 @@ Deno.test(
     }
   },
 );
+
+Deno.test("a fresh database opens empty and keeps its stores", async () => {
+  const restore = installFakes();
+  try {
+    const cache = await import("./cache.ts?case=open-fresh");
+    await cache.prepareCache();
+    assertEquals(databases.has(CURRENT), true);
+    assertEquals([...databases.get(CURRENT)!.stores.keys()].sort(), [
+      "messages",
+      "meta",
+      "pending",
+    ]);
+    assertEquals(await cache.readTail("c-1", 10), []);
+    assertEquals(await cache.readPendingByTagma("t-x"), []);
+  } finally {
+    restore();
+  }
+});

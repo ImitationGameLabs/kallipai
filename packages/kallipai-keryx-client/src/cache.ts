@@ -22,13 +22,12 @@ import type { FileAttachment } from "@kallipai/kallipai-common";
 // re-pull and never gates it. Three rules keep that true.
 //
 //  1. One open per document, single flight. `db()` memoizes the connection
-//     and the legacy migration's own `openDb()` joins the same request, so
-//     the two never race for the upgrade lock. The migration closes its
-//     handle once the copy lands; `db()` opens the connection it keeps.
-//  2. The whole chain -- legacy probe, migration, open -- runs under ONE
-//     budget. An open that another tab blocks, or one that never settles,
-//     rejects instead of waiting: waiting is what left every open tab
-//     staring at an empty history after a version upgrade.
+//     and every reader joins that one request, so two of them never race
+//     for the upgrade lock.
+//  2. The open runs under ONE budget. An open that another tab blocks, or
+//     one that never settles, rejects instead of waiting: waiting is what
+//     left every open tab staring at an empty history after a version
+//     upgrade.
 //  3. Opening needs a permit. `prepareCache()` is the only grant on the
 //     ordinary path (attach points and an explicit retry); message-store
 //     reads and writes never open on their own, so a blocked open cannot be
@@ -124,7 +123,7 @@ let cooldownMs = COOLDOWN_MS;
 let openPermit = false;
 /** No open may start before this wall-clock time (0 = open). */
 let cooldownUntil = 0;
-/** The in-flight open, so the migration and db() share one request. */
+/** The in-flight open request, shared by every caller (see `openDb`). */
 let openRequest: Promise<IDBDatabase> | null = null;
 /** The attempt that started the in-flight open already gave up. */
 let openAbandoned = false;
@@ -136,9 +135,8 @@ let preparedSchema: number | null = null;
  *  one transaction instead of queueing two. */
 let epochPending: Promise<void> | null = null;
 
-/** The one open request of this document. The legacy migration calls this
- * too (it cannot go through db(), which awaits that very migration), so the
- * two paths share one request and one connection. */
+/** The one open request of this document: the memo `db()` builds on,
+ * released when the request settles so a later attempt can retry. */
 function openDb(): Promise<IDBDatabase> {
   if (openRequest) return openRequest;
   const attempt = openOnce();
@@ -231,73 +229,8 @@ function openOnce(): Promise<IDBDatabase> {
   });
 }
 
-// --- one-shot legacy migration (pre-split database) ---------------------------
-//
-// This package inherited its IndexedDB schema from the pre-split
-// `kallipai-relay` database. The two matched at the rename; this side
-// has moved since: it is at v6, it creates `messages` and `pending`,
-// and it does not create the `read_watermarks` store, while a legacy
-// database keeps that store at whatever version it reached (rows
-// nothing reads). On the first open after the rename the durable rows
-// move over and the legacy database is deleted. The messages store is
-// deliberately left behind -- a disposable derived cache re-pulled from
-// the tagma, so paying the copy cost buys nothing.
-
-/** Migrate the legacy `kallipai-relay` database into this one, whenever the
- * legacy database exists. Durable rows only: pending (unsent) lines are
- * copied verbatim -- a dropped pending row is a lost message -- and the
- * disposable messages cache is skipped and re-pulled. Only pending rows
- * have anything to copy: 1:1 read state is not device-local any more.
- *
- * There is deliberately no "done" flag: the probe is the truth, because a
- * localStorage mark can drift from disk (a blocked delete leaves the
- * legacy database alive with the flag already set). An absent legacy
- * database costs one idempotent open that aborts its own upgrade. A
- * cross-database copy cannot be transactional, so the machine is ordered
- * for idempotent re-entry: every write is an upsert (a re-run rewrites the
- * same rows) and the legacy database is deleted only after the full copy,
- * so any interruption leaves a state the next run converges from. A
- * blocked delete (another tab still holds a legacy connection) still
- * completes the machine -- the copy is durable, and a later document's
- * probe re-copies whatever that tab wrote into the orphan, then reaps
- * it. */
-const LEGACY_DB_NAME = "kallipai-relay";
-
-let migrationPromise: Promise<void> | null = null;
-
-export async function migrateLegacyCache(): Promise<"migrated" | "absent"> {
-  const legacy = await openLegacyIfExists();
-  if (!legacy) {
-    return "absent";
-  }
-  // openDb, not db: db() awaits this very migration. The open sits inside
-  // the try with the copy: a failed open leaves no target to close, and the
-  // legacy handle must not outlive this function either.
-  let target: IDBDatabase | null = null;
-  try {
-    target = await openDb();
-    const pendings = await readLegacyRows(legacy, PENDING_STORE);
-    for (const row of pendings) {
-      await putRowOn(target, PENDING_STORE, row);
-    }
-  } finally {
-    // Both handles belong to this migration alone: the memo behind openDb
-    // is released the moment the open lands, so db() opens the connection
-    // it keeps after this resolves. Leaving either open would hold a second
-    // connection for every document that had a legacy database.
-    legacy.close();
-    target?.close();
-  }
-  await deleteLegacyDb();
-  return "migrated";
-}
-
 /** The connection, or a rejection: no permit, cooling down, or the attempt
- * failed. This never opens on its own -- one prepareCache() buys one attempt,
- * which is what stops a blocked open from being retried once per frame.
- *
- * A permit buys one attempt; every path below that does not start one spends
- * it, so a permission never outlives the request that took it. */
+ * failed. Attempts start only on a permit, which this call spends. */
 function db(): Promise<IDBDatabase> {
   if (dbPromise) {
     openPermit = false;
@@ -312,21 +245,17 @@ function db(): Promise<IDBDatabase> {
   }
   openPermit = false;
   openAbandoned = false;
-  // The attempt's own flag, not the shared one: a budget can expire over the
-  // legacy probe, before any open request exists, and the chain goes on to
-  // open a connection nobody will use. Wherever that connection lands, this
-  // chain closes it.
+  // The attempt's own flag, not the shared one: a connection that lands
+  // after its promise settled is closed by this chain (see openOnce).
   let abandoned = false;
   const attempt = withinBudget(
-    ensureMigrated()
-      .then(() => openDb())
-      .then((connection) => {
-        if (abandoned) {
-          connection.close();
-          throw new CacheUnavailable("cache open abandoned");
-        }
-        return connection;
-      }),
+    openDb().then((connection) => {
+      if (abandoned) {
+        connection.close();
+        throw new CacheUnavailable("cache open abandoned");
+      }
+      return connection;
+    }),
   );
   dbPromise = attempt;
   attempt.then(
@@ -361,8 +290,8 @@ function cacheFailed(connection?: IDBDatabase): void {
 }
 
 /** Reject after `openBudgetMs` unless `work` settled first. The budget
- * covers the whole chain the caller started (legacy probe, migration, open),
- * not one request inside it: each leg can wait on another tab. */
+ * covers the open the caller started, not one request inside it: an open
+ * can wait on another tab. */
 function withinBudget<T>(work: Promise<T>): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const timer = setTimeout(
@@ -382,19 +311,18 @@ function withinBudget<T>(work: Promise<T>): Promise<T> {
   });
 }
 
-/** An open on behalf of the durable pending store. Those rows are the only
- * copy of an unsent message, so this path may ask for an open itself; it is
- * driven by user sends and flushes, orders of magnitude rarer than the
- * per-frame message writes the permit rule fences off. */
+/** An open for the durable pending store; why it may take a permit of
+ * its own is in the open contract at the top of the file. */
 function durableDb(): Promise<IDBDatabase> {
   openPermit = true;
   return db();
 }
 
-/** Grant one open attempt and wait for it: the ONLY way an open starts. Call
- * it before the first cache read of an attach, and again when the user
- * retries, so "the cache is opened before it is read" is ordinary code order
- * rather than an import-order convention. Resolves when the connection is
+/** Grant one open attempt and wait for it: the usual way an open starts.
+ * Call it before the first cache read of an attach, and again when the user
+ * retries, so opening before the first read is ordinary code order rather
+ * than an import-order convention. `durableDb` is the other entry, for a
+ * pending line that exists nowhere else. Resolves when the connection is
  * usable; rejects (CacheUnavailable) when it is not -- callers degrade. */
 export async function prepareCache(historySchema?: number): Promise<void> {
   if (!dbPromise) {
@@ -473,114 +401,6 @@ function epochTransaction(
     };
     tx.onerror = () => failed("failed");
     tx.onabort = () => failed("aborted");
-  });
-}
-
-/** Run the legacy migration at most once per document lifetime, ahead of the
- * first cache open. A failed migration must not take the cache down with
- * it: the promise settles and the next page load retries the probe, while
- * this session serves re-pullable state from the new database (worst case
- * a pending line stays invisible until the migration lands). The warn
- * fires at most once per document: the cached promise runs the machine
- * once. */
-function ensureMigrated(): Promise<void> {
-  if (!migrationPromise) {
-    migrationPromise = migrateLegacyCache().then(
-      () => undefined,
-      (error) => {
-        // A dropped migration retries on the next page load, but leaves
-        // no trace without this; first-failure-only, the same shape as
-        // RelayChannel's decrypt warn.
-        console.warn(
-          "[KeryxCache] legacy cache migration failed; retries next load",
-          error,
-        );
-        return undefined;
-      },
-    );
-  }
-  return migrationPromise;
-}
-
-/** Open the legacy database without ever creating it: an upgrade event here
- * means it does not exist, and aborting the upgrade fails the open, which
- * maps to null. Stores absent from an older legacy version (pending is v5)
- * read as empty. Bounded by the caller's budget; a connection that arrives
- * after that budget is spent is closed on arrival (same rule as openOnce). */
-function openLegacyIfExists(): Promise<IDBDatabase | null> {
-  return new Promise((resolve, reject) => {
-    if (typeof indexedDB === "undefined") {
-      resolve(null);
-      return;
-    }
-    let settled = false;
-    const settle = (act: () => void) => {
-      if (settled) return;
-      settled = true;
-      act();
-    };
-    const req = indexedDB.open(LEGACY_DB_NAME);
-    req.onupgradeneeded = () => req.transaction?.abort();
-    req.onsuccess = () => {
-      if (settled) {
-        req.result.close();
-        return;
-      }
-      settle(() => resolve(req.result));
-    };
-    req.onerror = () =>
-      settle(() => {
-        if (req.error?.name === "AbortError") resolve(null);
-        else reject(req.error ?? new Error("legacy cache open failed"));
-      });
-  });
-}
-
-/** Upsert one row onto an open database handle. The migration cannot go
- * through run() -- run() opens via db(), which awaits this very
- * migration. Per-row transactions (not one per store): each write is an
- * idempotent upsert, so the granularity only sets the retry unit. */
-function putRowOn(
-  target: IDBDatabase,
-  store: string,
-  row: unknown,
-): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const req = target
-      .transaction(store, "readwrite")
-      .objectStore(store)
-      .put(row);
-    req.onsuccess = () => resolve();
-    req.onerror = () =>
-      reject(req.error ?? new Error("legacy cache copy failed"));
-  });
-}
-
-function readLegacyRows(
-  source: IDBDatabase,
-  store: string,
-): Promise<unknown[]> {
-  if (!source.objectStoreNames.contains(store)) return Promise.resolve([]);
-  return new Promise((resolve, reject) => {
-    const req = source
-      .transaction(store, "readonly")
-      .objectStore(store)
-      .getAll();
-    req.onsuccess = () => resolve(req.result as unknown[]);
-    req.onerror = () =>
-      reject(req.error ?? new Error("legacy cache read failed"));
-  });
-}
-
-function deleteLegacyDb(): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const req = indexedDB.deleteDatabase(LEGACY_DB_NAME);
-    req.onsuccess = () => resolve();
-    // Blocked only means another tab holds a legacy connection; the copy is
-    // durable and the orphan is reaped when that tab closes.
-    req.onblocked = () => resolve();
-    req.onerror = () =>
-      reject(req.error ?? new Error("legacy cache delete failed"));
   });
 }
 
