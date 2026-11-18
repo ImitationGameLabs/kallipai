@@ -182,6 +182,28 @@ page offers, and the `beforeNavigate` hook as a component prop
 state lives in the store both layers import (`profilesStore` is the
 precedent), and route changes still flow through ShellPort `navigate`.
 
+### Effect Stays Below `kallipai-ui`
+
+An effect is not something `kallipai-ui` holds; `kallipai-common` is the
+seam. `jsonRequest` builds an effect, `runClientEffect`
+(`packages/kallipai-common/src/http.ts:502`) turns one into a `Promise`,
+and `runClientStream` (`:522`) turns a stream into an `AsyncGenerator`.
+The `*-client` packages call those two and hand the UI a method that
+returns a `Promise` or an `AsyncGenerator` (`meEvents` in
+`kallipai-lesche-client/src/client.ts:411` is the shape); `kallipai-ui`
+consumes those faces only. A store that needs a new call gets a face
+added on the client side and awaits it, or `for await`s the generator
+and passes the `AbortSignal` the client method already takes when the
+work has to be interruptible.
+
+`effect` imports live in `kallipai-common` and the `*-client` packages;
+`kallipai-ui` has none. Nothing enforces that today: `effect` resolves
+from the hoisted root `node_modules`, so `deno check` and `deno lint`
+both pass on an import from a store, and the reader is the only check.
+The comments above `runClientEffect` and `runClientStream` are the source
+text for this seam, and the survey behind it is
+`dev-reports/20261118-svelte-effect-seam.md` in the team workspace.
+
 ### Update Notice and Bundle Caching
 
 Every build writes an id into `_app/version.json` (`version.name` in
