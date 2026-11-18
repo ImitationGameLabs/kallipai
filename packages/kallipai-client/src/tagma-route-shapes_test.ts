@@ -315,7 +315,10 @@ const AGENT_ROWS: readonly Row[] = [
   },
 ];
 
-/** The task ledger: list and read verbs, write verbs, then the exports. */
+/**
+ * The task ledger: list and read verbs, write verbs, then the archive and
+ * export verbs.
+ */
 const TASK_ROWS: readonly Row[] = [
   {
     name: "listTasks",
