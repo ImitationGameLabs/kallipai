@@ -34,6 +34,8 @@
   import { tagmaForConversation } from "../lib/session/convOf.ts";
   import { createUnresolvedGuard } from "../lib/session/unresolvedGuard.svelte.ts";
   import { composerState } from "../lib/session/composerState.ts";
+  import { classifyError } from "../lib/errors.ts";
+  import { isWriteRefusal } from "../lib/session/writeRefusal.ts";
   import {
     chat_conversation_unknown,
     chat_history_stale,
@@ -473,12 +475,38 @@
         })
       : null,
   );
+  // A link failure surfaces as its own line: the composer notice states the
+  // consequence (the axis is gone), and only this states the cause. A write
+  // refusal is the exception, because it can only arise once the axis is
+  // gone, where the notice already carries the sentence and the Retry.
+  const linkError = $derived(conv?.link.error ?? null);
+  const linkErrorCopy = $derived(
+    linkError && !isWriteRefusal(linkError)
+      ? classifyError(linkError).title
+      : null,
+  );
+
+  // One message per state: the error line names the failure, so the generic
+  // notice stands down while the line is up (its Retry action stays).
   const disabledNotice = $derived(
     composerUi?.notice === "opening"
       ? chat_opening()
-      : composerUi?.notice === "not-connected"
-        ? error_conversation_not_connected()
-        : undefined,
+      : linkErrorCopy
+        ? undefined
+        : composerUi?.notice === "not-connected"
+          ? error_conversation_not_connected()
+          : undefined,
+  );
+
+  // The transcript's own error wins: it is about the rows the reader sees.
+  // A link failure fills the line when the transcript has none.
+  const errorLine = $derived(
+    conv?.transcript.error ?? linkErrorCopy ?? undefined,
+  );
+  const errorStatus = $derived(
+    conv?.transcript.status === "error" || linkErrorCopy
+      ? "error"
+      : (conv?.transcript.status ?? "idle"),
   );
   // The tagma that owns this conversation, for the retry the notice offers.
   // Read from the conversation rather than the stored mapping: the mapping is
@@ -593,8 +621,8 @@
           {/if}
           <ConversationView
             lines={conv.transcript.rows}
-            status={conv.transcript.status}
-            error={conv.transcript.error}
+            status={errorStatus}
+            error={errorLine}
             sessionKey={conversationId}
             {composer}
             {disabled}

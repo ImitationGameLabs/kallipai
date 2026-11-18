@@ -27,8 +27,10 @@ const RESTART_BACKOFF: RestartBackoff = { min: 15_000, max: 60_000 };
 export class Link {
   status = $state<LinkStatus>("opening");
 
-  /** Transport-level error (the layout banner classifies it). Set when the
-   *  drain fails; cleared on a fresh attach. */
+  /** Transport-level error (the layout banner classifies it, a relay page
+   *  prints it above the composer). Set when the drain fails; a rebuilt
+   *  transport attaching clears it, so the field describes the current
+   *  connection attempt rather than the session's history. */
   error: unknown = $state(null);
 
   /** The latest aggregate status snapshot (root state, subagent counts, token
@@ -209,6 +211,11 @@ export class Link {
       if (rebuilt === null) return;
       this.transport = rebuilt;
       this.onAttached();
+
+      // The attempt this error described is over: a rebuilt transport is a
+      // fresh attach, so a stale failure must not outlive it (the banner
+      // would keep reporting a dead stream under a live one).
+      this.error = null;
     }
   }
 
