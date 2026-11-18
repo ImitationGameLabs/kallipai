@@ -1,20 +1,27 @@
-// Pins, not documentation: the wire shape of every verb TagmaClient exposes.
-// Each row was authored from docs/en/reference/tagma-api.md and the tagma's
-// route table (crates/kallipai-tagma/src/routes*.rs, plus the request structs),
-// not from this package's source, so the assertions below report drift between
-// the written contract and the client instead of restating the client to
-// itself.
+// Pins, not documentation: the wire shape of every verb TagmaClient exposes,
+// as recorded here. Each row was authored from docs/en/reference/tagma-api.md
+// and the tagma's route table (crates/kallipai-tagma/src/routes*.rs, plus
+// the request structs), not from this package's source.
+//
+// The table is a snapshot, not a two-end reconciliation: the doc and the
+// Rust side can move without turning this red.
 //
 // externalEventStream is a stream, not a method answer: its row pins the
-// request it opens, and each frame is `{event, data}` — the caller decodes a
-// payload per its event name, so no single return type describes the verb.
+// request it opens, and each frame is `{event, data}` — the caller decodes
+// a payload per its event name, so no single return type describes the verb.
 //
-// A row's `query` and `body` lists are the keys that travel, sorted; an empty
-// list means the verb sends none. Rows carry the fields this client sends,
-// which is the narrower side wherever the server accepts more (postMessage
-// leaves the server's `defer` at its default, for one).
+// A row's `query` and `body` lists are the keys that travel, sorted; an
+// empty list means the verb sends none. A row records what this client
+// sends, which can be narrower than what the server accepts: `postMessage`
+// leaves `defer` at its default, and `closeTask` cannot carry
+// `dossier_tar_b64` at all, a capability gap rather than a default-value
+// difference. Path-parameter escaping is outside the pin too: dropping an
+// `encodeURIComponent` would not turn it red.
+//
+// Each row's answer type rides a `satisfies`, which binds the type name:
+// a change inside types.ts stays invisible here.
 
-import { assertEquals } from "@std/assert";
+import { assert, assertEquals } from "@std/assert";
 import type { FileAttachment } from "@kallipai/kallipai-common";
 import { withFetch } from "@kallipai/kallipai-common/testing";
 import { TagmaClient } from "./client.ts";
@@ -73,14 +80,19 @@ function answer(url: string): Promise<Response> {
   );
 }
 
-/** The keys of the JSON body the seam put on the wire; none when it sent one. */
+/** The keys of the JSON body the seam put on the wire, none when the verb sent
+ * no body. Any other body form is a shape this pin cannot read, so it fails
+ * instead of answering as if the verb had sent nothing. */
 function sentBodyKeys(init?: RequestInit): readonly string[] {
-  if (typeof init?.body !== "string") return [];
-  const parsed = JSON.parse(init.body) as Record<string, unknown>;
+  const body = init?.body;
+  if (body === undefined || body === null) return [];
+  assert(typeof body === "string", "the wire body is no longer JSON text");
+  const parsed = JSON.parse(body) as Record<string, unknown>;
   return Object.keys(parsed).sort();
 }
 
-const ROWS: readonly Row[] = [
+/** The agent, budget, profile and schedule surface. */
+const AGENT_ROWS: readonly Row[] = [
   {
     name: "postMessage",
     method: "POST",
@@ -303,6 +315,7 @@ const ROWS: readonly Row[] = [
   },
 ];
 
+/** The task ledger: the list and read verbs, then one row per write verb. */
 const TASK_ROWS: readonly Row[] = [
   {
     name: "listTasks",
@@ -474,7 +487,8 @@ const TASK_ROWS: readonly Row[] = [
   },
 ];
 
-const TAIL_ROWS: readonly Row[] = [
+/** The settings surface and the turn-history reads. */
+const SETTINGS_HISTORY_ROWS: readonly Row[] = [
   {
     name: "getTimezone",
     method: "GET",
@@ -544,7 +558,32 @@ const TAIL_ROWS: readonly Row[] = [
   },
 ];
 
-const ALL_ROWS: readonly Row[] = [...ROWS, ...TASK_ROWS, ...TAIL_ROWS];
+const ALL_ROWS: readonly Row[] = [
+  ...AGENT_ROWS,
+  ...TASK_ROWS,
+  ...SETTINGS_HISTORY_ROWS,
+];
+
+/** One dial, one recorded request: a verb that fails after the request
+ * went out is irrelevant to this test, since the request is what is read.
+ * The `calls.length` assertion below is what keeps that harmless — a dial
+ * that never fires records nothing and fails there. */
+async function dialOnce(
+  client: TagmaClient,
+  row: Row,
+): Promise<Array<{ url: string; init?: RequestInit }>> {
+  const calls: Array<{ url: string; init?: RequestInit }> = [];
+  await withFetch(
+    (url, init) => {
+      calls.push({ url: String(url), init });
+      return answer(String(url));
+    },
+    async () => {
+      await row.dial(client).catch(() => undefined);
+    },
+  );
+  return calls;
+}
 
 /** Prototype members that are plumbing rather than verbs. Each is asserted to
  * exist, so renaming one fails here instead of silently moving a method into
@@ -563,16 +602,7 @@ Deno.test(
   async () => {
     const client = new TagmaClient({ baseUrl: "http://tagma.test" });
     for (const row of ALL_ROWS) {
-      const calls: Array<{ url: string; init?: RequestInit }> = [];
-      await withFetch(
-        (url, init) => {
-          calls.push({ url: String(url), init });
-          return answer(String(url));
-        },
-        async () => {
-          await row.dial(client).catch(() => undefined);
-        },
-      );
+      const calls = await dialOnce(client, row);
       assertEquals(
         calls.length,
         1,
@@ -610,8 +640,12 @@ Deno.test("the table names every prototype method and nothing else", () => {
   assertEquals(verbs, ALL_ROWS.map((row) => row.name).sort());
 });
 
-/** Every non-test TypeScript file under this directory, subdirectories
- * included: a seam bypass moved into a nested module stays caught. */
+/** Every non-test TypeScript file under this package's src/, subdirectories
+ * included, so a bypass moved into a nested module stays caught. Only `.ts`
+ * is read (`.tsx` and `.mts` are not), and test files are skipped by suffix.
+ * Reading needs `--allow-read=src`, resolved against the cwd: the package's
+ * test script runs from the package, so a hand-run from the repo root would
+ * fail on permissions rather than on a finding. */
 async function* sourceFiles(dir: URL): AsyncGenerator<URL> {
   const pending: URL[] = [dir];
   while (pending.length > 0) {
@@ -636,10 +670,17 @@ async function* sourceFiles(dir: URL): AsyncGenerator<URL> {
 }
 
 Deno.test("no source file outside this test calls fetch directly", async () => {
+  // A tripwire, not a proof: `fetch (` with a space, a reference taken once
+  // and called later, and `Reflect.apply` all slip past a substring count,
+  // while a comment mentioning `fetch(` turns it red. What it catches is the
+  // plain call, which is the shape a bypass takes in practice.
   let hits = 0;
+  let scanned = 0;
   for await (const file of sourceFiles(new URL("./", import.meta.url))) {
+    scanned += 1;
     const text = await Deno.readTextFile(file);
     hits += text.split("fetch(").length - 1;
   }
+  assertEquals(scanned > 0, true, "the scan found no source file");
   assertEquals(hits, 0, "an HTTP call bypasses the shared seam");
 });
