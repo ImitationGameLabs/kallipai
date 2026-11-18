@@ -148,7 +148,7 @@ fn canonical_data_root() -> Result<PathBuf> {
 ///
 /// Such overlap must be rejected by the tagma: an agent whose workspace *is* (or
 /// *contains*) the data tree could write tagma bookkeeping (`meta.json`,
-/// `context.json`, `exec_policy.toml`, peers' `agents/<id>/`, ...). With the overlap
+/// `manifest.json`, `pins.json`, `exec_policy.toml`, peers' `agents/<id>/`, ...). With the overlap
 /// eliminated, landlock alone enforces the data-dir integrity baseline (the agent's
 /// writable set never covers the data tree).
 ///

@@ -15,9 +15,9 @@ use super::io::{backup_path, load_with_backup};
 /// Read the cumulative usage counters out of an agent directory.
 ///
 /// Deliberately narrower than [`super::restore_agent`]: it parses only
-/// `manifest.json` (falling back to its backup) and never hydrates history,
-/// pins, or migrations, so a parked body can be read cheaply and without
-/// side effects.
+/// `manifest.json` (falling back to its backup) and never hydrates history
+/// or approvals, so a parked body can be read cheaply and without side
+/// effects.
 ///
 /// `None` means "not readable" — a missing directory, a missing manifest, or
 /// damage in both the manifest and its backup. Callers must record a skip

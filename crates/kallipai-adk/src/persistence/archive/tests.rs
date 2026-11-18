@@ -1,9 +1,12 @@
 use super::*;
 
+use crate::context::{AgenticContext as _, ContextStore};
 use crate::history::{HistoryWriter, RecordKind};
 use crate::persistence::test_support::with_data_dir;
-use crate::persistence::{AgentMeta, create_agent_dir, data_dir_root, scan_agents};
-use crate::test_support::user_msg;
+use crate::persistence::{
+    AgentMeta, create_agent_dir, data_dir_root, persist_context, scan_agents,
+};
+use crate::test_support::{usage, user_msg};
 use serial_test::serial;
 use std::path::PathBuf;
 use tempfile::TempDir;
@@ -27,10 +30,14 @@ fn archive_moves_dir_and_preserves_contents() {
         )
         .unwrap();
 
-        // One history record (as the live writer would produce).
+        // A split-format context: a pin, one turn with its history record, and
+        // non-zero cumulative usage, which the manifest carries.
+        let mut store = ContextStore::new();
+        store.pin("note", user_msg("pinned")).unwrap();
+        let (turn_id, _) = store.push_turn(vec![user_msg("hello")]);
         HistoryWriter::new(dir.clone())
             .append(
-                Some(0),
+                Some(turn_id.0),
                 &[user_msg("hello")],
                 16,
                 RecordKind::Turn,
@@ -39,12 +46,8 @@ fn archive_moves_dir_and_preserves_contents() {
                 None,
             )
             .unwrap();
-        // A context.json carrying non-zero cumulative usage.
-        std::fs::write(
-            dir.join("context.json"),
-            r#"{"cumulative_usage":{"prompt_tokens":100,"completion_tokens":50,"cache_hit_tokens":10}}"#,
-        )
-        .unwrap();
+        store.accumulate_usage(&usage(100));
+        persist_context(&store, &dir).unwrap();
 
         archive_agent_dir(&id).unwrap();
 
@@ -54,10 +57,10 @@ fn archive_moves_dir_and_preserves_contents() {
             archived.join("history").exists(),
             "history survives archival"
         );
-        let ctx: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(archived.join("context.json")).unwrap())
+        let manifest: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(archived.join("manifest.json")).unwrap())
                 .unwrap();
-        assert_eq!(ctx["cumulative_usage"]["prompt_tokens"], 100);
+        assert_eq!(manifest["cumulative_usage"]["prompt_tokens"], 100);
         // Live and archived trees share one root (the installed data
         // root; single filesystem here, so `rename` is atomic — a cross-fs
         // EXDEV falls back to copy + delete).

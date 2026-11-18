@@ -1,8 +1,15 @@
 use super::*;
 
-use crate::persistence::test_support::with_data_dir;
-use crate::persistence::{agent_dir, archive_agent_dir, create_agent_dir, data_dir_root};
+use crate::context::AgenticContext as _;
+use crate::history::{HistoryWriter, RecordKind};
+use crate::persistence::test_support::{NO_TRUNCATION, with_data_dir};
+use crate::persistence::{
+    agent_dir, archive_agent_dir, create_agent_dir, data_dir_root, persist_context,
+};
+use crate::test_support::{assistant_msg, user_msg};
+use kallipai_common::AgentId;
 use serial_test::serial;
+use tempfile::TempDir;
 
 #[test]
 #[serial]
@@ -140,4 +147,83 @@ fn scan_and_find_error_when_the_agents_dir_is_unreadable() {
             "error names the cause: {err:#}"
         );
     })
+}
+
+/// A split directory whose manifest lists a restart notice, as a manifest
+/// written by an earlier binary can: the second restore must not grow a second
+/// notice.
+#[test]
+fn restore_twice_leaves_a_single_restart_notice() {
+    let dir = TempDir::new().unwrap();
+    let mut store = ContextStore::new();
+    let stale = vec![user_msg(RESTART_MESSAGE)];
+    let (stale_id, _) = store.push_turn(stale.clone());
+    HistoryWriter::new(dir.path().to_path_buf())
+        .append(
+            Some(stale_id.0),
+            &stale,
+            8,
+            RecordKind::Turn,
+            None,
+            &[],
+            None,
+        )
+        .unwrap();
+    persist_context(&store, dir.path()).unwrap();
+
+    let id = AgentId::from("twice".to_owned());
+    let _ = restore_agent(&id, dir.path(), NO_TRUNCATION).unwrap();
+    let again = restore_agent(&id, dir.path(), NO_TRUNCATION).unwrap();
+
+    let notices = again
+        .store
+        .turns()
+        .iter()
+        .filter(|t| {
+            !t.is_pinned()
+                && t.messages.len() == 1
+                && t.messages[0].content() == Some(RESTART_MESSAGE)
+        })
+        .count();
+    assert_eq!(
+        notices, 1,
+        "exactly one fresh notice after the second restore"
+    );
+    assert!(again.degraded.is_empty());
+}
+
+/// A manifest naming a turn whose history record never landed degrades the
+/// restore instead of failing it, and the hydratable turns still come back.
+#[test]
+fn missing_history_records_degrade_instead_of_failing() {
+    let dir = TempDir::new().unwrap();
+    let mut store = ContextStore::new();
+    store.pin("note", user_msg("pinned note")).unwrap();
+    let first = vec![user_msg("first question")];
+    let (first_id, _) = store.push_turn(first.clone());
+    HistoryWriter::new(dir.path().to_path_buf())
+        .append(
+            Some(first_id.0),
+            &first,
+            8,
+            RecordKind::Turn,
+            None,
+            &[],
+            None,
+        )
+        .unwrap();
+    // No history record for the second turn.
+    store.push_turn(vec![assistant_msg("first answer")]);
+    persist_context(&store, dir.path()).unwrap();
+
+    let restored =
+        restore_agent(&AgentId::from("a".to_owned()), dir.path(), NO_TRUNCATION).unwrap();
+
+    assert_eq!(restored.degraded.len(), 1);
+    assert_eq!(
+        restored.degraded[0].kind,
+        DegradationKind::MissingHistoryTurns
+    );
+    let turns = restored.store.turns();
+    assert_eq!(turns.len(), 3, "pin + one hydratable turn + restart notice");
 }

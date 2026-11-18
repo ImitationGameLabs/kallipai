@@ -8,7 +8,6 @@
 mod archive;
 mod io;
 mod layout;
-mod legacy;
 mod meta;
 mod repair;
 mod scan;

@@ -35,10 +35,6 @@ fn persist_writes_manifest_and_pins_with_backup() {
 
     let doc: crate::context::manifest::ManifestDoc = serde_json::from_str(&manifest_v2).unwrap();
     assert_eq!(doc.conversation_turn_ids.len(), first_ids.len() + 1);
-    assert!(
-        !dir.path().join("context.json").exists(),
-        "legacy file not written"
-    );
 }
 
 #[test]

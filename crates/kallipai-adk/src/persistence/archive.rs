@@ -78,9 +78,9 @@ fn move_agent_dir(src: &Path, dst: &Path, agent_id: &AgentId, what: &str) -> Res
 
 /// Move a lived agent's directory from `agents/active/` to `agents/archived/` on remove.
 ///
-/// The agent's data (history, `context.json` with cumulative usage, approvals,
-/// exec_policy, meta) is preserved verbatim — removal becomes archival, not
-/// destruction. `agents/archived/` is a sibling of `agents/active/`, so it is invisible to
+/// The agent's data (history, `manifest.json` with cumulative usage, `pins.json`,
+/// approvals, exec_policy, meta) is preserved verbatim -- removal becomes archival,
+/// not destruction. `agents/archived/` is a sibling of `agents/active/`, so it is
 /// [`crate::persistence::scan_agents`] and the live registry.
 ///
 /// Idempotent: a missing source is a no-op. Bails if the destination already

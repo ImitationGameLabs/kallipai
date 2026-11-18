@@ -5,8 +5,6 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context as _, Result};
 
 use super::layout::{agents_base, inactive_base};
-use super::legacy::RESTART_MESSAGE;
-use super::legacy::{migrate_legacy_to_split, strip_restart_turns};
 use super::meta::AgentMeta;
 use super::meta::read_meta_from_dir;
 use super::store::{Degradation, DegradationKind, load_store};
@@ -184,22 +182,56 @@ pub fn scan_inactive() -> Result<Vec<(AgentId, AgentMeta)>> {
     Ok(parked)
 }
 
+/// The notice a restore pushes into context: an on-the-spot prompt telling the
+/// model that its shells were reset. It has no history record of its own -- the
+/// turn is registered as injected so the manifest projection skips it.
+const RESTART_MESSAGE: &str = concat!(
+    "[system]\n",
+    "Agent restored from a previous state. Shell sessions have been reset \u{2014}\n",
+    "environment variables, working directory, and background processes are no\n",
+    "longer available. Review the current state of the project and re-establish\n",
+    "any necessary conditions before continuing. Directory write-locks are managed by\n",
+    "the system for the lifetime of your task and were re-established on restore; they\n",
+    "need no action from you.\n"
+);
+
+/// Drop restart notices carried over from a previous restore before pushing a
+/// fresh one: they are on-the-spot prompts, meaningless across restarts, and
+/// have no history record to hydrate from. A manifest written by an earlier
+/// binary may still list one, so the strip runs on every restore. Matched by
+/// content against the current message; wording drift in an older notice
+/// leaves the turn in place, where the missing-ID degradation absorbs it.
+fn strip_restart_turns(store: &mut ContextStore) {
+    let restart_positions: Vec<usize> = store
+        .turns()
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| {
+            !t.is_pinned()
+                && t.messages.len() == 1
+                && t.messages[0].content() == Some(RESTART_MESSAGE)
+        })
+        .map(|(i, _)| i)
+        .collect();
+    for i in restart_positions.into_iter().rev() {
+        store.drain_turns(i..i + 1);
+    }
+}
+
 /// Deserialize a single agent from its directory.
-/// Loads the context via split persistence when `manifest.json` is present
-/// (hydrating the conversation window from history by turn ID), otherwise
-/// through the legacy `context.json` path — which then migrates in place to
-/// the split format. Either way the on-load migrations, token re-estimation,
-/// and restart-message injection still run. Non-fatal damage is collected in
-/// `degraded` rather than failing the restore. `tail_budget` caps the
-/// conversation window rebuilt from the history tail when manifest.json and
-/// its backup are both unreadable (see [`DegradationKind::TailRecovery`]).
+/// Loads the context from split persistence when `manifest.json` is present,
+/// hydrating the conversation window from history by turn ID; without it the
+/// window is rebuilt from the history tail. The on-load fold, token
+/// re-estimation and restart-message injection run either way. Non-fatal damage
+/// is collected in `degraded` rather than failing the restore. `tail_budget`
+/// caps the rebuilt window (see [`DegradationKind::TailRecovery`]).
 pub fn restore_agent(
     agent_id: &AgentId,
     dir: &Path,
     tail_budget: usize,
 ) -> Result<RestorableAgent> {
     let mut degraded = Vec::new();
-    let (mut store, migrate_pending, sidecar) = load_store(dir, tail_budget, &mut degraded)?;
+    let (mut store, sidecar) = load_store(dir, tail_budget, &mut degraded)?;
 
     let approvals: ApprovalStore = match fs::read_to_string(dir.join("approvals.json")) {
         Ok(json) => serde_json::from_str(&json).context("parsing approvals.json")?,
@@ -213,7 +245,7 @@ pub fn restore_agent(
     // Migrate legacy summary field to a pinned turn.
     store.migrate_legacy_summary();
 
-    // Ordering: fix the role before the deferred legacy→split write, else that write persists it.
+    // Restore-time invariant: the pinned summary is a user record.
     store.enforce_summary_pin_role();
 
     // Tool-call/result pairing is guaranteed at record time
@@ -223,27 +255,18 @@ pub fn restore_agent(
     // silently.
     check_tool_pairing(&store, &mut degraded);
     // Recompute every cached token estimate via the current estimator, so persisted estimates
-    // (possibly from a prior estimator version, e.g. the old char/4 heuristic or stale legacy
-    // pins) are brought up to date. Idempotent.
+    // (possibly from a prior estimator version) are brought up to date. Idempotent.
     store.reestimate_cached_tokens();
 
     // A restore may follow an agent-version upgrade that changed the system prompt or tool set,
     // invalidating the persisted `last_prompt_tokens` anchor. Force a full estimate on the first
     // post-restore round so the gate recomputes from the current config rather than trusting a
-    // cross-version anchor. (migrate/pin/unpin above also set the flag; this is the canonical
-    // restore statement and covers the clean-restore case.) See ContextStore::needs_full_estimate.
+    // cross-version anchor; this is the canonical restore statement and covers the
+    // clean-restore case. See ContextStore::needs_full_estimate.
     store.mark_needs_full_estimate();
-    // Deferred legacy→split migration: load_store only reads the legacy
-    // document. Writing the split files here, after the folds above, is
-    // what makes them carry the folded pins and summary instead of the
-    // raw legacy shape.
-    if migrate_pending {
-        migrate_legacy_to_split(dir, &store)?;
-    }
-    // Drop any restart notice carried over from a prior restore (legacy
-    // stores via `load_store`, split manifests written by older binaries
-    // whose projection did not exclude injected turns) so each restore
-    // leaves exactly one fresh notice below.
+    // Drop any restart notice carried over from a prior restore (a manifest
+    // written by an earlier binary may still list one) so each restore leaves
+    // exactly one fresh notice below.
     strip_restart_turns(&mut store);
 
     let restart_msgs = vec![Message::user(RESTART_MESSAGE)];

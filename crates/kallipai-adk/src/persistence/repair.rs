@@ -40,8 +40,7 @@ pub struct RepairReport {
 /// keeps message content only in history.
 ///
 /// `execute: false` is a dry run — `actions` lists what would be done
-/// and nothing is written, not even the deferred legacy→split migration,
-/// which only a restore completes (see the comment at `load_store`).
+/// and nothing is written.
 ///
 /// Idempotent: a repaired record is itself clean, so a second pass finds
 /// nothing to append.
@@ -51,10 +50,7 @@ pub fn repair_agent_context(
     execute: bool,
 ) -> Result<RepairReport> {
     let mut degraded = Vec::new();
-    // Repair never persists the store, so a legacy directory's deferred
-    // migration stays pending for the next restore to finish.
-    let (mut store, _migrate_pending, _sidecar) =
-        load_store(agent_dir, tail_budget, &mut degraded)?;
+    let (mut store, _sidecar) = load_store(agent_dir, tail_budget, &mut degraded)?;
     let history = crate::history::HistoryWriter::new(agent_dir.to_owned());
     let mut actions = Vec::new();
 

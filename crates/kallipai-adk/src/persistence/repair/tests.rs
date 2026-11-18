@@ -2,25 +2,46 @@ use super::*;
 
 use crate::context::ContextStore;
 use crate::history::{HistoryWriter, RecordKind};
-use crate::persistence::test_support::{NO_TRUNCATION, legacy_fixture, write_legacy};
+use crate::persistence::test_support::NO_TRUNCATION;
 use crate::persistence::{DegradationKind, persist_context, restore_agent};
-use crate::test_support::{TurnMessage, tool_calls_msg, tool_result_msg};
+use crate::test_support::{TurnMessage, tool_calls_msg, tool_result_msg, user_msg};
 use kallipai_common::AgentId;
 use std::fs;
 use tempfile::TempDir;
 
-/// Inspecting (or repairing) a legacy directory writes nothing: the
-/// deferred migration is completed only by a restore.
+/// Inspecting a clean directory writes nothing: the report is empty and both
+/// the manifest and the history stay byte-identical.
 #[test]
-fn repair_dry_run_leaves_legacy_directory_untouched() {
+fn repair_dry_run_leaves_a_clean_directory_untouched() {
     let dir = TempDir::new().unwrap();
-    let (store, convo) = legacy_fixture();
-    write_legacy(&dir, &store, true, &convo);
+    let mut store = ContextStore::new();
+    let (turn_id, _) = store.push_turn(vec![user_msg("hi")]);
+    HistoryWriter::new(dir.path().to_path_buf())
+        .append(
+            Some(turn_id.0),
+            &[user_msg("hi")],
+            8,
+            RecordKind::Turn,
+            None,
+            &[],
+            None,
+        )
+        .unwrap();
+    persist_context(&store, dir.path()).unwrap();
+    let manifest_before = fs::read_to_string(dir.path().join("manifest.json")).unwrap();
+    let lines_before = history_line_count(dir.path());
 
-    repair_agent_context(dir.path(), NO_TRUNCATION, false).unwrap();
+    let report = repair_agent_context(dir.path(), NO_TRUNCATION, false).unwrap();
 
-    assert!(!dir.path().join("manifest.json").exists());
-    assert!(dir.path().join("context.json").exists());
+    assert!(
+        report.actions.is_empty(),
+        "a clean directory needs no repair"
+    );
+    assert_eq!(history_line_count(dir.path()), lines_before);
+    assert_eq!(
+        fs::read_to_string(dir.path().join("manifest.json")).unwrap(),
+        manifest_before
+    );
 }
 
 /// Pairing damage in a hydrated turn is reported, not repaired: a

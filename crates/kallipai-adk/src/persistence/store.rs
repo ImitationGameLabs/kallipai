@@ -1,12 +1,10 @@
 use std::collections::BTreeMap;
-use std::fs;
 use std::path::Path;
 
-use anyhow::{Context as _, Result};
+use anyhow::Result;
 
 use super::io::backup_path;
 use super::io::load_with_backup;
-use super::legacy::{legacy_archive_path, strip_restart_turns};
 use crate::context::ContextStore;
 use just_llm_client::types::generation::Message;
 
@@ -36,35 +34,23 @@ pub enum DegradationKind {
     PinsLost,
 }
 
-/// Load the context store in the format the directory holds.
+/// Load the context store from an agent directory.
 ///
-/// `manifest.json` (or its backup) present → split format: parse both
-/// documents and hydrate the conversation window from history by turn
-/// ID. A leftover `context.json` (migration interrupted before the
-/// rename) is finished off. Only `context.json` → legacy format: load
-/// it and strip restart notices; the split documents are written by
-/// the caller after its transformations (the flag in the return says
-/// when). Neither split document but history exists → the window is
-/// rebuilt from the history tail. Nothing at all → fresh store.
+/// `manifest.json` (or its backup) present: parse both documents and hydrate
+/// the conversation window from history by turn ID. Neither document but
+/// history present: the window is rebuilt from the history tail. Nothing at
+/// all: a fresh store.
 pub(crate) fn load_store(
     dir: &Path,
     tail_budget: usize,
     degraded: &mut Vec<Degradation>,
 ) -> Result<(
     ContextStore,
-    bool,
     BTreeMap<u64, Vec<crate::history::AttachmentRef>>,
 )> {
     let manifest_path = dir.join("manifest.json");
-    let legacy_path = dir.join("context.json");
 
     if manifest_path.exists() || backup_path(&manifest_path).exists() {
-        if legacy_path.exists()
-            && let Err(e) = fs::rename(&legacy_path, legacy_archive_path(dir))
-        {
-            tracing::warn!("finishing legacy rename failed: {e:#}");
-        }
-
         let manifest =
             match load_with_backup::<crate::context::manifest::ManifestDoc>(&manifest_path) {
                 Ok((doc, false)) => doc,
@@ -78,7 +64,7 @@ pub(crate) fn load_store(
                 Err(e) => {
                     let (rebuilt, sidecar) =
                         rebuild_window_from_tail(dir, tail_budget, degraded, e);
-                    return Ok((rebuilt, false, sidecar));
+                    return Ok((rebuilt, sidecar));
                 }
             };
         let pins = load_pins(dir, degraded);
@@ -101,20 +87,8 @@ pub(crate) fn load_store(
         }
         return Ok((
             ContextStore::from_persisted(&pins, convo, &manifest),
-            false,
             report.sidecar,
         ));
-    }
-
-    if legacy_path.exists() {
-        let mut store: ContextStore = serde_json::from_str(
-            &fs::read_to_string(&legacy_path).context("reading context.json")?,
-        )
-        .context("parsing context.json")?;
-        strip_restart_turns(&mut store);
-        // Deferred migration: the caller writes the split documents after
-        // its folds; writing here would persist the raw legacy shape.
-        return Ok((store, true, BTreeMap::new()));
     }
 
     // Neither split document: with no history this is a fresh directory;
@@ -127,9 +101,9 @@ pub(crate) fn load_store(
             degraded,
             anyhow::anyhow!("manifest.json and its backup are missing"),
         );
-        return Ok((rebuilt, false, sidecar));
+        return Ok((rebuilt, sidecar));
     }
-    Ok((ContextStore::new(), false, BTreeMap::new()))
+    Ok((ContextStore::new(), BTreeMap::new()))
 }
 
 /// Load pins.json through its backup chain, degrading to empty pins
