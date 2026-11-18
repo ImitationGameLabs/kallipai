@@ -9,7 +9,7 @@
   },
   "scripts": {
     "check": "deno check src",
-    "test": "deno test src"
+    "test": "deno test --allow-read=src"
   },
   "dependencies": {
     "@kallipai/kallipai-common": "workspace:*",
