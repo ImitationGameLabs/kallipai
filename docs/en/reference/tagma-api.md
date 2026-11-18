@@ -60,6 +60,7 @@ single operator comparison additionally uses a constant-time compare.
 | `GET`    | `/agents`                                             | List running agents (`?created_by=`)                                                                            | any                          |
 | `GET`    | `/agents/root`                                        | Fetch the tagma-managed root agent                                                                              | any                          |
 | `DELETE` | `/agents/{id}`                                        | Stop and remove an agent (never the root)                                                                       | operator / superior          |
+| `PUT`    | `/agents/{id}/duty`                                   | Put one agent on duty or off it                                                                                 | operator                     |
 | `POST`   | `/agents/{id}/interrupt`                              | Interrupt current agent operation                                                                               | operator / superior          |
 | `POST`   | `/agents/{id}/message`                                | Send a user message (inbound)                                                                                   | any (peer-to-peer)           |
 | `POST`   | `/agents/{id}/lesche/messages`                        | Deliver an agent-authored message (root)                                                                        | self (root agent)            |
@@ -95,6 +96,10 @@ single operator comparison additionally uses a constant-time compare.
 | `POST`   | `/profiles/refresh`                                   | Re-pull the live gateway snapshot into the registry                                                             | operator                     |
 | `GET`    | `/budget`                                             | Get tagma-wide token budget status                                                                              | any                          |
 | `POST`   | `/budget`                                             | Adjust or set tagma-wide token budget                                                                           | operator                     |
+| `GET`    | `/work-schedule`                                      | Read the tagma-wide work schedule                                                                               | operator                     |
+| `PUT`    | `/work-schedule`                                      | Create or replace the tagma-wide work schedule                                                                  | operator                     |
+| `GET`    | `/settings/timezone`                                  | Read the display timezone                                                                                       | any                          |
+| `PUT`    | `/settings/timezone`                                  | Set or clear the display timezone                                                                               | operator                     |
 | `GET`    | `/approvals`                                          | List approvals                                                                                                  | any (filtered by scope)      |
 | `GET`    | `/approvals/{id}`                                     | Get a single approval                                                                                           | operator / superior          |
 | `POST`   | `/approvals/{id}`                                     | Approve or deny an approval                                                                                     | operator / superior          |
@@ -304,6 +309,7 @@ Auth: any authenticated identity. Response contains no secrets. See [Authenticat
       "role": "string — short display label (omitted when empty)",
       "description": "string — longer prose (omitted when empty)",
       "activity": "string — agent self-reported current activity (omitted when empty / idle)",
+      "duty": "onduty | offduty",
       "parked_reason": "object — why the agent parked (present only in state parked)",
       "retrying": "object — the armed transient-retry plan (present only in state retrying)"
     }
@@ -341,6 +347,44 @@ Status: `204 No Content`
 | 404  | Agent not found                                                                                                                      |
 | 409  | Agent is busy (interrupt it first), has active subagents (remove or interrupt them first), or is the tagma-managed (live) root agent |
 | 500  | Agent vanished during removal                                                                                                        |
+
+#### `PUT /agents/{id}/duty`: Set On-Duty or Off-Duty
+
+Puts one agent on duty or off it. An off-duty agent buffers external messages
+in its inbox instead of waking for them; coming back on duty notifies a live
+agent so it pulls whatever accumulated.
+
+This is the manual override. When an active work schedule exists (see
+[Work Schedule](#work-schedule)), the scheduling engine can set the value again
+on its next transition.
+
+The value lives in memory only: after a restart the store is empty and every
+agent reads as on duty, until the scheduling engine recomputes the root's state
+from the active schedule.
+
+Auth: **operator only** (`require_operator`). See [Authentication and authorization](auth.md).
+
+##### Request Body
+
+```json
+{
+  "status": "onduty"
+}
+```
+
+`status` is `onduty` or `offduty`.
+
+##### Response
+
+The agent's summary, the same object `GET /agents` returns, with the new
+value in `duty`.
+
+Status: `200 OK`
+
+| Code | Condition                  |
+| ---- | -------------------------- |
+| 403  | Caller is not the operator |
+| 404  | Agent not found            |
 
 #### `POST /agents/{id}/interrupt`: Interrupt Agent
 
@@ -1294,7 +1338,8 @@ The updated [`AgentSummary`](#get-agents-list-agents):
   "created_by": "AgentId | null",
   "role": "string",
   "description": "string",
-  "activity": "string"
+  "activity": "string",
+  "duty": "onduty | offduty",
   "parked_reason": "object — present only in state parked",
   "retrying": "object — present only in state retrying"
 }
@@ -1440,6 +1485,153 @@ Status: `200 OK`
 
 > **No persistence:** Budget changes are in-memory only. On restart the cap
 > comes back from `KALLIPAI_TOKEN_BUDGET`: unset, the tagma boots unlimited.
+
+### Work Schedule
+
+One tagma-wide schedule switches the root agent between on duty and off duty,
+and the scheduling engine fires the transitions. There is a single resource,
+read with `GET` and replaced with `PUT`; no list endpoint exists. A row is
+seeded on first boot, so a schedule always exists, in mode `always` until an
+operator changes it.
+
+#### `GET /work-schedule`: Read the Schedule
+
+Returns the single stored schedule.
+
+Auth: **operator only** (`require_operator`). See [Authentication and authorization](auth.md).
+
+##### Response
+
+```json
+{
+  "id": "seed",
+  "spec": { "mode": "always" },
+  "pre_warn_minutes": 10,
+  "final_warn_minutes": 5,
+  "final_warn_prompt": null,
+  "wake_prompt": "",
+  "status": "active",
+  "created_at": "2025-06-05T14:30:00Z"
+}
+```
+
+`final_warn_prompt` stays `null` while the built-in warning text is in use.
+
+Status: `200 OK`
+
+| Code | Condition                                                   |
+| ---- | ----------------------------------------------------------- |
+| 403  | Caller is not the operator                                  |
+| 500  | Stored row missing (the seed makes this an invariant break) |
+| 503  | Work-schedule store not configured                          |
+
+#### `PUT /work-schedule`: Create or Replace the Schedule
+
+`spec` is required. A body without it fails deserialization with
+`422 Unprocessable Entity`, so the request never reaches the handler.
+
+The schedule is tagma-wide, so the tagma must have a root agent to carry it.
+Pausing an active schedule also releases the root agent from duty, so
+messages are not buffered indefinitely.
+
+Auth: **operator only** (`require_operator`). See [Authentication and authorization](auth.md).
+
+##### Request Body
+
+```json
+{
+  "spec": { "mode": "weekly", "days": 31, "windows": [{ "start_minute": 540, "end_minute": 1020 }] },
+  "pre_warn_minutes": 10,
+  "final_warn_minutes": 5,
+  "wake_prompt": "string — optional; omitted or null keeps the stored text, an empty string clears to the built-in",
+  "final_warn_prompt": "string — optional; same three cases as wake_prompt",
+  "status": "active"
+}
+```
+
+- `spec` is tagged by `mode`: `weekly` (`days` bitmask, bit 0 is Monday),
+  `monthly` (`days` bitmask, bit 0 is the 1st), `interval` (`every_hours`,
+  `length_min`, `anchor`) or `always`. Windows are half-open minute-of-day
+  spans evaluated in UTC, at most 10 per schedule and non-overlapping;
+  `end_minute` equal to 1440 means the end of the day, and an `end_minute`
+  below `start_minute` crosses midnight inside the start day.
+- `pre_warn_minutes` and `final_warn_minutes` default to 10 and 5.
+- `status` defaults to `active`; the other value is `paused`.
+- `wake_prompt` and `final_warn_prompt` tell absent from empty apart: an absent
+  key keeps the stored text, `null` keeps it too, `""` clears back to the
+  built-in message, and any other string is trimmed and stored.
+- An `interval` spec re-anchors at save time, keeping the requested
+  minute-of-hour, unless the rhythm is unchanged and the request echoes the
+  stored anchor verbatim; a status-only toggle does, so pausing and resuming
+  keeps the phase.
+- An `interval` spec needs `every_hours` of at least 1 and `length_min`
+  between 1 minute and a week; `anchor` must be minute-aligned.
+
+##### Response
+
+The stored schedule, in the shape `GET /work-schedule` returns.
+
+Status: `200 OK`
+
+| Code | Condition                                                              |
+| ---- | ---------------------------------------------------------------------- |
+| 400  | The tagma has no root agent to carry the schedule                      |
+| 400  | `spec` fails validation (no day selected, empty or overlapping window) |
+| 400  | `pre_warn_minutes` is below `final_warn_minutes`                       |
+| 403  | Caller is not the operator                                             |
+| 503  | Work-schedule store not configured                                     |
+
+### Settings
+
+This surface carries one setting: the timezone every rendered timestamp is expressed in.
+
+#### `GET /settings/timezone`: Read the Display Timezone
+
+The configured IANA timezone name, or `null` when none is set. With no name,
+every surface falls back to its own local zone: the `kallip` CLI uses the
+machine's zone (`--utc` overrides), the UI the browser's.
+
+Auth: any authenticated identity. See [Authentication and authorization](auth.md).
+
+##### Response
+
+```json
+{
+  "timezone": "Asia/Shanghai"
+}
+```
+
+Status: `200 OK`
+
+#### `PUT /settings/timezone`: Set or Clear the Display Timezone
+
+The setting changes how every surface on the tagma renders timestamps.
+
+Auth: **operator only** (`require_operator`). See [Authentication and authorization](auth.md).
+
+##### Request Body
+
+```json
+{
+  "timezone": "Asia/Shanghai"
+}
+```
+
+Send `null` to clear the setting. A body without the `timezone` key clears it
+too, so a misspelled key silently wipes the configured zone. The name is checked
+against the IANA database, so a misspelling there is refused instead of stored.
+
+##### Response
+
+Echoes the stored value.
+
+Status: `200 OK`
+
+| Code | Condition                                    |
+| ---- | -------------------------------------------- |
+| 400  | `timezone` is not a non-empty string or null |
+| 400  | The string is not a valid IANA timezone name |
+| 500  | Persisting the settings file failed          |
 
 ### Approvals
 
