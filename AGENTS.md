@@ -82,7 +82,7 @@ After modifying TypeScript or Svelte code under `packages/` or in `scripts/`:
 
 - `deno task fmt:check` - prettier `--check` plus rumdl `--check` over the whole repo
 - `deno task lint` - the lint-rule guard, then `deno lint` over the whole tree, not per package; it must end with no findings
-- `deno task check` - types and Svelte diagnostics per package. One warning per host is the standing baseline; 0 errors is the gate.
+- `deno task check` - the `scripts/` tree, then types and Svelte diagnostics per package. One warning per host is the standing baseline; 0 errors is the gate.
 - `deno task test` - tests for the packages that define them
 
 `docs/en/development/frontend.md` covers the per-package loop behind these commands (`check`, `fmt:file`, `build`).

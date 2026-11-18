@@ -47,7 +47,7 @@ assume it.
 | --------------------------- | ---------------------------------------------------------------------- |
 | `deno task dev`             | Dev server for `kallipai-web`                                          |
 | `deno task build`           | Build `kallipai-web`                                                   |
-| `deno task check`           | Type / svelte checks across all JS/TS packages                         |
+| `deno task check`           | Type / svelte checks for `scripts/` and every JS/TS package            |
 | `deno task test`            | Run tests for the packages that define them                            |
 | `deno task sync`            | `svelte-kit sync` for `kallipai-web`                                   |
 | `deno task fmt`             | Prettier (TS/Svelte/CSS/JSON) + rumdl (Markdown) across the repo       |
