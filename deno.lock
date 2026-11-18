@@ -2196,14 +2196,16 @@
       "packages/kallipai-archeion-client": {
         "packageJson": {
           "dependencies": [
-            "npm:@jsr/std__assert@^1.0.19"
+            "npm:@jsr/std__assert@^1.0.19",
+            "npm:effect@4.1.4"
           ]
         }
       },
       "packages/kallipai-client": {
         "packageJson": {
           "dependencies": [
-            "npm:@jsr/std__assert@^1.0.19"
+            "npm:@jsr/std__assert@^1.0.19",
+            "npm:effect@4.1.4"
           ]
         }
       },
@@ -2241,7 +2243,8 @@
       "packages/kallipai-files-client": {
         "packageJson": {
           "dependencies": [
-            "npm:@jsr/std__assert@^1.0.19"
+            "npm:@jsr/std__assert@^1.0.19",
+            "npm:effect@4.1.4"
           ]
         }
       },
@@ -2251,7 +2254,8 @@
             "npm:@jsr/std__assert@^1.0.19",
             "npm:@noble/ciphers@^2.2.0",
             "npm:@noble/curves@^2.2.0",
-            "npm:@noble/hashes@^2.2.0"
+            "npm:@noble/hashes@^2.2.0",
+            "npm:effect@4.1.4"
           ]
         }
       },
@@ -2261,7 +2265,8 @@
             "npm:@jsr/std__assert@^1.0.19",
             "npm:@noble/ciphers@^2.2.0",
             "npm:@noble/curves@^2.2.0",
-            "npm:@noble/hashes@^2.2.0"
+            "npm:@noble/hashes@^2.2.0",
+            "npm:effect@4.1.4"
           ]
         }
       },

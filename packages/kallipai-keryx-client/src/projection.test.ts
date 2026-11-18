@@ -3,8 +3,9 @@
 // (same seam the browser uses), so the assertions cover the exact paths and
 // the wire shapes the keryx serves.
 
+import { DataPlaneApiError, TransportError } from "@kallipai/kallipai-common";
 import { withFetch } from "@kallipai/kallipai-common/testing";
-import { assertEquals, assertRejects } from "@std/assert";
+import { assert, assertEquals, assertRejects } from "@std/assert";
 import { LinearBackoff, ProjectionClient } from "./projection.ts";
 
 const AGENTS_BODY = {
@@ -87,3 +88,49 @@ Deno.test("linear backoff steps by 2s and caps at 30s", () => {
   hot.next();
   assertEquals(hot.next(), 6_000);
 });
+
+Deno.test(
+  "a frame that is not JSON fails the attempt instead of being skipped",
+  async () => {
+    const sseBody = "data: {not json\n\n";
+    await withFetch(
+      () =>
+        Promise.resolve(
+          new Response(sseBody, {
+            status: 200,
+            headers: { "content-type": "text/event-stream" },
+          }),
+        ),
+      async () => {
+        const client = new ProjectionClient("http://keryx.test/v1/keryx");
+        await assertRejects(async () => {
+          for await (const _dirty of client.state("t-a")) {
+            // No frame is valid: the attempt must fail, not run past it.
+          }
+        }, TransportError);
+      },
+    );
+  },
+);
+
+Deno.test(
+  "a refused state stream surfaces the status as a DataPlaneApiError",
+  async () => {
+    await withFetch(
+      () => Promise.resolve(new Response("", { status: 404 })),
+      async () => {
+        const client = new ProjectionClient("http://keryx.test/v1/keryx");
+        let caught: unknown;
+        try {
+          for await (const _dirty of client.state("gone")) {
+            // Nothing to read: the refusal arrives before the first frame.
+          }
+        } catch (error) {
+          caught = error;
+        }
+        assert(caught instanceof DataPlaneApiError);
+        assertEquals((caught as DataPlaneApiError).status, 404);
+      },
+    );
+  },
+);

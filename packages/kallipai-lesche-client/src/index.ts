@@ -10,7 +10,7 @@
 
 export const PACKAGE_NAME = "@kallipai/kallipai-lesche-client";
 
-export { LescheClient } from "./http.ts";
+export { LescheClient } from "./client.ts";
 
 // Data-plane wire types the UI consumes. The remaining wire types are
 // package-private.
@@ -27,7 +27,7 @@ export type {
   TagmaStatusPayload,
 } from "./types.ts";
 export type { LescheEvent } from "./types.ts";
-export type { MeEventFrame } from "./http.ts";
+export type { MeEventFrame } from "./client.ts";
 // Room management (relocated from the archeion client).
 export type {
   AddTagmaRequest,

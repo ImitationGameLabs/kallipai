@@ -24,7 +24,7 @@ import {
 import { DataPlaneApiError } from "./types.ts";
 import type { Participant } from "./types.ts";
 import { decodeB64, encodeB64 } from "@kallipai/kallipai-common";
-import type { KeryxClient } from "./http.ts";
+import type { KeryxClient } from "./client.ts";
 import type {
   Envelope,
   KeyExchangeInit,

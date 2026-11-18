@@ -1,5 +1,5 @@
-// The files service's six verbs, as effects, plus the promise-shaped class the
-// UI still awaits. The verbs mirror the server routes
+// The files service's verbs, as effects, plus the promise face the UI awaits
+// (`FilesClient`). The verbs mirror the server routes
 // (kallipai-files/src/state.rs): streaming upload (PUT ?path=), download (GET
 // /{id}), metadata (HEAD /{id}), listing (GET ?space=), delivery to another
 // principal's inbox (POST /{id}/send), and deletion (DELETE /{id}).
@@ -109,10 +109,11 @@ export function deleteRecord(
 }
 
 /**
- * The promise-shaped face of the six verbs, for call sites that still
- * `await`. It crosses `runClientEffect`, this repo's one Promise boundary: a
- * caller that moves to the effect functions above uses them directly, and
- * this class goes away with its last caller. Do not add behavior here.
+ * The promise face of the verbs above, as this package offers it to consumers
+ * (`kallipai-ui` is today's): one `runClientEffect` per call. Behaviour lives
+ * in the verbs; a caller that can hold an Effect uses them directly. Do not
+ * add behavior here. A rejection is the failure channel itself:
+ * `FilesApiError` for a refusal, `TransportError` for a dead exchange.
  */
 export class FilesClient {
   /** `base` is the full edge base, /v1/files included (the edge strips

@@ -14,13 +14,16 @@ import {
 import { classifyError } from "./errors.ts";
 import { WriteRefusal } from "./session/writeRefusal.ts";
 
-const RAW = "tagma request failed: /agents/abc/events";
+/** Stand-in for whatever the origin says; the path is there so a leak is
+ *  easy to spot, and it is the string the assertions look for. */
+const RAW_PATH = "/agents/abc/events";
+const RAW = "fetch failed: " + RAW_PATH;
 
 /** The two properties that make the copy ours: no detail channel at all, and
  *  no origin text anywhere in the view. */
 function assertOurOwnCopy(view: unknown) {
   assertEquals(Object.hasOwn(view as object, "detail"), false);
-  assertEquals(JSON.stringify(view).includes(RAW), false);
+  assertEquals(JSON.stringify(view).includes(RAW_PATH), false);
 }
 
 Deno.test("a server message stays out of the view", () => {

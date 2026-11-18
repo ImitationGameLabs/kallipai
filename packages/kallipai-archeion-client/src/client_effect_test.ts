@@ -9,6 +9,7 @@ import { withFetch } from "@kallipai/kallipai-common/testing";
 import {
   assert,
   assertEquals,
+  assertFalse,
   assertInstanceOf,
   assertRejects,
 } from "@std/assert";
@@ -152,8 +153,9 @@ Deno.test("a 204 and an empty body are successes with no value", async () => {
 });
 
 // `archeionRequest` turns an omitted window into `null`, so no verb can pick
-// up the shared thirty-second default by leaving the field out.
-Deno.test("no archeion call carries a timeout window", async () => {
+// up the shared thirty-second default by leaving the field out. The signal
+// that rides is the fiber's interruption, not a window.
+Deno.test("every archeion call carries the fiber's interruption", async () => {
   const seen: (RequestInit | undefined)[] = [];
   await withFetch(
     (_input, init) => {
@@ -167,7 +169,10 @@ Deno.test("no archeion call carries a timeout window", async () => {
     },
   );
   assertEquals(seen.length, 3);
-  for (const init of seen) assertEquals(init?.signal, undefined);
+  for (const init of seen) {
+    assert(init?.signal instanceof AbortSignal, "the fiber's signal must ride");
+    assertFalse(init.signal.aborted, "no window of this plane is running");
+  }
 });
 
 Deno.test(

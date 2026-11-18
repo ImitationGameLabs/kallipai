@@ -6,12 +6,18 @@
 
 import { assertEquals, assertRejects } from "@std/assert";
 import { KallipaiError } from "@kallipai/kallipai-common";
+import { withFetch } from "@kallipai/kallipai-common/testing";
 import {
   type ManageRestClient,
   ManageChannelError,
   ProjectionClient,
 } from "@kallipai/kallipai-keryx-client";
-import { OnlineBackend, type ProfilesEnvelopeChannel } from "./backend.ts";
+import { TagmaClient } from "@kallipai/kallipai-client";
+import {
+  OfflineBackend,
+  OnlineBackend,
+  type ProfilesEnvelopeChannel,
+} from "./backend.ts";
 
 // The projection feed consults document.hidden and binds a
 // visibilitychange listener at backend construction; deno test has
@@ -144,6 +150,45 @@ Deno.test(
     assertEquals(err.api.dangling, ["agent-x → 'alt'"]);
     // The store's catch classifies this as the confirm-flow branch.
     assertEquals(classifySaveFailure(err, false), "park-dangling");
+  },
+);
+
+Deno.test(
+  "an offline 409 with a dangling list reaches the confirm flow too",
+  async () => {
+    // The offline path builds its error inside the client now, so the list has
+    // to survive the seam as data: this drives a real TagmaClient over a stub
+    // fetch instead of handing the store a prebuilt error.
+    await withFetch(
+      () =>
+        Promise.resolve(
+          new Response(
+            JSON.stringify({
+              error: {
+                message: "config drops sets still bound",
+                dangling: ["agent-x"],
+              },
+            }),
+            { status: 409 },
+          ),
+        ),
+      async () => {
+        const backend = new OfflineBackend(
+          new TagmaClient({ baseUrl: "http://tagma.test" }),
+        );
+        let caught: unknown = null;
+        await backend
+          .updateProfiles({ ...PUT_BODY, force: false })
+          .catch((e) => {
+            caught = e;
+          });
+        assertEquals(caught instanceof KallipaiError, true);
+        const err = caught as KallipaiError;
+        assertEquals(err.api.status, 409);
+        assertEquals(err.api.dangling, ["agent-x"]);
+        assertEquals(classifySaveFailure(err, false), "park-dangling");
+      },
+    );
   },
 );
 

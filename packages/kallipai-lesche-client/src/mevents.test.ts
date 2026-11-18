@@ -3,7 +3,7 @@
 // SSE wiring; it does not re-test SSE framing itself.
 
 import { assert, assertEquals } from "@std/assert";
-import { LescheClient } from "./http.ts";
+import { LescheClient } from "./client.ts";
 import { DataPlaneApiError } from "./types.ts";
 
 Deno.test(

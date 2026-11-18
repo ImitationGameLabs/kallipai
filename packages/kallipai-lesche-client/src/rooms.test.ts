@@ -7,7 +7,7 @@ import type {
   ThreadSubscriptionView,
 } from "./types.ts";
 import { DataPlaneApiError } from "./types.ts";
-import { LescheClient } from "./http.ts";
+import { LescheClient } from "./client.ts";
 
 // HTTP-client contract tests for the rooms surface. The data-plane routes
 // (`/rooms/{id}/envelopes`, `.../messages`) come first; the management

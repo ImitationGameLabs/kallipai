@@ -5,7 +5,12 @@
 
 import { TransportError } from "@kallipai/kallipai-common";
 import { withFetch } from "@kallipai/kallipai-common/testing";
-import { assert, assertEquals, assertInstanceOf } from "@std/assert";
+import {
+  assert,
+  assertEquals,
+  assertFalse,
+  assertInstanceOf,
+} from "@std/assert";
 import { Cause, Effect, Exit, Result } from "effect";
 
 import {
@@ -84,7 +89,7 @@ Deno.test("deletion succeeds with no value on a 204", async () => {
   });
 });
 
-Deno.test("no files call carries a timeout window", async () => {
+Deno.test("every files call carries the fiber's interruption", async () => {
   const seen: (RequestInit | undefined)[] = [];
   await withFetch(
     (_input, init) => {
@@ -101,7 +106,11 @@ Deno.test("no files call carries a timeout window", async () => {
     },
   );
   assertEquals(seen.length, 6);
-  for (const init of seen) assertEquals(init?.signal, undefined);
+  for (const init of seen) {
+    // The signal that rides is the fiber's interruption, not a window.
+    assert(init?.signal instanceof AbortSignal, "the fiber's signal must ride");
+    assertFalse(init.signal.aborted, "no window of this plane's is running");
+  }
 });
 
 Deno.test("a refusal is a FilesApiError carrying the envelope", async () => {

@@ -40,8 +40,14 @@ export class FilesApiError extends Data.TaggedError("FilesApiError")<{
 export type FilesFailure = FilesApiError | TransportError;
 
 /** A files request: the shared fetch's parts, minus the base and path the
- * verb supplies. */
-export type FilesRequest = Omit<FetchRequest, "baseUrl" | "path">;
+ * verb supplies. `timeoutMs` and `credentials` are the two fields this plane
+ * writes once, in {@linkcode filesFetch}: the files service takes a bearer
+ * first and falls back to the `kallipai_session` cookie, so this plane is a
+ * cookie plane. */
+export type FilesRequest = Omit<
+  FetchRequest,
+  "baseUrl" | "path" | "timeoutMs" | "credentials"
+> & { readonly timeoutMs?: number | null };
 
 /**
  * One files call. The shared fetch reports only whether an answer arrived; a
@@ -66,8 +72,13 @@ export function filesFetch(
       ...request,
       baseUrl: base,
       path,
-      // This line is the whole of this plane's no-window policy: the shared
-      // fetch defaults an omitted window to `JSON_REQUEST_TIMEOUT_MS`.
+      // The credential mode is this plane's, written once here: files takes a
+      // bearer first and falls back to the session cookie.
+      credentials: "include",
+      // This line is the whole of this plane's no-window policy: a files
+      // exchange has no window of its own, and `fetchRequest` demands one be
+      // named, so dropping the field is a type error rather than a silent
+      // thirty-second default.
       timeoutMs: request.timeoutMs ?? null,
     });
     if (response.ok) return response;

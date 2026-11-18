@@ -1,5 +1,5 @@
-// The archeion control plane's HTTP verbs, as effects, plus the promise-shaped
-// class the UI still awaits. One verb per route, plus one projection over `/me`:
+// The archeion control plane's HTTP verbs, as effects, plus the promise face
+// class the UI awaits. One verb per route, plus one projection over `/me`:
 // passkey ceremonies, `/me`, the OAuth ceremonies, emails, passkeys, device
 // pairing, and the tagma lifecycle (mint/rename/revoke plus the pinned
 // device-key fetch). The exchange itself lives in ./http.ts.
@@ -686,12 +686,11 @@ export function resetTagmaCredential(
  * key is TOFU from the control plane, even though the key exchange itself runs
  * on the keryx (see `@kallipai/kallipai-keryx-client`).
  *
- * The promise-shaped face of the verbs above, for call sites that still
- * `await`. It crosses `runClientEffect`, this repo's one Promise boundary: a
- * caller that moves to the effect functions uses them directly, and this class
- * goes away with its last caller. Do not add behavior here. A rejection is the
- * failure channel itself: `ArcheionApiError` for a refusal, `TransportError` for
- * a dead exchange.
+ * The promise face of the verbs above, as this package offers it to consumers
+ * (`kallipai-ui` is today's): one `runClientEffect` per call. Behaviour lives
+ * in the verbs; a caller that can hold an Effect uses them directly. Do not
+ * add behavior here. A rejection is the failure channel itself:
+ * `ArcheionApiError` for a refusal, `TransportError` for a dead exchange.
  */
 export class ArcheionClient {
   /** `base` is the archeion base, /v1/archeion included (the edge strips that

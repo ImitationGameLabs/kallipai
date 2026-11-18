@@ -1,10 +1,21 @@
+import { Effect } from "effect";
 import {
+  fetchRequest,
+  JSON_REQUEST_TIMEOUT_MS,
+  jsonRequest,
   KallipaiError,
   parseSseStream,
   readApiError,
+  runClientEffect,
+  sseRequest,
   TransportError,
+  UNREADABLE_BODY_MESSAGE,
 } from "@kallipai/kallipai-common";
-import type { AgentId, FileAttachment } from "@kallipai/kallipai-common";
+import type {
+  AgentId,
+  FileAttachment,
+  RequestFailure,
+} from "@kallipai/kallipai-common";
 import type {
   AgentStatusResponse,
   BodyRange,
@@ -13,9 +24,7 @@ import type {
   CallBody,
   CallPart,
   DeleteSetResponse,
-  DirectMessageRow,
   ExternalHistoryResponse,
-  LescheSessionEntry,
   ListAgentsManagementResponse,
   ListAgentsQuery,
   MessageBody,
@@ -59,12 +68,51 @@ function bodyQuery(query?: BodyRange): string {
   return qs ? `?${qs}` : "";
 }
 
+/** The windows the profile verbs take instead of the seam's 30s. They are the
+ * only routes here whose answer waits on something the tagma does not control,
+ * and they wait in different shapes.
+ *
+ * A pull is two serial exchanges of the gateway (`profile_source/proxy.rs`
+ * `fetch_and_adapt_inner`: `/selected-collection`, then `/parking`), each with
+ * a 60s whole-request window, so a healthy but slow pull can take about 120s.
+ * A probe spends up to 20s on the provider calls (`PROBE_TIMEOUT`, once for
+ * the model list and once for the balance when the family has none) and then
+ * up to 60s on the real inference (`INFERENCE_TIMEOUT`), shared by every
+ * profile naming the same (provider, model); the phases run in sequence, so
+ * the worst case is about 80s. A 30s window would cut either of them
+ * while still healthy.
+ */
+const PROFILE_PROBE_TIMEOUT_MS = 90_000;
+const PROFILE_PULL_TIMEOUT_MS = 150_000;
+
+/** The seam's plane-neutral failure as the classes this client throws: the
+ * split callers already branch on stays put. An answer that arrived is a
+ * `KallipaiError` carrying its envelope (a 409's dangling list included); no
+ * answer at all is a `TransportError`. */
+function requestFailure(
+  failure: RequestFailure,
+): KallipaiError | TransportError {
+  if (failure.kind === "transport") {
+    return new TransportError(failure.message, { cause: failure.cause });
+  }
+  return new KallipaiError({
+    status: failure.status,
+    message: failure.message,
+    ...(failure.code !== undefined ? { code: failure.code } : {}),
+    ...(failure.dangling !== undefined ? { dangling: failure.dangling } : {}),
+  });
+}
+
 /**
  * Low-level HTTP client for the kallipai tagma. TypeScript counterpart to the
  * Rust `kallipai-client` crate's `TagmaClient`. Browser-first: uses `fetch` with
  * no Node globals. Throws {@link KallipaiError} on non-2xx (parsed from the
  * `{"error":{"message":...}}` envelope) and {@link TransportError} on network
  * failures.
+ *
+ * The transport is the shared seam: `json`, `status` and `bytes` cross
+ * `runClientEffect` once, `raw` stays an Effect, and the event stream
+ * opens with `sseRequest` and parses with `parseSseStream`.
  */
 export class TagmaClient {
   private readonly base: string;
@@ -75,46 +123,92 @@ export class TagmaClient {
     this.token = opts.authToken;
   }
 
-  private headers(extra?: Record<string, string>): Record<string, string> {
-    const h: Record<string, string> = { ...extra };
-    if (this.token) h["Authorization"] = `Bearer ${this.token}`;
-    return h;
+  /** The direct path authenticates with a bearer the caller supplied; the
+   * tagma reads no cookie on these routes, so the credential mode below is
+   * this plane's declaration and these are the only headers it adds. */
+  private authHeaders(): Record<string, string> {
+    return this.token ? { Authorization: `Bearer ${this.token}` } : {};
   }
 
-  private async request(
+  /** One JSON exchange through the shared seam: this plane's bearer and
+   * credential mode, the seam's window, body encoding and envelope parse. */
+  private json<T>(
     path: string,
-    init: RequestInit = {},
-  ): Promise<Response> {
-    let resp: Response;
-    try {
-      resp = await fetch(this.base + path, {
-        ...init,
-        headers: this.headers(
-          init.headers as Record<string, string> | undefined,
-        ),
-      });
-    } catch (cause) {
-      throw new TransportError(`tagma request failed: ${path}`, { cause });
-    }
-    if (!resp.ok) {
-      throw new KallipaiError(await readApiError(resp));
-    }
-    return resp;
+    options: {
+      readonly method?: string;
+      readonly body?: unknown;
+      /** Overrides the shared window for a route the tagma itself may
+       * spend longer on; `null` sends no window. */
+      readonly timeoutMs?: number | null;
+    } = {},
+  ): Promise<T> {
+    return runClientEffect(
+      Effect.mapError(
+        jsonRequest<T>({
+          baseUrl: this.base,
+          path,
+          method: options.method ?? "GET",
+          body: options.body,
+          headers: this.authHeaders(),
+          credentials: "omit",
+          timeoutMs: options.timeoutMs,
+        }),
+        requestFailure,
+      ),
+    );
   }
 
-  private json<T>(path: string, init: RequestInit = {}): Promise<T> {
-    return this.request(path, {
-      ...init,
-      headers: {
-        "content-type": "application/json",
-        ...(init.headers as Record<string, string> | undefined),
-      },
-    }).then((r) => r.json() as Promise<T>);
+  /** One raw exchange: the response itself, for the download that must not be
+   * decoded here and for the verbs that read the status line alone. The
+   * refusal mapping below is the one `externalEventStream` repeats; keep the
+   * two in step. */
+  private raw(
+    path: string,
+    options: { readonly method?: string; readonly timeoutMs: number | null },
+  ): Effect.Effect<Response, TransportError | KallipaiError> {
+    const headers = this.authHeaders();
+    return Effect.flatMap(
+      fetchRequest({
+        baseUrl: this.base,
+        path,
+        method: options.method ?? "GET",
+        headers,
+        credentials: "omit",
+        timeoutMs: options.timeoutMs,
+      }),
+      (resp) =>
+        resp.ok
+          ? Effect.succeed(resp)
+          : Effect.flatMap(
+              Effect.promise(() => readApiError(resp)),
+              (api) => Effect.fail(new KallipaiError(api)),
+            ),
+    );
   }
+
+  /** The status line is all these verbs read: a success is a success whatever
+   * the body says, and a refusal is the usual envelope error. */
+  private status(path: string, method: string): Promise<void> {
+    return runClientEffect(
+      Effect.asVoid(
+        this.raw(path, { method, timeoutMs: JSON_REQUEST_TIMEOUT_MS }),
+      ),
+    );
+  }
+
   private bytes(path: string): Promise<Uint8Array> {
-    return this.request(path)
-      .then((r) => r.arrayBuffer())
-      .then((b) => new Uint8Array(b));
+    return runClientEffect(
+      Effect.map(
+        Effect.flatMap(this.raw(path, { timeoutMs: null }), (resp) =>
+          Effect.tryPromise({
+            try: () => resp.arrayBuffer(),
+            catch: (cause) =>
+              new TransportError(UNREADABLE_BODY_MESSAGE, { cause }),
+          }),
+        ),
+        (buffer) => new Uint8Array(buffer),
+      ),
+    );
   }
 
   // --- agent surface ---
@@ -131,7 +225,7 @@ export class TagmaClient {
     // `{"text":...}` bytes: `JSON.stringify` drops undefined fields.
     return this.json<MessageResponse>(`/agents/${id}/message`, {
       method: "POST",
-      body: JSON.stringify({ text, attachment, quote }),
+      body: { text, attachment, quote },
     });
   }
 
@@ -149,7 +243,12 @@ export class TagmaClient {
    * it says frames were lost and the reader repairs from its own cursor. `closing`
    * says the tagma is shutting down and nothing follows. This is the frontend's
    * sole window onto the tagma -- new messages, runtime signals, status snapshots,
-   * the repair marker and the closing frame all arrive here. */
+   * the repair marker and the closing frame all arrive here.
+   * The ways it ends other than by frames: a refusal is a `KallipaiError`; a
+   * dead exchange or a wrong content type is a `TransportError`; a caller that
+   * aborts before the headers rejects with its `signal.reason`; once the body
+   * runs, an abort ends the loop cleanly and an error inside it surfaces as it
+   * is. */
   async *externalEventStream(
     id: AgentId,
     signal?: AbortSignal,
@@ -161,10 +260,20 @@ export class TagmaClient {
      * it. */
     onLiveness?: () => void,
   ): AsyncGenerator<{ readonly event: string; readonly data: string }> {
-    const resp = await this.request(`/agents/${id}/external/events`, {
-      method: "GET",
+    // The connect window is the seam's: it bounds how long the stream may take
+    // to produce headers, and nothing after the headers is cut by it.
+    const resp = await runClientEffect(
+      sseRequest(`${this.base}/agents/${id}/external/events`, {
+        credentials: "omit",
+        headers: this.authHeaders(),
+      }),
       signal,
-    });
+    );
+    if (!resp.ok) {
+      // The seam hands the status line back unread on purpose; this plane's
+      // refusal is the same envelope error every verb throws.
+      throw new KallipaiError(await readApiError(resp));
+    }
     const contentType = resp.headers.get("content-type") ?? "";
     if (!contentType.includes("text/event-stream")) {
       throw new TransportError(
@@ -209,33 +318,6 @@ export class TagmaClient {
     return this.json<ExternalHistoryResponse>(path);
   }
 
-  // --- lesche session surfaces (the root agent's relay conversation data) ---
-
-  /** GET /agents/{id}/lesche/sessions — every relay surface the agent can
-   * address (`bilateral` / `room` / `direct`), aggregated best-effort across
-   * the online relays. */
-  lescheSessions(id: AgentId): Promise<LescheSessionEntry[]> {
-    return this.json(`/agents/${id}/lesche/sessions`);
-  }
-
-  /** GET /agents/{id}/lesche/direct-sessions/{peer}/messages?format=json —
-   * the direct session with `peer` as typed rows (the console UI's
-   * transcript contract). `after` is exclusive (rows ascend by `seq`);
-   * `limit` defaults server-side to a conservative page sized for the
-   * manage bridge's response cap. */
-  directSessionHistory(
-    id: AgentId,
-    peer: string,
-    opts: { after?: number | null; limit?: number } = {},
-  ): Promise<DirectMessageRow[]> {
-    const params = new URLSearchParams({ format: "json" });
-    if (opts.after != null) params.set("after_seq", String(opts.after));
-    if (opts.limit != null) params.set("limit", String(opts.limit));
-    return this.json(
-      `/agents/${id}/lesche/direct-sessions/${peer}/messages?${params}`,
-    );
-  }
-
   // --- management: budget ---
 
   /** GET /budget — tagma-wide token budget status. */
@@ -247,7 +329,7 @@ export class TagmaClient {
   updateBudget(body: BudgetUpdateRequest): Promise<BudgetResponse> {
     return this.json<BudgetResponse>("/budget", {
       method: "POST",
-      body: JSON.stringify(body),
+      body,
     });
   }
 
@@ -270,23 +352,19 @@ export class TagmaClient {
 
   /** POST /agents/{id}/interrupt — cancel the agent's current round. */
   interruptAgent(id: string): Promise<void> {
-    return this.request(`/agents/${id}/interrupt`, { method: "POST" }).then(
-      () => undefined,
-    );
+    return this.status(`/agents/${id}/interrupt`, "POST");
   }
 
   /** DELETE /agents/{id} — remove an agent (must be idle, no subagents). */
   removeAgent(id: string): Promise<void> {
-    return this.request(`/agents/${id}`, { method: "DELETE" }).then(
-      () => undefined,
-    );
+    return this.status(`/agents/${id}`, "DELETE");
   }
 
   /** PUT /agents/{id}/duty — set on-duty/off-duty (operator-only). */
   setAgentDuty(id: string, body: UpdateDutyRequest): Promise<void> {
     return this.json(`/agents/${id}/duty`, {
       method: "PUT",
-      body: JSON.stringify(body),
+      body,
     }).then(() => undefined);
   }
 
@@ -297,7 +375,7 @@ export class TagmaClient {
   ): Promise<void> {
     return this.json(`/agents/${id}/metadata`, {
       method: "PUT",
-      body: JSON.stringify(body),
+      body,
     }).then(() => undefined);
   }
 
@@ -311,8 +389,9 @@ export class TagmaClient {
   /** PUT /profiles — validate, persist, and hot-swap (operator-only). */
   updateProfiles(body: ProfileConfigPutRequest): Promise<ProfileConfig> {
     return this.json<ProfileConfig>("/profiles", {
+      timeoutMs: PROFILE_PULL_TIMEOUT_MS,
       method: "PUT",
-      body: JSON.stringify(body),
+      body,
     });
   }
 
@@ -327,6 +406,7 @@ export class TagmaClient {
    * the bundle (operator-only; a local source is a 409). */
   refreshProfiles(): Promise<ProfileConfig> {
     return this.json<ProfileConfig>("/profiles/refresh", {
+      timeoutMs: PROFILE_PULL_TIMEOUT_MS,
       method: "POST",
     });
   }
@@ -334,8 +414,9 @@ export class TagmaClient {
   /** POST /profiles/probe — dry-run validation of a (draft) config (operator-only). */
   probeProfiles(body: ProfileProbeRequest): Promise<ProfileProbeResponse> {
     return this.json<ProfileProbeResponse>("/profiles/probe", {
+      timeoutMs: PROFILE_PROBE_TIMEOUT_MS,
       method: "POST",
-      body: JSON.stringify(body),
+      body,
     });
   }
 
@@ -361,7 +442,7 @@ export class TagmaClient {
   putWorkSchedule(body: PutWorkScheduleRequest): Promise<WorkSchedule> {
     return this.json<WorkSchedule>("/work-schedule", {
       method: "PUT",
-      body: JSON.stringify(body),
+      body,
     });
   }
 
@@ -392,7 +473,7 @@ export class TagmaClient {
   createTask(body: TaskCreateRequest): Promise<TaskExport> {
     return this.json<TaskExport>("/tasks", {
       method: "POST",
-      body: JSON.stringify(body),
+      body,
     });
   }
 
@@ -400,7 +481,7 @@ export class TagmaClient {
   startTask(id: number, body: TaskForceRequest = {}): Promise<TaskExport> {
     return this.json<TaskExport>(`/tasks/${id}/start`, {
       method: "POST",
-      body: JSON.stringify(body),
+      body,
     });
   }
 
@@ -408,7 +489,7 @@ export class TagmaClient {
   confirmTask(id: number, body: TaskConfirmRequest = {}): Promise<TaskExport> {
     return this.json<TaskExport>(`/tasks/${id}/confirm`, {
       method: "POST",
-      body: JSON.stringify(body),
+      body,
     });
   }
 
@@ -426,7 +507,7 @@ export class TagmaClient {
   resumeTask(id: number, body: TaskForceRequest = {}): Promise<TaskExport> {
     return this.json<TaskExport>(`/tasks/${id}/resume`, {
       method: "POST",
-      body: JSON.stringify(body),
+      body,
     });
   }
 
@@ -434,7 +515,7 @@ export class TagmaClient {
   noteTask(id: number, body: TaskNoteRequest): Promise<TaskExport> {
     return this.json<TaskExport>(`/tasks/${id}/note`, {
       method: "POST",
-      body: JSON.stringify(body),
+      body,
     });
   }
 
@@ -442,7 +523,7 @@ export class TagmaClient {
   closeTask(id: number, body: TaskCloseRequest): Promise<TaskExport> {
     return this.json<TaskExport>(`/tasks/${id}/close`, {
       method: "POST",
-      body: JSON.stringify(body),
+      body,
     });
   }
 
@@ -450,7 +531,7 @@ export class TagmaClient {
   reopenTask(id: number, body: TaskForceRequest = {}): Promise<TaskExport> {
     return this.json<TaskExport>(`/tasks/${id}/reopen`, {
       method: "POST",
-      body: JSON.stringify(body),
+      body,
     });
   }
 
@@ -458,7 +539,7 @@ export class TagmaClient {
   archiveTask(id: number, body: TaskForceRequest = {}): Promise<TaskExport> {
     return this.json<TaskExport>(`/tasks/${id}/archive`, {
       method: "POST",
-      body: JSON.stringify(body),
+      body,
     });
   }
 
@@ -490,7 +571,7 @@ export class TagmaClient {
   putTimezone(timezone: string | null): Promise<{ timezone: string | null }> {
     return this.json<{ timezone: string | null }>("/settings/timezone", {
       method: "PUT",
-      body: JSON.stringify({ timezone }),
+      body: { timezone },
     });
   }
 

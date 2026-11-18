@@ -1,7 +1,7 @@
 // Headless error classification. Projects a raw thrown value (TransportError,
 // KallipaiError, or anything else) into the { title, hint } a user-facing
-// banner can render, so we never leak internal paths like
-// `tagma request failed: /agents/<id>/events` to the user. The full error
+// banner can render: only this package's own copy reaches the user, so a raw
+// transport sentence (whatever route it names) never does. The full error
 // (with cause chain) is logged separately to the browser console by the caller.
 // Raw messages stay in the console: a server sentence or an arbitrary Error's
 // .message is diagnostic, and the view carries only copy of our own.

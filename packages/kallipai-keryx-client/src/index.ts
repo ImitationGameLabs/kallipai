@@ -14,7 +14,7 @@
 
 export const PACKAGE_NAME = "@kallipai/kallipai-keryx-client";
 
-export { KeryxClient } from "./http.ts";
+export { KeryxClient } from "./client.ts";
 export { manageOk } from "./channel.ts";
 export {
   ManageChannelError,
@@ -58,7 +58,7 @@ export type {
   TagmaStatusPayload,
 } from "./types.ts";
 export type { KeryxEvent } from "./types.ts";
-export type { KeryxEventFrame } from "./http.ts";
+export type { KeryxEventFrame } from "./client.ts";
 export type {
   ProjectionAgentsResponse,
   ProjectionBudgetResponse,

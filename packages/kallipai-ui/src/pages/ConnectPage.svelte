@@ -36,8 +36,7 @@
   // Field-level validation (e.g. malformed URL); shown inline.
   let error = $state<string | null>(null);
   // Raw connection failure from connectDirect; classified into the inline
-  // FormError so internal paths (e.g. `tagma request failed: /agents`) never
-  // reach the user.
+  // FormError so the transport's own text never reaches the user.
   let connectError = $state<unknown>(null);
   const connectView = $derived(
     connectError === null ? null : classifyError(connectError),

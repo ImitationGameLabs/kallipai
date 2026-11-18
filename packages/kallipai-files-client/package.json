@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@kallipai/kallipai-common": "workspace:*",
-    "@std/assert": "npm:@jsr/std__assert@^1.0.19"
+    "@std/assert": "npm:@jsr/std__assert@^1.0.19",
+    "effect": "npm:effect@4.1.4"
   }
 }

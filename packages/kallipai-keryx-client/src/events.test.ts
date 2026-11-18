@@ -6,7 +6,7 @@
 
 import { assert, assertEquals } from "@std/assert";
 import type { KeryxEvent } from "./types.ts";
-import { KeryxClient } from "./http.ts";
+import { KeryxClient } from "./client.ts";
 import { DataPlaneApiError } from "./types.ts";
 
 Deno.test("keryxEvents passes the marker and id cursors through", async () => {

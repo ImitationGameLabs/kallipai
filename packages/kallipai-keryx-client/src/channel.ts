@@ -11,7 +11,7 @@
 // Mirrors the Rust relay's `crates/platform/kallipai-e2ee/src/lib.rs` + the
 // keryx's `crates/platform/kallipai-keryx/src/routes.rs`.
 
-import { type KeryxClient } from "./http.ts";
+import { type KeryxClient } from "./client.ts";
 import {
   aeadDecrypt,
   aeadEncrypt,

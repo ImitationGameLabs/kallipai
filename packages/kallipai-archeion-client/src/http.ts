@@ -23,10 +23,14 @@ import { ArcheionApiError } from "./types.ts";
 export type ArcheionFailure = ArcheionApiError | TransportError;
 
 /** An archeion request: the shared JSON request's parts, minus the base and
- * path the verb supplies. `timeoutMs` is the one field this plane redefines:
- * omitted becomes no window (see `archeionRequest`), so a number is the only way
- * to bound the exchange. */
-export type ArcheionRequest = Omit<JsonRequest, "baseUrl" | "path">;
+ * path the verb supplies. `timeoutMs` and `credentials` are the two fields
+ * this plane writes once: omitted `timeoutMs` becomes no window (see
+ * `archeionRequest`), and the credential mode is the session cookie's, so a
+ * number is the only way to bound the exchange. */
+export type ArcheionRequest = Omit<
+  JsonRequest,
+  "baseUrl" | "path" | "credentials"
+>;
 
 /**
  * One archeion call: the shared JSON/CSRF exchange, with this plane's error
@@ -42,14 +46,21 @@ export function archeionRequest<T>(
   path: string,
   request: ArcheionRequest,
 ): Effect.Effect<T, ArcheionFailure> {
+  const window: number | null = request.timeoutMs ?? null;
   return Effect.mapError(
     jsonRequest<T>({
       ...request,
       baseUrl: base,
       path,
-      // This line is the whole of this plane's no-window policy: the shared
-      // request defaults an omitted window to `JSON_REQUEST_TIMEOUT_MS`.
-      timeoutMs: request.timeoutMs ?? null,
+      // The archeion shares its session cookie cross-subdomain, so this plane
+      // is a cookie plane; the field is written here, once, and the derived
+      // request type keeps verbs from naming another.
+      credentials: "include",
+      // This line is the whole of this plane's no-window policy: `jsonRequest`
+      // names its window at the seam, so an archeion call has to say `null`
+      // explicitly instead of inheriting a default by omission. The typed
+      // binding is what makes dropping the `?? null` a compile error.
+      timeoutMs: window,
     }),
     archeionFailure,
   );
