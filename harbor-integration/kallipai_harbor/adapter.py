@@ -6,7 +6,7 @@ full lifecycle:
 
 1. **install()** — upload the tarball, unpack, start the tagma
 2. **run()**     — invoke ``kallipai-run`` with the task instruction
-3. **populate_context_post_run()** — parse token usage from context.json
+3. **populate_context_post_run()** — sum token usage across agent manifests
 
 Usage::
 
@@ -21,7 +21,6 @@ adapter ships into the container as the tagma's config file.
 
 from __future__ import annotations
 
-import json
 import os
 import shlex
 import uuid
@@ -37,6 +36,7 @@ from harbor.agents.installed.base import (
 from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
 
+from kallipai_harbor.metrics import agent_usage_totals
 from kallipai_harbor.profiles import resolve_local_profile
 from kallipai_harbor.tagma import (
     PACKAGES,
@@ -238,33 +238,20 @@ class KallipaiAdapter(BaseInstalledAgent):
     # ------------------------------------------------------------------
 
     def populate_context_post_run(self, context: AgentContext) -> None:
-        """Parse context.json files for token usage metrics.
+        """Set token usage on the run context by summing the agent manifests.
 
-        Each agent (root + subagents) persists its own ``context.json``
-        under ``<data root>/agents/{uuid}/``; the data root is the
-        slug-derived tree this adapter named at install time
-        (``tagma.agents_dir`` mirrors the Rust resolver). Since
-        ``cumulative_usage`` is per-agent (not aggregated), we must sum
-        across all agent directories.
+        Every agent of the run (root + subagents) persists its own
+        ``manifest.json`` one life-stage layer down:
+        ``<data root>/agents/{stage}/{uuid}/manifest.json``, where the
+        stage is ``active``, ``archived`` or ``inactive``. The data root
+        is the slug-derived tree this adapter named at install time
+        (``tagma.agents_dir`` mirrors the Rust resolver).
         """
         agents_dir = agents_dir_fn(self.logs_dir, self._slug)
-        if not agents_dir.is_dir():
-            return
 
-        total_prompt = 0
-        total_completion = 0
-        total_cache = 0
-
-        for context_file in agents_dir.glob("*/context.json"):
-            try:
-                data = json.loads(context_file.read_text(encoding="utf-8"))
-                usage = data.get("cumulative_usage", {})
-                total_prompt += usage.get("prompt_tokens", 0)
-                total_completion += usage.get("completion_tokens", 0)
-                total_cache += usage.get("cache_hit_tokens", 0)
-            except (OSError, json.JSONDecodeError):
-                self.logger.debug("failed to parse %s", context_file, exc_info=True)
-                continue
+        total_prompt, total_completion, total_cache = agent_usage_totals(
+            agents_dir, self.logger
+        )
 
         if total_prompt or total_completion:
             context.n_input_tokens = total_prompt
