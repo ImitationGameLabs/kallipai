@@ -16,7 +16,6 @@
   import { navigate } from "../lib/shell/port.ts";
   import {
     tagma_chat_not_enrolled,
-    chat_channel_error,
     chat_channel_unavailable,
     common_retry,
     chat_opening,
@@ -97,24 +96,6 @@
         </div>
       </div>
     {:else if conversationId}
-      {#if channelState.kind === "error"}
-        <!-- The channel died after opening (transport error). The transcript
-         stays readable below; this row carries the user-facing retry. -->
-        <div
-          class="border-b border-surface-200-800 px-4 py-2 flex items-center justify-center gap-3"
-        >
-          <p class="text-xs text-error-500 dark:text-error-400">
-            {chat_channel_error()}
-          </p>
-          <button
-            type="button"
-            class="btn btn-sm preset-outlined-primary-500 hover:preset-filled-primary-500"
-            onclick={() => channelsStore.retryTagma(tagmaId)}
-          >
-            {common_retry()}
-          </button>
-        </div>
-      {/if}
       <div class="flex-1 min-h-0 flex flex-col">
         <div class="flex-1 min-h-0">
           <ChannelChatPage {conversationId} />

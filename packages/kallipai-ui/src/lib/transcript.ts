@@ -118,7 +118,7 @@ export interface ConversationLine {
   readonly seq?: number;
 }
 
-type ConversationStatus = "idle" | "busy" | "error";
+export type ConversationStatus = "idle" | "busy" | "error";
 
 export interface ConversationTranscript {
   readonly lines: ConversationLine[];

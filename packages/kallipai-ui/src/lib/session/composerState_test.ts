@@ -4,7 +4,7 @@
 // the chat page feeds, so deleting a branch turns one of these red.
 
 import { assertEquals } from "@std/assert";
-import { composerState } from "./composerState.ts";
+import { composerState, noticeRender } from "./composerState.ts";
 
 Deno.test("composerState announces the handshake", () => {
   assertEquals(
@@ -63,3 +63,12 @@ Deno.test(
     }
   },
 );
+
+// The note area's three states, as behavior: a string is said, an omitted
+// prop takes the pairing sentence, and null renders nothing. The composer
+// template dispatches on this, so each state owns its exit.
+Deno.test("each note state renders its own way", () => {
+  assertEquals(noticeRender("This conversation is not connected."), "say");
+  assertEquals(noticeRender(undefined), "fallback");
+  assertEquals(noticeRender(null), "none");
+});

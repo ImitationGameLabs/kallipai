@@ -4,6 +4,7 @@
   import type { ComposerModel } from "../lib/composer.svelte";
   import { composerKeyIntent } from "../lib/composerKeys.ts";
   import { MENTION_LIST_ID } from "../lib/mentions.ts";
+  import { noticeRender } from "../lib/session/composerState.ts";
   import { desktopQuery } from "../lib/shell/breakpoint.ts";
   import {
     composer_placeholder,
@@ -35,11 +36,11 @@
     composer: ComposerModel;
     disabled: boolean;
     pendingCount: number;
-    // Optional copy shown under a disabled composer. When omitted, the default
-    // tagma-pairing notice ("Connect a tagma to send" + /connect link) is shown
-    // -- correct for the bilateral (offline-tagma) chat surface, wrong for a
-    // room error, so the room page passes a room-appropriate string here.
-    disabledNotice?: string;
+    // Optional copy shown under a disabled composer, in three states: a string
+    // says it, `null` says nothing (the page reports this state elsewhere),
+    // and `undefined` falls back to the composer's own tagma-pairing notice
+    // ("Connect a tagma to send" + the /connect link).
+    disabledNotice?: string | null;
     // Optional affordance shown with that notice (a Retry button, say). The
     // page owns the action and its label; the composer only places it.
     disabledAction?: Snippet;
@@ -87,6 +88,10 @@
       readonly activeId: string | undefined;
     };
   } = $props();
+
+  // Which of the three note exits this render takes. The rule is named
+  // and tested in composerState; the template only dispatches on it.
+  const note = $derived(noticeRender(disabledNotice));
 
   let area: HTMLTextAreaElement | undefined = $state();
 
@@ -326,18 +331,20 @@
       </div>
     {/if}
     {#if disabled}
-      <div class="mt-1.5 text-xs opacity-60">
-        {#if disabledNotice}
+      {#if note === "say"}
+        <div class="mt-1.5 text-xs opacity-60">
           {disabledNotice}
-        {:else}
+        </div>
+      {:else if note === "fallback"}
+        <div class="mt-1.5 text-xs opacity-60">
           <a
             href="/connect"
             class="font-medium text-primary-500 dark:text-primary-400 hover:underline cursor-pointer"
             >{composer_connect_link()}</a
           >
           {composer_connect_tail()}
-        {/if}
-      </div>
+        </div>
+      {/if}
       {#if disabledAction}
         <div class="mt-1.5">{@render disabledAction()}</div>
       {/if}

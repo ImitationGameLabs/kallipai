@@ -105,9 +105,10 @@
     /** Optional file-attach affordance, forwarded to the composer verbatim
      *  (omitted = the button never renders). */
     fileButton?: { onFilesPicked: (files: File[]) => void };
-    /** Why the composer is disabled, forwarded verbatim. Omitted = the
+    /** Why the composer is disabled, forwarded verbatim in three states: a
+     *  string says it, `null` says nothing, and omitted falls back to the
      *  composer's own pairing notice. */
-    disabledNotice?: string;
+    disabledNotice?: string | null;
     /** Optional affordance shown with that notice, forwarded verbatim
      *  (a page-owned Retry, say). */
     disabledAction?: Snippet;

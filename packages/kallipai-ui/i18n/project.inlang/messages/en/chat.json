@@ -8,7 +8,6 @@
   "chat_opening": "Opening channel…",
   "chat_go_tagmata": "Go to tagmata",
   "chat_channel_unavailable": "Channel unavailable after repeated failed attempts.",
-  "chat_channel_error": "Channel error.",
   "chat_title_local": "KallipAI · chat",
   "chat_show_rendered_markdown": "Show rendered markdown",
   "chat_show_raw_text": "Show raw text",

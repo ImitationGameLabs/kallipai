@@ -73,8 +73,8 @@ export function applyReply(
     const localId = target.outbox.pendingInFlight!.localId;
     const failure = sendFailureCopy(reply);
     target.outbox.failInFlight(localId, failure.copy, failure.code);
-    // The frame's own sentence stays in the console for diagnosis; the line
-    // line carries our copy, the short form keyed by the code when present.
+    // The frame's own sentence stays in the console; the line shows our copy,
+    // the short form keyed by the code when the frame named one.
     console.warn(`[send] rejected (${reply.status}):`, reply.message);
     target.after(reply);
     return;

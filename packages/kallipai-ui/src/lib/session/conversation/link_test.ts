@@ -25,19 +25,23 @@ type ConversationSender = import("../../transcript.ts").ConversationSender;
 
 const SENDER: ConversationSender = { id: "me", kind: "user", handle: "me" };
 
+/** Streams nothing, or throws before the first frame: the two ends a drain
+ *  has to tell apart. The stream is still a generator, which is what the one
+ *  lint exception below is about. */
+function drained<T>(failure: unknown | null): AsyncGenerator<T> {
+  // deno-lint-ignore require-yield
+  return (async function* () {
+    if (failure !== null) throw failure;
+  })();
+}
+
 /** A transport whose three streams either throw `failure` or end cleanly. */
 function transport(failure: unknown | null): Transport {
   return {
     localSender: SENDER,
-    async *replies(): AsyncGenerator<IncomingFrame> {
-      if (failure !== null) throw failure;
-    },
-    async *signals(): AsyncGenerator<SignalEvent> {
-      if (failure !== null) throw failure;
-    },
-    async *status(): AsyncGenerator<never> {
-      if (failure !== null) throw failure;
-    },
+    replies: () => drained<IncomingFrame>(failure),
+    signals: () => drained<SignalEvent>(failure),
+    status: () => drained<never>(failure),
     close() {},
   };
 }

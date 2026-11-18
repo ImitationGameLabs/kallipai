@@ -1,10 +1,10 @@
-// Headless error classification. Projects a raw thrown value (TransportError,
-// KallipaiError, or anything else) into the { title, hint } a user-facing
-// banner can render: only this package's own copy reaches the user, so a raw
-// transport sentence (whatever route it names) never does. The full error
-// (with cause chain) is logged separately to the browser console by the caller.
-// Raw messages stay in the console: a server sentence or an arbitrary Error's
-// .message is diagnostic, and the view carries only copy of our own.
+// Headless error classification: two projections of one rule, so only this
+// package's own copy reaches the user. `classifyError` gives a standing
+// banner its { title, hint }; `sendFailureCopy` gives one failed send its
+// { copy, code }. Either way a raw transport sentence (whatever route it
+// names) never does: the full error (with cause chain) is logged to the
+// browser console by the caller, and a server sentence or an arbitrary
+// Error's .message stays there as diagnostic text.
 //
 // Pure, no runes, no app imports — stays reusable across consuming apps (the
 // paraglide messages it renders are this package's own compiled output).
@@ -31,7 +31,7 @@ export interface ErrorView {
 }
 
 // instanceof can break if a bundler ever duplicates @kallipai/kallipai-common;
-// both classes set `.name`, so accept by name as a fallback.
+// each class sets `.name`, so accept by name as a fallback.
 function isTransportError(e: unknown): e is TransportError {
   return (
     e instanceof TransportError ||
@@ -80,7 +80,11 @@ export function classifyError(e: unknown): ErrorView {
  *  named one (the chat view renders a code-specific sentence for the codes
  *  it knows). Only our own sentence reaches the line: the server's message
  *  and the raw error stay with the caller, which logs them, so a bilingual
- *  interface never shows a single-locale sentence by accident. */
+ *  interface never shows a single-locale sentence by accident.
+ *
+ *  A `WriteRefusal` is left alone on purpose: on the send path it means the
+ *  conversation closed, where "not sent" is the true statement and the
+ *  composer's own notice already says the axis is gone. */
 export function sendFailureCopy(e: unknown): { copy: string; code?: string } {
   return { copy: chat_send_failed(), code: failureCode(e) };
 }

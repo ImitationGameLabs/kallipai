@@ -28,3 +28,14 @@ export function composerState(c: {
   if (c.canWrite) return { notice: null, retry: false };
   return { notice: "not-connected", retry: c.kind === "relay" };
 }
+
+/** How the composer's note area treats what it was handed: say the string,
+ *  fall back to the pairing sentence, or stay empty. Three states, three
+ *  exits, so no branch has to lean on the one around it. An empty string is
+ *  said as itself: no page produces one, so it carries nothing to protect. */
+export type NoticeRender = "say" | "fallback" | "none";
+
+export function noticeRender(notice: string | null | undefined): NoticeRender {
+  if (typeof notice === "string") return "say";
+  return notice === undefined ? "fallback" : "none";
+}

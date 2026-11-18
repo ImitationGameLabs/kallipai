@@ -8,7 +8,6 @@
   "chat_opening": "正在打开通道…",
   "chat_go_tagmata": "前往智能体编队",
   "chat_channel_unavailable": "多次尝试后通道仍不可用。",
-  "chat_channel_error": "通道出错。",
   "chat_title_local": "KallipAI · 聊天",
   "chat_show_rendered_markdown": "显示渲染后的 markdown",
   "chat_show_raw_text": "显示原始文本",

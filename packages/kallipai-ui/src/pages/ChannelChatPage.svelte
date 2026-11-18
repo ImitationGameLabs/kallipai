@@ -36,6 +36,7 @@
   import { composerState } from "../lib/session/composerState.ts";
   import { classifyError } from "../lib/errors.ts";
   import { isWriteRefusal } from "../lib/session/writeRefusal.ts";
+  import { errorSurface } from "../lib/session/conversation/errorSurface.ts";
   import {
     chat_conversation_unknown,
     chat_history_stale,
@@ -475,44 +476,57 @@
         })
       : null,
   );
-  // A link failure surfaces as its own line: the composer notice states the
-  // consequence (the axis is gone), and only this states the cause. A write
-  // refusal is the exception, because it can only arise once the axis is
-  // gone, where the notice already carries the sentence and the Retry.
+  // A link failure surfaces as its own line, and this page is its only voice:
+  // the composer notice states the consequence (the axis is gone), and this
+  // states the cause. A write refusal is the exception, because it can only
+  // arise once the axis is gone, where the notice already carries the
+  // sentence. The face that states the cause also carries the way back: the
+  // composer offers it from its action slot, and composerState hands one to a
+  // relay channel alone.
   const linkError = $derived(conv?.link.error ?? null);
-  const linkErrorCopy = $derived(
+  const linkCopy = $derived(
     linkError && !isWriteRefusal(linkError)
       ? classifyError(linkError).title
       : null,
   );
-
-  // One message per state: the error line names the failure, so the generic
-  // notice stands down while the line is up (its Retry action stays).
+  // Who owns this conversation's link failure: the shell banner does for the
+  // local conversation (RootLayout reads the same link.error), so the page
+  // leaves the line empty there. Everywhere else this page states the cause.
+  // The rule lives in errorSurface; this page feeds it and turns its notice
+  // back into copy.
+  const surface = $derived(
+    errorSurface({
+      transcriptError: conv?.transcript.error,
+      transcriptStatus: conv?.transcript.status ?? "idle",
+      linkCopy,
+      causeSpokenAbove: isLocal,
+      notice: composerUi?.notice ?? null,
+    }),
+  );
+  // The composer's note crosses in three states: a string says it, null keeps
+  // the note area empty because the error line above already says the cause,
+  // and this page never passes undefined -- the composer's pairing fallback
+  // answers a question this page is not asking.
   const disabledNotice = $derived(
-    composerUi?.notice === "opening"
-      ? chat_opening()
-      : linkErrorCopy
-        ? undefined
-        : composerUi?.notice === "not-connected"
-          ? error_conversation_not_connected()
-          : undefined,
-  );
-
-  // The transcript's own error wins: it is about the rows the reader sees.
-  // A link failure fills the line when the transcript has none.
-  const errorLine = $derived(
-    conv?.transcript.error ?? linkErrorCopy ?? undefined,
-  );
-  const errorStatus = $derived(
-    conv?.transcript.status === "error" || linkErrorCopy
-      ? "error"
-      : (conv?.transcript.status ?? "idle"),
+    surface.notice === null
+      ? null
+      : surface.notice === "opening"
+        ? chat_opening()
+        : error_conversation_not_connected(),
   );
   // The tagma that owns this conversation, for the retry the notice offers.
   // Read from the conversation rather than the stored mapping: the mapping is
   // written once the channel opens, and a deep link resolves before that.
   const owningTagma = $derived(
     conv instanceof RelayConversation ? conv.tagmaId : undefined,
+  );
+  // Whether the notice's retry can be offered at all: the store reopens a
+  // relay channel only while it holds an endpoint for it, so the gate is
+  // decided here and the markup just picks between the action and none.
+  const canRetryChannel = $derived(
+    (composerUi?.retry ?? false) &&
+      owningTagma !== undefined &&
+      channelsStore.canRetryTagma(owningTagma),
   );
 </script>
 
@@ -621,18 +635,14 @@
           {/if}
           <ConversationView
             lines={conv.transcript.rows}
-            status={errorStatus}
-            error={errorLine}
+            status={surface.status}
+            error={surface.error}
             sessionKey={conversationId}
             {composer}
             {disabled}
             {pendingCount}
             {disabledNotice}
-            disabledAction={composerUi?.retry &&
-            owningTagma &&
-            channelsStore.canRetryTagma(owningTagma)
-              ? retryChannel
-              : undefined}
+            disabledAction={canRetryChannel ? retryChannel : undefined}
             onRetry={conv instanceof OfflineConversation
               ? undefined
               : (id) => conv?.retrySend(id)}
