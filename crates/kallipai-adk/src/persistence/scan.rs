@@ -238,13 +238,6 @@ pub fn restore_agent(
         Err(_) => ApprovalStore::new(),
     };
 
-    // Fold the legacy `pinned` vec (pre-unification format) into pinned turns at the front of
-    // `turns`. No-op for new-format stores.
-    store.migrate_legacy_pinned();
-
-    // Migrate legacy summary field to a pinned turn.
-    store.migrate_legacy_summary();
-
     // Restore-time invariant: the pinned summary is a user record.
     store.enforce_summary_pin_role();
 

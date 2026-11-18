@@ -210,82 +210,28 @@ fn pinned_turn_caches_estimated_tokens() {
 #[test]
 fn reestimate_recomputes_cached_tokens() {
     let mut store = new_store();
-    // A legacy pinned item folded in carrying a stale (0) estimate.
-    let msg = user_msg("legacy content from a pre-caching format");
+    let msg = user_msg("summary text whose cached estimate is stale");
     let real = estimate_message_tokens(&msg);
-    store.legacy_pinned.push(PinnedItem {
-        label: "legacy".into(),
-        message: msg,
-        estimated_tokens: 0,
-    });
-    store.migrate_legacy_pinned();
-    assert_eq!(store.pinned_turns().count(), 1);
+    store.pin(CONTEXT_SUMMARY_LABEL, msg).unwrap();
+    // A pins document carries whatever estimate its writer cached; restore
+    // takes it at face value.
+    let mut pins = store.to_pins_doc();
+    pins.pins[0].estimated_tokens = 0;
+    let mut restored = ContextStore::from_persisted(&pins, Vec::new(), &store.to_manifest_doc());
     assert_eq!(
-        store.pinned_turns().next().unwrap().estimated_tokens,
+        restored.pinned_turns().next().unwrap().estimated_tokens,
         0,
-        "migrated turn carries the stale legacy estimate before reestimate"
+        "the stored estimate is read back as written"
     );
     // reestimate brings every turn up to the current estimator.
-    store.reestimate_cached_tokens();
+    restored.reestimate_cached_tokens();
     assert_eq!(
-        store.pinned_tokens_total(),
+        restored.pinned_tokens_total(),
         real,
         "reestimate recomputes via the current estimator"
     );
-    assert_eq!(store.pinned_labels(), vec!["legacy"]);
-    assert_invariant(&store);
+    assert_invariant(&restored);
 }
-
-#[test]
-fn migrate_legacy_pinned_preserves_order_and_ids() {
-    let mut store = new_store();
-    // Two conversation turns already in the store.
-    store.push_turn(vec![user_msg("c1")]);
-    store.push_turn(vec![user_msg("c2")]);
-    let base_next = store.next_turn_id;
-    // Inject three legacy pinned items in a known order.
-    for label in ["sum", "skill:foo", "note"] {
-        store.legacy_pinned.push(PinnedItem {
-            label: label.into(),
-            message: user_msg(label),
-            estimated_tokens: 5,
-        });
-    }
-    store.migrate_legacy_pinned();
-
-    // Pinned turns at front in original order, conversation turns after.
-    let labels: Vec<&str> = store.turns().iter().filter_map(|t| t.label()).collect();
-    assert_eq!(labels, vec!["sum", "skill:foo", "note"]);
-    assert_eq!(store.turn_count(), 5);
-    // Conversation turns still at the back.
-    assert_eq!(store.pinned_turn_count(), 3);
-    // TurnIds unique and advanced past the migrated block.
-    let ids: std::collections::HashSet<TurnId> = store.turns().iter().map(|t| t.id).collect();
-    assert_eq!(ids.len(), 5, "all turn ids unique");
-    assert_eq!(store.next_turn_id, base_next + 3);
-    assert_invariant(&store);
-}
-
-#[test]
-fn pinned_item_estimated_tokens_serde_default_is_zero() {
-    // New-format pin round-trips with its cached value.
-    let item = PinnedItem {
-        label: "x".into(),
-        message: user_msg("hi"),
-        estimated_tokens: 42,
-    };
-    let json = serde_json::to_string(&item).unwrap();
-    let rt: PinnedItem = serde_json::from_str(&json).unwrap();
-    assert_eq!(rt.estimated_tokens, 42);
-
-    // Strip the field to emulate a legacy (pre-caching) serialized pin.
-    let mut v: serde_json::Value = serde_json::from_str(&json).unwrap();
-    v.as_object_mut().unwrap().remove("estimated_tokens");
-    let legacy = serde_json::to_string(&v).unwrap();
-    let legacy_rt: PinnedItem = serde_json::from_str(&legacy).unwrap();
-    assert_eq!(legacy_rt.estimated_tokens, 0, "missing field defaults to 0");
-}
-
 // --- safety: eviction skips pinned; ordering invariants ---
 
 #[test]

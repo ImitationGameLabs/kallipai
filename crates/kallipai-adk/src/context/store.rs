@@ -15,20 +15,6 @@ use super::tokens::estimate_message_tokens;
 use super::turn::{Turn, TurnId, TurnKind};
 use super::{CONTEXT_SUMMARY_LABEL, summary_record};
 
-/// Legacy pinned-item shape from the pre-unification format. Deserialized from old `context.json`
-/// `pinned` entries and converted to pinned [`Turn`]s by [`ContextStore::migrate_legacy_pinned`]
-/// on restore. Not constructed by new code.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct PinnedItem {
-    pub label: String,
-    #[serde(with = "crate::persisted_message::message")]
-    pub message: Message,
-    /// Cached `estimate_message_tokens(&message)`. `#[serde(default)]` so legacy pins
-    /// (pre-caching) deserialize as 0 and are backfilled on restore.
-    #[serde(default)]
-    pub estimated_tokens: usize,
-}
-
 /// Result of evicting turns from the context store.
 #[derive(Clone, Debug)]
 pub struct EvictResult {
@@ -97,50 +83,33 @@ pub trait AgenticContext: Send + Sync {
 /// summaries, skills, notes) is stored as `TurnKind::Pinned` turns at the front of `turns`,
 /// keeping a single collection. Budget checking is handled by the main loop using GenerationClient's
 /// accurate token estimation pipeline.
-#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ContextStore {
     /// Tool definitions: reconstructed on restore, not persisted.
-    #[serde(skip)]
     tool_definitions: Vec<ToolDefinition>,
     /// Logical conversation turns in chronological order. Always ordered
     /// `[pinned turns…][conversation turns…]` (see [`Self::pinned_turn_count`]); pinned turns
     /// live at the front and are never evicted.
     turns: VecDeque<Turn>,
-    /// Legacy pinned items from the pre-unification format. Deserialized from the old `pinned`
-    /// JSON key and folded into pinned turns by [`Self::migrate_legacy_pinned`] on restore.
-    /// Never written by new code (`skip_serializing`).
-    #[serde(default, skip_serializing, rename = "pinned")]
-    legacy_pinned: Vec<PinnedItem>,
-    /// Legacy field: migrated to a pinned turn on restore.
-    #[serde(default, skip_serializing)]
-    summary: Option<String>,
-    /// Legacy field: migrated alongside summary.
-    #[serde(default, skip_serializing)]
-    summary_tokens: usize,
     /// Exact prompt token count from the last provider response.
     last_prompt_tokens: Option<u32>,
     /// Number of turns baked into `last_prompt_tokens` (the incremental-estimate anchor).
     /// Runtime-only: resets to 0 on restore, forcing a full estimate on the first post-restore
     /// round (see `needs_full_estimate`).
-    #[serde(skip, default)]
     anchored_turn_count: usize,
     /// True when the next estimate must be a full render rather than an incremental one anchored
     /// to `last_prompt_tokens`. Set by any prefix-mutating op (evict/drain/pin/unpin/replace),
     /// by failover (the new provider's tokenizer renders the same prompt to a different count),
     /// and — critically — on restore. Cleared by `accumulate_usage`.
     ///
-    /// `#[serde(skip)]` defaults to `false`. That is correct for fresh agents: `new()` sets
-    /// `true`, and in any case `last_prompt_tokens` starts `None` so the estimator takes the full
-    /// branch regardless of this flag. Restored agents get it set to `true` by `restore_agent`,
+    /// `new()` sets it for fresh agents, and `last_prompt_tokens` starts `None`, so the
+    /// estimator takes the full branch regardless. `restore_agent` sets it to `true`,
     /// because a persisted `last_prompt_tokens` is authoritative ONLY for the exact prompt
     /// (system prompt + tools + pinned + turns) that produced it — and a restore may follow an
     /// agent-version upgrade that changed the system prompt or tool set, making the persisted
     /// base stale. The full estimate recomputes from the current config, so the gate never trusts
     /// a cross-version anchor.
-    #[serde(skip)]
     needs_full_estimate: bool,
     /// Cumulative token usage across all LLM calls for this agent.
-    #[serde(default)]
     cumulative_usage: CumulativeUsage,
     /// The next turn ID to assign.
     next_turn_id: u64,
@@ -151,21 +120,16 @@ pub struct ContextStore {
     /// only. On append, records older than the retry window are evicted, then the
     /// log is bounded to [`RETRY_LOG_KEEP`] most-recent records: the status endpoint
     /// renders only that many, and an unbounded persistent log would grow with
-    /// every transient failure across restarts (via `context.json`).
-    #[serde(default)]
+    /// every transient failure across restarts (retry records ride in the manifest).
     pub retry_log: Vec<RetryRecord>,
     /// Maximum tokens for the pinned layer. 0 = no limit.
-    #[serde(skip)]
     pinned_token_budget: usize,
     /// The caps a manual eviction keeps within. Derived from the active
     /// window like the pinned budget, and re-installed at the same points.
-    #[serde(skip)]
     eviction_caps: KeepCaps,
     /// Highest warning threshold already fired for this agent. Not persisted.
-    #[serde(skip)]
     highest_warned_pct: Option<u8>,
     /// Highest token-budget warning threshold already fired. Not persisted.
-    #[serde(skip)]
     highest_budget_warned_pct: Option<u8>,
     /// Turn IDs injected by restore (restart notices) rather than recorded
     /// through `record_turn`. A restart notice is an on-the-spot prompt: it
@@ -173,13 +137,11 @@ pub struct ContextStore {
     /// one), and it has no history record to hydrate from. The manifest
     /// projection skips these IDs; the assigned numbers are still consumed,
     /// so `next_turn_id` stays monotonic.
-    #[serde(skip)]
     injected_turn_ids: HashSet<u64>,
     /// The attachment blob store, wired by the host process after the
     /// store is built (never persisted, never defaulted). Pin-time
     /// seeding writes the master copy through this handle; when absent,
     /// image parts cannot be anchored and the pin is saved as text only.
-    #[serde(skip)]
     attachment_blobs: Option<std::sync::Arc<dyn kallipai_blob_store::BlobStore>>,
 }
 
@@ -394,9 +356,6 @@ impl ContextStore {
         Self {
             tool_definitions: Vec::new(),
             turns: VecDeque::new(),
-            legacy_pinned: Vec::new(),
-            summary: None,
-            summary_tokens: 0,
             last_prompt_tokens: None,
             anchored_turn_count: 0,
             needs_full_estimate: true,
@@ -562,20 +521,6 @@ impl ContextStore {
         drained
     }
 
-    /// Migrate legacy `summary` field to a pinned turn.
-    /// Called during agent restore. No-op if no legacy summary.
-    pub fn migrate_legacy_summary(&mut self) {
-        if let Some(summary) = self.summary.take() {
-            if !summary.is_empty() {
-                self.unpin(CONTEXT_SUMMARY_LABEL).ok();
-                self.pin(CONTEXT_SUMMARY_LABEL, summary_record(&summary))
-                    .ok();
-                tracing::info!("migrated legacy summary to pinned item");
-            }
-            self.summary_tokens = 0;
-        }
-    }
-
     /// Restore-time invariant: the pinned `context_summary` is a user message.
     ///
     /// A summary is a record of earlier turns that we inject, never something the
@@ -609,7 +554,7 @@ impl ContextStore {
 
     /// Recompute every cached token estimate (all turns) via the current estimator. Called once
     /// per restore so persisted estimates — which may be from a prior estimator version (e.g.
-    /// the old `char/4` heuristic, or legacy pins with unset caches) — are brought up to date.
+    /// the old `char/4` heuristic) — are brought up to date.
     ///
     /// O(turns): every turn is re-rendered and re-scored. A future optimization could gate this
     /// on a persisted estimator-version stamp so same-version restarts skip it; for now the cost
@@ -617,35 +562,6 @@ impl ContextStore {
     pub fn reestimate_cached_tokens(&mut self) {
         for turn in &mut self.turns {
             turn.estimated_tokens = Turn::estimate_tokens(&turn.messages);
-        }
-    }
-
-    /// Fold the legacy `pinned` vec (pre-unification format) into pinned turns at the front of
-    /// `turns`. Called on restore before [`Self::reestimate_cached_tokens`]. No-op for new-format
-    /// stores (the legacy vec is empty). Preserves legacy order; TurnIds are assigned monotonic
-    /// from `next_turn_id`.
-    pub fn migrate_legacy_pinned(&mut self) {
-        let legacy = std::mem::take(&mut self.legacy_pinned);
-        let mut inserted = 0usize;
-        for item in legacy {
-            let id = TurnId(self.next_turn_id);
-            self.next_turn_id += 1;
-            self.turns.insert(
-                inserted,
-                Turn {
-                    id,
-                    messages: vec![item.message],
-                    estimated_tokens: item.estimated_tokens,
-                    kind: TurnKind::Pinned {
-                        label: item.label,
-                        attachments: Vec::new(),
-                    },
-                },
-            );
-            inserted += 1;
-        }
-        if inserted > 0 {
-            self.needs_full_estimate = true;
         }
     }
 
