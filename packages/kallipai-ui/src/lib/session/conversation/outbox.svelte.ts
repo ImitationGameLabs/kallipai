@@ -16,8 +16,7 @@ import {
   putPending,
   readPendingByTagma,
 } from "@kallipai/kallipai-keryx-client";
-import { DataPlaneApiError } from "@kallipai/kallipai-lesche-client";
-import { KallipaiError } from "@kallipai/kallipai-common";
+import { sendFailureCopy } from "../../errors.ts";
 import {
   dropFailedLine,
   nextPendingSeq,
@@ -31,10 +30,7 @@ import { putCacheLine } from "./shared.ts";
 import type { SendOptions } from "../transport.ts";
 import type { MessageSender } from "../messageSender.svelte.ts";
 import type { Transcript } from "./transcript.svelte.ts";
-import {
-  chat_send_failed,
-  chat_send_timed_out,
-} from "../../../paraglide/messages.js";
+import { chat_send_timed_out } from "../../../paraglide/messages.js";
 
 /** One queued optimistic line: the rendered local id, its text and extras. */
 export interface PendingEntry {
@@ -294,21 +290,17 @@ export class Outbox {
         };
       }
     } catch (e) {
-      // Typed failures (direct KallipaiError / relay DataPlaneApiError) keep
-      // their server copy; transport failures are qualitative.
-      let failureCopy: string;
-      if (e instanceof KallipaiError || e instanceof DataPlaneApiError) {
-        failureCopy = e.message;
-      } else {
-        console.error("[chat] send failed:", e);
-        failureCopy = chat_send_failed();
-      }
+      // Our own sentence rides the line; the server's message and the code
+      // stay with this log and sendFailureCopy, so a bilingual interface
+      // never shows a single-locale sentence by accident.
+      console.error("[chat] send failed:", e);
+      const failure = sendFailureCopy(e);
       // Local send failure: red status error only -- no system history
       // line. A genuine server kind:"error" reply (the wire path)
       // still enters history via the reducer; that is by-design and
       // stays. Feeding this failure through the same reducer is what
       // double-rendered it (system line + red banner).
-      this.failInFlight(next.localId, failureCopy);
+      this.failInFlight(next.localId, failure.copy, failure.code);
     }
   }
 

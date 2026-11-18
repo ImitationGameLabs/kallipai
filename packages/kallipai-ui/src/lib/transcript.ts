@@ -511,9 +511,12 @@ export function sendFailed(
     ),
     // The transcript-wide red banner is copy-driven: no stored copy (the
     // common rehydration case) marks the line failed without forcing the
-    // whole transcript into the error state. A coded server rejection (the
-    // localized short form lives in the line bubble) skips the banner: the
-    // failure renders once, on the line.
+    // whole transcript into the error state. A coded rejection (its short
+    // form keyed by the code lives in the line bubble) skips the banner: the
+    // failure renders once, on the line. A relay rejection frame arrives here
+    // through `sendFailureCopy`, so `message` is always our sentence; `code`
+    // is the frame's when it named one, and a frame that named none drives
+    // the banner with the uncoded sentence.
     ...(message && !code
       ? { status: "error" as const, error: message, errorLine: localId }
       : {}),

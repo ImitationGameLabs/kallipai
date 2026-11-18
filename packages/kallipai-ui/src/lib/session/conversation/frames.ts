@@ -16,6 +16,7 @@ import {
   stampPosition,
   toSender,
 } from "../../transcript.ts";
+import { sendFailureCopy } from "../../errors.ts";
 import { deletePending } from "@kallipai/kallipai-keryx-client";
 import type { Transcript } from "./transcript.svelte.ts";
 import type { Outbox } from "./outbox.svelte.ts";
@@ -65,14 +66,15 @@ export function applyReply(
   // collides -- far rarer than the prior uncorrelated misfire.
   // An op error answering the in-flight send (correlated by req_id):
   // the message never landed -- e.g. the peer tagma is parked -- so close
-  // the optimistic line, surface the server copy as the single red
-  // error, and release the pump slot. Unmatched op errors keep the wire
+  // the optimistic line with our own sentence, release the pump slot, and
+  // let the code pick the line's short form. Unmatched op errors keep the
   // path below: a durable system line + red, the server-error record.
   if (isInFlightError(reply, target.outbox.pendingInFlight)) {
     const localId = target.outbox.pendingInFlight!.localId;
-    target.outbox.failInFlight(localId, reply.message, reply.code);
-    // The verbatim operator text stays in the console for diagnosis; the
-    // UI shows the localized short form keyed by the code (when present).
+    const failure = sendFailureCopy(reply);
+    target.outbox.failInFlight(localId, failure.copy, failure.code);
+    // The frame's own sentence stays in the console for diagnosis; the line
+    // line carries our copy, the short form keyed by the code when present.
     console.warn(`[send] rejected (${reply.status}):`, reply.message);
     target.after(reply);
     return;

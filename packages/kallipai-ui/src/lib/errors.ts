@@ -9,8 +9,13 @@
 // Pure, no runes, no app imports — stays reusable across consuming apps (the
 // paraglide messages it renders are this package's own compiled output).
 
-import { KallipaiError, TransportError } from "@kallipai/kallipai-common";
 import {
+  DataPlaneApiError,
+  KallipaiError,
+  TransportError,
+} from "@kallipai/kallipai-common";
+import {
+  chat_send_failed,
   error_conversation_not_connected,
   error_couldnt_reach,
   error_hint_check_settings,
@@ -69,4 +74,33 @@ export function classifyError(e: unknown): ErrorView {
   return {
     title: error_unknown(),
   };
+}
+
+/** The copy a failed line carries, plus the failure's machine code when it
+ *  named one (the chat view renders a code-specific sentence for the codes
+ *  it knows). Only our own sentence reaches the line: the server's message
+ *  and the raw error stay with the caller, which logs them, so a bilingual
+ *  interface never shows a single-locale sentence by accident. */
+export function sendFailureCopy(e: unknown): { copy: string; code?: string } {
+  return { copy: chat_send_failed(), code: failureCode(e) };
+}
+
+/** The machine-readable reason, when the failure carried one: our error
+ *  classes name it, a relay rejection frame carries it as a plain field,
+ *  and anything else has none. */
+function failureCode(e: unknown): string | undefined {
+  if (isKallipaiError(e)) return e.api?.code;
+  if (isDataPlaneApiError(e)) return e.code;
+  if (typeof e === "object" && e !== null) {
+    const code = (e as { code?: unknown }).code;
+    if (typeof code === "string") return code;
+  }
+  return undefined;
+}
+
+function isDataPlaneApiError(e: unknown): e is DataPlaneApiError {
+  return (
+    e instanceof DataPlaneApiError ||
+    (e instanceof Error && e.name === "DataPlaneApiError")
+  );
 }

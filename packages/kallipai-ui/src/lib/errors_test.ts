@@ -4,14 +4,19 @@
 // only. The raw text stays in the console line the caller already keeps.
 
 import { assertEquals } from "@std/assert";
-import { KallipaiError, TransportError } from "@kallipai/kallipai-common";
 import {
+  DataPlaneApiError,
+  KallipaiError,
+  TransportError,
+} from "@kallipai/kallipai-common";
+import {
+  chat_send_failed,
   error_conversation_not_connected,
   error_couldnt_reach,
   error_hint_check_settings,
   error_tagma,
 } from "../paraglide/messages.js";
-import { classifyError } from "./errors.ts";
+import { classifyError, sendFailureCopy } from "./errors.ts";
 import { WriteRefusal } from "./session/writeRefusal.ts";
 
 /** Stand-in for whatever the origin says; the path is there so a leak is
@@ -67,4 +72,48 @@ Deno.test("a transport error keeps its title and hint", () => {
   const view = classifyError(new TransportError("connect refused"));
   assertEquals(view.title, error_couldnt_reach());
   assertEquals(view.hint, error_hint_check_settings());
+});
+
+Deno.test("a failed send carries our copy and its code", () => {
+  const failure = sendFailureCopy(
+    new KallipaiError({
+      status: 409,
+      message: RAW,
+      code: "profile_set_unusable",
+    }),
+  );
+  assertEquals(failure.copy, chat_send_failed());
+  assertEquals(failure.code, "profile_set_unusable");
+  assertEquals(JSON.stringify(failure).includes(RAW_PATH), false);
+});
+
+Deno.test("a relay rejection carries our copy and its code", () => {
+  const failure = sendFailureCopy(
+    new DataPlaneApiError(429, RAW, "rate_limited"),
+  );
+  assertEquals(failure.copy, chat_send_failed());
+  assertEquals(failure.code, "rate_limited");
+  assertEquals(JSON.stringify(failure).includes(RAW_PATH), false);
+});
+
+Deno.test("a rejection frame carries our copy and its code", () => {
+  // The relay answers a send with an error frame, a plain object rather
+  // than a thrown class: it still names its code, so the line keeps the
+  // short form keyed by that code.
+  const failure = sendFailureCopy({
+    kind: "error",
+    req_id: "r-1",
+    code: "peer_unavailable",
+    message: RAW,
+  });
+  assertEquals(failure.copy, chat_send_failed());
+  assertEquals(failure.code, "peer_unavailable");
+  assertEquals(JSON.stringify(failure).includes(RAW_PATH), false);
+});
+
+Deno.test("an untyped send failure carries our copy with no code", () => {
+  const failure = sendFailureCopy(new Error(RAW));
+  assertEquals(failure.copy, chat_send_failed());
+  assertEquals(failure.code, undefined);
+  assertEquals(JSON.stringify(failure).includes(RAW_PATH), false);
 });
