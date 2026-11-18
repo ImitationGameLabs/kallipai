@@ -25,7 +25,7 @@
 import { untrack } from "svelte";
 import { roomLabelOf } from "./roomLabel.ts";
 import { roomConversationsStore } from "../session/roomConversations.svelte.ts";
-import { roomsStore } from "../session/rooms.svelte";
+import { roomsStore } from "../session/rooms.svelte.ts";
 import { roomKey, unreadStore } from "../session/unread.svelte.ts";
 import { startVisibleInterval } from "../visibleInterval.ts";
 

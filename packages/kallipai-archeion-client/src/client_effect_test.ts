@@ -4,7 +4,6 @@
 // wire surface (path, method, CSRF marker, bearer, window) is pinned here too:
 // the promise-shaped class inherits all of it unchanged.
 
-import { TransportError } from "@kallipai/kallipai-common";
 import { withFetch } from "@kallipai/kallipai-common/testing";
 import {
   assert,

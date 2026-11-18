@@ -16,7 +16,7 @@
 import { tick } from "svelte";
 import { rememberThreadHeadOf } from "./threadHeads.svelte.ts";
 import type { RoomLine } from "../room-message.ts";
-import { archeionSession } from "../session/archeion.svelte";
+import { archeionSession } from "../session/archeion.svelte.ts";
 import {
   roomConversationsStore,
   THREAD_WALK_MAX_PAGES,

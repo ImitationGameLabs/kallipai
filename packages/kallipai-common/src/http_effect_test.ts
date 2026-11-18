@@ -51,7 +51,7 @@ Deno.test("jsonRequest returns the parsed body", async () => {
 Deno.test("jsonRequest sends the CSRF marker on a non-GET", async () => {
   let sent: RequestInit | undefined;
   await withFetch(
-    ((url: string, init?: RequestInit) => {
+    ((_url: string, init?: RequestInit) => {
       sent = init;
       return Promise.resolve(jsonResponse("{}"));
     }) as typeof fetch,
@@ -77,7 +77,7 @@ Deno.test("jsonRequest sends the CSRF marker on a non-GET", async () => {
 Deno.test("jsonRequest leaves a GET free of the mutating headers", async () => {
   let sent: RequestInit | undefined;
   await withFetch(
-    ((url: string, init?: RequestInit) => {
+    ((_url: string, init?: RequestInit) => {
       sent = init;
       return Promise.resolve(jsonResponse("{}"));
     }) as typeof fetch,
@@ -126,7 +126,7 @@ Deno.test(
 Deno.test("jsonRequest merges caller headers", async () => {
   let sent: RequestInit | undefined;
   await withFetch(
-    ((url: string, init?: RequestInit) => {
+    ((_url: string, init?: RequestInit) => {
       sent = init;
       return Promise.resolve(jsonResponse("{}"));
     }) as typeof fetch,

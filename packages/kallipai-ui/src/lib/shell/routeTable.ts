@@ -49,6 +49,15 @@ import { shellIdentity } from "./port.ts";
 import { matchPath, type Params } from "./routeMatch.ts";
 import type { ROUTE_PATTERNS } from "./routePatterns.ts";
 
+/**
+ * The component slot of a page row. The table holds components with
+ * unrelated props, so the row types keep the three slots `Component`
+ * declares open: narrowing them to one props shape would reject every
+ * page but the first.
+ */
+// deno-lint-ignore no-explicit-any -- see above: the slots must stay open.
+export type RowComponent = Component<any, any, any>;
+
 /** What a row's props may read: the matched params and the query string. */
 export interface RouteContext {
   params: Params;
@@ -72,7 +81,7 @@ export interface ConditionalRedirect extends RouteRedirect {
 }
 
 /** A row that renders a component. */
-export interface PageRow<C extends Component<any, any, any>> {
+export interface PageRow<C extends RowComponent> {
   pattern: string;
   component: C;
   props?: (ctx: RouteContext) => ComponentProps<C>;
@@ -92,10 +101,10 @@ export interface RedirectRow {
   redirect: RouteRedirect;
 }
 
-export type RouteRow = PageRow<any> | RedirectRow;
+export type RouteRow = PageRow<RowComponent> | RedirectRow;
 
 /** Bind the component type of a page row. */
-export function row<P extends string, C extends Component<any, any, any>>(
+export function row<P extends string, C extends RowComponent>(
   r: PageRow<C> & { pattern: P },
 ): PageRow<C> & { pattern: P } {
   return r;
@@ -314,7 +323,7 @@ export function findRoute(
 
 /** Why a pathname renders nothing, renders a page, or must be sent away. */
 export type RouteResolution =
-  | { kind: "page"; row: PageRow<any>; params: Params }
+  | { kind: "page"; row: PageRow<RowComponent>; params: Params }
   | { kind: "redirect"; status: 301 | 307; location: string }
   | { kind: "missing" };
 

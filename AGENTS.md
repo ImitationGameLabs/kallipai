@@ -78,6 +78,15 @@ After modifying Markdown files:
 - `deno task fmt:md <markdown file>` - Format with rumdl (run individually for each modified file). Markdown uses rumdl, not prettier -- rumdl does not align table columns, so a one-row edit never reflows the rest of the table.
 - `deno task fmt:md:check` - Check every markdown file without writing (the read-only form of fmt:md)
 
+After modifying TypeScript or Svelte code under `packages/` or in `scripts/`:
+
+- `deno task fmt:check` - prettier `--check` plus rumdl `--check` over the whole repo
+- `deno task lint` - the lint-rule guard, then `deno lint` over the whole tree, not per package; it must end with no findings
+- `deno task check` - types and Svelte diagnostics per package. One warning per host is the standing baseline; 0 errors is the gate.
+- `deno task test` - tests for the packages that define them
+
+`docs/en/development/frontend.md` covers the per-package loop behind these commands (`check`, `fmt:file`, `build`).
+
 After modifying Rust code:
 
 - `cargo fmt --all --check` - Format check
