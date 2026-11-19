@@ -1,5 +1,5 @@
-// The lesche data plane's HTTP verbs, as effects, plus the promise face the
-// UI awaits. One verb per route, plus the `me/events` stream
+// The lesche data plane's HTTP verbs, as effects. One verb per route, plus the
+// `me/events` stream
 // (rooms and direct sessions). The lesche (default :7200) is the rooms data
 // plane: room envelopes, room history, room management, and the lesche
 // `me/events` SSE.
@@ -20,8 +20,6 @@ import {
   dataPlaneRequest,
   eventFrames,
   type EventFrame,
-  runClientEffect,
-  runClientStream,
 } from "@kallipai/kallipai-common";
 import { Effect, type Stream } from "effect";
 
@@ -367,130 +365,4 @@ export function listMyTagmaRooms(
     path: `/me/tagmata/${encodeURIComponent(tagmaId)}/rooms`,
     method: "GET",
   });
-}
-
-/**
- * Data-plane client (the lesche service, default :7200): the rooms family --
- * room envelopes, room history, room management, and the lesche `me/events`
- * SSE.
- *
- * The promise face of the verbs above, as this package offers it to consumers
- * (`kallipai-ui` is today's): one `runClientEffect` per call, and
- * `runClientStream` for the stream. Behaviour lives in the verbs; a caller
- * that can hold an Effect uses them directly. Do not add behavior here. A
- * rejection is the failure channel itself: `DataPlaneApiError` for a refusal,
- * `TransportError` for a dead exchange.
- */
-export class LescheClient {
-  private readonly base: string;
-
-  constructor(baseUrl: string) {
-    // Trim a trailing slash so `${base}${path}` stays single-slash.
-    this.base = baseUrl.replace(/\/+$/, "");
-  }
-
-  postRoomEnvelope(roomId: string, envelope: Envelope): Promise<void> {
-    return runClientEffect(postRoomEnvelope(this.base, roomId, envelope));
-  }
-
-  fetchRoomMessages(
-    roomId: string,
-    opts?: {
-      afterSeq?: number;
-      beforeSeq?: number;
-      thread?: number;
-      limit?: number;
-    },
-  ): Promise<RoomMessageView[]> {
-    return runClientEffect(fetchRoomMessages(this.base, roomId, opts));
-  }
-
-  /** The generator face of {@linkcode roomEvents}: same frames, same failure
-   * channel surfaced as a thrown `DataPlaneApiError`/`TransportError`, and it
-   * ends cleanly when `signal` aborts. */
-  meEvents(signal?: AbortSignal): AsyncGenerator<MeEventFrame> {
-    return runClientStream(roomEvents(this.base), signal);
-  }
-
-  createRoom(body: {
-    name: string;
-    description?: string;
-    visibility?: Visibility;
-  }): Promise<RoomView> {
-    return runClientEffect(createRoom(this.base, body));
-  }
-
-  listRooms(): Promise<RoomView[]> {
-    return runClientEffect(listRooms(this.base));
-  }
-
-  listPublicRooms(): Promise<RoomView[]> {
-    return runClientEffect(listPublicRooms(this.base));
-  }
-
-  joinRoom(roomId: string): Promise<void> {
-    return runClientEffect(joinRoom(this.base, roomId));
-  }
-
-  setRoomReadCursor(roomId: string, lastReadSeq: number): Promise<void> {
-    return runClientEffect(setRoomReadCursor(this.base, roomId, lastReadSeq));
-  }
-
-  fetchRoomUnread(roomId: string): Promise<RoomUnreadView> {
-    return runClientEffect(fetchRoomUnread(this.base, roomId));
-  }
-
-  fetchThreadSubscription(
-    roomId: string,
-    root: number,
-  ): Promise<ThreadSubscriptionView> {
-    return runClientEffect(fetchThreadSubscription(this.base, roomId, root));
-  }
-
-  setThreadSubscription(
-    roomId: string,
-    root: number,
-    state: ThreadChoice,
-  ): Promise<ThreadSubscriptionView> {
-    return runClientEffect(
-      setThreadSubscription(this.base, roomId, root, state),
-    );
-  }
-
-  clearThreadSubscription(roomId: string, root: number): Promise<void> {
-    return runClientEffect(clearThreadSubscription(this.base, roomId, root));
-  }
-
-  fetchRoomRoster(roomId: string): Promise<RoomRosterView> {
-    return runClientEffect(fetchRoomRoster(this.base, roomId));
-  }
-
-  listMyRoomInvites(): Promise<RoomInviteView[]> {
-    return runClientEffect(listMyRoomInvites(this.base));
-  }
-
-  createRoomInvite(
-    roomId: string,
-    inviteeUsername: string,
-  ): Promise<CreateInviteResponse> {
-    return runClientEffect(
-      createRoomInvite(this.base, roomId, inviteeUsername),
-    );
-  }
-
-  acceptRoomInvite(roomId: string, inviteId: string): Promise<void> {
-    return runClientEffect(acceptRoomInvite(this.base, roomId, inviteId));
-  }
-
-  removeRoomMember(roomId: string, memberId: string): Promise<void> {
-    return runClientEffect(removeRoomMember(this.base, roomId, memberId));
-  }
-
-  addRoomTagma(roomId: string, tagmaId: string): Promise<void> {
-    return runClientEffect(addRoomTagma(this.base, roomId, tagmaId));
-  }
-
-  listMyTagmaRooms(tagmaId: string): Promise<TagmaRoomView[]> {
-    return runClientEffect(listMyTagmaRooms(this.base, tagmaId));
-  }
 }

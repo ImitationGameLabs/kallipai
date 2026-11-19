@@ -1,10 +1,11 @@
 // Cursor tracking: unit legs for the MeCursor judge table and
-// one integration leg driving a real LescheClient.meEvents over a canned SSE
+// one integration leg driving the real roomEvents stream over a canned SSE
 // body through the cursor and the resync batcher.
 
 import { assertEquals } from "@std/assert";
 import type { MeEventFrame } from "@kallipai/kallipai-lesche-client";
-import { LescheClient } from "@kallipai/kallipai-lesche-client";
+import { roomEvents } from "@kallipai/kallipai-lesche-client";
+import { runClientStream } from "@kallipai/kallipai-common";
 import { MeCursor, ResyncBatcher } from "./cursor.ts";
 import type { ResyncPlan } from "./cursor.ts";
 
@@ -148,8 +149,8 @@ Deno.test(
       const plans: ResyncPlan[] = [];
       const batcher = new ResyncBatcher((plan) => plans.push(plan), 1);
       const cursor = new MeCursor();
-      const client = new LescheClient("http://x");
-      for await (const frame of client.meEvents()) {
+      const frames = runClientStream(roomEvents("http://x"));
+      for await (const frame of frames) {
         const plan = cursor.observe(frame);
         if (plan) batcher.push(plan);
       }

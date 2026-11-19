@@ -184,17 +184,15 @@ precedent), and route changes still flow through ShellPort `navigate`.
 
 ### Effect Stays Below `kallipai-ui`
 
-An effect is not something `kallipai-ui` holds; `kallipai-common` is the
-seam. `jsonRequest` builds an effect, `runClientEffect`
-(`packages/kallipai-common/src/http.ts:502`) turns one into a `Promise`,
-and `runClientStream` (`:522`) turns a stream into an `AsyncGenerator`.
-The `*-client` packages call those two and hand the UI a method that
-returns a `Promise` or an `AsyncGenerator` (`meEvents` in
-`kallipai-lesche-client/src/client.ts:411` is the shape); `kallipai-ui`
-consumes those faces only. A store that needs a new call gets a face
-added on the client side and awaits it, or `for await`s the generator
-and passes the `AbortSignal` the client method already takes when the
-work has to be interruptible.
+An effect is built by the `*-client` verbs and by `kallipai-common`'s
+request helpers; `runClientEffect`
+(`packages/kallipai-common/src/http.ts:501`) turns one into a `Promise`,
+and `runClientStream` (`:520`) turns a stream into an `AsyncGenerator`.
+The verbs sit below `kallipai-ui` and take the service base as their
+first argument, so a store awaiting a room page writes
+`runClientEffect(fetchRoomMessages(lescheBaseUrlOrFail(), roomId, opts))`.
+The two SSE feeds take the same route, with the `AbortSignal` the
+reconnect loop owns passed to `runClientStream`.
 
 `effect` imports live in `kallipai-common` and the `*-client` packages;
 `kallipai-ui` has none, and

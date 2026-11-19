@@ -23,7 +23,7 @@ import { SvelteMap, SvelteSet } from "svelte/reactivity";
 import {
   archeionClientOrFail,
   archeionSession,
-  keryxClientOrFail,
+  keryxBaseUrlOrFail,
 } from "./archeion.svelte.ts";
 import type { DirectConnection } from "./connect.ts";
 import { RelayMessageSender } from "./messageSender.svelte.ts";
@@ -341,7 +341,7 @@ export class ChannelsStore {
 
     const info = await archeionClientOrFail().getTagma(tagma.tagma_id);
     const channel = await openRelayChannel(
-      keryxClientOrFail(),
+      keryxBaseUrlOrFail(),
       tagma.tagma_id,
       userId,
       userHandle,

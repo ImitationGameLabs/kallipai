@@ -17,11 +17,15 @@
 // The map is bounded (a session visits many threads, and a standing matters
 // while its room is still being drawn): the oldest leaves first.
 
-import type {
-  ThreadChoice,
-  ThreadSubscriptionView,
+import {
+  clearThreadSubscription,
+  fetchThreadSubscription,
+  setThreadSubscription,
+  type ThreadChoice,
+  type ThreadSubscriptionView,
 } from "@kallipai/kallipai-lesche-client";
-import { lescheClientOrFail } from "../session/archeion.svelte.ts";
+import { runClientEffect } from "@kallipai/kallipai-common";
+import { lescheBaseUrlOrFail } from "../session/archeion.svelte.ts";
 
 /** How many standings stay remembered, oldest out first. */
 export const THREAD_CHOICES_MAX = 500;
@@ -86,8 +90,9 @@ export function ensureThreadChoice(
   }
   const pending = inFlight.get(key);
   if (pending !== undefined) return pending;
-  const read = lescheClientOrFail()
-    .fetchThreadSubscription(roomId, root)
+  const read = runClientEffect(
+    fetchThreadSubscription(lescheBaseUrlOrFail(), roomId, root),
+  )
     .then((view) => {
       remember(key, { view });
       return view;
@@ -109,10 +114,8 @@ export async function setThreadChoice(
   root: number,
   state: ThreadChoice,
 ): Promise<ThreadSubscriptionView> {
-  const view = await lescheClientOrFail().setThreadSubscription(
-    roomId,
-    root,
-    state,
+  const view = await runClientEffect(
+    setThreadSubscription(lescheBaseUrlOrFail(), roomId, root, state),
   );
   remember(keyOf(roomId, root), { view });
   return view;
@@ -126,7 +129,9 @@ export async function clearThreadChoice(
   roomId: string,
   root: number,
 ): Promise<ThreadSubscriptionView | null> {
-  await lescheClientOrFail().clearThreadSubscription(roomId, root);
+  await runClientEffect(
+    clearThreadSubscription(lescheBaseUrlOrFail(), roomId, root),
+  );
   forgetThreadChoice(roomId, root);
   return ensureThreadChoice(roomId, root);
 }

@@ -491,10 +491,9 @@ function decodeFailure(cause: unknown): RequestFailure {
 }
 
 /**
- * The one place an Effect becomes a Promise. The promise faces over the
- * effect verbs call it, and `kallipai-ui` awaits those faces; the UI holds
- * no Effect of its own. A caller that can hold an Effect calls the
- * effect-typed request functions in this module instead.
+ * The one place an Effect becomes a Promise: a verb, or a request function
+ * in this module, builds the effect and the caller hands it here to await.
+ * Nothing above this line holds the effect itself.
  *
  * `signal` is the caller's lifetime: aborting it interrupts the effect and
  * rejects with the signal's own reason.
@@ -509,10 +508,9 @@ export function runClientEffect<A, E>(
 }
 
 /**
- * The one place a stream becomes an AsyncGenerator: the stream verbs built
- * on {@linkcode eventFrames} call it once each, and consumers hold their
- * `for await` face. A consumer that can hold a Stream calls the stream verb
- * itself.
+ * The one place a stream becomes an AsyncGenerator: a stream verb builds
+ * the stream and the caller hands it here to iterate. Nothing above this
+ * line holds the stream itself.
  *
  * A typed failure reaches the iterator as that error itself, not a wrapper,
  * so `instanceof` branches in the consumers keep working. The caller's signal

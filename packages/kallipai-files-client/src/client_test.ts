@@ -1,14 +1,22 @@
-// Unit tests for the promise-shaped files client, against a stubbed global
-// fetch. The stub pins the wire shape (method, URL query, CSRF marker, cookie
-// credentials) and the response-to-value mapping (including the error
-// envelope reduction on 403/413), per the server routes. The effect-level
-// failure mapping lives in `client_effect_test.ts`.
+// Unit tests for the files verbs against a stubbed global fetch: these legs
+// pin the wire shape (method, URL query, CSRF marker, cookie credentials)
+// and the response-to-value mapping (including the error envelope reduction
+// on 403/413), per the server routes. The failure channel -- a refusal and
+// a dead exchange as typed values -- lives in `client_effect_test.ts`.
 
 import { withFetch } from "@kallipai/kallipai-common/testing";
 import { assert, assertEquals, assertRejects } from "@std/assert";
 
-import { FilesClient } from "./client.ts";
+import { runClientEffect } from "@kallipai/kallipai-common";
+import {
+  deleteRecord,
+  getRecord,
+  listRecords,
+  putRecord,
+  sendRecord,
+} from "./client.ts";
 import { FilesApiError } from "./http.ts";
+const BASE = "http://files.test/v1/files";
 
 interface RecordedRequest {
   method: string;
@@ -48,10 +56,12 @@ Deno.test(
         ),
     );
     await withFetch(stub, async () => {
-      const client = new FilesClient("http://files.test/v1/files");
-      const out = await client.put(
-        "/users/u1/shared/report.pdf",
-        new Uint8Array([1, 2, 3]),
+      const out = await runClientEffect(
+        putRecord(
+          BASE,
+          "/users/u1/shared/report.pdf",
+          new Uint8Array([1, 2, 3]),
+        ),
       );
       assertEquals(out.blob_id, "blake3-abc");
     });
@@ -73,10 +83,11 @@ Deno.test(
         ),
     );
     await withFetch(stub, async () => {
-      const client = new FilesClient("http://files.test/v1/files");
-      const out = await client.send("01890a5d-ac96-774b-bcce-b302099a8057", {
-        toTagma: "t1",
-      });
+      const out = await runClientEffect(
+        sendRecord(BASE, "01890a5d-ac96-774b-bcce-b302099a8057", {
+          toTagma: "t1",
+        }),
+      );
       assertEquals(out.path, "/users/u1/tagmas/t1/inbox/report.pdf");
       assertEquals(seen[0].method, "POST");
       assert(
@@ -100,8 +111,9 @@ Deno.test("get returns the bytes", async () => {
     () => new Response(new Uint8Array([9, 8, 7]), { status: 200 }),
   );
   await withFetch(stub, async () => {
-    const client = new FilesClient();
-    const bytes = await client.get("01890a5d-ac96-774b-bcce-b302099a8057");
+    const bytes = await runClientEffect(
+      getRecord("", "01890a5d-ac96-774b-bcce-b302099a8057"),
+    );
     assertEquals(new Uint8Array(bytes), new Uint8Array([9, 8, 7]));
   });
 });
@@ -122,8 +134,9 @@ Deno.test("list maps the entries array", async () => {
       ),
   );
   await withFetch(stub, async () => {
-    const client = new FilesClient();
-    const entries = await client.list({ space: "shared", limit: 10 });
+    const entries = await runClientEffect(
+      listRecords("", { space: "shared", limit: 10 }),
+    );
     assertEquals(entries.length, 1);
     assertEquals(entries[0].path, "/users/u1/shared/report.pdf");
   });
@@ -136,8 +149,9 @@ Deno.test(
       () => new Response(null, { status: 204 }),
     );
     await withFetch(stub, async () => {
-      const client = new FilesClient("http://files.test/v1/files");
-      await client.delete("01890a5d-ac96-774b-bcce-b302099a8057");
+      await runClientEffect(
+        deleteRecord(BASE, "01890a5d-ac96-774b-bcce-b302099a8057"),
+      );
       assertEquals(seen[0].method, "DELETE");
       assert(
         seen[0].url.endsWith("/v1/files/01890a5d-ac96-774b-bcce-b302099a8057"),
@@ -155,9 +169,9 @@ Deno.test("non-2xx becomes FilesApiError with the server message", async () => {
       }),
   );
   await withFetch(denied.stub, async () => {
-    const client = new FilesClient();
     const error = await assertRejects(
-      () => client.get("01890a5d-ac96-774b-bcce-b302099a8057"),
+      () =>
+        runClientEffect(getRecord("", "01890a5d-ac96-774b-bcce-b302099a8057")),
       FilesApiError,
     );
     assertEquals(error._tag, "FilesApiError");
@@ -173,9 +187,11 @@ Deno.test("non-2xx becomes FilesApiError with the server message", async () => {
       ),
   );
   await withFetch(tooLarge.stub, async () => {
-    const client = new FilesClient();
     const error = await assertRejects(
-      () => client.put("/users/u1/shared/big.bin", new Uint8Array(0)),
+      () =>
+        runClientEffect(
+          putRecord("", "/users/u1/shared/big.bin", new Uint8Array(0)),
+        ),
       FilesApiError,
     );
     assertEquals(error.status, 413);
@@ -191,9 +207,11 @@ Deno.test("non-2xx becomes FilesApiError with the server message", async () => {
       ),
   );
   await withFetch(deniedDelete.stub, async () => {
-    const client = new FilesClient();
     const error = await assertRejects(
-      () => client.delete("01890a5d-ac96-774b-bcce-b302099a8057"),
+      () =>
+        runClientEffect(
+          deleteRecord("", "01890a5d-ac96-774b-bcce-b302099a8057"),
+        ),
       FilesApiError,
     );
     assertEquals(error.status, 403);

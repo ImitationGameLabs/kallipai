@@ -1,8 +1,8 @@
-// The effect face of the lesche verbs: a refusal and a dead exchange arrive
-// in the failure channel as values, and the stream verb carries the same
-// two. The promise-shaped class is pinned by `rooms.test.ts` and
-// `mevents.test.ts`; these legs pin the surface a consumer reaches for when
-// it stops awaiting.
+// The failure channel of the lesche verbs: a refusal and a dead exchange
+// arrive as values, and the stream verb carries the same two. The wire
+// shape of the request verbs is pinned by `rooms.test.ts`, of the stream by
+// `mevents.test.ts`; these legs pin the typed failures a caller sees
+// when it runs the verb's effect.
 
 import { TransportError } from "@kallipai/kallipai-common";
 import { withFetch } from "@kallipai/kallipai-common/testing";

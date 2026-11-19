@@ -11,11 +11,14 @@
 // keeping only while a trail might draw it. The oldest leaves first, which is
 // the one a reader is least likely to come back to.
 
-import type { RoomMessageView } from "@kallipai/kallipai-lesche-client";
-import { decodeB64 } from "@kallipai/kallipai-common";
+import {
+  fetchRoomMessages,
+  type RoomMessageView,
+} from "@kallipai/kallipai-lesche-client";
+import { decodeB64, runClientEffect } from "@kallipai/kallipai-common";
 import { previewOf } from "../quote.ts";
 import { decodeRoomMessage, type RoomLine } from "../room-message.ts";
-import { lescheClientOrFail } from "../session/archeion.svelte.ts";
+import { lescheBaseUrlOrFail } from "../session/archeion.svelte.ts";
 
 /** How much of a discussion's first line a trail carries: enough to recognize
  *  the discussion beside its room's name, not a second line of the bar. */
@@ -150,7 +153,7 @@ export async function resolveThreadHead(
     roomId: string,
     options: { beforeSeq?: number; limit?: number },
   ) => Promise<readonly RoomMessageView[]> = (id, options) =>
-    lescheClientOrFail().fetchRoomMessages(id, options),
+    runClientEffect(fetchRoomMessages(lescheBaseUrlOrFail(), id, options)),
   deadlineMs: number = HEAD_READ_DEADLINE_MS,
 ): Promise<string | null> {
   const known = threadHeadOf(roomId, declared);

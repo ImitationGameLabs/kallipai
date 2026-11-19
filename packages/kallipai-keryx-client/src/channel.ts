@@ -11,7 +11,7 @@
 // Mirrors the Rust relay's `crates/platform/kallipai-e2ee/src/lib.rs` + the
 // keryx's `crates/platform/kallipai-keryx/src/routes.rs`.
 
-import { type KeryxClient } from "./client.ts";
+import { createConversation, keyExchangeInit, postEnvelope } from "./client.ts";
 import {
   aeadDecrypt,
   aeadEncrypt,
@@ -25,6 +25,7 @@ import {
   decodeB64,
   encodeB64,
   participantIdForUser,
+  runClientEffect,
   uuidV4,
 } from "@kallipai/kallipai-common";
 import { DataPlaneApiError } from "./types.ts";
@@ -84,20 +85,23 @@ export class ManageChannelError extends Error {
  * Throws if the tagma is offline / not owned / the signature fails to verify.
  */
 export async function openRelayChannel(
-  keryx: KeryxClient,
+  base: string,
   tagmaId: string,
   userId: string,
   userHandle: string,
   pinnedKeyB64: string,
 ): Promise<RelayChannel> {
   const pinnedKey = decodeB64(pinnedKeyB64);
-  const { conversation_id: conversationId } =
-    await keryx.createConversation(tagmaId);
+  const { conversation_id: conversationId } = await runClientEffect(
+    createConversation(base, tagmaId),
+  );
 
   const { privateKey: initiatorPriv, publicKey: initiatorEph } =
     generateEphemeralKeyPair();
   const init: KeyExchangeInit = { ephemeral_public: encodeB64(initiatorEph) };
-  const resp = await keryx.keyExchangeInit(conversationId, init);
+  const resp = await runClientEffect(
+    keyExchangeInit(base, conversationId, init),
+  );
   const responderEph = decodeB64(resp.ephemeral_public);
   const signature = decodeB64(resp.signature);
   if (
@@ -120,7 +124,7 @@ export async function openRelayChannel(
   // Rust `Participant::id` (`ParticipantId::for_user`) byte-for-byte.
   const participantId = await participantIdForUser(userId);
   return new RelayChannel(
-    keryx,
+    base,
     conversationId,
     tagmaId,
     participantId,
@@ -160,7 +164,7 @@ export class RelayChannel {
   /** Assembled by [`openRelayChannel`]; do not construct directly — it skips
    * the key-exchange verification the factory performs. */
   constructor(
-    private readonly keryx: KeryxClient,
+    private readonly base: string,
     readonly conversationId: string,
     readonly tagmaId: string,
     private readonly participantId: string,
@@ -365,7 +369,9 @@ export class RelayChannel {
       timestamp: new Date().toISOString(),
       ciphertext: encodeB64(ciphertext),
     };
-    await this.keryx.postEnvelope(this.conversationId, envelope);
+    await runClientEffect(
+      postEnvelope(this.base, this.conversationId, envelope),
+    );
   }
 }
 

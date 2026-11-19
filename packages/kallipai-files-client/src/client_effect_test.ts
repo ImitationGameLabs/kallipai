@@ -1,7 +1,7 @@
-// The effect-level contract of the files verbs: each one succeeds with its
-// value, a refusal arrives as `FilesApiError` carrying the envelope, and an
-// exchange that produced no answer arrives as `TransportError`. The
-// promise-shaped class is pinned separately in `client_test.ts`.
+// The failure channel of the files verbs: each one succeeds with its value,
+// a refusal arrives as `FilesApiError` carrying the envelope, and an
+// exchange that produced no answer arrives as `TransportError`. The wire
+// shape and the response mapping are pinned separately in `client_test.ts`.
 
 import { TransportError } from "@kallipai/kallipai-common";
 import { withFetch } from "@kallipai/kallipai-common/testing";

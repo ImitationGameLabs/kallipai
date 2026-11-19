@@ -63,7 +63,7 @@ export function projectionState(
 
 /** Read-side client for a tagma's projection state: four cached GETs
  * (agents/budget/work-schedule/status) plus the dirty-frame SSE. Constructed
- * with the keryx base URL (same origin as `KeryxClient`); the session
+ * with the keryx base URL (the service the conversation verbs dial); the
  * cookie is the auth, so every fetch is credentialed. GET-only, hence no
  * CSRF marker. */
 export class ProjectionClient {

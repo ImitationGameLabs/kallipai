@@ -10,11 +10,13 @@
   // chrome (back row to the chats hub) derives from the trail table, same as
   // /chat/{id}.
   import type { FileAttachment } from "@kallipai/kallipai-lesche-client";
+  import { getRecord } from "@kallipai/kallipai-files-client";
+  import { runClientEffect } from "@kallipai/kallipai-common";
   import type { DirectMessageRow } from "@kallipai/kallipai-client";
   import type { ConversationLine } from "../lib/transcript.ts";
   import { untrack } from "svelte";
   import ConversationView from "../components/ConversationView.svelte";
-  import { filesClientOrFail } from "../lib/session/archeion.svelte.ts";
+  import { filesBaseUrlOrFail } from "../lib/session/archeion.svelte.ts";
   import {
     directSessionsStore,
     pairKey,
@@ -119,7 +121,9 @@
   // The file card's download I/O (the ChannelChatPage pattern): pull the
   // referenced record and hand the bytes to the browser as a named download.
   async function downloadAttachment(attachment: FileAttachment): Promise<void> {
-    const bytes = await filesClientOrFail().get(attachment.record_id);
+    const bytes = await runClientEffect(
+      getRecord(filesBaseUrlOrFail(), attachment.record_id),
+    );
     saveBlob(new Blob([bytes]), attachment.name);
   }
 </script>

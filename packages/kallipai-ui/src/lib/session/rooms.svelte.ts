@@ -13,13 +13,25 @@
 // holds -- they just await + throw, no refresh.
 
 import {
+  acceptRoomInvite,
+  addRoomTagma,
+  createRoom,
+  createRoomInvite,
+  joinRoom,
+  listMyRoomInvites,
+  listPublicRooms,
+  listRooms,
+  removeRoomMember,
   type RoomInviteView,
   type RoomView,
   type Visibility,
 } from "@kallipai/kallipai-lesche-client";
 import { unreadStore } from "./unread.svelte.ts";
-import { participantIdForTagma } from "@kallipai/kallipai-common";
-import { archeionSession, lescheClientOrFail } from "./archeion.svelte.ts";
+import {
+  participantIdForTagma,
+  runClientEffect,
+} from "@kallipai/kallipai-common";
+import { archeionSession, lescheBaseUrlOrFail } from "./archeion.svelte.ts";
 import { rooms_public_failed } from "../../paraglide/messages.js";
 
 function messageOf(e: unknown): string {
@@ -52,11 +64,11 @@ class RoomsStore {
    * failure does not blank the other; stale lists + loaded flags are left in
    * place on error. Resolves when both settles. */
   async refresh(): Promise<void> {
-    const client = lescheClientOrFail();
+    const base = lescheBaseUrlOrFail();
     const [roomsRes, invitesRes, publicRes] = await Promise.allSettled([
-      client.listRooms(),
-      client.listMyRoomInvites(),
-      client.listPublicRooms(),
+      runClientEffect(listRooms(base)),
+      runClientEffect(listMyRoomInvites(base)),
+      runClientEffect(listPublicRooms(base)),
     ]);
     if (roomsRes.status === "fulfilled") {
       this.rooms = roomsRes.value;
@@ -102,7 +114,9 @@ class RoomsStore {
   }): Promise<RoomView> {
     this.creating = true;
     try {
-      const created = await lescheClientOrFail().createRoom(opts);
+      const created = await runClientEffect(
+        createRoom(lescheBaseUrlOrFail(), opts),
+      );
       this.rooms = [created, ...this.rooms];
       this.roomsLoaded = true;
       return created;
@@ -115,16 +129,15 @@ class RoomsStore {
    * (membership), so a full `refresh()` reconciles both lists. THROWS on error
    * (a 403 means the room is private -- use the invite flow). */
   async joinPublicRoom(roomId: string): Promise<void> {
-    await lescheClientOrFail().joinRoom(roomId);
+    await runClientEffect(joinRoom(lescheBaseUrlOrFail(), roomId));
     await this.refresh();
   }
 
   /** Accept a pending invite. The room joins `rooms` and the invite leaves the
    * inbox -- a splice would be fragile, so re-fetch both. THROWS on error. */
   async acceptInvite(invite: RoomInviteView): Promise<void> {
-    await lescheClientOrFail().acceptRoomInvite(
-      invite.room_id,
-      invite.invite_id,
+    await runClientEffect(
+      acceptRoomInvite(lescheBaseUrlOrFail(), invite.room_id, invite.invite_id),
     );
     await this.refresh();
   }
@@ -133,7 +146,9 @@ class RoomsStore {
   async leaveRoom(roomId: string): Promise<void> {
     const memberId = archeionSession.participantId;
     if (!memberId) throw new Error("no signed-in user");
-    await lescheClientOrFail().removeRoomMember(roomId, memberId);
+    await runClientEffect(
+      removeRoomMember(lescheBaseUrlOrFail(), roomId, memberId),
+    );
     await this.refresh();
   }
 
@@ -142,26 +157,32 @@ class RoomsStore {
    * Changes nothing the store caches (no roster); the page re-fetches. THROWS
    * on error. */
   async removeMember(roomId: string, memberId: string): Promise<void> {
-    await lescheClientOrFail().removeRoomMember(roomId, memberId);
+    await runClientEffect(
+      removeRoomMember(lescheBaseUrlOrFail(), roomId, memberId),
+    );
   }
 
   /** Pull a tagma you own out of a room (owner admin, works cross-room). The
    * tagma's member id is derived from its tagma id. THROWS on error. */
   async removeTagmaFromRoom(roomId: string, tagmaId: string): Promise<void> {
     const memberId = await participantIdForTagma(tagmaId);
-    await lescheClientOrFail().removeRoomMember(roomId, memberId);
+    await runClientEffect(
+      removeRoomMember(lescheBaseUrlOrFail(), roomId, memberId),
+    );
   }
 
   /** Invite a user to a room by @username. Changes nothing the store caches
    * (invites-sent are not listed); just await + throw. THROWS on error. */
   async inviteUser(roomId: string, inviteeUsername: string): Promise<void> {
-    await lescheClientOrFail().createRoomInvite(roomId, inviteeUsername);
+    await runClientEffect(
+      createRoomInvite(lescheBaseUrlOrFail(), roomId, inviteeUsername),
+    );
   }
 
   /** Add a tagma to a room. Changes nothing the store caches (no roster); just
    * await + throw. THROWS on error. */
   async addTagma(roomId: string, tagmaId: string): Promise<void> {
-    await lescheClientOrFail().addRoomTagma(roomId, tagmaId);
+    await runClientEffect(addRoomTagma(lescheBaseUrlOrFail(), roomId, tagmaId));
   }
 
   /** Whether `roomId` is one of the caller's current rooms. The RootLayout

@@ -1,13 +1,14 @@
-// meEvents shaping: a canned SSE body is parsed (via the shared @kallipai/
+// roomEvents shaping: a canned SSE body is parsed (via the shared @kallipai/
 // kallipai-common parseSseStream) into MeEventFrames. This validates the fetch +
 // SSE wiring; it does not re-test SSE framing itself.
 
 import { assert, assertEquals } from "@std/assert";
-import { LescheClient } from "./client.ts";
+import { runClientStream } from "@kallipai/kallipai-common";
+import { roomEvents } from "./client.ts";
 import { DataPlaneApiError } from "./types.ts";
 
 Deno.test(
-  "meEvents yields id-less payload frames without a cursor",
+  "roomEvents yields id-less payload frames without a cursor",
   async () => {
     const envelope = {
       channel_id: "c1",
@@ -31,9 +32,8 @@ Deno.test(
         }),
       )) as typeof fetch;
     try {
-      const client = new LescheClient("http://x");
       const events = [];
-      for await (const ev of client.meEvents()) {
+      for await (const ev of runClientStream(roomEvents("http://x"))) {
         events.push(ev);
       }
       assertEquals(events.length, 2);
@@ -58,7 +58,7 @@ Deno.test(
   },
 );
 
-Deno.test("meEvents passes the marker and id cursors through", async () => {
+Deno.test("roomEvents passes the marker and id cursors through", async () => {
   const body =
     `event: stream\nid: 0\ndata: ${JSON.stringify({ epoch: 3, next_seq: 0 })}\n\n` +
     `id: 3:0\nevent: tagma_online\ndata: ${JSON.stringify({ type: "tagma_online", tagma_id: "t2" })}\n\n`;
@@ -72,9 +72,8 @@ Deno.test("meEvents passes the marker and id cursors through", async () => {
       }),
     )) as typeof fetch;
   try {
-    const client = new LescheClient("http://x");
     const events = [];
-    for await (const ev of client.meEvents()) {
+    for await (const ev of runClientStream(roomEvents("http://x"))) {
       events.push(ev);
     }
     assertEquals(events.length, 2);
@@ -90,7 +89,7 @@ Deno.test("meEvents passes the marker and id cursors through", async () => {
   }
 });
 
-Deno.test("meEvents parses a zero epoch out of the id", async () => {
+Deno.test("roomEvents parses a zero epoch out of the id", async () => {
   const body = `id: 0:7\nevent: tagma_online\ndata: ${JSON.stringify({ type: "tagma_online", tagma_id: "t2" })}\n\n`;
 
   const originalFetch = globalThis.fetch;
@@ -102,9 +101,8 @@ Deno.test("meEvents parses a zero epoch out of the id", async () => {
       }),
     )) as typeof fetch;
   try {
-    const client = new LescheClient("http://x");
     const events = [];
-    for await (const ev of client.meEvents()) {
+    for await (const ev of runClientStream(roomEvents("http://x"))) {
       events.push(ev);
     }
     // Epoch 0 is a real epoch: a truthy id parse would null it out.
@@ -121,7 +119,7 @@ Deno.test("meEvents parses a zero epoch out of the id", async () => {
   }
 });
 
-Deno.test("meEvents marker precedes the payload frames", async () => {
+Deno.test("roomEvents marker precedes the payload frames", async () => {
   // Same wire shape as the passthrough leg, with the id dropped from the
   // payload: ordering (marker first) holds independently of cursoring.
   const body =
@@ -137,9 +135,8 @@ Deno.test("meEvents marker precedes the payload frames", async () => {
       }),
     )) as typeof fetch;
   try {
-    const client = new LescheClient("http://x");
     const events = [];
-    for await (const ev of client.meEvents()) {
+    for await (const ev of runClientStream(roomEvents("http://x"))) {
       events.push(ev);
     }
     assertEquals(events.length, 2);
@@ -155,7 +152,7 @@ Deno.test("meEvents marker precedes the payload frames", async () => {
   }
 });
 
-Deno.test("meEvents surfaces a non-2xx response as an error", async () => {
+Deno.test("roomEvents surfaces a non-2xx response as an error", async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = (() =>
     Promise.resolve(
@@ -164,8 +161,7 @@ Deno.test("meEvents surfaces a non-2xx response as an error", async () => {
       }),
     )) as typeof fetch;
   try {
-    const client = new LescheClient("http://x");
-    const iter = client.meEvents();
+    const iter = runClientStream(roomEvents("http://x"));
     let threw = false;
     try {
       await iter.next();
@@ -174,7 +170,7 @@ Deno.test("meEvents surfaces a non-2xx response as an error", async () => {
       assert(e instanceof DataPlaneApiError);
       assertEquals((e as { status: number }).status, 401);
     }
-    if (!threw) throw new Error("expected meEvents to throw on 401");
+    if (!threw) throw new Error("expected roomEvents to throw on 401");
   } finally {
     globalThis.fetch = originalFetch;
   }

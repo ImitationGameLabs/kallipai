@@ -7,7 +7,27 @@ import type {
   ThreadSubscriptionView,
 } from "./types.ts";
 import { DataPlaneApiError } from "./types.ts";
-import { LescheClient } from "./client.ts";
+import { runClientEffect } from "@kallipai/kallipai-common";
+import {
+  acceptRoomInvite,
+  addRoomTagma,
+  clearThreadSubscription,
+  createRoom,
+  createRoomInvite,
+  fetchRoomMessages,
+  fetchRoomRoster,
+  fetchRoomUnread,
+  fetchThreadSubscription,
+  joinRoom,
+  listMyTagmaRooms,
+  listMyRoomInvites,
+  listPublicRooms,
+  listRooms,
+  postRoomEnvelope,
+  removeRoomMember,
+  setRoomReadCursor,
+  setThreadSubscription,
+} from "./client.ts";
 
 // HTTP-client contract tests for the rooms surface. The data-plane routes
 // (`/rooms/{id}/envelopes`, `.../messages`) come first; the management
@@ -59,8 +79,7 @@ Deno.test("postRoomEnvelope POSTs /rooms/{id}/envelopes", async () => {
     );
   };
   await withFetch(stub, async () => {
-    const c = new LescheClient(BASE);
-    await c.postRoomEnvelope("room-1", ENVELOPE);
+    await runClientEffect(postRoomEnvelope(BASE, "room-1", ENVELOPE));
   });
   assertEquals(
     captured[0]!.url,
@@ -97,8 +116,9 @@ Deno.test(
     };
     let out: RoomMessageView[];
     await withFetch(stub, async () => {
-      const c = new LescheClient(BASE);
-      out = await c.fetchRoomMessages("room-1", { afterSeq: 3, limit: 50 });
+      out = await runClientEffect(
+        fetchRoomMessages(BASE, "room-1", { afterSeq: 3, limit: 50 }),
+      );
     });
     assertEquals(
       captured[0]!.url,
@@ -133,8 +153,9 @@ Deno.test(
       );
     };
     await withFetch(stub, async () => {
-      const c = new LescheClient(BASE);
-      await c.fetchRoomMessages("room-1", { beforeSeq: 8, limit: 20 });
+      await runClientEffect(
+        fetchRoomMessages(BASE, "room-1", { beforeSeq: 8, limit: 20 }),
+      );
     });
     assertEquals(
       captured[0]!.url,
@@ -157,12 +178,13 @@ Deno.test("fetchRoomMessages sends thread for a discussion page", async () => {
     );
   };
   await withFetch(stub, async () => {
-    const c = new LescheClient(BASE);
-    await c.fetchRoomMessages("room-1", {
-      afterSeq: 4,
-      thread: 3,
-      limit: 50,
-    });
+    await runClientEffect(
+      fetchRoomMessages(BASE, "room-1", {
+        afterSeq: 4,
+        thread: 3,
+        limit: 50,
+      }),
+    );
   });
   assertEquals(
     captured[0]!.url,
@@ -179,8 +201,7 @@ Deno.test("fetchRoomMessages omits the query when no opts given", async () => {
     return Promise.resolve(new Response("[]", { status: 200 }));
   };
   await withFetch(stub, async () => {
-    const c = new LescheClient(BASE);
-    await c.fetchRoomMessages("room-1");
+    await runClientEffect(fetchRoomMessages(BASE, "room-1"));
   });
   assertEquals(
     captured[0]!.url,
@@ -219,8 +240,7 @@ Deno.test("createRoom POSTs /rooms and decodes RoomView", async () => {
     );
   };
   await withFetch(stub, async () => {
-    const c = new LescheClient(BASE);
-    const out = await c.createRoom({ name: "General" });
+    const out = await runClientEffect(createRoom(BASE, { name: "General" }));
     assertEquals(out, {
       room_id: "room-1",
       created_at: "2026-08-03T00:00:00Z",
@@ -259,10 +279,12 @@ Deno.test("createRoom(public) sends the visibility body", async () => {
     );
   };
   await withFetch(stub, async () => {
-    const out = await new LescheClient(BASE).createRoom({
-      name: "Town square",
-      visibility: "public",
-    });
+    const out = await runClientEffect(
+      createRoom(BASE, {
+        name: "Town square",
+        visibility: "public",
+      }),
+    );
     assertEquals(out.visibility, "public");
   });
   assertEquals(
@@ -293,7 +315,7 @@ Deno.test("listPublicRooms GETs /rooms/public", async () => {
     );
   };
   await withFetch(stub, async () => {
-    const out = await new LescheClient(BASE).listPublicRooms();
+    const out = await runClientEffect(listPublicRooms(BASE));
     assertEquals(out.length, 1);
     assertEquals(out[0]!.visibility, "public");
   });
@@ -310,7 +332,7 @@ Deno.test("joinRoom POSTs /rooms/{id}/join", async () => {
     return Promise.resolve(new Response(null, { status: 204 }));
   };
   await withFetch(stub, async () => {
-    await new LescheClient(BASE).joinRoom("room-pub");
+    await runClientEffect(joinRoom(BASE, "room-pub"));
   });
   assertEquals(
     captured[0]!.url,
@@ -338,7 +360,7 @@ Deno.test(
       return Promise.resolve(new Response(null, { status: 204 }));
     };
     await withFetch(stub, async () => {
-      await new LescheClient(BASE).setRoomReadCursor("room-1", 42);
+      await runClientEffect(setRoomReadCursor(BASE, "room-1", 42));
     });
     assertEquals(
       captured[0]!.url,
@@ -367,7 +389,7 @@ Deno.test(
     };
     let got: { unread: number; cursor: number } | undefined;
     await withFetch(stub, async () => {
-      got = await new LescheClient(BASE).fetchRoomUnread("room-1");
+      got = await runClientEffect(fetchRoomUnread(BASE, "room-1"));
     });
     assertEquals(
       captured[0],
@@ -391,8 +413,7 @@ Deno.test("listRooms GETs /rooms with no CSRF marker", async () => {
     );
   };
   await withFetch(stub, async () => {
-    const c = new LescheClient(BASE);
-    const out = await c.listRooms();
+    const out = await runClientEffect(listRooms(BASE));
     assertEquals(out.length, 1);
     assertEquals(out[0]!.room_id, "r");
   });
@@ -419,8 +440,7 @@ Deno.test("listMyRoomInvites GETs /rooms/invites", async () => {
     );
   };
   await withFetch(stub, async () => {
-    const c = new LescheClient(BASE);
-    const out = await c.listMyRoomInvites();
+    const out = await runClientEffect(listMyRoomInvites(BASE));
     assertEquals(out[0]!.invite_id, "inv-1");
   });
   assertEquals(captured, ["https://lesche.test/v1/lesche/rooms/invites"]);
@@ -447,8 +467,9 @@ Deno.test(
       );
     };
     await withFetch(stub, async () => {
-      const c = new LescheClient(BASE);
-      const out = await c.createRoomInvite("room-1", "user-2");
+      const out = await runClientEffect(
+        createRoomInvite(BASE, "room-1", "user-2"),
+      );
       assertEquals(out.invite_id, "inv-1");
     });
     assertEquals(
@@ -475,8 +496,9 @@ Deno.test(
       return Promise.resolve(new Response(null, { status: 204 }));
     };
     await withFetch(stub, async () => {
-      const c = new LescheClient(BASE);
-      const out = await c.acceptRoomInvite("room-1", "inv-1");
+      const out = await runClientEffect(
+        acceptRoomInvite(BASE, "room-1", "inv-1"),
+      );
       assertEquals(out, undefined);
     });
     assertEquals(captured[0]!, {
@@ -498,8 +520,7 @@ Deno.test(
       return Promise.resolve(new Response(null, { status: 204 }));
     };
     await withFetch(stub, async () => {
-      const c = new LescheClient(BASE);
-      await c.removeRoomMember("room-1", "mid-1");
+      await runClientEffect(removeRoomMember(BASE, "room-1", "mid-1"));
     });
     assertEquals(captured[0]!, {
       url: "https://lesche.test/v1/lesche/rooms/room-1/members/mid-1",
@@ -517,8 +538,7 @@ Deno.test("addRoomTagma POSTs the tagma id body", async () => {
     return Promise.resolve(new Response(null, { status: 204 }));
   };
   await withFetch(stub, async () => {
-    const c = new LescheClient(BASE);
-    await c.addRoomTagma("room-1", "tagma-9");
+    await runClientEffect(addRoomTagma(BASE, "room-1", "tagma-9"));
   });
   assertEquals(captured[0]!.body, JSON.stringify({ tagma_id: "tagma-9" }));
 });
@@ -555,8 +575,7 @@ Deno.test("listMyTagmaRooms GETs the owner tagma-rooms path", async () => {
     );
   };
   await withFetch(stub, async () => {
-    const c = new LescheClient(BASE);
-    const out = await c.listMyTagmaRooms("tagma-9");
+    const out = await runClientEffect(listMyTagmaRooms(BASE, "tagma-9"));
     assertEquals(out.length, 2);
     assertEquals(out[0]!.room_id, "room-1");
     assertEquals(out[0]!.name, "Room one");
@@ -581,9 +600,8 @@ Deno.test(
         ),
       );
     await withFetch(stub, async () => {
-      const c = new LescheClient(BASE);
       const err = await assertRejects(
-        () => c.createRoomInvite("room-1", "user-2"),
+        () => runClientEffect(createRoomInvite(BASE, "room-1", "user-2")),
         DataPlaneApiError,
       );
       assertEquals(err.status, 409);
@@ -626,7 +644,7 @@ Deno.test(
     };
     let out: RoomRosterView;
     await withFetch(stub, async () => {
-      out = await new LescheClient(BASE).fetchRoomRoster("room-1");
+      out = await runClientEffect(fetchRoomRoster(BASE, "room-1"));
     });
     assertEquals(
       captured[0]!.url,
@@ -674,7 +692,7 @@ Deno.test(
     };
     let got: ThreadSubscriptionView | undefined;
     await withFetch(stub, async () => {
-      got = await new LescheClient(BASE).fetchThreadSubscription("room-1", 12);
+      got = await runClientEffect(fetchThreadSubscription(BASE, "room-1", 12));
     });
     assertEquals(
       captured[0],
@@ -717,10 +735,8 @@ Deno.test(
     };
     let got: ThreadSubscriptionView | undefined;
     await withFetch(stub, async () => {
-      got = await new LescheClient(BASE).setThreadSubscription(
-        "room-1",
-        12,
-        "following",
+      got = await runClientEffect(
+        setThreadSubscription(BASE, "room-1", 12, "following"),
       );
     });
     assertEquals(
@@ -746,7 +762,7 @@ Deno.test(
       return Promise.resolve(new Response(null, { status: 204 }));
     };
     await withFetch(stub, async () => {
-      await new LescheClient(BASE).clearThreadSubscription("room-1", 12);
+      await runClientEffect(clearThreadSubscription(BASE, "room-1", 12));
     });
     assertEquals(
       captured[0]!.url,

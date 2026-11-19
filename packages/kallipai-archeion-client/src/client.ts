@@ -497,7 +497,7 @@ export function mintTagma(
 
 /** `GET /tagmata` — the caller's tagmata (pending + enrolled, not revoked),
  * newest first. Registry view only; liveness is NOT included (it arrives via
- * the keryx's `meEvents`). */
+ * the keryx `/me/events` stream). */
 export function listTagmata(
   base: string,
 ): Effect.Effect<TagmaView[], ArcheionFailure> {

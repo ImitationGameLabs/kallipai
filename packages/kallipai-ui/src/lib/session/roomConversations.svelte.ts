@@ -14,12 +14,20 @@
 
 import {
   type Envelope,
+  fetchRoomMessages,
+  fetchRoomRoster,
+  postRoomEnvelope,
   type RoomRosterView,
   type Visibility,
 } from "@kallipai/kallipai-lesche-client";
-import { decodeB64, encodeB64, uuidV4 } from "@kallipai/kallipai-common";
+import {
+  decodeB64,
+  encodeB64,
+  runClientEffect,
+  uuidV4,
+} from "@kallipai/kallipai-common";
 import { SvelteMap, SvelteSet } from "svelte/reactivity";
-import { archeionSession, lescheClientOrFail } from "./archeion.svelte.ts";
+import { archeionSession, lescheBaseUrlOrFail } from "./archeion.svelte.ts";
 import { recentStore } from "./recent.svelte.ts";
 import { roomsStore } from "./rooms.svelte.ts";
 import { roomKey } from "./unread.svelte.ts";
@@ -326,9 +334,12 @@ class RoomConversationsStore {
           encodeRoomSendMessage(trimmed, { mentions, quote, thread }),
         ),
       );
-      await lescheClientOrFail().postRoomEnvelope(
-        roomId,
-        this.buildEnvelope(roomId, payload),
+      await runClientEffect(
+        postRoomEnvelope(
+          lescheBaseUrlOrFail(),
+          roomId,
+          this.buildEnvelope(roomId, payload),
+        ),
       );
       // The room moved: recents order by this on its own, so a room read to
       // the end (no badge left to fall) still climbs when something lands.
@@ -428,11 +439,13 @@ class RoomConversationsStore {
     if (!Number.isInteger(root) || root < 1) {
       return { lines, lastSeq: null, hasMore: false };
     }
-    const rows = await lescheClientOrFail().fetchRoomMessages(roomId, {
-      afterSeq,
-      thread: root,
-      limit: HISTORY_PAGE_SIZE,
-    });
+    const rows = await runClientEffect(
+      fetchRoomMessages(lescheBaseUrlOrFail(), roomId, {
+        afterSeq,
+        thread: root,
+        limit: HISTORY_PAGE_SIZE,
+      }),
+    );
     let lastSeq: number | null = null;
     for (const row of rows) {
       lastSeq = lastSeq === null ? row.seq : Math.max(lastSeq, row.seq);
@@ -497,7 +510,9 @@ class RoomConversationsStore {
     const fetchStartedAt = Date.now();
     let roster: RoomRosterView;
     try {
-      roster = await lescheClientOrFail().fetchRoomRoster(roomId);
+      roster = await runClientEffect(
+        fetchRoomRoster(lescheBaseUrlOrFail(), roomId),
+      );
     } catch {
       return; // roster fetch failed; the next poll retries
     }
@@ -547,9 +562,11 @@ class RoomConversationsStore {
     const conv = this.convs.get(roomId);
     if (!conv) return;
     try {
-      const rows = await lescheClientOrFail().fetchRoomMessages(roomId, {
-        afterSeq: conv.lastSeq ?? undefined,
-      });
+      const rows = await runClientEffect(
+        fetchRoomMessages(lescheBaseUrlOrFail(), roomId, {
+          afterSeq: conv.lastSeq ?? undefined,
+        }),
+      );
       for (const row of rows) {
         this.renderPublic(
           conv,

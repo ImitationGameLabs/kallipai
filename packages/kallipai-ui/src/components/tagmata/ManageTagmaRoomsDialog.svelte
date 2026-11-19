@@ -5,9 +5,13 @@
   // the room). Lazily fetched: the list is loaded ONLY when the dialog opens, so
   // the tagma dashboard overview never pays a request per card.
   import { Dialog, Portal } from "@skeletonlabs/skeleton-svelte";
-  import type { TagmaRoomView } from "@kallipai/kallipai-lesche-client";
+  import {
+    listMyTagmaRooms,
+    type TagmaRoomView,
+  } from "@kallipai/kallipai-lesche-client";
+  import { runClientEffect } from "@kallipai/kallipai-common";
   import ConfirmDialog from "../ConfirmDialog.svelte";
-  import { lescheClientOrFail } from "../../lib/session/archeion.svelte";
+  import { lescheBaseUrlOrFail } from "../../lib/session/archeion.svelte";
   import { roomsStore } from "../../lib/session/rooms.svelte";
   import {
     common_loading,
@@ -54,7 +58,9 @@
     loading = true;
     loadError = null;
     try {
-      rooms = await lescheClientOrFail().listMyTagmaRooms(tagmaId);
+      rooms = await runClientEffect(
+        listMyTagmaRooms(lescheBaseUrlOrFail(), tagmaId),
+      );
     } catch (e) {
       loadError = e instanceof Error ? e.message : String(e);
     } finally {

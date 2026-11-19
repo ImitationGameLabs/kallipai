@@ -6,7 +6,8 @@
 
 import { assert, assertEquals } from "@std/assert";
 import type { KeryxEvent } from "./types.ts";
-import { KeryxClient } from "./client.ts";
+import { runClientStream } from "@kallipai/kallipai-common";
+import { keryxEvents } from "./client.ts";
 import { DataPlaneApiError } from "./types.ts";
 
 Deno.test("keryxEvents passes the marker and id cursors through", async () => {
@@ -23,9 +24,8 @@ Deno.test("keryxEvents passes the marker and id cursors through", async () => {
       }),
     )) as typeof fetch;
   try {
-    const client = new KeryxClient("http://x");
     const events = [];
-    for await (const ev of client.keryxEvents()) {
+    for await (const ev of runClientStream(keryxEvents("http://x"))) {
       events.push(ev);
     }
     assertEquals(events.length, 2);
@@ -63,9 +63,8 @@ Deno.test(
         }),
       )) as typeof fetch;
     try {
-      const client = new KeryxClient("http://x");
       const events = [];
-      for await (const ev of client.keryxEvents()) {
+      for await (const ev of runClientStream(keryxEvents("http://x"))) {
         events.push(ev);
       }
       assertEquals(events.length, 1);
@@ -91,8 +90,7 @@ Deno.test("keryxEvents surfaces a non-2xx response as an error", async () => {
       }),
     )) as typeof fetch;
   try {
-    const client = new KeryxClient("http://x");
-    const iter = client.keryxEvents();
+    const iter = runClientStream(keryxEvents("http://x"));
     let threw = false;
     try {
       await iter.next();

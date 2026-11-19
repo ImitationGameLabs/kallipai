@@ -26,17 +26,20 @@ import {
   type Envelope,
   type LescheEvent,
   type MeEventFrame,
+  roomEvents,
   type SignalEvent,
   type TagmaStatusPayload,
 } from "@kallipai/kallipai-lesche-client";
-import type {
-  KeryxEvent,
-  KeryxEventFrame,
+import {
+  type KeryxEvent,
+  type KeryxEventFrame,
+  keryxEvents,
 } from "@kallipai/kallipai-keryx-client";
+import { runClientStream } from "@kallipai/kallipai-common";
 import { SvelteMap, SvelteSet } from "svelte/reactivity";
 import { reverifySession, type SessionVerifier } from "./realtimeReverify.ts";
 import type { TagmaStatusSummary } from "../tagmata.svelte.ts";
-import { keryxClientOrFail, lescheClientOrFail } from "./archeion.svelte.ts";
+import { keryxBaseUrlOrFail, lescheBaseUrlOrFail } from "./archeion.svelte.ts";
 import { MeCursor, ResyncBatcher, type ResyncPlan } from "./cursor.ts";
 import { recentStore } from "./recent.svelte.ts";
 import { tagmaKey, unreadStore } from "./unread.svelte.ts";
@@ -403,7 +406,7 @@ class RealtimeStore {
   private async runLesche(): Promise<void> {
     await this.runStream(
       "lesche",
-      (signal) => lescheClientOrFail().meEvents(signal),
+      (signal) => runClientStream(roomEvents(lescheBaseUrlOrFail()), signal),
       (frame) => {
         const plan = this.cursor.observe(frame);
         if (plan) this.resyncBatcher.push(plan);
@@ -420,7 +423,7 @@ class RealtimeStore {
   private async runKeryx(): Promise<void> {
     await this.runStream(
       "keryx",
-      (signal) => keryxClientOrFail().keryxEvents(signal),
+      (signal) => runClientStream(keryxEvents(keryxBaseUrlOrFail()), signal),
       (frame) => {
         if (frame.kind === "event") this.dispatchBilateral(frame.event);
       },

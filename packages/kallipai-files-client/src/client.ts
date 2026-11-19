@@ -1,10 +1,8 @@
-// The files service's verbs, as effects, plus the promise face the UI awaits
-// (`FilesClient`). The verbs mirror the server routes
+// The files service's verbs, as effects. The verbs mirror the server routes
 // (kallipai-files/src/state.rs): streaming upload (PUT ?path=), download (GET
 // /{id}), metadata (HEAD /{id}), listing (GET ?space=), delivery to another
 // principal's inbox (POST /{id}/send), and deletion (DELETE /{id}).
 
-import { runClientEffect } from "@kallipai/kallipai-common";
 import { Effect } from "effect";
 
 import { type FilesFailure, filesFetch, readBytes, readJson } from "./http.ts";
@@ -106,54 +104,4 @@ export function deleteRecord(
   return filesFetch(base, `/${id}`, { method: "DELETE" }).pipe(
     Effect.map(() => undefined),
   );
-}
-
-/**
- * The promise face of the verbs above, as this package offers it to consumers
- * (`kallipai-ui` is today's): one `runClientEffect` per call. Behaviour lives
- * in the verbs; a caller that can hold an Effect uses them directly. Do not
- * add behavior here. A rejection is the failure channel itself:
- * `FilesApiError` for a refusal, `TransportError` for a dead exchange.
- */
-export class FilesClient {
-  /** `base` is the full edge base, /v1/files included (the edge strips
-   * the /v1/files prefix before proxying -- the service name is the
-   * resource segment). Paths here are pure tails: `/{id}`, `/{id}/send`,
-   * `?query`. */
-  private readonly base: string;
-
-  constructor(base = "") {
-    // Trim a trailing slash so `${base}${path}` stays single-slash.
-    this.base = base.replace(/\/+$/, "");
-  }
-
-  put(
-    path: string,
-    blob: Blob | ArrayBuffer | Uint8Array,
-  ): Promise<PutResponse> {
-    return runClientEffect(putRecord(this.base, path, blob));
-  }
-
-  get(id: string): Promise<ArrayBuffer> {
-    return runClientEffect(getRecord(this.base, id));
-  }
-
-  head(id: string): Promise<boolean> {
-    return runClientEffect(headRecord(this.base, id));
-  }
-
-  list(options: ListOptions): Promise<FileEntryView[]> {
-    return runClientEffect(listRecords(this.base, options));
-  }
-
-  send(
-    id: string,
-    target: { toUser?: string; toTagma?: string },
-  ): Promise<SendResponse> {
-    return runClientEffect(sendRecord(this.base, id, target));
-  }
-
-  delete(id: string): Promise<void> {
-    return runClientEffect(deleteRecord(this.base, id));
-  }
 }

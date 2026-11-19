@@ -10,7 +10,28 @@
 
 import { assertEquals } from "@std/assert";
 import shapes from "../../../crates/platform/kallipai-lesche/src/route-shapes.json" with { type: "json" };
-import { LescheClient } from "./client.ts";
+import { runClientEffect, runClientStream } from "@kallipai/kallipai-common";
+import {
+  acceptRoomInvite,
+  addRoomTagma,
+  clearThreadSubscription,
+  createRoom,
+  createRoomInvite,
+  fetchRoomMessages,
+  fetchRoomRoster,
+  fetchRoomUnread,
+  fetchThreadSubscription,
+  joinRoom,
+  listMyTagmaRooms,
+  listMyRoomInvites,
+  listPublicRooms,
+  listRooms,
+  postRoomEnvelope,
+  removeRoomMember,
+  roomEvents,
+  setRoomReadCursor,
+  setThreadSubscription,
+} from "./client.ts";
 import type { Envelope } from "./types.ts";
 
 const ROUTES: ReadonlyArray<readonly string[]> = shapes.routes;
@@ -28,102 +49,129 @@ function dialledRouteExists(verb: string, path: string): boolean {
   });
 }
 
-/** One dial per method the class exposes, each with the route it must reach.
- * The assertions below compare this table's names with the prototype's and
- * each dial with its declared route, so a method added without a dial, or a
- * verb re-pointed at another route that already exists, fails here. */
+/** One dial per verb the module exports, each with the route it must reach.
+ * The assertions below compare this table's names with the module's function
+ * exports and each dial with its declared route, so a verb added without a
+ * dial, a dial row naming nothing, or a verb re-pointed at another route that
+ * already exists, fails here. */
 const DIALS: ReadonlyArray<
   readonly [
     name: string,
     verb: string,
     path: string,
-    dial: (client: LescheClient) => Promise<unknown>,
+    dial: (base: string) => Promise<unknown>,
   ]
 > = [
   [
     "postRoomEnvelope",
     "POST",
     "/rooms/r1/envelopes",
-    (c) => c.postRoomEnvelope("r1", {} as Envelope),
+    (b) => runClientEffect(postRoomEnvelope(b, "r1", {} as Envelope)),
   ],
   [
     "fetchRoomMessages",
     "GET",
     "/rooms/r1/messages",
-    (c) => c.fetchRoomMessages("r1", { afterSeq: 3, limit: 5 }),
+    (b) =>
+      runClientEffect(fetchRoomMessages(b, "r1", { afterSeq: 3, limit: 5 })),
   ],
-  ["createRoom", "POST", "/rooms", (c) => c.createRoom({ name: "n" })],
-  ["listRooms", "GET", "/rooms", (c) => c.listRooms()],
-  ["listPublicRooms", "GET", "/rooms/public", (c) => c.listPublicRooms()],
-  ["joinRoom", "POST", "/rooms/r1/join", (c) => c.joinRoom("r1")],
+  [
+    "createRoom",
+    "POST",
+    "/rooms",
+    (b) => runClientEffect(createRoom(b, { name: "n" })),
+  ],
+  ["listRooms", "GET", "/rooms", (b) => runClientEffect(listRooms(b))],
+  [
+    "listPublicRooms",
+    "GET",
+    "/rooms/public",
+    (b) => runClientEffect(listPublicRooms(b)),
+  ],
+  [
+    "joinRoom",
+    "POST",
+    "/rooms/r1/join",
+    (b) => runClientEffect(joinRoom(b, "r1")),
+  ],
   [
     "setRoomReadCursor",
     "PUT",
     "/rooms/r1/read-cursor",
-    (c) => c.setRoomReadCursor("r1", 7),
+    (b) => runClientEffect(setRoomReadCursor(b, "r1", 7)),
   ],
   [
     "fetchRoomUnread",
     "GET",
     "/rooms/r1/unread",
-    (c) => c.fetchRoomUnread("r1"),
+    (b) => runClientEffect(fetchRoomUnread(b, "r1")),
   ],
   [
     "fetchThreadSubscription",
     "GET",
     "/rooms/r1/threads/3/subscription",
-    (c) => c.fetchThreadSubscription("r1", 3),
+    (b) => runClientEffect(fetchThreadSubscription(b, "r1", 3)),
   ],
   [
     "setThreadSubscription",
     "PUT",
     "/rooms/r1/threads/3/subscription",
-    (c) => c.setThreadSubscription("r1", 3, "following"),
+    (b) => runClientEffect(setThreadSubscription(b, "r1", 3, "following")),
   ],
   [
     "clearThreadSubscription",
     "DELETE",
     "/rooms/r1/threads/3/subscription",
-    (c) => c.clearThreadSubscription("r1", 3),
+    (b) => runClientEffect(clearThreadSubscription(b, "r1", 3)),
   ],
-  ["fetchRoomRoster", "GET", "/rooms/r1", (c) => c.fetchRoomRoster("r1")],
-  ["listMyRoomInvites", "GET", "/rooms/invites", (c) => c.listMyRoomInvites()],
+  [
+    "fetchRoomRoster",
+    "GET",
+    "/rooms/r1",
+    (b) => runClientEffect(fetchRoomRoster(b, "r1")),
+  ],
+  [
+    "listMyRoomInvites",
+    "GET",
+    "/rooms/invites",
+    (b) => runClientEffect(listMyRoomInvites(b)),
+  ],
   [
     "createRoomInvite",
     "POST",
     "/rooms/r1/invites",
-    (c) => c.createRoomInvite("r1", "@u"),
+    (b) => runClientEffect(createRoomInvite(b, "r1", "@u")),
   ],
   [
     "acceptRoomInvite",
     "POST",
     "/rooms/r1/invites/i1/accept",
-    (c) => c.acceptRoomInvite("r1", "i1"),
+    (b) => runClientEffect(acceptRoomInvite(b, "r1", "i1")),
   ],
   [
     "removeRoomMember",
     "DELETE",
     "/rooms/r1/members/m1",
-    (c) => c.removeRoomMember("r1", "m1"),
+    (b) => runClientEffect(removeRoomMember(b, "r1", "m1")),
   ],
   [
     "addRoomTagma",
     "POST",
     "/rooms/r1/tagmata",
-    (c) => c.addRoomTagma("r1", "t-a"),
+    (b) => runClientEffect(addRoomTagma(b, "r1", "t-a")),
   ],
   [
     "listMyTagmaRooms",
     "GET",
     "/me/tagmata/t-a/rooms",
-    (c) => c.listMyTagmaRooms("t-a"),
+    (b) => runClientEffect(listMyTagmaRooms(b, "t-a")),
   ],
   [
-    "meEvents",
+    "roomEvents",
     "GET",
     "/me/events",
-    async (c) => {
-      const events = c.meEvents();
+    async (b) => {
+      const events = runClientStream(roomEvents(b));
       await events.next();
       await events.return(undefined);
     },
@@ -141,10 +189,9 @@ Deno.test(
       return Promise.resolve(Response.json({}));
     }) as typeof fetch;
     try {
-      const client = new LescheClient("http://x");
       for (const [name, verb, path, dial] of DIALS) {
         const before = seen.length;
-        await dial(client);
+        await dial("http://x");
         assertEquals(seen.length, before + 1, `${name} must dial once`);
         assertEquals(
           seen[before],
@@ -153,12 +200,13 @@ Deno.test(
         );
       }
       assertEquals(seen.length, DIALS.length);
-      // The dial table and the surface must name the same methods: a verb
-      // added without a dial fails here instead of slipping past the fixture.
+      // The dial table and the module's verbs must name the same set: a verb
+      // added without a dial, or a dial row naming nothing, fails here.
       assertEquals(
         DIALS.map(([name]) => name).sort(),
-        Object.getOwnPropertyNames(LescheClient.prototype)
-          .filter((name) => name !== "constructor")
+        Object.entries(await import("./client.ts"))
+          .filter(([, value]) => typeof value === "function")
+          .map(([name]) => name)
           .sort(),
       );
       for (const [verb, path] of seen) {

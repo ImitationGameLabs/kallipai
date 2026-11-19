@@ -9,13 +9,18 @@
   import { Dialog, Portal } from "@skeletonlabs/skeleton-svelte";
   import { onMount } from "svelte";
   import {
+    deleteRecord,
     FilesApiError,
+    getRecord,
+    listRecords,
+    putRecord,
     type FileEntryView,
     type PutResponse,
   } from "@kallipai/kallipai-files-client";
+  import { runClientEffect } from "@kallipai/kallipai-common";
   import {
     archeionSession,
-    filesClientOrFail,
+    filesBaseUrlOrFail,
   } from "../../lib/session/archeion.svelte";
   import {
     displayPath,
@@ -125,7 +130,9 @@
     phase = "loading";
     clearRowError();
     try {
-      entries = await filesClientOrFail().list({ space: "self", limit: LIMIT });
+      entries = await runClientEffect(
+        listRecords(filesBaseUrlOrFail(), { space: "self", limit: LIMIT }),
+      );
       phase = "ready";
     } catch {
       phase = "error";
@@ -135,7 +142,9 @@
   async function download(row: FileRowView): Promise<void> {
     clearRowError();
     try {
-      const bytes = await filesClientOrFail().get(row.id);
+      const bytes = await runClientEffect(
+        getRecord(filesBaseUrlOrFail(), row.id),
+      );
       const name = row.displayPath.split("/").pop() ?? row.displayPath;
       saveBlob(new Blob([bytes]), name);
     } catch {
@@ -154,7 +163,7 @@
     deleting = true;
     const target = deleteTarget;
     try {
-      await filesClientOrFail().delete(target.id);
+      await runClientEffect(deleteRecord(filesBaseUrlOrFail(), target.id));
       deleteTarget = null;
       if (highlightId === target.id) highlightId = null;
       await load();
@@ -186,9 +195,12 @@
     // The dropdown offers only the server's three legal areas (shared/,
     // inbox/, or tagmas/<id>/ for enrolled tagmata); others 400.
     try {
-      const minted: PutResponse = await filesClientOrFail().put(
-        `${selfPrefix}${uploadPrefix}${uploadFile.name}`,
-        uploadFile,
+      const minted: PutResponse = await runClientEffect(
+        putRecord(
+          filesBaseUrlOrFail(),
+          `${selfPrefix}${uploadPrefix}${uploadFile.name}`,
+          uploadFile,
+        ),
       );
       uploadOpen = false;
       // The highlight is the success signal: yield the filter so the

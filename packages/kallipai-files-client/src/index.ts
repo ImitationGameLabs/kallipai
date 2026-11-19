@@ -1,6 +1,5 @@
 export {
   deleteRecord,
-  FilesClient,
   getRecord,
   headRecord,
   listRecords,

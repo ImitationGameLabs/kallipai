@@ -47,9 +47,6 @@ import {
 } from "@kallipai/kallipai-archeion-client";
 import type { PairingCodeView } from "../passkeys.svelte.ts";
 import { INSTANCES_TOKEN_KEY } from "../instances/client.ts";
-import { LescheClient } from "@kallipai/kallipai-lesche-client";
-import { KeryxClient } from "@kallipai/kallipai-keryx-client";
-import { FilesClient } from "@kallipai/kallipai-files-client";
 import {
   auth_couldnt_reach,
   auth_no_signed_in_user,
@@ -108,52 +105,41 @@ export function archeionPolisOriginOrFail(): string {
   return base.slice(0, base.length - tail.length);
 }
 
-// The data-plane clients live on separate origins from the archeion; their
-// URLs are injected the same way (no import.meta.env in this library). The
-// session cookie is shared cross-subdomain, so the same credentialed fetch
-// works. The lesche client owns the rooms family (room envelopes, room
-// history, room management, the lesche /me/events stream); the keryx
-// client owns the bilateral family (key exchange, envelope posts, the
-// keryx /me/events stream, the projection/manage routes).
-let lescheClient: LescheClient | null = null;
-let keryxClient: KeryxClient | null = null;
+// The data-plane verbs live on separate origins from the archeion; their
+// base URLs are injected the same way (no import.meta.env in this library).
+// The session cookie is shared cross-subdomain, so the same credentialed fetch
+// works. The lesche base owns the rooms family (room envelopes, room history,
+// room management, the lesche /me/events stream); the keryx base owns the
+// bilateral family (key exchange, envelope posts, the keryx /me/events stream,
+// the projection/manage routes).
+let lescheBaseUrl = "";
 let keryxBaseUrl = "";
 
-/** Inject the lesche + keryx base URLs and construct the data-plane
- * clients. Called once at bootstrap alongside initArcheion. */
+/** Inject the lesche + keryx base URLs. Called once at bootstrap alongside
+ * initArcheion. The lesche base loses its trailing slash here, since the
+ * verbs concatenate path segments onto it; the keryx base is stored verbatim
+ * because the projection/manage clients take the same value. */
 export function initRelays(url: string, keryxUrl: string): void {
-  lescheClient = new LescheClient(url);
-  keryxClient = new KeryxClient(keryxUrl);
+  lescheBaseUrl = url.replace(/\/+$/, "");
   keryxBaseUrl = keryxUrl;
 }
 
-/** The data-plane (lesche) client; throws if initRelays has not been called.
+/** The data-plane (lesche) base; throws if initRelays has not been called.
  * Consumed by roomsStore (room management) and realtimeStore (the lesche
  * me/events SSE) -- both peer singletons. */
-export function lescheClientOrFail(): LescheClient {
-  if (!lescheClient) {
+export function lescheBaseUrlOrFail(): string {
+  if (!lescheBaseUrl) {
     throw new Error(
       "initRelays(url, keryxUrl) must be called at app bootstrap",
     );
   }
-  return lescheClient;
-}
-
-/** The data-plane (keryx) client; throws if initRelays has not been
- * called. Consumed by channelsStore (the key exchange + envelope relay)
- * and realtimeStore (the keryx me/events SSE). */
-export function keryxClientOrFail(): KeryxClient {
-  if (!keryxClient) {
-    throw new Error(
-      "initRelays(url, keryxUrl) must be called at app bootstrap",
-    );
-  }
-  return keryxClient;
+  return lescheBaseUrl;
 }
 
 /** The keryx service base; throws if initRelays has not been called.
- * Consumed by the projection/manage-REST clients (their routes moved to
- * the keryx service). */
+ * Consumed by channelsStore (the key exchange + envelope relay),
+ * realtimeStore (the keryx me/events SSE), and the projection/manage-REST
+ * clients (their routes moved to the keryx service). */
 export function keryxBaseUrlOrFail(): string {
   if (!keryxBaseUrl) {
     throw new Error(
@@ -163,25 +149,26 @@ export function keryxBaseUrlOrFail(): string {
   return keryxBaseUrl;
 }
 
-// The files (transfer-plane) client lives on its own origin too; its URL is
+// The files (transfer-plane) base lives on its own origin too; its URL is
 // injected the same way (no import.meta.env in this library). The session
 // cookie is shared cross-subdomain, so the same credentialed fetch works.
-let filesClient: FilesClient | null = null;
+let filesBaseUrl = "";
 
-/** Inject the files base URL and construct the transfer client. Called once
- * at bootstrap alongside initArcheion/initRelays. */
+/** Inject the files base URL. Called once at bootstrap alongside
+ * initArcheion/initRelays. The URL loses its trailing slash here, same as
+ * the lesche base. */
 export function initFiles(url: string): void {
-  filesClient = new FilesClient(url);
+  filesBaseUrl = url.replace(/\/+$/, "");
 }
 
-/** The files (transfer-plane) client; throws if initFiles has not been
- * called. Consumed by the chat page's attachment orchestration (shared
- * upload -> inbox delivery -> message reference). */
-export function filesClientOrFail(): FilesClient {
-  if (!filesClient) {
+/** The files (transfer-plane) base; throws if initFiles has not been called.
+ * Consumed by the chat page's attachment orchestration (shared upload ->
+ * inbox delivery -> message reference). */
+export function filesBaseUrlOrFail(): string {
+  if (!filesBaseUrl) {
     throw new Error("initFiles(url) must be called at app bootstrap");
   }
-  return filesClient;
+  return filesBaseUrl;
 }
 
 /** sessionStorage key stashing the in-flight OAuth provider + action across the

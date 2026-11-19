@@ -1,8 +1,8 @@
-// The effect face of the keryx verbs: a refusal and a dead exchange arrive in
-// the failure channel as values, the POST verbs carry the CSRF marker, and the
-// stream verb carries the same two failures. The promise-shaped class is
-// pinned by `events.test.ts` and `keryx-route-shapes_test.ts`; these legs pin
-// the surface a consumer reaches for when it stops awaiting.
+// The failure channel of the keryx verbs: a refusal and a dead exchange
+// arrive as values, the POST verbs carry the CSRF marker, and the stream
+// verb carries the same two. The wire shape is pinned by `events.test.ts`
+// and `keryx-route-shapes_test.ts`; these legs pin the typed failures a
+// caller sees when it runs the verb's effect.
 
 import { CSRF_HEADER, TransportError } from "@kallipai/kallipai-common";
 import { withFetch } from "@kallipai/kallipai-common/testing";

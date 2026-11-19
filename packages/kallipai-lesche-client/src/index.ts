@@ -10,7 +10,27 @@
 
 export const PACKAGE_NAME = "@kallipai/kallipai-lesche-client";
 
-export { LescheClient } from "./client.ts";
+export {
+  acceptRoomInvite,
+  addRoomTagma,
+  clearThreadSubscription,
+  createRoom,
+  createRoomInvite,
+  fetchRoomMessages,
+  fetchRoomRoster,
+  fetchRoomUnread,
+  fetchThreadSubscription,
+  joinRoom,
+  listMyTagmaRooms,
+  listMyRoomInvites,
+  listPublicRooms,
+  listRooms,
+  postRoomEnvelope,
+  removeRoomMember,
+  roomEvents,
+  setRoomReadCursor,
+  setThreadSubscription,
+} from "./client.ts";
 
 // Data-plane wire types the UI consumes. The remaining wire types are
 // package-private.

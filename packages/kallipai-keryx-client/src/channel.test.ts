@@ -24,11 +24,10 @@ import {
 import { DataPlaneApiError } from "./types.ts";
 import type { Participant } from "./types.ts";
 import { decodeB64, encodeB64 } from "@kallipai/kallipai-common";
-import type { KeryxClient } from "./client.ts";
+import { withFetch } from "@kallipai/kallipai-common/testing";
 import type {
   Envelope,
   KeyExchangeInit,
-  KeyExchangeResponse,
   TagmaControl,
   TagmaReply,
   TagmaRequest,
@@ -36,18 +35,50 @@ import type {
 
 const enc = new TextEncoder();
 
-/** A minimal tagma-relay mock for the data plane: the conversation + KEX +
- * envelope relay are served by the `keryx` mock; the pinned device key (TOFU
- * from the archeion in production) is returned as `pinnedKeyB64` for the caller to
- * pass into `openRelayChannel`. On each posted envelope the keryx mock
- * decrypts the initiator's request and enqueues an `assistant_content` reply
- * back into the channel. */
+const BASE = "http://keryx.test";
+interface Hop {
+  readonly method: string;
+  readonly path: string;
+  readonly body: unknown;
+}
+const json = (body: unknown, status = 200) =>
+  new Response(JSON.stringify(body), { status });
+interface Relay {
+  handle(hop: Hop): Response;
+}
+/** The relay the stub routes to; each `makeMock` replaces it. Before the
+ * first `makeMock` nothing answers, so a stray dial fails instead of
+ * reaching the network. */
+const NOTHING: Relay = { handle: () => new Response(null, { status: 404 }) };
+let relay: Relay = NOTHING;
+const stub = ((input: string | URL, init?: RequestInit) => {
+  const url = new URL(String(input));
+  return Promise.resolve(
+    relay.handle({
+      method: init?.method ?? "GET",
+      path: url.pathname,
+      body: init?.body ? JSON.parse(String(init.body)) : null,
+    }),
+  );
+}) as typeof fetch;
+/** Every case runs against the stub. */
+function test(name: string, run: () => Promise<void>): void {
+  Deno.test(name, () => withFetch(stub, run));
+}
+/** A minimal tagma-relay mock for the data plane: the fetch stub answers the
+ * conversation, KEX and envelope routes the verbs dial and plays the
+ * responder's half of the AEAD exchange. The pinned device key (TOFU from the
+ * archeion in production) is returned as `pinnedKeyB64` for the caller to pass
+ * into `openRelayChannel`. On each posted envelope the mock decrypts the
+ * initiator's request and enqueues an `assistant_content` reply back into the
+ * channel. */
 function makeMock(deviceSecret: Uint8Array, tagmaId: string, convId: string) {
   const devicePub = ed25519.getPublicKey(deviceSecret);
   const pinnedKeyB64 = encodeB64(devicePub);
   let responderKey: Uint8Array | null = null;
   let channel: RelayChannel | null = null;
   let responderSeq = 0;
+  let envelopeFailure = 0;
   // Captured state for assertions: the initiator-originated sequence numbers
   // seen and the most-recent decrypted request/control.
   const receivedSeqs: number[] = [];
@@ -76,52 +107,79 @@ function makeMock(deviceSecret: Uint8Array, tagmaId: string, convId: string) {
     });
   }
 
-  const keryx = {
-    createConversation(_t: string) {
-      return { conversation_id: convId };
-    },
-    keyExchangeInit(_c: string, init: KeyExchangeInit): KeyExchangeResponse {
-      const initiatorEph = decodeB64(init.ephemeral_public);
-      const rpriv = x25519.utils.randomSecretKey();
-      const rpub = x25519.getPublicKey(rpriv);
-      const shared = x25519.scalarMult(rpriv, initiatorEph);
-      responderKey = hkdf(sha256, shared, new Uint8Array(), HKDF_INFO, 32);
-      const sig = ed25519.sign(
-        kexTranscript(tagmaId, convId, initiatorEph, rpub),
-        deviceSecret,
-      );
-      return { ephemeral_public: encodeB64(rpub), signature: encodeB64(sig) };
-    },
-    postEnvelope(_c: string, envelope: Envelope): void {
-      // Responder decrypts the initiator's request (dir=0).
-      const pt = aeadDecrypt(
-        responderKey!,
-        DIR_INITIATOR_TO_RESPONDER,
-        envelope.sequence_n,
-        decodeB64(envelope.ciphertext),
-      );
-      assertExists(pt, "responder must decrypt the initiator's envelope");
-      const req = JSON.parse(new TextDecoder().decode(pt)) as
-        | TagmaRequest
-        | TagmaControl;
-      lastRequest = req;
-      receivedSeqs.push(envelope.sequence_n);
-      // A history control op carries no agent action; the mock just records it
-      // (a real tagma would reply with the batch). Otherwise echo the text.
-      if (req.op === "send_message") {
-        respond({
-          kind: "event",
-          event: { type: "assistant_content", content: `echo:${req.text}` },
-          history_id: 0,
+  relay = {
+    handle(hop: Hop): Response {
+      if (hop.method === "POST" && hop.path === "/conversations") {
+        return json({ conversation_id: convId });
+      }
+      if (
+        hop.method === "POST" &&
+        hop.path === `/conversations/${convId}/key-exchange/init`
+      ) {
+        const init = hop.body as KeyExchangeInit;
+        const initiatorEph = decodeB64(init.ephemeral_public);
+        const rpriv = x25519.utils.randomSecretKey();
+        const rpub = x25519.getPublicKey(rpriv);
+        const shared = x25519.scalarMult(rpriv, initiatorEph);
+        responderKey = hkdf(sha256, shared, new Uint8Array(), HKDF_INFO, 32);
+        const sig = ed25519.sign(
+          kexTranscript(tagmaId, convId, initiatorEph, rpub),
+          deviceSecret,
+        );
+        return json({
+          ephemeral_public: encodeB64(rpub),
+          signature: encodeB64(sig),
         });
       }
+      if (
+        hop.method === "POST" &&
+        hop.path === `/conversations/${convId}/envelopes`
+      ) {
+        if (envelopeFailure !== 0) {
+          return json(
+            { error: { message: "tagma is offline" } },
+            envelopeFailure,
+          );
+        }
+        const envelope = hop.body as Envelope;
+        // Responder decrypts the initiator's request (dir=0).
+        const pt = aeadDecrypt(
+          responderKey!,
+          DIR_INITIATOR_TO_RESPONDER,
+          envelope.sequence_n,
+          decodeB64(envelope.ciphertext),
+        );
+        assertExists(pt, "responder must decrypt the initiator's envelope");
+        const req = JSON.parse(new TextDecoder().decode(pt)) as
+          | TagmaRequest
+          | TagmaControl;
+        lastRequest = req;
+        receivedSeqs.push(envelope.sequence_n);
+        // A history control op carries no agent action; the mock just records it
+        // (a real tagma would reply with the batch). Otherwise echo the text.
+        if (req.op === "send_message") {
+          respond({
+            kind: "event",
+            event: { type: "assistant_content", content: `echo:${req.text}` },
+            history_id: 0,
+          });
+        }
+        return new Response(null, {
+          status: 202,
+          headers: { "content-length": "0" },
+        });
+      }
+      return json({ error: { message: "no such route" } }, 404);
     },
   };
   return {
-    keryx,
+    base: BASE,
     pinnedKeyB64,
     setChannel: (c: RelayChannel) => {
       channel = c;
+    },
+    failEnvelopes: (status: number) => {
+      envelopeFailure = status;
     },
     /** Push a raw responder reply (for dedup tests). */
     respond,
@@ -130,203 +188,185 @@ function makeMock(deviceSecret: Uint8Array, tagmaId: string, convId: string) {
   };
 }
 
-Deno.test(
-  "openRelayChannel + send round-trips against a mock tagma relay",
-  async () => {
-    const tagmaId = "tagma-1";
-    const convId = "conv-1";
-    const userId = "user-1";
-    const deviceSecret = ed25519.utils.randomSecretKey();
-    const { keryx, pinnedKeyB64, setChannel } = makeMock(
-      deviceSecret,
-      tagmaId,
-      convId,
-    );
+test("openRelayChannel + send round-trips against a mock tagma relay", async () => {
+  const tagmaId = "tagma-1";
+  const convId = "conv-1";
+  const userId = "user-1";
+  const deviceSecret = ed25519.utils.randomSecretKey();
+  const { base, pinnedKeyB64, setChannel } = makeMock(
+    deviceSecret,
+    tagmaId,
+    convId,
+  );
 
-    const channel = await openRelayChannel(
-      keryx as unknown as KeryxClient,
-      tagmaId,
-      userId,
-      "Alice",
-      pinnedKeyB64,
-    );
-    assertEquals(channel.conversationId, convId);
-    assertEquals(channel.tagmaId, tagmaId);
-    setChannel(channel);
+  const channel = await openRelayChannel(
+    base,
+    tagmaId,
+    userId,
+    "Alice",
+    pinnedKeyB64,
+  );
+  assertEquals(channel.conversationId, convId);
+  assertEquals(channel.tagmaId, tagmaId);
+  setChannel(channel);
 
-    await channel.send("hello");
+  await channel.send("hello");
 
-    const iter = channel.replies();
-    const first = await iter.next();
-    assertEquals(first.done, false);
-    const reply = (first.value as { sender: Participant; reply: TagmaReply })
-      .reply;
-    if (reply.kind !== "event") {
-      throw new Error(`expected event, got ${reply.kind}`);
-    }
-    if (reply.event.type !== "assistant_content") {
-      throw new Error(`expected assistant_content, got ${reply.event.type}`);
-    }
-    assertEquals(reply.event.content, "echo:hello");
-    channel.close();
-    assertEquals((await iter.next()).done, true);
-  },
-);
+  const iter = channel.replies();
+  const first = await iter.next();
+  assertEquals(first.done, false);
+  const reply = (first.value as { sender: Participant; reply: TagmaReply })
+    .reply;
+  if (reply.kind !== "event") {
+    throw new Error(`expected event, got ${reply.kind}`);
+  }
+  if (reply.event.type !== "assistant_content") {
+    throw new Error(`expected assistant_content, got ${reply.event.type}`);
+  }
+  assertEquals(reply.event.content, "echo:hello");
+  channel.close();
+  assertEquals((await iter.next()).done, true);
+});
 
-Deno.test(
-  "send increments sequence_n from 0 (the AEAD nonce counter)",
-  async () => {
-    const { keryx, pinnedKeyB64, setChannel, receivedSeqs } = makeMock(
-      ed25519.utils.randomSecretKey(),
-      "tagma-s",
-      "conv-s",
-    );
-    const channel = await openRelayChannel(
-      keryx as unknown as KeryxClient,
-      "tagma-s",
-      "u",
-      "Alice",
-      pinnedKeyB64,
-    );
-    setChannel(channel);
-    await channel.send("a");
-    await channel.send("b");
-    assertEquals(receivedSeqs, [0, 1]);
-    channel.close();
-  },
-);
+test("send increments sequence_n from 0 (the AEAD nonce counter)", async () => {
+  const { base, pinnedKeyB64, setChannel, receivedSeqs } = makeMock(
+    ed25519.utils.randomSecretKey(),
+    "tagma-s",
+    "conv-s",
+  );
+  const channel = await openRelayChannel(
+    base,
+    "tagma-s",
+    "u",
+    "Alice",
+    pinnedKeyB64,
+  );
+  setChannel(channel);
+  await channel.send("a");
+  await channel.send("b");
+  assertEquals(receivedSeqs, [0, 1]);
+  channel.close();
+});
 
-Deno.test(
-  "an undecryptable inbound envelope is dropped, not yielded",
-  async () => {
-    const { keryx, pinnedKeyB64, setChannel } = makeMock(
-      ed25519.utils.randomSecretKey(),
-      "tagma-d",
-      "conv-d",
+test("an undecryptable inbound envelope is dropped, not yielded", async () => {
+  const { base, pinnedKeyB64, setChannel } = makeMock(
+    ed25519.utils.randomSecretKey(),
+    "tagma-d",
+    "conv-d",
+  );
+  const channel = await openRelayChannel(
+    base,
+    "tagma-d",
+    "u",
+    "Alice",
+    pinnedKeyB64,
+  );
+  setChannel(channel);
+  // A garbage-ciphertext envelope (the SSE demux would route this in) that
+  // cannot decrypt under the session key.
+  channel.enqueue({
+    channel_id: channel.conversationId,
+    sender: { id: "tagma-d", kind: "agent", handle: "Tagma" },
+    sequence_n: 99,
+    trace_id: "t",
+    timestamp: new Date().toISOString(),
+    ciphertext: "AAAA",
+  });
+  // A valid send right after produces a real reply, which must be the FIRST
+  // yielded value (the tampered one was dropped).
+  await channel.send("ok");
+  const iter = channel.replies();
+  const first = await iter.next();
+  const reply = (first.value as { sender: Participant; reply: TagmaReply })
+    .reply;
+  if (reply.kind !== "event" || reply.event.type !== "assistant_content") {
+    throw new Error(
+      `tampered envelope was not dropped; got ${JSON.stringify(reply)}`,
     );
-    const channel = await openRelayChannel(
-      keryx as unknown as KeryxClient,
-      "tagma-d",
-      "u",
-      "Alice",
-      pinnedKeyB64,
-    );
-    setChannel(channel);
-    // A garbage-ciphertext envelope (the SSE demux would route this in) that
-    // cannot decrypt under the session key.
-    channel.enqueue({
-      channel_id: channel.conversationId,
-      sender: { id: "tagma-d", kind: "agent", handle: "Tagma" },
-      sequence_n: 99,
-      trace_id: "t",
-      timestamp: new Date().toISOString(),
-      ciphertext: "AAAA",
-    });
-    // A valid send right after produces a real reply, which must be the FIRST
-    // yielded value (the tampered one was dropped).
-    await channel.send("ok");
-    const iter = channel.replies();
-    const first = await iter.next();
-    const reply = (first.value as { sender: Participant; reply: TagmaReply })
-      .reply;
-    if (reply.kind !== "event" || reply.event.type !== "assistant_content") {
-      throw new Error(
-        `tampered envelope was not dropped; got ${JSON.stringify(reply)}`,
-      );
-    }
-    channel.close();
-  },
-);
+  }
+  channel.close();
+});
 
-Deno.test(
-  "send surfaces a postEnvelope 503 (tagma offline) as a rejection",
-  async () => {
-    const { keryx, pinnedKeyB64, setChannel } = makeMock(
-      ed25519.utils.randomSecretKey(),
-      "tagma-503",
-      "conv-503",
+test("send surfaces a postEnvelope 503 (tagma offline) as a rejection", async () => {
+  const { base, pinnedKeyB64, setChannel, failEnvelopes } = makeMock(
+    ed25519.utils.randomSecretKey(),
+    "tagma-503",
+    "conv-503",
+  );
+  const channel = await openRelayChannel(
+    base,
+    "tagma-503",
+    "u",
+    "Alice",
+    pinnedKeyB64,
+  );
+  setChannel(channel);
+  // The keryx answers 503 "tagma offline" on the envelope route.
+  failEnvelopes(503);
+  let caught: unknown;
+  try {
+    await channel.send("x");
+  } catch (e) {
+    caught = e;
+  }
+  if (!(caught instanceof DataPlaneApiError) || caught.status !== 503) {
+    throw new Error(
+      `expected DataPlaneApiError(503), got ${JSON.stringify(caught)}`,
     );
-    const channel = await openRelayChannel(
-      keryx as unknown as KeryxClient,
-      "tagma-503",
-      "u",
-      "Alice",
-      pinnedKeyB64,
-    );
-    setChannel(channel);
-    // Swap postEnvelope to a 503 (the keryx returns 503 "tagma offline").
-    const overridable = keryx as unknown as { postEnvelope: () => void };
-    overridable.postEnvelope = () => {
-      throw new DataPlaneApiError(503, "tagma is offline");
-    };
-    let caught: unknown;
-    try {
-      await channel.send("x");
-    } catch (e) {
-      caught = e;
-    }
-    if (!(caught instanceof DataPlaneApiError) || caught.status !== 503) {
-      throw new Error(
-        `expected DataPlaneApiError(503), got ${JSON.stringify(caught)}`,
-      );
-    }
-    channel.close();
-  },
-);
+  }
+  channel.close();
+});
 
-Deno.test(
-  "replies yields every frame without dedup (dedup is the UI store's job)",
-  async () => {
-    // The channel is a pure transport: it does NOT dedup by history_id. Two
-    // deliveries of the same frame both yield — ordering/dedup across batch
-    // replay and live frames is the UI store's responsibility (it owns the
-    // rendered cursor and the local cache).
-    const { keryx, pinnedKeyB64, setChannel, respond } = makeMock(
-      ed25519.utils.randomSecretKey(),
-      "tagma-h",
-      "conv-h",
-    );
-    const channel = await openRelayChannel(
-      keryx as unknown as KeryxClient,
-      "tagma-h",
-      "u",
-      "Alice",
-      pinnedKeyB64,
-    );
-    setChannel(channel);
+test("replies yields every frame without dedup (dedup is the UI store's job)", async () => {
+  // The channel is a pure transport: it does NOT dedup by history_id. Two
+  // deliveries of the same frame both yield — ordering/dedup across batch
+  // replay and live frames is the UI store's responsibility (it owns the
+  // rendered cursor and the local cache).
+  const { base, pinnedKeyB64, setChannel, respond } = makeMock(
+    ed25519.utils.randomSecretKey(),
+    "tagma-h",
+    "conv-h",
+  );
+  const channel = await openRelayChannel(
+    base,
+    "tagma-h",
+    "u",
+    "Alice",
+    pinnedKeyB64,
+  );
+  setChannel(channel);
 
-    const event = (id: number): TagmaReply => ({
-      kind: "event",
-      event: { type: "assistant_content", content: `m${id}` },
-      history_id: id,
-    });
-    respond(event(1));
-    respond(event(1)); // duplicate — yielded again; the store drops it
-    respond(event(2));
+  const event = (id: number): TagmaReply => ({
+    kind: "event",
+    event: { type: "assistant_content", content: `m${id}` },
+    history_id: id,
+  });
+  respond(event(1));
+  respond(event(1)); // duplicate — yielded again; the store drops it
+  respond(event(2));
 
-    const iter = channel.replies();
-    const a = ((await iter.next()).value as { reply: TagmaReply }).reply;
-    const b = ((await iter.next()).value as { reply: TagmaReply }).reply;
-    const c = ((await iter.next()).value as { reply: TagmaReply }).reply;
-    assertEquals((a as { event: { content: string } }).event.content, "m1");
-    assertEquals(
-      (b as { event: { content: string } }).event.content,
-      "m1",
-      "the channel yields the duplicate; the store dedups",
-    );
-    assertEquals((c as { event: { content: string } }).event.content, "m2");
-    channel.close();
-  },
-);
+  const iter = channel.replies();
+  const a = ((await iter.next()).value as { reply: TagmaReply }).reply;
+  const b = ((await iter.next()).value as { reply: TagmaReply }).reply;
+  const c = ((await iter.next()).value as { reply: TagmaReply }).reply;
+  assertEquals((a as { event: { content: string } }).event.content, "m1");
+  assertEquals(
+    (b as { event: { content: string } }).event.content,
+    "m1",
+    "the channel yields the duplicate; the store dedups",
+  );
+  assertEquals((c as { event: { content: string } }).event.content, "m2");
+  channel.close();
+});
 
-Deno.test("history() sends a cursor-based history control op", async () => {
-  const { keryx, pinnedKeyB64, setChannel, lastRequest } = makeMock(
+test("history() sends a cursor-based history control op", async () => {
+  const { base, pinnedKeyB64, setChannel, lastRequest } = makeMock(
     ed25519.utils.randomSecretKey(),
     "tagma-c",
     "conv-c",
   );
   const channel = await openRelayChannel(
-    keryx as unknown as KeryxClient,
+    base,
     "tagma-c",
     "u",
     "Alice",
@@ -344,53 +384,50 @@ Deno.test("history() sends a cursor-based history control op", async () => {
   channel.close();
 });
 
-Deno.test(
-  "manage() round-trips: request and response correlation",
-  async () => {
-    const { keryx, pinnedKeyB64, setChannel, respond, lastRequest } = makeMock(
-      ed25519.utils.randomSecretKey(),
-      "tagma-m",
-      "conv-m",
-    );
-    const channel = await openRelayChannel(
-      keryx as unknown as KeryxClient,
-      "tagma-m",
-      "u",
-      "Alice",
-      pinnedKeyB64,
-    );
-    setChannel(channel);
+test("manage() round-trips: request and response correlation", async () => {
+  const { base, pinnedKeyB64, setChannel, respond, lastRequest } = makeMock(
+    ed25519.utils.randomSecretKey(),
+    "tagma-m",
+    "conv-m",
+  );
+  const channel = await openRelayChannel(
+    base,
+    "tagma-m",
+    "u",
+    "Alice",
+    pinnedKeyB64,
+  );
+  setChannel(channel);
 
-    const managePromise = channel.manage("GET", "/budget");
-    // The mock captured the manage control op (including req_id).
-    const req = lastRequest() as TagmaControl | null;
-    if (!req || req.op !== "manage") {
-      throw new Error(`expected manage control, got ${JSON.stringify(req)}`);
-    }
-    assertEquals(req.method, "GET");
-    assertEquals(req.path, "/budget");
-    // Respond with a manage_result matching the req_id.
-    respond({
-      kind: "manage_result",
-      req_id: req.req_id,
-      status: 200,
-      body: { total: 5000 },
-    });
-    const result = await managePromise;
-    assertEquals(result.status, 200);
-    assertEquals(result.body, { total: 5000 });
-    channel.close();
-  },
-);
+  const managePromise = channel.manage("GET", "/budget");
+  // The mock captured the manage control op (including req_id).
+  const req = lastRequest() as TagmaControl | null;
+  if (!req || req.op !== "manage") {
+    throw new Error(`expected manage control, got ${JSON.stringify(req)}`);
+  }
+  assertEquals(req.method, "GET");
+  assertEquals(req.path, "/budget");
+  // Respond with a manage_result matching the req_id.
+  respond({
+    kind: "manage_result",
+    req_id: req.req_id,
+    status: 200,
+    body: { total: 5000 },
+  });
+  const result = await managePromise;
+  assertEquals(result.status, 200);
+  assertEquals(result.body, { total: 5000 });
+  channel.close();
+});
 
-Deno.test("close() rejects pending manage() promises", async () => {
-  const { keryx, pinnedKeyB64, setChannel } = makeMock(
+test("close() rejects pending manage() promises", async () => {
+  const { base, pinnedKeyB64, setChannel } = makeMock(
     ed25519.utils.randomSecretKey(),
     "tagma-c2",
     "conv-c2",
   );
   const channel = await openRelayChannel(
-    keryx as unknown as KeryxClient,
+    base,
     "tagma-c2",
     "u",
     "Alice",
@@ -415,14 +452,14 @@ Deno.test("close() rejects pending manage() promises", async () => {
   assertEquals(caught.message, "channel closed");
 });
 
-Deno.test("manage() honours a per-call timeoutMs", async () => {
-  const { keryx, pinnedKeyB64, setChannel } = makeMock(
+test("manage() honours a per-call timeoutMs", async () => {
+  const { base, pinnedKeyB64, setChannel } = makeMock(
     ed25519.utils.randomSecretKey(),
     "tagma-t2",
     "conv-t2",
   );
   const channel = await openRelayChannel(
-    keryx as unknown as KeryxClient,
+    base,
     "tagma-t2",
     "u",
     "Alice",
@@ -456,14 +493,14 @@ Deno.test("manage() honours a per-call timeoutMs", async () => {
   );
 });
 
-Deno.test("manage() on a closed channel rejects without waiting", async () => {
-  const { keryx, pinnedKeyB64, setChannel } = makeMock(
+test("manage() on a closed channel rejects without waiting", async () => {
+  const { base, pinnedKeyB64, setChannel } = makeMock(
     ed25519.utils.randomSecretKey(),
     "tagma-c3",
     "conv-c3",
   );
   const channel = await openRelayChannel(
-    keryx as unknown as KeryxClient,
+    base,
     "tagma-c3",
     "u",
     "Alice",
@@ -481,14 +518,14 @@ Deno.test("manage() on a closed channel rejects without waiting", async () => {
   assertEquals((caught as ManageChannelError).reason, "closed");
 });
 
-Deno.test("send carries the attachment on the send_message op", async () => {
-  const { keryx, pinnedKeyB64, setChannel, lastRequest } = makeMock(
+test("send carries the attachment on the send_message op", async () => {
+  const { base, pinnedKeyB64, setChannel, lastRequest } = makeMock(
     ed25519.utils.randomSecretKey(),
     "tagma-att",
     "conv-att",
   );
   const channel = await openRelayChannel(
-    keryx as unknown as KeryxClient,
+    base,
     "tagma-att",
     "u",
     "Alice",

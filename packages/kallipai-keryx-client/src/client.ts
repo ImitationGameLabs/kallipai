@@ -18,8 +18,6 @@ import {
   dataPlaneRequest,
   eventFrames,
   type EventFrame,
-  runClientEffect,
-  runClientStream,
 } from "@kallipai/kallipai-common";
 import { Effect, type Stream } from "effect";
 
@@ -96,45 +94,4 @@ export function keryxEvents(
   base: string,
 ): Stream.Stream<KeryxEventFrame, DataPlaneFailure> {
   return eventFrames<KeryxEvent>(base + "/me/events");
-}
-
-/**
- * The keryx data plane (the keryx service, default :7210): conversation
- * setup, the synchronous key exchange, envelope posting, and the bilateral
- * `me/events` SSE.
- *
- * The promise face of those verbs, as this package offers it to consumers
- * (`kallipai-ui` is today's): one `runClientEffect` per call and
- * `runClientStream` for the stream. Behaviour lives in the verbs above; a
- * caller that can hold an Effect uses them directly. Do not add behavior here.
- * A rejection is the failure channel itself: `DataPlaneApiError` for a
- * refusal, `TransportError` for a dead exchange.
- */
-export class KeryxClient {
-  constructor(private readonly base: string) {}
-
-  /** {@linkcode createConversation}. */
-  createConversation(tagmaId: string): Promise<CreateConversationResponse> {
-    return runClientEffect(createConversation(this.base, tagmaId));
-  }
-
-  /** {@linkcode keyExchangeInit}. */
-  keyExchangeInit(
-    conversationId: string,
-    init: KeyExchangeInit,
-  ): Promise<KeyExchangeResponse> {
-    return runClientEffect(keyExchangeInit(this.base, conversationId, init));
-  }
-
-  /** {@linkcode postEnvelope}. */
-  postEnvelope(conversationId: string, envelope: Envelope): Promise<void> {
-    return runClientEffect(postEnvelope(this.base, conversationId, envelope));
-  }
-
-  /** The generator face of {@linkcode keryxEvents}: same frames, same failure
-   * channel surfaced as a thrown `DataPlaneApiError`/`TransportError`, and it
-   * ends cleanly when `signal` aborts. */
-  keryxEvents(signal?: AbortSignal): AsyncGenerator<KeryxEventFrame> {
-    return runClientStream(keryxEvents(this.base), signal);
-  }
 }

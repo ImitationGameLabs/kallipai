@@ -48,7 +48,7 @@ Deno.test(
     const src = source(BAR);
     assert(!src.includes("fetch("), "the bar must not speak HTTP");
     assert(
-      !src.includes("FilesClient"),
+      !src.includes("@kallipai/kallipai-files-client"),
       "the bar must not depend on the files client",
     );
   },

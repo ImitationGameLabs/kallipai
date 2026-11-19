@@ -11,15 +11,19 @@
   // open) so the page works standalone, and re-fetched after each mutation.
   import { ChevronDown, ChevronLeft } from "@lucide/svelte";
   import { Menu, Portal } from "@skeletonlabs/skeleton-svelte";
-  import { participantIdForTagma } from "@kallipai/kallipai-common";
-  import type {
-    RoomMemberProfile,
-    RoomRosterView,
+  import {
+    participantIdForTagma,
+    runClientEffect,
+  } from "@kallipai/kallipai-common";
+  import {
+    type RoomMemberProfile,
+    type RoomRosterView,
+    fetchRoomRoster,
   } from "@kallipai/kallipai-lesche-client";
   import ConfirmDialog from "../components/ConfirmDialog.svelte";
   import {
     archeionSession,
-    lescheClientOrFail,
+    lescheBaseUrlOrFail,
   } from "../lib/session/archeion.svelte";
   import { roomsStore } from "../lib/session/rooms.svelte";
   import { roomConversationsStore } from "../lib/session/roomConversations.svelte";
@@ -153,7 +157,9 @@
   // overwrite the current view on a fast client-side nav.
   async function loadRoster(id: string, isStale: () => boolean): Promise<void> {
     try {
-      const next = await lescheClientOrFail().fetchRoomRoster(id);
+      const next = await runClientEffect(
+        fetchRoomRoster(lescheBaseUrlOrFail(), id),
+      );
       if (isStale()) return;
       roster = next;
       rosterError = null;

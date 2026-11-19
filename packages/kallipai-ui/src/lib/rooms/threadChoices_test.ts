@@ -1,6 +1,6 @@
 // The standing cache: one read per thread, one shared request while a read is
 // out, a failure remembered instead of retried, and a write replacing what the
-// read left. The client is a structural fake (no wire), and the passthrough
+// read left. The route is stubbed at the wire, and the passthrough
 // `$state` shim lets the rune-bearing module run uncompiled -- the harness the
 // other store tests use.
 
@@ -12,8 +12,8 @@ declare global {
 (globalThis as Record<string, unknown>)["$state"] = (v: unknown) => v;
 
 const { assertEquals } = await import("@std/assert");
-const { initRelays, lescheClientOrFail } =
-  await import("../session/archeion.svelte.ts");
+const { withFetch } = await import("@kallipai/kallipai-common/testing");
+const { initRelays } = await import("../session/archeion.svelte.ts");
 const {
   clearThreadChoice,
   ensureThreadChoice,
@@ -37,34 +37,63 @@ function view(override: View["override"], since = 9): View {
   };
 }
 
+// The subscription route, stubbed at the wire: `nextRead` decides what one read
+// answers (or rejects with), and each request is recorded by method before it
+// answers. A rejection stands for a request that never landed, the same shape
+// the real relay produces.
 let reads: [string, number][] = [];
 let writes: [string, number, string][] = [];
 let clears: [string, number][] = [];
 let nextRead: () => Promise<View> = () => Promise.resolve(view("muted"));
 
 initRelays("http://example.invalid", "http://example.invalid");
-const client = lescheClientOrFail() as unknown as {
-  fetchThreadSubscription: (roomId: string, root: number) => Promise<View>;
-  setThreadSubscription: (
-    roomId: string,
-    root: number,
-    state: string,
-  ) => Promise<View>;
-  clearThreadSubscription: (roomId: string, root: number) => Promise<void>;
-};
-client.fetchThreadSubscription = (roomId, root) => {
-  reads.push([roomId, root]);
-  return nextRead();
-};
-client.setThreadSubscription = (roomId, root, state) => {
-  writes.push([roomId, root, state]);
-  return Promise.resolve(view(state as View["override"]));
-};
-client.clearThreadSubscription = (roomId, root) => {
-  clears.push([roomId, root]);
-  return Promise.resolve();
-};
 
+/** `/rooms/{id}/threads/{root}/subscription` split into its two arguments, or
+ * null for any other path (the stub answers 404, so a renamed route fails). */
+function subscriptionOf(path: string): { roomId: string; root: number } | null {
+  const parts = path.split("/");
+  if (
+    parts.length !== 6 ||
+    parts[0] !== "" ||
+    parts[1] !== "rooms" ||
+    parts[3] !== "threads" ||
+    parts[5] !== "subscription"
+  ) {
+    return null;
+  }
+  return { roomId: decodeURIComponent(parts[2]!), root: Number(parts[4]) };
+}
+function jsonAnswer(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "content-type": "application/json" },
+  });
+}
+const stub = (async (input: string | URL, init?: RequestInit) => {
+  const url = new URL(String(input));
+  const route = subscriptionOf(url.pathname);
+  if (route === null) return jsonAnswer({ error: "no such route" }, 404);
+  const { roomId, root } = route;
+  const method = init?.method ?? "GET";
+  if (method === "GET") {
+    reads.push([roomId, root]);
+    return jsonAnswer(await nextRead());
+  }
+  if (method === "PUT") {
+    const body = JSON.parse(String(init?.body ?? "{}")) as { state: string };
+    writes.push([roomId, root, body.state]);
+    return jsonAnswer(view(body.state as View["override"]));
+  }
+  if (method === "DELETE") {
+    clears.push([roomId, root]);
+    return new Response(null, { status: 204 });
+  }
+  return jsonAnswer({ error: { message: "unexpected method" } }, 405);
+}) as typeof fetch;
+/** Every case runs against the stub. */
+function test(name: string, run: () => Promise<void>): void {
+  Deno.test(name, () => withFetch(stub, run));
+}
 function reset(): void {
   reads = [];
   writes = [];
@@ -72,7 +101,7 @@ function reset(): void {
   nextRead = () => Promise.resolve(view("muted"));
 }
 
-Deno.test("two draws of one thread share one request", async () => {
+test("two draws of one thread share one request", async () => {
   reset();
   const first = await ensureThreadChoice("room-a", 5);
   const second = await ensureThreadChoice("room-a", 5);
@@ -81,7 +110,7 @@ Deno.test("two draws of one thread share one request", async () => {
   assertEquals(threadChoiceOf("room-a", 5), view("muted"));
 });
 
-Deno.test("a failed read is not retried inside the window", async () => {
+test("a failed read is not retried inside the window", async () => {
   reset();
   nextRead = () => Promise.reject(new Error("offline"));
   const t0 = 1_000_000;
@@ -92,7 +121,7 @@ Deno.test("a failed read is not retried inside the window", async () => {
   assertEquals(threadChoiceOf("room-b", 7), null);
 });
 
-Deno.test("a failed read is asked again once the window passes", async () => {
+test("a failed read is asked again once the window passes", async () => {
   // One blip must not cost the thread its mark and its control for the rest of
   // the session, so the next draw after the window asks once more.
   reset();
@@ -105,7 +134,7 @@ Deno.test("a failed read is asked again once the window passes", async () => {
   assertEquals(reads.length, 2);
 });
 
-Deno.test("a retry that answers replaces the unknown", async () => {
+test("a retry that answers replaces the unknown", async () => {
   reset();
   nextRead = () => Promise.reject(new Error("offline"));
   const t0 = 3_000_000;
@@ -120,34 +149,31 @@ Deno.test("a retry that answers replaces the unknown", async () => {
   assertEquals(threadChoiceOf("room-g", 4), view("muted"));
 });
 
-Deno.test(
-  "the retry window runs from the answer, not the request",
-  async () => {
-    // A slow failure must not shorten its own silence: the window opens when the
-    // answer lands, not when the request went out.
-    reset();
-    const t0 = 4_000_000;
-    let t = t0;
-    nextRead = () => {
-      t = t0 + 25_000;
-      return Promise.reject(new Error("offline"));
-    };
-    assertEquals(await ensureThreadChoice("room-h", 6, () => t), null);
-    assertEquals(
-      await ensureThreadChoice(
-        "room-h",
-        6,
-        () => t0 + 25_000 + UNKNOWN_RETRY_MS - 1,
-      ),
-      null,
-    );
-    assertEquals(reads, [["room-h", 6]]);
-    await ensureThreadChoice("room-h", 6, () => t0 + 25_000 + UNKNOWN_RETRY_MS);
-    assertEquals(reads.length, 2);
-  },
-);
+test("the retry window runs from the answer, not the request", async () => {
+  // A slow failure must not shorten its own silence: the window opens when the
+  // answer lands, not when the request went out.
+  reset();
+  const t0 = 4_000_000;
+  let t = t0;
+  nextRead = () => {
+    t = t0 + 25_000;
+    return Promise.reject(new Error("offline"));
+  };
+  assertEquals(await ensureThreadChoice("room-h", 6, () => t), null);
+  assertEquals(
+    await ensureThreadChoice(
+      "room-h",
+      6,
+      () => t0 + 25_000 + UNKNOWN_RETRY_MS - 1,
+    ),
+    null,
+  );
+  assertEquals(reads, [["room-h", 6]]);
+  await ensureThreadChoice("room-h", 6, () => t0 + 25_000 + UNKNOWN_RETRY_MS);
+  assertEquals(reads.length, 2);
+});
 
-Deno.test("a write replaces the standing the read left", async () => {
+test("a write replaces the standing the read left", async () => {
   reset();
   await ensureThreadChoice("room-c", 2);
   const written = await setThreadChoice("room-c", 2, "following");
@@ -156,7 +182,7 @@ Deno.test("a write replaces the standing the read left", async () => {
   assertEquals(threadChoiceOf("room-c", 2), view("following"));
 });
 
-Deno.test("dropping a choice reads the default back", async () => {
+test("dropping a choice reads the default back", async () => {
   reset();
   nextRead = () => Promise.resolve(view(null));
   const standing = await clearThreadChoice("room-d", 3);
@@ -168,7 +194,7 @@ Deno.test("dropping a choice reads the default back", async () => {
   assertEquals(threadChoiceOf("room-d", 3), view(null));
 });
 
-Deno.test("the oldest standing leaves first", async () => {
+test("the oldest standing leaves first", async () => {
   reset();
   await ensureThreadChoice("room-oldest", 1);
   for (let root = 1; root <= THREAD_CHOICES_MAX; root += 1) {

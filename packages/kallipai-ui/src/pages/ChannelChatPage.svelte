@@ -47,8 +47,8 @@
   } from "../paraglide/messages.js";
   import { realtimeStore } from "../lib/session/realtime.svelte";
   import {
-    filesClientOrFail,
     archeionSession,
+    filesBaseUrlOrFail,
   } from "../lib/session/archeion.svelte.ts";
   import {
     allReady,
@@ -58,6 +58,12 @@
   } from "../lib/attachments.ts";
   import { createAttachmentTray } from "../lib/attachmentTray.svelte.ts";
   import type { FileAttachment } from "@kallipai/kallipai-lesche-client";
+  import {
+    getRecord,
+    putRecord,
+    sendRecord,
+  } from "@kallipai/kallipai-files-client";
+  import { runClientEffect } from "@kallipai/kallipai-common";
   import { createQuotes } from "../lib/quotes.svelte.ts";
   import { unreadStore, tagmaKey } from "../lib/session/unread.svelte.ts";
   import { recentStore } from "../lib/session/recent.svelte.ts";
@@ -237,14 +243,15 @@
       return;
     }
     try {
-      const client = filesClientOrFail();
-      const put = await client.put(
-        `/users/${username}/shared/${item.name}`,
-        item.file,
+      const base = filesBaseUrlOrFail();
+      const put = await runClientEffect(
+        putRecord(base, `/users/${username}/shared/${item.name}`, item.file),
       );
       // The message references the recipient's inbox copy -- the send
       // response's record id -- which the user keeps full read on (Row1).
-      const sent = await client.send(put.record_id, { toTagma: tagmaId });
+      const sent = await runClientEffect(
+        sendRecord(base, put.record_id, { toTagma: tagmaId }),
+      );
       setAttachment(owner, item.id, {
         status: "ready",
         recordId: sent.record_id,
@@ -301,7 +308,9 @@
   // keeps full read on it, Row1) and hand the bytes to the browser as a
   // named download. The bubble renders any failure inline.
   async function downloadAttachment(attachment: FileAttachment): Promise<void> {
-    const bytes = await filesClientOrFail().get(attachment.record_id);
+    const bytes = await runClientEffect(
+      getRecord(filesBaseUrlOrFail(), attachment.record_id),
+    );
     saveBlob(new Blob([bytes]), attachment.name);
   }
 
@@ -404,11 +413,12 @@
         // backend chain below cannot dereference a missing relay transport.
         void conv.link.status;
         if (!conv.link.connected) return;
+        const base = keryxBaseUrlOrFail();
         statusCardStore.attach(
           new OnlineBackend(
-            new ManageRestClient(keryxBaseUrlOrFail()),
+            new ManageRestClient(base),
             conv.relayTransport.relayChannel.tagmaId,
-            new ProjectionClient(keryxBaseUrlOrFail()),
+            new ProjectionClient(base),
             conv.relayTransport.relayChannel,
           ),
         );

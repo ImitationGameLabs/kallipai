@@ -1,7 +1,7 @@
 // @kallipai/kallipai-keryx-client
 //
 // Browser client for the keryx data-plane relay (default :7210): the
-// bilateral (1:1) E2EE conversation transport. `KeryxClient` covers
+// bilateral (1:1) E2EE conversation transport. The verbs cover
 // conversation setup, the synchronous key exchange, envelope posting, and the
 // bilateral `me/events` SSE stream; `openRelayChannel`/`RelayChannel` wire
 // those into a pure E2EE pipe to a tagma. The pinned device key is TOFU from
@@ -14,7 +14,12 @@
 
 export const PACKAGE_NAME = "@kallipai/kallipai-keryx-client";
 
-export { KeryxClient } from "./client.ts";
+export {
+  createConversation,
+  keyExchangeInit,
+  keryxEvents,
+  postEnvelope,
+} from "./client.ts";
 export { manageOk } from "./channel.ts";
 export {
   ManageChannelError,

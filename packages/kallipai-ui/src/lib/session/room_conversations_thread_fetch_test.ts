@@ -1,5 +1,5 @@
 // Behaviour of the discussion read: how it pages, when it may call itself
-// whole, and what it keeps. The client is a structural fake (no wire), and a
+// whole, and what it keeps. The route is stubbed at the wire, and a
 // passthrough `$state` shim lets the rune-bearing store module run uncompiled
 // -- the same harness the other store tests use.
 
@@ -12,7 +12,8 @@ declare global {
 
 const { assertEquals } = await import("@std/assert");
 const { encodeB64 } = await import("@kallipai/kallipai-common");
-const { initRelays, lescheClientOrFail } = await import("./archeion.svelte.ts");
+const { withFetch } = await import("@kallipai/kallipai-common/testing");
+const { initRelays } = await import("./archeion.svelte.ts");
 const { encodeRoomSendMessage } = await import("../room-message.ts");
 const { roomConversationsStore } =
   await import("./roomConversations.svelte.ts");
@@ -49,48 +50,77 @@ interface Call {
 
 let calls: Call[] = [];
 let pages: Row[][] = [];
+/** When set, the next request never lands -- the shape a dropped network gives. */
+let failing = false;
 
 initRelays("http://example.invalid", "http://example.invalid");
-const client = lescheClientOrFail() as unknown as {
-  fetchRoomMessages: (
-    roomId: string,
-    options: { afterSeq?: number; thread?: number; limit?: number },
-  ) => Promise<Row[]>;
-};
-client.fetchRoomMessages = (_roomId, options) => {
-  calls.push(options);
-  return Promise.resolve(pages.shift() ?? []);
-};
+/** `/rooms/{id}/messages` with its query, or null for any other path (which
+ * falls through to the stub's 404, so a renamed route fails loudly). */
+function callOf(url: URL): Call | null {
+  const parts = url.pathname.split("/");
+  if (
+    parts.length !== 4 ||
+    parts[0] !== "" ||
+    parts[1] !== "rooms" ||
+    parts[3] !== "messages"
+  ) {
+    return null;
+  }
+  const call: { afterSeq?: number; thread?: number; limit?: number } = {};
+  const afterSeq = url.searchParams.get("after_seq");
+  const thread = url.searchParams.get("thread");
+  const limit = url.searchParams.get("limit");
+  if (afterSeq !== null) call.afterSeq = Number(afterSeq);
+  if (thread !== null) call.thread = Number(thread);
+  if (limit !== null) call.limit = Number(limit);
+  return call;
+}
+const stub = ((input: string | URL, _init?: RequestInit) => {
+  const url = new URL(String(input));
+  const call = callOf(url);
+  if (call === null)
+    return Promise.resolve(new Response(null, { status: 404 }));
+  calls.push(call);
+  if (failing) return Promise.reject(new Error("offline"));
+  return Promise.resolve(
+    new Response(JSON.stringify(pages.shift() ?? []), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }),
+  );
+}) as typeof fetch;
+/** Every case runs against the stub. */
+function test(name: string, run: () => Promise<void>): void {
+  Deno.test(name, () => withFetch(stub, run));
+}
 
 function reset(staged: Row[][]): void {
   calls = [];
   pages = staged;
+  failing = false;
 }
 
-Deno.test(
-  "one page names the discussion and the cursor it starts from",
-  async () => {
-    // A full page says the discussion goes on, and its cursor is the last row it
-    // carried: the next page is asked for from there.
-    const first = [
-      ...Array.from({ length: PAGE }, (_, i) => {
-        const seq = i + 1;
-        return seq === 5 ? row(seq, 1) : row(seq);
-      }),
-    ];
-    reset([first]);
-    const page = await roomConversationsStore.fetchThreadPage("room-1", 1, 0);
-    assertEquals(
-      page.lines.map((line) => line.seq),
-      [1, 5],
-    );
-    assertEquals(page.lastSeq, PAGE);
-    assertEquals(page.hasMore, true);
-    assertEquals(calls, [{ afterSeq: 0, thread: 1, limit: PAGE }]);
-  },
-);
+test("one page names the discussion and the cursor it starts from", async () => {
+  // A full page says the discussion goes on, and its cursor is the last row it
+  // carried: the next page is asked for from there.
+  const first = [
+    ...Array.from({ length: PAGE }, (_, i) => {
+      const seq = i + 1;
+      return seq === 5 ? row(seq, 1) : row(seq);
+    }),
+  ];
+  reset([first]);
+  const page = await roomConversationsStore.fetchThreadPage("room-1", 1, 0);
+  assertEquals(
+    page.lines.map((line) => line.seq),
+    [1, 5],
+  );
+  assertEquals(page.lastSeq, PAGE);
+  assertEquals(page.hasMore, true);
+  assertEquals(calls, [{ afterSeq: 0, thread: 1, limit: PAGE }]);
+});
 
-Deno.test("a short page is the end of the discussion", async () => {
+test("a short page is the end of the discussion", async () => {
   reset([[row(1), row(2, 1), row(3, 9)]]);
   const page = await roomConversationsStore.fetchThreadPage("room-1", 1, PAGE);
   assertEquals(
@@ -102,7 +132,7 @@ Deno.test("a short page is the end of the discussion", async () => {
   assertEquals(calls, [{ afterSeq: PAGE, thread: 1, limit: PAGE }]);
 });
 
-Deno.test("the cursor moves past a row the filter dropped", async () => {
+test("the cursor moves past a row the filter dropped", async () => {
   // A relay that predates the `thread` parameter answers with room rows: the
   // stored-root filter drops them here, but the page still knows where it got
   // to. A cursor read off the kept lines would ask for the same stretch again
@@ -116,39 +146,35 @@ Deno.test("the cursor moves past a row the filter dropped", async () => {
   assertEquals(page.lastSeq, 12);
 });
 
-Deno.test(
-  "a row that does not decode loses the row, not the page",
-  async () => {
-    const broken = { ...row(11, 1), ciphertext: "not base64 at all" };
-    reset([[row(10, 1), broken, row(12, 1)]]);
-    const page = await roomConversationsStore.fetchThreadPage("room-1", 1, 9);
-    assertEquals(
-      page.lines.map((line) => line.seq),
-      [10, 12],
-    );
-    assertEquals(page.hasMore, false);
-  },
-);
+test("a row that does not decode loses the row, not the page", async () => {
+  const broken = { ...row(11, 1), ciphertext: "not base64 at all" };
+  reset([[row(10, 1), broken, row(12, 1)]]);
+  const page = await roomConversationsStore.fetchThreadPage("room-1", 1, 9);
+  assertEquals(
+    page.lines.map((line) => line.seq),
+    [10, 12],
+  );
+  assertEquals(page.hasMore, false);
+});
 
-Deno.test("a failed request is an error, never an empty end", async () => {
+test("a failed request is an error, never an empty end", async () => {
   // An empty page carries `hasMore: false`, which the panel reads as the end of
   // the discussion. A request that failed must stay an error, or the reader is
   // told the discussion ends where the network dropped.
   reset([]);
-  const answer = client.fetchRoomMessages;
-  client.fetchRoomMessages = () => Promise.reject(new Error("offline"));
+  failing = true;
   let threw = false;
   try {
     await roomConversationsStore.fetchThreadPage("room-1", 1, 0);
   } catch {
     threw = true;
   } finally {
-    client.fetchRoomMessages = answer;
+    failing = false;
   }
   assertEquals(threw, true);
 });
 
-Deno.test("a position below one asks for nothing", async () => {
+test("a position below one asks for nothing", async () => {
   // A root below 1 names no row -- seqs start at 1 and a stored root is a seq --
   // so an empty discussion is what the server would answer; the request itself
   // would be refused, so none is sent.

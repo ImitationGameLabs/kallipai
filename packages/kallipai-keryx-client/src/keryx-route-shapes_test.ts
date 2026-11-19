@@ -13,7 +13,13 @@
 import { withFetch } from "@kallipai/kallipai-common/testing";
 import { assertEquals } from "@std/assert";
 import shapes from "../../../crates/platform/kallipai-keryx/src/route-shapes.json" with { type: "json" };
-import { KeryxClient } from "./client.ts";
+import { runClientEffect, runClientStream } from "@kallipai/kallipai-common";
+import {
+  createConversation,
+  keyExchangeInit,
+  keryxEvents,
+  postEnvelope,
+} from "./client.ts";
 import { ManageRestClient } from "./manageRest.ts";
 import { ProjectionClient } from "./projection.ts";
 import type { Envelope, KeyExchangeInit } from "./types.ts";
@@ -69,42 +75,43 @@ function dialledRouteExists(verb: string, path: string): boolean {
   });
 }
 
-/** One dial per method the class exposes, each with the route it must reach.
- * The assertions below compare this table's names with the prototype's and
- * each dial with its declared route, so a method added without a dial, or a
- * verb re-pointed at another route that already exists, fails here. */
+/** One dial per verb the module exports, each with the route it must reach.
+ * The assertions below compare this table's names with the module's function
+ * exports and each dial with its declared route, so a verb added without a
+ * dial, a dial row naming nothing, or a verb re-pointed at another route that
+ * already exists, fails here. */
 const DIALS: ReadonlyArray<
   readonly [
     name: string,
     verb: string,
     path: string,
-    dial: (client: KeryxClient) => Promise<unknown>,
+    dial: (base: string) => Promise<unknown>,
   ]
 > = [
   [
     "createConversation",
     "POST",
     "/conversations",
-    (c) => c.createConversation("t-a"),
+    (b) => runClientEffect(createConversation(b, "t-a")),
   ],
   [
     "keyExchangeInit",
     "POST",
     "/conversations/c1/key-exchange/init",
-    (c) => c.keyExchangeInit("c1", {} as KeyExchangeInit),
+    (b) => runClientEffect(keyExchangeInit(b, "c1", {} as KeyExchangeInit)),
   ],
   [
     "postEnvelope",
     "POST",
     "/conversations/c1/envelopes",
-    (c) => c.postEnvelope("c1", {} as Envelope),
+    (b) => runClientEffect(postEnvelope(b, "c1", {} as Envelope)),
   ],
   [
     "keryxEvents",
     "GET",
     "/me/events",
-    async (c) => {
-      const events = c.keryxEvents();
+    async (b) => {
+      const events = runClientStream(keryxEvents(b));
       await events.next();
       await events.return(undefined);
     },
@@ -153,10 +160,9 @@ Deno.test(
         return Promise.resolve(Response.json({}));
       }) as typeof fetch,
       async () => {
-        const client = new KeryxClient(BASE);
         for (const [name, verb, path, dial] of DIALS) {
           const before = seen.length;
-          await dial(client);
+          await dial(BASE);
           assertEquals(seen.length, before + 1, `${name} must dial once`);
           assertEquals(
             seen[before],
@@ -164,12 +170,13 @@ Deno.test(
             `${name} must reach its route`,
           );
         }
-        // The dial table and the surface must name the same methods: a verb
-        // added without a dial fails here instead of slipping past the fixture.
+        // The dial table and the module's verbs must name the same set: a verb
+        // added without a dial, or a dial row naming nothing, fails here.
         assertEquals(
           DIALS.map(([name]) => name).sort(),
-          Object.getOwnPropertyNames(KeryxClient.prototype)
-            .filter((name) => name !== "constructor")
+          Object.entries(await import("./client.ts"))
+            .filter(([, value]) => typeof value === "function")
+            .map(([name]) => name)
             .sort(),
         );
 

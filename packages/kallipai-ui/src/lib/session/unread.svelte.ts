@@ -92,7 +92,12 @@
 // a value the server's max-clamp would pin irreversibly (and a late lower write
 // cannot regress the cursor anyway: the server clamps to max).
 import { SvelteMap } from "svelte/reactivity";
-import { lescheClientOrFail } from "./archeion.svelte.ts";
+import {
+  fetchRoomUnread,
+  setRoomReadCursor,
+} from "@kallipai/kallipai-lesche-client";
+import { runClientEffect } from "@kallipai/kallipai-common";
+import { lescheBaseUrlOrFail } from "./archeion.svelte.ts";
 
 /** Badge display cap: anything above renders as "99+" ({@link badgeLabel}). */
 export const UNREAD_CAP = 99;
@@ -156,10 +161,10 @@ type ReadCursorPutter = (roomId: string, seq: number) => Promise<void>;
 type TimerArmer = (fn: () => void) => ReturnType<typeof setTimeout>;
 
 function defaultFetchRoomUnread(roomId: string): Promise<UnreadStamp> {
-  return lescheClientOrFail().fetchRoomUnread(roomId);
+  return runClientEffect(fetchRoomUnread(lescheBaseUrlOrFail(), roomId));
 }
 function defaultPutCursor(roomId: string, seq: number): Promise<void> {
-  return lescheClientOrFail().setRoomReadCursor(roomId, seq);
+  return runClientEffect(setRoomReadCursor(lescheBaseUrlOrFail(), roomId, seq));
 }
 function defaultArmTimer(fn: () => void): ReturnType<typeof setTimeout> {
   return setTimeout(fn, PUT_THROTTLE_MS);
